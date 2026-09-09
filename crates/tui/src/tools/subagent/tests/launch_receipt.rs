@@ -259,6 +259,7 @@ fn issue_5305_builtin_inheritance_and_redaction_are_bounded() {
     let receipt = mint_child_route_receipt(
         &requested_route,
         &request,
+        None,
         &runtime,
         "deepseek-v4-flash".to_string(),
         "run.model",

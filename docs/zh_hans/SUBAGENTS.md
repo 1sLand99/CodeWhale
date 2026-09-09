@@ -10,7 +10,7 @@ Fleet 角色是面向用户的委派工作词汇：父代理通过 `agent` 启�
 
 子代理默认继承父代理的工具注册表，其中包括 `agent` 本身：子代理用 `with_full_agent_surface_options`（`crates/tui/src/tools/subagent/mod.rs:12164`）构建，因此它们可以递归。只有当深度预算耗尽时，`agent` 才会从子代理的目录中过滤掉——`can_spawn_child = !runtime.would_exceed_depth()`（`mod.rs:12145`），在 `mod.rs:12324` 和 `:12469` 强制执行。默认深度为 3（`DEFAULT_SPAWN_DEPTH`，`crates/config/src/lib.rs:1671`）时，子代理可以生成孙代理。已移除的 `agent_open`/`agent_eval`/`agent_close` 生命周期工具已从每个注册表中消失，父代理和子代理皆然。
 
-`agent` 启动 detached 后台工作：取消父代理的回合会停止父代理的等待路径，但不会杀死已经打开的 child 运行。
+`agent` 子代理默认归当前父回合所有；结束或取消父回合会停驻前台后代。只有显式 `detached=true` 才使用独立取消令牌启动后台工作。
 
 本文档涵盖角色分类和当前兼容性控制。活动的编排面是 `agent`；参见 `crates/tui/src/prompts/text.rs`（`AGENT_MODE`）中的子代理指南以及行内工具描述。
 
@@ -193,18 +193,23 @@ max_admitted = 12
 
 使用 `/config subagents status` 查看全局值和当前 provider 解析后的扇出、深度与超时配置。
 
-## 对外公布的 agent 工具字段（v0.9.9）
+## 对外公布的 agent 工具字段（v0.9.13）
 
-面向模型的 `agent` 工具 schema 正好公布 **12 个字段**（#5324、#5123）：
+面向模型的 `agent` 工具 schema 包含生命周期、作用域和每个任务的路由控制（#5915、#5955）：
 
-`action`、`prompt`、`type`、`profile`、`name`、`agent_id`、`message`、`until`、`detached`、`worktree`、`write_roots`、`resume_from`
+`action`、`prompt`、`type`、`profile`、`name`、`agent_id`、`message`、`until`、`detached`、`worktree`、`write_roots`、`resume_from`、`model`、`model_strength`、`thinking`
 
 外加按 action 区分的 `dependentSchemas` 树（`start` 需要 `prompt`；`message`/`followup` 需要目标和 `message`；`peek`/`interrupt`/`cancel` 需要目标）。schema 变更是钉死的提示词前缀的一部分，所以升级会在每个会话中重新填充一次 provider KV 前缀（docs/CACHE.md；在 v0.9.9 边界接受）。
+
+`agent(action="roster")` 使用与执行相同的解析器，列出内置角色实际使用的 provider、模型、思维层级、已知上下文限制和能力来源。每个任务的 `model` 优先于 `model_strength`，然后采用角色默认值和会话路由。请求其他 provider 的模型会在接受任务前被拒绝；角色权限上限保持不变。
+
+`profiles` 行显示现有已选 Fleet，或受信任配置、个人、工作区和插件层中的保存成员，并提供有界身份及相同的路由/费用证据。`profile="bug-hunter"` 使用该成员的指令、角色、provider/模型固定选择和深度上限。冲突的类型或模型请求会被拒绝；显式 `thinking` 可以覆盖保存的层级。缺失 provider、撤销的插件权限或禁用的项目配置会在接受子任务前失败。发现操作不会创建配置或自动添加模型。保存配置继续使用现有子任务生命周期，本身不代表持续 Bot 会话或 Computer 租约。
+
+费用类别仅描述当前未缓存文本输入和输出的费率，不代表未来任务的总费用。缺少费率或依赖路由的价格保持未知；订阅和本地路由标记为非按金额计费。查询不会向 provider 发送请求，可达性标记为未验证。
 
 **解析接受但未公布（兼容）。** 以下输入已从公布的 schema 中移除，但仍保持解析接受并按原样生效，因此已保存的转录、ACP/MCP 客户端和 Fleet 配置照旧重放——`token_budget` 已经遵循的正是同一个契约：
 
 - 预算：`max_steps`、`wall_time_secs`、`max_depth`（参见[子代理预算](#子代理预算步数墙钟时间)了解默认值现在来自何处）
-- 路由：`model`、`model_strength`、`thinking`（`profile` 钉死路由和思维层级；没有它时子代理继承操作者模型）
 - workspace/隔离：`workspace_policy`、`write_authority`、`fork_context`、`cwd`、`worktree_path`、`worktree_branch`、`worktree_base`
 - 发起契约：`deliberate`、`dependencies`、`acceptance`、`expected_artifact`、`exact_files`、`coordination_contracts`
 - 生命周期附加：`timeout_secs`（wait）、`reason`（interrupt）、`include_archived`（status）以及 `token_budget`

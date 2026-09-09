@@ -30,7 +30,6 @@ pub(super) fn session_denied_notice(app: &App, tool_name: &str) -> String {
 
 pub(super) fn surface_session_denied_notice(app: &mut App, tool_name: &str) {
     let notice = session_denied_notice(app, tool_name);
-    app.status_message = Some(notice.clone());
     app.push_status_toast(notice.clone(), StatusToastLevel::Warning, Some(12_000));
 
     // Tool completion and turn completion can replace the one-line status

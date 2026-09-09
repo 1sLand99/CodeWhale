@@ -147,6 +147,7 @@ fn events() -> CommandResult {
             HookEvent::WaitingForUser,
             "fires when an approval prompt opens, a question is presented, or a goal continuation parks (observer-only)",
         ),
+        (HookEvent::SessionBusy, "idle / waiting → in_progress"),
     ];
     for (event, desc) in ordered {
         out.push_str(&format!("  - `{}` — {desc}\n", event_label(event)));
@@ -503,6 +504,7 @@ mod tests {
             "session_idle",
             "session_error",
             "waiting_for_user",
+            "session_busy",
         ]
         .iter()
         .map(|name| {
@@ -553,6 +555,11 @@ mod tests {
             event_label(HookEvent::SubagentComplete),
             "subagent_complete"
         );
+        assert_eq!(event_label(HookEvent::ShellEnv), "shell_env");
+        assert_eq!(event_label(HookEvent::SessionIdle), "session_idle");
+        assert_eq!(event_label(HookEvent::SessionError), "session_error");
+        assert_eq!(event_label(HookEvent::WaitingForUser), "waiting_for_user");
+        assert_eq!(event_label(HookEvent::SessionBusy), "session_busy");
     }
 
     #[test]
@@ -602,13 +609,12 @@ mod tests {
     #[test]
     fn events_listing_covers_every_runtime_event() {
         let body = events().message.expect("non-empty body");
-        for event in crate::hooks::ALL_HOOK_EVENTS {
-            assert!(
-                body.contains(event.as_str()),
-                "event `{}` missing from /hooks events",
-                event.as_str()
-            );
-        }
+        let names: Vec<&str> = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("  - `"))
+            .map(|line| line.split('`').next().expect("listed event name"))
+            .collect();
+        assert_eq!(names, crate::hooks::ALL_HOOK_EVENTS.map(HookEvent::as_str));
     }
 
     #[test]

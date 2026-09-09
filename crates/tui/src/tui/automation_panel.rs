@@ -310,6 +310,7 @@ mod tests {
         let now = Utc::now();
         AutomationRecord {
             schema_version: 1,
+            execution_scope: Some(crate::task_manager::test_execution_scope("test")),
             id: id.to_string(),
             name: id.to_string(),
             prompt: "prompt".to_string(),
@@ -351,6 +352,7 @@ mod tests {
             thread_id: None,
             turn_id: None,
             error: None,
+            dispatch: None,
         }
     }
 

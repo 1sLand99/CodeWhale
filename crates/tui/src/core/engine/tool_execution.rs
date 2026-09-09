@@ -526,6 +526,13 @@ impl Engine {
             ));
         }
 
+        if let Some(context) = context_override
+            .as_ref()
+            .or_else(|| registry.map(|registry| registry.context()))
+        {
+            super::tool_catalog::enforce_tool_denial(context, &tool_name, &tool_input)?;
+        }
+
         let tool_authority = context_override
             .as_ref()
             .and_then(|context| context.tool_authority.as_ref())

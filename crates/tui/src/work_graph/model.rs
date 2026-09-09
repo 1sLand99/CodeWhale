@@ -46,9 +46,13 @@ pub const SEEN_KEYS_CAP: usize = 1024;
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningEffortTier {
     Off,
+    Minimal,
     Low,
     Medium,
     High,
+    #[serde(rename = "xhigh")]
+    XHigh,
+    Ultra,
     Auto,
     Max,
     /// Thinking is enabled, but the provider route exposes no supported

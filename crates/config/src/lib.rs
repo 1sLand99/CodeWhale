@@ -2,12 +2,14 @@ pub mod app_mode;
 pub mod auth_source;
 pub mod auto_model;
 pub mod catalog;
+pub mod cloud_facts;
 mod config_document;
 pub mod descriptors;
 pub mod device_code;
 pub mod external_credentials;
 pub mod model_reference;
 pub mod models_dev;
+pub mod notifications;
 pub mod persistence;
 pub mod pricing;
 pub mod provider;
@@ -140,8 +142,41 @@ pub fn is_upstream_auth_header(name: &str) -> bool {
     is_sensitive_config_key(name) || name.eq_ignore_ascii_case("cookie")
 }
 
+/// Preserve OpenRouter endpoint slugs verbatim; an empty value clears a pin.
+/// The service owns the vendor catalog, so validation must not freeze one here.
+pub fn validate_openrouter_vendor(value: &str) -> Result<Option<&str>> {
+    if value.trim().is_empty() {
+        return Ok(None);
+    }
+    if value
+        .chars()
+        .any(|ch| ch.is_whitespace() || ch.is_control())
+    {
+        bail!(
+            "providers.openrouter.vendor must be an OpenRouter slug without whitespace or control characters"
+        );
+    }
+    Ok(Some(value))
+}
+
+/// Apply a validated pin to an OpenRouter request without dropping unrelated
+/// caller policies such as data collection or zero-data-retention constraints.
+pub fn apply_openrouter_vendor(body: &mut serde_json::Value, vendor: Option<&str>) {
+    if let Some(vendor) = vendor {
+        if !body["provider"].is_object() {
+            body["provider"] = serde_json::json!({});
+        }
+        body["provider"]["order"] = serde_json::json!([vendor]);
+        body["provider"]["allow_fallbacks"] = serde_json::json!(false);
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProviderConfigToml {
+    /// OpenRouter upstream slug, including an optional endpoint variant.
+    /// Requests with a vendor pin disable OpenRouter's upstream fallbacks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -210,6 +245,7 @@ impl ProviderConfigToml {
         let blank = |value: Option<&String>| value.is_none_or(|value| value.trim().is_empty());
 
         blank(self.api_key.as_ref())
+            && self.vendor.is_none()
             && blank(self.base_url.as_ref())
             && blank(self.model.as_ref())
             && self.context_window.is_none()
@@ -819,12 +855,12 @@ pub struct ConfigToml {
     pub default_text_model: Option<String>,
     #[serde(default, deserialize_with = "deserialize_root_provider")]
     pub provider: ProviderKind,
-    /// Exact id for a dynamically named root provider.
+    /// Exact saved selector for a named custom provider or a built-in alias.
     ///
     /// This is runtime parse state rather than a second on-disk key. The
     /// serialized `provider` value is restored by [`ConfigStore`] so a typed
-    /// dispatcher read/write cannot collapse `[providers.<name>]` back to the
-    /// legacy literal `custom` route.
+    /// dispatcher read/write cannot collapse a named route to `custom` or a
+    /// regional selector to its catalog parent.
     #[doc(hidden)]
     #[serde(skip)]
     pub selected_provider_id: Option<String>,
@@ -858,6 +894,13 @@ pub struct ConfigToml {
     pub tools: Option<ToolsToml>,
     #[serde(default, skip_serializing_if = "ProvidersToml::is_empty")]
     pub providers: ProvidersToml,
+    /// Operator declarations for exact provider/endpoint/model tuples.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "catalog::configured::deserialize_configured_models"
+    )]
+    pub custom_models: Option<Vec<catalog::configured::ConfiguredModel>>,
     /// Provider fallback chain (#2574). TUI runtime code may advance through
     /// these providers after recoverable provider errors; config resolution
     /// itself still reports the selected primary provider.
@@ -946,6 +989,7 @@ impl ConfigToml {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProviderConfigField {
+    Vendor,
     ApiKey,
     BaseUrl,
     Model,
@@ -962,6 +1006,7 @@ enum ProviderConfigField {
 impl ProviderConfigField {
     fn parse(key: &str) -> Option<Self> {
         Some(match key {
+            "vendor" => Self::Vendor,
             "api_key" => Self::ApiKey,
             "base_url" => Self::BaseUrl,
             "model" => Self::Model,
@@ -979,6 +1024,7 @@ impl ProviderConfigField {
 
     fn key(self) -> &'static str {
         match self {
+            Self::Vendor => "vendor",
             Self::ApiKey => "api_key",
             Self::BaseUrl => "base_url",
             Self::Model => "model",
@@ -1040,6 +1086,7 @@ fn get_provider_config_value(
     field: ProviderConfigField,
 ) -> Option<String> {
     match field {
+        ProviderConfigField::Vendor => config.vendor.clone(),
         ProviderConfigField::ApiKey => config.api_key.clone(),
         ProviderConfigField::BaseUrl => config.base_url.clone(),
         ProviderConfigField::Model => config.model.clone(),
@@ -1091,6 +1138,13 @@ fn set_provider_config_value(
         bail!(LEGACY_ANTIGRAVITY_TOMBSTONE_MESSAGE);
     }
     match field {
+        ProviderConfigField::Vendor => {
+            if provider != ProviderKind::Openrouter {
+                bail!("vendor is only supported by providers.openrouter");
+            }
+            validate_openrouter_vendor(value)?;
+            config.providers.for_provider_mut(provider).vendor = Some(value.to_string());
+        }
         ProviderConfigField::ApiKey => {
             let value = value.to_string();
             config.providers.for_provider_mut(provider).api_key = Some(value.clone());
@@ -1157,6 +1211,9 @@ fn unset_provider_config_value(
     field: ProviderConfigField,
 ) {
     match field {
+        ProviderConfigField::Vendor => {
+            config.providers.for_provider_mut(provider).vendor = None;
+        }
         ProviderConfigField::ApiKey => {
             config.providers.for_provider_mut(provider).api_key = None;
             if provider == ProviderKind::Deepseek {
@@ -1220,6 +1277,12 @@ fn insert_provider_config_values(
     provider: ProviderKind,
     config: &ProviderConfigToml,
 ) {
+    if let Some(v) = config.vendor.as_ref() {
+        out.insert(
+            provider_config_key(provider, ProviderConfigField::Vendor),
+            v.clone(),
+        );
+    }
     if let Some(v) = config.api_key.as_ref() {
         out.insert(
             provider_config_key(provider, ProviderConfigField::ApiKey),
@@ -2670,7 +2733,20 @@ impl ConfigToml {
     /// provider selected by the TUI.
     #[must_use]
     pub fn provider_id(&self) -> &str {
-        self.named_custom_provider_id()
+        self.selected_provider_id
+            .as_deref()
+            .filter(|id| {
+                if self.provider == ProviderKind::Custom {
+                    self.providers.extras.contains_key(*id)
+                } else {
+                    ProviderKind::parse_config_identity(id) == Some(self.provider)
+                        && self.providers.extras.get(*id).is_none_or(|value| {
+                            value
+                                .as_table()
+                                .is_some_and(|table| !table.contains_key("kind"))
+                        })
+                }
+            })
             .unwrap_or_else(|| self.provider.as_str())
     }
 
@@ -2681,6 +2757,7 @@ impl ConfigToml {
         (self.provider == ProviderKind::Custom)
             .then_some(self.selected_provider_id.as_deref())
             .flatten()
+            .filter(|id| self.providers.extras.contains_key(*id))
     }
 
     fn named_custom_provider_table(&self, provider_id: &str) -> Result<&toml::value::Table> {
@@ -2773,6 +2850,9 @@ impl ConfigToml {
             );
         };
         let toml_value = match field {
+            ProviderConfigField::Vendor => {
+                bail!("vendor is only supported by providers.openrouter")
+            }
             ProviderConfigField::ApiKey
             | ProviderConfigField::BaseUrl
             | ProviderConfigField::Model
@@ -2830,14 +2910,37 @@ impl ConfigToml {
         table.remove(leg);
     }
 
-    fn bind_persisted_provider_id(&mut self, provider_id: &str) -> Result<()> {
-        self.selected_provider_id = None;
-        if self.provider != ProviderKind::Custom || provider_id == ProviderKind::Custom.as_str() {
-            return Ok(());
-        }
-
-        self.named_custom_provider_table(provider_id)?;
-        self.selected_provider_id = Some(provider_id.to_string());
+    /// Bind the raw selector after deserializing a document. Exact custom
+    /// tables take precedence over built-in aliases, and regional spellings
+    /// survive later typed saves. This does not apply environment overrides.
+    pub fn bind_persisted_provider_id(&mut self, provider_id: &str) -> Result<()> {
+        let provider_id = provider_id.trim();
+        let parsed = ProviderKind::parse_config_identity(provider_id);
+        // Kindless tables mirroring a built-in alias remain inert. An explicit
+        // custom declaration must validate; never fall back to a different
+        // credential/endpoint authority when its kind is invalid.
+        let custom_table = self.providers.extras.get(provider_id);
+        let kindless_alias = parsed.is_some()
+            && custom_table
+                .and_then(toml::Value::as_table)
+                .is_some_and(|table| !table.contains_key("kind"));
+        let provider = if parsed != Some(ProviderKind::Antigravity)
+            && custom_table.is_some()
+            && !kindless_alias
+        {
+            self.named_custom_provider_table(provider_id)?;
+            ProviderKind::Custom
+        } else if let Some(provider) = parsed {
+            provider
+        } else {
+            self.named_custom_provider_table(provider_id)?;
+            ProviderKind::Custom
+        };
+        self.provider = provider;
+        self.selected_provider_id = (provider_id != provider.as_str()
+            && (provider != ProviderKind::Custom
+                || self.providers.extras.contains_key(provider_id)))
+        .then(|| provider_id.to_string());
         Ok(())
     }
 
@@ -2888,6 +2991,14 @@ impl ConfigToml {
 
     #[must_use]
     pub fn get_value(&self, key: &str) -> Option<String> {
+        if notifications::in_namespace(key) {
+            let setting = notifications::NotificationSetting::parse(key)?;
+            return Some(
+                notifications::from_extras(&self.extras)
+                    .ok()?
+                    .display(setting),
+            );
+        }
         if let Some((provider, field)) = parse_provider_config_key(key) {
             return get_provider_config_value(self.providers.for_provider(provider), field);
         }
@@ -2942,6 +3053,9 @@ impl ConfigToml {
 
     #[must_use]
     pub fn get_display_value(&self, key: &str) -> Option<String> {
+        if notifications::in_namespace(key) {
+            return self.get_value(key);
+        }
         if let Some((provider, field)) = parse_provider_config_key(key) {
             return get_provider_config_display_value(self.providers.for_provider(provider), field);
         }
@@ -3009,6 +3123,11 @@ impl ConfigToml {
     }
 
     pub fn set_value(&mut self, key: &str, value: &str) -> Result<()> {
+        if notifications::in_namespace(key) {
+            let setting = notifications::NotificationSetting::required(key)?;
+            let update = notifications::NotificationConfigUpdate::parse(setting, value)?;
+            return notifications::edit_extras(&mut self.extras, setting, update.value()?);
+        }
         if parse_custom_provider_config_key(key).is_some_and(|(provider_id, _)| {
             ProviderKind::parse_config_identity(provider_id) == Some(ProviderKind::Antigravity)
         }) {
@@ -3023,24 +3142,15 @@ impl ConfigToml {
 
         match key {
             "provider" => {
-                if let Some(provider) = ProviderKind::parse_config_identity(value) {
-                    if provider == ProviderKind::Antigravity {
-                        bail!(LEGACY_ANTIGRAVITY_TOMBSTONE_MESSAGE);
-                    }
-                    self.provider = provider;
-                    self.selected_provider_id = None;
-                } else {
-                    let provider_id = value.trim();
-                    self.named_custom_provider_table(provider_id)
-                        .with_context(|| {
-                            format!(
-                                "unknown provider '{value}': expected {} or a configured custom provider",
-                                ProviderKind::names_hint()
-                            )
-                        })?;
-                    self.provider = ProviderKind::Custom;
-                    self.selected_provider_id = Some(provider_id.to_string());
+                if ProviderKind::parse_config_identity(value) == Some(ProviderKind::Antigravity) {
+                    bail!(LEGACY_ANTIGRAVITY_TOMBSTONE_MESSAGE);
                 }
+                self.bind_persisted_provider_id(value).with_context(|| {
+                    format!(
+                        "unknown provider '{value}': expected {} or a configured custom provider",
+                        ProviderKind::names_hint()
+                    )
+                })?;
             }
             "api_key" => self.api_key = Some(value.to_string()),
             "base_url" => self.base_url = Some(value.to_string()),
@@ -3074,6 +3184,10 @@ impl ConfigToml {
     }
 
     pub fn unset_value(&mut self, key: &str) -> Result<()> {
+        if notifications::in_namespace(key) {
+            let setting = notifications::NotificationSetting::required(key)?;
+            return notifications::edit_extras(&mut self.extras, setting, None);
+        }
         if let Some((provider, field)) = parse_provider_config_key(key) {
             unset_provider_config_value(self, provider, field);
             return Ok(());
@@ -3177,7 +3291,31 @@ impl ConfigToml {
         }
 
         for (k, v) in &self.extras {
-            out.insert(k.clone(), redact_toml_value_for_display(k, v));
+            if k == "notifications" {
+                if let Ok(config) = notifications::from_extras(&self.extras) {
+                    for setting in notifications::NotificationSetting::ALL {
+                        out.insert(
+                            format!("notifications.{}", setting.key()),
+                            config.display(setting),
+                        );
+                    }
+                } else {
+                    out.insert(k.clone(), "<invalid notification configuration>".into());
+                }
+            } else if notifications::in_namespace(k)
+                && notifications::NotificationSetting::parse(k).is_some()
+            {
+                if let Ok(config) = notifications::from_extras(&self.extras) {
+                    let setting = notifications::NotificationSetting::parse(k)
+                        .expect("known notification key");
+                    out.insert(
+                        format!("notifications.{}", setting.key()),
+                        config.display(setting),
+                    );
+                }
+            } else {
+                out.insert(k.clone(), redact_toml_value_for_display(k, v));
+            }
         }
         out
     }
@@ -3426,7 +3564,9 @@ impl ConfigToml {
                 {
                     DEFAULT_KIMI_CODE_MODEL.to_string()
                 } else {
-                    default_model_for_provider(provider).to_string()
+                    cloud_facts::cloud_default_model_for_route(provider, &base_url)
+                        .map(|(model, _)| model)
+                        .unwrap_or_else(|| default_model_for_provider(provider).to_string())
                 }
             });
         let model = if provider == ProviderKind::OpencodeGo {
@@ -4254,18 +4394,16 @@ fn normalize_model_for_provider(provider: ProviderKind, model: &str) -> String {
     }
 }
 
-/// OpenCode Go models documented for its OpenAI Chat Completions endpoint.
+/// OpenCode Go models reviewed for its OpenAI Chat Completions endpoint.
 ///
 /// Keep config validation, picker/catalog projections, and live-roster
 /// sanitization on this one protocol-scoped contract. The provider's combined
-/// `/models` roster also contains Anthropic-Messages-only models, which are
-/// deliberately absent here.
+/// `/models` roster also contains Messages and Responses models, which are
+/// deliberately absent from this Chat-only route.
 ///
-/// `glm-5.3` is also deliberately absent (2026-08-03): OpenCode Go documents no
-/// glm-5.3 row. The direct Z.ai and OpenRouter glm-5.3 rows inherit their
-/// metadata from glm-5.2, but that inheritance says nothing about which
-/// subscription gateways carry the model. Add it here only against an OpenCode
-/// Go roster listing.
+/// Reviewed against https://opencode.ai/docs/go/#endpoints on 2026-09-08.
+/// Previously reviewed IDs remain compatible absent explicit deprecation;
+/// live availability is established separately by the provider catalog.
 pub const OPENCODE_GO_CHAT_MODELS: &[&str] = &[
     DEFAULT_OPENCODE_GO_MODEL,
     OPENCODE_GO_GROK_4_5_MODEL,
@@ -4277,11 +4415,18 @@ pub const OPENCODE_GO_CHAT_MODELS: &[&str] = &[
     OPENCODE_GO_DEEPSEEK_V4_FLASH_MODEL,
     OPENCODE_GO_MIMO_V2_5_MODEL,
     OPENCODE_GO_MIMO_V2_5_PRO_MODEL,
+    "glm-5.3-flash",
+    "glm-5.3",
+    "longcat-2.0",
+    "deepseek-v4-flash-vision-exp",
+    "hy4-preview",
+    "hy3",
+    "omen-alpha",
 ];
 
 /// Canonicalize an OpenCode Go model that is documented for the OpenAI Chat
 /// Completions endpoint. The live `/models` roster also contains
-/// Anthropic-Messages-only models; returning `None` for those is the protocol
+/// Messages and Responses models; returning `None` for those is the protocol
 /// cutline shared by config and the TUI live-catalog paths.
 #[must_use]
 pub fn opencode_go_chat_model_id(model: &str) -> Option<&'static str> {
@@ -5277,6 +5422,14 @@ fn parse_config_toml_str(contents: &str) -> Result<ConfigToml, toml::de::Error> 
 }
 
 impl ConfigStore {
+    /// The validated file snapshot captured by the last load or successful
+    /// save. This read-only view preserves literal provider identities that a
+    /// typed serialization may normalize; it excludes unsaved in-memory edits.
+    #[must_use]
+    pub fn original_body(&self) -> Option<&str> {
+        self.original_raw.as_deref()
+    }
+
     pub fn load(path: Option<PathBuf>) -> Result<Self> {
         let path = resolve_config_path(path)?;
         let (config, original_raw) = if checked_path_exists(&path)? {
@@ -5320,9 +5473,13 @@ impl ConfigStore {
     /// [`persistence::SetupTransaction`] alongside sibling files and keep the
     /// comment-preserving write atomic with the rest of the transaction.
     pub fn rendered_body(&self) -> Result<String> {
+        catalog::configured::validate_configured_models(
+            self.config.custom_models.as_deref().unwrap_or_default(),
+        )?;
         let mut serialized =
             toml::to_string_pretty(&self.config).context("failed to serialize config")?;
-        if let Some(provider_id) = self.config.named_custom_provider_id() {
+        let provider_id = self.config.provider_id();
+        if provider_id != self.config.provider.as_str() {
             let mut document = serialized
                 .parse::<toml_edit::DocumentMut>()
                 .context("failed to edit serialized config")?;

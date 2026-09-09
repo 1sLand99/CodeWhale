@@ -10,7 +10,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -18,10 +18,6 @@ use uuid::Uuid;
 use crate::automation_manager::{AutomationManager, AutomationRecord, AutomationStatus};
 
 pub const CWC_OPERATE_SCHEMA_VERSION: u32 = 1;
-pub const CWC_OPERATE_DEFAULT_LEAD_MODEL: &str = "GLM-5.3";
-pub const CWC_OPERATE_DEFAULT_WORKER_MODEL: &str = "GLM-5.3-Flash";
-pub const OPERATE_LEAD_MODEL: &str = CWC_OPERATE_DEFAULT_LEAD_MODEL;
-pub const OPERATE_WORKER_MODEL: &str = CWC_OPERATE_DEFAULT_WORKER_MODEL;
 pub const OPERATE_MAX_WRITERS: usize = 3;
 /// `hold` admits no new writers past this budget (the 8% band is met; hold
 /// the current width instead of widening).
@@ -82,6 +78,7 @@ pub struct OperateRosterMember {
     pub id: String,
     pub display_name: String,
     pub role: String,
+    /// Saved selection for the lead; empty when no model has been assigned.
     pub model: String,
     pub state: String,
 }
@@ -132,6 +129,17 @@ pub struct Operation {
 }
 
 impl Operation {
+    /// Update display metadata from the saved selection without assigning a
+    /// route to planned workers or claiming that an executor is running.
+    pub(crate) fn set_lead_model(&mut self, model: &str) {
+        self.lead_operator.model = model.to_string();
+        for member in &mut self.roster {
+            if member.id == self.lead_operator.id {
+                member.model = model.to_string();
+            }
+        }
+    }
+
     #[must_use]
     pub fn new(direction: impl Into<String>, burn_usd_per_hour: Option<f64>) -> Self {
         let now = Utc::now().to_rfc3339();
@@ -139,7 +147,7 @@ impl Operation {
             id: "lead".to_string(),
             display_name: "Lead operator".to_string(),
             role: "lead".to_string(),
-            model: CWC_OPERATE_DEFAULT_LEAD_MODEL.to_string(),
+            model: String::new(),
             state: "planning".to_string(),
         };
         let mut op = Self {
@@ -649,16 +657,80 @@ pub fn read_direction(workspace: &Path) -> Result<String> {
     }
 }
 
-/// Operate runs GLM lead/workers, so its credential question is the Z.ai
-/// provider's. Resolve through the normal provider credential resolution —
-/// configured `[providers.zai] api_key`/`api_key_env`, the CLI override, the
-/// durable secret store, or the provider's ambient env vars (`ZAI_API_KEY`,
-/// `Z_AI_API_KEY`, `ZHIPU_API_KEY`, `GLM_API_KEY`) — instead of a bespoke
-/// env probe that ignored all of it. The resolver treats blank values as
-/// unset, so an empty variable never admits workers.
-#[must_use]
-pub fn operate_credentials_present(config: &crate::config::Config) -> bool {
-    crate::config::has_api_key_for(config, crate::config::ApiProvider::Zai)
+/// Resolve the saved keepalive pin, or the caller's effective session route
+/// for a fresh/unpinned record. Auto stays a policy until Runtime admits a turn;
+/// resolving its inventory here could run a paid classifier.
+fn keepalive_route(
+    config: &crate::config::Config,
+    current: Option<&AutomationRecord>,
+    selection: Option<(&crate::config::ProviderIdentity, &str)>,
+) -> Result<(crate::config::ProviderIdentity, String, bool)> {
+    let (identity, model) = if let Some(record) = current
+        .filter(|record| record.model_provider.is_some() || record.model_provider_id.is_some())
+    {
+        let identity = config
+            .resolve_persisted_provider_identity(
+                record.model_provider.as_deref(),
+                record.model_provider_id.as_deref(),
+            )
+            .map_err(anyhow::Error::msg)?;
+        let model = record
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .context("Pinned Operate keepalive has no model; repair its saved route")?;
+        (identity, model.to_string())
+    } else if let Some((identity, model)) = selection {
+        let identity = config
+            .resolve_persisted_provider_identity(
+                Some(identity.provider.as_str()),
+                identity.persisted_id(),
+            )
+            .map_err(anyhow::Error::msg)?;
+        (identity, model.to_string())
+    } else {
+        (
+            config
+                .active_provider_identity(config.api_provider())
+                .map_err(anyhow::Error::msg)?,
+            config.default_model(),
+        )
+    };
+    if model.trim().eq_ignore_ascii_case("auto") {
+        let mut scoped = config.clone();
+        scoped.scope_to_provider_identity(&identity);
+        let credentials = crate::config::has_api_key_for(&scoped, identity.provider);
+        return Ok((identity, "auto".to_string(), credentials));
+    }
+    let route =
+        crate::route_runtime::resolve_runtime_route_for_identity(config, &identity, Some(&model))
+            .map_err(anyhow::Error::msg)?;
+    let credentials = crate::config::has_api_key_for(&route.config, route.identity.provider);
+    Ok((route.identity, route.model, credentials))
+}
+
+/// Inspect the same saved route used by the scheduler. Credential presence is
+/// a local readiness observation, not proof of provider execution.
+pub(crate) fn keepalive_readiness(
+    manager: &AutomationManager,
+    config: &crate::config::Config,
+    selection: Option<(&crate::config::ProviderIdentity, &str)>,
+) -> Result<(String, bool)> {
+    let mut readiness = (String::new(), false);
+    manager.edit_automation(OPERATE_KEEPALIVE_ID, |current| {
+        if current
+            .as_ref()
+            .and_then(|record| record.execution_scope.as_deref())
+            .is_some_and(|scope| Some(scope) != manager.execution_scope())
+        {
+            bail!("Operate keepalive belongs to another Runtime execution scope");
+        }
+        let (_, model, credentials) = keepalive_route(config, current.as_ref(), selection)?;
+        readiness = (model, credentials);
+        Ok(None)
+    })?;
+    Ok(readiness)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -955,6 +1027,7 @@ pub fn start_operation(
     direction: Option<String>,
     burn_usd_per_hour: Option<f64>,
     credentials_present: bool,
+    lead_model: &str,
 ) -> Result<Operation> {
     let mut direction = match direction {
         Some(text) if !text.trim().is_empty() => text,
@@ -966,6 +1039,7 @@ pub fn start_operation(
         direction = existing.direction;
     }
     let mut op = Operation::new(direction, burn_usd_per_hour);
+    op.set_lead_model(lead_model);
     op.credentials_present = credentials_present;
     op.project();
     store.save(&op)?;
@@ -983,6 +1057,7 @@ pub fn attach_or_start_operation(
     direction: Option<String>,
     burn_usd_per_hour: Option<f64>,
     credentials_present: bool,
+    lead_model: &str,
 ) -> Result<Operation> {
     if store
         .load()?
@@ -992,6 +1067,7 @@ pub fn attach_or_start_operation(
             if let Some(text) = direction.as_ref().filter(|text| !text.trim().is_empty()) {
                 apply_operate_patch(op, &serde_json::json!({ "direction": text }))?;
             }
+            op.set_lead_model(lead_model);
             op.credentials_present = credentials_present;
             op.project();
             Ok(())
@@ -1006,6 +1082,7 @@ pub fn attach_or_start_operation(
         direction,
         burn_usd_per_hour,
         credentials_present,
+        lead_model,
     )
 }
 
@@ -1070,7 +1147,7 @@ fn sync_plan_owners(op: &mut Operation) {
                     id: slice.owner_id.clone(),
                     display_name: slice.owner_id.clone(),
                     role: "worker".to_string(),
-                    model: OPERATE_WORKER_MODEL.to_string(),
+                    model: String::new(),
                     state: "idle".to_string(),
                 });
             }
@@ -1119,33 +1196,48 @@ pub fn keep_alive_observation(
 ///
 /// The record is built directly under the fixed id — no create-then-delete
 /// id swap that could orphan an active UUID-named automation. Reuse
-/// refreshes *every* field that names this start: the prompt, the model, and
-/// the `cwds` the scheduled lead run executes in, so starting from workspace
-/// B after workspace A cannot leave scheduled runs pinned to A.
+/// refreshes the prompt and workspace while preserving an explicit saved
+/// model/provider pair. Fresh and legacy unpinned records capture the caller's
+/// effective route together, including Auto intent and exact custom identity.
 ///
 /// `kick_now` schedules the first lead-plan step for the next scheduler tick
 /// (a fresh operation otherwise idles up to an hour awaiting its plan); the
 /// hourly recurrence covers follow-ups.
-pub fn upsert_keepalive(
+pub(crate) fn upsert_keepalive(
     manager: &AutomationManager,
     workspace: &Path,
     kick_now: bool,
-) -> Result<()> {
+    config: &crate::config::Config,
+    selection: Option<(&crate::config::ProviderIdentity, &str)>,
+) -> Result<(String, bool)> {
     let now = Utc::now();
     let prompt = format!(
         "Keep Operate alive. Read the Operate record (current.json) and its direction, refresh the lead plan, and dispatch ready slices with at most `writersInFlight` concurrent workers — that budget already encodes pace (hold/throttle/widen), so honor it instead of widening on your own. Burn rate paces spend; it never stops the operation. Workspace: {}",
         workspace.display()
     );
-    let mut record = manager
-        .get_automation(OPERATE_KEEPALIVE_ID)
-        .unwrap_or_else(|_| AutomationRecord {
+    let mut readiness = (String::new(), false);
+    manager.edit_automation(OPERATE_KEEPALIVE_ID, |current| {
+        let scope = manager
+            .execution_scope()
+            .context("Operate execution ownership is unverified")?;
+        if current
+            .as_ref()
+            .and_then(|record| record.execution_scope.as_deref())
+            .is_some_and(|bound| bound != scope)
+        {
+            bail!("Operate keepalive belongs to another Runtime execution scope");
+        }
+        let (identity, model, ready) = keepalive_route(config, current.as_ref(), selection)?;
+        readiness = (model.clone(), ready);
+        let mut record = current.unwrap_or_else(|| AutomationRecord {
             schema_version: crate::automation_manager::CURRENT_AUTOMATION_SCHEMA_VERSION,
+            execution_scope: Some(scope.to_string()),
             id: OPERATE_KEEPALIVE_ID.to_string(),
             name: "Operate keep-alive".to_string(),
             prompt: prompt.clone(),
             rrule: OPERATE_KEEPALIVE_RRULE.to_string(),
             cwds: Vec::new(),
-            model: Some(OPERATE_LEAD_MODEL.to_string()),
+            model: None,
             model_provider: None,
             model_provider_id: None,
             mode: Some("operate".to_string()),
@@ -1159,22 +1251,30 @@ pub fn upsert_keepalive(
             next_run_at: None,
             last_run_at: None,
         });
-    record.name = "Operate keep-alive".to_string();
-    record.prompt = prompt;
-    record.rrule = OPERATE_KEEPALIVE_RRULE.to_string();
-    record.cwds = vec![workspace.to_path_buf()];
-    record.model = Some(OPERATE_LEAD_MODEL.to_string());
-    record.mode = Some("operate".to_string());
-    record.allow_shell = Some(true);
-    record.trust_mode = Some(false);
-    record.auto_approve = Some(false);
-    record.delivery_mode = None;
-    record.status = AutomationStatus::Active;
-    record.updated_at = now;
-    if kick_now {
-        record.next_run_at = Some(now);
-    }
-    manager.save_automation(&record)
+        record.schema_version = crate::automation_manager::CURRENT_AUTOMATION_SCHEMA_VERSION;
+        if record.execution_scope.is_none() {
+            record.execution_scope = Some(scope.to_string());
+        }
+        record.name = "Operate keep-alive".to_string();
+        record.prompt = prompt;
+        record.rrule = OPERATE_KEEPALIVE_RRULE.to_string();
+        record.cwds = vec![workspace.to_path_buf()];
+        record.model = Some(model);
+        record.model_provider = Some(identity.provider.as_str().to_string());
+        record.model_provider_id = identity.persisted_id().map(str::to_string);
+        record.mode = Some("operate".to_string());
+        record.allow_shell = Some(true);
+        record.trust_mode = Some(false);
+        record.auto_approve = Some(false);
+        record.delivery_mode = None;
+        record.status = AutomationStatus::Active;
+        record.updated_at = now;
+        if kick_now {
+            record.next_run_at = Some(now);
+        }
+        Ok(Some(record))
+    })?;
+    Ok(readiness)
 }
 
 /// Cancel tears the operation down *including* its keepalive: an unattended
@@ -1196,17 +1296,20 @@ pub fn pause_keepalive(manager: &AutomationManager) -> Result<()> {
 /// after a direction PATCH invalidated the plan). No-op when the keepalive is
 /// absent or paused (a paused keepalive belongs to a cancelled operation).
 pub fn kick_keepalive(manager: &AutomationManager) -> Result<bool> {
-    let Ok(mut record) = manager.get_automation(OPERATE_KEEPALIVE_ID) else {
-        return Ok(false);
-    };
-    if !matches!(record.status, AutomationStatus::Active) {
-        return Ok(false);
-    }
-    let now = Utc::now();
-    record.next_run_at = Some(now);
-    record.updated_at = now;
-    manager.save_automation(&record)?;
-    Ok(true)
+    let mut kicked = false;
+    manager.edit_automation(OPERATE_KEEPALIVE_ID, |current| {
+        let Some(mut record) = current else {
+            return Ok(None);
+        };
+        if record.status == AutomationStatus::Active {
+            let now = Utc::now();
+            record.next_run_at = Some(now);
+            record.updated_at = now;
+            kicked = true;
+        }
+        Ok(Some(record))
+    })?;
+    Ok(kicked)
 }
 
 #[must_use]
@@ -1221,6 +1324,203 @@ pub fn human_gate_for(action: &str) -> bool {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn route_fixture_config() -> crate::config::Config {
+        toml::from_str(
+            r#"
+provider = "route-a"
+[providers.route-a]
+kind = "openai-compatible"
+base_url = "https://route-a.example.test/v1"
+model = "same-model"
+auth_mode = "none"
+[providers.route-b]
+kind = "openai-compatible"
+base_url = "https://route-b.example.test/v1"
+model = "same-model"
+auth_mode = "api-key"
+api_key_env = "CW_OPERATE_MISSING_TEST_KEY"
+"#,
+        )
+        .expect("route fixture")
+    }
+
+    #[test]
+    fn keepalive_saved_route_controls_readiness_refresh_and_auto_intent() -> Result<()> {
+        let _env = crate::test_support::lock_test_env();
+        let _cli = crate::test_support::EnvVarGuard::remove("CODEWHALE_CLI_API_KEY");
+        let _missing = crate::test_support::EnvVarGuard::remove("CW_OPERATE_MISSING_TEST_KEY");
+        let root = TempDir::new()?;
+        let manager = AutomationManager::open_for_test(root.path().join("automations"))?;
+        let mut config = route_fixture_config();
+        assert!(upsert_keepalive(&manager, root.path(), true, &config, None)?.1);
+        let first = manager.get_automation(OPERATE_KEEPALIVE_ID)?;
+        assert_eq!(first.model.as_deref(), Some("same-model"));
+        assert_eq!(first.model_provider.as_deref(), Some("custom"));
+        assert_eq!(first.model_provider_id.as_deref(), Some("route-a"));
+        assert_eq!(first.auto_approve, Some(false));
+
+        // Explicitly edit the saved route. Parent route-a is credential-ready;
+        // route-b is not, even though both expose the same model spelling.
+        let mut pinned = first.clone();
+        pinned.model_provider_id = Some("route-b".into());
+        manager.save_automation(&pinned)?;
+        assert!(!keepalive_readiness(&manager, &config, None)?.1);
+        assert!(!upsert_keepalive(&manager, root.path(), false, &config, None)?.1);
+        assert_eq!(
+            manager
+                .get_automation(OPERATE_KEEPALIVE_ID)?
+                .model_provider_id,
+            Some("route-b".into())
+        );
+
+        pinned.model = Some("auto".into());
+        manager.save_automation(&pinned)?;
+        assert!(!upsert_keepalive(&manager, root.path(), false, &config, None)?.1);
+        let auto = manager.get_automation(OPERATE_KEEPALIVE_ID)?;
+        assert_eq!(auto.model.as_deref(), Some("auto"));
+        assert_eq!(auto.model_provider_id.as_deref(), Some("route-b"));
+        assert_eq!(auto.created_at, first.created_at);
+
+        config.providers.as_mut().unwrap().custom.remove("route-b");
+        let before = serde_json::to_value(&auto)?;
+        assert!(keepalive_readiness(&manager, &config, None).is_err());
+        assert!(upsert_keepalive(&manager, root.path(), true, &config, None).is_err());
+        assert_eq!(
+            serde_json::to_value(manager.get_automation(OPERATE_KEEPALIVE_ID)?)?,
+            before
+        );
+
+        // Legacy unpinned GLM is a previous scheduler default, not an exact
+        // provider choice. Migration replaces all route fields together.
+        pinned.model = Some("GLM-5.3".into());
+        pinned.model_provider = None;
+        pinned.model_provider_id = None;
+        manager.save_automation(&pinned)?;
+        assert!(upsert_keepalive(&manager, root.path(), true, &config, None)?.1);
+        let migrated = manager.get_automation(OPERATE_KEEPALIVE_ID)?;
+        assert_eq!(migrated.model.as_deref(), Some("same-model"));
+        assert_eq!(migrated.model_provider.as_deref(), Some("custom"));
+        assert_eq!(migrated.model_provider_id.as_deref(), Some("route-a"));
+        Ok(())
+    }
+
+    #[test]
+    fn keepalive_legacy_custom_keeps_absent_exact_id() -> Result<()> {
+        let _env = crate::test_support::lock_test_env();
+        let _cli = crate::test_support::EnvVarGuard::remove("CODEWHALE_CLI_API_KEY");
+        let root = TempDir::new()?;
+        let manager = AutomationManager::open_for_test(root.path().join("automations"))?;
+        let config = crate::config::Config {
+            provider: Some("custom".into()),
+            base_url: Some("https://legacy.example.test/v1".into()),
+            default_text_model: Some("legacy-model".into()),
+            ..Default::default()
+        };
+        upsert_keepalive(&manager, root.path(), false, &config, None)?;
+        let record = manager.get_automation(OPERATE_KEEPALIVE_ID)?;
+        assert_eq!(record.model.as_deref(), Some("legacy-model"));
+        assert_eq!(record.model_provider.as_deref(), Some("custom"));
+        assert_eq!(record.model_provider_id, None);
+        upsert_keepalive(&manager, root.path(), false, &config, None)?;
+        assert_eq!(
+            manager
+                .get_automation(OPERATE_KEEPALIVE_ID)?
+                .model_provider_id,
+            None
+        );
+        Ok(())
+    }
+
+    struct RouteRecordingExecutor(
+        std::sync::Arc<std::sync::Mutex<Vec<crate::runtime_threads::CreateThreadRequest>>>,
+    );
+
+    #[async_trait::async_trait]
+    impl crate::task_manager::TaskExecutor for RouteRecordingExecutor {
+        async fn execute(
+            &self,
+            task: crate::task_manager::ExecutionTask,
+            _events: tokio::sync::mpsc::Sender<crate::task_manager::TaskExecutionEvent>,
+            _cancel: tokio_util::sync::CancellationToken,
+        ) -> crate::task_manager::TaskExecutionResult {
+            self.0.lock().unwrap().push(task.thread_request());
+            crate::task_manager::TaskExecutionResult {
+                status: crate::task_manager::TaskStatus::Completed,
+                result_text: Some("route fixture completed".into()),
+                error: None,
+                terminal_reason: crate::task_manager::TaskTerminalReason::Completed,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn keepalive_pin_reaches_task_and_survives_parent_change() -> Result<()> {
+        let root = TempDir::new()?;
+        let manager = AutomationManager::open_for_test(root.path().join("automations"))?;
+        let mut config = route_fixture_config();
+        upsert_keepalive(&manager, root.path(), false, &config, None)?;
+        pause_keepalive(&manager)?;
+        config.provider = Some("route-b".into());
+        assert!(upsert_keepalive(&manager, root.path(), true, &config, None)?.1);
+        let observations = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tasks = crate::task_manager::TaskManager::start_with_executor(
+            crate::task_manager::TaskManagerConfig {
+                data_dir: root.path().join("tasks"),
+                worker_count: 1,
+                default_workspace: root.path().to_path_buf(),
+                default_model: "changed-default".into(),
+                default_mode: "agent".into(),
+                allow_shell: false,
+                trust_mode: false,
+                execution_limits: Default::default(),
+            },
+            std::sync::Arc::new(RouteRecordingExecutor(observations.clone())),
+        )
+        .await?;
+        let shared = std::sync::Arc::new(tokio::sync::Mutex::new(manager));
+        let run = crate::automation_manager::run_now_shared(&shared, OPERATE_KEEPALIVE_ID, &tasks)
+            .await?;
+        let id = run.task_id.as_deref().context("bound task")?;
+        let task = crate::task_manager::wait_for_terminal_state(
+            &tasks,
+            id,
+            std::time::Duration::from_secs(5),
+        )
+        .await?;
+        assert_eq!(task.status, crate::task_manager::TaskStatus::Completed);
+        assert_eq!(task.model, "same-model");
+        assert_eq!(task.model_provider.as_deref(), Some("custom"));
+        assert_eq!(task.model_provider_id.as_deref(), Some("route-a"));
+        let observed = observations.lock().unwrap();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].model, Some(task.model.clone()));
+        assert_eq!(observed[0].model_provider_id, task.model_provider_id);
+        assert_eq!(observed[0].auto_approve, Some(false));
+        drop(observed);
+        let reopened = AutomationManager::open_for_test(root.path().join("automations"))?;
+        assert!(keepalive_readiness(&reopened, &config, None)?.1);
+        assert_eq!(
+            reopened.list_runs(OPERATE_KEEPALIVE_ID, None)?[0]
+                .task_id
+                .as_deref(),
+            Some(id)
+        );
+        // A subsequent explicit edit cannot rewrite an accepted task binding.
+        let mut edited = reopened.get_automation(OPERATE_KEEPALIVE_ID)?;
+        edited.model = Some("replacement-model".into());
+        edited.model_provider_id = Some("route-b".into());
+        reopened.save_automation(&edited)?;
+        assert_eq!(
+            tasks
+                .read_bound_task(id)?
+                .context("accepted task")?
+                .model_provider_id,
+            Some("route-a".into())
+        );
+        tasks.shutdown();
+        Ok(())
+    }
 
     fn with_credentials(mut op: Operation) -> Operation {
         op.credentials_present = true;
@@ -1240,15 +1540,60 @@ mod tests {
             Some(OperateIdleReason::AwaitingLeadPlan)
         );
         assert!(!op.workers_admitted);
-        assert_eq!(op.lead_operator.model, "GLM-5.3");
+        assert!(op.lead_operator.model.is_empty(), "no model was assigned");
         let json = serde_json::to_value(&op).expect("json");
         assert!(json.get("burnRate").unwrap().is_null());
-        assert_eq!(json["leadOperator"]["model"], "GLM-5.3");
+        assert_eq!(json["leadOperator"]["model"], "");
         assert_eq!(json["schemaVersion"], 1);
         assert!(json.get("leadPlan").unwrap().is_null());
         assert_eq!(json["idleBlockedReason"], "awaiting_lead_plan");
         assert_eq!(json["workersAdmitted"], false);
         assert!(json["id"].as_str().unwrap().starts_with("op_"));
+    }
+
+    #[test]
+    fn operation_lead_label_follows_selection_and_planned_workers_stay_unassigned() -> Result<()> {
+        let root = TempDir::new()?;
+        let store = OperationStore::open(root.path())?;
+        let operation = start_operation(
+            &store,
+            root.path(),
+            Some("First bounded task\nSecond bounded task".into()),
+            None,
+            true,
+            "selected-model",
+        )?;
+        assert_eq!(operation.lead_operator.model, "selected-model");
+        let mut attached =
+            attach_or_start_operation(&store, root.path(), None, None, true, "auto")?;
+        assert_eq!(attached.id, operation.id);
+        assert_eq!(attached.lead_operator.model, "auto");
+        assert!(
+            attached
+                .roster
+                .iter()
+                .filter(|member| member.id == "lead")
+                .all(|member| member.model == "auto")
+        );
+        attached.plan_from_direction();
+        assert!(attached.roster.iter().any(|member| member.id != "lead"));
+        assert!(
+            attached
+                .roster
+                .iter()
+                .filter(|member| member.id != "lead")
+                .all(|member| member.model.is_empty())
+        );
+        assert!(
+            store
+                .load()?
+                .context("saved operation")?
+                .roster
+                .iter()
+                .filter(|member| member.id == "lead")
+                .all(|member| member.model == "auto")
+        );
+        Ok(())
     }
 
     #[test]
@@ -1347,6 +1692,7 @@ mod tests {
             Some("Contract shape".into()),
             None,
             true,
+            "selected-model",
         )
         .expect("start");
         let json = serde_json::to_value(&op).expect("json");
@@ -1427,6 +1773,7 @@ mod tests {
             Some("Keep the lineage".into()),
             None,
             true,
+            "selected-model",
         )
         .expect("start");
         let mut spent = first.clone();
@@ -1434,7 +1781,8 @@ mod tests {
         store.save(&spent).expect("save spend");
 
         let reentered =
-            attach_or_start_operation(&store, dir.path(), None, None, true).expect("attach");
+            attach_or_start_operation(&store, dir.path(), None, None, true, "selected-model")
+                .expect("attach");
         assert_eq!(reentered.id, first.id, "re-entry must attach, not reset");
         assert_eq!(reentered.spent_usd, 42.0);
         assert_eq!(reentered.observed_burn_usd_per_hour, Some(3.0));
@@ -1442,7 +1790,8 @@ mod tests {
         // A cancelled record is terminal: re-entry starts a new operation.
         cancel_operation(&store).expect("cancel");
         let fresh =
-            attach_or_start_operation(&store, dir.path(), None, None, true).expect("restart");
+            attach_or_start_operation(&store, dir.path(), None, None, true, "selected-model")
+                .expect("restart");
         assert_ne!(fresh.id, first.id);
         // The fresh operation reuses the recorded direction and awaits its
         // own lead plan (CWC projects a plan-less record to idle_blocked).
@@ -1460,7 +1809,15 @@ mod tests {
         let dir = TempDir::new().expect("temp");
         let writer = OperationStore::open(dir.path()).expect("store a");
         let reader = OperationStore::open(dir.path()).expect("store b");
-        start_operation(&writer, dir.path(), Some("First".into()), None, true).expect("start");
+        start_operation(
+            &writer,
+            dir.path(),
+            Some("First".into()),
+            None,
+            true,
+            "selected-model",
+        )
+        .expect("start");
 
         writer
             .mutate(|op| {
@@ -1496,19 +1853,21 @@ mod tests {
     #[test]
     fn keepalive_reuse_refreshes_cwds_and_kicks_first_lead_run() {
         let dir = TempDir::new().expect("temp");
-        let manager = AutomationManager::open(dir.path().to_path_buf()).expect("manager");
+        let manager = AutomationManager::open_for_test(dir.path().to_path_buf()).expect("manager");
         let workspace_a = dir.path().join("workspace-a");
         let workspace_b = dir.path().join("workspace-b");
         fs::create_dir_all(&workspace_a).expect("dir a");
         fs::create_dir_all(&workspace_b).expect("dir b");
 
-        upsert_keepalive(&manager, &workspace_a, false).expect("upsert a");
+        upsert_keepalive(&manager, &workspace_a, false, &route_fixture_config(), None)
+            .expect("upsert a");
         let first = manager
             .get_automation(OPERATE_KEEPALIVE_ID)
             .expect("keepalive a");
         assert_eq!(first.cwds, vec![workspace_a.clone()]);
 
-        upsert_keepalive(&manager, &workspace_b, true).expect("upsert b");
+        upsert_keepalive(&manager, &workspace_b, true, &route_fixture_config(), None)
+            .expect("upsert b");
         let second = manager
             .get_automation(OPERATE_KEEPALIVE_ID)
             .expect("keepalive b");
@@ -1522,7 +1881,7 @@ mod tests {
             Some(true),
             "kick schedules the first lead run for the next scheduler tick"
         );
-        assert_eq!(second.model.as_deref(), Some("GLM-5.3"));
+        assert_eq!(second.model.as_deref(), Some("same-model"));
         assert_eq!(second.mode.as_deref(), Some("operate"));
         assert_eq!(second.rrule, OPERATE_KEEPALIVE_RRULE);
 
@@ -1541,8 +1900,9 @@ mod tests {
     #[test]
     fn cancel_pauses_keepalive_so_no_cost_accrues() {
         let dir = TempDir::new().expect("temp");
-        let manager = AutomationManager::open(dir.path().to_path_buf()).expect("manager");
-        upsert_keepalive(&manager, dir.path(), false).expect("upsert");
+        let manager = AutomationManager::open_for_test(dir.path().to_path_buf()).expect("manager");
+        upsert_keepalive(&manager, dir.path(), false, &route_fixture_config(), None)
+            .expect("upsert");
         pause_keepalive(&manager).expect("pause");
         let paused = manager
             .get_automation(OPERATE_KEEPALIVE_ID)
@@ -1552,12 +1912,14 @@ mod tests {
 
         // Pausing is idempotent and a missing keepalive is not an error.
         pause_keepalive(&manager).expect("pause again");
-        let empty = AutomationManager::open(dir.path().join("empty")).expect("empty manager");
+        let empty =
+            AutomationManager::open_for_test(dir.path().join("empty")).expect("empty manager");
         pause_keepalive(&empty).expect("missing keepalive is a no-op");
         assert!(!kick_keepalive(&empty).expect("kick missing"));
 
         // A fresh start reactivates the keepalive.
-        upsert_keepalive(&manager, dir.path(), false).expect("reactivate");
+        upsert_keepalive(&manager, dir.path(), false, &route_fixture_config(), None)
+            .expect("reactivate");
         let active = manager
             .get_automation(OPERATE_KEEPALIVE_ID)
             .expect("keepalive");
@@ -1596,6 +1958,7 @@ mod tests {
             Some("Do not spend silently".into()),
             None,
             false,
+            "selected-model",
         )
         .expect("start");
         assert_eq!(op.status, OperateStatus::IdleBlocked);
@@ -1611,7 +1974,15 @@ mod tests {
     fn cancel_stays_cancelled_through_keep_alive() {
         let dir = TempDir::new().expect("temp");
         let store = OperationStore::open(dir.path()).expect("store");
-        start_operation(&store, dir.path(), Some("Stop".into()), None, true).expect("start");
+        start_operation(
+            &store,
+            dir.path(),
+            Some("Stop".into()),
+            None,
+            true,
+            "selected-model",
+        )
+        .expect("start");
         let cancelled = cancel_operation(&store).expect("cancel").expect("present");
         let mut kept = cancelled;
         keep_alive_observation(&mut kept, Some(40.0), Some(999.0), None, None);
@@ -1722,20 +2093,19 @@ mod tests {
     #[test]
     fn keepalive_automation_and_defaults() {
         let dir = TempDir::new().expect("temp");
-        let manager = AutomationManager::open(dir.path().to_path_buf()).expect("manager");
-        upsert_keepalive(&manager, dir.path(), false).expect("upsert");
+        let manager = AutomationManager::open_for_test(dir.path().to_path_buf()).expect("manager");
+        upsert_keepalive(&manager, dir.path(), false, &route_fixture_config(), None)
+            .expect("upsert");
         let record = manager
             .get_automation(OPERATE_KEEPALIVE_ID)
             .expect("keepalive");
-        assert_eq!(record.model.as_deref(), Some("GLM-5.3"));
+        assert_eq!(record.model.as_deref(), Some("same-model"));
         assert_eq!(record.mode.as_deref(), Some("operate"));
         assert_eq!(record.cwds, vec![dir.path().to_path_buf()]);
         assert_eq!(
             record.next_run_at, None,
             "without a kick the hourly recurrence owns the next run"
         );
-        assert_eq!(CWC_OPERATE_DEFAULT_WORKER_MODEL, "GLM-5.3-Flash");
-        assert_eq!(OPERATE_WORKER_MODEL, "GLM-5.3-Flash");
         assert_eq!(OPERATE_MAX_WRITERS, 3);
     }
 }

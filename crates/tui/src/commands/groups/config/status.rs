@@ -16,6 +16,48 @@ pub fn status(app: &mut App) -> CommandResult {
     CommandResult::message(format_status(app))
 }
 
+/// Models.dev live-layer freshness: source, row count, and age (#4187).
+fn catalog_summary() -> String {
+    use crate::models_dev_live::ModelsDevFreshness;
+    let st = crate::models_dev_live::status();
+    let now = codewhale_config::catalog::now_unix();
+    let mut out = match st.freshness {
+        ModelsDevFreshness::Bundled => "bundled".to_string(),
+        ModelsDevFreshness::Live => "models.dev live".to_string(),
+        ModelsDevFreshness::Stale => "models.dev stale".to_string(),
+        ModelsDevFreshness::Failed => "models.dev refresh failed".to_string(),
+    };
+    if st.offering_count > 0 {
+        let _ = write!(out, " · {} offerings", st.offering_count);
+    }
+    if let Some(fetched_at) = st.fetched_at {
+        let _ = write!(
+            out,
+            " · fetched {}",
+            codewhale_config::cloud_facts::provenance::age_label(fetched_at, now)
+        );
+    }
+    if let Some(err) = st.last_error.as_deref().filter(|e| !e.is_empty())
+        && st.freshness == ModelsDevFreshness::Failed
+    {
+        let _ = write!(out, " ({err})");
+    }
+    out
+}
+
+/// Cloud facts provenance: channel, version, key, age, origin — or why the
+/// bundled facts are in use. Off by default.
+fn cloud_facts_summary() -> String {
+    let status = codewhale_cloud_facts::status();
+    if status.state == codewhale_config::cloud_facts::CloudFactsState::Off {
+        // The adjacent catalog source already describes the available facts.
+        // Repeating "bundled" here also mislabels a live Models.dev catalog.
+        "off".to_string()
+    } else {
+        status.label(codewhale_config::catalog::now_unix())
+    }
+}
+
 /// Row label column, in columns. English's widest label is `Context window:`
 /// (15); the tail space in [`push_row`] makes its value start at column 19.
 /// Longer localized labels extend naturally rather than being truncated.
@@ -73,6 +115,21 @@ fn format_status(app: &App) -> String {
             &[("{count}", &app.mcp_configured_count.to_string())],
         ),
     );
+    if let Some(notice) = crate::core::turn::snapshots_disabled_status(
+        &app.workspace,
+        app.current_session_id.as_deref(),
+    ) {
+        let message = localized(
+            locale,
+            MessageId::SnapshotsDisabledNotice,
+            &[
+                ("{workspace}", &notice.workspace),
+                ("{reason}", &notice.reason),
+                ("{config_key}", crate::core::turn::SNAPSHOTS_CAP_CONFIG_KEY),
+            ],
+        );
+        let _ = writeln!(out, "  {message}");
+    }
     let _ = writeln!(out);
 
     push_row(
@@ -89,11 +146,31 @@ fn format_status(app: &App) -> String {
             ],
         ),
     );
+    let mut source_summary =
+        context_window_source_label(context_window_source(app), locale).into_owned();
+    // The default bundled source needs no second catalog label. Keeping it
+    // compact preserves the 80-column budget as well as the report's row count.
+    if crate::models_dev_live::status().freshness
+        != crate::models_dev_live::ModelsDevFreshness::Bundled
+    {
+        let _ = write!(
+            source_summary,
+            " · {}: {}",
+            tr(locale, MessageId::StatusLabelCatalog),
+            catalog_summary()
+        );
+    }
+    let _ = write!(
+        source_summary,
+        " · {}: {}",
+        tr(locale, MessageId::StatusLabelCloudFacts),
+        cloud_facts_summary()
+    );
     push_row(
         &mut out,
         locale,
         MessageId::StatusLabelWindowSource,
-        context_window_source_label(context_window_source(app), locale).as_ref(),
+        &source_summary,
     );
     if let Some(key) = context_window_override_key(app, locale) {
         push_row(&mut out, locale, MessageId::StatusLabelWindowOverride, &key);
@@ -375,7 +452,8 @@ fn context_window_source_label(
     tr(
         locale,
         match source {
-            crate::route_runtime::ContextWindowSource::Configured => {
+            crate::route_runtime::ContextWindowSource::Configured
+            | crate::route_runtime::ContextWindowSource::UserDeclared => {
                 MessageId::StatusContextSourceConfigured
             }
             crate::route_runtime::ContextWindowSource::ProviderReported => {
@@ -460,6 +538,55 @@ mod tests {
     use crate::tui::app::{AppMode, TuiOptions};
     use crate::tui::history::HistoryCell;
 
+    #[test]
+    fn status_keeps_current_session_snapshot_remedy_after_notice_delivery() {
+        let _env = crate::test_support::lock_test_env();
+        let root = TempDir::new().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path());
+        let _user_home = crate::test_support::EnvVarGuard::set("HOME", root.path());
+        let _user_profile = crate::test_support::EnvVarGuard::set("USERPROFILE", root.path());
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join("large.txt"), vec![b'x'; 4096]).unwrap();
+        let mut app = create_test_app(workspace.clone());
+        app.current_session_id = Some("session-a".into());
+        assert!(
+            crate::core::turn::pre_turn_snapshot(&workspace, 1, 1024, None, Some("session-a"))
+                .is_none()
+        );
+        assert_eq!(
+            crate::core::turn::take_snapshots_disabled_notices(&workspace, Some("session-a")).len(),
+            1
+        );
+        for _ in 0..2 {
+            let report = status(&mut app).message.unwrap();
+            assert!(report.contains("Snapshots and /undo are off"), "{report}");
+            assert!(report.contains("workspace too large"), "{report}");
+            assert!(
+                report.contains(crate::core::turn::SNAPSHOTS_CAP_CONFIG_KEY),
+                "{report}"
+            );
+        }
+        app.current_session_id = Some("session-b".into());
+        assert!(
+            !status(&mut app)
+                .message
+                .unwrap()
+                .contains("Snapshots and /undo are off")
+        );
+        app.current_session_id = Some("session-a".into());
+        assert!(
+            crate::core::turn::pre_turn_snapshot(&workspace, 2, 0, None, Some("session-a"))
+                .is_some()
+        );
+        assert!(
+            !status(&mut app)
+                .message
+                .unwrap()
+                .contains("Snapshots and /undo are off")
+        );
+    }
+
     fn create_test_app(workspace: PathBuf) -> App {
         let options = TuiOptions {
             skills_dir: PathBuf::from("/tmp/test-skills"),
@@ -532,6 +659,14 @@ mod tests {
         assert_eq!(
             rows, 18,
             "fresh session is 18 rows with Window override present, got {rows} rows:\n{msg}"
+        );
+        let source = msg
+            .lines()
+            .find(|line| line.contains("Window source:"))
+            .unwrap();
+        assert!(
+            source.chars().count() <= 80,
+            "fresh source provenance must not wrap: {source}"
         );
     }
 

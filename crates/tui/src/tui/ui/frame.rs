@@ -14,10 +14,9 @@ pub(crate) fn info_context_percent(app: &App) -> u8 {
     crate::tui::phase_strip::context_percent_from_app(app)
 }
 
-/// The session cost as the metrics line prints it — the same price string
-/// `/cost`, the roster's right column and the price widget print
-/// (SHELL-DESIGN-20260901 §2.11 item 5). Empty until the session has a
-/// priced or counted turn.
+/// Format the session's cumulative usage chip for the metrics line. `/cost`
+/// has its own detailed receipt and coverage report; it does not call this
+/// formatter. Chips without a cost display produce an empty string.
 ///
 /// Incomplete cost includes its receipt's reason, including an unclassified
 /// billing route. A provider switch cannot erase earlier missing coverage.
@@ -791,12 +790,7 @@ pub(crate) fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         project_context_pack_enabled: config.project_context_pack_enabled(),
         translation_enabled: app.translation_enabled,
         verbosity: app.verbosity.clone(),
-        // R1: finite, not `u32::MAX`. The old comment argued a runaway is
-        // "human-noticeable", but an interactive session left running is
-        // exactly where an unbounded loop spends real money unattended.
-        // The default (200) is far above what a long multi-step plan needs;
-        // operators who want more raise `[tui].max_model_steps`, and the
-        // clamp keeps even the maximum finite.
+        // Only an explicit `[tui].max_model_steps` installs a step ceiling.
         max_steps: config.max_model_steps(),
         max_subagents,
         max_admitted_subagents: config

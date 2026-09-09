@@ -15,6 +15,9 @@
 //! ladder result fits the budget the tool fails closed — nothing is sent —
 //! with the exact conversion command to retry with.
 
+#[cfg(test)]
+use image::ImageReader;
+#[cfg(test)]
 use std::io::Cursor;
 
 use async_trait::async_trait;
@@ -23,7 +26,7 @@ use codewhale_config::route::CapabilityState;
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::{CompressionType, FilterType as PngFilter, PngEncoder};
 use image::imageops::FilterType;
-use image::{DynamicImage, ExtendedColorType, GenericImageView, ImageEncoder, ImageReader, Limits};
+use image::{DynamicImage, ExtendedColorType, GenericImageView, ImageEncoder};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -35,14 +38,7 @@ use super::spec::{
 /// Maximum source image size before decoding (20 MiB).
 pub const MAX_SOURCE_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 
-/// Maximum width or height admitted for an input image (8192 px).
-pub const MAX_IMAGE_DIMENSION: u32 = 8192;
-
-/// Maximum total pixels admitted before decoding is aborted (~33.5 megapixels).
-pub const MAX_IMAGE_PIXELS: u64 = 33_554_432;
-
-/// Memory allocation limit for image decoding (64 MiB).
-pub const MAX_DECODE_ALLOC_BYTES: u64 = 64 * 1024 * 1024;
+use crate::image_attach::decode_and_guard_image;
 
 /// Maximum inline image payload admitted on the wire (5 MiB).
 pub const MAX_WIRE_IMAGE_BYTES: usize = crate::image_attach::MAX_IMAGE_BYTES;
@@ -643,7 +639,8 @@ fn process_media_file(
     };
 
     // 6. Bounded decoding with decompression-bomb guards
-    let (processed_image, orig_width, orig_height) = decode_and_guard_image(&raw_bytes)?;
+    let (processed_image, orig_width, orig_height) = decode_and_guard_image(&raw_bytes)
+        .map_err(|error| ToolError::execution_failed(format!("read_media: {error}")))?;
 
     // 7. Apply crop if requested
     let (cropped_image, crop_applied) = if let Some(crop) = crop_region {
@@ -729,55 +726,6 @@ fn process_media_file(
         encoded_bytes,
         original_path,
     })
-}
-
-fn decode_and_guard_image(bytes: &[u8]) -> Result<(DynamicImage, u32, u32), ToolError> {
-    let mut reader = ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .map_err(|e| {
-            ToolError::execution_failed(format!("read_media: failed to detect format: {e}"))
-        })?;
-
-    let mut limits = Limits::default();
-    limits.max_alloc = Some(MAX_DECODE_ALLOC_BYTES);
-    limits.max_image_width = Some(MAX_IMAGE_DIMENSION);
-    limits.max_image_height = Some(MAX_IMAGE_DIMENSION);
-    reader.limits(limits);
-
-    // Read header/dimensions first
-    let (width, height) = reader.into_dimensions().map_err(|e| {
-        ToolError::execution_failed(format!(
-            "read_media: decompression bomb guard or invalid header detected: {e}"
-        ))
-    })?;
-
-    let total_pixels = (width as u64) * (height as u64);
-    if total_pixels > MAX_IMAGE_PIXELS
-        || width > MAX_IMAGE_DIMENSION
-        || height > MAX_IMAGE_DIMENSION
-    {
-        return Err(ToolError::execution_failed(format!(
-            "read_media: decompression bomb guard triggered: image dimensions ({width}x{height}, {total_pixels} pixels) exceed safe limits (max {MAX_IMAGE_DIMENSION}x{MAX_IMAGE_DIMENSION} / {MAX_IMAGE_PIXELS} pixels). Please downscale or crop the image first."
-        )));
-    }
-
-    // Decode full dynamic image with limits
-    let mut decode_reader = ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .map_err(|e| {
-            ToolError::execution_failed(format!("read_media: failed to read image: {e}"))
-        })?;
-    let mut decode_limits = Limits::default();
-    decode_limits.max_alloc = Some(MAX_DECODE_ALLOC_BYTES);
-    decode_limits.max_image_width = Some(MAX_IMAGE_DIMENSION);
-    decode_limits.max_image_height = Some(MAX_IMAGE_DIMENSION);
-    decode_reader.limits(decode_limits);
-
-    let dynamic_img = decode_reader.decode().map_err(|e| {
-        ToolError::execution_failed(format!("read_media: failed to decode image: {e}"))
-    })?;
-
-    Ok((dynamic_img, width, height))
 }
 
 /// How the encoding ladder should treat an image's content.

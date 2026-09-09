@@ -34,6 +34,22 @@ function assertEventStrategy(strategy) {
   }
 }
 
+function appName(ref) {
+  if (ref === undefined) return "";
+  if (!ref || typeof ref !== "object" || Array.isArray(ref) || Object.keys(ref).length !== 1 || typeof ref.name !== "string" || !ref.name.trim()) {
+    throw Object.assign(new ExecError("Linux accessibility targeting supports only a nonblank app_ref.name; PID and bundle selectors are unavailable"), { code: "unsupported_selector" });
+  }
+  return ref.name;
+}
+
+function rejectWindowSelectors(args) {
+  if (Object.hasOwn(args, "app_ref") || Object.hasOwn(args, "window_id")) throw Object.assign(new ExecError("Linux window listing and screenshots do not support app_ref or window_id selectors"), { code: "unsupported_selector" });
+}
+
+function assertAppRootWindow(index, windowId) {
+  if (windowId !== undefined || (index !== undefined && index !== 0)) throw Object.assign(new ExecError("Linux accessibility paths start at the app root; window selectors are unavailable"), { code: "unsupported_selector" });
+}
+
 export function create({ exec } = {}) {
   const run = exec?.run ?? nativeRun;
   const have = exec?.have ?? nativeHave;
@@ -184,24 +200,20 @@ export function create({ exec } = {}) {
   }
 
   // ---------- AT-SPI tree ----------
+  const PYATSPI_APP = `def resolve_app(desktop, app_name):
+    apps = [desktop.getChildAtIndex(i) for i in range(desktop.childCount)]
+    if app_name:
+        matches = [app for app in apps if app and app_name.casefold() == (app.name or "").casefold()]
+        return matches[0] if len(matches) == 1 else None
+    return next((app for app in apps if app and app.childCount), None)
+`;
   const PYATSPI_WALK = `import json, sys, pyatspi
+${PYATSPI_APP}
 app_name = sys.argv[1] if len(sys.argv) > 1 else None
 depth_max = int(sys.argv[2]) if len(sys.argv) > 2 else 8
 max_el = int(sys.argv[3]) if len(sys.argv) > 3 else 400
 desktop = pyatspi.Registry.getDesktop(0)
-root = None
-if app_name:
-    for i in range(desktop.childCount):
-        app = desktop.getChildAtIndex(i)
-        if app and app_name.lower() in (app.name or "").lower():
-            root = app
-            break
-else:
-    for i in range(desktop.childCount):
-        a = desktop.getChildAtIndex(i)
-        if a and a.childCount:
-            root = a
-            break
+root = resolve_app(desktop, app_name)
 if root is None:
     print(json.dumps({"found": False}))
     sys.exit(0)
@@ -241,27 +253,18 @@ def walk(e, path, d):
 walk(root, [], 0)
 print(json.dumps({"found": True, "name": root.name, "elements": els, "truncated": truncated}))`;
 
-  async function atspiResolve(appName, pathArr, pythonBody, extraArg = null) {
+  async function atspiResolve(target, pythonBody, extraArg = null) {
+    const name = appName(target.app_ref);
+    assertAppRootWindow(target.windowIndex, target.window_id);
     await probeSession();
     need("python3", "semantic element actions (AT-SPI)");
     const script = `import json, sys, pyatspi
+${PYATSPI_APP}
 desktop = pyatspi.Registry.getDesktop(0)
 app_name = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else None
 target_path = json.loads(sys.argv[2])
 extra = sys.argv[3] if len(sys.argv) > 3 else None
-node = None
-if app_name:
-    for i in range(desktop.childCount):
-        a = desktop.getChildAtIndex(i)
-        if a and app_name.lower() in (a.name or "").lower():
-            node = a
-            break
-else:
-    for i in range(desktop.childCount):
-        a = desktop.getChildAtIndex(i)
-        if a and a.childCount:
-            node = a
-            break
+node = resolve_app(desktop, app_name)
 if node is None:
     print(json.dumps({"ok": False, "code": "app_not_found"}))
     sys.exit(0)
@@ -285,7 +288,7 @@ try:
 ${pythonBody}
 except Exception as e:
     print(json.dumps({"ok": False, "code": str(e)}))`;
-    const argv = ["-c", script, String(appName ?? ""), JSON.stringify(pathArr ?? [])];
+    const argv = ["-c", script, name, JSON.stringify(target.path ?? [])];
     if (extraArg != null) argv.push(String(extraArg));
     const r = await run("python3", argv, { timeoutMs: 30_000 });
     const out = tryJson((r.stdout.trim().split("\n").pop() ?? ""), null);
@@ -410,7 +413,8 @@ except Exception as e:
       }
       throw new ExecError("list_apps needs wmctrl (X11) or swaymsg/hyprctl (Wayland)");
     },
-    list_windows: async () => {
+    list_windows: async (args = {}) => {
+      rejectWindowSelectors(args);
       await probeSession();
       if (session === "x11" && tools.wmctrl) {
         const r = await runOk("wmctrl", ["-lGx"], { timeoutMs: 15_000 });
@@ -446,14 +450,18 @@ except Exception as e:
       await new Promise((r) => setTimeout(r, 500));
       return { launched: true, name: target, url: urlArg ?? null };
     },
-    get_app_state: async ({ app_ref } = {}) => {
-      const t = await run("python3", ["-c", PYATSPI_WALK, app_ref?.name ?? "", "10", "500"], { timeoutMs: 45_000 }).then((r) =>
+    get_app_state: async ({ app_ref, window_id } = {}) => {
+      const name = appName(app_ref);
+      if (window_id !== undefined) throw Object.assign(new ExecError("Linux app-state window_id selection is unavailable"), { code: "unsupported_selector" });
+      const t = await run("python3", ["-c", PYATSPI_WALK, name, "10", "500"], { timeoutMs: 45_000 }).then((r) =>
         tryJson((r.stdout.trim().split("\n").pop() ?? ""), null));
       if (!t) throw new ExecError("AT-SPI walk failed — is python3-pyatspi installed and the desktop running an accessibility bus (AT_SPI_BUS)?");
-      if (!t.found) throw new ExecError("application not found in the AT-SPI tree — pass app_ref.name from list_apps");
+      if (!t.found) throw new ExecError("application not found or name is ambiguous in the AT-SPI tree — use a unique exact app_ref.name");
       return t;
     },
-    screenshot: async ({ display, region, path: outPath } = {}) => {
+    screenshot: async (args = {}) => {
+      rejectWindowSelectors(args);
+      const { display, region, path: outPath } = args;
       await probeSession();
       const dir = recordingsDir();
       fs.mkdirSync(dir, { recursive: true });
@@ -472,26 +480,17 @@ except Exception as e:
       };
       return { ...lastRaster };
     },
-    resolve_element: async ({ app_ref, windowIndex, path: pathArr } = {}) => {
+    resolve_element: async ({ app_ref, windowIndex, window_id, path: pathArr } = {}) => {
+      const name = appName(app_ref);
+      assertAppRootWindow(windowIndex, window_id);
       await probeSession();
       need("python3", "element resolution (AT-SPI)");
       const script = `import json, sys, pyatspi
+${PYATSPI_APP}
 desktop = pyatspi.Registry.getDesktop(0)
 app_name = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else None
 target_path = json.loads(sys.argv[2])
-root = None
-if app_name:
-    for i in range(desktop.childCount):
-        a = desktop.getChildAtIndex(i)
-        if a and app_name.lower() in (a.name or "").lower():
-            root = a
-            break
-else:
-    for i in range(desktop.childCount):
-        a = desktop.getChildAtIndex(i)
-        if a and a.childCount:
-            root = a
-            break
+root = resolve_app(desktop, app_name)
 if root is None:
     print(json.dumps({"found": False, "element": None, "reason": "app_not_found"}))
     sys.exit(0)
@@ -518,7 +517,7 @@ print(json.dumps({"found": True, "reason": None, "element": {
     "role": node.getRoleName() or None, "label": node.name or None,
     "position": {"x": ext.x, "y": ext.y} if ext else None,
     "size": {"w": ext.width, "h": ext.height} if ext else None}}))`;
-      const r = await run("python3", ["-c", script, String(app_ref?.name ?? ""), JSON.stringify(pathArr ?? [])], { timeoutMs: 30_000 });
+      const r = await run("python3", ["-c", script, name, JSON.stringify(pathArr ?? [])], { timeoutMs: 30_000 });
       const out = tryJson(r.stdout.trim().split("\n").pop() ?? "", null);
       if (!out) throw new ExecError(`AT-SPI resolve failed: ${(r.stderr || r.stdout).slice(0, 250)}`, r);
       return out;
@@ -622,16 +621,14 @@ print(json.dumps({"found": True, "reason": None, "element": {
     },
     set_value: async ({ target, value }) => {
       const out = await atspiResolve(
-        target.app_ref?.name,
-        target.path,
+        target,
         `    v = found.queryValue()
     v.currentValue = float(extra)`,
         value,
       ).catch(async (e) => {
         // Fall back to the Text interface for text-bearing widgets.
         const out2 = await atspiResolve(
-          target.app_ref?.name,
-          target.path,
+          target,
           `    t = found.queryText()
     t.setTextContents(extra)`,
           String(value),
@@ -655,7 +652,7 @@ print(json.dumps({"found": True, "reason": None, "element": {
     else:
         a.doAction(names.index(match))
         print(json.dumps({"ok": True, "sent": True}))`;
-      const out = await atspiResolve(target.app_ref?.name, target.path, body, String(action));
+      const out = await atspiResolve(target, body, String(action));
       if (!out.ok) throw new ExecError(`perform_action failed: ${out.code}`);
       return { action_sent: true, strategy: "a11y", action };
     },

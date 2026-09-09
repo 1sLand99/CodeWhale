@@ -556,21 +556,13 @@ impl FleetRoster {
     /// Feeds the sub-agent `role_models` lookup; explicit `[subagents]`
     /// overrides are merged on top by the engine and win.
     ///
-    /// Members that ALSO pin a provider are deliberately excluded. This map is
-    /// provider-less by construction: the sub-agent role/type lookup
-    /// (`configured_model_for_role_or_type`) applies whatever it finds against
-    /// the *session* provider's client, so exporting a provider-pinned model
-    /// here strips the only thing that made the id routable. A profile pinning
-    /// `provider = "deepseek"` + `model = "deepseek-v4-flash"` then leaks that
-    /// bare id onto an unrelated session route — and on a pass-through
-    /// provider (Alibaba Model Studio, whose Token Plan actually serves
-    /// `deepseek-v4-flash-0731`) nothing downstream rejects it, so the child
-    /// dies on the provider's own denial instead of inheriting the parent's
-    /// working model. Provider-pinned profiles keep their full route through
-    /// the profile spawn path (`child_provider_binding`), which builds a client
-    /// for the pinned provider and carries the model with it.
+    /// Members that also pin a provider are deliberately excluded. Their
+    /// complete saved profiles bind provider/model together through the
+    /// profile spawn path; copying a bare model here would discard route
+    /// identity. Provider-less saved defaults share the typed override map
+    /// with explicit subagent configuration, without a second lookup table.
     #[must_use]
-    pub fn model_overrides(&self) -> HashMap<String, String> {
+    pub fn model_overrides(&self) -> HashMap<String, crate::config::SubagentModelOverride> {
         self.members
             .iter()
             .filter_map(|member| {
@@ -583,7 +575,7 @@ impl FleetRoster {
                     return None;
                 }
                 let model = member.profile.model.as_deref()?.trim();
-                (!model.is_empty()).then(|| (member.id.to_lowercase(), model.to_string()))
+                (!model.is_empty()).then(|| (member.id.to_lowercase(), model.into()))
             })
             .collect()
     }
@@ -1111,7 +1103,13 @@ mod tests {
 
         assert_eq!(
             overrides,
-            HashMap::from([("reviewer".to_string(), "deepseek-v4-pro".to_string())]),
+            HashMap::from([(
+                "reviewer".to_string(),
+                crate::config::SubagentModelOverride {
+                    provider: None,
+                    model: "deepseek-v4-pro".to_string(),
+                }
+            )]),
             "only members with explicit models are pinned, keyed lowercased"
         );
     }
@@ -1151,8 +1149,11 @@ mod tests {
              provider-less role_models map: {overrides:?}"
         );
         assert_eq!(
-            overrides.get("builder").map(String::as_str),
-            Some("deepseek-v4-pro"),
+            overrides.get("builder"),
+            Some(&crate::config::SubagentModelOverride {
+                provider: None,
+                model: "deepseek-v4-pro".to_string(),
+            }),
             "a blank provider pin is still provider-less: {overrides:?}"
         );
         // The pin itself survives on the member for the profile spawn path.

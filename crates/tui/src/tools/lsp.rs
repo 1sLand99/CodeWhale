@@ -515,12 +515,14 @@ mod tests {
         mgr.install_test_transport(Language::Rust, transport.clone())
             .await;
         let ctx = ToolContext::new(&workspace).with_lsp_manager(mgr);
-        let mut denied = vec![outside.display().to_string(), "../secret.rs".into()];
+        let denied = vec![outside.display().to_string(), "../secret.rs".into()];
         #[cfg(unix)]
-        {
+        let denied = {
             std::os::unix::fs::symlink(&outside, workspace.join("escape.rs")).unwrap();
+            let mut denied = denied;
             denied.push("escape.rs".into());
-        }
+            denied
+        };
         for operation in ["diagnostics", "symbols", "definition", "references"] {
             for path in &denied {
                 let result = LspTool

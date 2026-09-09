@@ -31,9 +31,8 @@ export async function Nav({ locale = "en" }: { locale?: Locale }) {
     <header className="site-nav paper-nav">
       <div className="site-nav-inner paper-nav-inner">
         <Link href={homeHref} className="site-wordmark paper-wordmark" aria-label={chrome.navHomeAria}>
-          {/* Founder-supplied mark with the existing traced wordmark. */}
           <div className="paper-wordmark-text">
-            <Image src="/brand/codewhalelogo.png" width={22} height={22} alt="" unoptimized className="paper-wordmark-mark" />
+            <Image src="/brand/mark-gradient.svg" width={22} height={22} alt="" className="paper-wordmark-mark" unoptimized />
             <img
               className="paper-wordmark-logo"
               src="/brand/wordmark.svg"

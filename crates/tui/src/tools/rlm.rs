@@ -45,8 +45,7 @@ const ALL_ACTIONS: &[&str] = &["session_objects", "open", "eval", "configure", "
 fn rlm_kernel_error_result(
     error: &str,
     elapsed: Duration,
-    route: &crate::cost_status::EffectiveRouteEnvelope,
-    usage: &crate::models::Usage,
+    usage_batch: &crate::cost_status::RuntimeUsageBatch,
 ) -> ToolResult {
     let mut metadata = json!({
         // The registered tool is `rlm`; `eval` is its action. Naming a
@@ -57,7 +56,7 @@ fn rlm_kernel_error_result(
         "duration_ms": elapsed.as_millis() as u64,
         "kernel_error": true,
     });
-    crate::cost_status::attach_child_usage_metadata(&mut metadata, route, usage);
+    crate::cost_status::attach_child_usage_batch_metadata(&mut metadata, usage_batch);
     ToolResult::error(format!("rlm action='eval': {error}")).with_metadata(metadata)
 }
 
@@ -126,10 +125,11 @@ impl RlmTool {
         }
     }
 
-    /// Mirror of the legacy per-tool approval contract: only `rlm_eval`
-    /// required approval (it is the non-bypassable code-eval surface, #3866).
+    /// Without concrete input, open may fetch a URL. Input-specific approval
+    /// below keeps local/inline reads automatic and inherits fetch_url's
+    /// outbound-payload approval for URL sources.
     fn action_requires_approval(action: &str) -> bool {
-        action == "eval"
+        matches!(action, "eval" | "open")
     }
 
     /// Mirror of the legacy per-tool read-only contract (capability-derived):
@@ -146,6 +146,7 @@ impl RlmTool {
                 ToolCapability::ReadOnly,
                 ToolCapability::Network,
                 ToolCapability::ExecutesCode,
+                ToolCapability::RequiresApproval,
             ],
             "eval" => vec![
                 ToolCapability::Network,
@@ -300,6 +301,10 @@ impl ToolSpec for RlmTool {
 
     fn approval_requirement_for(&self, input: &Value) -> ApprovalRequirement {
         match self.resolve_action(input) {
+            Ok("open") if rlm_open_source_field(input, "url").is_some() => {
+                FetchUrlTool.approval_requirement_for(&json!({"url": input["url"]}))
+            }
+            Ok("open") => ApprovalRequirement::Auto,
             Ok(action) if Self::action_requires_approval(action) => ApprovalRequirement::Required,
             Ok(_) => ApprovalRequirement::Auto,
             Err(_) => self.approval_requirement(),
@@ -445,6 +450,7 @@ impl RlmTool {
         input: &Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
+        crate::core::engine::tool_catalog::enforce_tool_denial(context, "rlm_eval", input)?;
         let name = required_non_empty_str(input, "name")?;
         let code = required_non_empty_str(input, "code").map_err(|_| {
             ToolError::invalid_input(
@@ -463,16 +469,14 @@ impl RlmTool {
         };
 
         let started = Instant::now();
-        let (round, child_usage, child_route) = if let Some(client) = self.client.clone() {
-            let route = client.effective_route_envelope(&self.root_model, chrono::Utc::now());
+        let (round, child_usage_batch) = if let Some(client) = self.client.clone() {
             let bridge = RlmBridge::new(
                 Arc::new(client),
                 self.root_model.clone(),
                 config.sub_rlm_max_depth.min(HARD_SUB_RLM_DEPTH_CAP),
             );
-            let usage_handle = bridge.usage_handle();
             let round_result = kernel.run(code, Some(&bridge)).await;
-            let usage = usage_handle.lock().await.clone();
+            let usage = bridge.usage_snapshot().await;
             let round = match round_result {
                 Ok(round) => round,
                 Err(error) => {
@@ -485,18 +489,28 @@ impl RlmTool {
                     return Ok(rlm_kernel_error_result(
                         &error.to_string(),
                         started.elapsed(),
-                        &route,
-                        &usage,
+                        &crate::cost_status::RuntimeUsageBatch {
+                            records: usage.records,
+                            drop_records: usage.drop_records,
+                            dropped_records: usage.dropped_records,
+                        },
                     ));
                 }
             };
-            (round, usage, Some(route))
+            (
+                round,
+                crate::cost_status::RuntimeUsageBatch {
+                    records: usage.records,
+                    drop_records: usage.drop_records,
+                    dropped_records: usage.dropped_records,
+                },
+            )
         } else {
             let round = kernel
                 .run(code, None::<&RlmBridge>)
                 .await
                 .map_err(|e| ToolError::execution_failed(format!("rlm_eval: {e}")))?;
-            (round, Default::default(), None)
+            (round, crate::cost_status::RuntimeUsageBatch::default())
         };
 
         session.rpc_count = session.rpc_count.saturating_add(round.rpc_count);
@@ -595,11 +609,10 @@ impl RlmTool {
             "tool": "rlm_eval",
             "duration_ms": started.elapsed().as_millis() as u64,
         });
-        // RLM fans out dozens of child rounds, so an undercounted class here
-        // scales; report every billable class from the shared producer (#4318).
-        if let Some(route) = child_route.as_ref() {
-            crate::cost_status::attach_child_usage_metadata(&mut metadata, route, &child_usage);
-        }
+        // Every RLM provider call keeps its own dispatch timestamp and frozen
+        // quote. The preferred batch format prevents a fan-out from being
+        // retroactively priced as one aggregate call on the first route.
+        crate::cost_status::attach_child_usage_batch_metadata(&mut metadata, &child_usage_batch);
 
         Ok(ToolResult::json(&output)
             .map_err(|e| ToolError::execution_failed(e.to_string()))?
@@ -782,6 +795,7 @@ async fn load_source(
     let url = rlm_open_source_field(input, "url")
         .map(str::trim)
         .ok_or_else(|| ToolError::invalid_input("rlm_open: missing source"))?;
+    crate::core::engine::tool_catalog::enforce_tool_denial(context, "fetch_url", input)?;
     let result = FetchUrlTool
         .execute(json!({"url": url, "format": "raw"}), context)
         .await?;
@@ -964,25 +978,39 @@ mod tests {
             reasoning_replay_tokens: Some(7),
             ..Default::default()
         };
+        let record = crate::cost_status::RuntimeUsageRecord {
+            source_id: "rlm:test:request:0".to_string(),
+            usage: crate::cost_status::EffectiveRouteUsage {
+                route: route.clone(),
+                usage: usage.clone(),
+            },
+        };
+        let drop_record = crate::cost_status::RuntimeUsageDropRecord {
+            source_id: "rlm:test:request:1".to_string(),
+            route: route.clone(),
+        };
         let result = rlm_kernel_error_result(
             "kernel stdout closed",
             Duration::from_millis(11),
-            &route,
-            &usage,
+            &crate::cost_status::RuntimeUsageBatch {
+                records: vec![record],
+                drop_records: vec![drop_record],
+                dropped_records: 1,
+            },
         );
 
         assert!(!result.success);
         let metadata = result
             .metadata
             .expect("usage metadata on failed tool result");
-        assert_eq!(
-            crate::cost_status::child_route_envelope_from_metadata(&metadata),
-            Some(route)
-        );
-        assert_eq!(
-            crate::cost_status::child_usage_from_metadata(&metadata),
-            Some(usage)
-        );
+        let batch = crate::cost_status::child_usage_records_from_metadata(&metadata)
+            .expect("preferred routed batch");
+        assert_eq!(batch.dropped_records, 1);
+        assert_eq!(batch.records.len(), 1);
+        assert_eq!(batch.drop_records.len(), 1);
+        assert_eq!(batch.records[0].usage.route, route);
+        assert_eq!(batch.records[0].usage.usage, usage);
+        assert_eq!(batch.drop_records[0].route, route);
     }
 
     #[test]
@@ -994,7 +1022,7 @@ mod tests {
                 .contains(&ToolCapability::RequiresApproval)
         );
 
-        // Approval routing on the canonical tool: only eval requires it.
+        // Evaluation requires approval; concrete open inputs are classified below.
         let canonical = RlmTool::new("rlm", None);
         assert_eq!(
             canonical.approval_requirement_for(&json!({"action": "eval"})),
@@ -1011,16 +1039,50 @@ mod tests {
     }
 
     #[test]
+    fn rlm_open_requires_outbound_approval_but_keeps_local_reads_automatic() {
+        for tool in [
+            RlmTool::new("rlm", None),
+            RlmTool::alias("rlm_open", "open", None),
+        ] {
+            assert_eq!(tool.approval_requirement(), ApprovalRequirement::Required);
+            for source in [
+                json!({"url": "https://example.com/document"}),
+                json!({"url": " https://example.com/document ", "content": ""}),
+            ] {
+                let mut input = source;
+                input["action"] = json!("open");
+                assert_eq!(
+                    tool.approval_requirement_for(&input),
+                    ApprovalRequirement::Required
+                );
+            }
+            for source in [
+                json!({"content": "local fixture"}),
+                json!({"file_path": "fixture.txt"}),
+                json!({"session_object": "fixture-object"}),
+                json!({"content": "local fixture", "url": "  "}),
+            ] {
+                let mut input = source;
+                input["action"] = json!("open");
+                assert_eq!(
+                    tool.approval_requirement_for(&input),
+                    ApprovalRequirement::Auto
+                );
+            }
+        }
+    }
+
+    #[test]
     fn read_only_and_parallel_flags_match_legacy_contract() {
         // Legacy: session_objects was parallel-friendly read-only; open carried
-        // ExecutesCode (not read-only) with Auto approval; eval required approval.
+        // ExecutesCode (not read-only). Open now classifies the concrete source.
         let session_objects = RlmTool::alias("rlm_session_objects", "session_objects", None);
         assert!(session_objects.supports_parallel());
         assert!(session_objects.is_read_only_for(&json!({})));
 
         let open = RlmTool::alias("rlm_open", "open", None);
         assert!(!open.is_read_only_for(&json!({})));
-        assert_eq!(open.approval_requirement(), ApprovalRequirement::Auto);
+        assert_eq!(open.approval_requirement(), ApprovalRequirement::Required);
 
         let canonical = RlmTool::new("rlm", None);
         assert!(canonical.supports_parallel_for(&json!({"action": "session_objects"})));

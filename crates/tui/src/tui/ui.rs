@@ -134,12 +134,12 @@ use crate::tui::workspace_context;
 use super::key_actions;
 
 use super::app::{
-    ActiveCompaction, ActiveTurnMetadata, AgentCurrentActivity, AgentCurrentActivityStatus, App,
-    AppAction, AppMode, ComposerSubmitAction, ComposerSubmitChord, EffectiveReasoningEffort,
-    GoalControlIntent, OnboardingState, PendingGoalControl, PendingProviderSwitch, QueuedMessage,
-    ReasoningEffort, ScreenMode, StatusToast, StatusToastLevel, SubmitDisposition, TaskPanelEntry,
-    TaskPanelEntryKind, ToolEvidence, TuiOptions, bound_agent_activity_text, is_stop_word,
-    looks_like_slash_command_input, shell_command_from_bang_input,
+    ActiveCompaction, ActiveTurnMetadata, AgentCurrentActivity, App, AppAction, AppMode,
+    ComposerSubmitAction, ComposerSubmitChord, EffectiveReasoningEffort, GoalControlIntent,
+    OnboardingState, PendingGoalControl, PendingProviderSwitch, QueuedMessage, ReasoningEffort,
+    RedactionGateNotice, ScreenMode, StatusToast, StatusToastLevel, SubmitDisposition,
+    TaskPanelEntry, TaskPanelEntryKind, ToolEvidence, TuiOptions, bound_agent_activity_text,
+    is_stop_word, looks_like_slash_command_input, shell_command_from_bang_input,
 };
 use super::approval::{
     ApprovalMode, ApprovalRequest, ApprovalView, ElevationRequest, ElevationView, ReviewDecision,
@@ -227,7 +227,6 @@ pub(crate) const UI_GHOSTTY_UNDERWATER_ANIMATION_MS: u64 = 34;
 // this constant once described no longer gates on it.)
 pub(crate) const FILE_TREE_MIN_HOST_WIDTH: u16 = 60;
 const DEFAULT_TERMINAL_PROBE_TIMEOUT_MS: u64 = 500;
-const TURN_META_PREFIX: &str = "<turn_meta>";
 const SESSION_TITLE_MAX_CHARS: usize = 32;
 const VERSION_HINT_TOAST_TTL_MS: u64 = 12_000;
 
@@ -268,15 +267,21 @@ type PendingToolUses = Vec<(String, String, serde_json::Value)>;
 #[derive(Debug)]
 enum TranslationEvent {
     AssistantMessage {
+        origin_session_fingerprint: Option<String>,
+        origin_turn_fingerprint: Option<String>,
         history_index: Option<usize>,
         original_text: String,
         translated: anyhow::Result<String>,
+        usage: Option<crate::models::Usage>,
         thinking: Option<String>,
         tool_uses: PendingToolUses,
     },
     Thinking {
+        origin_session_fingerprint: Option<String>,
+        origin_turn_fingerprint: Option<String>,
         placeholder: String,
         translated: anyhow::Result<String>,
+        usage: Option<crate::models::Usage>,
     },
 }
 
@@ -487,6 +492,38 @@ fn spawn_tui_engine(config: EngineConfig, api_config: &Config) -> EngineHandle {
     // so workspace switches and provider recovery cannot retain stale Work.
     let _ = handle.try_send(Op::ListSubAgents);
     handle
+}
+
+/// Startup and consent-triggered replacement restore the same conversation
+/// before admitting any pending input. The existing engine remains the sole
+/// owner of model-facing history and the frozen system prefix.
+async fn spawn_tui_engine_with_session(app: &mut App, config: &Config) -> Result<EngineHandle> {
+    let handle = spawn_tui_engine(build_engine_config(app, config), config);
+    let restored = async {
+        if !app.api_messages.is_empty() {
+            handle
+                .send(Op::SyncSession {
+                    session_id: app.current_session_id.clone(),
+                    messages: app.api_messages.clone(),
+                    system_prompt: app.system_prompt.clone(),
+                    system_prompt_override: false,
+                    model: app.model.clone(),
+                    workspace: app.workspace.clone(),
+                    mode: app.mode,
+                })
+                .await?;
+        }
+        // FIFO snapshot acknowledgement also proves the restore was processed.
+        let snapshot = handle.get_session_snapshot().await?;
+        app.system_prompt = snapshot.system_prompt;
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    if let Err(error) = restored {
+        let _ = handle.send(Op::Shutdown).await;
+        return Err(error);
+    }
+    Ok(handle)
 }
 
 fn configured_instruction_sources(config: &Config) -> Vec<prompts::InstructionSource> {
@@ -1009,6 +1046,7 @@ pub(crate) struct ApprovalDecisionEvent {
 }
 
 fn mark_active_turn_cancelled_locally(app: &mut App) {
+    app.retire_action_notices(None);
     // #2739: every local cancel surface (Esc, Ctrl+C, approval abort, paused
     // command abort) must snapshot before it clears turn state. Otherwise
     // --continue reloads the previous save and the interrupted turn vanishes.

@@ -4642,6 +4642,64 @@ api_key_env = "ACME_ZEN_GATEWAY_API_KEY"
 }
 
 #[test]
+fn config_store_preserves_builtin_shadowing_custom_and_regional_selectors() {
+    let _lock = env_lock();
+    let _env = EnvGuard::without_deepseek_runtime_overrides();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    for (selector, kind, table) in [
+        (
+            "OpenAI",
+            ProviderKind::Custom,
+            "[providers.OpenAI]\nkind = 'openai-compatible'\nbase_url = 'https://gateway.example/v1'\nmodel = 'Exact-Model'\n",
+        ),
+        (
+            "deepseek-cn",
+            ProviderKind::Deepseek,
+            "[providers.deepseek_cn]\nbase_url = 'https://api.deepseek.cn'\nmodel = 'deepseek-v4-flash'\n",
+        ),
+    ] {
+        fs::write(&path, format!("provider = '{selector}'\n{table}")).unwrap();
+        let mut store = ConfigStore::load(Some(path.clone())).unwrap();
+        assert_eq!(store.config.provider, kind);
+        assert_eq!(store.config.provider_id(), selector);
+        if kind == ProviderKind::Custom {
+            let route = store
+                .config
+                .resolve_runtime_options(&CliRuntimeOverrides::default());
+            assert_eq!(route.base_url, "https://gateway.example/v1");
+            assert_eq!(route.model, "Exact-Model");
+        }
+        store.config.set_value("verbosity", "quiet").unwrap();
+        store.save().unwrap();
+        let saved: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["provider"].as_str(), Some(selector));
+        let mut reloaded = ConfigStore::load(Some(path.clone())).unwrap();
+        assert_eq!(reloaded.config.provider, kind);
+        assert_eq!(reloaded.config.provider_id(), selector);
+        reloaded.config.set_value("provider", selector).unwrap();
+        assert_eq!(reloaded.config.provider, kind);
+        assert_eq!(reloaded.config.provider_id(), selector);
+        // Direct typed callers that change kind cannot retain an old alias.
+        reloaded.config.provider = if kind == ProviderKind::Custom {
+            ProviderKind::Openai
+        } else {
+            ProviderKind::Custom
+        };
+        assert_eq!(
+            reloaded.config.provider_id(),
+            reloaded.config.provider.as_str()
+        );
+        assert!(reloaded.config.named_custom_provider_id().is_none());
+        reloaded.save().unwrap();
+        let rebound = ConfigStore::load(Some(path.clone())).unwrap();
+        assert_eq!(rebound.config.provider, reloaded.config.provider);
+        reloaded.config.provider = ProviderKind::Zai;
+        assert_eq!(reloaded.config.provider_id(), "zai");
+    }
+}
+
+#[test]
 fn named_custom_root_provider_requires_a_matching_openai_compatible_table() {
     for body in [
         "provider = \"acme_zen_gateway\"\n",
@@ -4659,6 +4717,62 @@ base_url = "https://acme.example/v1"
         let message = format!("{err:#}");
         assert!(message.contains("acme_zen_gateway"), "{message}");
         assert!(message.contains("openai-compatible") || message.contains("matching"));
+    }
+}
+
+#[test]
+fn kindless_table_mirroring_a_builtin_alias_keeps_the_builtin_route() {
+    let _lock = env_lock();
+    let _env = EnvGuard::without_deepseek_runtime_overrides();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    // A kindless `[providers.deepseek-cn]` table merely mirrors the regional
+    // selector spelling. It is not an openai-compatible custom provider, so it
+    // must stay inert: the selector still binds the built-in DeepSeek kind and
+    // the load must not fail.
+    fs::write(
+        &path,
+        "provider = 'deepseek-cn'\n[providers.deepseek-cn]\nmodel = 'deepseek-v4-flash'\n",
+    )
+    .expect("kindless alias fixture");
+    let mut store = ConfigStore::load(Some(path.clone())).expect("kindless alias table must load");
+    assert_eq!(store.config.provider, ProviderKind::Deepseek);
+    assert_eq!(store.config.provider_id(), "deepseek-cn");
+    assert!(store.config.named_custom_provider_id().is_none());
+    // An unrelated typed save leaves the inert extras table untouched.
+    store.config.set_value("verbosity", "quiet").unwrap();
+    store.save().unwrap();
+    let saved: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(saved["provider"].as_str(), Some("deepseek-cn"));
+    assert_eq!(
+        saved["providers"]["deepseek-cn"]["model"].as_str(),
+        Some("deepseek-v4-flash")
+    );
+    let reloaded = ConfigStore::load(Some(path.clone())).expect("reload kindless alias config");
+    assert_eq!(reloaded.config.provider, ProviderKind::Deepseek);
+    assert_eq!(reloaded.config.provider_id(), "deepseek-cn");
+
+    // A table that does validate as openai-compatible still takes precedence
+    // over the built-in alias.
+    fs::write(
+        &path,
+        "provider = 'deepseek-cn'\n[providers.deepseek-cn]\nkind = 'openai-compatible'\nbase_url = 'https://gateway.example/v1'\nmodel = 'Exact-CN'\n",
+    )
+    .expect("valid custom table fixture");
+    let store = ConfigStore::load(Some(path)).expect("valid custom table takes precedence");
+    assert_eq!(store.config.provider, ProviderKind::Custom);
+    assert_eq!(store.config.provider_id(), "deepseek-cn");
+    assert_eq!(store.config.named_custom_provider_id(), Some("deepseek-cn"));
+}
+
+#[test]
+fn invalid_custom_kind_never_falls_back_to_a_builtin_alias() {
+    for kind in ["'unsupported'", "42", "false"] {
+        let mut config: ConfigToml = toml::from_str(&format!(
+            "provider = 'deepseek-cn'\n[providers.deepseek-cn]\nkind = {kind}\n"
+        ))
+        .unwrap();
+        assert!(config.bind_persisted_provider_id("deepseek-cn").is_err());
     }
 }
 
@@ -9365,4 +9479,241 @@ fn telemetry_metadata_update_refuses_corrupt_or_busy_state_and_reloads_the_saved
     })
     .unwrap();
     assert!(SetupState::load_from(&path).unwrap().telemetry_opted_out());
+}
+
+#[test]
+fn openrouter_vendor_config_round_trip_and_trust_boundary() -> Result<()> {
+    let key = "providers.openrouter.vendor";
+    let mut config = ConfigToml::default();
+    config.set_value(key, "deepinfra/turbo")?;
+    let serialized = toml::to_string(&config)?;
+    let mut reloaded: ConfigToml = toml::from_str(&serialized)?;
+    assert_eq!(reloaded.get_value(key).as_deref(), Some("deepinfra/turbo"));
+    assert_eq!(
+        reloaded.list_values().get(key).map(String::as_str),
+        Some("deepinfra/turbo")
+    );
+    // Repository config must not redirect a user-selected upstream vendor.
+    let mut project = ConfigToml::default();
+    project.providers.openrouter.vendor = Some("another-vendor".into());
+    reloaded.merge_project_overrides(project);
+    assert_eq!(reloaded.get_value(key).as_deref(), Some("deepinfra/turbo"));
+    for invalid in ["deep infra", "deepinfra\n/turbo", " deepinfra"] {
+        assert!(reloaded.set_value(key, invalid).is_err());
+    }
+    assert!(
+        reloaded
+            .set_value("providers.openai.vendor", "deepinfra")
+            .is_err()
+    );
+    assert!(
+        reloaded
+            .set_value("providers.my-gateway.vendor", "deepinfra")
+            .is_err()
+    );
+    reloaded.set_value(key, "")?;
+    let cleared: ConfigToml = toml::from_str(&toml::to_string(&reloaded)?)?;
+    assert_eq!(cleared.get_value(key).as_deref(), Some(""));
+    reloaded.unset_value(key)?;
+    assert_eq!(reloaded.get_value(key), None);
+    Ok(())
+}
+
+#[test]
+fn notifications_nested_edits_keep_toml_types_siblings_and_future_fields() {
+    let mut config: ConfigToml = toml::from_str(
+        r#"
+[notifications]
+quiet = false
+future_delivery = "keep"
+[notifications.events]
+input-needed = false
+"#,
+    )
+    .unwrap();
+    config.set_value("notifications.quiet", "true").unwrap();
+    config
+        .set_value("notifications.threshold_secs", "42")
+        .unwrap();
+    config
+        .set_value("notifications.events.approval-needed", "false")
+        .unwrap();
+    config
+        .set_value(
+            "notifications.event_sound.events",
+            r#"["input-needed", "model-notify"]"#,
+        )
+        .unwrap();
+    config.set_value("notifications.sound", "whale").unwrap();
+    let encoded = toml::to_string(&config).unwrap();
+    let raw: toml::Value = toml::from_str(&encoded).unwrap();
+    let notifications = &raw["notifications"];
+    assert_eq!(notifications["quiet"].as_bool(), Some(true));
+    assert_eq!(notifications["threshold_secs"].as_integer(), Some(42));
+    assert_eq!(
+        notifications["events"]["approval-needed"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        notifications["events"]["input-needed"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(notifications["future_delivery"].as_str(), Some("keep"));
+    assert_eq!(
+        notifications["event_sound"]["events"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(!raw.as_table().unwrap().contains_key("notifications.quiet"));
+    assert_eq!(
+        config.get_display_value("notifications.sound").as_deref(),
+        Some("whale")
+    );
+}
+
+#[test]
+fn notifications_invalid_edits_are_atomic_even_with_public_update_values() {
+    use notifications::{NotificationConfigUpdate as Update, NotificationSetting as Key};
+    let mut config = ConfigToml::default();
+    config.set_value("notifications.quiet", "true").unwrap();
+    let before = toml::to_string(&config).unwrap();
+    for (key, value) in [
+        ("notifications", "false"),
+        ("notifications.quiet", "maybe"),
+        ("notifications.threshold_secs", "18446744073709551615"),
+        ("notifications.event_sound.events", r#"["bogus"]"#),
+        ("notifications.events.unknown", "true"),
+        ("notifications.sound_file", ""),
+    ] {
+        assert!(config.set_value(key, value).is_err(), "{key}");
+        assert_eq!(toml::to_string(&config).unwrap(), before);
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, &before).unwrap();
+    for update in [
+        Update::ThresholdSecs(u64::MAX),
+        Update::SoundFile(PathBuf::new()),
+        Update::EventSoundEvents(vec!["bogus".into()]),
+    ] {
+        let mut live = notifications::NotificationsConfig::default();
+        let prior = live.clone();
+        assert!(update.persist(&path).is_err());
+        assert!(live.apply_update(update).is_err());
+        assert_eq!(live, prior);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+    assert!(
+        notifications::edit_extras(
+            &mut config.extras,
+            Key::Quiet,
+            Some(toml::Value::String("true".into()))
+        )
+        .is_err()
+    );
+    assert_eq!(toml::to_string(&config).unwrap(), before);
+}
+
+#[test]
+fn notifications_targeted_persistence_preserves_comments_and_leaf_unset() {
+    use notifications::{NotificationConfigUpdate as Update, NotificationSetting as Key};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "# operator note\n\"notifications.quiet\" = \"false\"\n[notifications]\nquiet = false # retained\nfuture = 7\n[notifications.events]\ninput-needed = false\n").unwrap();
+    Update::parse(Key::Quiet, "true")
+        .unwrap()
+        .persist(&path)
+        .unwrap();
+    Update::parse(Key::Sound, "whale")
+        .unwrap()
+        .persist(&path)
+        .unwrap();
+    Key::Quiet.unset(&path).unwrap();
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("# operator note"));
+    let raw: toml::Value = toml::from_str(&saved).unwrap();
+    assert!(!raw.as_table().unwrap().contains_key("notifications.quiet"));
+    assert!(raw["notifications"].get("quiet").is_none());
+    assert_eq!(raw["notifications"]["sound"].as_str(), Some("whale"));
+    assert_eq!(raw["notifications"]["future"].as_integer(), Some(7));
+    assert_eq!(
+        raw["notifications"]["events"]["input-needed"].as_bool(),
+        Some(false)
+    );
+}
+
+#[test]
+fn notifications_legacy_condition_is_fallback_and_explicit_sound_off_wins() {
+    let mut config: ConfigToml = toml::from_str(
+        "[tui]\nnotification_condition = \"never\"\n[notifications]\ncompletion_sound = \"bell\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        config.get_value("notifications.condition").as_deref(),
+        Some("never")
+    );
+    assert_eq!(
+        config.get_value("notifications.sound").as_deref(),
+        Some("legacy")
+    );
+    config
+        .set_value("notifications.condition", "always")
+        .unwrap();
+    config.set_value("notifications.sound", "off").unwrap();
+    assert_eq!(
+        config.get_value("notifications.condition").as_deref(),
+        Some("always")
+    );
+    config.unset_value("notifications.condition").unwrap();
+    assert_eq!(
+        config.get_value("notifications.condition").as_deref(),
+        Some("never")
+    );
+    assert_eq!(
+        config.get_value("notifications.sound").as_deref(),
+        Some("off")
+    );
+}
+
+#[test]
+fn notifications_path_whitespace_and_quotes_round_trip_without_reparsing() {
+    let mut config = ConfigToml::default();
+    for path in [
+        " sound with spaces.wav ",
+        "\"quoted-name.wav",
+        "folder/normal.wav",
+    ] {
+        let raw = toml::Value::String(path.into()).to_string();
+        config.set_value("notifications.sound_file", &raw).unwrap();
+        assert_eq!(
+            config.get_value("notifications.sound_file").as_deref(),
+            Some(path)
+        );
+    }
+}
+
+#[test]
+fn notifications_malformed_parent_and_unknown_root_cannot_erase_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let original = "[notifications]\nevents = false\nquiet = true\n";
+    std::fs::write(&path, original).unwrap();
+    let update = notifications::NotificationConfigUpdate::parse(
+        notifications::NotificationSetting::Event(notifications::NotificationEvent::InputNeeded),
+        "false",
+    )
+    .unwrap();
+    assert!(update.persist(&path).is_err());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    let mut config: ConfigToml = toml::from_str(original).unwrap();
+    assert!(config.unset_value("notifications").is_err());
+    let before = toml::to_string(&config).unwrap();
+    assert!(
+        config
+            .set_value("notifications.events.input-needed", "false")
+            .is_err()
+    );
+    assert_eq!(toml::to_string(&config).unwrap(), before);
 }

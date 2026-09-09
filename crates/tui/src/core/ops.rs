@@ -108,7 +108,11 @@ impl UserInputProvenance {
 pub enum Op {
     /// Send a message to the AI
     SendMessage {
+        /// Admitted allowance for this turn only; never changes session settings.
+        max_output_tokens: Option<std::num::NonZeroU32>,
         content: String,
+        /// Inline image bytes validated by Runtime admission; no file references.
+        images: Vec<codewhale_protocol::runtime::RuntimeImageInput>,
         mode: AppMode,
         /// Exact, structurally resolved route authority for this turn. The
         /// engine activates its client before mutating turn state; injected
@@ -117,6 +121,11 @@ pub enum Op {
         /// Compaction policy derived from the same provider route. Carrying it
         /// atomically avoids a model/limit mismatch before `SendMessage`.
         compaction: Box<CompactionConfig>,
+        /// Auxiliary provider calls completed while planning this exact turn
+        /// (currently Auto's classifier), bounded and paired with their own
+        /// immutable routes. The engine folds their tokens into total usage
+        /// only; they never enter the parent route's billing aggregate.
+        initial_routed_usage: Box<crate::cost_status::RuntimeUsageBatch>,
         goal_objective: Option<String>,
         goal_token_budget: Option<u32>,
         goal_status: GoalStatus,

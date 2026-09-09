@@ -9,6 +9,301 @@ use std::sync::mpsc;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[test]
+fn remembered_deepseek_cn_and_layered_root_models_keep_their_precedence() {
+    let _lock = lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+    let _overrides: Vec<_> = [
+        "CODEWHALE_CONFIG_PATH",
+        "DEEPSEEK_CONFIG_PATH",
+        "CODEWHALE_PROVIDER",
+        "DEEPSEEK_PROVIDER",
+        "CODEWHALE_MODEL",
+        "DEEPSEEK_MODEL",
+        "DEEPSEEK_DEFAULT_TEXT_MODEL",
+    ]
+    .into_iter()
+    .map(EnvVarGuard::remove)
+    .collect();
+    let path = home.path().join("config.toml");
+    fs::write(
+        &path,
+        "provider = 'deepseek-cn'\ndefault_text_model = 'deepseek-v4-flash'\n",
+    )
+    .unwrap();
+    fs::write(
+        home.path().join("settings.toml"),
+        "default_model = 'deepseek-v4-pro'\n",
+    )
+    .unwrap();
+    assert_eq!(
+        Config::load(None, None).unwrap().default_model(),
+        "deepseek-v4-pro"
+    );
+    crate::config_persistence::persist_root_bool_key(Some(&path), "allow_shell", false).unwrap();
+    assert_eq!(
+        Config::load(None, None).unwrap().default_model(),
+        "deepseek-v4-pro"
+    );
+
+    fs::write(&path, "route_preferences_version = 1\nprovider = 'deepseek'\n[providers.deepseek]\nmodel = 'deepseek-v4-flash'\n[profiles.pro]\ndefault_text_model = 'deepseek-v4-pro'\n").unwrap();
+    let profile = Config::load(None, Some("pro")).unwrap();
+    assert_eq!(profile.default_model(), "deepseek-v4-pro");
+    assert_eq!(
+        crate::route_runtime::resolve_runtime_route(&profile, ApiProvider::Deepseek, None)
+            .unwrap()
+            .model,
+        "deepseek-v4-pro"
+    );
+
+    let managed = home.path().join("managed.toml");
+    fs::write(&managed, "default_text_model = 'deepseek-v4-pro'\n").unwrap();
+    let source = format!(
+        "route_preferences_version = 1\nprovider = 'deepseek'\nmanaged_config_path = '{}'\n[providers.deepseek]\nmodel = 'deepseek-v4-flash'\n",
+        managed.display()
+    );
+    fs::write(&path, source).unwrap();
+    assert_eq!(
+        Config::load(None, None).unwrap().default_model(),
+        "deepseek-v4-pro"
+    );
+}
+
+#[test]
+fn legacy_hosted_ollama_migration_keeps_the_existing_table_and_endpoint() {
+    let _lock = lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+    let _overrides: Vec<_> = [
+        "CODEWHALE_CONFIG_PATH",
+        "DEEPSEEK_CONFIG_PATH",
+        "CODEWHALE_PROVIDER",
+        "DEEPSEEK_PROVIDER",
+        "CODEWHALE_MODEL",
+        "DEEPSEEK_MODEL",
+        "DEEPSEEK_DEFAULT_TEXT_MODEL",
+        "OLLAMA_MODEL",
+        "OLLAMA_CLOUD_MODEL",
+        "OLLAMA_BASE_URL",
+        "OLLAMA_CLOUD_BASE_URL",
+    ]
+    .into_iter()
+    .map(EnvVarGuard::remove)
+    .collect();
+    let path = home.path().join("config.toml");
+    fs::write(&path, "provider = 'ollama'\n[providers.ollama]\nbase_url = 'https://ollama.com/v1'\nmodel = 'old-model'\n").unwrap();
+    fs::write(
+        home.path().join("settings.toml"),
+        "default_provider = 'ollama'\n[provider_models]\nollama-cloud = 'remembered-model'\n",
+    )
+    .unwrap();
+    let before = Config::load(None, None).unwrap();
+    assert_eq!(before.api_provider(), ApiProvider::OllamaCloud);
+    assert_eq!(before.default_model(), "remembered-model");
+    crate::config_persistence::persist_root_bool_key(Some(&path), "allow_shell", false).unwrap();
+    let after = Config::load(None, None).unwrap();
+    assert_eq!(after.api_provider(), ApiProvider::OllamaCloud);
+    assert_eq!(after.default_model(), "remembered-model");
+    assert_eq!(after.deepseek_base_url(), "https://ollama.com/v1");
+    assert_eq!(
+        after
+            .active_provider_identity(ApiProvider::OllamaCloud)
+            .unwrap()
+            .persisted_id(),
+        Some("ollama")
+    );
+    let doc: toml::Value = toml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(doc["provider"].as_str(), Some("ollama"));
+    assert_eq!(
+        doc["providers"]["ollama"]["model"].as_str(),
+        Some("remembered-model")
+    );
+    assert!(doc["providers"].get("ollama_cloud").is_none());
+}
+
+#[test]
+fn loaded_startup_selection_is_shared_and_does_not_rewrite_saved_files() {
+    let _lock = lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+    let _overrides: Vec<_> = [
+        "CODEWHALE_CONFIG_PATH",
+        "DEEPSEEK_CONFIG_PATH",
+        "CODEWHALE_PROVIDER",
+        "DEEPSEEK_PROVIDER",
+        "CODEWHALE_MODEL",
+        "DEEPSEEK_MODEL",
+        "DEEPSEEK_DEFAULT_TEXT_MODEL",
+    ]
+    .into_iter()
+    .map(EnvVarGuard::remove)
+    .collect();
+    let path = home.path().join("config.toml");
+    let source = "provider = 'zai'\n[providers.zai]\nmodel = 'GLM-5.2'\n";
+    let saved = "[provider_models]\nzai = 'GLM-5.3'\n";
+    fs::write(&path, source).unwrap();
+    fs::write(home.path().join("settings.toml"), saved).unwrap();
+    let mut config = Config::load(None, None).unwrap();
+    assert_eq!(config.default_model(), "GLM-5.3");
+    assert_eq!(
+        crate::model_inventory::provider_default_model(&config, ApiProvider::Zai),
+        "GLM-5.3"
+    );
+    let route =
+        crate::route_runtime::resolve_runtime_route(&config, ApiProvider::Zai, None).unwrap();
+    assert_eq!(
+        route.model, "GLM-5.3",
+        "an omitted new-thread model uses the same selection"
+    );
+    let explicit =
+        crate::route_runtime::resolve_runtime_route(&config, ApiProvider::Zai, Some("GLM-5.2"))
+            .unwrap();
+    assert_eq!(explicit.model, "GLM-5.2");
+    let other = crate::settings::Settings {
+        provider_models: Some(HashMap::from([("zai".into(), "GLM-5.1".into())])),
+        ..Default::default()
+    };
+    assert!(
+        !config.apply_saved_selection(&other),
+        "loaded route snapshots never reread preferences"
+    );
+    assert_eq!(config.default_model(), "GLM-5.3");
+    assert_eq!(fs::read_to_string(path).unwrap(), source);
+    assert_eq!(
+        fs::read_to_string(home.path().join("settings.toml")).unwrap(),
+        saved
+    );
+}
+
+#[test]
+fn startup_memory_yields_to_explicit_launch_scoped_config_and_profile() {
+    let _lock = lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+    let _overrides: Vec<_> = [
+        "CODEWHALE_CONFIG_PATH",
+        "DEEPSEEK_CONFIG_PATH",
+        "CODEWHALE_PROVIDER",
+        "DEEPSEEK_PROVIDER",
+        "CODEWHALE_MODEL",
+        "DEEPSEEK_MODEL",
+        "DEEPSEEK_DEFAULT_TEXT_MODEL",
+    ]
+    .into_iter()
+    .map(EnvVarGuard::remove)
+    .collect();
+    let source = "provider = 'zai'\n[providers.zai]\nmodel = 'GLM-5.2'\n[profiles.pinned.providers.zai]\nmodel = 'GLM-5.1'\n";
+    fs::write(home.path().join("config.toml"), source).unwrap();
+    fs::write(
+        home.path().join("settings.toml"),
+        "[provider_models]\nzai = 'GLM-5.3'\n",
+    )
+    .unwrap();
+    {
+        let _explicit = EnvVarGuard::set("CODEWHALE_MODEL", "GLM-5.2");
+        let config = Config::load(None, None).unwrap();
+        assert_eq!(config.default_model(), "GLM-5.2");
+        assert_eq!(
+            crate::route_runtime::resolve_runtime_route(&config, ApiProvider::Zai, None)
+                .unwrap()
+                .model,
+            "GLM-5.2"
+        );
+    }
+    let profile = Config::load(None, Some("pinned")).unwrap();
+    assert_eq!(profile.default_model(), "GLM-5.1");
+    assert!(!profile.remembered_selection_is_applicable());
+    let project = home.path().join("project");
+    fs::create_dir(&project).unwrap();
+    let path = project.join("config.toml");
+    fs::write(&path, source).unwrap();
+    let config = Config::load(Some(path), None).unwrap();
+    assert_eq!(config.default_model(), "GLM-5.2");
+    assert!(!config.remembered_selection_is_applicable());
+}
+
+#[test]
+fn startup_memory_preserves_named_and_custom_endpoint_wire_ids() {
+    let _lock = lock_test_env();
+    let settings = crate::settings::Settings {
+        default_provider: Some("TeamA".into()),
+        provider_models: Some(HashMap::from([
+            ("TeamA".into(), "memory-upper".into()),
+            ("teama".into(), "memory-lower".into()),
+            ("zai".into(), "GLM-5.3".into()),
+        ])),
+        ..Default::default()
+    };
+    let mut config: Config = toml::from_str("provider = 'teama'\n[providers.TeamA]\nkind = 'openai-compatible'\nbase_url = 'https://upper.example.test/v1'\nmodel = 'Wire-Upper'\n[providers.teama]\nkind = 'openai-compatible'\nbase_url = 'https://lower.example.test/v1'\nmodel = 'wire-lower'\n[providers.zai]\nbase_url = 'https://proxy.example.test/v1'\nmodel = 'Exact-Zai-ID'\n").unwrap();
+    let _provider = EnvVarGuard::remove("CODEWHALE_PROVIDER");
+    let _legacy_provider = EnvVarGuard::remove("DEEPSEEK_PROVIDER");
+    assert!(config.apply_saved_selection(&settings));
+    assert_eq!(config.provider.as_deref(), Some("TeamA"));
+    let identity = config
+        .active_provider_identity(ApiProvider::Custom)
+        .unwrap();
+    let route =
+        crate::route_runtime::resolve_runtime_route_for_identity(&config, &identity, None).unwrap();
+    assert_eq!(route.model, "memory-upper");
+    assert_eq!(
+        route.candidate.endpoint().base_url,
+        "https://upper.example.test/v1"
+    );
+    let lower = config.resolve_provider_identity("teama").unwrap();
+    assert_eq!(
+        crate::route_runtime::resolve_runtime_route_for_identity(&config, &lower, None)
+            .unwrap()
+            .model,
+        "memory-lower"
+    );
+    assert_eq!(
+        config
+            .provider_config_for(ApiProvider::Zai)
+            .unwrap()
+            .model
+            .as_deref(),
+        Some("GLM-5.3")
+    );
+}
+
+#[test]
+fn provider_environment_model_outranks_startup_memory() {
+    let _lock = lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+    let _overrides: Vec<_> = [
+        "CODEWHALE_CONFIG_PATH",
+        "DEEPSEEK_CONFIG_PATH",
+        "CODEWHALE_PROVIDER",
+        "DEEPSEEK_PROVIDER",
+        "CODEWHALE_MODEL",
+        "DEEPSEEK_MODEL",
+    ]
+    .into_iter()
+    .map(EnvVarGuard::remove)
+    .collect();
+    fs::write(
+        home.path().join("config.toml"),
+        "provider = 'openai'\n[providers.openai]\nmodel = 'gpt-5.6-sol'\n",
+    )
+    .unwrap();
+    fs::write(
+        home.path().join("settings.toml"),
+        "[provider_models]\nopenai = 'gpt-5.6-terra'\n",
+    )
+    .unwrap();
+    let _model = EnvVarGuard::set("OPENAI_MODEL", "gpt-5.6-luna");
+    let config = Config::load(None, None).unwrap();
+    assert_eq!(config.default_model(), "gpt-5.6-luna");
+    assert_eq!(
+        crate::route_runtime::resolve_runtime_route(&config, ApiProvider::Openai, None)
+            .unwrap()
+            .model,
+        "gpt-5.6-luna"
+    );
+}
+
 #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 struct HeaderItemsTestConfig {
     #[serde(default, deserialize_with = "deser_header_items")]
@@ -1753,8 +2048,12 @@ fn notification_defaults_and_live_updates_share_one_consistent_model() {
         "a fresh install must never opt itself into an audible completion cue"
     );
 
-    notifications.apply_update(NotificationConfigUpdate::Method(NotificationMethod::Osc9));
-    notifications.apply_update(NotificationConfigUpdate::Quiet(true));
+    notifications
+        .apply_update(NotificationConfigUpdate::Method(NotificationMethod::Osc9))
+        .unwrap();
+    notifications
+        .apply_update(NotificationConfigUpdate::Quiet(true))
+        .unwrap();
 
     assert_eq!(notifications.method, NotificationMethod::Osc9);
     assert!(notifications.quiet);
@@ -2713,15 +3012,15 @@ reviewer_model = "reviewer-model"
     .expect("parse canonical Fleet role keys");
     let overrides = canonical.subagent_model_overrides();
     assert_eq!(
-        overrides.get("scout").map(String::as_str),
+        overrides.get("scout").map(|pin| pin.model.as_str()),
         Some("scout-model")
     );
     assert_eq!(
-        overrides.get("planner").map(String::as_str),
+        overrides.get("planner").map(|pin| pin.model.as_str()),
         Some("planner-model")
     );
     assert_eq!(
-        overrides.get("reviewer").map(String::as_str),
+        overrides.get("reviewer").map(|pin| pin.model.as_str()),
         Some("reviewer-model")
     );
 
@@ -2736,17 +3035,97 @@ review_model = "legacy-reviewer"
     .expect("parse v0.9.x role aliases");
     let overrides = legacy.subagent_model_overrides();
     assert_eq!(
-        overrides.get("scout").map(String::as_str),
+        overrides.get("scout").map(|pin| pin.model.as_str()),
         Some("legacy-scout")
     );
     assert_eq!(
-        overrides.get("planner").map(String::as_str),
+        overrides.get("planner").map(|pin| pin.model.as_str()),
         Some("legacy-planner")
     );
     assert_eq!(
-        overrides.get("reviewer").map(String::as_str),
+        overrides.get("reviewer").map(|pin| pin.model.as_str()),
         Some("legacy-reviewer")
     );
+}
+
+#[test]
+fn structured_role_pins_merge_into_legacy_override_authority() {
+    let config: Config = toml::from_str(
+        r#"
+[subagents]
+reviewer_model = "scalar-reviewer"
+worker_model = "scalar-worker"
+scout_model = "scalar-scout"
+[subagents.models]
+reviewer = "map-reviewer"
+[subagents.roles.REVIEW]
+model = "alias-reviewer"
+[subagents.roles.reviewer]
+model = "canonical-reviewer"
+[subagents.roles.scout]
+model = "structured-scout"
+[subagents.roles.default]
+model = "all-role-fallback"
+[subagents.roles.custom]
+model = "  "
+"#,
+    )
+    .expect("parse structured and legacy inputs together");
+    let overrides = config.subagent_model_overrides();
+    assert_eq!(overrides["reviewer"].model, "canonical-reviewer");
+    assert_eq!(overrides["explore"].model, "structured-scout");
+    assert_eq!(overrides["general"].model, "scalar-worker");
+    assert_eq!(overrides["default"].model, "all-role-fallback");
+    assert_eq!(
+        overrides["custom"].model, "",
+        "blank explicit pin reaches admission validation"
+    );
+}
+
+#[test]
+fn structured_role_declarations_preserve_provider_identity_and_legacy_wire_ids() {
+    let config: Config = toml::from_str(
+        r#"
+[subagents]
+worker_model = "deepseek/deepseek-v4-pro"
+[subagents.models]
+reviewer = "deepseek/deepseek-v4-flash"
+[subagents.roles.advisor]
+model = "ReviewerRoute/vendor/model-id"
+[subagents.roles.implement]
+model = "openrouter/deepseek/deepseek-v4-pro"
+"#,
+    )
+    .unwrap();
+    let pins = config.subagent_model_overrides();
+    for (role, model) in [
+        ("general", "deepseek/deepseek-v4-pro"),
+        ("reviewer", "deepseek/deepseek-v4-flash"),
+    ] {
+        assert_eq!(
+            pins[role].provider, None,
+            "legacy ids remain provider-owned"
+        );
+        assert_eq!(pins[role].model, model);
+    }
+    assert_eq!(pins["advisor"].provider.as_deref(), Some("ReviewerRoute"));
+    assert_eq!(pins["advisor"].model, "vendor/model-id");
+    assert_eq!(pins["implement"].provider.as_deref(), Some("openrouter"));
+    assert_eq!(pins["implement"].model, "deepseek/deepseek-v4-pro");
+}
+
+#[test]
+fn structured_role_pins_require_a_typed_model_field() {
+    for input in [
+        "[subagents.roles.reviewer]\n",
+        "[subagents.roles.reviewer]\nmodel = 42\n",
+        "[subagents.roles.reviewer]\nmodel = \"model\"\nprovider = \"other\"\n",
+    ] {
+        assert!(
+            toml::from_str::<Config>(input).is_err(),
+            "invalid role pin accepted: {input}"
+        );
+    }
 }
 
 #[test]
@@ -11249,6 +11628,26 @@ fn provider_capability_scenario_2() {
         assert_eq!(cap.max_output, Some(384_000));
         assert!(cap.thinking_supported);
         assert!(!cap.cache_telemetry_supported);
+
+        // Only the exact provider-owned bundled row supplies this ceiling.
+        // Neighboring IDs and a different provider cannot inherit its limit.
+        for (provider, model) in [
+            (
+                ApiProvider::Fireworks,
+                "accounts/fireworks/models/deepseek-v4.1-flash-expires-on-0910",
+            ),
+            (
+                ApiProvider::Fireworks,
+                "accounts/fireworks/models/deepseek-v4-pro-custom",
+            ),
+            (ApiProvider::Deepseek, DEFAULT_FIREWORKS_MODEL),
+        ] {
+            assert_eq!(
+                provider_capability(provider, model).max_output,
+                None,
+                "{model}"
+            );
+        }
     }
     // from provider_capability_siliconflow_v4_pro_has_thinking_no_cache
     {
@@ -11504,14 +11903,14 @@ fn provider_capability_scenario_3() {
             assert!(!cap.thinking_supported, "{model}");
         }
     }
-    // from provider_capability_ollama_deepseek_tag_uses_deepseek_heuristic
+    // Unknown local tags retain an explicitly conservative budget.
     {
-        // #3023: known model families resolve through models.rs lookups even
-        // on Ollama — a legacy DeepSeek tag gets the 128K heuristic window.
+        // A family name does not establish this deployment's context window.
         let cap = provider_capability(ApiProvider::Ollama, "deepseek-v3.1:671b");
+        assert_eq!(cap.context_window, 8192);
         assert_eq!(
-            cap.context_window,
-            crate::models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS
+            crate::models::context_window_for_model("deepseek-v3.1:671b"),
+            None
         );
         assert_eq!(cap.max_output, None);
         assert!(!cap.thinking_supported);
@@ -12912,6 +13311,54 @@ fn validate_still_rejects_unknown_model_on_official_deepseek() {
 }
 
 #[test]
+fn validate_checks_the_selected_provider_model_before_the_root_fallback() {
+    for (model, root, valid) in [
+        ("deepseek-v4-pro", "old-provider-model", true),
+        ("auto", "old-provider-model", true),
+        ("not-a-deepseek-model", "deepseek-v4-pro", false),
+        ("", "deepseek-v4-pro", false),
+        ("   ", "deepseek-v4-pro", false),
+    ] {
+        let mut config = Config {
+            provider: Some("deepseek".to_string()),
+            default_text_model: Some(root.to_string()),
+            ..Default::default()
+        };
+        config.provider_config_for_mut(ApiProvider::Deepseek).model = Some(model.to_string());
+        let result = config.validate();
+        assert_eq!(
+            result.is_ok(),
+            valid,
+            "selected {model:?}, root {root:?}: {result:?}"
+        );
+        if valid {
+            assert_eq!(config.default_model(), model);
+        }
+        assert_eq!(config.default_text_model.as_deref(), Some(root));
+    }
+
+    // Exact route declarations remain first-class; a declaration for another
+    // provider cannot make an unknown model valid on this route.
+    let mut declared: Config = toml::from_str(
+        r#"provider = "deepseek"
+default_text_model = "old-provider-model"
+[providers.deepseek]
+base_url = "https://api.deepseek.com"
+model = "account-model"
+[[custom_models]]
+provider = "deepseek"
+base_url = "https://api.deepseek.com"
+id = "account-model"
+"#,
+    )
+    .unwrap();
+    declared.validate().expect("matching declared model");
+    assert_eq!(declared.default_model(), "account-model");
+    declared.custom_models.as_mut().unwrap()[0].provider = "zai".to_string();
+    assert!(declared.validate().is_err());
+}
+
+#[test]
 fn native_memory_scenario() {
     // Scenario consolidation of: native_memory_backend_owns_explicit_path, native_memory_path_honours_an_already_native_setting
     // from native_memory_backend_owns_explicit_path
@@ -14016,4 +14463,135 @@ fn codewhale_route_without_a_key_fails_before_any_request() -> Result<()> {
     assert_eq!(text.matches("cwc_key_").count(), 1, "{text}");
     assert!(text.contains("cwc_key_..."), "{text}");
     Ok(())
+}
+
+#[test]
+fn openrouter_vendor_profile_override_clear_and_provider_boundary() {
+    let base: Config = toml::from_str(
+        r#"
+provider = "openrouter"
+[providers.openrouter]
+vendor = "deepinfra/turbo"
+"#,
+    )
+    .unwrap();
+    let unrelated: Config = toml::from_str(
+        r#"
+[providers.openrouter]
+model = "deepseek/deepseek-v4-pro"
+"#,
+    )
+    .unwrap();
+    let retained = merge_config(base.clone(), unrelated);
+    assert_eq!(
+        retained.openrouter_vendor().unwrap().as_deref(),
+        Some("deepinfra/turbo")
+    );
+    let clear: Config = toml::from_str("[providers.openrouter]\nvendor = \"\"\n").unwrap();
+    assert_eq!(
+        merge_config(base.clone(), clear)
+            .openrouter_vendor()
+            .unwrap(),
+        None
+    );
+    let mut switched = base;
+    switched.provider = Some("openai".into());
+    assert_eq!(switched.openrouter_vendor().unwrap(), None);
+    switched.provider_config_for_mut(ApiProvider::Openai).vendor = Some("deepinfra".into());
+    assert!(switched.openrouter_vendor().is_err());
+}
+
+#[test]
+fn notifications_saved_profile_edit_roundtrips_the_actual_tui_loader() {
+    let _guard = crate::test_support::lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("config.toml");
+    std::fs::write(&path, "[notifications]\nmethod = \"kitty\"\nsound = \"bell\"\n[profiles.work.notifications]\nquiet = true\nsound = \"off\"\n[profiles.inherited]\n").unwrap();
+    let edit = NotificationConfigUpdate::Sound(Some(CompletionSound::Whale));
+    edit.persist_for_profile(&path, Some("work")).unwrap();
+    let work = Config::load(Some(path.clone()), Some("work"))
+        .unwrap()
+        .notifications_config();
+    assert_eq!(work.sound, Some(CompletionSound::Whale));
+    assert!(work.quiet);
+    let root = Config::load(Some(path.clone()), None)
+        .unwrap()
+        .notifications_config();
+    assert_eq!(root.sound, Some(CompletionSound::Bell));
+    NotificationConfigUpdate::Quiet(true)
+        .persist_for_profile(&path, Some("inherited"))
+        .unwrap();
+    let inherited = Config::load(Some(path.clone()), Some("inherited"))
+        .unwrap()
+        .notifications_config();
+    assert!(inherited.quiet);
+    assert_eq!(inherited.method, NotificationMethod::Kitty);
+    let raw: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(raw["profiles"]["inherited"].get("notifications").is_none());
+    let before = std::fs::read(&path).unwrap();
+    assert!(edit.persist_for_profile(&path, Some("missing")).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn notifications_canonical_condition_overrides_and_unsets_to_legacy() {
+    let config: Config = toml::from_str("[tui]\nnotification_condition = \"never\"\n[notifications]\ncondition = \"always\"\nsound = \"off\"\ncompletion_sound = \"whale\"\n").unwrap();
+    assert_eq!(
+        config.notifications_config().condition,
+        Some(NotificationCondition::Always)
+    );
+    assert_eq!(
+        config.notifications_config().sound,
+        Some(CompletionSound::Off)
+    );
+    assert_eq!(
+        crate::tui::notifications::settings_projection(&config)
+            .unwrap()
+            .1,
+        std::time::Duration::ZERO
+    );
+}
+
+#[test]
+#[ignore = "requires CODEWHALE_TEST_NOTIFICATION_CLI pointing at the built CLI"]
+fn notifications_real_cli_file_is_consumed_by_actual_tui_loader() {
+    let _guard = crate::test_support::lock_test_env();
+    let binary = std::env::var_os("CODEWHALE_TEST_NOTIFICATION_CLI").expect("supply built CLI");
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("config.toml");
+    for (key, value) in [
+        ("sound", "whale"),
+        ("quiet", "true"),
+        ("events.approval-needed", "false"),
+        ("condition", "always"),
+        ("threshold_secs", "17"),
+        ("event_sound.events", r#"["model-notify", "input-needed"]"#),
+    ] {
+        let result = std::process::Command::new(&binary)
+            .env_clear()
+            .env("HOME", temp.path())
+            .env("USERPROFILE", temp.path())
+            .env("CODEWHALE_HOME", temp.path().join("state"))
+            .env("CODEWHALE_SECRET_BACKEND", "file")
+            .current_dir(temp.path())
+            .arg("--config")
+            .arg(&path)
+            .args(["config", "set", &format!("notifications.{key}"), value])
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{key}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    let loaded = Config::load(Some(path), None)
+        .unwrap()
+        .notifications_config();
+    assert_eq!(loaded.sound, Some(CompletionSound::Whale));
+    assert!(loaded.quiet);
+    assert!(!loaded.events.approval_needed);
+    assert_eq!(loaded.condition, Some(NotificationCondition::Always));
+    assert_eq!(loaded.threshold_secs, 17);
+    assert_eq!(loaded.event_sound.events, ["model-notify", "input-needed"]);
 }

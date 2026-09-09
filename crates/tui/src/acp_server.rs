@@ -1461,7 +1461,7 @@ impl AcpServer {
                 )))
             }
             "session/new" => Ok(AcpDispatch::Response(self.new_session(params)?)),
-            "session/list" => Ok(AcpDispatch::Response(self.list_sessions())),
+            "session/list" => Ok(AcpDispatch::Response(self.list_sessions(params)?)),
             "session/load" => Ok(AcpDispatch::Response(self.load_session(params)?)),
             "session/listProviders" => Ok(AcpDispatch::Response(self.list_providers())),
             "session/currentModel" => Ok(AcpDispatch::Response(self.current_model())),
@@ -1534,12 +1534,28 @@ impl AcpServer {
     /// that cannot be read is an empty list, not a failed request: enumeration
     /// is discovery, and a client asking what exists should not be broken by a
     /// missing sessions directory.
-    fn list_sessions(&self) -> Value {
+    fn list_sessions(&self, params: Value) -> std::result::Result<Value, AcpError> {
+        let cwd = match params.get("cwd") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(path)) if std::path::Path::new(path).is_absolute() => {
+                Some(PathBuf::from(path))
+            }
+            Some(_) => {
+                return Err(AcpError::invalid_params(
+                    "session/list cwd must be an absolute path",
+                ));
+            }
+        };
         let sessions = Self::session_manager()
             .and_then(|manager| manager.list_sessions().ok())
             .unwrap_or_default();
         let sessions: Vec<Value> = sessions
             .into_iter()
+            .filter(|meta| {
+                cwd.as_ref().is_none_or(|cwd| {
+                    crate::session_manager::paths_equivalent(&meta.workspace, cwd)
+                })
+            })
             .map(|meta| {
                 json!({
                     "sessionId": meta.id,
@@ -1551,7 +1567,7 @@ impl AcpServer {
                 })
             })
             .collect();
-        json!({ "sessions": sessions })
+        Ok(json!({ "sessions": sessions }))
     }
 
     /// Rehydrate a durable Codewhale session as this connection's ACP session.
@@ -2637,7 +2653,7 @@ mod tests {
             workspace.clone(),
         );
 
-        let listed = server.list_sessions();
+        let listed = server.list_sessions(json!({})).expect("session/list");
         let ids: Vec<&str> = listed["sessions"]
             .as_array()
             .expect("sessions array")
@@ -2648,6 +2664,60 @@ mod tests {
             ids.contains(&saved_id.as_str()),
             "session/list must enumerate durable sessions: {ids:?}"
         );
+
+        let other_workspace = home.path().join("other-workspace");
+        std::fs::create_dir_all(&other_workspace).unwrap();
+        let other = crate::session_manager::create_saved_session(
+            &saved.messages,
+            "deepseek-v4-flash",
+            &other_workspace,
+            0,
+            None,
+        );
+        manager.save_session(&other).unwrap();
+        for filter in [workspace.clone(), workspace.join(".")] {
+            let AcpDispatch::Response(filtered) = server
+                .handle_request("session/list", json!({"cwd": filter}))
+                .await
+                .expect("filtered session/list")
+            else {
+                panic!("session/list returned shutdown");
+            };
+            let entries = filtered["sessions"].as_array().unwrap();
+            assert_eq!(
+                entries.len(),
+                1,
+                "workspace filter must not include another directory"
+            );
+            assert_eq!(entries[0]["sessionId"], saved_id);
+        }
+        let AcpDispatch::Response(all) = server
+            .handle_request("session/list", json!({}))
+            .await
+            .unwrap()
+        else {
+            panic!("session/list returned shutdown");
+        };
+        assert_eq!(all["sessions"].as_array().unwrap().len(), 2);
+        let AcpDispatch::Response(empty) = server
+            .handle_request(
+                "session/list",
+                json!({"cwd": home.path().join("missing-workspace")}),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("session/list returned shutdown");
+        };
+        assert!(empty["sessions"].as_array().unwrap().is_empty());
+        for invalid in [json!("relative"), json!(""), json!(42)] {
+            let error = server
+                .handle_request("session/list", json!({"cwd": invalid}))
+                .await
+                .err()
+                .expect("invalid cwd must be rejected");
+            assert_eq!(error.code, -32602);
+        }
 
         let loaded = server
             .load_session(json!({ "sessionId": saved_id }))

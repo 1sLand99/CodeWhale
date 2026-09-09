@@ -2,21 +2,19 @@
 
 use super::CommandResult;
 use crate::config::{
-    ApiProvider, CompletionSound, Config, DEFAULT_STREAM_CHUNK_TIMEOUT_SECS,
-    DEFAULT_SUBAGENT_API_TIMEOUT_SECS, DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS,
-    DEFAULT_XIAOMI_MIMO_BASE_URL, MAX_STREAM_CHUNK_TIMEOUT_SECS, MAX_SUBAGENT_API_TIMEOUT_SECS,
+    ApiProvider, Config, DEFAULT_STREAM_CHUNK_TIMEOUT_SECS, DEFAULT_SUBAGENT_API_TIMEOUT_SECS,
+    DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS, DEFAULT_XIAOMI_MIMO_BASE_URL,
+    MAX_STREAM_CHUNK_TIMEOUT_SECS, MAX_SUBAGENT_API_TIMEOUT_SECS,
     MAX_SUBAGENT_HEARTBEAT_TIMEOUT_SECS, MAX_SUBAGENTS, MIN_STREAM_CHUNK_TIMEOUT_SECS,
     MIN_SUBAGENT_API_TIMEOUT_SECS, MIN_SUBAGENT_HEARTBEAT_TIMEOUT_SECS, NotificationConfigUpdate,
-    NotificationMethod, NotificationsConfig, SearchProvider, SearchProviderSource,
-    SubagentCompletionNotification, SubagentsConfig, XIAOMI_MIMO_PAY_AS_YOU_GO_BASE_URL,
-    clear_active_provider_api_key, normalize_custom_model_id, normalize_model_name_for_provider,
-    validate_route,
+    NotificationSetting, NotificationsConfig, SearchProvider, SearchProviderSource,
+    SubagentsConfig, XIAOMI_MIMO_PAY_AS_YOU_GO_BASE_URL, clear_active_provider_api_key,
+    normalize_custom_model_id, normalize_model_name_for_provider, validate_route,
 };
 use crate::config_persistence::{
     persist_provider_base_url_key, persist_root_bool_key, persist_root_string_key,
-    persist_subagents_bool_key, persist_subagents_integer_key, persist_table_bool_key,
-    persist_table_integer_key, persist_table_string_key, persist_tui_integer_key,
-    persist_unset_root_key,
+    persist_subagents_bool_key, persist_subagents_integer_key, persist_table_string_key,
+    persist_tui_integer_key, persist_unset_root_key,
 };
 use crate::localization::{MessageId, resolve_locale, tr};
 use crate::settings::Settings;
@@ -390,6 +388,7 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
             }
             .to_string(),
         ),
+        "contextual_tips" => Some(app.behavioral_tips.enabled().to_string()),
         "pin_last_prompt" | "pin_prompt" => {
             Some(if app.pin_last_prompt { "true" } else { "false" }.to_string())
         }
@@ -487,11 +486,10 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
             }
             .to_string(),
         ),
-        "default_model" => Settings::load().ok().map(|settings| {
-            settings
-                .default_model
-                .unwrap_or_else(|| "(default)".to_string())
-        }),
+        "default_model" => match saved_deepseek_default_model(app) {
+            Ok(model) => Some(model),
+            Err(error) => return CommandResult::error(error),
+        },
         "reasoning_effort" | "effort" => Some(
             app.reasoning_effort
                 .as_setting_for_provider(app.api_provider)
@@ -512,9 +510,7 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
         "prompt_suggestion" => load_command_config(app)
             .ok()
             .map(|config| prompt_suggestion_display(&config)),
-        "notifications" => load_command_config(app)
-            .ok()
-            .map(|config| notifications_summary(&config)),
+        "notifications" => Some(notifications_summary_value(&app.notification_settings)),
         _ => {
             let known = Settings::available_settings()
                 .iter()
@@ -1085,17 +1081,16 @@ fn prompt_suggestion_display(config: &Config) -> String {
     config.prompt_suggestion_enabled().to_string()
 }
 
-fn notifications_for_edit(config: &Config) -> NotificationsConfig {
-    config.notifications_config()
+fn notifications_summary(config: &Config) -> String {
+    notifications_summary_value(&config.notifications_config())
 }
 
-fn notifications_summary(config: &Config) -> String {
-    let notifications = notifications_for_edit(config);
+fn notifications_summary_value(notifications: &NotificationsConfig) -> String {
     format!(
         "method={} threshold={}s sound={} quiet={}",
         notifications.method.as_str(),
         notifications.threshold_secs,
-        notifications.completion_sound.as_str(),
+        notifications.display(NotificationSetting::Sound),
         notifications.quiet
     )
 }
@@ -1199,275 +1194,91 @@ fn set_prompt_suggestion(app: &mut App, value: &str, persist: bool) -> CommandRe
 }
 
 fn notifications_config_command(app: &mut App, raw: &str) -> CommandResult {
-    let mut tokens = raw.split_whitespace().collect::<Vec<_>>();
-    let persist = matches!(tokens.last(), Some(&"--save" | &"-s"));
-    if persist {
-        tokens.pop();
+    let raw = raw.trim();
+    let (raw, persist) = raw
+        .strip_suffix(" --save")
+        .or_else(|| raw.strip_suffix(" -s"))
+        .map_or((raw, false), |value| (value.trim_end(), true));
+    if raw.is_empty() || raw == "status" {
+        return show_notifications_status(app);
     }
-
-    match tokens.as_slice() {
-        [] | ["status"] => show_notifications_status(app),
-        [key] => show_notifications_setting(app, key),
-        [key, value] => set_notifications_value(app, key, value, persist),
-        _ => CommandResult::error(format!(
-            "{} /config notifications [status|method|threshold_secs|include_summary|quiet|completion_sound|subagent_completion <value>] [--save]",
-            tr(app.ui_locale, MessageId::HelpUsageLabel)
-        )),
+    match raw.split_once(char::is_whitespace) {
+        Some((key, value)) => set_notifications_value(app, key, value.trim(), persist),
+        None => show_notifications_setting(app, raw),
     }
 }
 
 fn show_notifications_status(app: &App) -> CommandResult {
-    let config = match load_command_config(app) {
-        Ok(config) => config,
-        Err(err) => return CommandResult::error(err),
-    };
-    let notifications = notifications_for_edit(&config);
-    let lines = [
-        "[notifications] — config.toml".to_string(),
-        format!("method = {}", notifications.method.as_str()),
-        format!("threshold_secs = {}", notifications.threshold_secs),
-        format!("include_summary = {}", notifications.include_summary),
-        format!("quiet = {}", notifications.quiet),
+    let mut lines = vec!["[notifications]".to_string()];
+    lines.extend(NotificationSetting::ALL.into_iter().map(|setting| {
         format!(
-            "completion_sound = {}",
-            notifications.completion_sound.as_str()
-        ),
-        format!(
-            "subagent_completion = {}",
-            notifications.subagent_completion.as_str()
-        ),
-        String::new(),
-        tr(app.ui_locale, MessageId::ConfigNotificationsSetHint).into_owned(),
-    ];
+            "{} = {}",
+            setting.key(),
+            app.notification_settings.display(setting)
+        )
+    }));
+    lines.push(tr(app.ui_locale, MessageId::ConfigNotificationsSetHint).into_owned());
     CommandResult::message(lines.join("\n"))
 }
 
 fn show_notifications_setting(app: &App, key: &str) -> CommandResult {
-    let config = match load_command_config(app) {
-        Ok(config) => config,
-        Err(err) => return CommandResult::error(err),
+    let Some(setting) = NotificationSetting::parse(key) else {
+        return invalid_notification_value(app, key, key, "/config notifications status");
     };
-    let Some(key) = canonical_notifications_key(key) else {
-        return CommandResult::error(
-            tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
-                .replace("{key}", "notifications")
-                .replace("{value}", key)
-                .replace("{choices}", "/config notifications status"),
-        );
-    };
-    let notifications = notifications_for_edit(&config);
-    let value = notifications_field_display(&notifications, key);
-    CommandResult::message(format!("notifications.{key} = {value}"))
+    CommandResult::message(format!(
+        "notifications.{} = {}",
+        setting.key(),
+        app.notification_settings.display(setting)
+    ))
+}
+
+fn invalid_notification_value(app: &App, key: &str, value: &str, choices: &str) -> CommandResult {
+    CommandResult::error(
+        tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
+            .replace("{key}", &format!("notifications.{key}"))
+            .replace("{value}", value)
+            .replace("{choices}", choices),
+    )
 }
 
 fn set_notifications_value(app: &mut App, key: &str, value: &str, persist: bool) -> CommandResult {
-    let Some(key) = canonical_notifications_key(key) else {
-        return CommandResult::error(
-            tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
-                .replace("{key}", "notifications")
-                .replace("{value}", key)
-                .replace("{choices}", "/config notifications status"),
-        );
+    let Some(setting) = NotificationSetting::parse(key) else {
+        return invalid_notification_value(app, key, value, "/config notifications status");
     };
-
-    let (update, save_result) = match key {
-        "method" => {
-            let Some(method) = NotificationMethod::parse(value) else {
-                return CommandResult::error(
-                    tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
-                        .replace("{key}", "notifications.method")
-                        .replace("{value}", value)
-                        .replace("{choices}", NotificationMethod::names_hint()),
-                );
-            };
-            (
-                NotificationConfigUpdate::Method(method),
-                persist.then(|| {
-                    persist_table_string_key(
-                        app.config_path.as_deref(),
-                        "notifications",
-                        "method",
-                        method.as_str(),
-                    )
-                }),
-            )
-        }
-        "threshold_secs" => {
-            let threshold = match value.trim().parse::<u64>() {
-                Ok(threshold) => threshold,
-                Err(_) => {
-                    return CommandResult::error(
-                        tr(app.ui_locale, MessageId::ConfigNotificationsWholeNumber).into_owned(),
-                    );
-                }
-            };
-            (
-                NotificationConfigUpdate::ThresholdSecs(threshold),
-                persist.then(|| {
-                    persist_table_integer_key(
-                        app.config_path.as_deref(),
-                        "notifications",
-                        "threshold_secs",
-                        threshold,
-                    )
-                }),
-            )
-        }
-        "include_summary" => {
-            let enabled = match parse_config_bool(value) {
-                Ok(enabled) => enabled,
-                Err(_) => {
-                    return CommandResult::error(
-                        tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
-                            .replace("{key}", "notifications.include_summary")
-                            .replace("{value}", value)
-                            .replace("{choices}", "on, off, true, false, yes, no"),
-                    );
-                }
-            };
-            (
-                NotificationConfigUpdate::IncludeSummary(enabled),
-                persist.then(|| {
-                    persist_table_bool_key(
-                        app.config_path.as_deref(),
-                        "notifications",
-                        "include_summary",
-                        enabled,
-                    )
-                }),
-            )
-        }
-        "quiet" => {
-            let enabled = match parse_config_bool(value) {
-                Ok(enabled) => enabled,
-                Err(_) => {
-                    return CommandResult::error(
-                        tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
-                            .replace("{key}", "notifications.quiet")
-                            .replace("{value}", value)
-                            .replace("{choices}", "on, off, true, false, yes, no"),
-                    );
-                }
-            };
-            (
-                NotificationConfigUpdate::Quiet(enabled),
-                persist.then(|| {
-                    persist_table_bool_key(
-                        app.config_path.as_deref(),
-                        "notifications",
-                        "quiet",
-                        enabled,
-                    )
-                }),
-            )
-        }
-        "completion_sound" => {
-            let Some(sound) = CompletionSound::parse(value) else {
-                return CommandResult::error(
-                    tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
-                        .replace("{key}", "notifications.completion_sound")
-                        .replace("{value}", value)
-                        .replace("{choices}", CompletionSound::names_hint()),
-                );
-            };
-            (
-                NotificationConfigUpdate::CompletionSound(sound),
-                persist.then(|| {
-                    persist_table_string_key(
-                        app.config_path.as_deref(),
-                        "notifications",
-                        "completion_sound",
-                        sound.as_str(),
-                    )
-                }),
-            )
-        }
-        "subagent_completion" => {
-            let Some(mode) = SubagentCompletionNotification::parse(value) else {
-                return CommandResult::error(
-                    tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
-                        .replace("{key}", "notifications.subagent_completion")
-                        .replace("{value}", value)
-                        .replace("{choices}", SubagentCompletionNotification::names_hint()),
-                );
-            };
-            (
-                NotificationConfigUpdate::SubagentCompletion(mode),
-                persist.then(|| {
-                    persist_table_string_key(
-                        app.config_path.as_deref(),
-                        "notifications",
-                        "subagent_completion",
-                        mode.as_str(),
-                    )
-                }),
-            )
-        }
-        _ => unreachable!("canonical notifications key"),
+    let update = match NotificationConfigUpdate::parse(setting, value) {
+        Ok(update) => update,
+        Err(_) => return invalid_notification_value(app, setting.key(), value, setting.choices()),
     };
-
-    let scope = if let Some(result) = save_result {
+    let scope = if persist {
+        let result = crate::config_persistence::config_toml_path(app.config_path.as_deref())
+            .and_then(|path| {
+                update.persist_for_profile(&path, app.config_profile.as_deref())?;
+                Ok(path)
+            });
         match result {
             Ok(path) => format!(
                 "{} {}",
                 tr(app.ui_locale, MessageId::ConfigScopeSaved),
                 path.display()
             ),
-            Err(err) => {
+            Err(error) => {
                 return CommandResult::error(
                     tr(app.ui_locale, MessageId::StartupDefaultNotSaved)
-                        .replace("{setting}", &format!("notifications.{key}"))
-                        .replace("{error}", &err.to_string()),
+                        .replace("{setting}", &format!("notifications.{}", setting.key()))
+                        .replace("{error}", &error.to_string()),
                 );
             }
         }
     } else {
         tr(app.ui_locale, MessageId::ConfigScopeSession).into_owned()
     };
-
-    let display_value = notification_update_display(update);
     CommandResult::with_message_and_action(
         tr(app.ui_locale, MessageId::ConfigNotificationUpdated)
-            .replace("{key}", key)
-            .replace("{value}", &display_value)
+            .replace("{key}", setting.key())
+            .replace("{value}", &update.display())
             .replace("{scope}", &scope),
         AppAction::UpdateNotification { update },
     )
-}
-
-fn notification_update_display(update: NotificationConfigUpdate) -> String {
-    match update {
-        NotificationConfigUpdate::Method(value) => value.as_str().to_string(),
-        NotificationConfigUpdate::ThresholdSecs(value) => value.to_string(),
-        NotificationConfigUpdate::IncludeSummary(value) => value.to_string(),
-        NotificationConfigUpdate::Quiet(value) => value.to_string(),
-        NotificationConfigUpdate::CompletionSound(value) => value.as_str().to_string(),
-        NotificationConfigUpdate::SubagentCompletion(value) => value.as_str().to_string(),
-    }
-}
-
-fn canonical_notifications_key(key: &str) -> Option<&'static str> {
-    match key.trim().to_ascii_lowercase().replace('-', "_").as_str() {
-        "method" => Some("method"),
-        "threshold_secs" | "threshold" => Some("threshold_secs"),
-        "include_summary" | "summary" => Some("include_summary"),
-        "quiet" => Some("quiet"),
-        "completion_sound" | "sound" => Some("completion_sound"),
-        "subagent_completion" => Some("subagent_completion"),
-        _ => None,
-    }
-}
-
-fn notifications_field_display(notifications: &NotificationsConfig, key: &str) -> String {
-    match key {
-        "method" => notifications.method.as_str().to_string(),
-        "threshold_secs" => notifications.threshold_secs.to_string(),
-        "include_summary" => notifications.include_summary.to_string(),
-        "quiet" => notifications.quiet.to_string(),
-        "completion_sound" => notifications.completion_sound.as_str().to_string(),
-        "subagent_completion" => notifications.subagent_completion.as_str().to_string(),
-        _ => unreachable!("canonical notifications key"),
-    }
 }
 
 fn stream_chunk_timeout_value_label(raw: u64, resolved: u64) -> String {
@@ -1504,6 +1315,38 @@ fn subagents_config_command(app: &mut App, raw: &str) -> CommandResult {
 fn load_command_config(app: &App) -> Result<Config, String> {
     Config::load(app.config_path.clone(), app.config_profile.as_deref())
         .map_err(|err| format!("Failed to load config: {err}"))
+}
+
+/// The compatibility default_model command describes saved DeepSeek config,
+/// independent of the active provider and one-launch environment overrides.
+fn saved_deepseek_default_model(app: &App) -> Result<String, String> {
+    let path = crate::config_persistence::config_toml_path(app.config_path.as_deref())
+        .map_err(|error| format!("Failed to resolve config: {error}"))?;
+    let read = || -> anyhow::Result<String> {
+        let store = codewhale_config::ConfigStore::load(Some(path.clone()))?;
+        let mut config = Config::from_saved_document(
+            store.original_body().unwrap_or(""),
+            app.config_profile.as_deref(),
+        )?;
+        if app.config_profile.is_none() && crate::config::is_home_config_path(&path) {
+            config.apply_saved_selection(&Settings::load_legacy_route_preferences_read_only()?);
+        }
+        let provider = if app.api_provider == ApiProvider::DeepseekCN {
+            ApiProvider::DeepseekCN
+        } else {
+            ApiProvider::Deepseek
+        };
+        let identity = config
+            .resolve_provider_pin_identity(provider.as_str())
+            .map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(
+            identity.provider == provider,
+            "The saved provider identity is shadowed by another route"
+        );
+        config.scope_to_provider_identity(&identity);
+        Ok(config.default_model())
+    };
+    read().map_err(|error| format!("Failed to read saved model config: {error}"))
 }
 
 fn subagents_status(app: &App) -> CommandResult {
@@ -1977,6 +1820,42 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
     }
 
     match key.as_str() {
+        "contextual_tips" => {
+            let enabled = match parse_config_bool(value) {
+                Ok(enabled) => enabled,
+                Err(_) => {
+                    return CommandResult::error(
+                        tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
+                            .replace("{key}", &key)
+                            .replace("{value}", value)
+                            .replace("{choices}", "on/off"),
+                    );
+                }
+            };
+            // Apply the opt-out even when the settings file cannot be read
+            // or saved. Only the existing single-key transaction may claim
+            // persistence; a failure leaves the live preference in effect.
+            app.set_contextual_tips_enabled(enabled);
+            if persist && let Err(error) = persist_single_setting(&key, &enabled.to_string()) {
+                let message = tr(app.ui_locale, MessageId::ContextualTipsNotSaved)
+                    .replace("{error}", &error.to_string());
+                app.push_status_toast(
+                    message.clone(),
+                    crate::tui::app::StatusToastLevel::Error,
+                    Some(8_000),
+                );
+                return CommandResult::error(message);
+            }
+            let scope = if persist {
+                MessageId::ConfigScopeSaved
+            } else {
+                MessageId::ConfigScopeSession
+            };
+            return CommandResult::message(format!(
+                "contextual_tips = {enabled} ({})",
+                tr(app.ui_locale, scope)
+            ));
+        }
         "telemetry" => {
             if !persist {
                 return CommandResult::error(
@@ -2002,26 +1881,86 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
                 CommandResult::message(message)
             };
         }
-        "model" => {
-            // Support "/model auto" — auto-select model based on request complexity
-            if value.trim().eq_ignore_ascii_case("auto") {
-                app.set_model_selection("auto".to_string());
-                app.update_model_compaction_budget();
-                app.session.last_prompt_tokens = None;
-                app.session.last_completion_tokens = None;
-                return CommandResult::with_message_and_action(
-                    format!(
-                        "model = auto (auto-select model per turn; thinking = {})",
-                        app.reasoning_effort_display_label()
-                    ),
-                    AppAction::UpdateCompaction(app.compaction_config()),
-                );
+        "default_model" => {
+            let value = value.trim();
+            let value = if value.is_empty()
+                || matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "none" | "default" | "(default)"
+                ) {
+                crate::config::DEFAULT_TEXT_MODEL
+            } else {
+                value
+            };
+            if matches!(
+                app.api_provider,
+                ApiProvider::Deepseek | ApiProvider::DeepseekCN
+            ) {
+                return set_config_value(app, "model", value, persist);
             }
+            if !persist {
+                return CommandResult::error(format!(
+                    "default_model is the DeepSeek startup fallback and cannot change the active {} session. Use /model for the current provider, or add --save to change only future DeepSeek sessions.",
+                    app.api_provider.as_str()
+                ));
+            }
+            let model = if value.eq_ignore_ascii_case("auto") {
+                "auto".to_string()
+            } else {
+                // Route-aware, matching POST /v1/config: a custom DeepSeek
+                // endpoint owns its model namespace, so an id declared for the
+                // saved DeepSeek route validates verbatim before the catalog
+                // normalization runs.
+                let saved = match load_command_config(app) {
+                    Ok(config) => config,
+                    Err(err) => return CommandResult::error(err),
+                };
+                if crate::provider_lake::configured_model_for_route(
+                    &saved,
+                    ApiProvider::Deepseek,
+                    &saved.provider_identity_for(ApiProvider::Deepseek),
+                    &saved.base_url_for_route(ApiProvider::Deepseek),
+                    value.trim(),
+                )
+                .is_some()
+                {
+                    value.trim().to_string()
+                } else {
+                    let Some(model) =
+                        normalize_model_name_for_provider(ApiProvider::Deepseek, value)
+                    else {
+                        return CommandResult::error(format!("Invalid DeepSeek model '{value}'."));
+                    };
+                    if let Err(error) = validate_route(ApiProvider::Deepseek, &model) {
+                        return CommandResult::error(error);
+                    }
+                    model
+                }
+            };
+            return match crate::config_persistence::persist_provider_model_key(
+                app.config_path.as_deref(),
+                ApiProvider::Deepseek,
+                "deepseek",
+                &model,
+            ) {
+                Ok(path) => CommandResult::message(format!(
+                    "default_model = {model} (saved to {}); DeepSeek fallback only — active {}/{} is unchanged",
+                    path.display(),
+                    app.api_provider.as_str(),
+                    app.model_display_label()
+                )),
+                Err(error) => CommandResult::error(format!("Failed to save model: {error}")),
+            };
+        }
+        "model" => {
             // Route-aware: a custom DeepSeek (or other) endpoint owns its model
             // namespace. Provider-only normalization would reject a non-DeepSeek
             // id that the live session is already allowed to use via `/model`.
             // OpenCode Go stays protocol-strict even on a custom host.
-            let model = if app.api_provider == ApiProvider::OpencodeGo {
+            let auto_select = value.trim().eq_ignore_ascii_case("auto");
+            let model = if auto_select {
+                "auto".to_string()
+            } else if app.api_provider == ApiProvider::OpencodeGo {
                 let Some(model) = normalize_model_name_for_provider(app.api_provider, value) else {
                     return CommandResult::error(format!(
                         "Invalid model '{value}' for provider {}.",
@@ -2032,7 +1971,16 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
                     return CommandResult::error(reason);
                 }
                 model
-            } else if app.accepts_custom_model_ids() {
+            } else if app.accepts_custom_model_ids()
+                || (app.api_provider != ApiProvider::OpenaiCodex
+                    && app.configured_models.iter().any(|row| {
+                        row.id == value.trim()
+                            && row.matches_route(
+                                app.provider_identity_for_persistence(),
+                                &app.active_route_base_url,
+                            )
+                    }))
+            {
                 let Some(model) = normalize_custom_model_id(value) else {
                     return CommandResult::error(format!(
                         "Invalid model '{value}' for provider {}.",
@@ -2052,12 +2000,44 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
                 }
                 model
             };
+            let saved = if persist {
+                let provider_id = match app.provider_selector_for_config_persistence() {
+                    Ok(provider_id) => provider_id,
+                    Err(error) => {
+                        return CommandResult::error(format!("Failed to save model: {error}"));
+                    }
+                };
+                match crate::config_persistence::persist_provider_selection(
+                    app.config_path.as_deref(),
+                    app.api_provider,
+                    provider_id,
+                    Some(&model),
+                ) {
+                    Ok(path) => Some(path),
+                    Err(error) => {
+                        return CommandResult::error(format!("Failed to save model: {error}"));
+                    }
+                }
+            } else {
+                None
+            };
             app.set_model_selection(model.clone());
             app.update_model_compaction_budget();
             app.session.last_prompt_tokens = None;
             app.session.last_completion_tokens = None;
+            let mut message = if model == "auto" {
+                format!(
+                    "model = auto (auto-select model per turn; thinking = {})",
+                    app.reasoning_effort_display_label()
+                )
+            } else {
+                format!("model = {model}")
+            };
+            if let Some(path) = saved {
+                message.push_str(&format!(" (saved to {})", path.display()));
+            }
             return CommandResult::with_message_and_action(
-                format!("model = {model}"),
+                message,
                 AppAction::UpdateCompaction(app.compaction_config()),
             );
         }
@@ -2380,14 +2360,62 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
         }
         // The two bottom-chrome rows' size presets (`tui.posture_bar`,
         // `tui.metrics_line`, #5950). Live on the next frame; `--save`
-        // writes the `[tui]` key. `/statusline` composes what is in a row;
+        // writes the owning `[tui]` table. `/statusline` composes what is in a row;
         // this only decides whether and how much of it paints.
         row_key @ ("posture_bar" | "metrics_line") => {
             let Some(preset) = crate::config::ChromeRowPreset::from_setting(value) else {
-                return CommandResult::error(format!(
-                    "{row_key} must be one of: {}",
-                    crate::config::ChromeRowPreset::SETTINGS.join(", ")
-                ));
+                return CommandResult::error(
+                    tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
+                        .replace("{key}", row_key)
+                        .replace("{value}", value)
+                        .replace(
+                            "{choices}",
+                            &crate::config::ChromeRowPreset::SETTINGS.join(", "),
+                        ),
+                );
+            };
+            let value = preset.as_setting();
+            let scope = if persist {
+                let saved = crate::config_persistence::config_toml_path(app.config_path.as_deref())
+                    .and_then(|path| {
+                        crate::config_persistence::mutate_config_document(&path, |doc| {
+                            // Profiles replace the whole TUI table on load. Edit its
+                            // existing owner without creating an empty override that
+                            // would reset the other inherited display settings.
+                            let mut segments = Vec::new();
+                            if let Some(profile) = app.config_profile.as_deref() {
+                                let table = doc
+                                    .get("profiles")
+                                    .and_then(|v| v.get(profile))
+                                    .and_then(toml_edit::Item::as_table_like)
+                                    .ok_or_else(|| {
+                                        anyhow::anyhow!("active profile is missing or malformed")
+                                    })?;
+                                if table.contains_key("tui") {
+                                    segments.extend(["profiles", profile]);
+                                }
+                            }
+                            segments.extend(["tui", row_key]);
+                            crate::config_persistence::set_document_value(doc, &segments, value)
+                        })?;
+                        Ok(path)
+                    });
+                match saved {
+                    Ok(path) => format!(
+                        "{} {}",
+                        tr(app.ui_locale, MessageId::ConfigScopeSaved),
+                        path.display()
+                    ),
+                    Err(error) => {
+                        return CommandResult::error(
+                            tr(app.ui_locale, MessageId::StartupDefaultNotSaved)
+                                .replace("{setting}", row_key)
+                                .replace("{error}", &error.to_string()),
+                        );
+                    }
+                }
+            } else {
+                tr(app.ui_locale, MessageId::ConfigScopeSession).into_owned()
             };
             if row_key == "posture_bar" {
                 app.posture_bar = preset;
@@ -2395,22 +2423,7 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
                 app.metrics_line = preset;
             }
             app.needs_redraw = true;
-            let value = preset.as_setting();
-            if persist {
-                return match persist_table_string_key(
-                    app.config_path.as_deref(),
-                    "tui",
-                    row_key,
-                    value,
-                ) {
-                    Ok(path) => CommandResult::message(format!(
-                        "{row_key} = {value} (saved to {})",
-                        path.display()
-                    )),
-                    Err(err) => CommandResult::error(format!("Failed to save: {err}")),
-                };
-            }
-            return CommandResult::message(format!("{row_key} = {value} (session only)"));
+            return CommandResult::message(format!("{row_key} = {value} ({scope})"));
         }
         "stream_chunk_timeout_secs" => {
             let raw = match value.trim().parse::<u64>() {
@@ -2481,19 +2494,6 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
         }
         Err(e) => return CommandResult::error(format!("Failed to load settings: {e}")),
     };
-
-    if key == "default_model"
-        && !matches!(
-            app.api_provider,
-            ApiProvider::Deepseek | ApiProvider::DeepseekCN
-        )
-        && !persist
-    {
-        return CommandResult::error(format!(
-            "default_model is the DeepSeek startup fallback and cannot change the active {} session. Use /model for the current provider, or add --save to change only future DeepSeek sessions.",
-            app.api_provider.as_str()
-        ));
-    }
 
     if let Err(e) = settings.set(&key, value) {
         return CommandResult::error(format!("{e}"));
@@ -2760,19 +2760,6 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
         "max_history" | "history" => {
             app.max_input_history = settings.max_input_history;
         }
-        "default_model" => {
-            if matches!(
-                app.api_provider,
-                ApiProvider::Deepseek | ApiProvider::DeepseekCN
-            ) && let Some(ref model) = settings.default_model
-            {
-                app.set_model_selection(model.clone());
-                app.update_model_compaction_budget();
-                app.session.last_prompt_tokens = None;
-                app.session.last_completion_tokens = None;
-                action = Some(AppAction::UpdateCompaction(app.compaction_config()));
-            }
-        }
         "reasoning_effort" | "effort" => {
             app.reasoning_effort_preference = settings
                 .reasoning_effort
@@ -2835,7 +2822,7 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
         _ => value.to_string(),
     };
 
-    let mut message = if persist {
+    let message = if persist {
         if let Err(e) = persist_single_setting(&key, value) {
             return CommandResult::error(format!("Failed to save: {e}"));
         }
@@ -2843,19 +2830,6 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
     } else {
         format!("{key} = {display_value} (session only, add --save to persist)")
     };
-    if key == "default_model"
-        && !matches!(
-            app.api_provider,
-            ApiProvider::Deepseek | ApiProvider::DeepseekCN
-        )
-    {
-        message.push_str(&format!(
-            "; DeepSeek fallback only — active {}/{} is unchanged",
-            app.api_provider.as_str(),
-            app.model_display_label()
-        ));
-    }
-
     CommandResult {
         message: Some(message),
         action,
@@ -3265,6 +3239,7 @@ pub fn logout(app: &mut App) -> CommandResult {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::config::NotificationMethod;
     use crate::test_support::{EnvVarGuard, TestEnvLock, lock_test_env};
     use crate::tui::app::{App, TuiOptions};
     use crate::tui::approval::ApprovalMode;
@@ -3329,6 +3304,110 @@ mod tests {
 
     fn create_test_app() -> App {
         create_test_app_with_config(&Config::default())
+    }
+
+    #[test]
+    fn contextual_tips_disable_only_guidance_and_keep_session_cap() {
+        use crate::tui::app::{StatusToast, StatusToastKind, StatusToastLevel};
+        use crate::tui::behavioral_tips::BehavioralTip;
+
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::new(temp.path());
+        let mut app = create_test_app();
+        app.status_toasts.clear();
+        assert!(app.maybe_show_behavioral_tip(BehavioralTip::PlanningMode));
+        app.push_status_toast("warning receipt", StatusToastLevel::Warning, None);
+        app.push_status_toast("error receipt", StatusToastLevel::Error, None);
+        app.sticky_status = Some(StatusToast::context_pressure(
+            "context warning",
+            crate::context_budget::PressureLevel::High,
+        ));
+
+        let result = crate::commands::execute("/config contextual_tips off", &mut app);
+        assert!(!result.is_error);
+        assert!(!app.behavioral_tips.enabled());
+        assert_eq!(
+            app.status_toasts
+                .iter()
+                .map(|toast| toast.text.as_str())
+                .collect::<Vec<_>>(),
+            ["warning receipt", "error receipt"]
+        );
+        assert!(matches!(
+            app.sticky_status.as_ref().unwrap().kind,
+            StatusToastKind::ContextPressure(_)
+        ));
+        assert!(!app.maybe_show_behavioral_tip(BehavioralTip::McpValidation));
+
+        assert!(!crate::commands::execute("/config contextual_tips on", &mut app).is_error);
+        assert!(app.behavioral_tips.enabled());
+        assert!(
+            !app.maybe_show_behavioral_tip(BehavioralTip::McpValidation),
+            "reenabling must not reset the session cap"
+        );
+    }
+
+    #[test]
+    fn contextual_tips_command_persists_and_reports_failed_save() {
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::new(temp.path());
+        let mut app = create_test_app();
+        Settings::transact(|settings| {
+            settings.theme = "terminal".into();
+            settings
+                .behavioral_tip_impressions
+                .insert("planning_mode".into(), 2);
+            Ok(())
+        })
+        .unwrap();
+
+        let result = crate::commands::execute("/config contextual_tips off --save", &mut app);
+        assert!(!result.is_error);
+        let saved = Settings::load_persisted().unwrap();
+        assert!(!saved.contextual_tips);
+        assert_eq!(saved.theme, "terminal");
+        assert_eq!(
+            saved.behavioral_tip_impressions.get("planning_mode"),
+            Some(&2)
+        );
+        assert!(
+            !create_test_app().behavioral_tips.enabled(),
+            "restart must load the saved opt-out"
+        );
+
+        assert!(!crate::commands::execute("/config contextual_tips on --save", &mut app).is_error);
+        assert!(create_test_app().behavioral_tips.enabled());
+        assert_eq!(
+            Settings::load_persisted()
+                .unwrap()
+                .behavioral_tip_impressions
+                .get("planning_mode"),
+            Some(&2)
+        );
+        let path = Settings::path().unwrap();
+        let before = fs::read(&path).unwrap();
+        assert!(
+            crate::commands::execute("/config contextual_tips invalid --save", &mut app).is_error
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(app.behavioral_tips.enabled());
+
+        let malformed = "contextual_tips = [private_fixture_payload\n";
+        fs::write(&path, malformed).unwrap();
+        let failed = crate::commands::execute("/config contextual_tips off --save", &mut app);
+        assert!(failed.is_error);
+        assert!(
+            !app.behavioral_tips.enabled(),
+            "failed persistence still honors the session opt-out"
+        );
+        assert_eq!(fs::read_to_string(path).unwrap(), malformed);
+        let message = failed.message.unwrap();
+        assert!(message.contains("could not be saved"), "{message}");
+        assert!(
+            !message.contains("private_fixture_payload"),
+            "parse errors must not echo settings contents"
+        );
+        assert!(message.ends_with(&app.status_toasts.back().unwrap().text));
     }
 
     #[test]
@@ -3793,7 +3872,11 @@ mod tests {
         let text = settings_command(&mut app, Some("text"));
         let message = text.message.as_deref().expect("settings diagnostic text");
         assert!(message.contains("Settings:"), "{message}");
-        assert!(message.contains("provider_models:"), "{message}");
+        assert!(
+            message.contains("model defaults:     config.toml"),
+            "{message}"
+        );
+        assert!(!message.contains("provider_models:"), "{message}");
         assert!(message.contains("Config file:"), "{message}");
         assert!(text.action.is_none());
     }
@@ -3895,12 +3978,15 @@ mod tests {
 
     #[test]
     fn config_default_model_cannot_replace_a_non_deepseek_live_route() {
-        let temp_root = env::temp_dir().join(format!(
-            "codewhale-tui-provider-scoped-default-model-test-{}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&temp_root).unwrap();
-        let _guard = EnvGuard::new(&temp_root);
+        let temp_root = tempfile::tempdir().expect("isolated configuration");
+        let _guard = EnvGuard::new(temp_root.path());
+        let config_path = crate::config_persistence::config_toml_path(None).expect("config path");
+        fs::create_dir_all(config_path.parent().expect("config directory")).expect("mkdir");
+        fs::write(
+            &config_path,
+            "provider = 'zai'\n[providers.zai]\nmodel = 'GLM-5.2'\n",
+        )
+        .expect("config");
         let mut app = create_test_app();
         app.api_provider = ApiProvider::Zai;
         app.model = crate::config::ZAI_GLM_5_2_MODEL.to_string();
@@ -3929,11 +4015,142 @@ mod tests {
                 .as_deref()
                 .is_some_and(|message| message.contains("active zai/GLM-5.2 is unchanged"))
         );
-        let persisted = Settings::load_persisted().expect("saved settings");
+        let persisted: toml::Value =
+            toml::from_str(&fs::read_to_string(&config_path).expect("saved config")).expect("toml");
         assert_eq!(
-            persisted.default_model.as_deref(),
+            persisted["providers"]["deepseek"]["model"].as_str(),
             Some("deepseek-v4-flash")
         );
+        assert_eq!(persisted["provider"].as_str(), Some("zai"));
+        assert_eq!(
+            saved_deepseek_default_model(&app).expect("saved value"),
+            "deepseek-v4-flash"
+        );
+        assert!(
+            Settings::load_persisted()
+                .expect("settings")
+                .default_model
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn saved_automatic_model_selection_round_trips_every_provider_route() {
+        let temp_root = tempfile::tempdir().expect("isolated configuration");
+        let _guard = EnvGuard::new(temp_root.path());
+        let config_path = crate::config_persistence::config_toml_path(None).unwrap();
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        for (provider, selector, table, initial) in [
+            (
+                ApiProvider::Deepseek,
+                "deepseek",
+                "deepseek",
+                "deepseek-v4-pro",
+            ),
+            (
+                ApiProvider::DeepseekCN,
+                "deepseek-cn",
+                "deepseek_cn",
+                "deepseek-v4-pro",
+            ),
+            (ApiProvider::Zai, "zai", "zai", "GLM-5.3"),
+        ] {
+            fs::write(
+                &config_path,
+                format!("provider = '{selector}'\n[providers.{table}]\nmodel = '{initial}'\n"),
+            )
+            .unwrap();
+            let mut app = create_test_app();
+            app.set_provider_identity(provider, selector);
+            app.model = initial.to_string();
+            app.auto_model = false;
+            let result = set_config_value(&mut app, "model", "auto", true);
+            assert!(!result.is_error, "{:?}", result.message);
+            assert!(app.auto_model);
+            assert!(
+                result
+                    .message
+                    .as_deref()
+                    .is_some_and(|m| m.contains("saved"))
+            );
+            let persisted: toml::Value =
+                toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+            assert_eq!(
+                persisted["providers"][table]["model"].as_str(),
+                Some("auto")
+            );
+            let loaded = Config::load(Some(config_path.clone()), None).unwrap();
+            assert_eq!(
+                loaded.default_model(),
+                "auto",
+                "{selector} must consume its saved choice"
+            );
+        }
+    }
+
+    #[test]
+    fn config_default_model_save_accepts_models_declared_for_the_deepseek_route() {
+        let temp_root = tempfile::tempdir().expect("isolated configuration");
+        let _guard = EnvGuard::new(temp_root.path());
+        // The declaration matches on the saved DeepSeek route's base URL; keep
+        // ambient endpoint overrides out of the comparison.
+        let _base_url_env = [
+            EnvVarGuard::remove("CODEWHALE_BASE_URL"),
+            EnvVarGuard::remove("DEEPSEEK_BASE_URL"),
+        ];
+        let config_path = crate::config_persistence::config_toml_path(None).expect("config path");
+        fs::create_dir_all(config_path.parent().expect("config directory")).expect("mkdir");
+        fs::write(
+            &config_path,
+            "provider = 'zai'\n[providers.zai]\nmodel = 'GLM-5.2'\n[providers.deepseek]\nbase_url = 'https://my-gateway.example/v1'\n[[custom_models]]\nprovider = 'deepseek'\nbase_url = 'https://my-gateway.example/v1'\nid = 'my-llm'\n",
+        )
+        .expect("config");
+
+        let mut app = create_test_app();
+        app.api_provider = ApiProvider::Zai;
+        app.model = crate::config::ZAI_GLM_5_2_MODEL.to_string();
+        app.auto_model = false;
+
+        let result = set_config_value(&mut app, "default_model", "my-llm", true);
+
+        assert!(!result.is_error, "{:?}", result.message);
+        let persisted: toml::Value =
+            toml::from_str(&fs::read_to_string(&config_path).expect("saved config")).expect("toml");
+        assert_eq!(
+            persisted["providers"]["deepseek"]["model"].as_str(),
+            Some("my-llm")
+        );
+        // The same id on a different DeepSeek endpoint is not declared for the
+        // saved route and must still be rejected by catalog normalization.
+        fs::write(
+            &config_path,
+            "provider = 'zai'\n[providers.zai]\nmodel = 'GLM-5.2'\n[providers.deepseek]\nbase_url = 'https://other-gateway.example/v1'\n[[custom_models]]\nprovider = 'deepseek'\nbase_url = 'https://my-gateway.example/v1'\nid = 'my-llm'\n",
+        )
+        .expect("config");
+        let rejected = set_config_value(&mut app, "default_model", "my-llm", true);
+        assert!(rejected.is_error, "{:?}", rejected.message);
+    }
+
+    #[test]
+    fn saved_model_display_uses_the_same_profile_root_precedence_as_startup() {
+        let temp_root = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::new(temp_root.path());
+        let path = crate::config_persistence::config_toml_path(None).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut app = create_test_app();
+        app.config_path = Some(path.clone());
+        app.config_profile = Some("pro".to_string());
+        for field in ["default_text_model", "model"] {
+            fs::write(&path, format!("route_preferences_version = 1\nprovider = 'deepseek'\n[providers.deepseek]\nmodel = 'deepseek-v4-flash'\n[profiles.pro]\n{field} = 'deepseek-v4-pro'\n")).unwrap();
+            let configured =
+                Config::from_saved_document(&fs::read_to_string(&path).unwrap(), Some("pro"))
+                    .unwrap();
+            assert_eq!(configured.default_model(), "deepseek-v4-pro");
+            assert_eq!(
+                saved_deepseek_default_model(&app).unwrap(),
+                configured.default_model()
+            );
+        }
     }
 
     #[test]
@@ -4026,8 +4243,107 @@ mod tests {
         let temp_root = tempfile::tempdir().expect("isolated settings dir");
         let _guard = EnvGuard::new(temp_root.path());
         let mut app = create_test_app();
-        let _result = config_command(&mut app, Some("model deepseek-v4-flash --save"));
+        let result = config_command(&mut app, Some("model deepseek-v4-flash --save"));
+        assert!(!result.is_error, "{:?}", result.message);
         assert_eq!(app.model, "deepseek-v4-flash");
+        let config_path = crate::config_persistence::config_toml_path(app.config_path.as_deref())
+            .expect("config path");
+        let persisted: toml::Value =
+            toml::from_str(&fs::read_to_string(config_path).expect("saved config")).expect("toml");
+        assert_eq!(persisted["provider"].as_str(), Some("deepseek"));
+        assert_eq!(
+            persisted["providers"]["deepseek"]["model"].as_str(),
+            Some("deepseek-v4-flash")
+        );
+        assert!(
+            Settings::load_persisted()
+                .expect("settings")
+                .provider_models
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn failed_model_save_keeps_the_live_selection() {
+        let temp_root = tempfile::tempdir().expect("isolated config");
+        let _guard = EnvGuard::new(temp_root.path());
+        let mut app = create_test_app();
+        let previous = app.model.clone();
+        let blocked_path = temp_root.path().join("config-directory");
+        fs::create_dir(&blocked_path).expect("blocked config path");
+        app.config_path = Some(blocked_path);
+
+        let result = config_command(&mut app, Some("model deepseek-v4-flash --save"));
+
+        assert!(result.is_error);
+        assert!(result.action.is_none());
+        assert_eq!(app.model, previous);
+    }
+
+    #[test]
+    fn hosted_ollama_model_saves_keep_the_legacy_provider_slot() {
+        use crate::tui::app::PendingRouteSave;
+        use crate::tui::views::route_save_prompt::RouteSaveChoice;
+
+        let temp_root = tempfile::tempdir().expect("isolated config");
+        let _guard = EnvGuard::new(temp_root.path());
+        let config_path = temp_root.path().join(".codewhale/config.toml");
+        fs::create_dir_all(config_path.parent().expect("config parent")).expect("config home");
+        fs::write(
+            &config_path,
+            "provider = \"ollama\"\n[providers.ollama]\nbase_url = \"https://ollama.com/v1\"\nmodel = \"original:cloud\"\napi_key_env = \"TEST_OLLAMA_KEY\"\n",
+        )
+        .expect("legacy hosted config");
+        let mut app = create_test_app();
+        app.config_path = Some(config_path.clone());
+        app.set_provider_identity(ApiProvider::OllamaCloud, "ollama");
+        app.active_route_base_url = "https://ollama.com/v1".to_string();
+        app.model_ids_passthrough = true;
+
+        for (index, model) in ["live:cloud", "pending:cloud", "command:cloud"]
+            .into_iter()
+            .enumerate()
+        {
+            app.model = model.to_string();
+            match index {
+                0 => {
+                    let receipt = app
+                        .try_save_live_route_as_startup_default()
+                        .expect("remember live hosted route");
+                    assert!(receipt.contains("ollama-cloud/live:cloud"), "{receipt}");
+                }
+                1 => {
+                    app.pending_route_save = Some(PendingRouteSave {
+                        provider_identity: "ollama-cloud".to_string(),
+                        model: model.to_string(),
+                        fleet: None,
+                    });
+                    let receipt = app.apply_route_save_choice(RouteSaveChoice::SaveAsDefault);
+                    assert!(receipt.starts_with("Remembered "), "{receipt}");
+                }
+                _ => {
+                    let result = set_config_value(&mut app, "model", model, true);
+                    assert!(!result.is_error, "{:?}", result.message);
+                }
+            }
+            let saved: toml::Value =
+                toml::from_str(&fs::read_to_string(&config_path).expect("saved config"))
+                    .expect("valid config");
+            assert_eq!(saved["provider"].as_str(), Some("ollama"));
+            assert_eq!(saved["providers"]["ollama"]["model"].as_str(), Some(model));
+            assert_eq!(
+                saved["providers"]["ollama"]["base_url"].as_str(),
+                Some("https://ollama.com/v1")
+            );
+            assert_eq!(
+                saved["providers"]["ollama"]["api_key_env"].as_str(),
+                Some("TEST_OLLAMA_KEY")
+            );
+            assert!(saved["providers"].get("ollama_cloud").is_none());
+            assert!(saved["providers"].get("ollama-cloud").is_none());
+            assert_eq!(app.provider_identity_for_persistence(), "ollama-cloud");
+            assert_eq!(app.provider_id_for_persistence(), Some("ollama"));
+        }
     }
 
     #[test]
@@ -4500,7 +4816,7 @@ completion_sound = "off"
         );
         assert!(
             msg.contains(
-                "notifications | method=osc9 threshold=45s sound=off quiet=true | runtime+persisted"
+                "notifications | method=osc9 threshold=45s sound=legacy quiet=true | runtime+persisted"
             ),
             "{msg}"
         );
@@ -4542,7 +4858,12 @@ completion_sound = "bell"
         .unwrap();
 
         let mut app = create_test_app();
-        app.config_path = Some(config_path);
+        app.config_path = Some(config_path.clone());
+        // This fixture starts App with defaults; seed its current Config view
+        // as the real constructor does before asking a live-session query.
+        app.notification_settings = Config::load(Some(config_path), None)
+            .unwrap()
+            .notifications_config();
 
         let search = config_command(&mut app, Some("search.provider"));
         assert!(!search.is_error, "{:?}", search.message);
@@ -4647,7 +4968,7 @@ completion_sound = "bell"
             let Some(AppAction::UpdateNotification { update }) = result.action else {
                 panic!("expected notification field delta for {command}");
             };
-            live.apply_update(update);
+            live.apply_update(update).unwrap();
         }
 
         assert_eq!(live.method, NotificationMethod::Osc9);
@@ -4662,7 +4983,7 @@ completion_sound = "bell"
         assert!(search.is_error);
         let search_msg = search.message.unwrap();
         assert!(
-            search_msg.contains("Invalid search.provider"),
+            search_msg.contains("Can't use 'not-a-backend' for search.provider"),
             "{search_msg}"
         );
         assert!(search_msg.contains("firecrawl"), "{search_msg}");
@@ -4671,7 +4992,7 @@ completion_sound = "bell"
         assert!(notifications.is_error);
         let notifications_msg = notifications.message.unwrap();
         assert!(
-            notifications_msg.contains("Invalid notifications.method"),
+            notifications_msg.contains("Can't use 'semaphore' for notifications.method"),
             "{notifications_msg}"
         );
         assert!(notifications_msg.contains("osc9"), "{notifications_msg}");
@@ -4896,7 +5217,7 @@ context_window = 262144
         assert_eq!(app.posture_bar, ChromeRowPreset::Compact);
         assert_eq!(
             live.message.as_deref(),
-            Some("posture_bar = compact (session only)")
+            Some("posture_bar = compact (SESSION)")
         );
         assert_eq!(
             config_command(&mut app, Some("posture_bar"))
@@ -4921,7 +5242,7 @@ context_window = 262144
         assert!(
             bad.message
                 .as_deref()
-                .is_some_and(|m| m.contains("metrics_line must be one of: full, compact, hidden")),
+                .is_some_and(|m| m.contains("metrics_line. Try: full, compact, hidden")),
             "{bad:?}"
         );
         assert_eq!(
@@ -4929,6 +5250,81 @@ context_window = 262144
             ChromeRowPreset::Hidden,
             "a bad value changes nothing"
         );
+    }
+
+    #[test]
+    fn row_preset_save_failure_preserves_live_state_and_uses_current_locale() {
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::new(temp.path());
+        let path = temp.path().join("config.toml");
+        // A directory in place of the file fails on every supported OS.
+        fs::create_dir(&path).unwrap();
+        let mut app = create_test_app();
+        app.config_path = Some(path);
+        app.ui_locale = crate::localization::Locale::ZhHans;
+        let before = (app.posture_bar, app.metrics_line);
+        for key in ["posture_bar", "metrics_line"] {
+            let result = config_command(&mut app, Some(&format!("{key} hidden --save")));
+            assert!(result.is_error, "{result:?}");
+            assert!(result.message.unwrap().contains("未能保存"));
+            assert_eq!((app.posture_bar, app.metrics_line), before);
+            let invalid = config_command(&mut app, Some(&format!("{key} tiny")));
+            assert!(invalid.is_error);
+            assert_eq!(
+                invalid.message,
+                CommandResult::error(
+                    tr(app.ui_locale, MessageId::ConfigCommandInvalidValue)
+                        .replace("{key}", key)
+                        .replace("{value}", "tiny")
+                        .replace("{choices}", "full, compact, hidden")
+                )
+                .message
+            );
+        }
+        // A session-only change needs no writable file and uses the new locale.
+        let result = config_command(&mut app, Some("posture_bar compact"));
+        assert!(!result.is_error);
+        assert_eq!(
+            result.message.as_deref(),
+            Some("posture_bar = compact (会话)")
+        );
+    }
+
+    #[test]
+    fn row_preset_saved_in_active_profile_reloads_without_resetting_other_rows() {
+        use crate::config::ChromeRowPreset;
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::new(temp.path());
+        let path = temp.path().join("selected.toml");
+        for owns_tui in [false, true] {
+            let mut body = "# Keep this comment\n[tui]\nposture_bar = \"full\"\nmetrics_line = \"hidden\"\n[profiles.\"work.team\"]\nmax_subagents = 4\n".to_string();
+            if owns_tui {
+                body.push_str("[profiles.\"work.team\".tui]\nposture_bar = \"hidden\"\nmetrics_line = \"compact\"\n");
+            }
+            fs::write(&path, body).unwrap();
+            let config = Config::load(Some(path.clone()), Some("work.team")).unwrap();
+            let mut app = create_test_app_with_config(&config);
+            app.config_path = Some(path.clone());
+            app.config_profile = Some("work.team".to_string());
+            let metrics_before = app.metrics_line;
+            let result = config_command(&mut app, Some("posture_bar compact --save"));
+            assert!(!result.is_error, "{result:?}");
+            assert_eq!(app.posture_bar, ChromeRowPreset::Compact);
+            let reloaded = Config::load(Some(path.clone()), Some("work.team")).unwrap();
+            let restarted = create_test_app_with_config(&reloaded);
+            assert_eq!(restarted.posture_bar, app.posture_bar);
+            assert_eq!(restarted.metrics_line, metrics_before);
+            let saved = fs::read_to_string(&path).unwrap();
+            assert!(saved.starts_with("# Keep this comment"));
+            let document: toml::Value = toml::from_str(&saved).unwrap();
+            assert_eq!(
+                document["profiles"]["work.team"].get("tui").is_some(),
+                owns_tui
+            );
+            if owns_tui {
+                assert_eq!(document["tui"]["posture_bar"].as_str(), Some("full"));
+            }
+        }
     }
 
     #[test]

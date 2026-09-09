@@ -1,3 +1,4 @@
+use codewhale_protocol::runtime::{MAX_RUNTIME_IMAGE_BODY_BYTES, RuntimeImageInput};
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -36,7 +37,7 @@ pub mod daemon_socket;
 
 /// Legacy DeepSeek-era naming kept for external compatibility.
 ///
-/// CodeWhale began life as a DeepSeek CLI; existing health probes, SDK
+/// CodeWhale began life as DeepSeek-TUI; existing health probes, SDK
 /// harnesses, and on-disk layouts still key off these names. Every remaining
 /// legacy reference in this crate routes through this shim so a future
 /// coordinated migration touches exactly one place (repo policy: preserve
@@ -306,8 +307,12 @@ struct ThreadIdParams {
 
 #[derive(Debug, Deserialize)]
 struct ThreadMessageParams {
+    #[serde(default, rename = "maxOutputTokens", alias = "max_output_tokens")]
+    max_output_tokens: Option<std::num::NonZeroU32>,
     thread_id: String,
     input: String,
+    #[serde(default)]
+    images: Vec<RuntimeImageInput>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -353,9 +358,19 @@ async fn shutdown_signal() {
 
 fn app_router(state: AppState, cors_origins: &[String]) -> Router {
     let protected_routes = Router::new()
-        .route("/thread", post(thread_handler))
+        .route(
+            "/thread",
+            post(thread_handler).layer(axum::extract::DefaultBodyLimit::max(
+                MAX_RUNTIME_IMAGE_BODY_BYTES,
+            )),
+        )
         .route("/app", post(app_handler))
-        .route("/prompt", post(prompt_handler))
+        .route(
+            "/prompt",
+            post(prompt_handler).layer(axum::extract::DefaultBodyLimit::max(
+                MAX_RUNTIME_IMAGE_BODY_BYTES,
+            )),
+        )
         .route("/tool", post(tool_handler))
         .route("/jobs", get(jobs_handler))
         .route("/mcp/startup", post(mcp_startup_handler))
@@ -521,6 +536,12 @@ enum ParsedStdioLine {
 }
 
 fn parse_stdio_line(line: &str) -> ParsedStdioLine {
+    if line.len() > MAX_RUNTIME_IMAGE_BODY_BYTES {
+        return ParsedStdioLine::Rejected(jsonrpc_error(
+            None,
+            JsonRpcError::invalid_params("request exceeds the 8 MiB transport limit"),
+        ));
+    }
     if line.trim().is_empty() {
         return ParsedStdioLine::Blank;
     }
@@ -648,8 +669,16 @@ async fn thread_handler(State(state): State<AppState>, Json(req): Json<ThreadReq
     // A message is a turn, and turns belong to the runtime — not to the
     // bookkeeping `Runtime` behind the other thread operations. This mirrors
     // the interception stdio `thread/message` has always done.
-    if let ThreadRequest::Message { thread_id, input } = req {
-        return match run_http_thread_message(&state, thread_id, input).await {
+    if let ThreadRequest::Message {
+        thread_id,
+        input,
+        images,
+        max_output_tokens,
+    } = req
+    {
+        return match run_http_thread_message(&state, thread_id, input, images, max_output_tokens)
+            .await
+        {
             Ok(res) => (StatusCode::OK, Json(res)).into_response(),
             Err(err) => http_error_from_jsonrpc(err).into_response(),
         };
@@ -1113,9 +1142,11 @@ async fn handle_thread_request(
 /// One turn's worth of routing decisions, shared by every surface that runs
 /// a turn through the bridge.
 struct BridgedTurn<'a> {
+    max_output_tokens: Option<std::num::NonZeroU32>,
     /// Client-facing thread id; the bridge maps it to a runtime thread.
     thread_key: &'a str,
     input: &'a str,
+    images: &'a [RuntimeImageInput],
     /// Model for the runtime thread when this call is the one that creates
     /// it. An existing thread keeps the model it was created with.
     model_override: Option<String>,
@@ -1153,6 +1184,33 @@ async fn run_bridged_turn<W: AsyncWrite + Unpin>(
     // access. The cache slot itself stays unlocked, so config updates and
     // bridge invalidation are never queued behind a streaming turn.
     let mut bridge = bridge.lock().await;
+    if turn.max_output_tokens.is_some() {
+        let info = bridge
+            .request_json(
+                bridge.authed(
+                    bridge
+                        .client
+                        .get(format!("{}/v1/runtime/info", bridge.base_url)),
+                ),
+            )
+            .await
+            .map_err(|err| JsonRpcError::runtime_unavailable(err.to_string()))?;
+        if info
+            .pointer("/capabilities/turn_output_token_limit")
+            .and_then(Value::as_bool)
+            != Some(true)
+        {
+            return Err(JsonRpcError::invalid_params(
+                "Runtime does not support maxOutputTokens",
+            ));
+        }
+        if !bridge.thread_map.contains_key(turn.thread_key) {
+            bridge
+                .require_output_limited_model(hint.as_ref().and_then(|hint| hint.model.as_deref()))
+                .await
+                .map_err(|err| JsonRpcError::invalid_params(err.to_string()))?;
+        }
+    }
     let runtime_thread_id = bridge
         .ensure_runtime_thread(turn.thread_key, hint)
         .await
@@ -1164,6 +1222,8 @@ async fn run_bridged_turn<W: AsyncWrite + Unpin>(
         .message_thread(
             &runtime_thread_id,
             turn.input,
+            turn.images,
+            turn.max_output_tokens,
             writer,
             registration,
             transcript,
@@ -1205,8 +1265,10 @@ async fn run_prompt_turn<W: AsyncWrite + Unpin>(
         state,
         writer,
         BridgedTurn {
+            max_output_tokens: req.max_output_tokens,
             thread_key: &thread_key,
             input: &req.prompt,
+            images: &req.images,
             model_override: req.model.clone(),
             // `thread/interrupt` addresses client-facing thread ids. A
             // one-shot prompt has none to hand back, and a caller-supplied
@@ -1256,6 +1318,8 @@ async fn run_http_thread_message(
     state: &AppState,
     thread_id: String,
     input: String,
+    images: Vec<RuntimeImageInput>,
+    max_output_tokens: Option<std::num::NonZeroU32>,
 ) -> std::result::Result<ThreadResponse, JsonRpcError> {
     let mut transcript = TurnTranscript::default();
     let mut sink = tokio::io::sink();
@@ -1263,8 +1327,10 @@ async fn run_http_thread_message(
         state,
         &mut sink,
         BridgedTurn {
+            max_output_tokens,
             thread_key: &thread_id,
             input: &input,
+            images: &images,
             model_override: None,
             interruptible: false,
             ephemeral: false,
@@ -1300,8 +1366,10 @@ async fn handle_stdio_thread_message<W: AsyncWrite + Unpin>(
         state,
         writer,
         BridgedTurn {
+            max_output_tokens: parsed.max_output_tokens,
             thread_key: &parsed.thread_id,
             input: &parsed.input,
+            images: &parsed.images,
             model_override: None,
             interruptible: true,
             ephemeral: false,
@@ -1500,6 +1568,73 @@ impl RuntimeBridge {
         serde_json::from_str(&body).with_context(|| format!("invalid runtime API json: {body}"))
     }
 
+    /// Read the existing Runtime catalog before a one-shot prompt can create
+    /// its thread. Existing threads are checked by canonical turn admission.
+    async fn require_output_limited_model(&self, requested_model: Option<&str>) -> Result<()> {
+        let providers = self
+            .request_json(self.authed(self.client.get(format!("{}/v1/providers", self.base_url))))
+            .await?;
+        let current = providers
+            .get("current")
+            .and_then(Value::as_str)
+            .context("Runtime provider is unavailable")?;
+        let provider = providers
+            .get("providers")
+            .and_then(Value::as_array)
+            .and_then(|providers| {
+                providers
+                    .iter()
+                    .find(|provider| provider.get("id").and_then(Value::as_str) == Some(current))
+            })
+            .context("Runtime provider is unavailable")?;
+        let model = requested_model
+            .or_else(|| provider.get("default_model").and_then(Value::as_str))
+            .context("maxOutputTokens requires an exact model")?;
+        if model.trim().is_empty() || model.eq_ignore_ascii_case("auto") {
+            bail!("maxOutputTokens requires an exact model");
+        }
+        if !current
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        {
+            bail!("Runtime provider identity is invalid");
+        }
+        let mut cursor = None;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            let mut url =
+                reqwest::Url::parse(&format!("{}/v1/providers/{current}/models", self.base_url))?;
+            url.query_pairs_mut().append_pair("limit", "250");
+            if let Some(cursor) = cursor.as_deref() {
+                url.query_pairs_mut().append_pair("cursor", cursor);
+            }
+            let catalog = self.request_json(self.authed(self.client.get(url))).await?;
+            if let Some(entry) =
+                catalog
+                    .get("models")
+                    .and_then(Value::as_array)
+                    .and_then(|models| {
+                        models
+                            .iter()
+                            .find(|entry| entry.get("id").and_then(Value::as_str) == Some(model))
+                    })
+            {
+                if entry.get("output_token_limit").and_then(Value::as_str) == Some("supported") {
+                    return Ok(());
+                }
+                bail!("The selected Runtime model does not support maxOutputTokens");
+            }
+            let next = catalog
+                .get("nextCursor")
+                .and_then(Value::as_str)
+                .context("Output-limit support is unknown for the selected Runtime model")?;
+            if !seen.insert(next.to_string()) {
+                bail!("Runtime model catalog cursor repeated");
+            }
+            cursor = Some(next.to_string());
+        }
+    }
+
     async fn ensure_runtime_thread(
         &mut self,
         stdio_thread_id: &str,
@@ -1557,17 +1692,43 @@ impl RuntimeBridge {
         &mut self,
         thread_id: &str,
         input: &str,
+        images: &[RuntimeImageInput],
+        max_output_tokens: Option<std::num::NonZeroU32>,
         writer: &mut W,
         registration: Option<(TurnRegistry, String)>,
         mut transcript: Option<&mut TurnTranscript>,
     ) -> Result<Value> {
+        let mut request = json!({ "prompt": input });
+        if !images.is_empty() {
+            let info = self
+                .request_json(
+                    self.authed(
+                        self.client
+                            .get(format!("{}/v1/runtime/info", self.base_url)),
+                    ),
+                )
+                .await?;
+            if info
+                .pointer("/capabilities/turn_image_inputs")
+                .and_then(Value::as_bool)
+                != Some(true)
+            {
+                bail!(
+                    "Runtime image input is unavailable; update the Runtime before sending attachments"
+                );
+            }
+            request["images"] = json!(images);
+        }
+        if let Some(limit) = max_output_tokens {
+            request["maxOutputTokens"] = json!(limit);
+        }
         let turn = self
             .request_json(
                 self.authed(
                     self.client
                         .post(format!("{}/v1/threads/{thread_id}/turns", self.base_url)),
                 )
-                .json(&json!({ "prompt": input })),
+                .json(&request),
             )
             .await?;
         let turn_id = turn
@@ -1943,6 +2104,7 @@ async fn dispatch_stdio_request_with_writer<W: AsyncWrite + Unpin>(
                 result: json!({
                     "transport": transport.label(),
                     "families": ["thread/*", "app/*", "prompt/*"],
+                    "turn_image_inputs": true,
                     "methods": methods,
                 }),
                 should_exit: false,
@@ -1950,6 +2112,7 @@ async fn dispatch_stdio_request_with_writer<W: AsyncWrite + Unpin>(
         }
         "thread/capabilities" => StdioDispatchResult {
             result: json!({
+                "turn_image_inputs": true,
                 "methods": [
                     "thread/request",
                     "thread/create",
@@ -1972,11 +2135,22 @@ async fn dispatch_stdio_request_with_writer<W: AsyncWrite + Unpin>(
         },
         "thread/request" => {
             let request: ThreadRequest = parse_params(params)?;
-            if let ThreadRequest::Message { thread_id, input } = request {
+            if let ThreadRequest::Message {
+                thread_id,
+                input,
+                images,
+                max_output_tokens,
+            } = request
+            {
                 let response = handle_stdio_thread_message(
                     state,
                     writer,
-                    ThreadMessageParams { thread_id, input },
+                    ThreadMessageParams {
+                        thread_id,
+                        input,
+                        images,
+                        max_output_tokens,
+                    },
                 )
                 .await?;
                 return Ok(StdioDispatchResult {
@@ -3398,6 +3572,153 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn output_cap_bridge_checks_support_before_creation_and_forwards_each_surface() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        #[derive(Clone)]
+        struct Fixture {
+            supported: Arc<AtomicBool>,
+            created: Arc<AtomicUsize>,
+            requests: Arc<Mutex<Vec<Value>>>,
+        }
+        async fn info(State(f): State<Fixture>, headers: axum::http::HeaderMap) -> Json<Value> {
+            assert_eq!(
+                headers.get(header::AUTHORIZATION).unwrap(),
+                "Bearer fixture-output-cap"
+            );
+            Json(
+                json!({"capabilities":{"turn_output_token_limit":f.supported.load(Ordering::SeqCst)}}),
+            )
+        }
+        async fn providers() -> Json<Value> {
+            Json(
+                json!({"current":"custom","providers":[{"id":"custom","default_model":"fixture-model"}]}),
+            )
+        }
+        async fn models() -> Json<Value> {
+            Json(
+                json!({"models":[{"id":"fixture-model","output_token_limit":"supported"},{"id":"uncapped-transport","output_token_limit":"unsupported"}]}),
+            )
+        }
+        async fn create_thread(State(f): State<Fixture>) -> Json<Value> {
+            let n = f.created.fetch_add(1, Ordering::SeqCst);
+            Json(json!({"id":format!("thr_cap_{n}")}))
+        }
+        async fn create_turn(State(f): State<Fixture>, Json(body): Json<Value>) -> Json<Value> {
+            f.requests.lock().await.push(body);
+            Json(json!({"turn":{"id":"turn_cap"}}))
+        }
+        async fn events() -> impl IntoResponse {
+            (
+                [(header::CONTENT_TYPE, "text/event-stream")],
+                sse_frame(
+                    "turn.completed",
+                    json!({
+                        "seq":1,"turn_id":"turn_cap","payload":{"turn":{"status":"completed"}}
+                    }),
+                ),
+            )
+        }
+        let fixture = Fixture {
+            supported: Arc::new(AtomicBool::new(false)),
+            created: Arc::new(AtomicUsize::new(0)),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = Router::new()
+            .route("/v1/runtime/info", get(info))
+            .route("/v1/providers", get(providers))
+            .route("/v1/providers/custom/models", get(models))
+            .route("/v1/threads", post(create_thread))
+            .route("/v1/threads/{id}/turns", post(create_turn))
+            .route("/v1/threads/{id}/events", get(events))
+            .with_state(fixture.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let (state, _tmp) = capability_test_state();
+        let mut bridge = RuntimeBridge::from_base_url_for_test(format!("http://{addr}"));
+        bridge.auth_token = Some("fixture-output-cap".into());
+        *state.runtime_bridge.lock().await = Some(Arc::new(Mutex::new(bridge)));
+        let result = dispatch_stdio_request(
+            &state,
+            "prompt/run",
+            json!({"prompt":"review","maxOutputTokens":1500}),
+        )
+        .await;
+        assert!(result.unwrap_err().message.contains("does not support"));
+        assert_eq!(fixture.created.load(Ordering::SeqCst), 0);
+        assert!(fixture.requests.lock().await.is_empty());
+        fixture.supported.store(true, Ordering::SeqCst);
+        for model in ["auto", "uncapped-transport", "unknown-model"] {
+            assert!(
+                dispatch_stdio_request(
+                    &state,
+                    "prompt/run",
+                    json!({"prompt":"review","model":model,"maxOutputTokens":1500})
+                )
+                .await
+                .is_err()
+            );
+        }
+        assert_eq!(fixture.created.load(Ordering::SeqCst), 0);
+        for (method, params) in [
+            (
+                "prompt/run",
+                json!({"prompt":"review","maxOutputTokens":1500}),
+            ),
+            (
+                "thread/message",
+                json!({"thread_id":"stdio-cap","input":"review","maxOutputTokens":1500}),
+            ),
+            (
+                "thread/request",
+                json!({"kind":"message","thread_id":"request-cap","input":"review","maxOutputTokens":1500}),
+            ),
+        ] {
+            dispatch_stdio_request(&state, method, params)
+                .await
+                .expect("existing app-server caller forwards allowance");
+        }
+        run_http_thread_message(
+            &state,
+            "http-cap".into(),
+            "review".into(),
+            Vec::new(),
+            std::num::NonZeroU32::new(1500),
+        )
+        .await
+        .unwrap();
+        let requests = fixture.requests.lock().await.clone();
+        assert_eq!(requests.len(), 4);
+        assert!(
+            requests
+                .iter()
+                .all(|request| request["maxOutputTokens"] == 1500)
+        );
+        let count = fixture.created.load(Ordering::SeqCst);
+        for invalid in [
+            json!(0),
+            json!(-1),
+            json!(1.5),
+            json!("1500"),
+            json!(4_294_967_296u64),
+        ] {
+            assert!(
+                dispatch_stdio_request(
+                    &state,
+                    "prompt/run",
+                    json!({"prompt":"review","maxOutputTokens":invalid})
+                )
+                .await
+                .is_err()
+            );
+        }
+        assert_eq!(fixture.created.load(Ordering::SeqCst), count);
+        assert_eq!(fixture.requests.lock().await.len(), 4);
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
     async fn stdio_runtime_bridge_streams_response_delta_events() {
         async fn create_turn(AxumPath(thread_id): AxumPath<String>) -> Json<Value> {
             Json(json!({
@@ -3461,7 +3782,7 @@ mod tests {
         let (mut reader, mut writer) = tokio::io::duplex(4096);
 
         let result = bridge
-            .message_thread("thr_test", "hello", &mut writer, None, None)
+            .message_thread("thr_test", "hello", &[], None, &mut writer, None, None)
             .await
             .expect("message_thread should succeed");
         drop(writer);
@@ -3753,9 +4074,15 @@ mod tests {
         let (base_url, prompts, server) = spawn_stub_runtime().await;
         seed_bridge_at(&state, base_url).await;
 
-        let response = run_http_thread_message(&state, "thr_http".to_string(), "go".to_string())
-            .await
-            .expect("http thread message");
+        let response = run_http_thread_message(
+            &state,
+            "thr_http".to_string(),
+            "go".to_string(),
+            Vec::new(),
+            None,
+        )
+        .await
+        .expect("http thread message");
 
         assert_eq!(response.status, "completed");
         assert_eq!(response.thread_id, "thr_http");
@@ -3778,9 +4105,15 @@ mod tests {
         let (state, _tmp) = capability_test_state();
         seed_bridge_at(&state, "http://127.0.0.1:9".to_string()).await;
 
-        let err = run_http_thread_message(&state, "thr_http".to_string(), "go".to_string())
-            .await
-            .expect_err("no runtime means no turn");
+        let err = run_http_thread_message(
+            &state,
+            "thr_http".to_string(),
+            "go".to_string(),
+            Vec::new(),
+            None,
+        )
+        .await
+        .expect_err("no runtime means no turn");
         assert_eq!(err.code, RUNTIME_UNAVAILABLE_CODE);
     }
 
@@ -4160,5 +4493,85 @@ mod tests {
         assert!(DEFAULT_CORS_ORIGINS.contains(&"http://localhost:3000"));
         assert!(DEFAULT_CORS_ORIGINS.contains(&"http://localhost:5173"));
         assert!(DEFAULT_CORS_ORIGINS.contains(&"tauri://localhost"));
+    }
+    #[tokio::test]
+    async fn runtime_image_daemon_bridge_checks_transport_and_forwards_exact_wire() {
+        async fn capture(
+            State(seen): State<Arc<Mutex<Vec<Value>>>>,
+            Json(body): Json<Value>,
+        ) -> (StatusCode, Json<Value>) {
+            seen.lock().await.push(body);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"fixture stops before an Engine"})),
+            )
+        }
+        for supported in [false, true] {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let app = Router::new()
+                .route(
+                    "/v1/runtime/info",
+                    get(move || async move {
+                        Json(json!({"capabilities":{"turn_image_inputs":supported}}))
+                    }),
+                )
+                .route("/v1/threads/{id}/turns", post(capture))
+                .with_state(seen.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let mut bridge = RuntimeBridge::from_base_url_for_test(format!("http://{addr}"));
+            let images = vec![RuntimeImageInput {
+                mime: "image/png".into(),
+                data_base64: "fixture-bytes-validated-by-Core".into(),
+            }];
+            let mut writer = tokio::io::sink();
+            assert!(
+                bridge
+                    .message_thread(
+                        "thr_fixture",
+                        "look",
+                        &images,
+                        None,
+                        &mut writer,
+                        None,
+                        None
+                    )
+                    .await
+                    .is_err()
+            );
+            let requests = seen.lock().await;
+            assert_eq!(requests.len(), usize::from(supported));
+            if supported {
+                assert_eq!(requests[0], json!({"prompt":"look","images":images}));
+            }
+            server.abort();
+        }
+    }
+
+    #[test]
+    fn runtime_image_daemon_all_input_families_preserve_images() {
+        let image = json!({"mime":"image/png","dataBase64":"AQ=="});
+        let thread: ThreadMessageParams = serde_json::from_value(
+            json!({"thread_id":"thr_fixture","input":"look","images":[image.clone()]}),
+        )
+        .unwrap();
+        let prompt: PromptRequest =
+            serde_json::from_value(json!({"prompt":"look","images":[image.clone()]})).unwrap();
+        let generic: ThreadRequest = serde_json::from_value(
+            json!({"kind":"message","thread_id":"thr_fixture","input":"look","images":[image]}),
+        )
+        .unwrap();
+        assert_eq!(thread.images, prompt.images);
+        let ThreadRequest::Message { images, .. } = generic else {
+            panic!("message");
+        };
+        assert_eq!(thread.images, images);
+        assert!(matches!(
+            parse_stdio_line(&" ".repeat(MAX_RUNTIME_IMAGE_BODY_BYTES + 1)),
+            ParsedStdioLine::Rejected(_)
+        ));
     }
 }

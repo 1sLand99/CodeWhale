@@ -48,6 +48,8 @@ dist/
 *.log
 
 # Generated
+# Local design critiques and operator receipts do not ship with the product.
+/.impeccable/
 outputs/
 tmp/
 backup/
@@ -63,7 +65,6 @@ docs/*.pdf
 *.cmd
 !scripts/**
 !.github/scripts/**
-!.buildkite/**
 !web/public/install.sh
 !packaging/winget/**
 test.txt

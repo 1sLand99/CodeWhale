@@ -4,6 +4,7 @@ export const STREAM_EVENT_NAMES = [
   "thread.forked",
   "turn.started",
   "turn.lifecycle",
+  "turn.usage",
   "turn.steered",
   "turn.interrupt_requested",
   "turn.completed",
@@ -630,6 +631,76 @@ function appendItemDelta(state, itemId, payload) {
     status: "in_progress",
     detail: `${existing.detail || ""}${delta}`,
   });
+}
+
+const PROVIDER_MODELS_PAGE_SIZE = 250;
+const MAX_PROVIDER_MODELS = 10_000;
+const MAX_PROVIDER_MODEL_PAGES = Math.ceil(
+  MAX_PROVIDER_MODELS / PROVIDER_MODELS_PAGE_SIZE,
+);
+
+/**
+ * Load every bounded page of one provider catalog.
+ *
+ * `fetchPage` is injected so the browser client can retain its authenticated
+ * Runtime API boundary and tests can prove catalogs larger than one page are
+ * not silently truncated. Cursors are opaque and may never repeat.
+ */
+export async function collectProviderModelPages(providerId, fetchPage) {
+  const provider = String(providerId || "").trim();
+  if (!provider || typeof fetchPage !== "function") {
+    throw new Error("A provider and page loader are required.");
+  }
+
+  const entries = [];
+  const seenCursors = new Set();
+  let expectedTotal;
+  let cursor = "";
+  for (let page = 0; page < MAX_PROVIDER_MODEL_PAGES; page += 1) {
+    const query = new URLSearchParams({ limit: String(PROVIDER_MODELS_PAGE_SIZE) });
+    if (cursor) query.set("cursor", cursor);
+    const response = await fetchPage(
+      `/v1/providers/${encodeURIComponent(provider)}/models?${query.toString()}`,
+    );
+    if (String(response?.provider || "") !== provider) {
+      throw new Error("The Runtime returned a model page for a different provider.");
+    }
+    if (!Array.isArray(response?.models)
+      || response.models.length > PROVIDER_MODELS_PAGE_SIZE
+      || !Number.isSafeInteger(response.total)
+      || response.total < 0
+      || response.total > MAX_PROVIDER_MODELS) {
+      throw new Error("The Runtime returned an invalid provider model page.");
+    }
+    if (expectedTotal !== undefined && expectedTotal !== response.total) {
+      throw new Error("The provider catalog changed; restart loading its models.");
+    }
+    expectedTotal = response.total;
+    const pageEntries = response.models;
+    if (entries.length + pageEntries.length > MAX_PROVIDER_MODELS) {
+      throw new Error(`The provider catalog exceeds ${MAX_PROVIDER_MODELS} models.`);
+    }
+    entries.push(...pageEntries);
+
+    const nextCursor = typeof response?.nextCursor === "string"
+      ? response.nextCursor.trim()
+      : "";
+    if (!nextCursor) {
+      if (entries.length !== expectedTotal) {
+        throw new Error("The Runtime returned an incomplete provider model catalog.");
+      }
+      return entries;
+    }
+    if (pageEntries.length === 0 || seenCursors.has(nextCursor)) {
+      throw new Error("The Runtime returned a non-progressing model cursor.");
+    }
+    if (entries.length >= expectedTotal) {
+      throw new Error("The Runtime returned a cursor beyond its provider model catalog.");
+    }
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+  }
+  throw new Error(`The provider catalog exceeds ${MAX_PROVIDER_MODELS} models.`);
 }
 
 function startBrowserClient() {
@@ -1856,11 +1927,17 @@ function startBrowserClient() {
     setNewThreadStatus("Loading models…");
     syncNewThreadControls();
     try {
-      const response = await api(`/v1/providers/${encodeURIComponent(provider.id)}/models`);
+      const modelEntries = await collectProviderModelPages(provider.id, async (path) => {
+        const page = await api(path);
+        if (generation !== app.newThreadGeneration || !dom.newThreadDialog.open) {
+          throw new Error("The model request was superseded.");
+        }
+        return page;
+      });
       if (generation !== app.newThreadGeneration || !dom.newThreadDialog.open) return;
       const seen = new Set();
       const models = [];
-      for (const entry of Array.isArray(response?.models) ? response.models : []) {
+      for (const entry of modelEntries) {
         const id = String(entry?.id || "").trim();
         const key = id.toLowerCase();
         if (!id || seen.has(key)) continue;

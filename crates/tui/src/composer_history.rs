@@ -85,8 +85,8 @@ fn load_history_from(path: &Path) -> Vec<String> {
 }
 
 /// Append an entry to the persisted history, pruning old entries to
-/// stay within [`MAX_HISTORY_ENTRIES`]. Slash-commands and empty input
-/// are skipped — those don't help recall.
+/// stay within [`MAX_HISTORY_ENTRIES`]. Prompts and slash commands are kept;
+/// empty input is skipped.
 ///
 /// Best-effort and non-blocking — work is forwarded to a dedicated writer
 /// thread so the caller (typically the UI submit handler) returns
@@ -200,6 +200,17 @@ fn append_history_to(path: &Path, entry: &str) {
     append_history_entries_to(path, std::iter::once(entry));
 }
 
+/// Keep immediate recall and persisted history on the same duplicate rule.
+/// Callers choose whether to preserve the submitted whitespace in their copy.
+pub(crate) fn push_history_entry(entries: &mut Vec<String>, entry: &str) -> bool {
+    let trimmed = entry.trim();
+    if trimmed.is_empty() || entries.last().is_some_and(|last| last.trim() == trimmed) {
+        return false;
+    }
+    entries.push(entry.to_string());
+    true
+}
+
 fn append_history_entries_to<'a>(
     path: &Path,
     entries_to_append: impl IntoIterator<Item = &'a str>,
@@ -219,20 +230,7 @@ fn append_history_entries_to<'a>(
     let mut entries = load_history_from(path);
     let mut changed = false;
     for entry in entries_to_append {
-        let trimmed = entry.trim();
-        // Slash commands are stored too: recalling `/theme` with Up-arrow is
-        // ordinary history behavior, and the old `/`-prefix filter also
-        // dropped absolute paths like `cat /etc/fstab` (#6006).
-        if trimmed.is_empty() {
-            continue;
-        }
-        if entries.last().map(String::as_str) == Some(trimmed) {
-            // De-dupe consecutive duplicates — repeated submission of the
-            // same prompt shouldn't bloat the file.
-            continue;
-        }
-        entries.push(trimmed.to_string());
-        changed = true;
+        changed |= push_history_entry(&mut entries, entry.trim());
     }
 
     if !changed {
@@ -288,6 +286,17 @@ fn write_history_atomic(path: &Path, payload: &[u8]) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
+pub(crate) fn flush_history_writer_for_tests(timeout: Duration) {
+    let (done_tx, done_rx) = channel();
+    writer_sender()
+        .send(HistoryWrite::Flush(done_tx))
+        .expect("history writer accepts flush");
+    done_rx
+        .recv_timeout(timeout)
+        .expect("history writer flush timed out");
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
@@ -301,16 +310,6 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join(HISTORY_FILE_NAME);
         (tmp, path)
-    }
-
-    fn flush_history_writer_for_tests(timeout: Duration) {
-        let (done_tx, done_rx) = channel();
-        writer_sender()
-            .send(HistoryWrite::Flush(done_tx))
-            .expect("history writer accepts flush");
-        done_rx
-            .recv_timeout(timeout)
-            .expect("history writer flush timed out");
     }
 
     // #3240: a fresh install must resolve the history file under `.codewhale`,

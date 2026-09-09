@@ -7,16 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.13] - 2026-09-07
+## [0.9.13] - Unreleased candidate
 
-Codewhale v0.9.13 is the integrity release for 0.9.12: multiline paste is
-one paste again, truncated tool arguments can no longer execute, strict
+Codewhale v0.9.13 source candidate addresses integrity issues in 0.9.12:
+multiline paste is one paste again, truncated tool arguments can no longer execute, strict
 ACP clients connect again, concurrent instances stop destroying each
-other's queued text, and the Computer Use bundle ships at plugin 0.2.0
+other's queued text, and the Computer Use bundle includes plugin 0.2.1
 with an accessibility-first pointer.
 
 ### Fixed
 
+- Cancelling a foreground shell wait stops its owned process group even when
+  the tool future is dropped. Explicitly backgrounded jobs retain their
+  ownership. Interrupted tool receipts distinguish work that started from
+  calls skipped before execution, and returned tool failures remain errors in
+  the next model request.
+- Saved Fleet model identifiers retain exact spelling through selection,
+  role pins, and roster changes, so changing one saved model does not modify
+  another identifier that differs only in letter case.
+- Chat wrapping reserves its scrollbar gutter consistently, keeping long
+  identifiers readable when the viewport changes.
+- The Engine keeps large send-message futures off the event loop's stack,
+  preventing stack exhaustion when a restored session starts a provider turn.
+- New, imported, and live session titles skip runtime handoffs and use the
+  first real user prompt. Explicitly renamed titles retain priority
+  (#6012, thanks @SparkofSpike).
+- UI dispatch acceptance now precedes Engine execution, so a delayed acceptance
+  callback cannot overwrite a turn that has already started or completed.
+  Cancelling before acceptance preserves the prompt and leaves the next
+  dispatch usable.
 - Bottom-chrome effort is omitted when the route cannot prove an effective
   tier; `/status` retains the full explanation. Cost remains visible when
   known, and `cost: unknown` remains on metered routes lacking a reading (#5950).
@@ -84,22 +103,50 @@ with an accessibility-first pointer.
 
 ### Changed
 
+- The website uses Shannon Sans with versioned local font assets and retained
+  serif, monospace, and language fallbacks. Terminal fonts are unchanged.
+- `codewhale metrics` reports recorded model requests and stream recovery
+  separately from provider-reported token usage, with coverage for missing
+  and duplicate receipts. Status messages and cumulative snapshots do not
+  add requests or count tokens again.
+- Runtime turn receipts retain the Engine's terminal model-request, stream-retry,
+  and resume counters separately from displayed status and provider-reported
+  usage. These counters do not count HTTP retries inside a provider client or
+  establish provider billing.
+- Initial tool definitions no longer repeat shell interpreter guidance and
+  agent lifecycle/scope instructions in multiple description fields. Parameter
+  schemas, approval rules and dispatch behavior are preserved. This reduces
+  prompt schema size; it does not establish a provider billing regression.
+
 - The built-in Computer Use plugin bundle is refreshed to the standalone
-  plugin's 0.2.0 runtime (vendored from `Hmbown/codewhale-cu-plugin`
-  PR #12 @ `906b433`): the native macOS accessibility backend with an
+  plugin's 0.2.1 runtime (vendored from `Hmbown/codewhale-cu-plugin`
+  at `724ad258`): the native macOS accessibility backend with an
   a11y-first pointer strategy (covered points are refused, previews are
   drawn), the permission-owning desktop-app socket transport, remote
   computers over ssh and HarmonyOS HDC with contained temp handling,
   truthful win32 PowerShell failure reporting, and the shared
-  allow-listed request handler for the app socket and ssh agent. The
+  allow-listed request handler for the app socket and ssh agent.
+  The bundle retains the hardening port from
+  [standalone plugin PR #12](https://github.com/Hmbown/codewhale-cu-plugin/pull/12).
+  Single left clicks on macOS element targets now revalidate and press
+  the observed element directly, without substituting a point hit-test
+  or raw-pointer fallback. Explicit event clicks retain the app-ownership
+  guard; a sent press still requires visual verification. Background mode
+  permits application-bound keys and accessibility actions while refusing
+  shared-pointer gestures; it does not provide an isolated desktop. The
   embed list gained the five new runtime files, and a consistency test
   now pins the embed list to the vendored tree so the bundle cannot rot
   silently again. Because the bundle's content hash changes, Computer
   Use deactivates and asks for a fresh review after upgrading — that is
   the designed fail-closed path for a desktop-driving plugin. The
-  desktop app itself stays an opt-in install from the plugin
-  distribution; the bundled server runs direct mode and says how to get
-  the app.
+  current macOS source candidate also embeds the compiled native helper,
+  so its bundled server can run directly without a separate Computer Use
+  app or a compiler on the user's machine. Accessibility and Screen
+  Recording permissions belong to the hosting app or terminal and remain
+  user-controlled. The CLI's Computer Use server requires Node.js 20 or newer. These are source
+  candidate changes; they do not establish published-package or platform
+  qualification. See the [included plugin guide](crates/tui/plugins/computer-use/README.md)
+  for platform requirements and limitations.
 - `/statusline` drives the bottom chrome again. Since the 0.9.12 shell
   redesign the posture bar and the metrics line were built independently of
   `tui.status_items`, so every toggle in the picker except the balance fetch
@@ -177,6 +224,21 @@ with an accessibility-first pointer.
 
 ### Added
 
+- Native plugin authoring guides now cover English and Chinese. The explicit
+  offline converter supports selected portable Skills and static Streamable
+  HTTP MCP declarations from OpenCode and DSH. Unsupported executable hooks,
+  automatic OAuth and policy-bearing configurations are refused; generated
+  bundles still require native installation, review and trust. Legacy SSE
+  fallback is not reproduced (#5827, requested by @giancarlocp).
+
+- Signed cloud model facts can refresh provider capabilities and prices while
+  preserving verified cached data when a refresh fails. A dispatched request
+  keeps its selected price snapshot so later catalog updates cannot change its
+  recorded cost (#5752).
+- Saved sessions preserve exact provider routes. Auxiliary model calls settle
+  their usage once against the route and price snapshot that executed them,
+  including recovery, rather than resolving a new price at completion
+  (#5726, #5848).
 - `[tui].posture_bar` and `[tui].metrics_line` accept `full`, `compact`, or
   `hidden`, also available through `/config`. Compact preserves the existing
   rows' essential fields; hidden returns their space to the transcript (#5973).
@@ -251,29 +313,29 @@ with an accessibility-first pointer.
 
 ### Contributors
 
-- **[@nsfoxer](https://github.com/nsfoxer)** — reported the 0.9.12
-  multiline-paste regression with a root-cause analysis that made the
-  fix a one-day turnaround (#5981).
-- **@Nefelibata1024** — confirmed the paste regression's impact.
-- **[@Gabriel-Degret](https://github.com/Gabriel-Degret)** — reported
-  `allow_insecure_http` being silently dropped in 0.9.12, with the
-  valid-key list that pinned it (#5991).
-- **[@Lujc0523](https://github.com/Lujc0523)** — reported the ACP
-  `initialize` schema violation that made Codewhale unusable from
-  JetBrains IDEs (#5969).
-- **[@gaord](https://github.com/gaord)** — the fleet role-precedence
-  recovery (#5945) and the README link to the community VS Code
-  frontend (#5992).
-- **[@goransh-walia](https://github.com/goransh-walia)** — the
-  propose-only `commit_plan` rework (#5870).
+- **[@gaord](https://github.com/gaord)** — contributed Fleet schema inspection, role precedence and worker deliverable receipts, and linked the community VS Code frontend ([#5944](https://github.com/Hmbown/Codewhale/pull/5944), [#5945](https://github.com/Hmbown/Codewhale/pull/5945), [#5946](https://github.com/Hmbown/Codewhale/pull/5946), [#5992](https://github.com/Hmbown/Codewhale/pull/5992)).
+- **[@goransh-walia](https://github.com/goransh-walia)** — contributed the propose-only commit-planning rework ([#5870](https://github.com/Hmbown/Codewhale/pull/5870)).
+- **[@7jrxt42BxFZo4iAnN4CX](https://github.com/7jrxt42BxFZo4iAnN4CX)** — documented turn budgets and goal configuration, and reported gaps in command discovery, Fleet navigation, human waits, state hooks, history and provider routing ([#5996](https://github.com/Hmbown/Codewhale/pull/5996), [#5952](https://github.com/Hmbown/Codewhale/issues/5952), [#5954](https://github.com/Hmbown/Codewhale/issues/5954), [#6003](https://github.com/Hmbown/Codewhale/issues/6003), [#6004](https://github.com/Hmbown/Codewhale/issues/6004), [#6006](https://github.com/Hmbown/Codewhale/issues/6006), [#6007](https://github.com/Hmbown/Codewhale/issues/6007)).
+- **[@SparkofSpike](https://github.com/SparkofSpike)** — contributed two-stage consent for opting out of model-bound credential redaction ([#5982](https://github.com/Hmbown/Codewhale/pull/5982)).
+- **[@aboimpinto](https://github.com/aboimpinto)** — moved session lifecycle and session-control commands onto shared command contracts ([#5902](https://github.com/Hmbown/Codewhale/pull/5902), [#5951](https://github.com/Hmbown/Codewhale/pull/5951)).
+- **[@EvanProgramming](https://github.com/EvanProgramming)** — reported Windows input and CRLF-write defects, and contributed CRLF preservation and an injectable Windows input runner ([#5908](https://github.com/Hmbown/Codewhale/issues/5908), [#5909](https://github.com/Hmbown/Codewhale/issues/5909), [#5910](https://github.com/Hmbown/Codewhale/pull/5910), [#5911](https://github.com/Hmbown/Codewhale/pull/5911), [#5912](https://github.com/Hmbown/Codewhale/pull/5912)).
+- **[@wuisabel-gif](https://github.com/wuisabel-gif)** — added custom-theme discovery, preview and selection in the theme picker ([#5907](https://github.com/Hmbown/Codewhale/pull/5907)).
+- **[@zhuowp](https://github.com/zhuowp)** — matched model-visible shell guidance to the interpreter selected for execution ([#5900](https://github.com/Hmbown/Codewhale/pull/5900)).
+- **[@nsfoxer](https://github.com/nsfoxer)** — reported the multiline-paste regression and incomplete provider model lists ([#5981](https://github.com/Hmbown/Codewhale/issues/5981), [#6009](https://github.com/Hmbown/Codewhale/issues/6009)).
+- **[@Nefelibata1024](https://github.com/Nefelibata1024)** — confirmed the multiline-paste regression's impact ([#5981](https://github.com/Hmbown/Codewhale/issues/5981)).
+- **[@Gabriel-Degret](https://github.com/Gabriel-Degret)** — reported the loss of the allow_insecure_http provider setting ([#5991](https://github.com/Hmbown/Codewhale/issues/5991)).
+- **[@Lujc0523](https://github.com/Lujc0523)** — reported the ACP initialize schema violation affecting strict IDE clients ([#5969](https://github.com/Hmbown/Codewhale/issues/5969)).
+- **[@mo-vic](https://github.com/mo-vic)** — proposed storing evicted context on disk so it can be retrieved later ([#6008](https://github.com/Hmbown/Codewhale/issues/6008)).
+- **[@giancarlocp](https://github.com/giancarlocp)** — requested a plugin authoring guide and OpenCode plugin conversion ([#5827](https://github.com/Hmbown/Codewhale/discussions/5827)).
+- **[@hxfhd](https://github.com/hxfhd)** — supplied a Windows reproduction of a turn stopping before its stated next tool action ([#6010](https://github.com/Hmbown/Codewhale/discussions/6010)).
 
 ### Notes
 
 - Upgrading from 0.9.12 with Computer Use trusted and enabled: the
-  bundle's content hash changes with the 0.2.0 refresh, so the plugin
+  bundle's content hash changes with the 0.2.1 refresh, so the plugin
   deactivates and asks for a fresh review — that is the designed
   fail-closed path for a desktop-driving plugin. Re-trust it from the
-  Extensions page.
+  Plugins page.
 - The multiline-paste fix restores v9.11 behavior on terminals that
   accept `EnableBracketedPaste` but deliver pastes as keystrokes
   (reported on Windows 11 / PowerShell). Verified at the input-contract

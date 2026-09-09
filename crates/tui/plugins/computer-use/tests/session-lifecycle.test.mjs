@@ -198,6 +198,56 @@ test("another MCP host cannot redirect the selected computer", async () => {
   await closeHost(b);
 });
 
+test("retiring a helper-backed local alias closes only that MCP host's session", async () => {
+  const retiring = mcp();
+  const survivor = mcp();
+  let retiringErrors = "";
+  let survivorErrors = "";
+  retiring.child.stderr.on("data", chunk => { retiringErrors += chunk; });
+  survivor.child.stderr.on("data", chunk => { survivorErrors += chunk; });
+  const alias = "retiring-helper-alias";
+  assert.equal((await retiring.tool("computer_register", { computer: alias, transport: "local" })).ok, true);
+  assert.equal((await retiring.tool("get_app_state", { computer: alias, app_ref: { name: "Retiring alias owner" } })).ok, true);
+  assert.equal((await survivor.tool("get_app_state", { app_ref: { name: "Alias retirement survivor" } })).ok, true);
+  const owner = calls().find(item => item.method === "get_app_state" && item.appName === "Retiring alias owner").instance;
+  const other = calls().find(item => item.method === "get_app_state" && item.appName === "Alias retirement survivor").instance;
+  assert.notEqual(owner, other);
+  assert.equal((await retiring.tool("left_mouse_down", { target: { x: 10, y: 10 } })).ok, true);
+  assert.equal((await survivor.tool("type", { text: "blocked by retiring owner" })).error.code, "input_busy");
+
+  // Registration only changes the private fixture catalog. No HDC observation
+  // or backend operation is requested, so no device command can run here.
+  const registered = await retiring.tool("computer_register", { computer: alias, transport: "hdc", target: "unobserved-fixture-device" });
+  assert.equal(registered.ok, true, JSON.stringify(registered));
+  assert.equal(registered.registered.transport, "hdc");
+  assert.ok(calls().some(item => item.instance === owner && item.method === "release_input" && item.pointerDown), "retiring the route releases the old helper's held pointer");
+  assert.ok(calls().some(item => item.instance === owner && item.method === "session_closed"), "retiring the route closes its helper backend");
+  assert.ok(!calls().some(item => item.instance === other && item.method === "session_closed"), "the second MCP host keeps its helper session");
+
+  for (const [name, args] of [
+    ["request_access", {}],
+    ["type", { text: "must not revive retired helper" }],
+  ]) {
+    const reply = await retiring.tool(name, { computer: "local", ...args });
+    assert.equal(reply.ok, false);
+    assert.equal(reply.error.code, "app_session_closed");
+    assert.match(reply.error.message, /new MCP session/);
+  }
+  assert.ok(!calls().some(item => item.text === "must not revive retired helper"));
+  assert.equal((await survivor.tool("type", { text: "survives alias retirement" })).appName, "Alias retirement survivor");
+  assert.equal((await retiring.tool("computer_remove", { computer: alias })).ok, true);
+
+  const retiringClosed = new Promise(resolve => retiring.child.once("close", resolve));
+  await closeHost(retiring);
+  await retiringClosed;
+  assert.equal(retiringErrors, "", "shutdown must not retry an already closed helper as a cleanup failure");
+  assert.equal((await survivor.tool("type", { text: "survives retiring host shutdown" })).appName, "Alias retirement survivor");
+  const survivorClosed = new Promise(resolve => survivor.child.once("close", resolve));
+  await closeHost(survivor);
+  await survivorClosed;
+  assert.equal(survivorErrors, "");
+});
+
 test("MCP forced exit releases idle held input without waiting for another client", async () => {
   const dead = mcp();
   const survivor = mcp();

@@ -42,6 +42,7 @@ impl StepBudgetSource {
 /// Context for a single turn (user message + AI response).
 #[derive(Debug)]
 pub struct TurnContext {
+    pub max_output_tokens: Option<std::num::NonZeroU32>,
     /// Turn ID
     pub id: String,
 
@@ -52,7 +53,8 @@ pub struct TurnContext {
     /// Current step in the turn (tool call iteration)
     pub step: u32,
 
-    /// Maximum steps allowed
+    /// Configured steps, or `u32::MAX` for no limit. Use `step_limit` for
+    /// budget decisions; the counter saturates without stopping an uncapped turn.
     pub max_steps: u32,
 
     /// Which configured limit `max_steps` came from.
@@ -63,6 +65,9 @@ pub struct TurnContext {
     /// it so an exhausted goal pauses instead of re-arming.
     pub budget_exhausted_final_report: bool,
 
+    pub(crate) stop_diagnostics: crate::tool_inspection::TurnStopDiagnostics,
+    pub(crate) last_request_snapshot: Option<crate::tool_inspection::ToolInspectionSnapshot>,
+
     /// Number of tool calls made in this turn.
 
     /// Whether the turn has been cancelled
@@ -71,6 +76,16 @@ pub struct TurnContext {
 
     /// Usage for this turn
     pub usage: Usage,
+
+    /// Subset of `usage` served by the parent turn's frozen route. Programmatic
+    /// reviewer/RLM calls remain in the total above but are billed only from
+    /// their own routed receipts.
+    pub parent_route_usage: Usage,
+
+    /// Provider calls whose usage became ambiguous after dispatch (for
+    /// example an RLM timeout). A non-zero value makes cost coverage
+    /// explicitly incomplete instead of inventing a zero-usage receipt.
+    pub routed_usage_dropped_records: u64,
 
     /// Input tokens reported for the most recent parent-route model request.
     /// This is deliberately separate from `usage`, which accumulates every
@@ -96,18 +111,27 @@ impl TurnContext {
     /// Create a turn context with an explicit budget provenance (#5994).
     pub fn with_budget_source(max_steps: u32, budget_source: StepBudgetSource) -> Self {
         Self {
+            max_output_tokens: None,
             id: uuid::Uuid::new_v4().to_string(),
             started_at: Instant::now(),
             step: 0,
             max_steps,
             budget_source,
             budget_exhausted_final_report: false,
+            stop_diagnostics: crate::tool_inspection::TurnStopDiagnostics {
+                effective_max_steps: (max_steps != u32::MAX).then_some(max_steps),
+                step_budget_source: budget_source.key_label(),
+                ..Default::default()
+            },
+            last_request_snapshot: None,
             cancelled: false,
             usage: Usage {
                 input_tokens: 0,
                 output_tokens: 0,
                 ..Usage::default()
             },
+            parent_route_usage: Usage::default(),
+            routed_usage_dropped_records: 0,
             latest_parent_input_tokens: None,
             compaction_refusal_notified: false,
             pending_route: None,
@@ -116,13 +140,20 @@ impl TurnContext {
 
     /// Increment the step counter
     pub fn next_step(&mut self) -> bool {
-        self.step += 1;
-        self.step <= self.max_steps
+        self.step = self.step.saturating_add(1);
+        self.step_limit().is_none_or(|limit| self.step <= limit)
+    }
+
+    /// A resolved integer default means no ceiling, including at counter
+    /// saturation. Explicit positive configuration is clamped before here.
+    #[must_use]
+    pub fn step_limit(&self) -> Option<u32> {
+        (self.max_steps != u32::MAX).then_some(self.max_steps)
     }
 
     /// Check if the turn has reached max steps
     pub fn at_max_steps(&self) -> bool {
-        self.step >= self.max_steps
+        self.step_limit().is_some_and(|limit| self.step >= limit)
     }
 
     /// Model steps consumed so far (for soft-landing and reporting).
@@ -143,35 +174,34 @@ impl TurnContext {
         self.started_at.elapsed()
     }
 
+    /// Complete the existing request projection with observed turn-exit facts.
+    /// A turn that never prepared a request has no request snapshot to publish.
+    pub(crate) fn terminal_request_snapshot(
+        &mut self,
+        status: super::events::TurnOutcomeStatus,
+    ) -> Option<crate::tool_inspection::ToolInspectionSnapshot> {
+        use crate::tool_inspection::TurnStopReason;
+        self.stop_diagnostics.status = Some(status);
+        self.stop_diagnostics.model_step_index = self.step;
+        self.stop_diagnostics.final_report_requested |= self.budget_exhausted_final_report;
+        self.stop_diagnostics.last_reported_input_tokens = self.latest_parent_input_tokens;
+        match status {
+            super::events::TurnOutcomeStatus::Interrupted => {
+                self.stop_diagnostics.reason = Some(TurnStopReason::Interrupted);
+            }
+            super::events::TurnOutcomeStatus::Failed if self.stop_diagnostics.reason.is_none() => {
+                self.stop_diagnostics.reason = Some(TurnStopReason::Failed);
+            }
+            _ => {}
+        }
+        let mut snapshot = self.last_request_snapshot.take()?;
+        snapshot.terminal = Some(self.stop_diagnostics.clone());
+        Some(snapshot)
+    }
+
     /// Add usage from an API response
     pub fn add_usage(&mut self, usage: &Usage) {
-        self.usage.input_tokens = self.usage.input_tokens.saturating_add(usage.input_tokens);
-        self.usage.output_tokens = self.usage.output_tokens.saturating_add(usage.output_tokens);
-        self.usage.prompt_cache_hit_tokens = add_optional_usage(
-            self.usage.prompt_cache_hit_tokens,
-            usage.prompt_cache_hit_tokens,
-        );
-        self.usage.prompt_cache_miss_tokens = add_optional_usage(
-            self.usage.prompt_cache_miss_tokens,
-            usage.prompt_cache_miss_tokens,
-        );
-        self.usage.prompt_cache_write_tokens = add_optional_usage(
-            self.usage.prompt_cache_write_tokens,
-            usage.prompt_cache_write_tokens,
-        );
-        self.usage.reasoning_tokens =
-            add_optional_usage(self.usage.reasoning_tokens, usage.reasoning_tokens);
-        self.usage.reasoning_replay_tokens = add_optional_usage(
-            self.usage.reasoning_replay_tokens,
-            usage.reasoning_replay_tokens,
-        );
-        if let Some(delta) = usage.server_tool_use.as_ref() {
-            let total = self.usage.server_tool_use.get_or_insert_default();
-            total.code_execution_requests =
-                add_optional_usage(total.code_execution_requests, delta.code_execution_requests);
-            total.tool_search_requests =
-                add_optional_usage(total.tool_search_requests, delta.tool_search_requests);
-        }
+        add_usage_to(&mut self.usage, usage);
     }
 
     /// Record one parent-route response for both billing and live-context
@@ -180,8 +210,57 @@ impl TurnContext {
     pub fn add_parent_usage(&mut self, usage: &Usage) {
         self.latest_parent_input_tokens = (usage.input_tokens > 0).then_some(usage.input_tokens);
         self.add_usage(usage);
+        add_usage_to(&mut self.parent_route_usage, usage);
     }
 
+    pub fn add_routed_usage_dropped_records(&mut self, dropped_records: u64) {
+        self.routed_usage_dropped_records = self
+            .routed_usage_dropped_records
+            .saturating_add(dropped_records);
+    }
+
+    /// Add programmatic child-call usage to the authoritative total and
+    /// return the same batch aggregate for telemetry emission.
+    pub fn add_routed_usages<'a>(&mut self, usages: impl IntoIterator<Item = &'a Usage>) -> Usage {
+        let mut aggregate = Usage::default();
+        for usage in usages {
+            self.add_usage(usage);
+            add_usage_to(&mut aggregate, usage);
+        }
+        aggregate
+    }
+}
+
+pub(crate) fn add_usage_to(total: &mut Usage, delta: &Usage) {
+    total.input_tokens = total.input_tokens.saturating_add(delta.input_tokens);
+    total.output_tokens = total.output_tokens.saturating_add(delta.output_tokens);
+    total.prompt_cache_hit_tokens =
+        add_optional_usage(total.prompt_cache_hit_tokens, delta.prompt_cache_hit_tokens);
+    total.prompt_cache_miss_tokens = add_optional_usage(
+        total.prompt_cache_miss_tokens,
+        delta.prompt_cache_miss_tokens,
+    );
+    total.prompt_cache_write_tokens = add_optional_usage(
+        total.prompt_cache_write_tokens,
+        delta.prompt_cache_write_tokens,
+    );
+    total.reasoning_tokens = add_optional_usage(total.reasoning_tokens, delta.reasoning_tokens);
+    total.reasoning_replay_tokens =
+        add_optional_usage(total.reasoning_replay_tokens, delta.reasoning_replay_tokens);
+    if let Some(delta) = delta.server_tool_use.as_ref() {
+        let server_total = total.server_tool_use.get_or_insert_default();
+        server_total.code_execution_requests = add_optional_usage(
+            server_total.code_execution_requests,
+            delta.code_execution_requests,
+        );
+        server_total.tool_search_requests = add_optional_usage(
+            server_total.tool_search_requests,
+            delta.tool_search_requests,
+        );
+    }
+}
+
+impl TurnContext {
     /// Billed prompt the compaction gate should honor: this turn's latest
     /// parent request, else the session-carried receipt from the previous
     /// turn. A fresh `TurnContext` starts empty, so without the session
@@ -472,6 +551,7 @@ fn snapshot_with_label(
 ) -> Option<String> {
     match SnapshotRepo::open_or_init_with_cap(workspace, cap_bytes) {
         Ok(repo) => {
+            clear_snapshots_disabled_status(workspace, session_id);
             let id = match repo.snapshot_with_session(label, session_id) {
                 Ok(id) => Some(id.0),
                 Err(e) => {
@@ -486,10 +566,10 @@ fn snapshot_with_label(
             id
         }
         Err(e) => {
-            // The first failure per workspace is the operator's notice; every
-            // later turn hits the same gate and only needs a debug line (#5930).
-            if maybe_notify_snapshots_disabled_once(workspace, &e) {
-                tracing::warn!(target: "snapshot", "snapshot repo init failed: {e}");
+            // The first gated failure belongs to this session, even when other
+            // sessions use the same workspace in this process (#5930).
+            if maybe_notify_snapshots_disabled_once(workspace, session_id, &e) {
+                tracing::warn!(target: "snapshot", session_id, "snapshot repo init failed: {e}");
             } else {
                 tracing::debug!(target: "snapshot", "snapshot repo init still failing: {e}");
             }
@@ -498,10 +578,9 @@ fn snapshot_with_label(
     }
 }
 
-/// A snapshots-disabled notice waiting for the engine to surface it as
-/// [`crate::core::Event::SnapshotsDisabled`]. Snapshot attempts run on
-/// blocking tasks without an event channel, so the once-per-workspace notice
-/// is parked here and drained at the next turn boundary (#5930).
+/// Snapshot availability observed for a session and its workspace. Delivering
+/// the notice does not erase the status: `/status` can still explain why undo
+/// is unavailable after the transient toast has expired (#5930).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotsDisabledNotice {
     pub workspace: String,
@@ -512,61 +591,99 @@ pub struct SnapshotsDisabledNotice {
 /// notice so the remedy travels with the failure.
 pub const SNAPSHOTS_CAP_CONFIG_KEY: &str = "[snapshots] max_workspace_gb";
 
-fn pending_snapshot_notices() -> &'static std::sync::Mutex<Vec<SnapshotsDisabledNotice>> {
-    static PENDING: std::sync::OnceLock<std::sync::Mutex<Vec<SnapshotsDisabledNotice>>> =
-        std::sync::OnceLock::new();
-    PENDING.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+type SnapshotNoticeKey = (std::path::PathBuf, Option<String>);
+
+#[derive(Default)]
+struct SnapshotNoticeState {
+    warned: bool,
+    pending: bool,
+    disabled: Option<SnapshotsDisabledNotice>,
 }
 
-/// Drain the notices parked by [`maybe_notify_snapshots_disabled_once`] for
-/// one workspace. Each workspace produces at most one per process lifetime,
-/// and an engine only takes its own so two sessions (or two tests) in one
-/// process never see each other's notice.
-pub fn take_snapshots_disabled_notices(workspace: &Path) -> Vec<SnapshotsDisabledNotice> {
-    let key = workspace.to_string_lossy();
-    let Ok(mut guard) = pending_snapshot_notices().lock() else {
+fn snapshot_notices()
+-> &'static std::sync::Mutex<std::collections::HashMap<SnapshotNoticeKey, SnapshotNoticeState>> {
+    static NOTICES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<SnapshotNoticeKey, SnapshotNoticeState>>,
+    > = std::sync::OnceLock::new();
+    NOTICES.get_or_init(Default::default)
+}
+
+fn snapshot_notice_key(workspace: &Path, session_id: Option<&str>) -> SnapshotNoticeKey {
+    (workspace.to_path_buf(), session_id.map(str::to_owned))
+}
+
+/// Take only this session's pending delivery. Other sessions in the same
+/// workspace keep their own notice; the observed disabled status remains.
+pub fn take_snapshots_disabled_notices(
+    workspace: &Path,
+    session_id: Option<&str>,
+) -> Vec<SnapshotsDisabledNotice> {
+    let mut states = snapshot_notices()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(state) = states.get_mut(&snapshot_notice_key(workspace, session_id)) else {
         return Vec::new();
     };
-    let (mine, others): (Vec<_>, Vec<_>) = std::mem::take(&mut *guard)
-        .into_iter()
-        .partition(|notice| notice.workspace == key);
-    *guard = others;
-    mine
+    if !std::mem::take(&mut state.pending) {
+        return Vec::new();
+    }
+    state.disabled.iter().cloned().collect()
 }
 
-// The stderr print is deliberate: headless/CLI stderr is the user surface for
-// this once-per-workspace warning, matching the pre-TUI notices in
-// runtime_log.rs. The TUI gets the same notice through the parked
-// `SnapshotsDisabledNotice`, because its alternate screen never shows stderr.
-// Returns whether this call was the workspace's first notice.
+/// Non-consuming availability projection for the current session's status.
+pub fn snapshots_disabled_status(
+    workspace: &Path,
+    session_id: Option<&str>,
+) -> Option<SnapshotsDisabledNotice> {
+    snapshot_notices()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&snapshot_notice_key(workspace, session_id))
+        .and_then(|state| state.disabled.clone())
+}
+
+fn clear_snapshots_disabled_status(workspace: &Path, session_id: Option<&str>) {
+    if let Some(state) = snapshot_notices()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get_mut(&snapshot_notice_key(workspace, session_id))
+    {
+        state.disabled = None;
+        state.pending = false;
+    }
+}
+
+// Keep stderr for headless sessions. The TUI receives the same notice via the
+// existing Engine event, and `/status` reads the retained observation.
+// Production snapshot callers always supply the current Engine session id;
+// callers without one retain the legacy workspace scope.
 #[allow(clippy::print_stderr)]
-fn maybe_notify_snapshots_disabled_once(workspace: &Path, error: &std::io::Error) -> bool {
+fn maybe_notify_snapshots_disabled_once(
+    workspace: &Path,
+    session_id: Option<&str>,
+    error: &std::io::Error,
+) -> bool {
     let message = error.to_string();
     if !(message.contains("workspace too large for snapshots")
         || message.contains("workspace snapshots are disabled"))
     {
         return true;
     }
-    use std::collections::HashSet;
-    use std::sync::{Mutex, OnceLock};
-    static NOTIFIED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    let key = workspace.to_string_lossy().into_owned();
-    let set = NOTIFIED.get_or_init(|| Mutex::new(HashSet::new()));
-    let Ok(mut guard) = set.lock() else {
-        return true;
-    };
-    if !guard.insert(key.clone()) {
+    let mut states = snapshot_notices()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let state = states
+        .entry(snapshot_notice_key(workspace, session_id))
+        .or_default();
+    state.disabled = Some(SnapshotsDisabledNotice {
+        workspace: workspace.to_string_lossy().into_owned(),
+        reason: message.clone(),
+    });
+    if std::mem::replace(&mut state.warned, true) {
         return false;
     }
-    if let Ok(mut pending) = pending_snapshot_notices().lock() {
-        pending.push(SnapshotsDisabledNotice {
-            workspace: key,
-            reason: message.clone(),
-        });
-    }
-    // One prominent notice per workspace process lifetime — silent disable is
-    // the §2.7 failure mode. Opt-in remains `[snapshots] max_workspace_gb`
-    // (raise the cap or set 0 to disable the size gate).
+    state.pending = true;
+    drop(states);
     eprintln!(
         "warning: workspace snapshots/undo are OFF for {}
   {message}
@@ -579,46 +696,105 @@ fn maybe_notify_snapshots_disabled_once(workspace: &Path, error: &std::io::Error
 #[cfg(test)]
 mod snapshot_notice_tests {
     use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tracing_subscriber::prelude::*;
+
+    #[derive(Clone, Default)]
+    struct SnapshotWarnings(Arc<AtomicUsize>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SnapshotWarnings {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() == "snapshot"
+                && *event.metadata().level() == tracing::Level::WARN
+            {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
 
     #[test]
-    fn a_workspace_over_the_cap_parks_exactly_one_notice_and_warns_once() {
-        let workspace = std::env::temp_dir().join(format!(
-            "codewhale-snapshot-notice-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let error = || {
-            std::io::Error::other(
-                "workspace too large for snapshots (over 2 GB of non-excluded content or > 200000 entries): x",
-            )
-        };
-        assert!(
-            maybe_notify_snapshots_disabled_once(&workspace, &error()),
-            "the first failure is the operator's notice"
+    fn oversized_workspace_warns_once_per_session_and_retains_status_after_delivery() {
+        let _env = crate::test_support::lock_test_env();
+        let root = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path());
+        let _user_home = crate::test_support::EnvVarGuard::set("HOME", root.path());
+        let _user_profile = crate::test_support::EnvVarGuard::set("USERPROFILE", root.path());
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join("large.txt"), vec![b'x'; 4096]).unwrap();
+        let warnings = SnapshotWarnings::default();
+        let subscriber = tracing_subscriber::registry().with(warnings.clone());
+        tracing::subscriber::with_default(subscriber, || {
+            for session in ["session-a", "session-b"] {
+                for turn in 1..=3 {
+                    assert!(
+                        pre_turn_snapshot(&workspace, turn, 1024, None, Some(session)).is_none()
+                    );
+                    assert!(
+                        post_turn_snapshot(&workspace, turn, 1024, None, Some(session)).is_none()
+                    );
+                }
+            }
+        });
+        assert_eq!(
+            warnings.0.load(Ordering::SeqCst),
+            2,
+            "exactly one real WARN for each session"
         );
-        assert!(
-            !maybe_notify_snapshots_disabled_once(&workspace, &error()),
-            "later turns hit the same gate silently"
-        );
-        let ours = take_snapshots_disabled_notices(&workspace);
-        assert_eq!(ours.len(), 1, "one notice per workspace: {ours:?}");
-        assert!(ours[0].reason.contains("workspace too large for snapshots"));
-        assert!(
-            take_snapshots_disabled_notices(&workspace).is_empty(),
-            "draining is destructive"
-        );
-        // Another workspace's engine never sees this one's notice.
-        let other = std::env::temp_dir().join("codewhale-snapshot-notice-other");
-        assert!(maybe_notify_snapshots_disabled_once(&other, &error()));
-        assert!(take_snapshots_disabled_notices(&workspace).is_empty());
-        assert_eq!(take_snapshots_disabled_notices(&other).len(), 1);
+        for session in ["session-b", "session-a"] {
+            let notices = take_snapshots_disabled_notices(&workspace, Some(session));
+            assert_eq!(notices.len(), 1, "each session receives its own notice");
+            assert!(
+                notices[0]
+                    .reason
+                    .contains("workspace too large for snapshots")
+            );
+            assert!(take_snapshots_disabled_notices(&workspace, Some(session)).is_empty());
+            assert_eq!(
+                snapshots_disabled_status(&workspace, Some(session)),
+                notices.first().cloned(),
+                "delivery must not erase /status"
+            );
+        }
+        assert!(snapshots_disabled_status(&workspace, Some("session-c")).is_none());
+        assert!(snapshots_disabled_status(&root.path().join("other"), Some("session-a")).is_none());
+    }
+
+    #[test]
+    fn successful_snapshot_clears_disabled_status_and_pending_notice() {
+        let _env = crate::test_support::lock_test_env();
+        let root = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path());
+        let _user_home = crate::test_support::EnvVarGuard::set("HOME", root.path());
+        let _user_profile = crate::test_support::EnvVarGuard::set("USERPROFILE", root.path());
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join("large.txt"), vec![b'x'; 4096]).unwrap();
+        assert!(pre_turn_snapshot(&workspace, 1, 1024, None, Some("session")).is_none());
+        assert!(snapshots_disabled_status(&workspace, Some("session")).is_some());
+        assert!(pre_turn_snapshot(&workspace, 2, 0, None, Some("session")).is_some());
+        assert!(snapshots_disabled_status(&workspace, Some("session")).is_none());
+        assert!(take_snapshots_disabled_notices(&workspace, Some("session")).is_empty());
     }
 
     #[test]
     fn unrelated_snapshot_errors_are_not_gated_notices() {
-        let workspace = std::env::temp_dir().join("codewhale-snapshot-notice-unrelated");
+        let workspace = tempfile::tempdir().unwrap();
         let error = std::io::Error::other("disk full");
-        assert!(maybe_notify_snapshots_disabled_once(&workspace, &error));
-        assert!(take_snapshots_disabled_notices(&workspace).is_empty());
+        assert!(maybe_notify_snapshots_disabled_once(
+            workspace.path(),
+            Some("session"),
+            &error
+        ));
+        assert!(take_snapshots_disabled_notices(workspace.path(), Some("session")).is_empty());
+        assert!(snapshots_disabled_status(workspace.path(), Some("session")).is_none());
     }
 }
 

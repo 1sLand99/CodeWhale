@@ -22,13 +22,18 @@ use ratatui::{
 
 use crate::localization::MessageId;
 use crate::palette;
-use crate::tui::app::App;
+use crate::tui::app::{App, RedactionGateNotice, StatusToastKind};
+use crate::tui::onboarding::wrap_words;
+use crate::tui::shell_key_routing::{ShellBindingId, binding};
 use crate::tui::views::{ActionHint, render_modal_footer, render_underwater_surface};
 
 /// Whether the startup gate must ask before the current config's
 /// `[redaction] model_bound` request can take effect.
 pub fn confirmation_required(config: &crate::config::Config) -> bool {
-    codewhale_config::redaction::confirmation_required(config.model_bound_redaction())
+    codewhale_config::redaction::confirmation_required(
+        config.model_bound_redaction(),
+        config.loaded_config_path.as_deref(),
+    )
 }
 
 /// Render the gate. Callers (the frame compositor) invoke this only while
@@ -43,7 +48,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     } else {
         app.tr(MessageId::RedactionGateTitle).into_owned()
     };
-    let hints = action_hints(app);
+    let mut hints = action_hints(app);
+    hints.push(ActionHint::new(
+        binding(ShellBindingId::RedactionGateScroll).footer_chord,
+        app.tr(MessageId::SetupActionScrollBody).to_string(),
+    ));
     let buf = f.buffer_mut();
     let inner = render_underwater_surface(area, buf, &title);
     let content = render_modal_footer(inner, buf, &hints);
@@ -68,43 +77,53 @@ fn center_vertically(area: Rect, rows: usize) -> Rect {
 }
 
 fn action_hints(app: &App) -> Vec<ActionHint> {
-    if app.redaction_gate_confirming {
-        vec![
-            ActionHint::new(
-                "1/Y",
-                app.tr(MessageId::RedactionGateActionConfirm).to_string(),
-            ),
-            ActionHint::new(
-                "2/U",
-                app.tr(MessageId::RedactionGateActionBack).to_string(),
-            ),
-            ActionHint::new(
-                "3/N",
-                app.tr(MessageId::RedactionGateActionQuit).to_string(),
-            ),
-        ]
-    } else {
-        vec![
-            ActionHint::new(
-                "1/Y",
-                app.tr(MessageId::RedactionGateActionConfirm).to_string(),
-            ),
-            ActionHint::new(
-                "2/U",
-                app.tr(MessageId::RedactionGateActionKeep).to_string(),
-            ),
-            ActionHint::new(
-                "3/N",
-                app.tr(MessageId::RedactionGateActionQuit).to_string(),
-            ),
-        ]
-    }
+    [
+        (
+            ShellBindingId::RedactionGateConfirm,
+            MessageId::RedactionGateActionConfirm,
+        ),
+        (
+            ShellBindingId::RedactionGateKeepOrBack,
+            if app.redaction_gate_confirming {
+                MessageId::RedactionGateActionBack
+            } else {
+                MessageId::RedactionGateActionKeep
+            },
+        ),
+        (
+            ShellBindingId::RedactionGateQuit,
+            MessageId::RedactionGateActionQuit,
+        ),
+    ]
+    .into_iter()
+    .map(|(id, label)| ActionHint::new(binding(id).footer_chord, app.tr(label).to_string()))
+    .collect()
 }
 
-fn screen_lines(app: &App, width: usize, _height: usize) -> Vec<Line<'static>> {
+fn screen_lines(app: &App, width: usize, height: usize) -> Vec<Line<'static>> {
     let mut out = Vec::new();
-    // The surface title (rendered by `render`) already names the screen, so
-    // the body opens with the question itself — no duplicated heading.
+    let now = std::time::Instant::now();
+    if let Some(toast) = [
+        RedactionGateNotice::WriteFailure,
+        RedactionGateNotice::EnterGuidance,
+    ]
+    .into_iter()
+    .find_map(|notice| {
+        app.status_toasts.iter().rev().find(|toast| {
+            toast.kind == StatusToastKind::RedactionGate(notice) && !toast.is_expired(now)
+        })
+    }) {
+        for line in wrap_words(&toast.text, width) {
+            out.push(Line::from(Span::styled(
+                line,
+                Style::default().fg(toast.level.ink().color(&app.ui_theme)),
+            )));
+        }
+        out.push(Line::from(""));
+    }
+    // Put the consequence first even when the rest needs scrolling.
+    wrap_body_danger(&mut out, app, MessageId::RedactionGateDangerNotice, width);
+    out.push(Line::from(""));
     if app.redaction_gate_confirming {
         wrap_body(
             &mut out,
@@ -112,28 +131,19 @@ fn screen_lines(app: &App, width: usize, _height: usize) -> Vec<Line<'static>> {
             MessageId::RedactionGateConfirmQuestion,
             width,
         );
-        out.push(Line::from(""));
-        wrap_body_danger(&mut out, app, MessageId::RedactionGateDangerNotice, width);
     } else {
         wrap_body(&mut out, app, MessageId::RedactionGateQuestion, width);
-        out.push(Line::from(""));
-        // The red warning is part of both stages: disabling masking sends
-        // credential text to the model, and the user must see that stated in
-        // bold red before either confirm.
-        wrap_body_danger(&mut out, app, MessageId::RedactionGateDangerNotice, width);
         out.push(Line::from(""));
         wrap_body_muted(&mut out, app, MessageId::RedactionGateRisk, width);
         wrap_body_muted(&mut out, app, MessageId::RedactionGateEffect, width);
         wrap_body_muted(&mut out, app, MessageId::RedactionGateRollbackHint, width);
     }
-    if let Some(message) = app.status_message.as_deref() {
-        out.push(Line::from(""));
-        out.push(Line::from(Span::styled(
-            message.to_string(),
-            Style::default().fg(palette::STATUS_WARNING),
-        )));
-    }
-    out
+    let scroll = app
+        .redaction_gate_scroll
+        .get()
+        .min(out.len().saturating_sub(height));
+    app.redaction_gate_scroll.set(scroll);
+    out.into_iter().skip(scroll).take(height).collect()
 }
 
 /// Body sentence in the primary lane.
@@ -172,103 +182,14 @@ fn wrap_body_muted(lines: &mut Vec<Line<'static>>, app: &App, id: MessageId, wid
     }
 }
 
-/// Characters that may not begin a line in Japanese and Chinese typography
-/// (a small, uncontroversial kinsoku set). Kept in sync with the onboarding
-/// screens' wrapper: a gate question cut mid-word is not answerable.
-const NO_LINE_START: &[char] = &[
-    '。', '、', '．', '，', '」', '』', '）', '］', '｝', '〕', '〉', '》', '”', '’', '！', '？',
-    '：', '；', 'ー', '々', '·', '…', '!', '?', ',', '.', ':', ';', ')', ']', '}',
-];
-
-/// Break one unbreakable token into lines of at most `width` display columns.
-fn break_by_display_width(text: &str, width: usize) -> Vec<String> {
-    use unicode_segmentation::UnicodeSegmentation;
-    use unicode_width::UnicodeWidthStr;
-
-    let mut out: Vec<String> = Vec::new();
-    let mut current = String::new();
-    let mut current_width = 0usize;
-
-    for cluster in text.graphemes(true) {
-        let cluster_width = UnicodeWidthStr::width(cluster);
-        if current_width + cluster_width > width && !current.is_empty() {
-            let starts_forbidden = cluster
-                .chars()
-                .next()
-                .is_some_and(|c| NO_LINE_START.contains(&c));
-            if starts_forbidden {
-                current.push_str(cluster);
-                out.push(std::mem::take(&mut current));
-                current_width = 0;
-                continue;
-            }
-            out.push(std::mem::take(&mut current));
-            current_width = 0;
-        }
-        current.push_str(cluster);
-        current_width += cluster_width;
-    }
-
-    if !current.is_empty() {
-        out.push(current);
-    }
-    out
-}
-
-/// Word wrap by display width so the composed row count is exact and no
-/// paragraph re-wrap can clip a locale with longer sentences.
-fn wrap_words(text: &str, width: usize) -> Vec<String> {
-    use unicode_width::UnicodeWidthStr;
-    let width = width.max(8);
-    let mut out = Vec::new();
-    let mut current = String::new();
-    let mut current_width = 0usize;
-    for word in text.split_whitespace() {
-        let word_width = UnicodeWidthStr::width(word);
-
-        if word_width > width {
-            if !current.is_empty() {
-                out.push(std::mem::take(&mut current));
-                current_width = 0;
-            }
-            let mut chunks = break_by_display_width(word, width);
-            if let Some(last) = chunks.pop() {
-                out.extend(chunks);
-                current_width = UnicodeWidthStr::width(last.as_str());
-                current = last;
-            }
-            continue;
-        }
-
-        let needed = if current.is_empty() {
-            word_width
-        } else {
-            current_width + 1 + word_width
-        };
-        if !current.is_empty() && needed > width {
-            out.push(std::mem::take(&mut current));
-            current_width = 0;
-        }
-        if !current.is_empty() {
-            current.push(' ');
-            current_width += 1;
-        }
-        current.push_str(word);
-        current_width += word_width;
-    }
-    if !current.is_empty() {
-        out.push(current);
-    }
-    if out.is_empty() {
-        out.push(String::new());
-    }
-    out
-}
-
 /// Persist the confirmation and return the written receipt path. Called after
 /// the user picks the explicit "confirm" action.
-pub fn record_confirmation() -> anyhow::Result<std::path::PathBuf> {
-    codewhale_config::redaction::record_model_bound_disabled_confirmation()
+pub fn record_confirmation(config: &crate::config::Config) -> anyhow::Result<std::path::PathBuf> {
+    let path = config
+        .loaded_config_path
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("No loaded config file can receive this confirmation"))?;
+    codewhale_config::redaction::record_model_bound_disabled_confirmation(path)
         .map_err(anyhow::Error::from)
 }
 
@@ -349,6 +270,164 @@ mod tests {
                 let _ = screen_lines(&app, width, 24);
             }
         }
+    }
+
+    #[test]
+    fn gate_scroll_reaches_every_body_line_with_actions_visible_in_all_locales() {
+        use ratatui::{
+            Terminal,
+            backend::TestBackend,
+            buffer::{Buffer, CellWidth},
+        };
+        use std::collections::HashSet;
+        let visible_row = |buffer: &Buffer, area: Rect, y| {
+            let mut row = String::new();
+            let mut x = area.x;
+            while x < area.right() {
+                let cell = &buffer[(x, y)];
+                row.push_str(cell.symbol());
+                // TestBackend retains hidden cells beneath wide characters
+                // between draws. Read the terminal-visible graphemes only.
+                x += cell.cell_width().max(1);
+            }
+            row
+        };
+        let compact = |text: &str| {
+            text.chars()
+                .filter(|ch| !ch.is_whitespace())
+                .collect::<String>()
+        };
+        for &(width, height) in &[(40, 12), (60, 16), (80, 24)] {
+            for &locale in crate::localization::Locale::shipped() {
+                for confirming in [false, true] {
+                    let mut app = app_fixture();
+                    app.ui_locale = locale;
+                    app.redaction_gate_confirming = confirming;
+                    let area = Rect::new(0, 0, width, height);
+                    let mut buffer = Buffer::empty(area);
+                    let inner = render_underwater_surface(area, &mut buffer, "");
+                    let mut hints = action_hints(&app);
+                    hints.push(ActionHint::new(
+                        "↑/↓",
+                        app.tr(MessageId::SetupActionScrollBody).to_string(),
+                    ));
+                    let content = render_modal_footer(inner, &mut buffer, &hints);
+                    assert!(
+                        content.height > 0,
+                        "no reading space at {width}x{height}, {locale:?}"
+                    );
+                    let expected = screen_lines(&app, content.width as usize, usize::MAX);
+                    let mut seen = HashSet::new();
+                    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                    for scroll in 0..=expected.len() {
+                        app.redaction_gate_scroll.set(scroll);
+                        let rendered = terminal.draw(|frame| render(frame, area, &app)).unwrap();
+                        let buffer = rendered.buffer;
+                        let mut whole = String::new();
+                        for y in 0..height {
+                            let row = visible_row(buffer, area, y);
+                            whole.push_str(&row);
+                        }
+                        for key in ["1/Y", "2/U", "3/N", "↑/↓"] {
+                            assert!(
+                                whole.contains(key),
+                                "missing action {key} at {width}x{height}, {locale:?}"
+                            );
+                        }
+                        for y in content.y..content.y + content.height {
+                            let row = visible_row(buffer, content, y);
+                            seen.insert(compact(&row));
+                        }
+                    }
+                    for line in expected {
+                        let text = line
+                            .spans
+                            .iter()
+                            .map(|span| span.content.as_ref())
+                            .collect::<String>();
+                        assert!(
+                            unicode_width::UnicodeWidthStr::width(text.as_str())
+                                <= usize::from(content.width),
+                            "overflow at {width}x{height}, {locale:?}: {text}"
+                        );
+                        assert!(
+                            seen.contains(&compact(&text)),
+                            "unreachable or clipped body at {width}x{height}, {locale:?}, stage {confirming}: {text}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gate_notice_survives_unrelated_status_refresh_and_receipt_failure_keeps_masking() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("selected.toml");
+        std::fs::write(&path, "[redaction]\nmodel_bound = \"disabled\"\n").unwrap();
+        let config = Config::load(Some(path.clone()), None).unwrap();
+        // An existing directory makes the write fail on every supported OS.
+        std::fs::create_dir(codewhale_config::redaction::model_bound_state_path(&path)).unwrap();
+        assert!(record_confirmation(&config).is_err());
+        assert!(confirmation_required(&config));
+        let mut app = app_fixture();
+        let notice = app.tr(MessageId::RedactionGateSaveFailed).into_owned();
+        app.push_status_toast_record(
+            crate::tui::app::StatusToast::new(
+                notice.clone(),
+                crate::tui::app::StatusToastLevel::Error,
+                None,
+            )
+            .for_redaction_gate(RedactionGateNotice::WriteFailure),
+        );
+        let hint = app.tr(MessageId::RedactionGateEnterHint).into_owned();
+        app.push_status_toast_record(
+            crate::tui::app::StatusToast::new(
+                hint.clone(),
+                crate::tui::app::StatusToastLevel::Info,
+                Some(12_000),
+            )
+            .for_redaction_gate(RedactionGateNotice::EnterGuidance),
+        );
+        app.push_status_toast(
+            "Unrelated runtime error",
+            crate::tui::app::StatusToastLevel::Error,
+            None,
+        );
+        app.status_message = Some("Unrelated runtime status".to_string());
+        let lines = screen_lines(&app, 38, 6)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(lines.contains("Could not save confirmation"));
+        assert!(!lines.contains("Unrelated runtime status"));
+        assert!(!lines.contains("Unrelated runtime error"));
+        assert!(!lines.contains(&hint));
+        assert_eq!(
+            screen_lines(&app, 38, 6)[0].spans[0].style.fg,
+            Some(app.ui_theme.error_fg)
+        );
+        assert!(app.redaction_gate);
+        assert_eq!(
+            codewhale_config::redaction::effective_masking(
+                config.model_bound_redaction(),
+                config.loaded_config_path.as_deref()
+            ),
+            codewhale_config::redaction::ModelBoundMasking::Enabled
+        );
+        app.retire_redaction_gate_notice(RedactionGateNotice::EnterGuidance);
+        assert!(screen_lines(&app, 100, 24)[0].to_string().contains(&notice));
+        app.retire_redaction_gate_notice(RedactionGateNotice::WriteFailure);
+        let remaining = screen_lines(&app, 100, 24)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(!remaining.contains(&notice));
+        assert!(!remaining.contains("Unrelated runtime error"));
+        assert_eq!(app.status_toasts.len(), 1);
+        assert_eq!(app.status_toasts[0].text, "Unrelated runtime error");
     }
 
     /// The red warning is part of both stages, and the second stage swaps the

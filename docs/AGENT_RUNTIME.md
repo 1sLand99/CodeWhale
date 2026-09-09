@@ -131,7 +131,7 @@ transcripts, ACP/MCP clients, and internal compatibility callers, and rejects
 values above 8. Current model-authored calls inherit the Runtime configuration
 instead of negotiating recursion depth in the tool schema.
 
-Workflow IR has a separate structural validation limit of five nested nodes.
+Workflow IR has a separate default structural validation limit of five nested nodes.
 That limit constrains the orchestration document's shape; it does not grant or
 consume Runtime child-delegation depth.
 
@@ -152,6 +152,41 @@ emits
 run/phase/task/gate receipt while a Workflow is in flight and is retained as a
 typed `WorkflowEvent` in the Runtime execution ledger; the enclosing Runtime
 worker still owns the terminal `done` or `error`. One vocabulary, two surfaces.
+
+`session_capture` is emitted once, when the exec run persisted its transcript
+as a saved session, and carries the recoverable id in exactly one place:
+
+```json
+{"type": "session_capture", "schema": "codewhale.exec-stream", "schema_version": 1,
+ "content": "<redacted:…>", "saved_session_id": "01J…"}
+```
+
+- `saved_session_id` is the raw saved-session id, emitted only after a
+  successful save. For local Fleet workers, the parent assigns a fresh ID and
+  shares the Runtime's existing session directory. The executor advertises
+  `FleetReceipt.saved_session_id` only when that exact ID was reported and its
+  saved transcript can be loaded. A client with Runtime API access can then
+  read the reply through `GET /v1/sessions/{id}`. SSH workers retain their
+  excerpt and remote log, but do not advertise an unavailable local session
+  link. An ID is a lookup key, not a substitute for Runtime authentication.
+- `content` is the same redacted fingerprint the terminal `metadata.session_id`
+  carries, so a captured `metadata` receipt stays safe to log on its own and
+  the two events can still be correlated. `metadata.resume_command` therefore
+  names this field (`codewhale exec --resume <session_capture.saved_session_id>`)
+  rather than carrying the id itself.
+
+The terminal `metadata` receipt also carries the worker's visible final answer:
+`visible_final_answer_chars` is the real character count of the final
+assistant reply, and `visible_final_answer_excerpt` is a bounded (4,000
+characters, `...` when cut), secret-redacted excerpt of it, omitted when the
+current turn produced no visible answer. Resumed turns never reuse an older
+reply, and failed/interrupted receipts may carry partial current-turn text;
+the receipt status remains authoritative. The Runtime executor reads the excerpt from
+this receipt — never from the streamed `content` deltas, which are the run
+thinking out loud — and attaches it to `Completed.summary` and, for a task
+with no scorer and no file artifact, to the receipt notes as the task's
+deliverable. Lifecycle event labels and worker inspection summaries show a
+short excerpt; the event `payload` and the receipt keep the full excerpt.
 
 `turn_usage` is the per-model-call usage receipt, emitted once per model
 request (turn-step) when the provider reported usage for that call:

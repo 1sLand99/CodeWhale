@@ -4197,6 +4197,11 @@ async fn execute_foreground_via_background(
     let task_id = spawned
         .task_id
         .ok_or_else(|| anyhow!("foreground shell did not return a process id"))?;
+    let mut foreground = ForegroundShellGuard {
+        manager: context.shell_manager.clone(),
+        task_id: task_id.clone(),
+        armed: true,
+    };
     if let Some(permit) = heavy_permit {
         let mut manager = context
             .shell_manager
@@ -4232,6 +4237,7 @@ async fn execute_foreground_via_background(
             let result = manager.kill(&task_id);
             if result.is_ok() {
                 manager.acknowledge_foreground_completion(&task_id);
+                foreground.armed = false;
             }
             return result;
         }
@@ -4246,7 +4252,9 @@ async fn execute_foreground_via_background(
                 .lock()
                 .map_err(|_| anyhow!("shell manager lock poisoned"))?;
             if manager.take_foreground_background_request() {
-                return manager.get_output(&task_id, false, 0);
+                let snapshot = manager.get_output(&task_id, false, 0)?;
+                foreground.armed = false;
+                return Ok(snapshot);
             }
             if manager.poll_status(&task_id)? == ShellStatus::Running {
                 None
@@ -4260,6 +4268,7 @@ async fn execute_foreground_via_background(
         };
 
         if let Some(snapshot) = finished {
+            foreground.armed = false;
             return Ok(snapshot);
         }
 
@@ -4271,11 +4280,48 @@ async fn execute_foreground_via_background(
             let mut result = manager.kill(&task_id)?;
             manager.acknowledge_foreground_completion(&task_id);
             result.status = ShellStatus::TimedOut;
+            foreground.armed = false;
             return Ok(result);
         }
 
         tokio::time::sleep(Duration::from_millis(poll_tick_ms)).await;
         poll_tick_ms = (poll_tick_ms * 2).min(FOREGROUND_POLL_MAX_MS);
+    }
+}
+
+/// A foreground wait owns its process even if its caller drops the future
+/// before cooperative cancellation can be polled. Only an explicit transfer
+/// to /jobs releases that ownership while the process is still running.
+struct ForegroundShellGuard {
+    manager: SharedShellManager,
+    task_id: String,
+    armed: bool,
+}
+
+impl Drop for ForegroundShellGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut manager = self
+            .manager
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let result = manager.poll_status(&self.task_id).and_then(|status| {
+            if status == ShellStatus::Running {
+                manager.kill(&self.task_id).map(|_| ())
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(error) = result {
+            tracing::warn!(shell_id = %self.task_id, %error, "foreground shell cleanup failed");
+        }
+        if let Some(shell) = manager.processes.get_mut(&self.task_id) {
+            // No result received these bytes. Retain them for /jobs inspection,
+            // but do not let an abandoned foreground wait wake a new model turn.
+            shell.completion_reported = true;
+        }
     }
 }
 
@@ -4753,6 +4799,20 @@ impl ToolSpec for BashTool {
             Some(forced) => forced,
             None => optional_str(&input, "action")?.unwrap_or("run"),
         };
+        let mut policy_input = input.clone();
+        if let Some(object) = policy_input.as_object_mut() {
+            object.insert("action".into(), json!(action));
+        }
+        crate::core::engine::tool_catalog::enforce_tool_denial(
+            context,
+            self.name(),
+            &policy_input,
+        )?;
+        if action == "interact" && context.shell_policy != ShellPolicy::Full {
+            return Err(ToolError::permission_denied(
+                "Sending shell input requires full shell permission.",
+            ));
+        }
         match action {
             "wait" => return self.execute_wait(&input, context).await,
             "interact" => return self.execute_interact(&input, context).await,

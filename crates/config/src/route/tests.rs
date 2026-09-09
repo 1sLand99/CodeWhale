@@ -415,8 +415,8 @@ fn resolver_routes_only_official_deepseek_flash_over_responses() {
             Some("deepseek-v5-future"),
         ))
         .expect("unknown future model preserves direct-provider pass-through");
-    assert_eq!(future.protocol(), RequestProtocol::Responses);
-    assert_eq!(future.endpoint().endpoint_key, "responses");
+    assert_eq!(future.protocol(), RequestProtocol::ChatCompletions);
+    assert_eq!(future.endpoint().endpoint_key, "chat");
 
     let legacy_unknown = resolver
         .resolve(&req(
@@ -442,6 +442,34 @@ fn resolver_routes_only_official_deepseek_flash_over_responses() {
         custom.capabilities().server_side_web_search,
         CapabilityState::Unknown
     );
+}
+
+#[test]
+fn resolver_uncatalogued_deepseek_preview_keeps_chat_and_verbatim_model() {
+    let model = "deepseek-v4.1-flash-expires-on-0910";
+    for base_url in [
+        "https://api.deepseek.com",
+        "https://api.deepseek.com/v1",
+        "https://api.deepseek.com/beta",
+    ] {
+        let route = RouteResolver::new()
+            .resolve(&RouteRequest {
+                base_url_override: Some(base_url.to_string()),
+                ..req(Some(ProviderKind::Deepseek), Some(model))
+            })
+            .expect("uncatalogued preview keeps direct-provider pass-through");
+        assert_eq!(route.provider_kind(), ProviderKind::Deepseek);
+        assert_eq!(route.wire_model_id().as_str(), model);
+        assert!(
+            route.canonical_model().is_none(),
+            "no fallback to a known model"
+        );
+        assert_eq!(route.protocol(), RequestProtocol::ChatCompletions);
+        assert_eq!(route.endpoint().endpoint_key, "chat");
+        assert_eq!(route.endpoint().base_url, base_url);
+        assert_eq!(route.capabilities().image_input, CapabilityState::Unknown);
+        assert_eq!(route.limits().output_tokens, None);
+    }
 }
 
 #[test]
@@ -1101,11 +1129,30 @@ fn openrouter_custom_endpoint_preserves_qwen37_alias() {
 #[test]
 fn opencode_go_resolver_accepts_only_chat_completions_models() {
     let resolver = RouteResolver::new();
-    let chat_models = crate::OPENCODE_GO_CHAT_MODELS;
-    assert!(chat_models.contains(&"grok-4.5"));
-    assert!(chat_models.contains(&"kimi-k3"));
+    // Literal review fixture: the 2026-09-08 endpoint table plus previously
+    // accepted IDs retained for compatibility. Do not derive from the contract.
+    let chat_models = [
+        "deepseek-v4-pro",
+        "grok-4.5",
+        "glm-5.2",
+        "glm-5.1",
+        "kimi-k3",
+        "kimi-k2.7-code",
+        "kimi-k2.6",
+        "deepseek-v4-flash",
+        "mimo-v2.5",
+        "mimo-v2.5-pro",
+        "glm-5.3-flash",
+        "glm-5.3",
+        "longcat-2.0",
+        "deepseek-v4-flash-vision-exp",
+        "hy4-preview",
+        "hy3",
+        "omen-alpha",
+    ];
+    assert_eq!(crate::OPENCODE_GO_CHAT_MODELS, &chat_models);
 
-    for &model in chat_models {
+    for model in chat_models {
         for requested in [model.to_string(), format!("opencode-go/{model}")] {
             let route = resolver
                 .resolve(&req(Some(ProviderKind::OpencodeGo), Some(&requested)))
@@ -1116,6 +1163,7 @@ fn opencode_go_resolver_accepts_only_chat_completions_models() {
                 "{requested}"
             );
             assert_eq!(route.wire_model_id().as_str(), model, "{requested}");
+            assert_eq!(route.protocol(), RequestProtocol::ChatCompletions);
         }
     }
 
@@ -1126,18 +1174,24 @@ fn opencode_go_resolver_accepts_only_chat_completions_models() {
 }
 
 #[test]
-fn opencode_go_resolver_rejects_messages_models_even_on_custom_base_urls() {
+fn opencode_go_resolver_rejects_non_chat_models_even_on_custom_base_urls() {
     let resolver = RouteResolver::new();
-    let messages_models = [
+    let non_chat_models = [
         "minimax-m3",
         "minimax-m2.7",
         "minimax-m2.5",
         "qwen3.7-max",
         "qwen3.7-plus",
         "qwen3.6-plus",
+        "qwen3.8-max",
+        "qwen3.8-flash",
+        "grok-4.6",
+        "gpt-5.6-luna",
+        "muse-spark-1.3-contributor",
+        "muse-spark-1.2-contributor",
     ];
 
-    for model in messages_models {
+    for model in non_chat_models {
         for requested in [model.to_string(), format!("opencode-go/{model}")] {
             for base_url_override in [None, Some("https://go-gateway.example.test/v1".to_string())]
             {
@@ -1791,6 +1845,33 @@ fn custom_endpoint_does_not_inherit_first_party_pricing() {
         "a custom proxy cannot inherit first-party pricing by reusing the model id: {:?}",
         out.pricing()
     );
+}
+
+#[test]
+fn exact_endpoint_catalog_may_carry_its_own_pricing_on_a_custom_base_url() {
+    use super::candidate::PricingSku;
+
+    let request = RouteRequest {
+        explicit_provider: Some(ProviderKind::Deepseek),
+        model_selector: Some(LogicalModelRef::from("deepseek-v4-pro")),
+        saved_provider_model: None,
+        base_url_override: Some("https://authenticated-catalog.example.test/v1".to_string()),
+        limit_overrides: Vec::new(),
+    };
+    let out = priced_deepseek_resolver()
+        .resolve_with_endpoint_catalog_authority(&request)
+        .expect("exact endpoint-owned catalog route resolves");
+
+    match out.pricing() {
+        Some(PricingSku::Token {
+            input_per_mtok,
+            output_per_mtok,
+        }) => {
+            assert_eq!(*input_per_mtok, Some(0.28));
+            assert_eq!(*output_per_mtok, Some(0.42));
+        }
+        other => panic!("expected exact endpoint pricing, got {other:?}"),
+    }
 }
 
 #[test]

@@ -64,14 +64,17 @@ pub(crate) fn route_identity_fields(
     }
     let field = |kind, text: String| RouteIdentityField { kind, text };
     let mut candidates: Vec<Vec<RouteIdentityField>> = Vec::new();
-    if tier != ShellTier::Compact && !provider.is_empty() && !effort.is_empty() {
+    if tier != ShellTier::Compact && !provider.is_empty() {
         // The smallest shell never repeats the provider: model and effort are
         // the two facts that change what comes back.
-        candidates.push(vec![
+        let mut fields = vec![
             field(RouteFieldKind::Provider, provider),
             field(RouteFieldKind::Model, model.clone()),
-            field(RouteFieldKind::Effort, effort.clone()),
-        ]);
+        ];
+        if !effort.is_empty() {
+            fields.push(field(RouteFieldKind::Effort, effort.clone()));
+        }
+        candidates.push(fields);
     }
     if !effort.is_empty() {
         candidates.push(vec![
@@ -203,17 +206,6 @@ fn fit_notice(text: &str, budget: usize) -> Option<String> {
     join_while_fitting(&notice_clauses(first, &CLAUSE_MARKS), budget)
 }
 
-/// Toasts share the footer rail, so their typed level must resolve through
-/// the same closed status-bar grammar as the phase marker around them.
-fn status_toast_ink(level: crate::tui::app::StatusToastLevel) -> ChromeInk {
-    match level {
-        crate::tui::app::StatusToastLevel::Info => ChromeInk::Info,
-        crate::tui::app::StatusToastLevel::Success => ChromeInk::Outcome,
-        crate::tui::app::StatusToastLevel::Warning => ChromeInk::Attention,
-        crate::tui::app::StatusToastLevel::Error => ChromeInk::Failure,
-    }
-}
-
 /// Map the boot surface's typed severity through the same semantic palette as
 /// every other footer fact. Keeping this conversion closed makes the plugin
 /// warning/failure distinction testable without guessing from its text.
@@ -232,27 +224,17 @@ fn boot_activity_ink(level: crate::tui::session_boot::SessionBootActivityLevel) 
 /// visible after `done`, only routine informational copy yields.
 fn selected_notice(
     status_toast: Option<crate::tui::app::StatusToast>,
-    phase: ShellPhase,
     phase_label: &str,
 ) -> Option<(String, ChromeInk, bool)> {
     status_toast
-        .filter(|toast| {
-            let survives_completion = matches!(
-                toast.level,
-                crate::tui::app::StatusToastLevel::Warning
-                    | crate::tui::app::StatusToastLevel::Error
-            );
-            (phase != ShellPhase::Done || survives_completion)
-                && !toast.text.trim().is_empty()
-                && toast.text.trim() != phase_label
-        })
+        .filter(|toast| !toast.text.trim().is_empty() && toast.text.trim() != phase_label)
         .map(|toast| {
             let urgent = matches!(
                 toast.level,
                 crate::tui::app::StatusToastLevel::Warning
                     | crate::tui::app::StatusToastLevel::Error
             );
-            (toast.text.clone(), status_toast_ink(toast.level), urgent)
+            (toast.text.clone(), toast.level.ink(), urgent)
         })
 }
 
@@ -303,6 +285,36 @@ mod tests {
             crate::tui::underwater::phase_ink(ShellPhase::Working).family(),
             crate::palette::SemanticFamily::Failure
         );
+    }
+
+    #[test]
+    fn done_footer_preserves_unresolved_notice_behind_later_routine_info() {
+        use crate::tui::app::StatusToastLevel;
+        for (level, ink) in [
+            (StatusToastLevel::Warning, ChromeInk::Attention),
+            (StatusToastLevel::Error, ChromeInk::Failure),
+        ] {
+            let mut app = test_app();
+            app.runtime_turn_status = Some("completed".into());
+            app.push_status_toast("Unresolved issue", level, Some(12_000));
+            app.push_status_toast("Routine update", StatusToastLevel::Info, Some(5_000));
+            assert_eq!(ShellPhase::from_app(&app), ShellPhase::Done);
+            assert!(
+                app.history.is_empty(),
+                "the transcript must not satisfy this fixture"
+            );
+            let facts = tideline_footer_from_app(&mut app, 140);
+            assert_eq!(facts.right, Some(("Unresolved issue".into(), ink)));
+            let mut buf = Buffer::empty(Rect::new(0, 0, 140, 1));
+            render_tideline_footer(
+                Rect::new(0, 0, 140, 1),
+                &mut buf,
+                &facts.widget(&app.ui_theme, false),
+            );
+            let text: String = buf.content.iter().map(|cell| cell.symbol()).collect();
+            assert!(text.contains("Unresolved issue"), "{text}");
+            assert!(!text.contains("Routine update"));
+        }
     }
 
     #[test]
@@ -471,6 +483,27 @@ mod tests {
     /// long model id; whole fields shed (provider first, effort label next)
     /// and neither name is ever clipped. Ported from the identity band to
     /// `route_identity_fields`.
+    #[test]
+    fn unproven_effort_keeps_named_provider_when_the_route_fits() {
+        let mut app = test_app();
+        app.set_provider_identity(crate::config::ApiProvider::Custom, "lab-gateway");
+        app.model = "unlisted-model".to_string();
+        assert!(app.provable_reasoning_effort_label().is_none());
+        let fields = route_identity_fields(&app, ShellTier::for_chrome_width(160), 100).unwrap();
+        assert_eq!(
+            fields.iter().map(|field| field.kind).collect::<Vec<_>>(),
+            vec![RouteFieldKind::Provider, RouteFieldKind::Model]
+        );
+        assert_eq!(fields[0].text, "lab-gateway");
+        assert_eq!(fields[1].text, "unlisted-model");
+        let compact = route_identity_fields(&app, ShellTier::Compact, 100).unwrap();
+        assert_eq!(compact.len(), 1);
+        assert_eq!(compact[0].kind, RouteFieldKind::Model);
+        let narrow = route_identity_fields(&app, ShellTier::for_chrome_width(160), 14).unwrap();
+        assert_eq!(narrow.len(), 1);
+        assert_eq!(narrow[0].text, "unlisted-model");
+    }
+
     #[test]
     fn long_custom_route_names_shed_whole_fields_across_width_tiers() {
         let model = "deepseek-v4-flash-vision-preview-2026-08-01";
@@ -1269,7 +1302,7 @@ pub(crate) fn tideline_footer_from_app(app: &mut App, width: u16) -> TidelineFoo
     // Clause-shed against half the row — the posture facts own the other
     // half.
     let notice_budget = (usize::from(width) / 2).max(8);
-    let right = selected_notice(app.active_status_toast(), phase, &phase_label)
+    let right = selected_notice(app.active_status_toast(phase), &phase_label)
         .map(|(text, ink, _urgent)| (text, ink))
         .or_else(|| {
             let boot = crate::tui::session_boot::SessionBootSurface::from_app(app);

@@ -300,7 +300,21 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
                 AppAction::UpdateCompaction(app.compaction_config()),
             );
         }
-        let model_id = if app.accepts_custom_model_ids() {
+        let declared = app.api_provider != ApiProvider::OpenaiCodex
+            && codewhale_config::catalog::configured::validate_configured_models(
+                &app.configured_models,
+            )
+            .is_ok()
+            && app.configured_models.iter().any(|model| {
+                model.id == name
+                    && model.matches_route(
+                        app.provider_identity_for_persistence(),
+                        &app.active_route_base_url,
+                    )
+            });
+        let model_id = if declared {
+            name.to_string()
+        } else if app.accepts_custom_model_ids() {
             let Some(model_id) = normalize_custom_model_id(name) else {
                 return CommandResult::error(format!(
                     "Invalid model '{name}'. Expected a non-empty model ID."
@@ -321,7 +335,19 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
                 app.api_provider,
                 ApiProvider::Deepseek | ApiProvider::DeepseekCN | ApiProvider::Zai
             );
-        let route_resolution = if strict_direct_custom_endpoint {
+        let route_resolution = if declared {
+            match crate::route_runtime::resolve_declared_model_candidate(
+                app.api_provider,
+                app.provider_identity_for_persistence(),
+                &model_id,
+                &app.active_route_base_url,
+                app.active_context_window_override,
+                &app.configured_models,
+            ) {
+                Ok(resolution) => Some(resolution),
+                Err(reason) => return CommandResult::error(reason),
+            }
+        } else if strict_direct_custom_endpoint {
             None
         } else {
             // `/model` normally resolves against the active provider's
@@ -1253,6 +1279,8 @@ mod tests {
         // model either — the change is session-local until the user explicitly
         // saves it via the route-save prompt.
         let _settings = SettingsPathGuard::new();
+        let startup_config = crate::config::home_config_path().expect("isolated startup config");
+        let startup_before = std::fs::read(&startup_config).ok();
         {
             let seed = crate::settings::Settings {
                 default_provider: Some("deepseek".to_string()),
@@ -1271,7 +1299,8 @@ mod tests {
         assert!(!result.is_error, "GLM-5.2 is valid on Z.ai");
 
         let settings = crate::settings::Settings::load().expect("load settings");
-        // The shared default provider is untouched.
+        // Neither canonical startup config nor the legacy archive changes.
+        assert_eq!(std::fs::read(startup_config).ok(), startup_before);
         assert_eq!(settings.default_provider.as_deref(), Some("deepseek"));
         // No scoped entry was written either — session-local.
         assert_eq!(
@@ -1596,7 +1625,7 @@ mod tests {
         assert_eq!(app.view_stack.top_kind(), Some(ModalKind::SubAgents));
         assert_eq!(
             app.status_message,
-            Some("Fetching current-session sub-agents...".to_string())
+            Some("Finding this session's sub-agents...".to_string())
         );
     }
 

@@ -9,7 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { run, runOk, ExecError, tryJson, have } from "../exec.mjs";
+import { run, runOk, ExecError, tryJson, have, currentSignal, throwIfAborted } from "../exec.mjs";
 
 const DEVICE_TMP = "/data/local/tmp/cu";
 
@@ -63,6 +63,10 @@ function assertEventStrategy(strategy) {
   }
 }
 
+function rejectAppSelectors(args) {
+  if (["app_ref", "window_id", "windowIndex"].some(key => Object.hasOwn(args, key))) throw Object.assign(new ExecError("HarmonyOS cannot select an app or window for observation or element actions; explicit selectors are unsupported"), { code: "unsupported_selector" });
+}
+
 export function create({ exec }) {
   const shell = (args, opts = {}) => exec.shell(args, { timeoutMs: 20_000, ...opts });
 
@@ -101,6 +105,7 @@ export function create({ exec }) {
   }
 
   async function centerOf(target) {
+    rejectAppSelectors(target);
     const tree = await dumpLayout();
     const els = flatten(tree);
     const el = els[target.index];
@@ -112,8 +117,30 @@ export function create({ exec }) {
   let recording = null; // {id, dir, startedAt, intervalMs, timer, display}
   let displayPixels = null;
 
+  async function stopFrames() {
+    const rec = recording;
+    if (!rec) return null;
+    rec.stopped = true;
+    clearInterval(rec.timer);
+    rec.controller.abort();
+    let timer;
+    try {
+      await Promise.race([rec.pending, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new ExecError("Harmony recording frame did not stop within 2 seconds")), 2_000);
+      })]);
+    } finally { clearTimeout(timer); }
+    recording = null;
+    return rec;
+  }
+
   return {
     platform: "harmonyos",
+    // Session/route cleanup stops capture without a long mux or deleting
+    // unfinished frames. Failed cleanup retains the recorder for a retry.
+    closeSession: async () => {
+      const rec = await stopFrames();
+      return rec ? { id: rec.id, frames: rec.seq, framesDir: rec.dir } : null;
+    },
     probe: async () => {
       const r = await exec.run("hdc", [...exec.targetArgs, "list", "targets"], { timeoutMs: 10_000 });
       const targets = r.stdout.trim().split("\n").filter(Boolean);
@@ -146,7 +173,8 @@ export function create({ exec }) {
       const bundles = out.split("\n").map((s) => s.trim()).filter((s) => /^[a-zA-Z][\w.]*$/.test(s));
       return { apps: bundles.map((b) => ({ name: b, bundle_id: b, kind: "bundle" })) };
     },
-    list_windows: async () => {
+    list_windows: async (args = {}) => {
+      rejectAppSelectors(args);
       const out = await deviceOut(["hidumper", "-s", "WindowManagerService", "-a", "-a"], { timeoutMs: 25_000 }).catch(() => "");
       const windows = out.split("\n").filter((l) => /Window Name|bundleName/i.test(l)).slice(0, 40).map((l) => ({ title: l.trim().slice(0, 160) }));
       return { windows: windows.length ? windows : [{ title: "(window list unavailable on this HarmonyOS build)" }] };
@@ -165,12 +193,15 @@ export function create({ exec }) {
       }
       throw new ExecError(`aa start failed: ${last}`);
     },
-    get_app_state: async () => {
+    get_app_state: async (args = {}) => {
+      rejectAppSelectors(args);
       const tree = await dumpLayout();
       const els = flatten(tree);
       return { bundle_id: tree.attributes?.bundleName ?? null, elements: els, truncated: els.length >= 600 };
     },
-    screenshot: async ({ path: outPath } = {}) => {
+    screenshot: async (args = {}) => {
+      rejectAppSelectors(args);
+      const { path: outPath } = args;
       const dir = process.env.CODEWHALE_CU_RECORDINGS_DIR || path.join(os.homedir(), ".codewhale-cu", "recordings");
       fs.mkdirSync(dir, { recursive: true });
       const file = outPath || path.join(dir, `shot-${new Date().toISOString().replace(/[:.]/g, "-")}-${crypto.randomBytes(3).toString("hex")}.jpeg`);
@@ -242,27 +273,36 @@ export function create({ exec }) {
       const id = crypto.randomBytes(4).toString("hex");
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), `cu-rec-${id}-`));
       const startedAt = new Date().toISOString();
-      recording = { id, dir, startedAt, intervalMs, seq: 0 };
-      const tick = async () => {
-        if (!recording || recording.id !== id) return;
-        try {
-          const remote = `${DEVICE_TMP}-rec-${String(recording.seq).padStart(5, "0")}.jpeg`;
-          await deviceOut(["snapshot_display", "-f", remote], { timeoutMs: 15_000 });
-          await exec.pullFile(remote, path.join(dir, `f${String(recording.seq).padStart(5, "0")}.jpeg`), { timeoutMs: 15_000 });
-          await shell(["rm", "-f", remote]).catch(() => {});
-          recording.seq++;
-        } catch {}
+      const rec = recording = { id, dir, startedAt, intervalMs, seq: 0, controller: new AbortController() };
+      const tick = () => {
+        if (rec.stopped || rec.pending) return rec.pending;
+        rec.pending = (async () => {
+          const opts = { timeoutMs: 15_000, signal: rec.controller.signal };
+          const remote = `${DEVICE_TMP}-rec-${id}-${String(rec.seq).padStart(5, "0")}.jpeg`;
+          try {
+            await deviceOut(["snapshot_display", "-f", remote], opts);
+            await exec.pullFile(remote, path.join(dir, `f${String(rec.seq).padStart(5, "0")}.jpeg`), opts);
+            rec.seq++;
+          } finally { await shell(["rm", "-f", remote], opts).catch(() => {}); }
+        })().catch(() => {}).finally(() => { rec.pending = null; });
+        return rec.pending;
       };
-      await tick();
-      const timer = setInterval(tick, Math.max(150, intervalMs));
-      recording.timer = timer;
+      const signal = currentSignal();
+      const abort = () => rec.controller.abort();
+      signal?.addEventListener("abort", abort, { once: true });
+      try {
+        throwIfAborted(signal);
+        await tick();
+        throwIfAborted(signal);
+        if (rec.stopped) throw new ExecError("Harmony recording closed during startup");
+        rec.timer = setInterval(tick, Math.max(150, intervalMs));
+      } catch (err) { await stopFrames(); throw err; }
+      finally { signal?.removeEventListener("abort", abort); }
       return { id, mode: "snapshot-series", intervalMs, startedAt, note: "no HarmonyOS CLI screen recorder; frames are muxed into mp4 on stop" };
     },
     recordingStop: async ({ id }) => {
       if (!recording || recording.id !== id) throw new ExecError(`unknown recording "${id}"`);
-      clearInterval(recording.timer);
-      const { dir, seq, startedAt, intervalMs } = recording;
-      recording = null;
+      const { dir, seq, startedAt, intervalMs } = await stopFrames();
       const dirOut = process.env.CODEWHALE_CU_RECORDINGS_DIR || path.join(os.homedir(), ".codewhale-cu", "recordings");
       fs.mkdirSync(dirOut, { recursive: true });
       const out = path.join(dirOut, `rec-${id}.mp4`);

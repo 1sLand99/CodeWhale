@@ -308,6 +308,12 @@ impl ChatWidget {
             };
         }
 
+        // Reserve the scrollbar's column before wrapping, so painting it cannot
+        // erase the final character of a line. Keep this width stable when the
+        // history starts/stops scrolling; cached lines and copy metadata must
+        // use the same layout on both sides of that transition.
+        let transcript_width = content_area.width.saturating_sub(1).max(1);
+
         // Per-cell revision caching (fix for issue #78):
         //
         // Every committed history cell carries its own revision counter in
@@ -426,7 +432,7 @@ impl ChatWidget {
             app.viewport.transcript_cache.ensure_split(
                 &shards,
                 &cell_revisions,
-                content_area.width.max(1),
+                transcript_width,
                 render_options,
                 &app.folded_thinking,
                 None,
@@ -527,7 +533,7 @@ impl ChatWidget {
             app.viewport.transcript_cache.ensure_filtered(
                 &filtered_cells,
                 &filtered_revs,
-                content_area.width.max(1),
+                transcript_width,
                 render_options,
                 &app.folded_thinking,
                 Some(&app.collapsed_cell_map),
@@ -8088,47 +8094,89 @@ mod tests {
     /// 1-column gutter rather than overdrawing chat content).
     #[test]
     fn chat_widget_reserves_scrollbar_gutter_when_scrollbar_visible() {
-        let mut app = create_test_app();
-        // Many short messages → forces the scrollbar to be visible.
-        for i in 0..200 {
-            app.add_message(HistoryCell::User {
-                content: format!("user message {i}"),
-            });
-        }
-
-        let area = Rect {
-            x: 0,
-            y: 0,
-            width: 80,
-            height: 8,
+        let content_hash = "0123456789abcdef".repeat(4);
+        let capability_hash = "fedcba9876543210".repeat(4);
+        // System continuations paint a left rail as well as the right scrollbar.
+        // Neither decoration is part of a wrapped trust token.
+        let token_text = |text: &str| -> String {
+            text.chars()
+                .filter(|ch| !ch.is_whitespace() && !matches!(ch, '│' | '┃' | '\u{258f}'))
+                .collect()
         };
-        let mut buf = Buffer::empty(area);
-        let widget = ChatWidget::new(&mut app, area);
-        widget.render(area, &mut buf);
-
-        // The rightmost column should host the scrollbar track/thumb.
-        // The penultimate column should still hold normal content (a digit,
-        // letter, or space — never the scrollbar glyph).
-        let scrollbar_track = "│";
-        let scrollbar_thumb = "┃";
-        let mut scrollbar_seen = false;
-        for y in 0..area.height {
-            let last = buf[(area.width - 1, y)].symbol();
-            let penult = buf[(area.width - 2, y)].symbol();
-            if last == scrollbar_track || last == scrollbar_thumb {
-                scrollbar_seen = true;
+        for filtered in [false, true] {
+            let mut app = create_test_app();
+            app.low_motion = true;
+            app.fancy_animations = false;
+            app.use_mouse_capture = false;
+            for i in 0..20 {
+                app.add_message(HistoryCell::User {
+                    content: format!("user message {i}"),
+                });
             }
-            assert!(
-                penult != scrollbar_track && penult != scrollbar_thumb,
-                "scrollbar leaked into column {} (cell {:?}) at row {y}",
-                area.width - 2,
-                penult
-            );
+            app.add_message(HistoryCell::System {
+                content: format!(
+                    "Content hash:\n{content_hash}\nCapability hash:\n{capability_hash}"
+                ),
+            });
+            if filtered {
+                app.collapsed_cells.insert(0);
+            }
+
+            // Reuse the cache across scrollbar appearance, narrow-pane resizes,
+            // and disappearance. Both ordinary and filtered histories must keep
+            // every trust-token character in the painted terminal cells.
+            for (width, height) in [
+                (40, 100),
+                (40, 16),
+                (58, 16),
+                (60, 16),
+                (80, 16),
+                (40, 16),
+                (40, 100),
+            ] {
+                let area = Rect::new(2, 1, width, height);
+                let mut buf = Buffer::empty(area);
+                let widget = ChatWidget::new(&mut app, area);
+                assert_eq!(widget.scrollbar.is_some(), height == 16);
+                widget.render(area, &mut buf);
+
+                let rendered = buffer_text(&buf, area);
+                let joined = token_text(&rendered);
+                for hash in [&content_hash, &capability_hash] {
+                    assert!(
+                        joined.contains(hash.as_str()),
+                        "lost trust-token characters at {width}x{height}, filtered={filtered}: {rendered:?}"
+                    );
+                    // The decoration filter must still reject actual overpaint:
+                    // replace the last hex cell on this token's first row with
+                    // a scrollbar, as in the reported narrow-pane failure.
+                    let y = (area.y..area.bottom())
+                        .find(|&y| {
+                            buffer_text(&buf, Rect::new(area.x, y, width, 1)).contains(&hash[..16])
+                        })
+                        .expect("the first token segment is visible");
+                    let x = (area.x..area.right())
+                        .rev()
+                        .find(|&x| {
+                            let symbol = buf[(x, y)].symbol();
+                            symbol.len() == 1 && symbol.as_bytes()[0].is_ascii_hexdigit()
+                        })
+                        .expect("the token row contains hex cells");
+                    let mut overpainted = buf.clone();
+                    overpainted[(x, y)].set_symbol("│");
+                    assert!(
+                        !token_text(&buffer_text(&overpainted, area)).contains(hash.as_str()),
+                        "the token check must reject a scrollbar-erased hex cell"
+                    );
+                }
+                if widget.scrollbar.is_some() {
+                    for y in widget.transcript_area.y..widget.transcript_area.bottom() {
+                        assert!(matches!(buf[(area.right() - 1, y)].symbol(), "│" | "┃"));
+                        assert!(!matches!(buf[(area.right() - 2, y)].symbol(), "│" | "┃"));
+                    }
+                }
+            }
         }
-        assert!(
-            scrollbar_seen,
-            "scrollbar should be visible for a long history"
-        );
     }
 
     #[test]

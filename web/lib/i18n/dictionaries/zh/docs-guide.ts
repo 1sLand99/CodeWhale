@@ -8,15 +8,15 @@ import type { DocsGuideDict } from "../types";
 export const docsGuide: DocsGuideDict = {
   metaTitle: "新手指引 · Codewhale 文档",
   metaDescription:
-    "从安装到配置理想 fleet 的完整路径：安装、无需密钥的首次会话、连接提供商、设置 fleet。",
+    "安装 Codewhale、连接模型并开始第一项任务。需要模型与角色列表时，再配置 Fleet。",
   bodyClassName: "text-ink-soft leading-[1.9] tracking-wide",
   overviewTitle: "新手指引",
   overviewLead:
-    "从一条安装命令到配置好你的 fleet，四步走完。",
+    "安装 Codewhale，连接模型，然后交给它一项任务。Fleet 配置为可选步骤。",
   sessionTitle: "看一次真实会话",
   sessionLead:
-    "这里将放一段真实会话的录像。目前还没有录制，所以什么也不显示。",
+    "查看一项任务从首次请求到完成的全过程。",
   nextTitle: "接下来",
   sourceNote:
-    "来源文档：docs/GUIDE.md, docs/KEYBINDINGS.md · 步骤文案来自 web/lib/content/getting-started.ts；更新时请同步修改 docs-map.ts。",
+    "更多细节见文档中的用户指南与快捷键说明。",
 };

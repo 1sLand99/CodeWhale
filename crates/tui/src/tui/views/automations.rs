@@ -816,6 +816,7 @@ mod tests {
         let at = Utc.with_ymd_and_hms(2026, 9, 4, 17, 0, 0).unwrap();
         AutomationRecord {
             schema_version: 1,
+            execution_scope: Some(crate::task_manager::test_execution_scope("test")),
             id: id.to_string(),
             name: format!("cwc daily {id}"),
             prompt: "patrol".to_string(),
@@ -852,6 +853,7 @@ mod tests {
             thread_id: None,
             turn_id: None,
             error: None,
+            dispatch: None,
         }
     }
 
@@ -938,7 +940,8 @@ mod tests {
         let _env = crate::test_support::lock_test_env();
         let root = tempfile::tempdir().unwrap();
         let manager = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::automation_manager::AutomationManager::open(root.path().join("store")).unwrap(),
+            crate::automation_manager::AutomationManager::open_for_test(root.path().join("store"))
+                .unwrap(),
         ));
         let mut view = AutomationsView::from_rows(Vec::new(), Locale::En);
         view.workspace = root.path().to_path_buf();

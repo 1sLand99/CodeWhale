@@ -9,7 +9,7 @@ use serde::Serialize;
 use crate::config::{
     ApiProvider, Config, has_api_key_for, normalize_model_name_for_provider, provider_capability,
 };
-use crate::provider_lake::{all_catalog_models_for_provider, models_for_provider};
+use crate::provider_lake::models_for_provider;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -28,6 +28,10 @@ pub(crate) struct ModelRouteCandidate {
     pub(crate) provider_name: &'static str,
     pub(crate) provider_display_name: &'static str,
     pub(crate) model: String,
+    /// Explicit declarations keep case-sensitive wire identity; bundled aliases
+    /// retain the existing case-insensitive convenience lookup.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) user_declared: bool,
     pub(crate) context_window: u32,
     /// The context window came from the legacy capability fallback (an `_Nk`
     /// name-suffix parse or a vendor-family heuristic), not a route fact
@@ -102,6 +106,20 @@ impl ModelInventory {
             for model in models_for_provider(config, active_provider, provider) {
                 push_model(&mut models, provider, &model);
             }
+            for declaration in config.custom_models.as_deref().unwrap_or_default() {
+                if crate::provider_lake::configured_model_for_route(
+                    config,
+                    provider,
+                    &config.provider_identity_for(provider),
+                    &config.base_url_for_route(provider),
+                    &declaration.id,
+                )
+                .is_some()
+                    && !models.contains(&declaration.id)
+                {
+                    models.push(declaration.id.clone());
+                }
+            }
             if models.is_empty() {
                 push_model(&mut models, provider, &default_model);
             }
@@ -110,6 +128,7 @@ impl ModelInventory {
                 let readiness =
                     crate::provider_readiness::resolve_for_model(config, provider, &model, health);
                 let mut capability = provider_capability(provider, &model);
+                let mut user_declared = false;
                 // #5239/#5441: a candidate whose window came from the legacy
                 // capability fallback (a `_Nk` name-suffix parse or a
                 // vendor-family heuristic) carries the number *and* the fact
@@ -122,7 +141,7 @@ impl ModelInventory {
                 {
                     if let Some(context_window) = route.candidate.limits().context_tokens {
                         capability.context_window = context_window.min(u64::from(u32::MAX)) as u32;
-                        context_window_unverified = false;
+                        context_window_unverified = !route.context_window.source.is_verified();
                     }
                     // A concrete offering maximum is a stronger fact than the
                     // static compatibility matrix — and is the only way a
@@ -136,14 +155,35 @@ impl ModelInventory {
                     {
                         capability.max_output = Some(max_output);
                     }
+                    user_declared = route
+                        .candidate
+                        .applied_limit_overrides()
+                        .iter()
+                        .any(|entry| {
+                            entry.source
+                                == codewhale_config::route::OverrideSource::UserModelMetadata
+                        });
+                    if user_declared {
+                        context_window_unverified = !route.context_window.source.is_verified();
+                        capability.context_window = route.context_window.tokens;
+                        capability.max_output = route
+                            .candidate
+                            .limits()
+                            .output_tokens
+                            .and_then(|value| u32::try_from(value).ok());
+                        capability.thinking_supported = route.candidate.capabilities().reasoning
+                            == codewhale_config::route::CapabilityState::Supported;
+                    }
                     // Do not promote bare `k3` into the global capability
                     // catalog. Its thinking trace contract belongs only to
                     // Kimi Code's exact membership-plan route.
-                    if crate::config::is_exact_kimi_code_k3_route(
-                        provider,
-                        &route.candidate.endpoint().base_url,
-                        route.candidate.wire_model_id().as_str(),
-                    ) {
+                    if !user_declared
+                        && crate::config::is_exact_kimi_code_k3_route(
+                            provider,
+                            &route.candidate.endpoint().base_url,
+                            route.candidate.wire_model_id().as_str(),
+                        )
+                    {
                         capability.thinking_supported = true;
                     }
                 }
@@ -162,8 +202,9 @@ impl ModelInventory {
                 }
                 // Unready routes stay visible (annotated) so an operator can
                 // override explicitly, but they are never a silent default.
-                let default_for_provider =
-                    readiness.can_attempt() && model.eq_ignore_ascii_case(&default_model);
+                let default_for_provider = readiness.can_attempt()
+                    && (model == default_model
+                        || (!user_declared && model.eq_ignore_ascii_case(&default_model)));
                 if default_for_provider {
                     tags.push("default");
                 }
@@ -177,6 +218,7 @@ impl ModelInventory {
                     provider_display_name: provider.display_name(),
                     default_for_provider,
                     model,
+                    user_declared,
                     context_window: capability.context_window,
                     context_window_unverified,
                     max_output: capability.max_output,
@@ -251,9 +293,17 @@ impl ModelInventory {
         provider: ApiProvider,
         model: &str,
     ) -> Option<&ModelRouteCandidate> {
-        self.candidates.iter().find(|candidate| {
-            candidate.provider == provider && candidate.model.eq_ignore_ascii_case(model.trim())
-        })
+        let model = model.trim();
+        self.candidates
+            .iter()
+            .find(|candidate| candidate.provider == provider && candidate.model == model)
+            .or_else(|| {
+                self.candidates.iter().find(|candidate| {
+                    candidate.provider == provider
+                        && !candidate.user_declared
+                        && candidate.model.eq_ignore_ascii_case(model)
+                })
+            })
     }
 
     pub(crate) fn active_default(&self) -> Option<&ModelRouteCandidate> {
@@ -344,6 +394,9 @@ impl ModelInventory {
 }
 
 fn push_model(models: &mut Vec<String>, provider: ApiProvider, model: &str) {
+    if provider == ApiProvider::Ollama && crate::config::is_unresolved_local_ollama_model(model) {
+        return;
+    }
     let Some(model) = normalize_model_name_for_provider(provider, model)
         .or_else(|| crate::config::normalize_custom_model_id(model))
     else {
@@ -365,55 +418,29 @@ fn configured_model_for_provider(config: &Config, provider: ApiProvider) -> Opti
         .filter(|model| !model.is_empty())
 }
 
-fn provider_default_model(config: &Config, provider: ApiProvider) -> String {
-    if provider == ApiProvider::Ollama {
-        let configured = if provider == config.api_provider() {
-            Some(config.default_model())
-        } else {
-            configured_model_for_provider(config, provider)
-        };
-        let unresolved = configured.as_deref().is_none_or(|model| {
-            model.trim().eq_ignore_ascii_case("auto")
-                || crate::config::is_unresolved_local_ollama_model(model)
-        });
-        if unresolved
-            && let Some(live) = crate::provider_lake::live_per_provider_models(provider)
-                .into_iter()
-                .next()
-        {
-            return live;
-        }
-        if let Some(model) = configured.filter(|model| {
-            !model.trim().eq_ignore_ascii_case("auto")
-                && !crate::config::is_unresolved_local_ollama_model(model)
-        }) {
-            return model;
-        }
-    }
-    if provider == config.api_provider() {
-        let model = config.default_model();
-        if !model.trim().eq_ignore_ascii_case("auto") {
-            return model;
-        }
-    }
-    if provider == ApiProvider::Moonshot
-        && config
-            .provider_config_for(provider)
-            .is_some_and(crate::config::provider_config_uses_kimi_imported_token)
-    {
-        return crate::config::DEFAULT_KIMI_CODE_MODEL.to_string();
-    }
-    all_catalog_models_for_provider(provider)
-        .first()
-        .map(|model| model.as_str())
-        .unwrap_or(match provider {
-            ApiProvider::Ollama => crate::config::DEFAULT_OLLAMA_MODEL,
-            ApiProvider::OllamaCloud => crate::config::DEFAULT_OLLAMA_CLOUD_MODEL,
-            ApiProvider::Sglang => crate::config::DEFAULT_SGLANG_MODEL,
-            ApiProvider::Vllm => crate::config::DEFAULT_VLLM_MODEL,
-            _ => crate::config::DEFAULT_TEXT_MODEL,
+pub(crate) fn provider_default_model(config: &Config, provider: ApiProvider) -> String {
+    let configured = configured_model_for_provider(config, provider).or_else(|| {
+        (provider == config.api_provider() && config.default_text_model.is_some())
+            .then(|| config.default_model())
+    });
+    let selector = configured.as_deref().filter(|model| {
+        !model.trim().eq_ignore_ascii_case("auto")
+            && !(provider == ApiProvider::Ollama
+                && crate::config::is_unresolved_local_ollama_model(model))
+    });
+    // Inventory labels must use the executable route's exact endpoint default,
+    // not whichever provider-wide snapshot happened to refresh most recently.
+    crate::route_runtime::resolve_runtime_route(config, provider, selector)
+        .map(|route| route.model)
+        .unwrap_or_else(|_| {
+            configured.unwrap_or_else(|| {
+                provider
+                    .kind()
+                    .map(|kind| kind.provider().default_model())
+                    .unwrap_or(crate::config::DEFAULT_TEXT_MODEL)
+                    .to_string()
+            })
         })
-        .to_string()
 }
 
 fn auth_source_for_provider(config: &Config, provider: ApiProvider) -> Option<ModelAuthSource> {
@@ -541,7 +568,8 @@ mod tests {
     fn inventory_marks_local_providers_keyless() {
         let _env_lock = crate::test_support::lock_test_env();
         let _deepseek = crate::test_support::EnvVarGuard::remove("DEEPSEEK_API_KEY");
-        let config = Config::default();
+        let mut config = Config::default();
+        config.set_provider_model_override(ApiProvider::Ollama, Some("local-tag:latest".into()));
 
         let inventory = ModelInventory::from_config(&config);
 
@@ -931,6 +959,7 @@ mod tests {
             model: "gpt-5.5".to_string(),
             context_window: 128_000,
             context_window_unverified: false,
+            user_declared: false,
             max_output: Some(16_384),
             thinking_supported: true,
             cache_telemetry_supported: false,
@@ -962,6 +991,7 @@ mod tests {
                 model: "unsupported-model".to_string(),
                 context_window: 1,
                 context_window_unverified: false,
+                user_declared: false,
                 max_output: Some(1),
                 thinking_supported: false,
                 cache_telemetry_supported: false,
@@ -997,6 +1027,7 @@ mod tests {
             model: "unsupported-model".to_string(),
             context_window: 1,
             context_window_unverified: false,
+            user_declared: false,
             max_output: Some(1),
             thinking_supported: false,
             cache_telemetry_supported: false,
@@ -1133,31 +1164,122 @@ mod tests {
     }
 
     #[test]
-    fn ollama_default_prefers_live_local_tags_over_the_unresolved_marker() {
+    fn declared_inventory_ids_remain_case_distinct() {
+        let _env = crate::test_support::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let mut config: Config = toml::from_str(include_str!(
+            "../../config/tests/fixtures/custom_models.toml"
+        ))
+        .unwrap();
+        let declaration = config.custom_models.as_mut().unwrap().first_mut().unwrap();
+        declaration.id = "Preview-fixture".into();
+        let mut other = declaration.clone();
+        other.id = "preview-fixture".into();
+        other.limit.as_mut().unwrap().context = Some(128000);
+        config.custom_models.as_mut().unwrap().push(other);
+        config.set_provider_api_key_override(ApiProvider::Deepseek, Some("fixture-key".into()));
+        let inventory = ModelInventory::from_config(&config);
+        for (id, context) in [("Preview-fixture", 96000), ("preview-fixture", 128000)] {
+            let candidate = inventory.candidate(ApiProvider::Deepseek, id).unwrap();
+            assert!(candidate.user_declared);
+            assert_eq!(candidate.model, id);
+            assert_eq!(candidate.context_window, context);
+        }
+        assert!(
+            inventory
+                .candidate(ApiProvider::Deepseek, "PREVIEW-FIXTURE")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn ollama_inventory_default_uses_only_the_fresh_exact_endpoint_roster() {
+        use codewhale_config::catalog::{
+            CatalogOffering, CatalogRefreshError, CatalogSource, ProviderCatalogDelta,
+            base_url_fingerprint, now_unix,
+        };
+
+        let _env = crate::test_support::lock_test_env();
         let _live = crate::provider_lake::lock_live_snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        crate::provider_catalog_live::reset_cache_for_test();
         crate::provider_lake::clear_live_snapshot();
-        let config = Config {
+        let mut config = Config {
             provider: Some("ollama".to_string()),
             ..Default::default()
         };
+        let endpoint = "http://localhost:11445/v1";
+        config.provider_config_for_mut(ApiProvider::Ollama).base_url = Some(endpoint.into());
         assert_eq!(
             provider_default_model(&config, ApiProvider::Ollama),
-            crate::config::DEFAULT_OLLAMA_MODEL
+            "unknown"
         );
-
-        crate::provider_lake::merge_live_offerings(vec![
-            codewhale_config::catalog::CatalogOffering {
-                provider: "ollama".to_string(),
-                wire_model_id: "qwen2.5:0.5b".to_string(),
-                endpoint_key: "chat".to_string(),
-                default_for_provider: true,
-                ..Default::default()
+        assert!(
+            ModelInventory::from_config(&config)
+                .candidates
+                .iter()
+                .all(|row| { row.provider != ApiProvider::Ollama || row.model != "unknown" })
+        );
+        let fingerprint = base_url_fingerprint(endpoint);
+        let now = now_unix();
+        let ticket = crate::provider_catalog_live::begin_refresh_for_identity(
+            ApiProvider::Ollama,
+            "ollama",
+            endpoint,
+        );
+        crate::provider_catalog_live::record_success_if_current(
+            &ticket,
+            ProviderCatalogDelta {
+                provider: "ollama".into(),
+                base_url_fingerprint: fingerprint.clone(),
+                fetched_at: now,
+                offerings: vec![CatalogOffering {
+                    provider: "ollama".into(),
+                    wire_model_id: "qwen2.5:0.5b".into(),
+                    endpoint_key: "chat".into(),
+                    source: CatalogSource::Live {
+                        base_url_fingerprint: fingerprint.clone(),
+                        fetched_at: now,
+                    },
+                    ..Default::default()
+                }],
             },
-        ]);
+        );
         assert_eq!(
             provider_default_model(&config, ApiProvider::Ollama),
             "qwen2.5:0.5b"
         );
+        let inventory = ModelInventory::from_config(&config);
+        assert!(inventory.candidates.iter().any(|row| {
+            row.provider == ApiProvider::Ollama
+                && row.model == "qwen2.5:0.5b"
+                && row.default_for_provider
+        }));
+        let mut other = config.clone();
+        other.provider_config_for_mut(ApiProvider::Ollama).base_url =
+            Some("http://localhost:11446/v1".into());
+        assert_eq!(
+            provider_default_model(&other, ApiProvider::Ollama),
+            "unknown"
+        );
+        crate::provider_catalog_live::record_failure_if_current(
+            &ticket,
+            "ollama",
+            &fingerprint,
+            CatalogRefreshError::Network,
+        );
+        assert_eq!(
+            provider_default_model(&config, ApiProvider::Ollama),
+            "unknown"
+        );
+        config.set_provider_model_override(ApiProvider::Ollama, Some("chosen:tag".into()));
+        assert_eq!(
+            provider_default_model(&config, ApiProvider::Ollama),
+            "chosen:tag"
+        );
+        crate::provider_catalog_live::reset_cache_for_test();
         crate::provider_lake::clear_live_snapshot();
     }
 }

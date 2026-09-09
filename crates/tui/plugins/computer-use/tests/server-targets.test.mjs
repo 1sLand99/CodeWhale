@@ -95,6 +95,13 @@ after(() => {
   for (const d of [stateDir, recDir, path.dirname(callsFile)]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} }
 });
 
+test("app-state arguments distinguish an omitted reference from an explicit null", async () => {
+  await tool("get_app_state", {});
+  assert.equal(Object.hasOwn(calls("get_app_state").at(-1).args, "app_ref"), false);
+  await tool("get_app_state", { app_ref: null });
+  assert.equal(calls("get_app_state").at(-1).args.app_ref, null);
+});
+
 test("summary preserves readable UI and original target indices while full retains tree structure", async () => {
   for (const detail of [undefined, "summary", "compact"]) {
     const state = await tool("get_app_state", { detail });
@@ -208,6 +215,9 @@ test("element targets are revalidated; moved geometry re-aims and marks the rece
     assert.equal(r.target_reacquired, true);
     const last = calls("left_click").at(-1);
     assert.deepEqual({ x: last.args.target.x, y: last.args.target.y }, { x: 130, y: 215 }); // fresh center
+    assert.deepEqual(last.args.target.path, [0, 1], "pointer dispatch retains the original element path");
+    assert.equal(last.args.target.windowIndex, 0);
+    assert.equal(last.args.target.label, "OK");
   } finally {
     setControl(null);
   }
@@ -253,16 +263,30 @@ test("in-place replacement (same geometry, different label) fails element_stale"
   }
 });
 
+test("an element losing its label or role is stale even if the geometry matches", async () => {
+  const st = await freshState();
+  const before = calls("left_click").length;
+  try {
+    for (const identity of [{ role: "AXButton", label: "" }, { role: "AXButton" }, { label: "OK" }]) {
+      setControl({ found: true, element: { ...identity, position: { x: 10, y: 20 }, size: { w: 60, h: 30 } } });
+      const r = await tool("left_click", { target: { type: "element", state_id: st.state_id, index: 1 } });
+      assert.equal(r.ok, false);
+      assert.equal(r.error.code, "element_stale");
+    }
+    assert.equal(calls("left_click").length, before);
+  } finally { setControl(null); }
+});
+
 test("a state_id issued on another computer fails state_wrong_computer", async () => {
   const st = await freshState(); // bound to "local"
-  const reg = await tool("computer_register", { computer: "pad", transport: "hdc" });
+  const reg = await tool("computer_register", { computer: "other-pad", transport: "hdc" });
   assert.equal(reg.ok, true);
   try {
-    const r = await tool("left_click", { computer: "pad", target: { type: "element", state_id: st.state_id, index: 1 } });
+    const r = await tool("left_click", { computer: "other-pad", target: { type: "element", state_id: st.state_id, index: 1 } });
     assert.equal(r.ok, false);
     assert.equal(r.error.code, "state_wrong_computer");
   } finally {
-    await tool("computer_remove", { computer: "pad" });
+    await tool("computer_remove", { computer: "other-pad" });
     await tool("computer_switch", { computer: "local" });
   }
 });

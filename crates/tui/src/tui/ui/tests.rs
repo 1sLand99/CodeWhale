@@ -6,7 +6,7 @@ use super::compaction_flow::{
 use super::event_loop::{TabDispatch, dispatch_tab_key, shell_binding_for_key};
 use super::observer_hooks::{
     bounded_subagent_hook_preview, subagent_completion_status, subagent_failure_notice,
-    subagent_status_from_completion_result, turn_end_observer_metadata,
+    turn_end_observer_metadata,
 };
 use super::task_projection::{
     ShellExecLiveUpdate, active_rlm_task_entries, newly_completed_id,
@@ -55,6 +55,46 @@ use std::time::{Duration, Instant};
 use crate::models::Role;
 use crate::tui::selection::{SelectionAutoscroll, TranscriptSelectionPoint};
 use tempfile::TempDir;
+
+#[test]
+fn failed_engine_channel_settles_classifier_batch_once() {
+    let _cost_scope = crate::cost_status::test_scope();
+    let route = crate::cost_status::EffectiveRouteEnvelope::capture(
+        None,
+        ApiProvider::Deepseek,
+        "deepseek",
+        "classifier-model",
+        Some(ApiProvider::Deepseek.default_base_url()),
+        chrono::Utc::now(),
+    );
+    let batch = crate::cost_status::RuntimeUsageBatch {
+        records: vec![crate::cost_status::RuntimeUsageRecord {
+            source_id: "auto-router:dispatch-usage".to_string(),
+            usage: crate::cost_status::EffectiveRouteUsage {
+                route: route.clone(),
+                usage: crate::models::Usage {
+                    input_tokens: 6,
+                    output_tokens: 2,
+                    ..Default::default()
+                },
+            },
+        }],
+        drop_records: vec![crate::cost_status::RuntimeUsageDropRecord {
+            source_id: "auto-router:dispatch-drop".to_string(),
+            route,
+        }],
+        dropped_records: 1,
+    };
+
+    for _ in 0..2 {
+        drop(super::dispatch::UnacceptedDispatchUsage {
+            scope: crate::cost_status::scope_token(),
+            batch: Some(batch.clone()),
+        });
+    }
+    let pending = crate::cost_status::drain();
+    assert_eq!(pending.usage_source_fingerprints.len(), 2);
+}
 
 #[test]
 fn session_shell_area_fills_the_host_terminal_at_every_width() {
@@ -532,11 +572,13 @@ fn completed_turn_cost_receipt_uses_the_captured_effective_route() {
             auto_model: false,
             receipt: None,
             billing: Some(crate::core::events::RouteBillingEnvelope {
+                openrouter_vendor: None,
                 billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
                 // A real fingerprint, produced by the production hasher. A
                 // receipt fails closed on anything that is not one, so a
                 // hand-written placeholder here would have tested nothing.
                 endpoint_fingerprint: served_endpoint_fingerprint(),
+                provider_live_pricing: None,
                 billing_mode: crate::cost_status::RouteBillingMode::Metered,
                 dispatched_at: chrono::Utc::now(),
             }),
@@ -673,6 +715,14 @@ fn focus_test_app() -> App {
 /// One representative terminal encoding per shell binding.
 fn shell_binding_probe(id: ShellBindingId) -> KeyEvent {
     match id {
+        ShellBindingId::RedactionGateConfirm => {
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)
+        }
+        ShellBindingId::RedactionGateKeepOrBack => {
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE)
+        }
+        ShellBindingId::RedactionGateQuit => KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+        ShellBindingId::RedactionGateScroll => KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
         ShellBindingId::ToolDetails => KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT),
         ShellBindingId::ContextInspector => KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT),
         ShellBindingId::ProviderRoute => KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE),
@@ -724,6 +774,10 @@ fn no_shell_binding_changes_meaning_once_the_composer_has_text() {
             "{:?} changed meaning because the composer has text",
             binding.id
         );
+        if binding.focus == crate::tui::shell_key_routing::FocusScope::RedactionGate {
+            assert_eq!(on_typed, None, "consent keys must not act on a draft");
+            continue;
+        }
         assert_eq!(
             on_typed,
             Some(binding.id),
@@ -876,6 +930,25 @@ fn focus_owner_follows_the_surface_that_owns_the_keys() {
         shell_binding_for_key(&app, &KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)),
         Some(ShellBindingId::Help)
     );
+
+    app.redaction_gate = true;
+    assert_eq!(app.focus(), Focus::RedactionGate);
+    let confirm = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+    assert_eq!(
+        shell_binding_for_key(&app, &confirm),
+        Some(ShellBindingId::RedactionGateConfirm)
+    );
+    assert_eq!(
+        shell_binding_for_key(&app, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        None
+    );
+    assert_eq!(
+        shell_binding_for_key(&app, &KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)),
+        None
+    );
+    app.onboarding = crate::tui::app::OnboardingState::Welcome;
+    assert_eq!(app.focus(), Focus::Modal(ModalKind::Help));
+    assert_eq!(shell_binding_for_key(&app, &confirm), None);
 }
 
 #[test]
@@ -2032,6 +2105,24 @@ impl SettingsHomeGuard {
             _lock: lock,
         }
     }
+}
+
+fn assert_saved_startup_route(provider: &str, provider_key: &str, model: &str) -> toml::Value {
+    let path = crate::config::home_config_path().expect("isolated global config path");
+    let saved: toml::Value =
+        toml::from_str(&std::fs::read_to_string(path).expect("read canonical startup config"))
+            .expect("parse canonical startup config");
+    assert_eq!(saved["route_preferences_version"].as_integer(), Some(1));
+    assert_eq!(saved["provider"].as_str(), Some(provider));
+    assert_eq!(
+        saved["providers"][provider_key]["model"].as_str(),
+        Some(model)
+    );
+    let settings = crate::settings::Settings::load().expect("unchanged settings archive");
+    assert_eq!(settings.default_provider, None);
+    assert_eq!(settings.default_model, None);
+    assert_eq!(settings.provider_models, None);
+    saved
 }
 
 #[test]
@@ -6588,6 +6679,159 @@ fn setup_runtime_preset_apply_persists_settings_config_and_state() {
 }
 
 #[test]
+fn setup_runtime_presets_preserve_environment_authority_and_state() {
+    use crate::test_support::EnvVarGuard;
+
+    let home = SettingsHomeGuard::new();
+    let _posture_env = [
+        "CODEWHALE_APPROVAL_POLICY",
+        "DEEPSEEK_APPROVAL_POLICY",
+        "CODEWHALE_ALLOW_SHELL",
+        "DEEPSEEK_ALLOW_SHELL",
+        "CODEWHALE_SANDBOX_MODE",
+        "DEEPSEEK_SANDBOX_MODE",
+    ]
+    .map(EnvVarGuard::remove);
+    let _managed = EnvVarGuard::set(
+        "CODEWHALE_MANAGED_CONFIG_PATH",
+        home._tmp.path().join("absent-managed.toml"),
+    );
+    let _requirements = EnvVarGuard::set(
+        "CODEWHALE_REQUIREMENTS_PATH",
+        home._tmp.path().join("absent-requirements.toml"),
+    );
+    let config_path = crate::config_persistence::config_toml_path(None).expect("config path");
+    std::fs::create_dir_all(config_path.parent().expect("config parent"))
+        .expect("config directory");
+    std::fs::write(
+        &config_path,
+        "# preserve root defaults\napproval_policy = \"auto\"\nallow_shell = true\nsandbox_mode = \"workspace-write\"\n",
+    )
+    .expect("seed config");
+    Settings {
+        default_mode: "plan".to_string(),
+        permission_posture: Some("ask".to_string()),
+        ..Settings::default()
+    }
+    .save()
+    .expect("seed settings");
+    codewhale_config::SetupState::default()
+        .save()
+        .expect("seed setup state");
+    let files = [
+        config_path.clone(),
+        Settings::path().expect("settings path"),
+        codewhale_config::SetupState::path().expect("setup state path"),
+    ];
+    let app_posture = |app: &App| {
+        (
+            app.mode,
+            app.allow_shell,
+            app.trust_mode,
+            app.approval_mode,
+            app.yolo,
+            app.approval_policy_locked(),
+            app.configured_sandbox_mode.clone(),
+            app.configured_sandbox_network,
+            app.agent_trust_baseline(),
+            app.needs_redraw,
+        )
+    };
+
+    for (canonical, legacy, restrictive, permissive) in [
+        (
+            "CODEWHALE_APPROVAL_POLICY",
+            "DEEPSEEK_APPROVAL_POLICY",
+            "never",
+            "auto",
+        ),
+        (
+            "CODEWHALE_ALLOW_SHELL",
+            "DEEPSEEK_ALLOW_SHELL",
+            "false",
+            "true",
+        ),
+        (
+            "CODEWHALE_SANDBOX_MODE",
+            "DEEPSEEK_SANDBOX_MODE",
+            "read-only",
+            "workspace-write",
+        ),
+    ] {
+        for (canonical_value, legacy_value) in [
+            (Some(restrictive), None),
+            (None, Some(restrictive)),
+            (Some(restrictive), Some(permissive)),
+        ] {
+            let _canonical = canonical_value.map_or_else(
+                || EnvVarGuard::remove(canonical),
+                |value| EnvVarGuard::set(canonical, value),
+            );
+            let _legacy = legacy_value.map_or_else(
+                || EnvVarGuard::remove(legacy),
+                |value| EnvVarGuard::set(legacy, value),
+            );
+            let mut config = Config::load(Some(config_path.clone()), None)
+                .expect("load the real environment-controlled config");
+            let effective = match canonical {
+                "CODEWHALE_APPROVAL_POLICY" => config.approval_policy.clone(),
+                "CODEWHALE_ALLOW_SHELL" => config.allow_shell.map(|value| value.to_string()),
+                _ => config.sandbox_mode.clone(),
+            };
+            assert_eq!(
+                effective.as_deref(),
+                Some(restrictive),
+                "{canonical}: canonical wins when both are set"
+            );
+
+            let mut options = crate::test_support::test_tui_options(home._tmp.path());
+            options.config_path = Some(config_path.clone());
+            options.allow_shell = config.allow_shell.unwrap_or(false);
+            options.start_in_agent_mode = true;
+            let mut app = App::new(options, &config);
+            let app_before = app_posture(&app);
+            // Compare the whole resolved Config without exposing credential-bearing
+            // fields in an assertion's failure output.
+            let config_before = format!("{config:?}");
+            let files_before = files
+                .each_ref()
+                .map(|path| std::fs::read(path).expect("snapshot"));
+
+            for preset in [
+                crate::tui::setup::SetupRuntimePreset::NormalAgent,
+                crate::tui::setup::SetupRuntimePreset::AskFirst,
+                crate::tui::setup::SetupRuntimePreset::HighTrustLocal,
+            ] {
+                let state = codewhale_config::SetupState {
+                    runtime_posture_source: codewhale_config::RuntimePostureSource::Confirmed,
+                    ..Default::default()
+                };
+                let error = apply_setup_runtime_preset(&mut app, &mut config, preset, state)
+                    .expect_err("a preset must not override environment authority");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("environment-controlled runtime posture"),
+                    "{canonical}/{preset:?}: {error:#}"
+                );
+                assert!(
+                    format!("{config:?}") == config_before,
+                    "{canonical}/{preset:?}: resolved Config changed"
+                );
+                assert_eq!(app_posture(&app), app_before, "{canonical}/{preset:?}");
+                for (path, before) in files.iter().zip(&files_before) {
+                    assert!(
+                        std::fs::read(path).expect("persisted state") == *before,
+                        "{canonical}/{preset:?}: changed {}",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn setup_runtime_preset_rolls_back_durable_and_live_state_when_state_save_fails() {
     let _home = SettingsHomeGuard::new();
     let config_path = crate::config_persistence::config_toml_path(None).expect("config path");
@@ -8310,6 +8554,158 @@ async fn mode_change_update_sends_restored_agent_policy() {
     }
 }
 
+fn operate_tui_route_config() -> Config {
+    let mut config: Config = toml::from_str(
+        r#"
+provider = "startup-route"
+[providers.startup-route]
+kind = "openai-compatible"
+base_url = "https://startup.example.test/v1"
+model = "startup-model"
+auth_mode = "none"
+[providers.collision-route]
+kind = "openai-compatible"
+base_url = "https://custom-openai.example.test/v1"
+model = "table-default"
+auth_mode = "none"
+"#,
+    )
+    .expect("operate TUI routes");
+    let custom = &mut config.providers.as_mut().expect("providers").custom;
+    let collision = custom.remove("collision-route").expect("custom fixture");
+    custom.insert("openai".to_string(), collision);
+    config
+}
+
+#[tokio::test]
+async fn operate_entry_preserves_live_custom_identity_and_auto_over_startup_route() {
+    let _env = crate::test_support::lock_test_env();
+    for selected in ["session-model", "auto"] {
+        let root = TempDir::new().expect("root");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path());
+        let _operate = crate::test_support::EnvVarGuard::set(
+            "CODEWHALE_OPERATE_DIR",
+            root.path().join("operate"),
+        );
+        let mut config = operate_tui_route_config();
+        config.fleet_operator_route_applied = true;
+        let manager = crate::automation_manager::AutomationManager::open_for_test(
+            root.path().join("automations"),
+        )
+        .expect("manager");
+        let automations = Arc::new(tokio::sync::Mutex::new(manager));
+        let mut app = create_test_app();
+        app.workspace = root.path().to_path_buf();
+        app.runtime_services.automations = Some(automations.clone());
+        app.set_provider_identity_record(
+            config
+                .resolve_persisted_provider_identity(Some("custom"), Some("openai"))
+                .expect("exact custom"),
+        );
+        app.set_model_selection(selected.to_string());
+        app.last_effective_model = Some("previous-turn-model".to_string());
+        let engine = mock_engine_handle();
+        apply_mode_update(
+            &mut app,
+            &engine.handle,
+            &config,
+            crate::tui::app::AppMode::Operate,
+        )
+        .await;
+        let record = automations
+            .lock()
+            .await
+            .get_automation(crate::operate::OPERATE_KEEPALIVE_ID)
+            .expect("keepalive installed");
+        assert_eq!(record.model.as_deref(), Some(selected));
+        assert_eq!(record.model_provider.as_deref(), Some("custom"));
+        assert_eq!(record.model_provider_id.as_deref(), Some("openai"));
+        assert_eq!(record.auto_approve, Some(false));
+        let operation = crate::operate::OperationStore::open(root.path().join("operate"))
+            .expect("store")
+            .load()
+            .expect("load")
+            .expect("operation");
+        assert_eq!(operation.lead_operator.model, selected);
+        assert!(
+            operation
+                .roster
+                .iter()
+                .filter(|member| member.id == "lead")
+                .all(|member| member.model == selected)
+        );
+        assert!(operation.credentials_present);
+        assert!(
+            automations
+                .lock()
+                .await
+                .list_runs(&record.id, None)
+                .expect("runs")
+                .is_empty(),
+            "entry alone is not task execution"
+        );
+    }
+}
+
+#[tokio::test]
+async fn operate_rejected_attach_does_not_reactivate_saved_keepalive() {
+    let _env = crate::test_support::lock_test_env();
+    let root = TempDir::new().expect("root");
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path());
+    let operate_dir = root.path().join("operate");
+    let _operate = crate::test_support::EnvVarGuard::set("CODEWHALE_OPERATE_DIR", &operate_dir);
+    let config = operate_tui_route_config();
+    let manager = crate::automation_manager::AutomationManager::open_for_test(
+        root.path().join("automations"),
+    )
+    .expect("manager");
+    crate::operate::upsert_keepalive(&manager, root.path(), true, &config, None).expect("upsert");
+    crate::operate::pause_keepalive(&manager).expect("pause");
+    let before = serde_json::to_value(
+        manager
+            .get_automation(crate::operate::OPERATE_KEEPALIVE_ID)
+            .expect("record"),
+    )
+    .expect("json");
+    std::fs::create_dir_all(&operate_dir).expect("directory");
+    std::fs::write(operate_dir.join("current.json"), b"{broken")
+        .expect("corrupt operation fixture");
+    let automations = Arc::new(tokio::sync::Mutex::new(manager));
+    let mut app = create_test_app();
+    app.workspace = root.path().to_path_buf();
+    app.runtime_services.automations = Some(automations.clone());
+    app.set_provider_identity_record(
+        config
+            .active_provider_identity(ApiProvider::Custom)
+            .expect("identity"),
+    );
+    app.set_model_selection("startup-model".into());
+    let engine = mock_engine_handle();
+    apply_mode_update(
+        &mut app,
+        &engine.handle,
+        &config,
+        crate::tui::app::AppMode::Operate,
+    )
+    .await;
+    let record = automations
+        .lock()
+        .await
+        .get_automation(crate::operate::OPERATE_KEEPALIVE_ID)
+        .expect("saved keepalive");
+    assert_eq!(serde_json::to_value(&record).expect("json"), before);
+    assert_eq!(
+        record.status,
+        crate::automation_manager::AutomationStatus::Paused
+    );
+    assert!(record.next_run_at.is_none());
+    assert_eq!(
+        std::fs::read(operate_dir.join("current.json")).expect("operation"),
+        b"{broken"
+    );
+    assert!(app.history.iter().any(|cell| matches!(cell, HistoryCell::System { content } if content.contains("Operate did not start"))));
+}
+
 #[tokio::test]
 async fn operate_mode_entry_attaches_to_recorded_operation() {
     let _lock = crate::test_support::lock_test_env();
@@ -8318,14 +8714,24 @@ async fn operate_mode_entry_attaches_to_recorded_operation() {
     // Pre-record a planned operation: entering Operate must attach to it
     // (same id) instead of minting a fresh record that resets spend and plan.
     let store = crate::operate::OperationStore::open(dir.path()).expect("store");
-    let recorded =
-        crate::operate::start_operation(&store, dir.path(), Some("Steady ops".into()), None, true)
-            .expect("start");
+    let recorded = crate::operate::start_operation(
+        &store,
+        dir.path(),
+        Some("Steady ops".into()),
+        None,
+        true,
+        "selected-model",
+    )
+    .expect("start");
     let mut planned = recorded.clone();
     planned.plan_from_direction();
     store.save(&planned).expect("save planned");
 
     let mut app = create_test_app();
+    app.runtime_services.automations = Some(Arc::new(tokio::sync::Mutex::new(
+        crate::automation_manager::AutomationManager::open_for_test(dir.path().join("automations"))
+            .expect("automations"),
+    )));
     let engine = crate::core::engine::mock_engine_handle();
     assert!(
         apply_mode_update(
@@ -8428,7 +8834,7 @@ async fn provider_switch_clears_turn_cache_history() {
         &mut engine.handle,
         &mut config,
         ApiProvider::Ollama,
-        None,
+        Some("fixture-local:tag".to_string()),
     )
     .await;
 
@@ -8567,7 +8973,7 @@ async fn provider_switch_from_mimo_to_openrouter_without_key_fails_before_dispat
 async fn successful_custom_provider_activation_completes_onboarding() {
     let config_env = ConfigPathEnvGuard::new();
     let mut app = create_test_app();
-    app.config_path = Some(config_env.config_path());
+    app.config_path = crate::config::home_config_path();
     app.onboarding = OnboardingState::Provider;
     app.onboarding_needs_api_key = true;
     app.onboarding_missing_key_recovery = true;
@@ -8596,32 +9002,21 @@ async fn successful_custom_provider_activation_completes_onboarding() {
         .unwrap()
         .join("settings.toml");
     assert_eq!(crate::settings::Settings::path().unwrap(), fixture_settings);
-    assert!(fixture_settings.is_file());
+    assert!(fixture_home.join("config.toml").is_file());
     assert!(fixture_home.join("setup_state.json").is_file());
     assert_ne!(
         app.onboarding,
         OnboardingState::Provider,
         "a successfully activated custom route must complete provider onboarding"
     );
-    let settings = crate::settings::Settings::load().expect("reload custom startup route");
-    assert_eq!(
-        settings.default_provider.as_deref(),
-        Some("fixture-local"),
-        "named custom onboarding must persist the exact identity, not `custom`",
-    );
-    assert_eq!(
-        settings
-            .provider_models
-            .as_ref()
-            .and_then(|models| models.get("fixture-local"))
-            .map(String::as_str),
-        Some("fixture-model"),
-    );
+    assert_saved_startup_route("fixture-local", "fixture-local", "fixture-model");
 }
 
 #[tokio::test]
 async fn failed_custom_provider_activation_stays_in_onboarding_recovery() {
     let config_env = ConfigPathEnvGuard::new();
+    let global_config = crate::config::home_config_path().expect("global config path");
+    let startup_before = std::fs::read(&global_config).ok();
     let blocked_parent = config_env._tmp.path().join("not-a-directory");
     std::fs::write(&blocked_parent, "fixture").expect("create blocking file");
     let mut app = create_test_app();
@@ -8646,6 +9041,7 @@ async fn failed_custom_provider_activation_stays_in_onboarding_recovery() {
     assert!(!switched);
     assert_eq!(app.onboarding, OnboardingState::Provider);
     assert_eq!(app.api_provider, ApiProvider::Deepseek);
+    assert_eq!(std::fs::read(global_config).ok(), startup_before);
     assert_eq!(
         crate::settings::Settings::load()
             .expect("reload failed custom setup settings")
@@ -8859,6 +9255,8 @@ fn setup_confirm_toast_names_secret_store_and_global_scope() {
 #[tokio::test]
 async fn provider_switch_is_session_local_until_explicitly_saved() {
     let _home = SettingsHomeGuard::new();
+    let global_config = crate::config::home_config_path().expect("global config path");
+    let startup_before = std::fs::read(&global_config).ok();
     let tmp = TempDir::new().expect("config tempdir");
     let config_path = tmp.path().join("config.toml");
     std::fs::write(
@@ -8908,6 +9306,7 @@ api_key = "arcee-key"
 
     let settings = crate::settings::Settings::load().expect("load settings");
     assert_eq!(settings.default_provider.as_deref(), None);
+    assert_eq!(std::fs::read(global_config).ok(), startup_before);
 
     // The save decision is pending for the route-save prompt.
     let pending = app.pending_route_save.as_ref().expect("pending save");
@@ -8917,10 +9316,10 @@ api_key = "arcee-key"
 
 /// The provider step is the first run's explicit startup-route decision, not
 /// an ordinary session-local `/provider` preview. Persist it in user-global
-/// settings so a completed Ollama setup cannot restart on DeepSeek merely
+/// config so a completed Ollama setup cannot restart on DeepSeek merely
 /// because the compatibility config still carries a DeepSeek root default.
 #[test]
-fn first_run_ollama_choice_survives_restart_without_rewriting_config() {
+fn first_run_ollama_choice_survives_restart_from_canonical_config() {
     let _home = SettingsHomeGuard::new();
     let config_path = std::env::var_os("DEEPSEEK_CONFIG_PATH")
         .map(PathBuf::from)
@@ -8951,16 +9350,7 @@ fn first_run_ollama_choice_survives_restart_without_rewriting_config() {
 
     complete_provider_picker_onboarding(&mut app, ApiProvider::Ollama);
 
-    let settings = crate::settings::Settings::load().expect("reload onboarding settings");
-    assert_eq!(settings.default_provider.as_deref(), Some("ollama"));
-    assert_eq!(
-        settings
-            .provider_models
-            .as_ref()
-            .and_then(|models| models.get("ollama"))
-            .map(String::as_str),
-        Some(crate::config::DEFAULT_OLLAMA_MODEL),
-    );
+    let saved = assert_saved_startup_route("ollama", "ollama", crate::config::DEFAULT_OLLAMA_MODEL);
     assert!(app.pending_route_save.is_none());
     assert!(
         app.status_message.as_deref().is_some_and(|message| {
@@ -8973,11 +9363,11 @@ fn first_run_ollama_choice_survives_restart_without_rewriting_config() {
         app.status_message,
     );
 
-    // The route belongs to user-global startup settings. Do not rewrite a
-    // folder's compatibility config as a side effect of onboarding.
+    // The canonical provider slot owns the selection; preserve the unrelated
+    // compatibility root for callers that still explicitly read it.
     assert_eq!(
-        std::fs::read_to_string(&config_path).expect("reload config bytes"),
-        original_config,
+        saved["default_text_model"].as_str(),
+        Some("deepseek-v4-pro"),
     );
 
     // Selecting a keyless route is not a health check. Setup state must keep
@@ -9001,7 +9391,20 @@ fn first_run_ollama_choice_survives_restart_without_rewriting_config() {
     app.finish_onboarding_without_feature_intro();
     drop(app);
     let restart_config = Config::load(Some(config_path), None).expect("reload restart config");
-    let restarted = Box::new(App::new(create_test_options(), &restart_config));
+    // A launch derives its startup model from the config it just read
+    // (`run_interactive`: `TuiOptions.model = config.default_model()`). The
+    // shared fixture options hard-code a DeepSeek id no launch would supply
+    // here, and `App::new` only re-derives the model when the legacy Settings
+    // archive still owns the selection — which, since Config became the saved
+    // route authority, it no longer does. Pin the resolved id before `App`
+    // sees it, so a regression in `default_model` cannot hide behind the
+    // app-level assertions below.
+    let options = TuiOptions {
+        model: restart_config.default_model(),
+        ..create_test_options()
+    };
+    assert_eq!(options.model, crate::config::DEFAULT_OLLAMA_MODEL);
+    let restarted = Box::new(App::new(options, &restart_config));
     assert_eq!(restarted.api_provider, ApiProvider::Ollama);
     assert_eq!(restarted.model, crate::config::DEFAULT_OLLAMA_MODEL);
     assert_ne!(
@@ -10109,7 +10512,7 @@ fn manual_compaction_queues_once_after_active_turn_without_blocking() {
     );
     assert_eq!(
         app.status_message.as_deref(),
-        Some("Context compaction queued; it will run after the active turn.")
+        Some("Compaction queued — runs after this turn.")
     );
     match engine.rx_op.try_recv().expect("one queued compact op") {
         crate::core::ops::Op::CompactContext { compaction, .. } => {
@@ -10128,7 +10531,7 @@ fn manual_compaction_queues_once_after_active_turn_without_blocking() {
     );
     assert_eq!(
         app.status_message.as_deref(),
-        Some("Context compaction is already in progress.")
+        Some("Compaction is already running.")
     );
 }
 
@@ -10155,14 +10558,14 @@ fn full_engine_mailbox_defers_manual_compaction_and_flushes_once_drained() {
     assert!(app.deferred_manual_compaction.is_some());
     assert_eq!(
         app.status_message.as_deref(),
-        Some("Context compaction queued; it will run after the active turn.")
+        Some("Compaction queued — runs after this turn.")
     );
 
     // A repeat during deferral is the single queued pass, not a second one.
     try_queue_manual_compaction(&mut app, &config, &engine.handle, None);
     assert_eq!(
         app.status_message.as_deref(),
-        Some("Context compaction is already in progress.")
+        Some("Compaction is already running.")
     );
 
     // The mailbox is still full: the flush waits without dropping the request.
@@ -10237,7 +10640,7 @@ fn closed_engine_mailbox_reports_manual_compaction_unavailable() {
 
     assert!(!app.manual_compaction_queued);
     assert!(app.sticky_status.as_ref().is_some_and(|toast| {
-        toast.level == StatusToastLevel::Error && toast.text.contains("engine is no longer running")
+        toast.level == StatusToastLevel::Error && toast.text.contains("engine stopped")
     }));
 }
 
@@ -10249,7 +10652,7 @@ fn compaction_lifecycle_keeps_truthful_auto_label_until_matching_completion() {
     assert!(app.is_compacting);
     assert_eq!(
         app.status_message.as_deref(),
-        Some("Context automatically compacting…")
+        Some("Auto-compacting context…")
     );
     assert_eq!(
         app.active_compaction
@@ -10270,7 +10673,7 @@ fn compaction_lifecycle_keeps_truthful_auto_label_until_matching_completion() {
     assert!(app.is_compacting, "stale id must not clear newer activity");
     assert_eq!(
         app.status_message.as_deref(),
-        Some("Context automatically compacting…")
+        Some("Auto-compacting context…")
     );
 
     apply_compaction_completed(
@@ -10673,22 +11076,425 @@ async fn lost_strict_message_submit_executor_keeps_dispatch_atomic_and_recoverab
     )
     .await
     .expect("later dispatch remains usable");
-    match engine.rx_op.recv().await.expect("recovery SendMessage") {
-        crate::core::ops::Op::SendMessage { content, .. } => {
-            assert_eq!(content, "recover now");
-        }
-        other => panic!("expected SendMessage, got {other:?}"),
-    }
     let apply_dispatch =
         tokio::time::timeout(std::time::Duration::from_secs(2), completion_rx.recv())
             .await
             .expect("recovery dispatch result timed out")
             .expect("production completion mailbox closed");
     apply_dispatch(&mut app, &engine.handle, &Config::default()).expect("apply recovery dispatch");
+    match engine.rx_op.recv().await.expect("recovery SendMessage") {
+        crate::core::ops::Op::SendMessage { content, .. } => {
+            assert_eq!(content, "recover now");
+        }
+        other => panic!("expected SendMessage, got {other:?}"),
+    }
     assert!(app.history.iter().any(|cell| matches!(
         cell,
         HistoryCell::User { content } if content == "recover now"
     )));
+}
+
+/// A SendMessage must not beat its UI acceptance callback through the other
+/// mailbox. Previously a fast Engine could finish before this callback reset
+/// loading/status/usage and queued a checkpoint over the completed receipt.
+#[tokio::test]
+async fn reserved_dispatch_waits_for_ui_acceptance_before_engine_op() {
+    let mut app = create_test_app();
+    let config = Config::default();
+    let mut engine = mock_engine_handle();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::tui::app::DispatchApplyFn>(1);
+    app.dispatch_completion_tx = Some(tx);
+    start_user_dispatch(
+        &mut app,
+        &config,
+        &engine.handle,
+        QueuedMessage::new("preserve Engine lifecycle".to_string(), None),
+        DispatchRecovery::Immediate,
+    )
+    .expect("start dispatch");
+    let apply = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+        .await
+        .expect("dispatch callback timeout")
+        .expect("dispatch callback");
+    assert!(
+        engine.rx_op.try_recv().is_err(),
+        "Engine cannot start or finish before UI acceptance is installed"
+    );
+    assert!(app.dispatch_in_flight);
+    assert!(app.dispatch_started_at.is_none());
+    apply(&mut app, &engine.handle, &config).expect("accept dispatch");
+    assert!(!app.dispatch_in_flight);
+    assert!(app.is_loading);
+    assert!(app.dispatch_started_at.is_some());
+    assert!(app.pending_turn_route.is_some());
+    assert!(matches!(
+        engine.rx_op.try_recv(),
+        Ok(crate::core::ops::Op::SendMessage { content, .. })
+            if content == "preserve Engine lifecycle"
+    ));
+    assert!(engine.rx_op.try_recv().is_err(), "one Engine admission");
+    assert!(rx.try_recv().is_err(), "no late reset callback remains");
+}
+
+#[tokio::test]
+async fn reserved_dispatch_normal_engine_counts_requests_and_accepts_next_turn() {
+    use crate::core::engine::{Engine, EngineConfig};
+    use crate::core::events::TurnOutcomeStatus;
+    use crate::core::ops::Op;
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    async fn snapshot(handle: &EngineHandle) -> crate::core::ops::SessionSnapshot {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .send(Op::GetSessionSnapshot {
+                tx: Arc::new(Mutex::new(Some(tx))),
+            })
+            .await
+            .expect("snapshot request");
+        tokio::time::timeout(Duration::from_secs(10), rx)
+            .await
+            .expect("Engine control barrier")
+            .expect("snapshot response")
+    }
+
+    let workspace = TempDir::new().expect("workspace");
+    let mut app = create_test_app();
+    app.workspace = workspace.path().to_path_buf();
+    let config = Config::default();
+    let mock = Arc::new(MockLlmClient::new(vec![
+        canned::simple_text_turn("Now re-run the tree suite with the job-assignment fix:"),
+        canned::simple_text_turn("Second real user turn completed."),
+    ]));
+    let (engine, handle) = Engine::new_with_model_client(
+        EngineConfig {
+            workspace: workspace.path().to_path_buf(),
+            snapshots_enabled: false,
+            subagents_enabled: false,
+            terminal_chrome_enabled: false,
+            ..EngineConfig::default()
+        },
+        &config,
+        mock.clone(),
+    );
+    let engine_task = tokio::spawn(engine.run());
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::tui::app::DispatchApplyFn>(1);
+    app.dispatch_completion_tx = Some(tx);
+    let mut turn_ids = Vec::new();
+    for (index, prompt) in ["first real user message", "second real user message"]
+        .into_iter()
+        .enumerate()
+    {
+        start_user_dispatch(
+            &mut app,
+            &config,
+            &handle,
+            QueuedMessage::new(prompt.to_string(), None),
+            DispatchRecovery::Immediate,
+        )
+        .expect("start UI dispatch");
+        let apply = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("dispatch callback timeout")
+            .expect("callback");
+        // A control Op behind an old eager SendMessage waits for that turn.
+        // With reserved admission it returns without any new model request.
+        let before = snapshot(&handle).await;
+        assert_eq!(
+            mock.captured_requests().len(),
+            index,
+            "no model work before UI acceptance"
+        );
+        assert!(
+            !serde_json::to_string(&before.messages)
+                .unwrap()
+                .contains(prompt)
+        );
+        apply(&mut app, &handle, &config).expect("accept UI dispatch");
+        assert!(app.is_loading);
+        assert!(app.dispatch_started_at.is_some());
+        let mut events = handle.rx_event.write().await;
+        let mut terminal_diagnostics = None;
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(30), events.recv())
+                .await
+                .expect("normal Engine turn timeout")
+                .expect("Engine event");
+            match event {
+                EngineEvent::TurnStarted { turn_id, .. } => turn_ids.push(turn_id),
+                EngineEvent::ToolRequestSnapshot { snapshot } if snapshot.terminal.is_some() => {
+                    terminal_diagnostics = snapshot.terminal;
+                }
+                EngineEvent::TurnComplete { status, error, .. } => {
+                    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                    assert!(error.is_none(), "{error:?}");
+                    break;
+                }
+                EngineEvent::ApprovalRequired { .. }
+                | EngineEvent::UserInputRequired { .. }
+                | EngineEvent::ElevationRequired { .. } => panic!("unexpected blocked state"),
+                _ => {}
+            }
+        }
+        drop(events);
+        assert_eq!(mock.captured_requests().len(), index + 1);
+        let terminal = terminal_diagnostics.expect("normal lifecycle terminal diagnostics");
+        assert_eq!(terminal.model_requests_started, 1);
+        assert_eq!(terminal.last_response_tool_calls, Some(0));
+        assert_eq!(terminal.last_response_tool_calls_suppressed, Some(0));
+        assert_eq!(
+            terminal.reason,
+            Some(crate::tool_inspection::TurnStopReason::ProviderNoToolCall)
+        );
+        let saved = snapshot(&handle).await;
+        let saved_messages = serde_json::to_string(&saved.messages).unwrap();
+        for expected in [
+            "first real user message",
+            "Now re-run the tree suite with the job-assignment fix:",
+            "second real user message",
+            "Second real user turn completed.",
+        ]
+        .into_iter()
+        .take((index + 1) * 2)
+        {
+            assert_eq!(saved_messages.matches(expected).count(), 1, "{expected}");
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "no late callback can overwrite terminal state"
+        );
+    }
+    assert_eq!(turn_ids.len(), 2);
+    assert_ne!(turn_ids[0], turn_ids[1]);
+    handle.send(Op::Shutdown).await.expect("shutdown");
+    tokio::time::timeout(Duration::from_secs(10), engine_task)
+        .await
+        .expect("Engine shutdown timeout")
+        .expect("Engine task");
+}
+
+#[tokio::test]
+async fn reserved_dispatch_cancel_before_acceptance_keeps_prompt_and_next_dispatch() {
+    let mut app = create_test_app();
+    let config = Config::default();
+    let mut engine = mock_engine_handle();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::tui::app::DispatchApplyFn>(1);
+    app.dispatch_completion_tx = Some(tx);
+    for cancelled in [true, false] {
+        start_user_dispatch(
+            &mut app,
+            &config,
+            &engine.handle,
+            QueuedMessage::new("recover this prompt".to_string(), None),
+            DispatchRecovery::Immediate,
+        )
+        .expect("start dispatch");
+        let apply = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .expect("dispatch callback timeout")
+            .expect("dispatch callback");
+        assert!(engine.rx_op.try_recv().is_err());
+        if cancelled {
+            engine.handle.cancel();
+            mark_active_turn_cancelled_locally(&mut app);
+            assert!(engine.handle.is_cancelled());
+            assert!(apply(&mut app, &engine.handle, &config).is_err());
+            assert!(!app.is_loading);
+            assert!(!app.dispatch_in_flight);
+            assert!(app.dispatch_started_at.is_none());
+            assert_eq!(app.input, "recover this prompt");
+            assert!(!app.suppress_stream_events_until_turn_complete);
+            assert!(engine.rx_op.try_recv().is_err());
+        } else {
+            apply(&mut app, &engine.handle, &config).expect("next dispatch");
+            assert!(matches!(
+                engine.rx_op.try_recv(),
+                Ok(crate::core::ops::Op::SendMessage { .. })
+            ));
+            assert!(engine.rx_op.try_recv().is_err());
+        }
+    }
+}
+
+#[tokio::test]
+async fn failed_dispatch_after_local_cancel_retires_suppression() {
+    for replaced_session in [false, true] {
+        let mut app = create_test_app();
+        let config = Config::default();
+        let engine = mock_engine_handle();
+        let prepare = prepare_user_dispatch(
+            &mut app,
+            &config,
+            QueuedMessage::new("route failed while cancelling".to_string(), None),
+        )
+        .expect("prepare dispatch");
+        mark_active_turn_cancelled_locally(&mut app);
+        if replaced_session {
+            let _ = crate::cost_status::close_current_scope();
+            app.input = "replacement draft".to_string();
+        }
+        let apply = build_dispatch_error_closure(
+            prepare,
+            DispatchRecovery::Immediate,
+            "injected route or reservation failure".to_string(),
+        );
+        assert!(apply(&mut app, &engine.handle, &config).is_err());
+        assert!(!app.suppress_stream_events_until_turn_complete);
+        assert!(!app.dispatch_in_flight);
+        assert!(!app.is_loading);
+        assert_eq!(
+            app.input,
+            if replaced_session {
+                "replacement draft"
+            } else {
+                "route failed while cancelling"
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn reserved_dispatch_preserves_previous_turn_cancellation_ownership() {
+    for route_error in [true, false] {
+        for previous_turn_completed in [true, false] {
+            let mut app = create_test_app();
+            let config = Config::default();
+            let mut engine = mock_engine_handle();
+            app.suppress_stream_events_until_turn_complete = true;
+            let prepare = prepare_user_dispatch(
+                &mut app,
+                &config,
+                QueuedMessage::new("following a cancelled turn".to_string(), None),
+            )
+            .expect("prepare dispatch");
+            let apply = if route_error {
+                build_dispatch_error_closure(
+                    prepare,
+                    DispatchRecovery::Immediate,
+                    "injected route failure".to_string(),
+                )
+            } else {
+                spawned_dispatch_inner(prepare, DispatchRecovery::Immediate, engine.handle.clone())
+                    .await
+            };
+            // A previous turn may complete during routing. Retirement must
+            // neither clear its outstanding latch nor resurrect a retired one.
+            app.suppress_stream_events_until_turn_complete = !previous_turn_completed;
+            app.is_loading = false;
+            assert!(apply(&mut app, &engine.handle, &config).is_err());
+            assert_eq!(
+                app.suppress_stream_events_until_turn_complete,
+                !previous_turn_completed
+            );
+            assert!(engine.rx_op.try_recv().is_err());
+        }
+    }
+}
+
+#[tokio::test]
+async fn reserved_dispatch_closed_before_acceptance_keeps_prompt() {
+    let mut app = create_test_app();
+    let config = Config::default();
+    let mut engine = mock_engine_handle();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::tui::app::DispatchApplyFn>(1);
+    app.dispatch_completion_tx = Some(tx);
+    start_user_dispatch(
+        &mut app,
+        &config,
+        &engine.handle,
+        QueuedMessage::new("keep rejected prompt".to_string(), None),
+        DispatchRecovery::Immediate,
+    )
+    .expect("start dispatch");
+    let apply = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+        .await
+        .expect("dispatch callback timeout")
+        .expect("dispatch callback");
+    engine.rx_op.close();
+    assert!(apply(&mut app, &engine.handle, &config).is_err());
+    assert!(!app.is_loading);
+    assert!(!app.dispatch_in_flight);
+    assert!(app.dispatch_started_at.is_none());
+    assert_eq!(app.input, "keep rejected prompt");
+    assert!(engine.rx_op.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn reserved_dispatch_replaced_engine_or_session_leaves_current_state_untouched() {
+    for replace_engine in [true, false] {
+        let mut app = create_test_app();
+        let config = Config::default();
+        let mut origin = mock_engine_handle();
+        let mut replacement = mock_engine_handle();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::tui::app::DispatchApplyFn>(1);
+        app.dispatch_completion_tx = Some(tx);
+        start_user_dispatch(
+            &mut app,
+            &config,
+            &origin.handle,
+            QueuedMessage::new("old session prompt".to_string(), None),
+            DispatchRecovery::Immediate,
+        )
+        .expect("start dispatch");
+        let apply = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .expect("dispatch callback timeout")
+            .expect("dispatch callback");
+        origin.handle.cancel();
+        mark_active_turn_cancelled_locally(&mut app);
+        assert!(origin.handle.is_cancelled());
+        assert!(app.suppress_stream_events_until_turn_complete);
+        if !replace_engine {
+            let _ = crate::cost_status::close_current_scope();
+        }
+        app.api_messages = vec![text_message("user", "replacement session")];
+        app.input = "new draft".to_string();
+        assert!(app.dispatch_in_flight, "old admission is still outstanding");
+        app.is_loading = false;
+        let current = if replace_engine {
+            &replacement.handle
+        } else {
+            &origin.handle
+        };
+        assert!(apply(&mut app, current, &config).is_err());
+        assert_eq!(app.api_messages.len(), 1);
+        assert!(
+            matches!(&app.api_messages[0].content[0], ContentBlock::Text { text, .. } if text == "replacement session")
+        );
+        assert_eq!(app.input, "new draft");
+        assert!(!app.is_loading);
+        assert!(!app.dispatch_in_flight);
+        assert!(!app.suppress_stream_events_until_turn_complete);
+        assert!(origin.rx_op.try_recv().is_err());
+        start_user_dispatch(
+            &mut app,
+            &config,
+            current,
+            QueuedMessage::new("new session request".to_string(), None),
+            DispatchRecovery::Immediate,
+        )
+        .expect("next dispatch");
+        let next = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .expect("next callback timeout")
+            .expect("next callback");
+        next(&mut app, current, &config).expect("accept replacement request");
+        assert!(app.is_loading);
+        assert!(!app.suppress_stream_events_until_turn_complete);
+        assert!(
+            !current.is_cancelled(),
+            "replacement admission is not cancelled"
+        );
+        let next_op = if replace_engine {
+            replacement.rx_op.try_recv()
+        } else {
+            origin.rx_op.try_recv()
+        };
+        assert!(matches!(
+            next_op,
+            Ok(crate::core::ops::Op::SendMessage { content, .. })
+                if content == "new session request"
+        ));
+    }
 }
 
 #[tokio::test]
@@ -10773,10 +11579,10 @@ fn subagent_event_handlers_preserve_dispatch_failures_as_separate_toasts() {
         "inspect the repository",
         "inspect the repository",
     );
-    assert_eq!(
-        app.status_message.as_deref(),
-        Some("Agent 1 starting: inspect the repository")
-    );
+    assert!(app.status_toasts.iter().any(|toast| {
+        toast.level == StatusToastLevel::Info
+            && toast.text == "Running · Agent 1 · inspect the repository"
+    }));
     assert!(app.status_toasts.back().is_some_and(|toast| {
         toast
             .text
@@ -10788,12 +11594,12 @@ fn subagent_event_handlers_preserve_dispatch_failures_as_separate_toasts() {
         &mut app,
         "agent-test",
         "finished cleanly",
-        "completed",
+        &crate::tools::subagent::SubAgentStatus::Completed,
     );
-    assert_eq!(
-        app.status_message.as_deref(),
-        Some("Agent 1 completed: finished cleanly")
-    );
+    assert!(app.status_toasts.iter().any(|toast| {
+        toast.level == StatusToastLevel::Success
+            && toast.text == "Sub-agent complete · Agent 1 · finished cleanly"
+    }));
     assert!(app.status_toasts.back().is_some_and(|toast| {
         toast
             .text
@@ -11914,8 +12720,10 @@ fn turn_liveness_recovers_stalled_in_progress_turn() {
             auto_model: false,
             receipt: None,
             billing: Some(crate::core::events::RouteBillingEnvelope {
+                openrouter_vendor: None,
                 billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
                 endpoint_fingerprint: Some("openai-endpoint".to_string()),
+                provider_live_pricing: None,
                 billing_mode: crate::cost_status::RouteBillingMode::Metered,
                 dispatched_at: chrono::Utc::now(),
             }),
@@ -11965,8 +12773,10 @@ fn engine_event_disconnect_recovers_live_turn_immediately() {
             auto_model: false,
             receipt: None,
             billing: Some(crate::core::events::RouteBillingEnvelope {
+                openrouter_vendor: None,
                 billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
                 endpoint_fingerprint: Some("openai-endpoint".to_string()),
+                provider_live_pricing: None,
                 billing_mode: crate::cost_status::RouteBillingMode::Metered,
                 dispatched_at: chrono::Utc::now(),
             }),
@@ -12040,8 +12850,10 @@ fn engine_event_disconnect_cleans_cancelled_turn_metadata() {
             auto_model: false,
             receipt: None,
             billing: Some(crate::core::events::RouteBillingEnvelope {
+                openrouter_vendor: None,
                 billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
                 endpoint_fingerprint: Some("openai-endpoint".to_string()),
+                provider_live_pricing: None,
                 billing_mode: crate::cost_status::RouteBillingMode::Metered,
                 dispatched_at: chrono::Utc::now(),
             }),
@@ -12693,57 +13505,22 @@ fn subagent_completion_status_reads_summary_fallbacks() {
 }
 
 #[test]
-fn subagent_status_from_completion_result_maps_terminal_sentinels() {
-    let failed = r#"Tool timed out
-<codewhale:subagent.done>{"agent_id":"agent_x","status":"failed"}</codewhale:subagent.done>"#;
-    match subagent_status_from_completion_result(failed) {
-        crate::tools::subagent::SubAgentStatus::Failed(reason) => {
-            assert_eq!(reason, "Tool timed out")
-        }
-        status => panic!("expected failed status, got {status:?}"),
-    }
-
-    let interrupted = r#"Waiting for follow-up
-<codewhale:subagent.done>{"agent_id":"agent_x","status":"interrupted"}</codewhale:subagent.done>"#;
-    match subagent_status_from_completion_result(interrupted) {
-        crate::tools::subagent::SubAgentStatus::Interrupted(reason) => {
-            assert_eq!(reason, "Waiting for follow-up")
-        }
-        status => panic!("expected interrupted status, got {status:?}"),
-    }
-
-    let budget = r#"Token budget exhausted
-<codewhale:subagent.done>{"agent_id":"agent_x","status":"budget_exhausted"}</codewhale:subagent.done>"#;
-    assert_eq!(
-        subagent_status_from_completion_result(budget),
-        crate::tools::subagent::SubAgentStatus::BudgetExhausted
+fn agent_complete_toast_is_truthful_and_localized_for_cancelled_workers() {
+    let cancelled = crate::tools::subagent::SubAgentStatus::Cancelled;
+    let mut app = create_test_app();
+    app.ui_locale = crate::localization::Locale::Ja;
+    apply_agent_complete_status_and_observer(&mut app, "agent_x", "worker result", &cancelled);
+    let toast = app.status_toasts.back().unwrap();
+    assert_eq!(toast.level, StatusToastLevel::Warning);
+    assert!(
+        toast
+            .text
+            .starts_with(&*app.tr(MessageId::NotificationSubagentCancelled))
     );
-
-    let cancelled = r#"Cancelled
-<codewhale:subagent.done>{"agent_id":"agent_x","status":"cancelled"}</codewhale:subagent.done>"#;
-    assert_eq!(
-        subagent_status_from_completion_result(cancelled),
-        crate::tools::subagent::SubAgentStatus::Cancelled
-    );
-
-    assert_eq!(
-        subagent_status_from_completion_result("plain successful summary"),
-        crate::tools::subagent::SubAgentStatus::Completed
-    );
-}
-
-#[test]
-fn agent_complete_terminal_verb_is_truthful_for_cancelled_workers() {
-    let cancelled = subagent_status_from_completion_result(
-        r#"Cancelled
-<codewhale:subagent.done>{"agent_id":"agent_x","status":"cancelled"}</codewhale:subagent.done>"#,
-    );
-
-    assert_eq!(subagent_terminal_verb(&cancelled), "cancelled");
-    assert_ne!(subagent_terminal_verb(&cancelled), "completed");
-    assert_eq!(
-        subagent_terminal_verb(&crate::tools::subagent::SubAgentStatus::Completed),
-        "completed"
+    assert!(
+        !toast
+            .text
+            .contains(&*app.tr(MessageId::NotificationSubagentComplete))
     );
 }
 
@@ -12935,7 +13712,10 @@ fn subagent_token_usage_updates_live_cost_counter_without_card_change() {
         &crate::tools::subagent::MailboxMessage::TokenUsage {
             agent_id: "agent-a".to_string(),
             source_id: "response-a".to_string(),
-            route: test_mailbox_route(ApiProvider::Deepseek, "deepseek-v4-flash"),
+            route: Box::new(test_mailbox_route(
+                ApiProvider::Deepseek,
+                "deepseek-v4-flash",
+            )),
             usage: crate::models::Usage {
                 input_tokens: 10_000,
                 output_tokens: 1_000,
@@ -12962,7 +13742,7 @@ fn subagent_token_usage_prices_the_child_route_not_the_parent_route() {
         &crate::tools::subagent::MailboxMessage::TokenUsage {
             agent_id: "agent-codex".to_string(),
             source_id: "response-codex".to_string(),
-            route: test_mailbox_route(ApiProvider::OpenaiCodex, "gpt-5.5"),
+            route: Box::new(test_mailbox_route(ApiProvider::OpenaiCodex, "gpt-5.5")),
             usage: crate::models::Usage {
                 input_tokens: 10_000,
                 output_tokens: 1_000,
@@ -12983,7 +13763,10 @@ fn subagent_token_usage_is_deduped_by_response_source() {
     let usage = crate::tools::subagent::MailboxMessage::TokenUsage {
         agent_id: "agent-a".to_string(),
         source_id: "response-a".to_string(),
-        route: test_mailbox_route(ApiProvider::Deepseek, "deepseek-v4-flash"),
+        route: Box::new(test_mailbox_route(
+            ApiProvider::Deepseek,
+            "deepseek-v4-flash",
+        )),
         usage: crate::models::Usage {
             input_tokens: 10_000,
             output_tokens: 1_000,
@@ -13005,12 +13788,107 @@ fn subagent_token_usage_is_deduped_by_response_source() {
 }
 
 #[test]
+fn active_deleted_origin_mailbox_usage_does_not_accrue_or_restore_the_session() {
+    let _cost_scope = crate::cost_status::test_scope();
+    let mut app = create_test_app();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let manager = crate::session_manager::SessionManager::new(tmp.path().join("sessions"))
+        .expect("session manager");
+    let session = crate::session_manager::create_saved_session_with_id_and_mode(
+        "active-deleted-origin".to_string(),
+        &[],
+        "deepseek-v4-flash",
+        tmp.path(),
+        0,
+        None,
+        Some("agent"),
+    );
+    manager.save_session(&session).expect("save origin");
+    app.current_session_id = Some(session.metadata.id.clone());
+    app.current_session_metadata = Some(session.metadata.clone());
+    let origin_scope = crate::cost_status::scope_token();
+    let owner = "interactive:active-deleted-origin:origin-turn";
+    crate::cost_status::register_persistent_interactive_runtime_usage_sink_for_test(
+        owner,
+        origin_scope,
+        &session.metadata.id,
+        "origin-turn",
+        &manager,
+    );
+    let route = test_mailbox_route(ApiProvider::Deepseek, "deepseek-v4-flash");
+    let usage = crate::models::Usage {
+        input_tokens: 10_000,
+        output_tokens: 1_000,
+        ..Default::default()
+    };
+    assert!(
+        route
+            .audit(&usage)
+            .estimate
+            .is_some_and(|cost| cost.usd > 0.0)
+    );
+    let source_id = "subagent:deleted-origin:response";
+    let mailbox = crate::tools::subagent::MailboxMessage::token_usage(
+        "agent-deleted-origin",
+        source_id,
+        route.clone(),
+        usage.clone(),
+    );
+    manager
+        .delete_session(&session.metadata.id)
+        .expect("delete active origin");
+    // The generation and active App deliberately remain unchanged. This is
+    // an active-origin callback, not the already-covered stale-scope path.
+    assert_eq!(crate::cost_status::scope_token(), origin_scope);
+    for seq in 1..=2 {
+        crate::cost_status::report_effective_route_for_runtime(
+            origin_scope,
+            Some(owner),
+            source_id,
+            &route,
+            &usage,
+        );
+        handle_subagent_mailbox_for_turn(&mut app, "origin-turn", seq, &mailbox);
+    }
+    assert!(crate::cost_status::drain().is_empty());
+    let fallback = crate::cost_status::take_runtime_usage(owner);
+    assert!(fallback.records.is_empty());
+    assert!(fallback.drop_records.is_empty());
+    assert_eq!(fallback.dropped_records, 0);
+    crate::cost_status::finish_runtime_usage_owner(owner);
+    assert_eq!(app.session.subagent_cost, 0.0);
+    assert_eq!(app.session.subagent_cost_cny, 0.0);
+    assert_eq!(app.session.cost_priced_turns, 0);
+    assert_eq!(app.session.cost_unpriced_turns, 0);
+    assert_eq!(app.session.cost_cny_priced_turns, 0);
+    assert_eq!(app.session.cost_cny_unpriced_turns, 0);
+    assert!(app.session.subagent_usage_sources.is_empty());
+    assert!(app.session.cost_route_receipts.is_empty());
+    assert!(app.history.is_empty());
+    assert!(crate::cost_status::usage_source_seen(source_id));
+    assert!(manager.list_sessions().expect("sessions").is_empty());
+    assert!(
+        !manager
+            .sessions_dir()
+            .join(".late-usage/active-deleted-origin.json")
+            .exists()
+    );
+    assert!(
+        manager.save_session(&session).is_err(),
+        "a stale autosave cannot restore the deleted origin"
+    );
+}
+
+#[test]
 fn subagent_token_usage_source_is_stable_across_engine_turns() {
     let mut app = create_test_app();
     let usage = crate::tools::subagent::MailboxMessage::TokenUsage {
         agent_id: "agent-a".to_string(),
         source_id: "response-a".to_string(),
-        route: test_mailbox_route(ApiProvider::Deepseek, "deepseek-v4-flash"),
+        route: Box::new(test_mailbox_route(
+            ApiProvider::Deepseek,
+            "deepseek-v4-flash",
+        )),
         usage: crate::models::Usage {
             input_tokens: 10_000,
             output_tokens: 1_000,
@@ -13936,7 +14814,7 @@ fn context_pressure_warning_survives_later_status_and_can_be_dismissed() {
 
     app.status_message = Some("A later transcript status".to_string());
     let visible = app
-        .active_status_toast()
+        .active_status_toast(crate::tui::underwater::ShellPhase::Working)
         .expect("a later transient status is visible");
     assert_eq!(visible.text, "A later transcript status");
     assert_eq!(
@@ -14176,6 +15054,8 @@ fn local_cancel_marks_late_stream_events_for_suppression() {
     assert!(!suppress_engine_event_after_local_cancel(
         &EngineEvent::TurnComplete {
             usage: Usage::default(),
+            parent_route_usage: Usage::default(),
+            routed_usage_dropped_records: 0,
             status: crate::core::events::TurnOutcomeStatus::Interrupted,
             error: None,
             tool_catalog: None,
@@ -14218,8 +15098,10 @@ fn turn_started_route_is_captured_before_cancel_suppression() {
             auto_model: true,
             receipt: None,
             billing: Some(crate::core::events::RouteBillingEnvelope {
+                openrouter_vendor: None,
                 billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
                 endpoint_fingerprint: Some("openai-endpoint".to_string()),
+                provider_live_pricing: None,
                 billing_mode: crate::cost_status::RouteBillingMode::Metered,
                 dispatched_at: created_at,
             }),
@@ -14282,8 +15164,10 @@ fn turn_started_suggestion_authority_comes_from_the_route_receipt_not_config() {
             auto_model: false,
             receipt: Some(receipt),
             billing: Some(crate::core::events::RouteBillingEnvelope {
+                openrouter_vendor: None,
                 billing_surface: None,
                 endpoint_fingerprint: None,
+                provider_live_pricing: None,
                 billing_mode: crate::cost_status::RouteBillingMode::Unknown,
                 dispatched_at: chrono::Utc::now(),
             }),
@@ -14324,8 +15208,10 @@ fn turn_started_without_a_route_receipt_captures_no_suggestion_authority() {
             auto_model: false,
             receipt: None,
             billing: Some(crate::core::events::RouteBillingEnvelope {
+                openrouter_vendor: None,
                 billing_surface: None,
                 endpoint_fingerprint: None,
+                provider_live_pricing: None,
                 billing_mode: crate::cost_status::RouteBillingMode::Unknown,
                 dispatched_at: chrono::Utc::now(),
             }),
@@ -14360,8 +15246,10 @@ fn engine_error_health_accounting_uses_active_turn_route() {
             auto_model: true,
             receipt: None,
             billing: Some(crate::core::events::RouteBillingEnvelope {
+                openrouter_vendor: None,
                 billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
                 endpoint_fingerprint: Some("openai-endpoint".to_string()),
+                provider_live_pricing: None,
                 billing_mode: crate::cost_status::RouteBillingMode::Metered,
                 dispatched_at: chrono::Utc::now(),
             }),
@@ -15403,6 +16291,189 @@ async fn startup_prompt_waits_for_onboarding_then_dispatches() {
 }
 
 #[tokio::test]
+async fn redaction_gate_preserves_startup_and_external_input_without_dispatch() {
+    let mut app = create_test_app();
+    app.onboarding = OnboardingState::None;
+    app.redaction_gate = true;
+    app.input = "review the local fixture".to_string();
+    app.cursor_position = app.input.chars().count();
+    app.auto_submit_initial_input = true;
+    let config = Config::default();
+    let mut engine = mock_engine_handle();
+    for confirming in [false, true] {
+        app.redaction_gate_confirming = confirming;
+        submit_initial_input_if_ready(&mut app, &config, &engine.handle)
+            .await
+            .unwrap();
+        assert!(app.auto_submit_initial_input);
+        assert_eq!(app.input, "review the local fixture");
+        assert!(app.api_messages.is_empty());
+        assert!(engine.rx_op.try_recv().is_err());
+        assert!(
+            super::dispatch::prepare_user_dispatch(
+                &mut app,
+                &config,
+                QueuedMessage::new("external callback".to_string(), None)
+            )
+            .is_err()
+        );
+    }
+    // Choosing keep masking on releases precisely the original pending input.
+    app.redaction_gate = false;
+    submit_initial_input_if_ready(&mut app, &config, &engine.handle)
+        .await
+        .unwrap();
+    submit_initial_input_if_ready(&mut app, &config, &engine.handle)
+        .await
+        .unwrap();
+    assert!(!app.auto_submit_initial_input);
+    assert!(app.input.is_empty());
+    match engine.rx_op.try_recv().unwrap() {
+        Op::SendMessage { content, .. } => assert!(content.contains("review the local fixture")),
+        other => panic!("unexpected operation: {other:?}"),
+    }
+    assert!(engine.rx_op.try_recv().is_err());
+
+    let mut external = create_test_app();
+    external.redaction_gate = true;
+    dispatch_user_message(
+        &mut external,
+        &config,
+        &engine.handle,
+        QueuedMessage::new("callback while confirming".to_string(), None),
+    )
+    .await
+    .unwrap();
+    assert_eq!(external.input, "callback while confirming");
+    assert!(external.api_messages.is_empty());
+    assert!(engine.rx_op.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn redaction_confirmation_restores_history_before_first_local_provider_request() {
+    use crate::test_support::{EnvVarGuard, lock_test_env};
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+    let _lock = lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", temp.path());
+    let _proxy = EnvVarGuard::set("NO_PROXY", "*");
+    let server = MockServer::builder()
+        .body_print_limit(wiremock::BodyPrintLimit::Limited(0))
+        .start()
+        .await;
+    Mock::given(method("POST")).and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string(concat!(
+                "data: {\"id\":\"local-consent\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Done.\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"id\":\"local-consent\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n"
+            )))
+        .expect(1).mount(&server).await;
+    let config_path = temp.path().join("selected.toml");
+    std::fs::write(&config_path, format!(
+        "provider = \"deepseek\"\napi_key = \"synthetic-local-consent-key\"\nbase_url = \"{}\"\n[redaction]\nmodel_bound = \"disabled\"\n",
+        server.uri()
+    )).unwrap();
+    let config = Config::load(Some(config_path), None).unwrap();
+    let mut app = crate::test_support::test_app_with_options(TuiOptions {
+        start_in_agent_mode: true,
+        ..crate::test_support::test_tui_options(temp.path())
+    });
+    app.auto_model = false;
+    app.onboarding = OnboardingState::None;
+    app.redaction_gate = true;
+    app.current_session_id = Some("local-consent-resumed-session".to_string());
+    app.api_messages = vec![
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "Remember the fixture color is amber.".to_string(),
+                cache_control: None,
+            }],
+        },
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "I will remember amber.".to_string(),
+                cache_control: None,
+            }],
+        },
+    ];
+    let expected_history = serde_json::to_value(&app.api_messages).unwrap();
+    app.input = "What color did I give you?".to_string();
+    app.cursor_position = app.input.chars().count();
+    app.auto_submit_initial_input = true;
+    let engine = spawn_tui_engine_with_session(&mut app, &config)
+        .await
+        .unwrap();
+    for confirming in [false, true] {
+        app.redaction_gate_confirming = confirming;
+        submit_initial_input_if_ready(&mut app, &config, &engine)
+            .await
+            .unwrap();
+        // A snapshot is a FIFO barrier after any accidentally queued operation.
+        let snapshot = engine.get_session_snapshot().await.unwrap();
+        assert_eq!(
+            serde_json::to_value(snapshot.messages).unwrap(),
+            expected_history
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+    crate::tui::redaction_gate::record_confirmation(&config).unwrap();
+    engine.send(Op::Shutdown).await.unwrap();
+    let replacement = spawn_tui_engine_with_session(&mut app, &config)
+        .await
+        .unwrap();
+    let snapshot = replacement.get_session_snapshot().await.unwrap();
+    assert_eq!(
+        serde_json::to_value(snapshot.messages).unwrap(),
+        expected_history
+    );
+    assert_eq!(
+        app.current_session_id.as_deref(),
+        Some("local-consent-resumed-session")
+    );
+    assert!(!crate::tui::redaction_gate::confirmation_required(&config));
+    app.redaction_gate = false;
+    app.redaction_gate_confirming = false;
+    submit_initial_input_if_ready(&mut app, &config, &replacement)
+        .await
+        .unwrap();
+    submit_initial_input_if_ready(&mut app, &config, &replacement)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if !server.received_requests().await.unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("one request to the local provider after consent");
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let wire = body["messages"].to_string();
+    for expected in [
+        "Remember the fixture color is amber.",
+        "I will remember amber.",
+        "What color did I give you?",
+    ] {
+        assert!(
+            wire.contains(expected),
+            "resumed conversation missing from local request"
+        );
+    }
+    replacement.send(Op::Shutdown).await.unwrap();
+}
+
+#[tokio::test]
 async fn steer_user_message_records_prompt_for_cancel_restore() {
     let mut app = create_test_app();
     let mut engine = crate::core::engine::mock_engine_handle();
@@ -15776,7 +16847,7 @@ async fn steer_failure_queues_message_and_surfaces_toast() {
     assert_eq!(app.queued_message_count(), 1);
     let toast = app.status_toasts.back().expect("steer failure toast");
     assert_eq!(toast.level, StatusToastLevel::Warning);
-    assert!(toast.text.contains("Could not send into this turn"));
+    assert!(toast.text.contains("Couldn't send into this turn"));
 }
 
 #[tokio::test]
@@ -15801,7 +16872,7 @@ async fn streaming_enter_queue_pushes_visible_toast() {
     assert_eq!(app.queued_message_count(), 1);
     let toast = app.status_toasts.back().expect("queue toast");
     assert_eq!(toast.level, StatusToastLevel::Info);
-    assert!(toast.text.contains("Queued. Sends after this turn."));
+    assert!(toast.text.contains("Queued — sends after this turn."));
 }
 
 #[test]
@@ -15902,7 +16973,7 @@ async fn operate_streaming_enter_queues_another_parallel_task() {
     assert_eq!(app.queued_message_count(), 1);
     let toast = app.status_toasts.back().expect("Operate queue toast");
     assert_eq!(toast.level, StatusToastLevel::Info);
-    assert_eq!(toast.text, "Queued. Sends after this turn.");
+    assert_eq!(toast.text, "Queued — sends after this turn.");
     assert_eq!(app.status_message.as_deref(), Some(toast.text.as_str()));
 }
 
@@ -16141,16 +17212,7 @@ fn external_grant_reuse_completes_provider_onboarding() {
     assert_eq!(app.onboarding_provider, crate::config::ApiProvider::Xai);
     assert!(!app.onboarding_needs_api_key);
     assert!(!app.offline_mode);
-    let settings = crate::settings::Settings::load().expect("reload onboarding default");
-    assert_eq!(settings.default_provider.as_deref(), Some("xai"));
-    assert_eq!(
-        settings
-            .provider_models
-            .as_ref()
-            .and_then(|models| models.get("xai"))
-            .map(String::as_str),
-        Some(crate::config::DEFAULT_XAI_MODEL),
-    );
+    assert_saved_startup_route("xai", "xai", crate::config::DEFAULT_XAI_MODEL);
 }
 
 #[test]
@@ -17535,10 +18597,12 @@ fn legacy_child_usage_metadata_fails_closed_without_parent_route_fallback() {
             // borrow it: the fail-closed answer is Unknown, reported as
             // missing spend rather than silently inherited.
             billing: Some(crate::core::events::RouteBillingEnvelope {
+                openrouter_vendor: None,
                 billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
                 endpoint_fingerprint: crate::cost_status::endpoint_fingerprint(
                     crate::config::DEFAULT_DEEPSEEK_BASE_URL,
                 ),
+                provider_live_pricing: None,
                 billing_mode: crate::cost_status::RouteBillingMode::Metered,
                 dispatched_at: chrono::Utc::now(),
             }),
@@ -17592,6 +18656,7 @@ fn child_usage_metadata_carries_cache_write_and_reasoning_end_to_end() {
 
     // The shared producer emits every class.
     let priced_route = crate::cost_status::EffectiveRouteEnvelope {
+        openrouter_vendor: None,
         provider: crate::config::ApiProvider::Anthropic,
         provider_identity: "anthropic-api".to_string(),
         model: "claude-haiku-4-5".to_string(),
@@ -17602,6 +18667,7 @@ fn child_usage_metadata_carries_cache_write_and_reasoning_end_to_end() {
         endpoint_fingerprint: crate::cost_status::endpoint_fingerprint(
             "https://api.anthropic.com/v1",
         ),
+        provider_live_pricing: None,
         billing_mode: crate::cost_status::RouteBillingMode::Metered,
         dispatched_at: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).expect("epoch"),
     };
@@ -17650,11 +18716,13 @@ fn child_usage_metadata_carries_cache_write_and_reasoning_end_to_end() {
     unpriced_app.api_provider = crate::config::ApiProvider::Deepseek;
     unpriced_app.billing_presentation = crate::route_billing::BillingPresentation::Metered;
     let unpriced_route = crate::cost_status::EffectiveRouteEnvelope {
+        openrouter_vendor: None,
         provider: crate::config::ApiProvider::Moonshot,
         provider_identity: "moonshot-api".to_string(),
         model: "kimi-k2.7-code".to_string(),
         billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
         endpoint_fingerprint: Some("test-moonshot-endpoint".to_string()),
+        provider_live_pricing: None,
         billing_mode: crate::cost_status::RouteBillingMode::Metered,
         dispatched_at: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).expect("epoch"),
     };
@@ -17729,6 +18797,53 @@ fn zero_usage_model_child_still_records_priced_receipt() {
     assert_eq!(app.session.cost_priced_turns, 1);
     assert_eq!(app.session.cost_unpriced_turns, 0);
     assert_eq!(app.session.cost_route_receipts.len(), 1);
+}
+
+#[test]
+fn routed_missing_usage_batch_prices_exact_routes_and_only_residual_as_generic() {
+    let mut app = create_test_app();
+    let mut metered_route = test_mailbox_route(ApiProvider::Deepseek, "deepseek-v4-flash");
+    metered_route.billing_mode = crate::cost_status::RouteBillingMode::Metered;
+    let mut local_route = metered_route.clone();
+    local_route.provider_identity = "local-computer".to_string();
+    local_route.billing_mode = crate::cost_status::RouteBillingMode::Local;
+    let batch = crate::cost_status::RuntimeUsageBatch {
+        records: Vec::new(),
+        drop_records: vec![
+            crate::cost_status::RuntimeUsageDropRecord {
+                source_id: "rlm:missing:metered".to_string(),
+                route: metered_route,
+            },
+            crate::cost_status::RuntimeUsageDropRecord {
+                source_id: "rlm:missing:local".to_string(),
+                route: local_route,
+            },
+        ],
+        // Two exact routes plus one overflowed/route-less residual.
+        dropped_records: 3,
+    };
+    let mut metadata = serde_json::json!({});
+    crate::cost_status::attach_child_usage_batch_metadata(&mut metadata, &batch);
+    let result = Ok(crate::tools::spec::ToolResult::success("ok").with_metadata(metadata));
+
+    handle_tool_call_complete(&mut app, "rlm-missing", "rlm", &result);
+
+    assert_eq!(app.session.cost_priced_turns, 0);
+    assert_eq!(
+        app.session.cost_unpriced_turns, 2,
+        "metered exact drop and one residual gap count; local exact drop does not"
+    );
+    assert!(
+        app.session
+            .cost_unpriced_reasons
+            .contains("provider_success_missing_usage")
+    );
+    assert!(
+        app.session
+            .cost_unpriced_reasons
+            .contains("routed_usage_receipt_missing")
+    );
+    assert_eq!(app.session.subagent_usage_sources.len(), 2);
 }
 
 #[test]
@@ -19081,6 +20196,8 @@ fn app_new_auto_model_ignores_reasoning_inferred_from_legacy_alias() {
 #[tokio::test]
 async fn model_picker_apply_is_session_local_until_startup_default_is_requested() {
     let _guard = SettingsHomeGuard::new();
+    let global_config = crate::config::home_config_path().expect("global config path");
+    let startup_before = std::fs::read(&global_config).ok();
     let mut app = create_test_app();
     app.set_model_selection("auto".to_string());
     app.reasoning_effort = ReasoningEffort::Auto;
@@ -19115,6 +20232,7 @@ async fn model_picker_apply_is_session_local_until_startup_default_is_requested(
         None
     );
     assert_eq!(settings.reasoning_effort.as_deref(), None);
+    assert_eq!(std::fs::read(global_config).ok(), startup_before);
     assert!(!app.auto_model);
     assert_eq!(app.reasoning_effort, ReasoningEffort::High);
 
@@ -19162,6 +20280,13 @@ async fn model_picker_startup_default_overrides_configured_xai_route_after_resta
         }),
         ..Config::default()
     };
+    let config_path = crate::config::home_config_path().expect("global config path");
+    std::fs::create_dir_all(config_path.parent().expect("config home")).expect("config home");
+    std::fs::write(
+        &config_path,
+        "provider = \"xai\"\n[providers.xai]\nmodel = \"grok-4.5\"\n",
+    )
+    .expect("seed canonical xAI route");
     let mut config = xai_config.clone();
     let initial_options = TuiOptions {
         model: config.default_model(),
@@ -19201,28 +20326,24 @@ async fn model_picker_startup_default_overrides_configured_xai_route_after_resta
         "the explicit save must report what it wrote: {:?}",
         app.status_message
     );
-    let settings = crate::settings::Settings::load().expect("load settings");
-    assert_eq!(settings.default_provider.as_deref(), Some("deepseek"));
+    let saved = assert_saved_startup_route("deepseek", "deepseek", "deepseek-v4-flash");
     assert_eq!(
-        settings
-            .provider_models
-            .as_ref()
-            .and_then(|models| models.get("deepseek"))
-            .map(String::as_str),
-        Some("deepseek-v4-flash")
+        saved["providers"]["xai"]["model"].as_str(),
+        Some("grok-4.5")
     );
 
+    let restart_config = Config::load(Some(config_path), None).expect("reload saved route");
     let restart_options = TuiOptions {
-        model: xai_config.default_model(),
+        model: restart_config.default_model(),
         start_in_agent_mode: true,
         skip_onboarding: false,
         ..crate::test_support::test_tui_options(PathBuf::from("."))
     };
-    let restarted = App::new(restart_options, &xai_config);
+    let restarted = App::new(restart_options, &restart_config);
     assert_eq!(restarted.api_provider, ApiProvider::Deepseek);
     assert_eq!(
         restarted.model, "deepseek-v4-flash",
-        "the explicit startup default must outrank config's xAI seed"
+        "the explicit startup default must replace config's xAI selection"
     );
 }
 
@@ -19345,6 +20466,8 @@ async fn auto_model_effort_picker_persists_unresolved_tier_verbatim() {
 #[tokio::test]
 async fn reselecting_live_model_and_thinking_is_session_local() {
     let _guard = SettingsHomeGuard::new();
+    let global_config = crate::config::home_config_path().expect("global config path");
+    let startup_before = std::fs::read(&global_config).ok();
     let mut app = create_test_app();
     app.set_model_selection("deepseek-v4-pro".to_string());
     app.reasoning_effort = ReasoningEffort::High;
@@ -19387,6 +20510,7 @@ async fn reselecting_live_model_and_thinking_is_session_local() {
         None
     );
     assert_eq!(settings.reasoning_effort.as_deref(), None);
+    assert_eq!(std::fs::read(global_config).ok(), startup_before);
     assert!(app.pending_route_save.is_some());
     assert!(
         app.status_message
@@ -21554,6 +22678,7 @@ fn recoverable_provider_error_advances_fallback_chain() {
     use crate::error_taxonomy::{ErrorCategory, ErrorEnvelope, ErrorSeverity};
 
     let mut app = create_test_app();
+    app.ui_locale = crate::localization::Locale::Fr;
     app.api_provider = ApiProvider::Deepseek;
     app.provider_chain = Some(codewhale_config::ProviderChain::new(
         codewhale_config::ProviderKind::Deepseek,
@@ -21574,11 +22699,15 @@ fn recoverable_provider_error_advances_fallback_chain() {
     assert_eq!(app.api_provider, ApiProvider::Openrouter);
     assert!(app.is_fallback_active());
     assert!(!app.offline_mode);
-    assert!(
-        app.status_message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("Switched to openrouter")
+    let toast = app.status_toasts.back().expect("fallback notice");
+    assert_eq!(toast.level, StatusToastLevel::Warning);
+    assert_eq!(toast.ttl_ms, Some(8_000));
+    assert_eq!(
+        toast.text,
+        app.tr(MessageId::NotificationProviderFallback)
+            .replace("{provider}", "openrouter")
+            .replace("{position}", "1")
+            .replace("{total}", "1")
     );
     assert!(
         app.last_fallback_reason
@@ -21663,7 +22792,9 @@ fn fallback_switch_status_shows_one_based_position_and_reason() {
         Some(1),
         "first fallback sits at 1-based position 1"
     );
-    let status = app.status_message.as_deref().unwrap_or_default();
+    let toast = app.status_toasts.back().expect("fallback notice");
+    assert_eq!(toast.level, StatusToastLevel::Warning);
+    let status = toast.text.as_str();
     assert!(
         status.contains("Switched to openrouter") && status.contains("(fallback 1/"),
         "visible status must show the destination and 1-based position: {status}"
@@ -22082,6 +23213,7 @@ fn non_recoverable_engine_error_enters_offline_mode() {
 fn env_only_auth_failure_reopens_provider_onboarding() {
     use crate::error_taxonomy::ErrorEnvelope;
     let mut app = create_test_app();
+    app.ui_locale = crate::localization::Locale::Ja;
     app.api_provider = crate::config::ApiProvider::Anthropic;
     app.config_path = Some(std::path::PathBuf::from("/tmp/codewhale-phase2.toml"));
     app.api_key_env_only = true;
@@ -22101,10 +23233,17 @@ fn env_only_auth_failure_reopens_provider_onboarding() {
     );
     assert!(app.onboarding_needs_api_key);
     assert!(app.turn_error_posted, "turn_error_posted must be set");
-    let status = app
-        .status_message
-        .as_deref()
-        .expect("auth recovery should explain the env key source");
+    let toast = app.status_toasts.back().expect("auth recovery notice");
+    assert_eq!(toast.level, StatusToastLevel::Error);
+    assert_eq!(toast.ttl_ms, Some(App::STICKY_ERROR_TTL_MS));
+    let status = toast.text.as_str();
+    assert_eq!(
+        status,
+        app.tr(MessageId::OnboardApiKeyRejectedEnv)
+            .replace("{provider}", "anthropic")
+            .replace("{env}", &app.api_provider.env_vars_label())
+            .replace("{path}", "/tmp/codewhale-phase2.toml")
+    );
     assert!(
         status.contains("anthropic")
             && status.contains("ANTHROPIC_API_KEY")
@@ -22443,7 +23582,10 @@ fn duplicate_mailbox_token_usage_does_not_regress_displayed_cost() {
     let usage = crate::tools::subagent::MailboxMessage::TokenUsage {
         agent_id: "agent-x".to_string(),
         source_id: "response-x".to_string(),
-        route: test_mailbox_route(ApiProvider::Deepseek, "deepseek-v4-flash"),
+        route: Box::new(test_mailbox_route(
+            ApiProvider::Deepseek,
+            "deepseek-v4-flash",
+        )),
         usage: crate::models::Usage {
             input_tokens: 10_000,
             output_tokens: 1_000,
@@ -22891,6 +24033,8 @@ fn notification_settings_tui_always_keeps_configured_method_no_threshold() {
             event_sound: crate::config::EventSoundConfig::default(),
             quiet: false,
             events: crate::config::NotificationEventsConfig::default(),
+            sound: None,
+            condition: None,
         }),
         ..Config::default()
     };
@@ -22929,6 +24073,8 @@ fn notification_settings_no_tui_override_uses_notifications_block() {
             event_sound: crate::config::EventSoundConfig::default(),
             quiet: false,
             events: crate::config::NotificationEventsConfig::default(),
+            sound: None,
+            condition: None,
         }),
         ..Config::default()
     };
@@ -23288,6 +24434,7 @@ mod work_sidebar_projection_tests {
         owner_session_id: Option<&str>,
     ) -> TaskSummary {
         TaskSummary {
+            execution_binding_known: true,
             id: id.to_string(),
             status,
             prompt_summary: format!("task {id}"),
@@ -24880,6 +26027,8 @@ mod work_surface {
 #[tokio::test]
 async fn refused_route_change_does_not_pin_a_startup_default_and_says_so() {
     let _guard = SettingsHomeGuard::new();
+    let global_config = crate::config::home_config_path().expect("global config path");
+    let startup_before = std::fs::read(&global_config).ok();
     let mut config = Config {
         provider: Some("xai".to_string()),
         providers: Some(ProvidersConfig {
@@ -24924,6 +26073,7 @@ async fn refused_route_change_does_not_pin_a_startup_default_and_says_so() {
         "the refused switch must leave the live route alone"
     );
     let settings = crate::settings::Settings::load().expect("load settings");
+    assert_eq!(std::fs::read(global_config).ok(), startup_before);
     assert_eq!(
         settings.default_provider.as_deref(),
         None,
@@ -25519,7 +26669,7 @@ fn startup_that_cannot_account_for_its_bytes_keeps_the_line_in_the_composer() {
     // The pre-fix shape: a probe swallowed `/plu` (here: consumed bytes it
     // cannot replay) and only the tail reached the composer.
     crate::palette::osc11::note_consumed_unreplayable(b"/plu");
-    crate::palette::osc11::carry_typed_ahead(b"gin install /tmp/bundle\r");
+    crate::palette::osc11::carry_typed_ahead(b"gin install /tmp/bundle\r\rsecond line\r");
 
     let mut pending: VecDeque<Event> = VecDeque::new();
     let receipt = crate::tui::startup_input::replay_into(&mut pending);
@@ -25537,20 +26687,48 @@ fn startup_that_cannot_account_for_its_bytes_keeps_the_line_in_the_composer() {
         "a line the shell cannot vouch for is never submitted to the model"
     );
     assert_eq!(
-        app.input, "gin install /tmp/bundle",
-        "the text stays in the composer for the user to look at"
+        app.input, "gin install /tmp/bundle\n\nsecond line\n",
+        "all text and line boundaries stay in the composer for review"
+    );
+    assert!(
+        app.startup_input_unproven,
+        "queued Enters cannot clear the hold"
+    );
+    assert!(
+        app.handle_composer_enter().is_none(),
+        "the first fresh Enter explains the hold"
     );
     assert!(
         app.status_message
             .as_deref()
-            .is_some_and(|message| message.contains("startup")),
+            .is_some_and(|message| !message.trim().is_empty()),
         "the hold explains itself: {:?}",
         app.status_message
     );
 
     // The user has now seen it; a deliberate second Enter sends what is shown.
     let resent = app.handle_composer_enter();
-    assert_eq!(resent.as_deref(), Some("gin install /tmp/bundle"));
+    assert_eq!(
+        resent.as_deref(),
+        Some("gin install /tmp/bundle\n\nsecond line\n")
+    );
+}
+
+#[test]
+fn delayed_terminal_color_reply_preserves_actual_composer_command_dispatch() {
+    let _lock = startup_input_test_lock();
+    let _home = SettingsHomeGuard::new();
+    crate::palette::osc11::carry_typed_ahead(b"\x1b]11;rgb:1e1e/1e1e/1e1e\x07/plugin list\r");
+    let mut pending = VecDeque::new();
+    let receipt = crate::tui::startup_input::replay_into(&mut pending);
+    assert!(receipt.whole_line_proven(), "{receipt:?}");
+    let mut app = App::new(create_test_options(), &Config::default());
+    app.startup_input_unproven = !receipt.whole_line_proven();
+    assert_eq!(
+        drive_composer_events(&mut app, &mut pending).as_deref(),
+        Some("/plugin list")
+    );
+    assert!(app.input.is_empty());
 }
 
 #[test]
@@ -25869,4 +27047,291 @@ fn stale_session_projection_cannot_rewind_a_host_launch() {
         vec![text_message("user", "expected engine transcript")]
     );
     assert_eq!(app.input, "typing remains responsive");
+}
+
+#[test]
+fn notification_live_delta_updates_current_config_projection_and_queries_atomically() {
+    let _guard = crate::test_support::lock_test_env();
+    let mut app = create_test_app();
+    let mut config = Config::default();
+    for (key, value) in [
+        ("quiet", "true"),
+        ("sound", "whale"),
+        ("events.approval-needed", "false"),
+    ] {
+        let result = commands::execute(&format!("/config notifications {key} {value}"), &mut app);
+        assert!(!result.is_error, "{:?}", result.message);
+        let Some(AppAction::UpdateNotification { update }) = result.action else {
+            panic!("missing typed delta")
+        };
+        apply_notification_update(&mut app, &mut config, update).unwrap();
+        let get = commands::execute(&format!("/config notifications {key}"), &mut app);
+        assert!(get.message.unwrap().contains(&format!("= {value}")));
+    }
+    assert!(config.notifications_config().quiet);
+    assert!(!config.notifications_config().events.approval_needed);
+    assert_eq!(
+        config.notifications_config().sound,
+        Some(crate::config::CompletionSound::Whale)
+    );
+    assert_eq!(app.notification_settings, config.notifications_config());
+    let before = app.notification_settings.clone();
+    assert!(
+        apply_notification_update(
+            &mut app,
+            &mut config,
+            crate::config::NotificationConfigUpdate::ThresholdSecs(u64::MAX)
+        )
+        .is_err()
+    );
+    assert_eq!(config.notifications_config(), before);
+    assert_eq!(app.notification_settings, before);
+    // The same replacement helper used by profile/resume/provider paths
+    // must refresh both UI and installed policy without a second store.
+    app.refresh_notification_settings(&Config::default());
+    assert!(!app.notification_settings.quiet);
+    assert_eq!(app.notification_settings.sound, None);
+}
+
+#[test]
+fn notification_invalid_live_delta_uses_selected_locale_and_keeps_policy() {
+    use crate::localization::Locale;
+
+    let _guard = crate::test_support::lock_test_env();
+    let mut app = create_test_app();
+    let mut config = Config::default();
+    let before = config.notifications_config();
+    for locale in [Locale::Ja, Locale::Fr] {
+        app.ui_locale = locale;
+        let error = apply_notification_update(
+            &mut app,
+            &mut config,
+            crate::config::NotificationConfigUpdate::ThresholdSecs(u64::MAX),
+        )
+        .unwrap_err();
+        let expected = tr(locale, MessageId::ConfigCommandInvalidValue)
+            .replace("{key}", "notifications.threshold_secs")
+            .replace("{value}", &tr(locale, MessageId::ConfigUnavailable))
+            .replace(
+                "{choices}",
+                codewhale_config::notifications::NotificationSetting::ThresholdSecs.choices(),
+            );
+        assert_eq!(error.to_string(), expected);
+        assert!(!error.to_string().contains("notification integer exceeds"));
+        assert_eq!(config.notifications_config(), before);
+        assert_eq!(app.notification_settings, before);
+    }
+}
+
+#[tokio::test]
+async fn notification_approval_settlement_retires_the_prompt_and_preserves_warning_receipts() {
+    let _guard = crate::test_support::lock_test_env();
+    let mut app = create_test_app();
+    app.ui_locale = crate::localization::Locale::Ja;
+    let payload = notifications::approval_needed_payload(app.ui_locale, "saved-failed-tool");
+    app.push_status_toast_record(
+        StatusToast::new(payload.headline(), StatusToastLevel::Warning, Some(12_000))
+            .for_action("approval-a"),
+    );
+    app.push_status_toast("Keep this receipt", StatusToastLevel::Warning, Some(12_000));
+    let mut engine = mock_engine_handle();
+    apply_approval_decision(
+        &mut app,
+        &mut engine.handle,
+        &mut Config::default(),
+        ApprovalDecisionEvent {
+            tool_id: "approval-a".into(),
+            tool_name: "saved-failed-tool".into(),
+            decision: ReviewDecision::Approved,
+            timed_out: false,
+            approval_key: "key-a".into(),
+            approval_grouping_key: "group-a".into(),
+            persistent_rules: Vec::new(),
+        },
+    )
+    .await;
+    assert_eq!(
+        engine.recv_approval_event().await,
+        Some(crate::core::engine::MockApprovalEvent::Approved {
+            id: "approval-a".into()
+        })
+    );
+    assert!(
+        !app.status_toasts
+            .iter()
+            .any(|toast| toast.text == payload.headline())
+    );
+    app.runtime_turn_status = Some("completed".into());
+    let facts = crate::tui::phase_strip::tideline_footer_from_app(&mut app, 140);
+    assert_eq!(
+        facts.right,
+        Some((
+            "Keep this receipt".into(),
+            crate::palette::ChromeInk::Attention
+        ))
+    );
+}
+
+#[test]
+fn notification_input_failure_keeps_the_request_and_success_retires_only_its_action() {
+    let _guard = crate::test_support::lock_test_env();
+    let mut app = create_test_app();
+    app.ui_locale = crate::localization::Locale::Fr;
+    let payload = notifications::input_needed_payload(app.ui_locale);
+    app.pending_user_input_prompt = Some((
+        "input-a".into(),
+        crate::tools::user_input::UserInputRequest {
+            questions: Vec::new(),
+        },
+    ));
+    app.push_status_toast_record(
+        StatusToast::new(payload.headline(), StatusToastLevel::Warning, Some(12_000))
+            .for_action("input-a"),
+    );
+    apply_user_input_submission_result(
+        &mut app,
+        "input-a",
+        Err(anyhow::anyhow!("injected transport failure")),
+    );
+    assert!(app.pending_user_input_prompt.is_some());
+    assert_eq!(app.status_toasts.len(), 2);
+    let error = app.status_toasts.back().unwrap();
+    assert_eq!(error.level, StatusToastLevel::Error);
+    assert_eq!(
+        error.text,
+        app.tr(MessageId::NotificationInputSubmitFailed)
+            .replace("{error}", "injected transport failure")
+    );
+    let error_text = error.text.clone();
+    app.sync_status_message_to_toasts();
+    assert_eq!(
+        app.status_toasts.len(),
+        2,
+        "failure must have one typed notice"
+    );
+    // The retried view closes before its submitted event is applied.
+    app.view_stack.pop();
+    apply_user_input_submission_result(&mut app, "input-a", Ok(()));
+    assert!(app.pending_user_input_prompt.is_none());
+    assert_eq!(app.status_toasts.len(), 1);
+    assert_eq!(app.status_toasts[0].text, error_text);
+    app.runtime_turn_status = Some("completed".into());
+    let facts = crate::tui::phase_strip::tideline_footer_from_app(&mut app, 500);
+    assert_eq!(
+        facts.right,
+        Some((error_text, crate::palette::ChromeInk::Failure))
+    );
+}
+
+#[test]
+fn notification_input_result_never_reopens_or_clears_a_different_pending_question() {
+    let _guard = crate::test_support::lock_test_env();
+    let mut app = create_test_app();
+    app.pending_user_input_prompt = Some((
+        "input-b".into(),
+        crate::tools::user_input::UserInputRequest {
+            questions: Vec::new(),
+        },
+    ));
+    app.push_status_toast_record(
+        StatusToast::new("Answer B", StatusToastLevel::Warning, Some(12_000)).for_action("input-b"),
+    );
+    assert!(app.view_stack.top_kind().is_none());
+    apply_user_input_submission_result(&mut app, "input-a", Err(anyhow::anyhow!("late failure")));
+    assert!(
+        app.view_stack.top_kind().is_none(),
+        "failure of A must not open B again"
+    );
+    assert_eq!(
+        app.pending_user_input_prompt
+            .as_ref()
+            .map(|(id, _)| id.as_str()),
+        Some("input-b")
+    );
+    apply_user_input_submission_result(&mut app, "input-a", Ok(()));
+    assert_eq!(
+        app.pending_user_input_prompt
+            .as_ref()
+            .map(|(id, _)| id.as_str()),
+        Some("input-b")
+    );
+    assert_eq!(app.status_toasts[0].text, "Answer B");
+    apply_user_input_submission_result(&mut app, "input-b", Err(anyhow::anyhow!("late failure")));
+    assert_eq!(
+        app.status_toasts.len(),
+        3,
+        "different request failures remain independent even with identical text"
+    );
+}
+
+#[tokio::test]
+async fn task_inventory_failure_preserves_only_the_same_session_snapshot() -> anyhow::Result<()> {
+    use crate::task_manager::{
+        NewTaskRequest, TaskExecutionResult, TaskManager, TaskManagerConfig, TaskStatus,
+        TaskTerminalReason,
+    };
+    struct Done;
+    #[async_trait::async_trait]
+    impl crate::task_manager::TaskExecutor for Done {
+        async fn execute(
+            &self,
+            _: crate::task_manager::ExecutionTask,
+            _: tokio::sync::mpsc::Sender<crate::task_manager::TaskExecutionEvent>,
+            _: tokio_util::sync::CancellationToken,
+        ) -> TaskExecutionResult {
+            TaskExecutionResult {
+                status: TaskStatus::Completed,
+                result_text: Some("fixture".into()),
+                error: None,
+                terminal_reason: TaskTerminalReason::Completed,
+            }
+        }
+    }
+    let root = TempDir::new()?;
+    let tasks = TaskManager::start_with_executor(
+        TaskManagerConfig {
+            data_dir: root.path().into(),
+            worker_count: 1,
+            default_workspace: root.path().into(),
+            default_model: "fixture".into(),
+            default_mode: "plan".into(),
+            allow_shell: false,
+            trust_mode: false,
+            execution_limits: crate::task_manager::TaskExecutionLimits::default(),
+        },
+        Arc::new(Done),
+    )
+    .await?;
+    let record = tasks
+        .add_task(NewTaskRequest {
+            owner_session_id: Some("session-a".into()),
+            ..NewTaskRequest::from_prompt("session A receipt")
+        })
+        .await?;
+    crate::task_manager::wait_for_terminal_state(&tasks, &record.id, Duration::from_secs(5))
+        .await?;
+    let mut app = create_test_app();
+    app.current_session_id = Some("session-a".into());
+    app.session_started_at = chrono::Utc::now() - chrono::Duration::minutes(1);
+    super::task_projection::refresh_active_task_panel(&mut app, &tasks).await;
+    assert!(app.task_panel.iter().any(|row| row.id == record.id));
+    let queue = root.path().join("queue.json");
+    let saved = std::fs::read(&queue)?;
+    std::fs::write(&queue, b"{corrupt")?;
+    assert!(super::task_projection::refresh_active_task_panel(&mut app, &tasks).await);
+    assert!(app.task_panel_unavailable);
+    assert!(app.task_panel.iter().any(|row| row.id == record.id));
+    app.current_session_id = Some("session-b".into());
+    assert!(super::task_projection::refresh_active_task_panel(&mut app, &tasks).await);
+    assert!(app.task_panel_unavailable);
+    assert!(
+        app.task_panel.is_empty(),
+        "session A's stale rows cannot cross into B"
+    );
+    std::fs::write(queue, saved)?;
+    super::task_projection::refresh_active_task_panel(&mut app, &tasks).await;
+    assert!(!app.task_panel_unavailable);
+    assert!(app.task_panel.is_empty());
+    tasks.shutdown_and_wait().await?;
+    Ok(())
 }

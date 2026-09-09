@@ -328,6 +328,9 @@ pub struct Settings {
     /// the long tail. Type-to-filter still unfolds matches.
     #[serde(default)]
     pub help_expand_groups: bool,
+    /// Show quiet, action-triggered command discovery tips.
+    #[serde(default = "default_true")]
+    pub contextual_tips: bool,
     /// Pin the last user prompt at the top of the transcript when it has
     /// scrolled off. Default on.
     #[serde(default = "default_true")]
@@ -401,10 +404,9 @@ pub struct Settings {
     pub cost_currency: String,
     /// Maximum number of input history entries to save
     pub max_input_history: usize,
-    /// Default provider override (e.g. "deepseek", "openai").
+    /// Archived startup provider used only to migrate older settings into config.
     pub default_provider: Option<String>,
-    /// DeepSeek-only fallback model. Non-DeepSeek providers use the
-    /// provider-scoped entry in [`Self::provider_models`] instead.
+    /// Archived DeepSeek fallback used only by the config selection migration.
     pub default_model: Option<String>,
     /// Default reasoning effort selected from the TUI model picker.
     /// `None` falls back to `config.toml` and then the runtime default.
@@ -422,8 +424,8 @@ pub struct Settings {
     /// never confused with unrestricted filesystem writes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_mode: Option<String>,
-    /// Per-provider model overrides. Key is provider name (e.g. "openai"),
-    /// value is the model id. Takes precedence over `default_model`.
+    /// Archived provider model choices used only by the config selection
+    /// migration. Preserve them on unrelated settings saves until migrated.
     pub provider_models: Option<std::collections::HashMap<String, String>>,
     /// Provider-scoped model IDs intentionally enabled for the ordinary model
     /// picker. Missing on older files; current and saved provider choices are
@@ -560,6 +562,7 @@ impl Default for Settings {
             thinking_preview_lines: default_thinking_preview_lines(),
             thinking_highlight: true,
             help_expand_groups: false,
+            contextual_tips: true,
             pin_last_prompt: true,
             show_tool_details: false,
             inline_diffs: "full".to_string(),
@@ -751,6 +754,24 @@ impl Settings {
     pub(crate) fn load_read_only() -> Result<Self> {
         let mut settings = Self::load_persisted_read_only()?;
         settings.apply_env_overrides();
+        Ok(settings)
+    }
+
+    /// Read archived route preferences from the user-global settings store.
+    ///
+    /// Canonical config migration must not inherit a project config's sibling
+    /// settings or runtime environment overlays, and must not migrate files.
+    pub(crate) fn load_legacy_route_preferences_read_only() -> Result<Self> {
+        let (primary, legacy_home, legacy_config_dir) = settings_path_candidates_for_scope(false);
+        let settings = Self::load_persisted_from_candidates_with_migration(
+            primary,
+            legacy_home,
+            legacy_config_dir,
+            false,
+        )?;
+        // Interactive readers may recover with defaults, but migration must
+        // not commit those defaults as if the archived selection were read.
+        anyhow::ensure!(settings.load_error.is_none(), "settings.toml: invalid TOML");
         Ok(settings)
     }
 
@@ -1321,6 +1342,9 @@ impl Settings {
     }
 
     fn save_to_path(&self, path: &Path) -> Result<()> {
+        // Parse-error fallback values keep the UI usable, but cannot replace
+        // the unreadable document. Do not echo its potentially private text.
+        anyhow::ensure!(self.load_error.is_none(), "settings.toml: invalid TOML");
         // Create config directory if it doesn't exist
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).with_context(|| {
@@ -1385,6 +1409,7 @@ impl Settings {
             "thinking_preview_lines" | "thinking_preview" => "thinking_preview_lines",
             "thinking_highlight" | "reasoning_highlight" => "thinking_highlight",
             "help_expand_groups" | "help_expanded" => "help_expand_groups",
+            "contextual_tips" => "contextual_tips",
             "pin_last_prompt" | "pin_prompt" => "pin_last_prompt",
             "show_tool_details" | "tool_details" => "show_tool_details",
             "inline_diffs" | "inline_diff" | "diffs" => "inline_diffs",
@@ -1533,6 +1558,9 @@ impl Settings {
             "help_expand_groups" | "help_expanded" => {
                 self.help_expand_groups = parse_bool(value)?;
             }
+            "contextual_tips" => {
+                self.contextual_tips = parse_bool(value)?;
+            }
             "pin_last_prompt" | "pin_prompt" => {
                 self.pin_last_prompt = parse_bool(value)?;
             }
@@ -1659,22 +1687,9 @@ impl Settings {
                 self.max_input_history = max;
             }
             "default_model" | "model" => {
-                let trimmed = value.trim();
-                if trimmed.is_empty()
-                    || matches!(
-                        trimmed.to_ascii_lowercase().as_str(),
-                        "none" | "default" | "(default)"
-                    )
-                {
-                    self.default_model = None;
-                } else {
-                    let Some(model) = normalize_default_model(trimmed) else {
-                        anyhow::bail!(
-                            "Failed to update setting: invalid model '{value}'. Expected: auto, a DeepSeek model ID (for example deepseek-v4-pro, deepseek-v4-flash), or none/default."
-                        );
-                    };
-                    self.default_model = Some(model);
-                }
+                anyhow::bail!(
+                    "Model defaults belong to config.toml. Use /model and choose Remember as my default, or /config model <id> --save."
+                );
             }
             "reasoning_effort" | "effort" => {
                 self.reasoning_effort = normalize_reasoning_effort_setting(value)?;
@@ -1785,6 +1800,7 @@ impl Settings {
             self.help_expand_groups
         ));
         lines.push(format!("  pin_last_prompt:    {}", self.pin_last_prompt));
+        lines.push(format!("  contextual_tips:    {}", self.contextual_tips));
         lines.push(format!("  show_tool_details:  {}", self.show_tool_details));
         lines.push(format!("  inline_diffs:      {}", self.inline_diffs));
         lines.push(format!("  locale:            {}", self.locale));
@@ -1814,30 +1830,7 @@ impl Settings {
         lines.push(format!("  context_panel:      {}", self.context_panel));
         lines.push(format!("  cost_currency:      {}", self.cost_currency));
         lines.push(format!("  max_history:        {}", self.max_input_history));
-        lines.push(format!(
-            "  deepseek_fallback:  {}",
-            self.default_model.as_deref().unwrap_or("(default)")
-        ));
-        lines.push(format!(
-            "  default_provider:   {}",
-            self.default_provider
-                .as_deref()
-                .unwrap_or("(config/default)")
-        ));
-        let mut provider_models = self
-            .provider_models
-            .as_ref()
-            .map(|models| models.iter().collect::<Vec<_>>())
-            .unwrap_or_default();
-        provider_models.sort_by_key(|(provider, _)| *provider);
-        if provider_models.is_empty() {
-            lines.push("  provider_models:    (none)".to_string());
-        } else {
-            lines.push("  provider_models:".to_string());
-            for (provider, model) in provider_models {
-                lines.push(format!("    {provider}: {model}"));
-            }
-        }
+        lines.push("  model defaults:     config.toml (use /config)".to_string());
         lines.push(format!(
             "  reasoning_effort:   {}",
             self.reasoning_effort
@@ -1949,6 +1942,7 @@ impl Settings {
                 "@-mention completion behavior: fuzzy/browser (default fuzzy)",
             ),
             ("show_thinking", "Show model thinking: on/off"),
+            ("contextual_tips", ""), // Localized guidance comes from the schema.
             (
                 "thinking_default_expanded",
                 "Expand model thinking by default; Space still toggles: on/off",
@@ -2038,27 +2032,16 @@ impl Settings {
             ("cost_currency", "Cost display currency: usd, cny"),
             ("max_history", "Max input history entries"),
             (
-                "default_model",
-                "DeepSeek fallback model: auto or a DeepSeek model ID (e.g. deepseek-v4-pro); other providers use provider_models",
-            ),
-            (
                 "reasoning_effort",
                 "Default thinking effort: auto, off, low, medium, high, max, or default",
             ),
         ]
     }
 
-    /// Persist the model for a specific provider.
-    pub fn set_model_for_provider(&mut self, provider: &str, model: &str) {
-        self.provider_models
-            .get_or_insert_with(std::collections::HashMap::new)
-            .insert(provider.to_string(), model.to_string());
-        self.enable_model_for_provider(provider, model);
-    }
-
     /// Add a model to a provider's enabled chooser set without removing prior
     /// choices. IDs are compared case-insensitively but preserve their wire
     /// spelling on disk.
+    #[cfg(test)]
     pub fn enable_model_for_provider(&mut self, provider: &str, model: &str) {
         let provider = provider.trim();
         let model = model.trim();
@@ -2533,13 +2516,39 @@ fn lock_settings_transaction(
 }
 
 fn settings_path_candidates() -> (Option<PathBuf>, Option<PathBuf>, Option<PathBuf>) {
+    settings_path_candidates_for_scope(true)
+}
+
+fn settings_path_candidates_for_scope(
+    include_config_override: bool,
+) -> (Option<PathBuf>, Option<PathBuf>, Option<PathBuf>) {
+    let from_environment = || {
+        if include_config_override {
+            settings_path_candidates_from_environment()
+        } else {
+            home_settings_path_candidates_from_environment()
+        }
+    };
     #[cfg(test)]
     {
         let honor_guarded_environment =
             crate::test_support::guarded_environment_provides_state_paths();
         crate::test_support::with_test_env_lock(|| {
-            if honor_guarded_environment {
-                settings_path_candidates_from_environment()
+            // A project-path guard cannot authorize a reader that deliberately
+            // ignores that path. Likewise, a guarded HOME must not expose an
+            // ambient CODEWHALE_HOME that takes precedence over it.
+            let home_is_guarded = || {
+                let present = |var| std::env::var_os(var).is_some_and(|value| !value.is_empty());
+                if present("CODEWHALE_HOME") {
+                    crate::test_support::env_var_currently_guarded("CODEWHALE_HOME")
+                } else {
+                    ["HOME", "USERPROFILE"].iter().any(|var| {
+                        crate::test_support::env_var_currently_guarded(var) && present(var)
+                    })
+                }
+            };
+            if honor_guarded_environment && (include_config_override || home_is_guarded()) {
+                from_environment()
             } else {
                 (
                     Some(crate::test_support::unsealed_test_state_root().join(SETTINGS_FILE_NAME)),
@@ -2551,7 +2560,7 @@ fn settings_path_candidates() -> (Option<PathBuf>, Option<PathBuf>, Option<PathB
     }
 
     #[cfg(not(test))]
-    settings_path_candidates_from_environment()
+    from_environment()
 }
 
 fn settings_path_candidates_from_environment() -> (Option<PathBuf>, Option<PathBuf>, Option<PathBuf>)
@@ -2563,6 +2572,11 @@ fn settings_path_candidates_from_environment() -> (Option<PathBuf>, Option<PathB
         return (Some(parent.join(SETTINGS_FILE_NAME)), None, None);
     }
 
+    home_settings_path_candidates_from_environment()
+}
+
+fn home_settings_path_candidates_from_environment()
+-> (Option<PathBuf>, Option<PathBuf>, Option<PathBuf>) {
     let primary = codewhale_config::codewhale_home()
         .ok()
         .map(|home| home.join(SETTINGS_FILE_NAME));
@@ -3602,6 +3616,34 @@ mod tests {
     }
 
     #[test]
+    fn contextual_tips_default_on_and_round_trip_opt_out() {
+        let old: Settings = toml::from_str("").unwrap();
+        assert!(old.contextual_tips);
+        let mut settings = old;
+        settings.set("contextual_tips", "off").unwrap();
+        let restored: Settings = toml::from_str(&toml::to_string(&settings).unwrap()).unwrap();
+        assert!(!restored.contextual_tips);
+    }
+
+    #[test]
+    fn settings_save_preserves_malformed_document_instead_of_fallback_defaults() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.toml");
+        let malformed = "theme = [private_fixture_payload\n";
+        std::fs::write(&path, malformed).unwrap();
+        let mut settings =
+            Settings::load_persisted_from_candidates(Some(path.clone()), None, None).unwrap();
+        assert!(settings.load_error.is_some());
+        // Impression writers use this same save boundary as the opt-out.
+        settings
+            .behavioral_tip_impressions
+            .insert("planning_mode".into(), 1);
+        let error = settings.save_to_path(&path).unwrap_err().to_string();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), malformed);
+        assert!(!error.contains("private_fixture_payload"));
+    }
+
+    #[test]
     fn footer_hint_uses_are_backward_compatible_and_persist_when_recorded() {
         let default_body = toml::to_string_pretty(&Settings::default()).expect("serialize");
         assert!(!default_body.contains("footer_hint_uses"));
@@ -4143,40 +4185,77 @@ mod tests {
     }
 
     #[test]
-    fn display_separates_deepseek_fallback_from_provider_scoped_models() {
-        let mut settings = Settings {
+    fn display_does_not_present_archived_route_preferences_as_current_defaults() {
+        let settings = Settings {
             default_provider: Some("zai".to_string()),
             default_model: Some("deepseek-v4-pro".to_string()),
+            provider_models: Some(std::collections::HashMap::from([
+                ("zai".to_string(), "GLM-5.2".to_string()),
+                ("deepseek".to_string(), "deepseek-v4-flash".to_string()),
+            ])),
             ..Settings::default()
         };
-        settings.set_model_for_provider("zai", "GLM-5.2");
-        settings.set_model_for_provider("deepseek", "deepseek-v4-flash");
 
         let display = settings.display(crate::localization::Locale::En);
 
-        assert!(display.contains("deepseek_fallback:  deepseek-v4-pro"));
-        assert!(display.contains("default_provider:   zai"));
-        assert!(display.contains("    zai: GLM-5.2"));
-        assert!(display.contains("    deepseek: deepseek-v4-flash"));
-        assert!(!display.contains("  default_model:"));
+        assert!(display.contains("model defaults:     config.toml (use /config)"));
+        for archived in [
+            "deepseek_fallback:",
+            "default_provider:",
+            "provider_models:",
+            "default_model:",
+            "GLM-5.2",
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+        ] {
+            assert!(
+                !display.contains(archived),
+                "archived value shown as current: {display}"
+            );
+        }
     }
 
     #[test]
-    fn provider_model_selection_additively_enables_models() {
+    fn archived_model_preferences_survive_serialization_but_reject_new_settings_writes() {
+        let mut settings: Settings = toml::from_str(
+            "default_provider = 'zai'\ndefault_model = 'deepseek-v4-pro'\n[provider_models]\nzai = 'GLM-5.3'\n",
+        ).expect("legacy preferences");
+        let before = toml::to_string(&settings).expect("legacy snapshot");
+
+        for key in ["model", "default_model"] {
+            let error = settings
+                .set(key, "deepseek-v4-flash")
+                .expect_err("canonical config owns models");
+            assert!(error.to_string().contains("/config model"));
+        }
+
+        assert_eq!(
+            toml::to_string(&settings).expect("unchanged legacy snapshot"),
+            before
+        );
+        let restored: Settings = toml::from_str(&before).expect("preserved migration inputs");
+        assert_eq!(restored.default_provider.as_deref(), Some("zai"));
+        assert_eq!(restored.default_model.as_deref(), Some("deepseek-v4-pro"));
+        assert_eq!(
+            restored
+                .provider_models
+                .as_ref()
+                .and_then(|models| models.get("zai"))
+                .map(String::as_str),
+            Some("GLM-5.3")
+        );
+    }
+
+    #[test]
+    fn model_chooser_preferences_do_not_write_a_startup_selection() {
         let mut settings = Settings::default();
 
-        settings.set_model_for_provider("openrouter", "anthropic/claude-sonnet-4");
+        settings.enable_model_for_provider("openrouter", "anthropic/claude-sonnet-4");
         settings.enable_model_for_provider("openrouter", "qwen/qwen3.7-plus");
         settings.enable_model_for_provider("openrouter", "QWEN/QWEN3.7-PLUS");
         settings.enable_model_for_provider("openrouter", "auto");
 
-        assert_eq!(
-            settings
-                .provider_models
-                .as_ref()
-                .and_then(|models| models.get("openrouter")),
-            Some(&"anthropic/claude-sonnet-4".to_string())
-        );
+        assert!(settings.provider_models.is_none());
         assert_eq!(
             settings
                 .enabled_models
@@ -5239,6 +5318,91 @@ mod tests {
     }
 
     #[test]
+    fn legacy_route_preferences_ignore_project_settings_and_runtime_overlays() {
+        let _g = config_path_test_guard();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let global = tmp.path().join("global");
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&global).expect("global directory");
+        std::fs::create_dir_all(&project).expect("project directory");
+        let global_bytes = b"default_provider = \"zai\"\nlow_motion = false\n[provider_models]\nzai = \"GLM-5.3\"\n";
+        let project_bytes = b"default_provider = \"openai\"\nlow_motion = false\n[provider_models]\nopenai = \"project-model\"\n";
+        let global_settings = global.join(SETTINGS_FILE_NAME);
+        let project_settings = project.join(SETTINGS_FILE_NAME);
+        std::fs::write(&global_settings, global_bytes).expect("global settings");
+        std::fs::write(&project_settings, project_bytes).expect("project settings");
+        let _global_home = EnvVarRestore::set("CODEWHALE_HOME", &global);
+        let _config_override =
+            EnvVarRestore::set("CODEWHALE_CONFIG_PATH", project.join("config.toml"));
+        let _legacy_override =
+            EnvVarRestore::set("DEEPSEEK_CONFIG_PATH", project.join("config.toml"));
+        let _no_animations = EnvVarRestore::set("NO_ANIMATIONS", "1");
+
+        let legacy =
+            Settings::load_legacy_route_preferences_read_only().expect("global legacy preferences");
+        assert_eq!(legacy.default_provider.as_deref(), Some("zai"));
+        assert_eq!(
+            legacy
+                .provider_models
+                .as_ref()
+                .and_then(|models| models.get("zai"))
+                .map(String::as_str),
+            Some("GLM-5.3")
+        );
+        assert!(
+            !legacy.low_motion,
+            "migration must read the persisted value"
+        );
+        let ordinary = Settings::load_read_only().expect("ordinary project settings");
+        assert_eq!(ordinary.default_provider.as_deref(), Some("openai"));
+        assert!(
+            ordinary.low_motion,
+            "ordinary runtime overlays are unchanged"
+        );
+        assert_eq!(
+            std::fs::read(&global_settings).expect("unchanged global settings"),
+            global_bytes
+        );
+        assert_eq!(
+            std::fs::read(&project_settings).expect("unchanged project settings"),
+            project_bytes
+        );
+
+        std::fs::remove_file(&global_settings).expect("remove fixture global settings");
+        let missing = Settings::load_legacy_route_preferences_read_only()
+            .expect("missing global preferences");
+        assert_eq!(missing.default_provider, None);
+        assert!(missing.provider_models.is_none());
+        assert!(
+            !global_settings.exists(),
+            "migration reads must not create settings"
+        );
+        assert!(!global.join("config.toml").exists());
+        assert!(!project.join("config.toml").exists());
+    }
+
+    #[test]
+    fn project_path_guard_does_not_authorize_global_legacy_settings_reads() {
+        let _g = config_path_test_guard();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _config_override =
+            EnvVarRestore::set("CODEWHALE_CONFIG_PATH", tmp.path().join("config.toml"));
+        let _global_home = EnvVarRestore::remove("CODEWHALE_HOME");
+        let _home = EnvVarRestore::remove("HOME");
+        let _userprofile = EnvVarRestore::remove("USERPROFILE");
+
+        assert_eq!(
+            settings_path_candidates_for_scope(false),
+            (
+                Some(crate::test_support::unsealed_test_state_root().join(SETTINGS_FILE_NAME)),
+                None,
+                None,
+            ),
+            "a project-only test must stay isolated when reading global preferences"
+        );
+    }
+
+    #[test]
     fn settings_load_migrates_platform_legacy_fallback_into_codewhale_home_without_explicit_home() {
         let _g = config_path_test_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -5575,7 +5739,6 @@ mod tests {
             (&["session_auto_resume", "auto_resume"], "true"),
             (&["cost_currency", "currency"], "cny"),
             (&["max_history", "history"], "50"),
-            (&["default_model", "model"], "none"),
             (&["reasoning_effort", "effort"], "low"),
             (&["permission_posture", "permissions"], "ask"),
             (

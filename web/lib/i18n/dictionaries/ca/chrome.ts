@@ -82,7 +82,7 @@ export const chrome: ChromeDict = {
   themeTitle: "Tema de la documentació · auto / clar / fosc",
 
   footerTagline:
-    "Els teus models. Més capaços junts. Documentació, codi font i comunitat del runtime de codi obert.",
+    "Crea el que vulguis i automatitza la feina quotidiana amb els models que triïs.",
   footerProduct: "Producte",
   footerProject: "Projecte",
   footerDocs: "Documentació",

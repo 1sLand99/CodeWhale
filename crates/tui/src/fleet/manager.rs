@@ -1499,6 +1499,8 @@ impl FleetManager {
                         exit_code: None,
                         tail_payloads: Vec::new(),
                         reported_route: None,
+                        final_answer: None,
+                        saved_session_id: None,
                         requires_reported_route: false,
                     };
                     let _ = self.record_task_outcome(&task, terminal)?;
@@ -1547,6 +1549,8 @@ impl FleetManager {
                         exit_code: None,
                         tail_payloads: Vec::new(),
                         reported_route: None,
+                        final_answer: None,
+                        saved_session_id: None,
                         requires_reported_route: false,
                     };
                     let _ = self.record_task_outcome(&task, terminal)?;
@@ -1666,6 +1670,8 @@ impl FleetManager {
             exit_code,
             tail_payloads,
             reported_route,
+            final_answer,
+            saved_session_id,
             requires_reported_route,
         } = terminal;
         let (receipt_result, failure_kind, exit_code) = task_receipt_outcome(&payload, exit_code);
@@ -1722,6 +1728,8 @@ impl FleetManager {
             attempt: task.entry.attempts,
             exit_code,
             artifacts,
+            final_answer,
+            saved_session_id,
             resolved_route,
             effective_permissions,
         };
@@ -1740,8 +1748,19 @@ impl FleetManager {
                 result: receipt_result,
                 failure_kind,
                 artifacts: verification_input.artifacts,
-                score: None,
+                // No scorer ran, but a worker that failed after writing most
+                // of a report keeps its visible answer on the receipt rather
+                // than losing it with the failed attempt.
+                score: verification_input
+                    .final_answer
+                    .as_ref()
+                    .map(|answer| FleetScore {
+                        value: 0.0,
+                        max: Some(1.0),
+                        notes: Some(answer.receipt_note()),
+                    }),
                 resolved_route: verification_input.resolved_route,
+                saved_session_id: verification_input.saved_session_id,
                 effective_permissions: verification_input.effective_permissions,
             }
         };
@@ -1801,6 +1820,7 @@ impl FleetManager {
             artifacts,
             score: None,
             resolved_route: self.resolve_task_route(&task.task_spec),
+            saved_session_id: None,
             effective_permissions: self.resolve_task_effective_permissions(task),
         };
         let payload = FleetWorkerEventPayload::Cancelled {
@@ -2295,10 +2315,18 @@ fn receipt_summary(receipt: &FleetReceipt) -> String {
         .and_then(|score| score.notes.as_deref())
         .filter(|notes| !notes.trim().is_empty())
     {
-        summary.push_str(&format!(" notes={notes}"));
+        // Notes may carry the worker's final-answer excerpt; the inspection
+        // summary is a one-line status surface.
+        summary.push_str(&format!(
+            " notes={}",
+            crate::utils::truncate_with_ellipsis(notes, RECEIPT_SUMMARY_NOTES_BYTES, "...")
+        ));
     }
     summary
 }
+
+/// Byte bound on receipt notes inside the one-line inspection summary.
+const RECEIPT_SUMMARY_NOTES_BYTES: usize = 240;
 
 fn latest_error_for_worker(state: &FleetLedgerState, worker_id: &str) -> Option<String> {
     state
@@ -2581,6 +2609,7 @@ mod tests {
             .map(|(id, role)| FleetMember {
                 id: (*id).to_string(),
                 display_name: None,
+                shortlist: false,
                 role: (*role).to_string(),
                 model: provider.map(|_| "private-model".to_string()),
                 provider: provider.map(str::to_string),
@@ -3405,6 +3434,7 @@ mod tests {
                     artifacts: Vec::new(),
                     score: None,
                     resolved_route: None,
+                    saved_session_id: None,
                     effective_permissions: None,
                 })
                 .unwrap();

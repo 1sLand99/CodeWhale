@@ -100,16 +100,9 @@ fn artifact_sessions_root() -> Option<PathBuf> {
         return Some(root);
     }
 
-    // Honor explicit HOME/USERPROFILE isolation before consulting the host
-    // known-folder API. On Windows, `crate::config::effective_home_dir()` can ignore subprocess
-    // environment redirection and leak artifacts into the runner profile.
-    let home = crate::config::effective_home_dir()?;
-    let primary = home.join(".codewhale").join("sessions");
-    let legacy = home.join(".deepseek").join("sessions");
-    if primary.exists() || !legacy.exists() {
-        return Some(primary);
-    }
-    Some(legacy)
+    // Use the same state-root authority as saved sessions, including an explicit
+    // CODEWHALE_HOME and legacy read fallback.
+    codewhale_config::resolve_state_dir("sessions").ok()
 }
 
 #[cfg(test)]

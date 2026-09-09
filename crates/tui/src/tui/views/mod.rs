@@ -1351,6 +1351,14 @@ struct ConfigRow {
 }
 
 impl ConfigRow {
+    fn edit_value(&self) -> &str {
+        if self.key.starts_with("notifications.") {
+            self.facts.effective.as_deref().unwrap_or(&self.value)
+        } else {
+            &self.value
+        }
+    }
+
     /// The schema declaration behind this row. `None` means the key is not
     /// declared, and the row is dropped before the view is built.
     fn schema(&self) -> Option<&'static codewhale_config::SettingDef> {
@@ -2216,6 +2224,14 @@ impl ConfigView {
                 facts: ConfigRowFacts::saved_setting(),
             },
             ConfigRow {
+                key: "contextual_tips".to_string(),
+                value: settings.contextual_tips.to_string(),
+                editable: true,
+                scope: ConfigScope::Saved,
+                facts: ConfigRowFacts::saved_setting()
+                    .effective(app.behavioral_tips.enabled().to_string()),
+            },
+            ConfigRow {
                 key: "pin_last_prompt".to_string(),
                 value: settings.pin_last_prompt.to_string(),
                 editable: true,
@@ -2529,6 +2545,19 @@ impl ConfigView {
             });
         rows.splice(2..2, external_status_rows);
         rows.extend(experimental_config_rows(&config));
+        rows.extend(
+            codewhale_config::notifications::NotificationSetting::ALL
+                .into_iter()
+                .map(|setting| ConfigRow {
+                    key: format!("notifications.{}", setting.key()),
+                    value: config.notifications_config().display(setting),
+                    editable: true,
+                    scope: ConfigScope::Saved,
+                    facts: ConfigRowFacts::saved_setting()
+                        .authority(SettingAuthority::WorkspaceConfiguration)
+                        .effective(app.notification_settings.display(setting)),
+                }),
+        );
 
         // The schema decides what is shown and in what order. A row whose key
         // carries no `ui` block is declared but not browsable (it stays
@@ -2889,7 +2918,7 @@ impl ConfigView {
         if SettingsRegistry::new(self).meta(row).kind != SettingKind::Boolean {
             return None;
         }
-        let value = if canonical_config_choice(&row.key, &row.value) == "true" {
+        let value = if canonical_config_choice(&row.key, row.edit_value()) == "true" {
             "false"
         } else {
             "true"
@@ -3197,7 +3226,7 @@ impl ConfigView {
             return;
         };
         let key = row.key.clone();
-        let original_value = row.value.clone();
+        let original_value = row.edit_value().to_string();
         let initial_value = match config_default_placeholder_message(&key) {
             Some(message_id)
                 if original_value == tr(self.locale, message_id)
@@ -3243,6 +3272,9 @@ impl ConfigView {
     }
 
     fn row_display_value(&self, row: &ConfigRow) -> String {
+        if row.key.starts_with("notifications.") {
+            return config_choice_label(self.locale, &row.key, row.edit_value());
+        }
         // The effective lane is only ever an explicit `App` observation carried
         // on the row's typed facts; a persisted value never stands in for it.
         let effective = row.facts.effective.as_deref();
@@ -3697,7 +3729,6 @@ impl ModalView for ConfigView {
                     ViewAction::None
                 }
             }
-            KeyCode::Char('q') if self.filter.is_empty() => ViewAction::Close,
             KeyCode::Tab | KeyCode::Right
                 if !key.modifiers.contains(KeyModifiers::SHIFT) && self.filter.is_empty() =>
             {
@@ -3714,15 +3745,7 @@ impl ModalView for ConfigView {
                 self.move_selection(-1);
                 ViewAction::None
             }
-            KeyCode::Char('k') if self.filter.is_empty() => {
-                self.move_selection(-1);
-                ViewAction::None
-            }
             KeyCode::Down => {
-                self.move_selection(1);
-                ViewAction::None
-            }
-            KeyCode::Char('j') if self.filter.is_empty() => {
                 self.move_selection(1);
                 ViewAction::None
             }
@@ -3758,19 +3781,6 @@ impl ModalView for ConfigView {
                 self.clear_filter();
                 ViewAction::None
             }
-            KeyCode::Char('e') | KeyCode::Char('E') if self.filter.is_empty() => {
-                if self
-                    .selected_row_index()
-                    .and_then(|idx| self.rows.get(idx))
-                    .is_some_and(|row| row.editable)
-                {
-                    if let Some(action) = self.open_selected_catalog_picker() {
-                        return action;
-                    }
-                    self.start_edit();
-                }
-                ViewAction::None
-            }
             KeyCode::Enter => {
                 if self
                     .selected_row_index()
@@ -3786,13 +3796,6 @@ impl ModalView for ConfigView {
                     self.start_edit();
                 }
                 ViewAction::None
-            }
-            KeyCode::Char(' ') if self.filter.is_empty() => {
-                if let Some(action) = self.toggle_selected_boolean() {
-                    action
-                } else {
-                    ViewAction::None
-                }
             }
             KeyCode::Char(ch)
                 if !key.modifiers.contains(KeyModifiers::CONTROL) && !ch.is_control() =>
@@ -5166,7 +5169,7 @@ impl ConfigView {
                     let value = fit_config_column(&self.row_display_value(row), value_column_width);
                     let kind = self.editor_kind(row);
                     let on = (kind == SettingKind::Boolean)
-                        .then(|| canonical_config_choice(&row.key, &row.value) == "true");
+                        .then(|| canonical_config_choice(&row.key, row.edit_value()) == "true");
                     let affordance = setting_affordance(kind, on);
                     // Action and diagnostic rows are not persisted facts, so
                     // they carry no scope badge.
@@ -6453,7 +6456,7 @@ mod tests {
             "{empty_text}"
         );
         assert!(
-            empty_text.contains("Configure roles and launch posture with /fleet."),
+            empty_text.contains("Set up roles with /fleet."),
             "{empty_text}"
         );
 
@@ -7361,7 +7364,7 @@ mod tests {
                             | super::ConfigSection::Legacy
                     )
                 })
-                .all(|row| !row.editable)
+                .all(|row| !row.editable || row.key.starts_with("notifications."))
         );
         // Route endpoint rows are provider-specific: DeepSeek routes expose
         // `base_url`, every other provider exposes `provider_url`. Whichever
@@ -7742,9 +7745,9 @@ api_key_env = "ACME_API_KEY"
     }
 
     #[test]
-    fn config_view_saved_deepseek_fallback_stays_settable_without_a_row() {
-        // The backend key stays live even with no row: a saved fallback still
-        // parses, and `/set` still accepts it for cleanup.
+    fn config_view_saved_deepseek_fallback_is_a_read_only_migration_input() {
+        // Old fallback values still parse, but new model choices belong to
+        // the canonical config selection writer.
         let _guard = ConfigSettingsEnvGuard::new("default_model = \"deepseek-v4-pro\"\n");
         let mut app = create_test_app();
         app.api_provider = crate::config::ApiProvider::Zai;
@@ -7755,9 +7758,11 @@ api_key_env = "ACME_API_KEY"
             "saved legacy fallback must not surface a row"
         );
         let mut settings = Settings::default();
-        settings
+        let error = settings
             .set("default_model", "deepseek-v4-pro")
-            .expect("default_model stays settable through `/set` after the row is gone");
+            .expect_err("legacy model settings must not become another writer");
+        assert!(error.to_string().contains("config.toml"));
+        assert!(settings.default_model.is_none());
     }
 
     /// Retired rows leave no section behind: sub-agent depth moved into the
@@ -7924,7 +7929,15 @@ max_spawn_depth = 2
         view.clear_filter();
         type_filter(&mut view, "workflow");
         assert_eq!(visible_section_labels(&view), vec!["Workflow"]);
-        assert_eq!(visible_row_keys(&view), vec!["workflow"]);
+        let workflow_keys = visible_row_keys(&view);
+        assert_eq!(workflow_keys.first(), Some(&"workflow"));
+        assert_eq!(
+            workflow_keys.len(),
+            1 + codewhale_config::notifications::NotificationSetting::ALL.len()
+        );
+        assert!(workflow_keys[1..].iter().all(|key| {
+            codewhale_config::notifications::NotificationSetting::parse(key).is_some()
+        }));
 
         view.clear_filter();
         type_filter(&mut view, "whaleflow");
@@ -8127,6 +8140,55 @@ base_url = "https://api.xiaomimimo.com/v1"
         out
     }
 
+    #[test]
+    fn notification_rows_keep_saved_and_live_values_distinct_after_reopening() {
+        let _guard = ConfigSettingsEnvGuard::new("");
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        std::fs::write(&path, "[notifications]\nquiet = false\nsound = \"off\"\n").unwrap();
+        let mut app = create_test_app();
+        app.config_path = Some(path.clone());
+        let mut config = Config::load(Some(path), None).unwrap();
+        crate::tui::ui::apply_notification_update(
+            &mut app,
+            &mut config,
+            crate::config::NotificationConfigUpdate::Quiet(true),
+        )
+        .unwrap();
+        crate::tui::ui::apply_notification_update(
+            &mut app,
+            &mut config,
+            crate::config::NotificationConfigUpdate::Sound(Some(
+                crate::config::CompletionSound::Whale,
+            )),
+        )
+        .unwrap();
+        for _ in 0..2 {
+            let mut view = ConfigView::new_for_app(&app);
+            let row = view
+                .rows
+                .iter()
+                .find(|row| row.key == "notifications.quiet")
+                .unwrap();
+            assert_eq!(row.value, "false");
+            assert_eq!(row.edit_value(), "true");
+            let fact = view.setting_fact(row).unwrap();
+            assert_ne!(fact.saved, fact.current);
+            view.focus_key("notifications.quiet");
+            assert!(
+                matches!(view.toggle_selected_boolean(), Some(ViewAction::Emit(ViewEvent::ConfigUpdated { value, .. })) if value == "false")
+            );
+            view.focus_key("notifications.sound");
+            view.start_edit();
+            let edit = view.editing.as_ref().unwrap();
+            assert_eq!(
+                edit.choices.as_ref().unwrap()[edit.selected_choice],
+                "whale"
+            );
+        }
+        app.refresh_notification_settings(&Config::default());
+    }
+
     /// The settings screen is a projection of the schema: its rail tabs, the
     /// group headings inside them, and the row order are the schema's
     /// declaration order, not a second table's. This is the one table test
@@ -8229,6 +8291,7 @@ base_url = "https://api.xiaomimimo.com/v1"
     /// quietly become one that discards the user's edit.
     #[test]
     fn every_settings_row_reaches_a_store() {
+        let _guard = crate::test_support::lock_test_env();
         // Not `settings.toml`: opens another surface, reports a fact, or is
         // persisted to config.toml by `set_config_value`.
         const NOT_SETTINGS_TOML: &[&str] = &[
@@ -8267,6 +8330,39 @@ base_url = "https://api.xiaomimimo.com/v1"
         ];
 
         for def in codewhale_config::schema_rows() {
+            if let Some(setting) =
+                codewhale_config::notifications::NotificationSetting::parse(def.key)
+            {
+                let samples = match setting {
+                    codewhale_config::notifications::NotificationSetting::SoundFile => {
+                        vec!["call with spaces.wav".to_string()]
+                    }
+                    codewhale_config::notifications::NotificationSetting::EventSoundEvents => {
+                        vec![r#"["input-needed", "model-notify"]"#.to_string()]
+                    }
+                    _ => def
+                        .values()
+                        .map(|values| values.into_iter().map(str::to_string).collect())
+                        .unwrap_or_else(|| vec!["37".to_string()]),
+                };
+                let temp = tempfile::tempdir().unwrap();
+                let path = temp.path().join("config.toml");
+                for sample in samples {
+                    let edit =
+                        crate::config::NotificationConfigUpdate::parse(setting, &sample).unwrap();
+                    edit.persist(&path).unwrap();
+                    let loaded = Config::load(Some(path.clone()), None)
+                        .unwrap()
+                        .notifications_config();
+                    assert_eq!(
+                        loaded.display(setting),
+                        edit.display(),
+                        "{} must reach the TUI config store",
+                        def.key
+                    );
+                }
+                continue;
+            }
             // At least one value per row that is not the default, so a row
             // whose store silently drops writes cannot pass by looking like
             // an untouched `Settings`: bools and enums try every value, an
@@ -8567,7 +8663,7 @@ context_window = 262144
     }
 
     #[test]
-    fn config_view_filter_accepts_j_k_and_unicode_case() {
+    fn config_view_filter_accepts_unicode_case() {
         let app = create_test_app();
         let mut view = ConfigView::new_for_app(&app);
 
@@ -8590,6 +8686,79 @@ context_window = 262144
         view.rows[0].value = "CAFÉ".to_string();
         type_filter(&mut view, "café");
         assert_eq!(visible_row_keys(&view), vec!["theme"]);
+    }
+
+    fn assert_config_search_owns_text(query: &str) {
+        let mut view = create_config_view(Locale::En);
+        // Start on an actionable boolean so a stolen Space would emit a
+        // persisted update, and a stolen e would open an editor.
+        view.focus_key("low_motion");
+        let values = view
+            .rows
+            .iter()
+            .map(|row| row.value.clone())
+            .collect::<Vec<_>>();
+        let mut stack = ViewStack::new();
+        stack.push(view);
+        for ch in query.chars() {
+            assert!(
+                stack
+                    .handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                    .is_empty(),
+                "{query:?}"
+            );
+            assert_eq!(stack.top_kind(), Some(ModalKind::Config), "{query:?}");
+        }
+        let mut modal = stack.pop().unwrap();
+        let view = modal.as_any_mut().downcast_mut::<ConfigView>().unwrap();
+        assert_eq!(view.filter, query);
+        assert!(
+            view.editing.is_none(),
+            "search text must not enter a settings editor"
+        );
+        assert_eq!(
+            view.rows
+                .iter()
+                .map(|row| row.value.clone())
+                .collect::<Vec<_>>(),
+            values
+        );
+        assert!(matches!(
+            view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            ViewAction::None
+        ));
+        assert!(view.filter.is_empty());
+        assert!(matches!(
+            view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            ViewAction::Close
+        ));
+    }
+
+    #[test]
+    fn config_search_owns_initial_q() {
+        assert_config_search_owns_text("quiet");
+        assert_config_search_owns_text("Queue");
+    }
+
+    #[test]
+    fn config_search_owns_initial_e() {
+        assert_config_search_owns_text("effort");
+        assert_config_search_owns_text("Effort");
+    }
+
+    #[test]
+    fn config_search_owns_initial_j() {
+        assert_config_search_owns_text("json");
+    }
+
+    #[test]
+    fn config_search_owns_initial_k() {
+        assert_config_search_owns_text("key");
+    }
+
+    #[test]
+    fn config_search_owns_initial_space() {
+        assert_config_search_owns_text(" 队列é");
     }
 
     #[test]
@@ -9866,7 +10035,7 @@ context_window = 262144
             assert!(matches!(key(&mut view, KeyCode::Enter), ViewAction::None));
             assert!(view.editing.is_none(), "{w}x{h} read-only rows never edit");
 
-            // Tab ×4 → Motion; ↓ → fancy_animations; Space toggles it and
+            // Tab ×4 → Motion; ↓ → fancy_animations; Enter toggles it and
             // emits the persisted update without opening an editor.
             for _ in 0..4 {
                 assert!(matches!(key(&mut view, KeyCode::Tab), ViewAction::None));
@@ -9880,12 +10049,12 @@ context_window = 262144
                 dump.contains(&en(MessageId::ConfigActivateAgain)),
                 "{w}x{h} activation copy:\n{dump}"
             );
-            match key(&mut view, KeyCode::Char(' ')) {
+            match key(&mut view, KeyCode::Enter) {
                 ViewAction::Emit(ViewEvent::ConfigUpdated { key, persist, .. }) => {
                     assert_eq!(key, "fancy_animations");
                     assert!(persist);
                 }
-                other => panic!("{w}x{h} Space should toggle, got {other:?}"),
+                other => panic!("{w}x{h} Enter should toggle, got {other:?}"),
             }
             assert!(view.editing.is_none());
 

@@ -79,7 +79,7 @@ export const chrome: ChromeDict = {
   themeTitle: "Belge teması · otomatik / açık / koyu",
 
   footerTagline:
-    "Senin modellerin. Birlikte daha yetenekli. Açık kaynak runtime'ın belgeleri, kaynak kodu ve topluluğu.",
+    "Seçtiğin modellerle istediğini oluştur ve günlük işleri otomatikleştir.",
   footerProduct: "Ürün",
   footerProject: "Proje",
   footerDocs: "Belgeler",

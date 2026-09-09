@@ -5,49 +5,21 @@ name: Codewhale PR Review
 # line comments, anchored to the PR head SHA. CODEOWNERS (@Hmbown) stays the
 # human owner — this review posts alongside it and never approves.
 #
-# Setup — full step-by-step guide in docs/GITHUB_APP.md. Summary:
-#   1. Key: Settings -> Secrets and variables -> Actions -> New repository
-#      secret `CODEWHALE_API_KEY`. This is the canonical name: it is your
-#      Codewhale account's review key, not any one vendor's. The workflow maps
-#      it into whatever env var the configured provider expects.
-#      BYOK alternative: set the provider's own key instead
-#      (`ZAI_API_KEY`, `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`,
-#      `ANTHROPIC_API_KEY`); any one of them is enough.
-#   2. Which agent runs the review: repository variables
-#      `CODEWHALE_REVIEW_PROVIDER` (e.g. `zai`) and `CODEWHALE_REVIEW_MODEL`
-#      (e.g. `GLM-5.3`). Both optional — see "Route selection" below.
-#   3. Optional identity: to post as the Codewhale Agent GitHub App instead
-#      of the workflow's github-token identity, set repository variable
-#      `CODEWHALE_APP_ID` and secret `CODEWHALE_APP_PRIVATE_KEY`; the job
-#      mints an installation token via actions/create-github-app-token.
-#   4. Optional output budget: repository variable
-#      `CODEWHALE_REVIEW_MAX_OUTPUT_TOKENS` — see "Output budget" below.
-# Until at least one accepted key exists the job no-ops with a notice (stays
-# green), so this workflow is safe to merge before it is configured.
+# Setup: docs/GITHUB_APP.md. CODEWHALE_API_KEY is an account machine key;
+# it stays on the Codewhale relay and is never copied into a vendor variable.
+# Account mode requires an explicit account-catalog provider/model id in
+# CODEWHALE_REVIEW_MODEL. BYOK uses the provider's own key unchanged.
 #
-# Actions-syntax note (why the `env:` hoist below exists):
-#   the `secrets` context is NOT available in a job-level `if:`. It IS
-#   available in a job-level `env:`, and step-level `if:` can read the `env`
-#   context. So the key-presence test is evaluated once into
-#   `env.HAS_ANY_KEY` at job scope and every step gates on that string.
-#   Only non-secret booleans live at job scope; the key values themselves are
-#   injected into the single step that needs them.
+# Only same-repository PRs receive model/App secrets or execute the candidate
+# build. Fork PRs fetch objects against a trusted base checkout, but do not run
+# a model review. Keep this pull_request event: a PR must not gain secrets by
+# being fetched for its diff. Same-repository authors already have write access.
 #
-# Route selection:
-#   `CODEWHALE_REVIEW_PROVIDER` is passed straight through as
-#   `codewhale review --provider <name>`, which pins the route. Without it a
-#   model offered by more than one configured route hard-errors
-#   ("available from configured provider route(s): openrouter, zai"). When
-#   the variable is unset the provider is inferred from which key is present.
-#
-# Output budget:
-#   GLM-5.3 is a reasoning model: it emits `reasoning_content` before
-#   `content`, and both are charged against `max_tokens`. A small cap
-#   therefore yields an EMPTY review rather than an error. The CLI's
-#   automatic cap (64K) is already generous, so this workflow sets no cap by
-#   default; `CODEWHALE_REVIEW_MAX_OUTPUT_TOKENS` can override it but is
-#   rejected below a floor that leaves no room for the answer. The run step
-#   also fails loudly on a zero-length review instead of reporting success.
+# CODEWHALE_REVIEW_MAX_CHARS bounds each complete ordered review pass
+# (default 200000). CODEWHALE_REVIEW_MAX_PASSES defaults to 1; increasing it is
+# an explicit spend/duration choice. Exceeding either bound never posts a prefix.
+# Missing keys and provider outages keep the existing advisory policy, and
+# their explicit non-run receipts must never be counted as completed reviews.
 
 on:
   pull_request:
@@ -66,7 +38,7 @@ jobs:
     env:
       # `secrets` is unavailable in a job-level `if:` but allowed here; these
       # are booleans about presence, never key material.
-      HAS_ANY_KEY: ${{ secrets.CODEWHALE_API_KEY != '' || secrets.ZAI_API_KEY != '' || secrets.MODELSTUDIO_API_KEY != '' || secrets.DEEPSEEK_API_KEY != '' || secrets.OPENROUTER_API_KEY != '' || secrets.ANTHROPIC_API_KEY != '' }}
+      HAS_ANY_KEY: ${{ github.event.pull_request.head.repo.full_name == github.repository && (secrets.CODEWHALE_API_KEY != '' || secrets.ZAI_API_KEY != '' || secrets.MODELSTUDIO_API_KEY != '' || secrets.DEEPSEEK_API_KEY != '' || secrets.OPENROUTER_API_KEY != '' || secrets.ANTHROPIC_API_KEY != '') }}
       HAS_APP_KEY: ${{ secrets.CODEWHALE_APP_PRIVATE_KEY != '' }}
     permissions:
       contents: read
@@ -80,13 +52,48 @@ jobs:
       - name: Skip when no review key is configured
         if: env.HAS_ANY_KEY != 'true'
         run: |
-          echo "::notice::No Codewhale review key is set — skipping. Add repository secret CODEWHALE_API_KEY (or a provider key: ZAI_API_KEY / MODELSTUDIO_API_KEY / DEEPSEEK_API_KEY / OPENROUTER_API_KEY / ANTHROPIC_API_KEY) to enable it."
+          echo "::notice::No Codewhale review ran: model secrets are unavailable or this is a fork PR. Configure a review key for same-repository PRs; review fork PRs separately with a trusted build."
+          echo "Codewhale review: not run (no eligible review credentials; this is not a clean-review result)." >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Checkout repository
-        if: env.HAS_ANY_KEY == 'true'
+      - name: Checkout pinned review source
         uses: actions/checkout@v7
         with:
-          fetch-depth: 1
+          ref: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.sha || github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Make exact PR diff objects available
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          REVIEW_SOURCE_SHA: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.sha || github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]] || { echo "::error::Invalid PR number"; exit 1; }
+          for SHA in "$PR_HEAD_SHA" "$PR_BASE_SHA" "$REVIEW_SOURCE_SHA"; do
+            [[ "$SHA" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]] || { echo "::error::Invalid pinned commit"; exit 1; }
+          done
+          [ "$(git rev-parse HEAD)" = "$REVIEW_SOURCE_SHA" ]
+          [ "$(git rev-parse --is-shallow-repository)" = false ]
+          # Fetch objects via the base repository's PR ref. Do not check out
+          # the fetched head, initialize submodules, or run PR hooks/filters.
+          git -c core.hooksPath=/dev/null -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
+            fetch --no-tags --no-recurse-submodules origin \
+            "+refs/pull/${PR_NUMBER}/head:refs/codewhale-review/head"
+          [ "$(git rev-parse 'refs/codewhale-review/head^{commit}')" = "$PR_HEAD_SHA" ] || {
+            echo "::error::PR head changed during checkout; rerun for the current revision."
+            exit 1
+          }
+          git cat-file -e "${PR_BASE_SHA}^{commit}"
+          git cat-file -e "${PR_HEAD_SHA}^{commit}"
+          MERGE_BASE=$(git merge-base --all "$PR_BASE_SHA" "$PR_HEAD_SHA")
+          [[ "$MERGE_BASE" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]] || {
+            echo "::error::The pinned PR commits do not have one available merge base."
+            exit 1
+          }
+          [ "$(git rev-parse HEAD)" = "$REVIEW_SOURCE_SHA" ]
 
       - name: Mint Codewhale Agent app token
         if: env.HAS_ANY_KEY == 'true' && env.HAS_APP_KEY == 'true' && vars.CODEWHALE_APP_ID != ''
@@ -116,16 +123,15 @@ jobs:
 
       - name: Build codewhale
         if: env.HAS_ANY_KEY == 'true'
-        run: cargo build --release -p codewhale-cli
+        run: cargo build --release --locked -p codewhale-cli
 
       - name: Run Codewhale PR review
         if: env.HAS_ANY_KEY == 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
-          # Canonical Codewhale account key. Mapped below into whichever
-          # provider env var the configured route expects.
+          # Account machine key, consumed only by the existing account/relay path.
           CODEWHALE_API_KEY: ${{ secrets.CODEWHALE_API_KEY }}
-          # BYOK fallbacks: a provider key used directly, no mapping needed.
+          # Provider credentials remain separate and are never overwritten.
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
           # Alibaba Model Studio Token Plan (DeepSeek V4 Pro / Qwen 3.8 on the
           # founder's credit); all Model Studio kinds read MODELSTUDIO_API_KEY.
@@ -136,66 +142,60 @@ jobs:
           CODEWHALE_REVIEW_PROVIDER: ${{ vars.CODEWHALE_REVIEW_PROVIDER }}
           CODEWHALE_REVIEW_MODEL: ${{ vars.CODEWHALE_REVIEW_MODEL }}
           CODEWHALE_REVIEW_MAX_OUTPUT_TOKENS: ${{ vars.CODEWHALE_REVIEW_MAX_OUTPUT_TOKENS }}
+          CODEWHALE_REVIEW_MAX_CHARS: ${{ vars.CODEWHALE_REVIEW_MAX_CHARS }}
+          CODEWHALE_REVIEW_MAX_PASSES: ${{ vars.CODEWHALE_REVIEW_MAX_PASSES }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          set -uo pipefail
+          set -euo pipefail
 
-          # --- Which agent reviews this PR -------------------------------
-          # Explicit repository variable wins. Otherwise: the canonical
-          # Codewhale key defaults to the z.ai Coding Plan route (the route
-          # verified end-to-end), and a BYOK-only repo gets the provider whose
-          # key it actually set.
+          # Account mode uses the existing machine precondition and Codewhale
+          # model relay. A configured account provider is not a vendor key.
           PROVIDER="${CODEWHALE_REVIEW_PROVIDER:-}"
-          if [ -z "$PROVIDER" ]; then
-            if   [ -n "${CODEWHALE_API_KEY:-}" ];  then PROVIDER=zai
-            elif [ -n "${ZAI_API_KEY:-}" ];        then PROVIDER=zai
-            elif [ -n "${MODELSTUDIO_API_KEY:-}" ]; then PROVIDER=modelstudio-token-plan
-            elif [ -n "${DEEPSEEK_API_KEY:-}" ];   then PROVIDER=deepseek
-            elif [ -n "${OPENROUTER_API_KEY:-}" ]; then PROVIDER=openrouter
-            elif [ -n "${ANTHROPIC_API_KEY:-}" ];  then PROVIDER=anthropic
-            fi
-          fi
-          if [ -z "$PROVIDER" ]; then
-            echo "::error::No review key resolved to a provider. This should be unreachable (HAS_ANY_KEY was true)."
-            exit 1
-          fi
-
-          # --- Map the canonical key onto that provider's env var ---------
-          # Names only are ever printed; values never are.
-          KEY_VAR=""
-          case "$PROVIDER" in
-            zai|z-ai|zhipu|glm)   KEY_VAR=ZAI_API_KEY ;;
-            deepseek|deepseek-cn) KEY_VAR=DEEPSEEK_API_KEY ;;
-            openrouter)           KEY_VAR=OPENROUTER_API_KEY ;;
-            anthropic|claude)     KEY_VAR=ANTHROPIC_API_KEY ;;
-            *)
-              # No mapping for a custom provider. With an account key set that
-              # is a real misconfiguration (hard error below). BYOK-only repos
-              # are fine — the provider's own secret is used directly — so say
-              # so without a red ::error:: annotation on a correct config.
-              if [ -z "${CODEWHALE_API_KEY:-}" ]; then
-                echo "::warning::CODEWHALE_REVIEW_PROVIDER='${PROVIDER}' has no CODEWHALE_API_KEY mapping in this workflow, and none is needed: no account key is set, so the provider's own BYOK secret is used directly."
-              else
-                echo "::error::CODEWHALE_REVIEW_PROVIDER='${PROVIDER}' has no CODEWHALE_API_KEY mapping in this workflow. Set that provider's own key as a repository secret, or add the mapping here."
-              fi
-              KEY_VAR=""
-              ;;
-          esac
+          MODEL="${CODEWHALE_REVIEW_MODEL:-}"
           if [ -n "${CODEWHALE_API_KEY:-}" ]; then
-            if [ -z "$KEY_VAR" ]; then
+            if [ -n "$PROVIDER" ] && [ "$PROVIDER" != codewhale ]; then
+              echo "::error::With CODEWHALE_API_KEY, set CODEWHALE_REVIEW_PROVIDER=codewhale or leave it unset. Provider keys are never overwritten."
               exit 1
             fi
-            # The canonical account key is authoritative for the chosen route.
-            export "$KEY_VAR=$CODEWHALE_API_KEY"
-            echo "Review key: CODEWHALE_API_KEY -> ${KEY_VAR} (provider: ${PROVIDER})"
+            PROVIDER=codewhale
+            if [[ ! "$MODEL" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[^[:space:]]+$ ]]; then
+              echo "::error::Account review requires CODEWHALE_REVIEW_MODEL as an exact provider/model id from the account catalog."
+              exit 1
+            fi
+            ./target/release/codewhale --no-project-config account agent > /dev/null
+            echo "Review key: Codewhale account relay (provider: codewhale)"
           else
+            if [ -z "$PROVIDER" ]; then
+              if   [ -n "${ZAI_API_KEY:-}" ];        then PROVIDER=zai
+              elif [ -n "${MODELSTUDIO_API_KEY:-}" ]; then PROVIDER=modelstudio-token-plan
+              elif [ -n "${DEEPSEEK_API_KEY:-}" ];   then PROVIDER=deepseek
+              elif [ -n "${OPENROUTER_API_KEY:-}" ]; then PROVIDER=openrouter
+              elif [ -n "${ANTHROPIC_API_KEY:-}" ];  then PROVIDER=anthropic
+              fi
+            fi
+            if [ -z "$PROVIDER" ]; then
+              echo "::error::No BYOK review provider is configured."
+              exit 1
+            fi
             echo "Review key: BYOK provider secret (provider: ${PROVIDER})"
           fi
 
+          MAX_CHARS="${CODEWHALE_REVIEW_MAX_CHARS:-200000}"
+          if [[ ! "$MAX_CHARS" =~ ^[1-9][0-9]{0,6}$ ]] || [ "$MAX_CHARS" -gt 8388608 ]; then
+            echo "::error::CODEWHALE_REVIEW_MAX_CHARS must be an integer from 1 to 8388608."
+            exit 1
+          fi
+
+          MAX_PASSES="${CODEWHALE_REVIEW_MAX_PASSES:-1}"
+          if [[ ! "$MAX_PASSES" =~ ^[1-9][0-9]?$ ]] || [ "$MAX_PASSES" -gt 64 ]; then
+            echo "::error::CODEWHALE_REVIEW_MAX_PASSES must be an integer from 1 to 64."
+            exit 1
+          fi
+          echo "Review limits: ${MAX_CHARS} characters per pass, at most ${MAX_PASSES} passes"
+
           # --- Output budget ---------------------------------------------
-          # GLM-5.3 spends max_tokens on reasoning_content before it emits any
-          # content, so an undersized cap returns an empty review, not an
-          # error. Unset means "use the CLI's automatic 64K cap".
+          # Some models share an output budget between reasoning and content.
+          # Leave room for the review; unset keeps the CLI's automatic cap.
           BUDGET="${CODEWHALE_REVIEW_MAX_OUTPUT_TOKENS:-}"
           if [ -n "$BUDGET" ]; then
             case "$BUDGET" in
@@ -204,7 +204,7 @@ jobs:
                 exit 1 ;;
             esac
             if [ "$BUDGET" -lt 8192 ]; then
-              echo "::error::CODEWHALE_REVIEW_MAX_OUTPUT_TOKENS=${BUDGET} is below the 8192 floor. A reasoning model (GLM-5.3) would spend the whole budget on reasoning_content and return an empty review."
+              echo "::error::CODEWHALE_REVIEW_MAX_OUTPUT_TOKENS=${BUDGET} is below the 8192 floor. Leave room for reasoning and the final review."
               exit 1
             fi
             export CODEWHALE_MAX_OUTPUT_TOKENS="$BUDGET"
@@ -214,12 +214,15 @@ jobs:
           fi
 
           # --- Run --------------------------------------------------------
-          REVIEW_ARGS=(--pr "$PR_NUMBER" --post --provider "$PROVIDER")
-          if [ -n "${CODEWHALE_REVIEW_MODEL:-}" ]; then
-            REVIEW_ARGS+=(--model "$CODEWHALE_REVIEW_MODEL")
+          # Global route/model flags keep the existing CLI resolver on the
+          # selected credential boundary before the review subcommand starts.
+          CLI_ARGS=(--no-project-config --provider "$PROVIDER")
+          if [ -n "$MODEL" ]; then
+            CLI_ARGS+=(--model "$MODEL")
           fi
+          REVIEW_ARGS=(--pr "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --max-chars "$MAX_CHARS" --max-passes "$MAX_PASSES" --post)
           set +e
-          OUTPUT=$(./target/release/codewhale review "${REVIEW_ARGS[@]}" 2>&1)
+          OUTPUT=$(./target/release/codewhale "${CLI_ARGS[@]}" review "${REVIEW_ARGS[@]}" 2>&1)
           STATUS=$?
           set -e
           echo "$OUTPUT"
@@ -244,6 +247,7 @@ jobs:
           if echo "$OUTPUT" | grep -qE 'LLM error: HTTP (401|402|403|408|429|5[0-9][0-9])'; then
             REASON=$(echo "$OUTPUT" | grep -oE 'LLM error: HTTP (401|402|403|408|429|5[0-9][0-9])[^"]{0,80}' | head -1)
             echo "::warning::Codewhale review could not run (${REASON}). The PR is not blocked — provider funding/config is founder-gated."
+            echo "Codewhale review: not run (provider unavailable; this is not a clean-review result)." >> "$GITHUB_STEP_SUMMARY"
             # Silence is not success: leave one visible, idempotent note on the
             # PR so a non-run never passes for a clean review. Only the HTTP
             # status line is quoted, never the model output.

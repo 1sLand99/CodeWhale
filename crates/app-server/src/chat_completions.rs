@@ -17,11 +17,12 @@ use axum::http::{HeaderName, StatusCode};
 use axum::response::IntoResponse;
 use codewhale_agent::ModelRegistry;
 use codewhale_config::{
-    ConfigApiKeyValueKind, ConfigToml, ProviderKind, auth_mode_disables_api_key,
-    classify_config_api_key_value, is_upstream_auth_header,
+    ConfigApiKeyValueKind, ConfigToml, ProviderKind, apply_openrouter_vendor,
+    auth_mode_disables_api_key, classify_config_api_key_value, is_upstream_auth_header,
     provider::WireFormat,
     provider_base_url_is_official, provider_preserves_custom_base_url_model,
     route::{LogicalModelRef, RouteError, RouteRequest, RouteResolver},
+    validate_openrouter_vendor,
 };
 use serde_json::Value;
 
@@ -314,6 +315,28 @@ pub(crate) async fn chat_completions_handler(
 
     // Resolve endpoint.
     let config = state.config.read().await;
+    let vendor = config
+        .providers
+        .for_provider(config.provider)
+        .vendor
+        .as_deref()
+        .unwrap_or_default();
+    let openrouter_vendor = match validate_openrouter_vendor(vendor) {
+        Ok(vendor) if vendor.is_none() || config.provider == ProviderKind::Openrouter => vendor,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": "vendor is supported only for OpenRouter and must be a slug without whitespace or control characters",
+                        "type": "invalid_request_error",
+                        "code": "invalid_vendor"
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
     let endpoint = match resolve_endpoint(&config, &state.registry, request_model) {
         Ok(endpoint) => endpoint,
         Err(error) => {
@@ -353,6 +376,9 @@ pub(crate) async fn chat_completions_handler(
     // byte-for-byte passthrough values, while known aliases become their exact
     // provider wire ids before forwarding.
     body["model"] = serde_json::Value::String(endpoint.model.clone());
+    // The operator pin overrides caller ordering/fallback preferences while
+    // retaining caller restrictions such as only, ignore, and privacy policy.
+    apply_openrouter_vendor(&mut body, openrouter_vendor);
 
     let url = upstream_url(&endpoint, &body);
 
@@ -675,6 +701,96 @@ api_key = {provider_api_key:?}
             .await
             .expect("body bytes");
         serde_json::from_slice(&bytes).expect("json response")
+    }
+
+    #[tokio::test]
+    async fn openrouter_vendor_forwarding_preserves_pin_and_caller_restrictions() {
+        install_crypto_provider();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mock_url = format!("http://{}", listener.local_addr().unwrap());
+        let (captured_tx, mut captured_rx) = mpsc::unbounded_channel::<Value>();
+        let upstream = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(move |Json(body): Json<Value>| {
+                let captured = captured_tx.clone();
+                async move {
+                    captured.send(body).unwrap();
+                    Json(serde_json::json!({"choices": []}))
+                }
+            }),
+        );
+        let upstream_task = tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+
+        for (provider, vendor, status) in [
+            ("openrouter", "deepinfra/turbo", StatusCode::OK),
+            ("openrouter", "", StatusCode::OK),
+            ("openrouter", "bad vendor fixture", StatusCode::BAD_REQUEST),
+            ("arcee", "deepinfra/turbo", StatusCode::BAD_REQUEST),
+            ("arcee", "", StatusCode::OK),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let config_path = tmp.path().join("config.toml");
+            let openrouter_vendor = if provider == "openrouter" {
+                vendor
+            } else {
+                "dormant/pin"
+            };
+            let arcee_vendor = if provider == "arcee" { vendor } else { "" };
+            fs::write(&config_path, format!(
+                "provider = {provider:?}\n\
+                 [providers.openrouter]\nbase_url = {mock_url:?}\napi_key = \"fixture-openrouter-key\"\nvendor = {openrouter_vendor:?}\n\
+                 [providers.arcee]\nbase_url = {mock_url:?}\napi_key = \"fixture-arcee-key\"\nvendor = {arcee_vendor:?}\n"
+            )).unwrap();
+            let state = build_state(Some(config_path), None).unwrap();
+            let app = app_router(state, &[]);
+            let caller_policy = serde_json::json!({
+                "order": ["caller/escape"],
+                "allow_fallbacks": true,
+                "only": ["caller/restriction"],
+                "ignore": ["caller/blocked"],
+                "zdr": true,
+                "data_collection": "deny",
+                "require_parameters": true
+            });
+            let body = serde_json::json!({
+                "model": "fixture/model",
+                "messages": [{"role": "user", "content": "hello"}],
+                "provider": caller_policy
+            });
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/v1/chat/completions")
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status, "{provider}: {vendor}");
+            if status == StatusCode::BAD_REQUEST {
+                let error = response_body_json(response).await;
+                assert_eq!(error["error"]["code"], "invalid_vendor");
+                assert!(!error.to_string().contains(vendor));
+                assert!(
+                    captured_rx.try_recv().is_err(),
+                    "invalid config reached upstream"
+                );
+            } else {
+                let forwarded = captured_rx.try_recv().expect("captured forwarded request");
+                let mut expected = caller_policy;
+                if provider == "openrouter" && !vendor.is_empty() {
+                    expected["order"] = serde_json::json!([vendor]);
+                    expected["allow_fallbacks"] = serde_json::json!(false);
+                }
+                assert_eq!(forwarded["provider"], expected, "{provider}: {vendor}");
+                assert_eq!(forwarded["model"], "fixture/model");
+            }
+        }
+        upstream_task.abort();
     }
 
     #[tokio::test]

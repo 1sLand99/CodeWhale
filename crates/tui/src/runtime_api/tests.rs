@@ -14,6 +14,8 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::time::sleep;
 use uuid::Uuid;
 
+mod headless_catalog;
+
 /// Scale a wait budget for shared CI runners.
 ///
 /// These deadlines are tuned for a developer laptop running one test at a
@@ -121,12 +123,12 @@ fn provider_default_model_cases() -> Vec<(&'static str, Config, &'static str)> {
 fn runtime_request_model_uses_the_active_provider_default() {
     for (label, config, expected) in provider_default_model_cases() {
         assert_eq!(
-            runtime_request_model(&config, None),
+            runtime_request_model(&config, None).expect("configured default"),
             expected,
             "{label} omitted-model resolution"
         );
         assert_eq!(
-            runtime_request_model(&config, Some("explicit-model")),
+            runtime_request_model(&config, Some("explicit-model")).expect("explicit model"),
             "explicit-model",
             "{label} explicit model"
         );
@@ -432,8 +434,10 @@ fn messages_from_thread_detail_batches_tool_results() {
         task_id: None,
         title: None,
         session_id: None,
+        saved_session_checkpoint: None,
     };
     let turn = TurnRecord {
+        max_output_tokens: None,
         schema_version: 2,
         id: turn_id.clone(),
         thread_id: thread.id.clone(),
@@ -444,15 +448,21 @@ fn messages_from_thread_detail_batches_tool_results() {
         ended_at: Some(now),
         duration_ms: Some(0),
         usage: None,
+        model_request_diagnostics: None,
+        routing_settlement: false,
+        effective_route_usage: None,
         permission_posture: Some("ask".to_string()),
         effective_provider: None,
         effective_provider_id: None,
+        effective_openrouter_vendor: None,
         effective_billing_surface: None,
         effective_endpoint_fingerprint: None,
+        effective_provider_live_pricing: None,
         effective_billing_mode: None,
         effective_dispatched_at: None,
         effective_model: None,
         routed_usage: Vec::new(),
+        routed_usage_drop_records: Vec::new(),
         routed_usage_source_ids: Vec::new(),
         routed_usage_dropped_records: 0,
         error: None,
@@ -622,6 +632,7 @@ fn legacy_exact_thread_export_normalizes_provider_kind_and_id() {
             task_id: None,
             title: None,
             session_id: None,
+            saved_session_checkpoint: None,
         },
         turns: Vec::new(),
         items: Vec::new(),
@@ -980,6 +991,155 @@ async fn spawn_test_server_with_root_token_mobile_workspace_and_overrides(
         tokio::task::JoinHandle<()>,
     )>,
 > {
+    let (setup_tx, setup_rx) = oneshot::channel();
+    // If this test sealed the process environment (`lock_test_env`), the
+    // server thread must join that scope: its `Config::load` reads env through
+    // `with_test_env_lock`, which would otherwise block on the mutex the test
+    // holds while awaiting this very setup — a deadlock.
+    let env_ticket = crate::test_support::env_scope_ticket();
+    spawn_product_stack_server(
+        root,
+        sessions_dir,
+        runtime_token,
+        mobile_enabled,
+        workspace,
+        overrides,
+        env_ticket,
+        setup_tx,
+    );
+    let Some((addr, runtime_threads, shutdown_tx)) = setup_rx
+        .await
+        .context("runtime-api test server thread ended during setup")??
+    else {
+        return Ok(None);
+    };
+    // Owns the shutdown side for as long as the test keeps the handle alive:
+    // aborting it (or the test runtime dropping it) closes the listener and
+    // ends the server thread.
+    let handle = tokio::spawn(async move {
+        let _shutdown = shutdown_tx;
+        std::future::pending::<()>().await
+    });
+    Ok(Some((addr, runtime_threads, handle)))
+}
+
+/// What the server thread hands back once the router is bound: everything the
+/// test body needs, plus the shutdown side of the server.
+type TestServerSetup = (SocketAddr, SharedRuntimeThreadManager, oneshot::Sender<()>);
+
+/// Builds and serves the Runtime API router where the product builds and
+/// serves it: on a thread with the product's `CODEWHALE_MAIN_STACK_BYTES`
+/// stack.
+///
+/// `#[tokio::test]` drives its current-thread runtime on the 2 MiB libtest
+/// thread, so a harness that built its state and spawned its server onto that
+/// runtime ran every product path — config load and reload (the serde
+/// `toml::de::visit_map` frames for the full `Config`), manager construction,
+/// thread lifecycle, streaming — on a stack the product never gives it
+/// (`lib.rs` sizes the runtime workers with `CODEWHALE_MAIN_STACK_BYTES`).
+/// Config load under a profile and the thread-lifecycle path marginally
+/// overflowed 2 MiB in debug builds (`has overflowed its stack`, SIGABRT for
+/// the whole lib suite), which CI masked with `RUST_MIN_STACK`. Running setup
+/// *and* serving on one product-sized thread removes the class: the libtest
+/// thread keeps only the test body and its HTTP client, and no product frame
+/// depth can overflow it.
+///
+/// Setup results come back through `setup_tx`; the caller wraps the shutdown
+/// sender in the `JoinHandle` the call sites expect. Nothing here runs on the
+/// test's runtime, so the server thread must outlive setup: it serves until
+/// the shutdown sender is dropped.
+///
+/// `env_ticket` adopts the thread into the calling test's sealed env scope
+/// (`test_env_lock::join_env_scope`), so its `Config::load` env reads see the
+/// test's environment instead of blocking on the mutex the test holds while
+/// awaiting setup. `None` when the caller sealed nothing.
+fn spawn_product_stack_server(
+    root: PathBuf,
+    sessions_dir: PathBuf,
+    runtime_token: Option<String>,
+    mobile_enabled: bool,
+    workspace: PathBuf,
+    overrides: TestServerOverrides,
+    env_ticket: Option<crate::test_support::EnvScopeTicket>,
+    setup_tx: oneshot::Sender<Result<Option<TestServerSetup>>>,
+) {
+    std::thread::Builder::new()
+        .name("runtime-api-test-server".to_string())
+        .stack_size(crate::CODEWHALE_MAIN_STACK_BYTES)
+        .spawn(move || {
+            // Adopted for the thread's lifetime; the scope's generation check
+            // refuses enrollment once the sealing test has ended.
+            let _membership = crate::test_support::join_env_scope(env_ticket);
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime-api test server runtime");
+            runtime.block_on(async move {
+                match build_test_server(
+                    root,
+                    sessions_dir,
+                    runtime_token,
+                    mobile_enabled,
+                    workspace,
+                    overrides,
+                )
+                .await
+                {
+                    Ok(Some((listener, app, addr, runtime_threads))) => {
+                        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+                        if setup_tx
+                            .send(Ok(Some((addr, runtime_threads, shutdown_tx))))
+                            .is_err()
+                        {
+                            // The test gave up waiting; do not serve.
+                            return;
+                        }
+                        listener
+                            .set_nonblocking(true)
+                            .expect("nonblocking test listener");
+                        let listener =
+                            TcpListener::from_std(listener).expect("register test listener");
+                        tokio::select! {
+                            _ = async {
+                                let _ = axum::serve(
+                                    listener,
+                                    app.into_make_service_with_connect_info::<SocketAddr>(),
+                                )
+                                .await;
+                            } => {}
+                            _ = shutdown_rx => {}
+                        }
+                    }
+                    Ok(None) => {
+                        let _ = setup_tx.send(Ok(None));
+                    }
+                    Err(err) => {
+                        let _ = setup_tx.send(Err(err));
+                    }
+                }
+            });
+        })
+        .expect("spawn runtime-api test server thread");
+}
+
+/// The whole harness body — config load, managers, router build — formerly
+/// inline in `spawn_test_server_with_root_token_mobile_workspace_and_overrides`.
+/// Runs on the product-stack server thread (see `spawn_product_stack_server`).
+async fn build_test_server(
+    root: PathBuf,
+    sessions_dir: PathBuf,
+    runtime_token: Option<String>,
+    mobile_enabled: bool,
+    workspace: PathBuf,
+    overrides: TestServerOverrides,
+) -> Result<
+    Option<(
+        std::net::TcpListener,
+        axum::Router,
+        SocketAddr,
+        SharedRuntimeThreadManager,
+    )>,
+> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     fs::create_dir_all(&sessions_dir)?;
     fs::create_dir_all(&workspace)?;
@@ -994,8 +1154,6 @@ async fn spawn_test_server_with_root_token_mobile_workspace_and_overrides(
             ..Config::default()
         }
     };
-    config.mcp_config_path = Some(root.join("mcp.json").to_string_lossy().to_string());
-
     config.mcp_config_path = Some(root.join("mcp.json").to_string_lossy().to_string());
     let manager = TaskManager::start_with_executor(
         TaskManagerConfig {
@@ -1017,7 +1175,7 @@ async fn spawn_test_server_with_root_token_mobile_workspace_and_overrides(
         RuntimeThreadManagerConfig::from_task_data_dir(root.join("runtime")),
     )?);
     runtime_threads.attach_task_manager(manager.clone());
-    let automations = Arc::new(Mutex::new(AutomationManager::open(
+    let automations = Arc::new(Mutex::new(AutomationManager::open_for_test(
         root.join("automations"),
     )?));
     runtime_threads.attach_automation_manager(automations.clone());
@@ -1026,7 +1184,9 @@ async fn spawn_test_server_with_root_token_mobile_workspace_and_overrides(
     let sub_agent_manager = overrides
         .sub_agent_manager
         .unwrap_or_else(|| runtime_api_sub_agent_manager(&workspace, 2));
-    let listener = match TcpListener::bind("127.0.0.1:0").await {
+    // A std listener: the server thread registers it with its own runtime
+    // after setup is reported (see `spawn_product_stack_server`).
+    let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
         Ok(listener) => listener,
         Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return Ok(None),
         Err(err) => return Err(err.into()),
@@ -1072,14 +1232,7 @@ async fn spawn_test_server_with_root_token_mobile_workspace_and_overrides(
         compat_stream_test_hook: overrides.compat_stream_test_hook,
     };
     let app = build_router(state);
-    let handle = tokio::spawn(async move {
-        let _ = axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .await;
-    });
-    Ok(Some((addr, runtime_threads, handle)))
+    Ok(Some((listener, app, addr, runtime_threads)))
 }
 
 async fn spawn_test_server() -> Result<
@@ -2603,6 +2756,12 @@ async fn compatibility_stream_closes_losslessly_across_replay_live_handoff() -> 
                     output_tokens: 1,
                     ..Usage::default()
                 },
+                parent_route_usage: Usage {
+                    input_tokens: 3,
+                    output_tokens: 1,
+                    ..Usage::default()
+                },
+                routed_usage_dropped_records: 0,
                 status: TurnOutcomeStatus::Completed,
                 error: None,
                 tool_catalog: None,
@@ -2851,6 +3010,8 @@ async fn compatibility_stream_exposes_and_resolves_user_input_without_answer_ech
             .tx_event
             .send(EngineEvent::TurnComplete {
                 usage: Usage::default(),
+                parent_route_usage: Usage::default(),
+                routed_usage_dropped_records: 0,
                 status: TurnOutcomeStatus::Completed,
                 error: None,
                 tool_catalog: None,
@@ -3214,6 +3375,12 @@ async fn thread_endpoints_expose_lifecycle_contract() -> Result<()> {
                                 output_tokens: 5,
                                 ..Usage::default()
                             },
+                            parent_route_usage: Usage {
+                                input_tokens: 10,
+                                output_tokens: 5,
+                                ..Usage::default()
+                            },
+                            routed_usage_dropped_records: 0,
                             status: TurnOutcomeStatus::Completed,
                             error: None,
                             tool_catalog: None,
@@ -3229,6 +3396,8 @@ async fn thread_endpoints_expose_lifecycle_contract() -> Result<()> {
                                 output_tokens: 0,
                                 ..Usage::default()
                             },
+                            parent_route_usage: Usage::default(),
+                            routed_usage_dropped_records: 0,
                             status: TurnOutcomeStatus::Completed,
                             error: None,
                             tool_catalog: None,
@@ -3366,6 +3535,8 @@ async fn turn_endpoint_operation_key_returns_original_and_conflicts_on_mismatch(
             let _ = tx_event
                 .send(EngineEvent::TurnComplete {
                     usage: Usage::default(),
+                    parent_route_usage: Usage::default(),
+                    routed_usage_dropped_records: 0,
                     status: TurnOutcomeStatus::Completed,
                     error: None,
                     tool_catalog: None,
@@ -3424,6 +3595,229 @@ async fn turn_endpoint_operation_key_returns_original_and_conflicts_on_mismatch(
 }
 
 #[tokio::test]
+async fn turn_operation_lookup_is_authenticated_read_only_and_survives_restart() -> Result<()> {
+    fn file_bytes(root: &Path) -> Result<std::collections::BTreeMap<PathBuf, Vec<u8>>> {
+        let mut files = std::collections::BTreeMap::new();
+        for entry in fs::read_dir(root)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                files.extend(file_bytes(&entry.path())?);
+            } else {
+                // Match the Runtime-store lookup fixture: Windows locks can
+                // deny reads even on empty claim files. Their length proves
+                // their bytes; retain every path so a new lock still fails.
+                let bytes = if entry.metadata()?.len() == 0 {
+                    Vec::new()
+                } else {
+                    fs::read(entry.path()).with_context(|| {
+                        format!("read Runtime fixture file {:?}", entry.file_name())
+                    })?
+                };
+                files.insert(entry.path(), bytes);
+            }
+        }
+        Ok(files)
+    }
+
+    let _env = lock_test_env();
+    let dir = tempfile::tempdir()?;
+    let home = dir.path().join("home");
+    fs::create_dir_all(&home)?;
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", &home);
+    let store_root = dir.path().join("store");
+    let _runtime_dir = EnvVarGuard::set("CODEWHALE_RUNTIME_DIR", &store_root);
+    let root = dir.path().join("server");
+    let sessions = dir.path().join("sessions");
+    let workspace = dir.path().join("workspace");
+    let token = "turn-lookup-local-fixture";
+    let _backend = EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+    let _proxy = EnvVarGuard::set("NO_PROXY", "*");
+    let (addr, manager, server) = spawn_test_server_with_root_token_mobile_workspace(
+        root.clone(),
+        sessions.clone(),
+        Some(token.into()),
+        false,
+        workspace.clone(),
+    )
+    .await?
+    .context("loopback listener required for turn operation lookup proof")?;
+    let client = crate::tls::reqwest_client_builder()
+        .timeout(ci_scaled(Duration::from_secs(2)))
+        .build()?;
+    let thread = manager.create_thread(Default::default()).await?;
+    let other_thread = manager.create_thread(Default::default()).await?;
+    let mut engine = crate::core::engine::mock_engine_handle();
+    manager
+        .install_test_engine(&thread.id, engine.handle.clone())
+        .await?;
+    let key = "cwc-http-operation-lookup";
+    let accepted = client
+        .post(format!("http://{addr}/v1/threads/{}/turns", thread.id))
+        .bearer_auth(token)
+        .json(&json!({"prompt":"one accepted lookup fixture", "operation_key":key}))
+        .send()
+        .await?;
+    assert_eq!(accepted.status(), StatusCode::CREATED);
+    let accepted: Value = accepted.json().await?;
+    let turn_id = accepted["turn"]["id"]
+        .as_str()
+        .context("accepted turn id")?
+        .to_string();
+    assert!(matches!(
+        tokio::time::timeout(ci_scaled(Duration::from_secs(2)), engine.rx_op.recv())
+            .await?
+            .context("accepted mock Engine operation")?,
+        Op::SendMessage { .. }
+    ));
+
+    let endpoint = format!(
+        "http://{addr}/v1/threads/{}/turn-operations/{key}",
+        thread.id
+    );
+    let before = file_bytes(&store_root)?;
+    let response = client.get(&endpoint).bearer_auth(token).send().await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let found: Value = response.json().await?;
+    assert_eq!(
+        found,
+        serde_json::to_value(manager.test_store().load_turn(&turn_id)?)?,
+        "lookup returns the existing bare TurnRecord"
+    );
+    assert_eq!(found["id"], accepted["turn"]["id"]);
+    assert!(found.get("turn").is_none());
+    for bearer in [None, Some("wrong-lookup-token")] {
+        let mut request = client.get(&endpoint);
+        if let Some(bearer) = bearer {
+            request = request.bearer_auth(bearer);
+        }
+        assert_eq!(request.send().await?.status(), StatusCode::UNAUTHORIZED);
+    }
+    for (thread_id, operation_key) in [
+        (thread.id.as_str(), "absent-operation"),
+        (other_thread.id.as_str(), key),
+    ] {
+        let response = client
+            .get(format!(
+                "http://{addr}/v1/threads/{thread_id}/turn-operations/{operation_key}"
+            ))
+            .bearer_auth(token)
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+    let overlong = "x".repeat(crate::runtime_threads::MAX_RUNTIME_TURN_OPERATION_KEY_BYTES + 1);
+    for (thread_id, operation_key) in [
+        (thread.id.as_str(), "%20leading"),
+        (thread.id.as_str(), "control%0Acharacter"),
+        (thread.id.as_str(), overlong.as_str()),
+        ("invalid%20thread", key),
+    ] {
+        let response = client
+            .get(format!(
+                "http://{addr}/v1/threads/{thread_id}/turn-operations/{operation_key}"
+            ))
+            .bearer_auth(token)
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    assert_eq!(
+        file_bytes(&store_root)?,
+        before,
+        "GET must not create a lock or rewrite records"
+    );
+    assert!(
+        engine.rx_op.try_recv().is_err(),
+        "GET must not dispatch an Engine operation"
+    );
+
+    for event in [
+        EngineEvent::TurnStarted {
+            turn_id: "lookup-fixture-engine-turn".into(),
+            created_at: chrono::Utc::now(),
+            route: None,
+        },
+        EngineEvent::MessageStarted { index: 0 },
+        EngineEvent::MessageDelta {
+            index: 0,
+            content: "lookup fixture completed".into(),
+        },
+        EngineEvent::MessageComplete { index: 0 },
+    ] {
+        engine.tx_event.send(event).await?;
+    }
+    engine
+        .tx_event
+        .send(EngineEvent::TurnComplete {
+            usage: Default::default(),
+            parent_route_usage: Default::default(),
+            routed_usage_dropped_records: 0,
+            status: TurnOutcomeStatus::Completed,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        })
+        .await?;
+    tokio::time::timeout(ci_scaled(Duration::from_secs(2)), async {
+        loop {
+            if manager.test_store().load_turn(&turn_id)?.status == RuntimeTurnStatus::Completed {
+                return Ok::<_, anyhow::Error>(());
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("mock turn did not settle before restart")??;
+    tokio::time::timeout(
+        ci_scaled(Duration::from_secs(2)),
+        manager.shutdown_and_wait(),
+    )
+    .await??;
+    let settled = serde_json::to_value(manager.test_store().load_turn(&turn_id)?)?;
+    let released = Arc::downgrade(&manager);
+    server.abort();
+    let _ = server.await;
+    drop(manager);
+    drop(engine);
+    tokio::time::timeout(ci_scaled(Duration::from_secs(2)), async {
+        while released.upgrade().is_some() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("old Runtime did not release its store before restart")?;
+
+    let (addr, _manager, server) = spawn_test_server_with_root_token_mobile_workspace(
+        root,
+        sessions,
+        Some(token.into()),
+        false,
+        workspace,
+    )
+    .await?
+    .context("loopback listener required for restarted lookup proof")?;
+    // Startup recovery is complete. No Engine is installed in this Runtime.
+    let before = file_bytes(&store_root)?;
+    let response = client
+        .get(format!(
+            "http://{addr}/v1/threads/{}/turn-operations/{key}",
+            thread.id
+        ))
+        .bearer_auth(token)
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.json::<Value>().await?, settled);
+    assert_eq!(
+        file_bytes(&store_root)?,
+        before,
+        "restart lookup must remain read-only"
+    );
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn events_endpoint_respects_since_seq_cursor() -> Result<()> {
     let Some((addr, runtime_threads, handle)) = spawn_test_server().await? else {
         return Ok(());
@@ -3474,6 +3868,12 @@ async fn events_endpoint_respects_since_seq_cursor() -> Result<()> {
                     output_tokens: 3,
                     ..Usage::default()
                 },
+                parent_route_usage: Usage {
+                    input_tokens: 5,
+                    output_tokens: 3,
+                    ..Usage::default()
+                },
+                routed_usage_dropped_records: 0,
                 status: TurnOutcomeStatus::Completed,
                 error: None,
                 tool_catalog: None,
@@ -3693,6 +4093,12 @@ async fn steer_and_interrupt_endpoints_work_on_active_turn() -> Result<()> {
                     output_tokens: 1,
                     ..Usage::default()
                 },
+                parent_route_usage: Usage {
+                    input_tokens: 2,
+                    output_tokens: 1,
+                    ..Usage::default()
+                },
+                routed_usage_dropped_records: 0,
                 status: TurnOutcomeStatus::Completed,
                 error: None,
                 tool_catalog: None,
@@ -3993,6 +4399,105 @@ async fn stream_compat_mapping_handles_expected_runtime_events() -> Result<()> {
     Ok(())
 }
 
+/// Renders one mapped SSE frame and returns its `data:` payload as JSON.
+async fn sse_frame_payload(event: SseEvent) -> Result<Value> {
+    let stream = async_stream::stream! {
+        yield Ok::<_, Infallible>(event);
+    };
+    let body =
+        axum::body::to_bytes(Sse::new(stream).into_response().into_body(), usize::MAX).await?;
+    let text = String::from_utf8_lossy(&body).into_owned();
+    let data = text
+        .lines()
+        .find_map(|line| line.strip_prefix("data: "))
+        .context("SSE frame had no data line")?;
+    Ok(serde_json::from_str(data)?)
+}
+
+fn approval_event_record(seq: u64, event: &str, payload: Value) -> RuntimeEventRecord {
+    RuntimeEventRecord {
+        schema_version: 1,
+        seq,
+        timestamp: chrono::Utc::now(),
+        thread_id: "thr_test".to_string(),
+        turn_id: Some("turn_test".to_string()),
+        item_id: None,
+        event: event.to_string(),
+        payload,
+    }
+}
+
+/// Every approval frame an SSE-only client sees identifies the approval by the
+/// runtime-minted capability. A provider tool-call ID must never surface in
+/// `approval_id` or its legacy `id` alias, because those are the fields clients
+/// echo back to `POST /v1/approvals/{id}`.
+#[tokio::test]
+async fn approval_sse_frames_identify_approvals_by_the_opaque_capability() -> Result<()> {
+    const OPAQUE: &str = "approval_0123456789abcdef";
+    const RAW: &str = "call_1";
+
+    // Each arm reads only the identity fields; the rest are the shape a real
+    // payload carries and are ignored by the arms that do not use them.
+    for (seq, event) in ["approval.required", "approval.decided", "approval.timeout"]
+        .into_iter()
+        .enumerate()
+    {
+        let record = approval_event_record(
+            seq as u64 + 1,
+            event,
+            json!({
+                "id": OPAQUE,
+                "approval_id": OPAQUE,
+                "tool_call_id": RAW,
+                "tool_name": "exec_command",
+                "description": "Run tests",
+                "decision": "allow",
+                "timeout_secs": 300,
+            }),
+        );
+        let mapped =
+            map_compat_stream_event(&record).with_context(|| format!("missing {event} frame"))?;
+        let frame = sse_frame_payload(mapped).await?;
+        assert_eq!(frame["approval_id"], OPAQUE, "{event} approval_id");
+        assert_eq!(frame["id"], OPAQUE, "{event} legacy id alias");
+        assert_ne!(frame["approval_id"], RAW, "{event} must not publish raw id");
+        assert_eq!(frame["thread_id"], "thr_test");
+    }
+    Ok(())
+}
+
+/// Companion to the test above: the raw tool-call ID is the only correlator an
+/// SSE-only client can use to attach an approval prompt to the tool row it
+/// gates, so the projection should forward it alongside the capability.
+#[tokio::test]
+async fn approval_sse_frames_forward_the_tool_call_correlator() -> Result<()> {
+    const OPAQUE: &str = "approval_0123456789abcdef";
+    const RAW: &str = "call_1";
+
+    for (seq, event) in ["approval.required", "approval.decided", "approval.timeout"]
+        .into_iter()
+        .enumerate()
+    {
+        let record = approval_event_record(
+            seq as u64 + 1,
+            event,
+            json!({
+                "id": OPAQUE,
+                "approval_id": OPAQUE,
+                "tool_call_id": RAW,
+                "tool_name": "exec_command",
+                "decision": "allow",
+            }),
+        );
+        let mapped =
+            map_compat_stream_event(&record).with_context(|| format!("missing {event} frame"))?;
+        let frame = sse_frame_payload(mapped).await?;
+        assert_eq!(frame["tool_call_id"], RAW, "{event} tool_call_id");
+        assert_eq!(frame["approval_id"], OPAQUE, "{event} approval_id");
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn stream_endpoint_remains_backward_compatible() -> Result<()> {
     let Some((addr, runtime_threads, handle)) = spawn_test_server().await? else {
@@ -4050,6 +4555,12 @@ async fn stream_endpoint_remains_backward_compatible() -> Result<()> {
                     output_tokens: 2,
                     ..Usage::default()
                 },
+                parent_route_usage: Usage {
+                    input_tokens: 4,
+                    output_tokens: 2,
+                    ..Usage::default()
+                },
+                routed_usage_dropped_records: 0,
                 status: TurnOutcomeStatus::Completed,
                 error: None,
                 tool_catalog: None,
@@ -4739,6 +5250,12 @@ async fn session_create_from_thread_rejects_active_turn() -> Result<()> {
                     output_tokens: 1,
                     ..Usage::default()
                 },
+                parent_route_usage: Usage {
+                    input_tokens: 2,
+                    output_tokens: 1,
+                    ..Usage::default()
+                },
+                routed_usage_dropped_records: 0,
                 status: TurnOutcomeStatus::Completed,
                 error: None,
                 tool_catalog: None,
@@ -4882,7 +5399,10 @@ async fn session_summary_route_projects_rows_and_honours_archive_filters() -> Re
     let client = crate::tls::reqwest_client();
 
     let active: Vec<serde_json::Value> = client
-        .get(format!("http://{addr}/v1/sessions/summary"))
+        .get(format!(
+            "http://127.0.0.1:{}/v1/sessions/summary",
+            addr.port()
+        ))
         .send()
         .await?
         .error_for_status()?
@@ -4912,7 +5432,8 @@ async fn session_summary_route_projects_rows_and_honours_archive_filters() -> Re
 
     let archived: Vec<serde_json::Value> = client
         .get(format!(
-            "http://{addr}/v1/sessions/summary?archived_only=true"
+            "http://127.0.0.1:{}/v1/sessions/summary?archived_only=true",
+            addr.port()
         ))
         .send()
         .await?
@@ -4943,7 +5464,10 @@ async fn session_patch_route_renames_archives_and_reports_real_changes() -> Resu
     let client = crate::tls::reqwest_client();
 
     let patched: serde_json::Value = client
-        .patch(format!("http://{addr}/v1/sessions/sess-patch"))
+        .patch(format!(
+            "http://127.0.0.1:{}/v1/sessions/sess-patch",
+            addr.port()
+        ))
         .json(&json!({ "title": "After", "archived": true }))
         .send()
         .await?
@@ -4963,7 +5487,10 @@ async fn session_patch_route_renames_archives_and_reports_real_changes() -> Resu
 
     // A re-patch to the same state changes nothing, and says so.
     let repeat: serde_json::Value = client
-        .patch(format!("http://{addr}/v1/sessions/sess-patch"))
+        .patch(format!(
+            "http://127.0.0.1:{}/v1/sessions/sess-patch",
+            addr.port()
+        ))
         .json(&json!({ "archived": true }))
         .send()
         .await?
@@ -4980,7 +5507,10 @@ async fn session_patch_route_renames_archives_and_reports_real_changes() -> Resu
 
     // An empty body is a client error, not a silent no-op.
     let empty = client
-        .patch(format!("http://{addr}/v1/sessions/sess-patch"))
+        .patch(format!(
+            "http://127.0.0.1:{}/v1/sessions/sess-patch",
+            addr.port()
+        ))
         .json(&json!({}))
         .send()
         .await?;
@@ -4988,7 +5518,10 @@ async fn session_patch_route_renames_archives_and_reports_real_changes() -> Resu
 
     // A blank title is rejected with the reason, not accepted.
     let blank = client
-        .patch(format!("http://{addr}/v1/sessions/sess-patch"))
+        .patch(format!(
+            "http://127.0.0.1:{}/v1/sessions/sess-patch",
+            addr.port()
+        ))
         .json(&json!({ "title": "   " }))
         .send()
         .await?;
@@ -5015,7 +5548,10 @@ async fn session_patch_route_refuses_a_live_session_with_a_conflict() -> Result<
 
     crate::session_manager::set_live_session(Some("sess-live"));
     let conflict = client
-        .patch(format!("http://{addr}/v1/sessions/sess-live"))
+        .patch(format!(
+            "http://127.0.0.1:{}/v1/sessions/sess-live",
+            addr.port()
+        ))
         .json(&json!({ "title": "Renamed from the dashboard" }))
         .send()
         .await?;
@@ -5023,7 +5559,10 @@ async fn session_patch_route_refuses_a_live_session_with_a_conflict() -> Result<
 
     crate::session_manager::set_live_session(None);
     let allowed = client
-        .patch(format!("http://{addr}/v1/sessions/sess-live"))
+        .patch(format!(
+            "http://127.0.0.1:{}/v1/sessions/sess-live",
+            addr.port()
+        ))
         .json(&json!({ "title": "Renamed from the dashboard" }))
         .send()
         .await?;
@@ -5046,7 +5585,8 @@ async fn session_detail_route_serves_a_bounded_redacted_peek_on_request() -> Res
 
     let peek: serde_json::Value = client
         .get(format!(
-            "http://{addr}/v1/sessions/sess-peek?peek=true&entries=12"
+            "http://127.0.0.1:{}/v1/sessions/sess-peek?peek=true&entries=12",
+            addr.port()
         ))
         .send()
         .await?
@@ -5068,7 +5608,10 @@ async fn session_detail_route_serves_a_bounded_redacted_peek_on_request() -> Res
     }
 
     let detail: serde_json::Value = client
-        .get(format!("http://{addr}/v1/sessions/sess-peek"))
+        .get(format!(
+            "http://127.0.0.1:{}/v1/sessions/sess-peek",
+            addr.port()
+        ))
         .send()
         .await?
         .error_for_status()?
@@ -5538,6 +6081,7 @@ async fn session_save_merges_thread_cost_split_and_records_coverage() -> Result<
     let store = runtime_threads.test_store();
     let now = Utc::now();
     let mut turn = TurnRecord {
+        max_output_tokens: None,
         schema_version: 2,
         id: "turn_cost_merge".to_string(),
         thread_id: thread_id.clone(),
@@ -5552,21 +6096,28 @@ async fn session_save_merges_thread_cost_split_and_records_coverage() -> Result<
             output_tokens: 1_000,
             ..Usage::default()
         }),
+        model_request_diagnostics: None,
+        routing_settlement: false,
+        effective_route_usage: None,
         permission_posture: None,
         effective_provider: None,
         effective_provider_id: None,
+        effective_openrouter_vendor: None,
         effective_billing_surface: None,
         effective_endpoint_fingerprint: None,
+        effective_provider_live_pricing: None,
         effective_billing_mode: None,
         effective_dispatched_at: None,
         effective_model: None,
         routed_usage: vec![crate::cost_status::EffectiveRouteUsage {
             route: crate::cost_status::EffectiveRouteEnvelope {
+                openrouter_vendor: None,
                 provider: ApiProvider::Deepseek,
                 provider_identity: ApiProvider::Deepseek.as_str().to_string(),
                 model: "deepseek-v4-flash".to_string(),
                 billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
                 endpoint_fingerprint: None,
+                provider_live_pricing: None,
                 billing_mode: crate::cost_status::RouteBillingMode::Metered,
                 dispatched_at: now,
             },
@@ -5576,6 +6127,7 @@ async fn session_save_merges_thread_cost_split_and_records_coverage() -> Result<
                 ..Usage::default()
             },
         }],
+        routed_usage_drop_records: Vec::new(),
         routed_usage_source_ids: Vec::new(),
         routed_usage_dropped_records: 0,
         error: None,
@@ -5723,6 +6275,7 @@ async fn session_save_persists_parent_cny_unpriced_reasons_without_double_count(
     let store = runtime_threads.test_store();
     let now = Utc::now();
     let mut turn = TurnRecord {
+        max_output_tokens: None,
         schema_version: 2,
         id: "turn_cny_reasons".to_string(),
         thread_id: thread_id.clone(),
@@ -5737,21 +6290,28 @@ async fn session_save_persists_parent_cny_unpriced_reasons_without_double_count(
             output_tokens: 1_000,
             ..Usage::default()
         }),
+        model_request_diagnostics: None,
+        routing_settlement: false,
+        effective_route_usage: None,
         permission_posture: None,
         effective_provider: None,
         effective_provider_id: None,
+        effective_openrouter_vendor: None,
         effective_billing_surface: None,
         effective_endpoint_fingerprint: None,
+        effective_provider_live_pricing: None,
         effective_billing_mode: None,
         effective_dispatched_at: None,
         effective_model: None,
         routed_usage: vec![crate::cost_status::EffectiveRouteUsage {
             route: crate::cost_status::EffectiveRouteEnvelope {
+                openrouter_vendor: None,
                 provider: ApiProvider::Deepseek,
                 provider_identity: ApiProvider::Deepseek.as_str().to_string(),
                 model: "deepseek-v4-flash".to_string(),
                 billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
                 endpoint_fingerprint: None,
+                provider_live_pricing: None,
                 billing_mode: crate::cost_status::RouteBillingMode::Metered,
                 dispatched_at: now,
             },
@@ -5761,6 +6321,7 @@ async fn session_save_persists_parent_cny_unpriced_reasons_without_double_count(
                 ..Usage::default()
             },
         }],
+        routed_usage_drop_records: Vec::new(),
         routed_usage_source_ids: Vec::new(),
         routed_usage_dropped_records: 0,
         error: None,
@@ -5861,6 +6422,7 @@ async fn runtime_info_reports_bind_state() -> Result<()> {
         info["capabilities"]["turn_operation_idempotency"], true,
         "clients must have an explicit fail-closed gate before sending operation_key"
     );
+    assert_eq!(info["capabilities"]["turn_operation_lookup"], true);
     assert_eq!(info["capabilities"]["account_session"], true);
     assert_eq!(info["capabilities"]["external_tools"], true);
     assert_eq!(info["capabilities"]["worker_runtime"], true);
@@ -6097,7 +6659,7 @@ async fn mobile_page_is_available_only_when_enabled() -> Result<()> {
     let root = tmp.path().to_path_buf();
     let sessions_dir = root.join("sessions");
     let Some((addr, runtime_threads, handle)) = spawn_test_server_with_root_token_and_mobile(
-        root.clone(),
+        root.join("disabled"),
         sessions_dir.clone(),
         None,
         false,
@@ -6113,8 +6675,13 @@ async fn mobile_page_is_available_only_when_enabled() -> Result<()> {
     let _ = handle.await;
     drop(runtime_threads);
 
-    let Some((addr, _runtime_threads, handle)) =
-        spawn_test_server_with_root_token_and_mobile(root, sessions_dir, None, true).await?
+    let Some((addr, _runtime_threads, handle)) = spawn_test_server_with_root_token_and_mobile(
+        root.join("enabled"),
+        sessions_dir,
+        None,
+        true,
+    )
+    .await?
     else {
         return Ok(());
     };
@@ -6726,6 +7293,7 @@ fn seed_summary_search_transcript(
             item_ids.push(item_id);
         }
         store.save_turn(&TurnRecord {
+            max_output_tokens: None,
             schema_version: 2,
             id: turn_id.clone(),
             thread_id: thread_id.to_string(),
@@ -6736,15 +7304,21 @@ fn seed_summary_search_transcript(
             ended_at: Some(created_at),
             duration_ms: Some(0),
             usage: None,
+            model_request_diagnostics: None,
+            routing_settlement: false,
+            effective_route_usage: None,
             permission_posture: None,
             effective_provider: None,
             effective_provider_id: None,
+            effective_openrouter_vendor: None,
             effective_billing_surface: None,
             effective_endpoint_fingerprint: None,
+            effective_provider_live_pricing: None,
             effective_billing_mode: None,
             effective_dispatched_at: None,
             effective_model: None,
             routed_usage: Vec::new(),
+            routed_usage_drop_records: Vec::new(),
             routed_usage_source_ids: Vec::new(),
             routed_usage_dropped_records: 0,
             error: None,
@@ -6863,16 +7437,28 @@ async fn decide_approval_delivers_to_runtime() -> Result<()> {
         return Ok(());
     };
     let client = crate::tls::reqwest_client();
-    let rx = runtime_threads.register_pending_approval_for_test("ext_id");
+    // The caller never chooses the approval ID; the runtime mints it and the
+    // client echoes it back verbatim.
+    let (approval_id, rx) = runtime_threads.register_pending_approval_for_test("ext_id");
+    assert_ne!(approval_id, "ext_id");
+
+    // A provider-shaped raw ID is not accepted as a fallback for the real one.
+    let raw = client
+        .post(format!("http://{addr}/v1/approvals/ext_id"))
+        .json(&json!({ "decision": "allow", "remember": false }))
+        .send()
+        .await?;
+    assert_eq!(raw.status(), StatusCode::NOT_FOUND);
 
     let resp = client
-        .post(format!("http://{addr}/v1/approvals/ext_id"))
+        .post(format!("http://{addr}/v1/approvals/{approval_id}"))
         .json(&json!({ "decision": "allow", "remember": false }))
         .send()
         .await?;
     assert_eq!(resp.status(), StatusCode::OK);
     let body: serde_json::Value = resp.json().await?;
     assert_eq!(body["ok"], true);
+    assert_eq!(body["approval_id"], approval_id);
     assert_eq!(body["decision"], "allow");
     assert_eq!(body["delivered"], true);
 
@@ -6881,6 +7467,74 @@ async fn decide_approval_delivers_to_runtime() -> Result<()> {
         received,
         ExternalApprovalDecision::Allow { remember: false }
     );
+
+    // The capability is single-use: a duplicate response (retry, double-click,
+    // replayed request) cannot deliver a second decision.
+    let replay = client
+        .post(format!("http://{addr}/v1/approvals/{approval_id}"))
+        .json(&json!({ "decision": "deny", "remember": true }))
+        .send()
+        .await?;
+    assert_eq!(replay.status(), StatusCode::NOT_FOUND);
+
+    handle.abort();
+    Ok(())
+}
+
+/// The snapshot a reconnecting client resumes from must carry both halves of
+/// the approval identity over the wire: the opaque capability it posts back,
+/// and the raw tool-call correlator it matches against the tool row. Only the
+/// first is accepted by `POST /v1/approvals/{id}`.
+#[tokio::test]
+async fn thread_snapshot_separates_approval_capability_from_tool_correlator() -> Result<()> {
+    let Some((addr, runtime_threads, handle)) = spawn_test_server().await? else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+    let thread: serde_json::Value = client
+        .post(format!("http://{addr}/v1/threads"))
+        .json(&json!({}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let thread_id = thread["id"].as_str().context("missing thread id")?;
+
+    let (approval_id, rx) =
+        runtime_threads.register_pending_approval_for_thread_for_test(thread_id, "call_1");
+
+    let detail: serde_json::Value = client
+        .get(format!("http://{addr}/v1/threads/{thread_id}"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let pending = detail["pending_approvals"]
+        .as_array()
+        .context("missing pending_approvals")?;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0]["id"], approval_id);
+    assert_eq!(pending[0]["tool_call_id"], "call_1");
+
+    // A provider call ID is a correlator, not a credential — even now that a
+    // client can read it straight out of the snapshot.
+    let by_correlator = client
+        .post(format!("http://{addr}/v1/approvals/call_1"))
+        .json(&json!({ "decision": "allow", "remember": false }))
+        .send()
+        .await?;
+    assert_eq!(by_correlator.status(), StatusCode::NOT_FOUND);
+
+    let by_capability = client
+        .post(format!("http://{addr}/v1/approvals/{approval_id}"))
+        .json(&json!({ "decision": "deny", "remember": false }))
+        .send()
+        .await?;
+    assert_eq!(by_capability.status(), StatusCode::OK);
+    let received = tokio::time::timeout(ci_scaled(Duration::from_secs(1)), rx).await??;
+    assert_eq!(received, ExternalApprovalDecision::Deny { remember: false });
 
     handle.abort();
     Ok(())
@@ -7611,6 +8265,247 @@ async fn get_provider_models(
         .expect("GET /v1/providers/{id}/models should return valid JSON")
 }
 
+#[test]
+fn provider_model_catalog_paginates_all_six_hundred_rows_without_truncation() {
+    let models = (0..600)
+        .rev()
+        .map(|index| ProviderModelEntry {
+            reasoning_effort: codewhale_config::route::CapabilityState::Unknown,
+            reasoning_effort_levels: Vec::new(),
+            reasoning_effort_source: None,
+            output_token_limit: codewhale_config::route::CapabilityState::Unknown,
+            id: format!("openrouter/model-{index:03}"),
+            image_input: codewhale_config::route::CapabilityState::Unknown,
+        })
+        .collect::<Vec<_>>();
+    let mut cursor = None;
+    let mut observed = Vec::new();
+    let mut page_count = 0usize;
+
+    loop {
+        let response = paginate_provider_models(
+            "openrouter",
+            models.clone(),
+            &ListProviderModelsParams {
+                filter: None,
+                cursor,
+                limit: Some(MAX_PROVIDER_MODELS_PAGE_SIZE),
+                ..Default::default()
+            },
+            None,
+        )
+        .expect("page should be valid");
+        page_count += 1;
+        assert_eq!(response.provider, "openrouter");
+        assert_eq!(response.total, 600);
+        assert!(!response.models.is_empty());
+        assert!(response.models.len() <= MAX_PROVIDER_MODELS_PAGE_SIZE);
+        observed.extend(response.models.into_iter().map(|entry| entry.id));
+        cursor = response.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    assert_eq!(page_count, 3);
+    assert_eq!(observed.len(), 600);
+    assert_eq!(
+        observed.first().map(String::as_str),
+        Some("openrouter/model-000")
+    );
+    assert_eq!(
+        observed.last().map(String::as_str),
+        Some("openrouter/model-599")
+    );
+    let unique = observed.iter().collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(unique.len(), 600);
+}
+
+#[test]
+fn provider_model_catalog_applies_filter_before_cursor_and_rejects_cross_scope_replay() {
+    let models = ["Alpha-One", "alpha-two", "beta"]
+        .into_iter()
+        .map(|id| ProviderModelEntry {
+            reasoning_effort: codewhale_config::route::CapabilityState::Unknown,
+            reasoning_effort_levels: Vec::new(),
+            reasoning_effort_source: None,
+            output_token_limit: codewhale_config::route::CapabilityState::Unknown,
+            id: id.to_string(),
+            image_input: codewhale_config::route::CapabilityState::Unknown,
+        })
+        .collect::<Vec<_>>();
+    let first = paginate_provider_models(
+        "openrouter",
+        models.clone(),
+        &ListProviderModelsParams {
+            filter: Some(" ALPHA ".to_string()),
+            cursor: None,
+            limit: Some(1),
+            ..Default::default()
+        },
+        None,
+    )
+    .expect("filtered first page should be valid");
+    assert_eq!(first.total, 2);
+    assert_eq!(first.models[0].id, "Alpha-One");
+    let cursor = first.next_cursor.expect("a second filtered row remains");
+
+    let second = paginate_provider_models(
+        "openrouter",
+        models.clone(),
+        &ListProviderModelsParams {
+            filter: Some("alpha".to_string()),
+            cursor: Some(cursor.clone()),
+            limit: Some(1),
+            ..Default::default()
+        },
+        None,
+    )
+    .expect("matching filter should continue");
+    assert_eq!(second.models[0].id, "alpha-two");
+    assert!(second.next_cursor.is_none());
+
+    let replay = paginate_provider_models(
+        "baseten",
+        models,
+        &ListProviderModelsParams {
+            filter: Some("alpha".to_string()),
+            cursor: Some(cursor),
+            limit: Some(1),
+            ..Default::default()
+        },
+        None,
+    );
+    assert!(replay.is_err(), "a cursor cannot cross provider ownership");
+}
+
+#[test]
+fn provider_model_cursor_rejects_catalog_change_between_pages() {
+    let models = ["bravo", "charlie"]
+        .into_iter()
+        .map(|id| ProviderModelEntry {
+            reasoning_effort: codewhale_config::route::CapabilityState::Unknown,
+            reasoning_effort_levels: Vec::new(),
+            reasoning_effort_source: None,
+            output_token_limit: codewhale_config::route::CapabilityState::Unknown,
+            id: id.to_string(),
+            image_input: codewhale_config::route::CapabilityState::Unknown,
+        })
+        .collect::<Vec<_>>();
+    let first = paginate_provider_models(
+        "openrouter",
+        models.clone(),
+        &ListProviderModelsParams {
+            filter: None,
+            cursor: None,
+            limit: Some(1),
+            ..Default::default()
+        },
+        None,
+    )
+    .expect("first page");
+    let cursor = first.next_cursor.expect("second page remains");
+    let mut changed = models.clone();
+    changed.push(ProviderModelEntry {
+        reasoning_effort: codewhale_config::route::CapabilityState::Unknown,
+        reasoning_effort_levels: Vec::new(),
+        reasoning_effort_source: None,
+        output_token_limit: codewhale_config::route::CapabilityState::Unknown,
+        id: "alpha".to_string(),
+        image_input: codewhale_config::route::CapabilityState::Unknown,
+    });
+    assert!(
+        paginate_provider_models(
+            "openrouter",
+            changed,
+            &ListProviderModelsParams {
+                filter: None,
+                cursor: Some(cursor.clone()),
+                limit: Some(1),
+                ..Default::default()
+            },
+            None,
+        )
+        .is_err(),
+        "an insertion before the cursor must force a restart, not disappear"
+    );
+    let mut changed = models;
+    changed[1].image_input = codewhale_config::route::CapabilityState::Supported;
+    assert!(
+        paginate_provider_models(
+            "openrouter",
+            changed,
+            &ListProviderModelsParams {
+                filter: None,
+                cursor: Some(cursor),
+                limit: Some(1),
+                ..Default::default()
+            },
+            None,
+        )
+        .is_err(),
+        "capability changes also invalidate a catalog snapshot"
+    );
+}
+
+#[test]
+fn provider_model_cursor_round_trips_multibyte_filter_at_the_allowed_limit() {
+    let filter = "😀".repeat(MAX_PROVIDER_MODELS_FILTER_CHARS);
+    let models = ["a", "b"]
+        .into_iter()
+        .map(|suffix| ProviderModelEntry {
+            reasoning_effort: codewhale_config::route::CapabilityState::Unknown,
+            reasoning_effort_levels: Vec::new(),
+            reasoning_effort_source: None,
+            output_token_limit: codewhale_config::route::CapabilityState::Unknown,
+            id: format!("{filter}{suffix}"),
+            image_input: codewhale_config::route::CapabilityState::Unknown,
+        })
+        .collect::<Vec<_>>();
+    let first = paginate_provider_models(
+        "openrouter",
+        models.clone(),
+        &ListProviderModelsParams {
+            filter: Some(filter.clone()),
+            cursor: None,
+            limit: Some(1),
+            ..Default::default()
+        },
+        None,
+    )
+    .expect("first page");
+    let second = paginate_provider_models(
+        "openrouter",
+        models,
+        &ListProviderModelsParams {
+            filter: Some(filter),
+            cursor: first.next_cursor,
+            limit: Some(1),
+            ..Default::default()
+        },
+        None,
+    )
+    .expect("all emitted cursors must be accepted, including multibyte filters");
+    assert_eq!(second.models.len(), 1);
+    assert!(second.next_cursor.is_none());
+}
+
+#[test]
+fn runtime_chat_relay_projection_keeps_six_hundred_safe_models_without_silent_cutoff() {
+    let models = (0..600)
+        .map(|index| format!("openrouter/model-{index:03}"))
+        .collect::<Vec<_>>();
+    let projected = runtime_chat_safe_models(models.clone()).expect("600 rows are safely bounded");
+    assert_eq!(projected, models);
+
+    let oversized = (0..=MAX_PROVIDER_MODELS_CATALOG_SIZE)
+        .map(|index| format!("provider/model-{index:05}"))
+        .collect::<Vec<_>>();
+    let error = runtime_chat_safe_models(oversized).expect_err("oversized relay must fail loudly");
+    assert!(error.contains("safe"));
+    assert!(error.contains(&MAX_PROVIDER_MODELS_CATALOG_SIZE.to_string()));
+}
+
 #[tokio::test]
 async fn provider_catalog_and_switch_preserve_each_listed_route_identity() -> Result<()> {
     let _lock = lock_test_env();
@@ -7875,6 +8770,9 @@ async fn provider_models_expose_exact_image_input_facts_and_thread_selection_sta
         .find(|entry| entry["id"] == "deepseek-v4-pro")
         .context("DeepSeek text model entry")?;
     assert_eq!(text_only["image_input"], "unsupported");
+    // A reasoning-capable model does not imply a published effort ladder.
+    assert_eq!(text_only["reasoning_effort"], "unknown");
+    assert_eq!(text_only["reasoning_effort_levels"], json!([]));
 
     let config_before = get_config(&client, &addr).await;
     let response = client
@@ -7899,6 +8797,183 @@ async fn provider_models_expose_exact_image_input_facts_and_thread_selection_sta
 }
 
 #[test]
+fn provider_reasoning_metadata_keeps_exact_roster_levels_and_unknown_boundaries() {
+    let _lock = crate::test_support::lock_test_env();
+    let root = tempfile::tempdir().unwrap();
+    let _codex_home = crate::test_support::EnvVarGuard::set("CODEX_HOME", root.path());
+    let config = Config {
+        provider: Some("openai-codex".to_string()),
+        ..Config::default()
+    };
+    let cache_path = root.path().join("models_cache.json");
+    let cache = json!({
+        "fetched_at": chrono::Utc::now(),
+        "models": [
+            {"slug": "gpt-6-astra", "supported_reasoning_levels": [
+                {"effort": "low"}, {"effort": "medium"}, {"effort": "high"},
+                {"effort": "xhigh"}, {"effort": "max"}, {"effort": "ultra"},
+                {"effort": "unexpected-private-value"}
+            ]},
+            {"slug": "gpt-5.5", "supported_reasoning_levels": [{"effort": "high"}, {"effort": "xhigh"}]},
+            {"slug": "no-reasoning", "supported_reasoning_levels": []},
+            {"slug": "optional-reasoning", "supported_reasoning_levels": [{"effort": "none"}, {"effort": "minimal"}, {"effort": "low"}]},
+            {"slug": "no-effort-metadata"},
+            {"slug": "unrecognized-efforts", "supported_reasoning_levels": [{"effort": "future-value"}]}
+        ]
+    });
+    fs::write(&cache_path, serde_json::to_vec(&cache).unwrap()).unwrap();
+    let astra =
+        provider_model_entry_for_api(&config, ApiProvider::OpenaiCodex, "gpt-6-astra".to_string());
+    assert_eq!(
+        astra.reasoning_effort,
+        codewhale_config::route::CapabilityState::Supported
+    );
+    assert_eq!(
+        astra.reasoning_effort_levels,
+        ["low", "medium", "high", "xhigh", "max", "ultra"]
+    );
+    assert_eq!(astra.reasoning_effort_source, Some("codex_cli_cache"));
+    // The relay preserves the same model facts without elevating them into
+    // a tool-execution or account-entitlement receipt.
+    let _token = crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
+    let _legacy = crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
+    let relay = runtime_chat_relay_catalog(&config, &"c".repeat(32)).unwrap();
+    let relayed_astra = relay["providers"][0]["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["id"] == "gpt-6-astra")
+        .unwrap();
+    assert_eq!(relayed_astra["reasoningEffort"], "supported");
+    assert_eq!(
+        relayed_astra["reasoningEffortLevels"],
+        json!(astra.reasoning_effort_levels)
+    );
+    assert_eq!(relayed_astra["reasoningEffortSource"], "codex_cli_cache");
+    assert_eq!(relay["runtime"]["capabilities"]["tool_execution"], false);
+    assert!(!relay.to_string().contains("test-token"));
+    let older =
+        provider_model_entry_for_api(&config, ApiProvider::OpenaiCodex, "gpt-5.5".to_string());
+    assert_eq!(older.reasoning_effort_levels, ["high", "xhigh"]);
+    let unsupported = provider_model_entry_for_api(
+        &config,
+        ApiProvider::OpenaiCodex,
+        "no-reasoning".to_string(),
+    );
+    assert_eq!(
+        unsupported.reasoning_effort,
+        codewhale_config::route::CapabilityState::Unsupported
+    );
+    assert!(unsupported.reasoning_effort_levels.is_empty());
+    let optional = provider_model_entry_for_api(
+        &config,
+        ApiProvider::OpenaiCodex,
+        "optional-reasoning".to_string(),
+    );
+    assert_eq!(optional.reasoning_effort_levels, ["low"]);
+    assert_eq!(
+        optional.reasoning_effort,
+        codewhale_config::route::CapabilityState::Supported
+    );
+    for id in ["no-effort-metadata", "unrecognized-efforts"] {
+        let unknown =
+            provider_model_entry_for_api(&config, ApiProvider::OpenaiCodex, id.to_string());
+        assert_eq!(
+            unknown.reasoning_effort,
+            codewhale_config::route::CapabilityState::Unknown
+        );
+        assert!(unknown.reasoning_effort_levels.is_empty());
+    }
+    let missing = provider_model_entry_for_api(
+        &config,
+        ApiProvider::OpenaiCodex,
+        "unknown-model".to_string(),
+    );
+    assert_eq!(
+        missing.reasoning_effort,
+        codewhale_config::route::CapabilityState::Unknown
+    );
+    assert!(missing.reasoning_effort_levels.is_empty());
+    let mut custom = config.clone();
+    custom
+        .provider_config_for_mut(ApiProvider::OpenaiCodex)
+        .base_url = Some("https://proxy.example.test/v1".to_string());
+    let proxy =
+        provider_model_entry_for_api(&custom, ApiProvider::OpenaiCodex, "gpt-6-astra".to_string());
+    assert_eq!(
+        proxy.reasoning_effort,
+        codewhale_config::route::CapabilityState::Unknown
+    );
+    assert!(proxy.reasoning_effort_levels.is_empty());
+    let mut stale = cache;
+    stale["fetched_at"] = json!(chrono::Utc::now() - chrono::Duration::hours(48));
+    fs::write(&cache_path, serde_json::to_vec(&stale).unwrap()).unwrap();
+    let stale =
+        provider_model_entry_for_api(&config, ApiProvider::OpenaiCodex, "gpt-6-astra".to_string());
+    assert_eq!(
+        stale.reasoning_effort,
+        codewhale_config::route::CapabilityState::Unknown
+    );
+    assert!(stale.reasoning_effort_levels.is_empty());
+}
+
+#[tokio::test]
+async fn provider_models_query_keeps_named_routes_separate_without_switching() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let config_file = root.path().join("config.toml");
+    fs::write(
+        &config_file,
+        r#"provider = "first"
+[providers.first]
+kind = "openai-compatible"
+base_url = "http://127.0.0.1:18190/v1"
+model = "first-model"
+[providers.second]
+kind = "openai-compatible"
+base_url = "http://127.0.0.1:18191/v1"
+model = "gpt-6-astra"
+"#,
+    )?;
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_config_path(config_file).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+    let before = get_config(&client, &addr).await;
+    let response = client
+        .get(format!(
+            "http://{addr}/v1/providers/custom/models?model_provider_id=second"
+        ))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await?;
+    assert_eq!(body["model_provider_id"], "second");
+    assert_eq!(body["models"].as_array().unwrap().len(), 1);
+    assert_eq!(body["models"][0]["id"], "gpt-6-astra");
+    assert_eq!(body["models"][0]["reasoning_effort"], "unknown");
+    assert_eq!(body["models"][0]["reasoning_effort_levels"], json!([]));
+    assert_eq!(
+        get_config(&client, &addr).await["provider"],
+        before["provider"]
+    );
+    for path in [
+        "custom/models?model_provider_id=",
+        "custom/models?model_provider_id=missing",
+        "openai-codex/models?model_provider_id=second",
+    ] {
+        let response = client
+            .get(format!("http://{addr}/v1/providers/{path}"))
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    handle.abort();
+    Ok(())
+}
+
+#[test]
 fn provider_catalog_keeps_official_deepseek_facts_but_not_custom_proxy_claims() {
     for official_base_url in [
         "https://api.deepseek.com/v1",
@@ -7914,7 +8989,7 @@ fn provider_catalog_keeps_official_deepseek_facts_but_not_custom_proxy_claims() 
         provider_config.model = Some("deepseek-v4-pro".to_string());
 
         assert!(
-            !provider_uses_custom_route_for_api(&config, ApiProvider::Deepseek),
+            !config.provider_uses_custom_endpoint(ApiProvider::Deepseek),
             "official DeepSeek endpoint must retain the shared model catalog: {official_base_url}"
         );
         let models = provider_models_for_api(&config, ApiProvider::Deepseek, ApiProvider::Deepseek);
@@ -7935,10 +9010,7 @@ fn provider_catalog_keeps_official_deepseek_facts_but_not_custom_proxy_claims() 
     provider_config.base_url = Some("https://deepseek-proxy.example.test/v1".to_string());
     provider_config.model = Some("private-deepseek-deployment".to_string());
 
-    assert!(provider_uses_custom_route_for_api(
-        &custom,
-        ApiProvider::Deepseek
-    ));
+    assert!(custom.provider_uses_custom_endpoint(ApiProvider::Deepseek));
     assert_eq!(
         provider_models_for_api(&custom, ApiProvider::Deepseek, ApiProvider::Deepseek),
         vec!["private-deepseek-deployment".to_string()],
@@ -7984,6 +9056,156 @@ fn provider_credential_state_wire_values_are_stable_and_sanitized() {
             expected,
         );
     }
+}
+
+#[tokio::test]
+async fn operate_api_uses_saved_route_for_start_patch_and_keepalive_readiness() -> Result<()> {
+    let _env = lock_test_env();
+    let root = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", root.path());
+    let _operate = EnvVarGuard::set("CODEWHALE_OPERATE_DIR", root.path().join("operate"));
+    let _cli = EnvVarGuard::remove("CODEWHALE_CLI_API_KEY");
+    let _missing = EnvVarGuard::remove("CW_OPERATE_MISSING_TEST_KEY");
+    let mut config: Config = toml::from_str(
+        r#"
+provider = "fleet-route"
+[providers.fleet-route]
+kind = "openai-compatible"
+base_url = "https://fleet.example.test/v1"
+model = "fleet-model"
+auth_mode = "none"
+[providers.saved-route]
+kind = "openai-compatible"
+base_url = "https://saved.example.test/v1"
+model = "saved-model"
+auth_mode = "api-key"
+api_key_env = "CW_OPERATE_MISSING_TEST_KEY"
+"#,
+    )?;
+    config.fleet_operator_route_applied = true;
+    let (addr, _runtime, server) =
+        spawn_test_server_with_root_token_mobile_workspace_and_overrides(
+            root.path().to_path_buf(),
+            root.path().join("sessions"),
+            None,
+            false,
+            root.path().join("workspace"),
+            TestServerOverrides {
+                config: Some(config),
+                ..Default::default()
+            },
+        )
+        .await?
+        .context("loopback server is required for Operate API acceptance")?;
+    let client = crate::tls::reqwest_client();
+    let url = format!("http://{addr}/v1/operate");
+    let started: serde_json::Value = client
+        .post(&url)
+        .json(&json!({"direction":"route fixture"}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(started["operation"]["credentialsPresent"], true);
+    assert_eq!(started["operation"]["leadOperator"]["model"], "fleet-model");
+    let manager = AutomationManager::open_for_test(root.path().join("automations"))?;
+    let mut record = manager.get_automation(crate::operate::OPERATE_KEEPALIVE_ID)?;
+    assert_eq!(record.model.as_deref(), Some("fleet-model"));
+    assert_eq!(record.model_provider.as_deref(), Some("custom"));
+    assert_eq!(record.model_provider_id.as_deref(), Some("fleet-route"));
+    assert_eq!(record.auto_approve, Some(false));
+
+    record.model = Some("saved-model".into());
+    record.model_provider_id = Some("saved-route".into());
+    manager.save_automation(&record)?;
+    let restarted: serde_json::Value = client
+        .post(&url)
+        .json(&json!({"direction":"saved fixture"}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(restarted["operation"]["credentialsPresent"], false);
+    assert_eq!(
+        restarted["operation"]["leadOperator"]["model"],
+        "saved-model"
+    );
+    let patched: serde_json::Value = client
+        .patch(&url)
+        .json(&json!({"direction":"changed direction"}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(patched["operation"]["credentialsPresent"], false);
+    assert_eq!(patched["operation"]["leadOperator"]["model"], "saved-model");
+    let observed: serde_json::Value = client
+        .post(format!("{url}/keepalive"))
+        .json(&json!({"credentialsPresent":true}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(
+        observed["operation"]["credentialsPresent"], true,
+        "explicit observation retained"
+    );
+    let inferred: serde_json::Value = client
+        .post(format!("{url}/keepalive"))
+        .json(&json!({}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(
+        inferred["operation"]["credentialsPresent"], false,
+        "fallback checks saved route, not ready parent"
+    );
+
+    record.model = Some("auto".into());
+    manager.save_automation(&record)?;
+    let auto: serde_json::Value = client
+        .post(&url)
+        .json(&json!({"direction":"auto fixture"}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(auto["operation"]["leadOperator"]["model"], "auto");
+    assert_eq!(
+        manager.get_automation(&record.id)?.model.as_deref(),
+        Some("auto")
+    );
+    record.model_provider_id = Some("removed-route".into());
+    manager.save_automation(&record)?;
+    let before = serde_json::to_value(manager.get_automation(&record.id)?)?;
+    let operation_before = fs::read(root.path().join("operate/current.json"))?;
+    let rejected = client
+        .post(&url)
+        .json(&json!({"direction":"must not apply"}))
+        .send()
+        .await?;
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        serde_json::to_value(manager.get_automation(&record.id)?)?,
+        before
+    );
+    assert_eq!(
+        fs::read(root.path().join("operate/current.json"))?,
+        operation_before
+    );
+    assert!(
+        manager.list_runs(&record.id, None)?.is_empty(),
+        "API installation did not execute a provider task"
+    );
+    server.abort();
+    Ok(())
 }
 
 #[tokio::test]
@@ -8486,12 +9708,17 @@ async fn switch_provider_rejects_legacy_deepseek_cn_alias() -> Result<()> {
 }
 
 #[tokio::test]
-async fn switch_provider_with_deepseek_and_explicit_model_updates_default_text_model() -> Result<()>
-{
-    // When switching TO a DeepSeek provider with an explicit model, the
-    // endpoint must persist `default_text_model` (the DeepSeek-specific
-    // root key) in addition to the provider change, mirroring
-    // `switch_provider` in ui.rs which pins `default_model` for DeepSeek.
+async fn switch_provider_with_deepseek_and_explicit_model_preserves_root_fallback() -> Result<()> {
+    // Switching TO DeepSeek with an explicit model persists that model on the
+    // canonical `[providers.deepseek].model` leaf, and the incoming route
+    // resolves it from there.
+    //
+    // The fixture also carries a root `default_text_model` left over from the
+    // outgoing Volcengine route. `Config::validate` checks the *selected*
+    // route's model, so that alias is inert under DeepSeek: the write neither
+    // overwrites it nor is invalidated by it, and the file still loads. It is
+    // saved state, and deleting it to satisfy validation of a value nothing
+    // resolves would be data loss.
     let root = std::env::temp_dir().join(format!(
         "codewhale-switch-deepseek-model-{}",
         Uuid::new_v4()
@@ -8531,18 +9758,42 @@ model = "glm-2"
         "switch to deepseek with model should succeed, body: {body}"
     );
 
-    // The persisted config must have provider = "deepseek" and
-    // default_text_model updated to the explicit model.
+    assert_eq!(body["provider"], "deepseek");
+    assert_eq!(body["model"], "deepseek-v4-pro");
+
     let persisted = fs::read_to_string(&config_file)?;
-    assert!(
-        persisted.contains("provider = \"deepseek\""),
+    let saved: toml::Value = toml::from_str(&persisted)?;
+    assert_eq!(
+        saved["provider"].as_str(),
+        Some("deepseek"),
         "provider should be persisted as deepseek. Actual config:\n{persisted}"
     );
-    assert!(
-        persisted.contains("default_text_model = \"deepseek-v4-pro\""),
-        "DeepSeek explicit model must be persisted as default_text_model. \
+    assert_eq!(
+        saved["default_text_model"].as_str(),
+        Some("old-model"),
+        "an inert root fallback is saved state and must survive the switch. \
          Actual config:\n{persisted}"
     );
+    assert_eq!(
+        saved["providers"]["deepseek"]["model"].as_str(),
+        Some("deepseek-v4-pro"),
+        "the explicit model belongs on DeepSeek's canonical leaf. \
+         Actual config:\n{persisted}"
+    );
+    assert_eq!(
+        saved["providers"]["volcengine"]["model"].as_str(),
+        Some("glm-2"),
+        "the outgoing route keeps its own saved model. Actual config:\n{persisted}"
+    );
+    // The receipt that matters: what was written still loads under the new
+    // route, and resolves the selected leaf rather than the root fallback.
+    // Validating the root alias instead of the selection returned 500 here.
+    let reloaded = Config::load(Some(config_file.clone()), None)?;
+    assert_eq!(
+        reloaded.api_provider(),
+        crate::config::ApiProvider::Deepseek
+    );
+    assert_eq!(reloaded.default_model(), "deepseek-v4-pro");
 
     handle.abort();
     Ok(())
@@ -9605,6 +10856,7 @@ fn fleet_receipt_json_pass_result_has_no_failure_fields() {
         artifacts: Vec::new(),
         score: None,
         resolved_route: None,
+        saved_session_id: None,
         effective_permissions: None,
     };
     let value = fleet_receipt_json(&receipt);
@@ -9638,6 +10890,7 @@ fn fleet_receipt_json_verifier_failure_is_not_retry_eligible() {
         artifacts: Vec::new(),
         score: None,
         resolved_route: None,
+        saved_session_id: None,
         effective_permissions: None,
     };
     let value = fleet_receipt_json(&receipt);
@@ -9669,6 +10922,7 @@ fn fleet_receipt_json_transport_failure_is_retry_eligible() {
         artifacts: Vec::new(),
         score: None,
         resolved_route: None,
+        saved_session_id: None,
         effective_permissions: None,
     };
     let value = fleet_receipt_json(&receipt);
@@ -9704,6 +10958,7 @@ fn fleet_receipt_json_receipt_artifact_sets_evidence_available() {
             notes: Some("all checks pass".to_string()),
         }),
         resolved_route: None,
+        saved_session_id: None,
         effective_permissions: None,
     };
     let value = fleet_receipt_json(&receipt);
@@ -9780,6 +11035,8 @@ async fn fleet_receipt_api_list_and_get_round_trip() -> Result<()> {
         attempt: 1,
         exit_code: Some(0),
         artifacts: Vec::new(),
+        final_answer: None,
+        saved_session_id: None,
         resolved_route: None,
         effective_permissions: None,
     };
@@ -9797,6 +11054,8 @@ async fn fleet_receipt_api_list_and_get_round_trip() -> Result<()> {
             evidence: vec!["exit_code=0".to_string()],
         },
     )?;
+    let evidence_path = workspace.join(&receipt.artifacts.last().unwrap().path);
+    let original_evidence = fs::read(&evidence_path)?;
     ledger.record_receipt(receipt)?;
 
     let sessions_dir = root.join("sessions");
@@ -9868,6 +11127,55 @@ async fn fleet_receipt_api_list_and_get_round_trip() -> Result<()> {
         "evidence content should parse as JSON object"
     );
     assert_eq!(evidence["content"]["task_id"], "task-receipt");
+
+    // Read the actual route after same-size tampering and symlink swaps. The
+    // ledger still names the original digest: metadata alone is not evidence.
+    let evidence_url = format!(
+        "http://{addr}/v1/fleet/runs/{}/receipts/task-receipt/evidence",
+        run_id.0
+    );
+    let mut rejected = Vec::new();
+    let mut changed = original_evidence.clone();
+    *changed.last_mut().unwrap() ^= 1;
+    fs::write(&evidence_path, changed)?;
+    rejected.push(client.get(&evidence_url).send().await?.status().as_u16());
+    fs::write(&evidence_path, &original_evidence)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let outside = root.join("outside-receipt.txt");
+        let canary = "OUTSIDE_SYNTHETIC_RECEIPT_CANARY";
+        fs::write(&outside, canary)?;
+        fs::remove_file(&evidence_path)?;
+        symlink(&outside, &evidence_path)?;
+        let response = client.get(&evidence_url).send().await?;
+        rejected.push(response.status().as_u16());
+        let body = response.text().await?;
+        assert!(!body.contains(canary));
+        fs::remove_file(&evidence_path)?;
+        fs::write(&evidence_path, &original_evidence)?;
+
+        let parent = evidence_path.parent().unwrap();
+        let retained = parent.with_extension("retained");
+        let outside_dir = root.join("outside-directory");
+        fs::create_dir_all(&outside_dir)?;
+        fs::write(outside_dir.join(evidence_path.file_name().unwrap()), canary)?;
+        fs::rename(parent, &retained)?;
+        symlink(&outside_dir, parent)?;
+        let response = client.get(&evidence_url).send().await?;
+        rejected.push(response.status().as_u16());
+        let body = response.text().await?;
+        assert!(!body.contains(canary));
+        fs::remove_file(parent)?;
+        fs::rename(retained, parent)?;
+        assert_eq!(fs::read_to_string(outside)?, canary);
+    }
+    assert!(
+        rejected.iter().all(|status| *status == 400),
+        "unverified evidence status codes: {rejected:?}"
+    );
+    let restored = client.get(&evidence_url).send().await?;
+    assert_eq!(restored.status(), 200);
 
     // Missing task returns 404.
     let missing = client
@@ -10948,16 +12256,16 @@ async fn skill_lifecycle_runtime_info_advertises_skill_lifecycle_capability() ->
 fn receipt_evidence_paths_must_stay_confined_to_the_workspace() {
     use std::path::Path;
 
-    assert!(super::receipt_evidence_path_is_confined(Path::new(
+    assert!(crate::fleet::artifacts::path_is_confined(Path::new(
         "receipts/run-1/task-a.json"
     )));
-    assert!(!super::receipt_evidence_path_is_confined(Path::new(
+    assert!(!crate::fleet::artifacts::path_is_confined(Path::new(
         "/etc/passwd"
     )));
-    assert!(!super::receipt_evidence_path_is_confined(Path::new(
+    assert!(!crate::fleet::artifacts::path_is_confined(Path::new(
         "receipts/../../escape.json"
     )));
-    assert!(!super::receipt_evidence_path_is_confined(Path::new(
+    assert!(!crate::fleet::artifacts::path_is_confined(Path::new(
         "../escape.json"
     )));
 }
@@ -11253,6 +12561,7 @@ async fn marketplace_catalog_lifecycle_over_http_lists_installs_and_removes() ->
         }))
         .send()
         .await?;
+    assert_eq!(add_resp.status(), StatusCode::CREATED);
     let add: serde_json::Value = add_resp.json().await?;
     assert!(add["action"] == "added", "marketplace add failed: {add}");
     assert_eq!(add["candidate_count"], 1);
@@ -11402,5 +12711,1169 @@ async fn stream_compat_mapping_forwards_runtime_store_failures() -> Result<()> {
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("event: runtime.store_failure"), "{text}");
     assert!(text.contains("/tmp/runtime/items/item_1.json"), "{text}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn reload_config_updates_openrouter_vendor_for_new_clients_only() -> Result<()> {
+    let _env = crate::test_support::lock_test_env();
+    let temp = tempfile::tempdir()?;
+    let config_file = temp.path().join("vendor-pin.toml");
+    fs::write(&config_file, "# initial\n")?;
+    let (addr, manager, handle) = spawn_test_server_with_config_path(config_file.clone())
+        .await?
+        .expect("local Runtime API must be available for reload regression");
+    let client = crate::tls::reqwest_client();
+    for vendor in ["deepinfra/turbo", "another-vendor/region", ""] {
+        fs::write(
+            &config_file,
+            format!(
+                r#"
+provider = "openrouter"
+[providers.openrouter]
+api_key = "vendor-reload-local-fixture"
+base_url = "https://openrouter.ai/api/v1"
+model = "deepseek/deepseek-v4-pro"
+vendor = "{vendor}"
+"#
+            ),
+        )?;
+        let old_config = manager.read_config().clone();
+        let old_vendor = old_config.openrouter_vendor()?;
+        let old_client = if old_config.api_provider() == crate::config::ApiProvider::Openrouter {
+            Some(crate::client::DeepSeekClient::new(&old_config)?)
+        } else {
+            None
+        };
+        let reload = client
+            .post(format!("http://{addr}/v1/config/reload"))
+            .send()
+            .await?;
+        assert_eq!(reload.status(), StatusCode::OK);
+        let fresh = crate::client::DeepSeekClient::new(&manager.read_config())?;
+        assert_eq!(
+            fresh.openrouter_vendor(),
+            (!vendor.is_empty()).then_some(vendor)
+        );
+        if let Some(old) = old_client {
+            assert_eq!(old.openrouter_vendor(), old_vendor.as_deref());
+        }
+    }
+    handle.abort();
+    Ok(())
+}
+
+#[test]
+fn api_provider_default_and_model_list_follow_exact_local_catalog() {
+    use codewhale_config::catalog::{
+        CatalogOffering, CatalogRefreshError, CatalogSource, ProviderCatalogDelta,
+        base_url_fingerprint, now_unix,
+    };
+
+    let _env = crate::test_support::lock_test_env();
+    let _live = crate::provider_lake::lock_live_snapshot();
+    let home = tempfile::tempdir().unwrap();
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+    crate::provider_catalog_live::reset_cache_for_test();
+    crate::provider_lake::clear_live_snapshot();
+    let provider = ApiProvider::Ollama;
+    let endpoint = "http://localhost:11455/v1";
+    let mut config = Config {
+        provider: Some("ollama".into()),
+        ..Default::default()
+    };
+    config.provider_config_for_mut(provider).base_url = Some(endpoint.into());
+    assert_eq!(
+        provider_default_model_for_api(&config, provider, provider),
+        ""
+    );
+    assert!(!provider_models_for_api(&config, provider, provider).contains(&"unknown".to_string()));
+    assert!(runtime_request_model(&config, None).is_err());
+    assert_eq!(
+        runtime_request_model(&config, Some("auto")).unwrap(),
+        "auto"
+    );
+    assert_eq!(
+        runtime_request_model(&config, Some("chosen:tag")).unwrap(),
+        "chosen:tag"
+    );
+    let fingerprint = base_url_fingerprint(endpoint);
+    let fetched_at = now_unix();
+    let ticket =
+        crate::provider_catalog_live::begin_refresh_for_identity(provider, "ollama", endpoint);
+    crate::provider_catalog_live::record_success_if_current(
+        &ticket,
+        ProviderCatalogDelta {
+            provider: "ollama".into(),
+            base_url_fingerprint: fingerprint.clone(),
+            fetched_at,
+            offerings: vec![CatalogOffering {
+                provider: "ollama".into(),
+                wire_model_id: "local-default:tag".into(),
+                endpoint_key: "chat".into(),
+                source: CatalogSource::Live {
+                    base_url_fingerprint: fingerprint.clone(),
+                    fetched_at,
+                },
+                ..Default::default()
+            }],
+        },
+    );
+    assert_eq!(
+        provider_default_model_for_api(&config, provider, provider),
+        "local-default:tag"
+    );
+    assert_eq!(
+        provider_models_for_api(&config, provider, provider),
+        vec!["local-default:tag"]
+    );
+    assert_eq!(
+        runtime_request_model(&config, None).unwrap(),
+        "local-default:tag"
+    );
+    let mut other = config.clone();
+    other.provider_config_for_mut(provider).base_url = Some("http://localhost:11456/v1".into());
+    assert_eq!(
+        provider_default_model_for_api(&other, provider, provider),
+        ""
+    );
+    assert!(provider_models_for_api(&other, provider, provider).is_empty());
+    crate::provider_catalog_live::record_failure_if_current(
+        &ticket,
+        "ollama",
+        &fingerprint,
+        CatalogRefreshError::Network,
+    );
+    assert_eq!(
+        provider_default_model_for_api(&config, provider, provider),
+        ""
+    );
+    assert!(runtime_request_model(&config, None).is_err());
+    config.set_provider_model_override(provider, Some("chosen:tag".into()));
+    assert_eq!(
+        provider_default_model_for_api(&config, provider, provider),
+        "chosen:tag"
+    );
+    crate::provider_catalog_live::reset_cache_for_test();
+    crate::provider_lake::clear_live_snapshot();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn api_config_reports_local_default_availability_without_blocking_config_reads() -> Result<()>
+{
+    use codewhale_config::catalog::{
+        CatalogOffering, CatalogSource, ProviderCatalogDelta, base_url_fingerprint, now_unix,
+    };
+
+    let _env = lock_test_env();
+    let _live = crate::provider_lake::lock_live_snapshot();
+    let home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+    crate::provider_catalog_live::reset_cache_for_test();
+    crate::provider_lake::clear_live_snapshot();
+    let config_file = home.path().join("config.toml");
+    let endpoint = "http://localhost:11457/v1";
+    fs::write(
+        &config_file,
+        format!("provider = \"ollama\"\n[providers.ollama]\nbase_url = \"{endpoint}\"\n"),
+    )?;
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_config_path(config_file).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+    let unavailable = get_config(&client, &addr).await;
+    assert_eq!(unavailable["model"], "");
+    assert_eq!(unavailable["model_available"], false);
+    assert_eq!(
+        unavailable["default_model"], DEFAULT_TEXT_MODEL,
+        "legacy root field stays unchanged"
+    );
+    for path in ["tasks", "stream"] {
+        let response = client
+            .post(format!("http://{addr}/v1/{path}"))
+            .json(&json!({"prompt": "missing local model"}))
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            response
+                .text()
+                .await?
+                .contains("no available default model")
+        );
+    }
+    let fetched_at = now_unix();
+    let fingerprint = base_url_fingerprint(endpoint);
+    let ticket = crate::provider_catalog_live::begin_refresh_for_identity(
+        ApiProvider::Ollama,
+        "ollama",
+        endpoint,
+    );
+    crate::provider_catalog_live::record_success_if_current(
+        &ticket,
+        ProviderCatalogDelta {
+            provider: "ollama".into(),
+            base_url_fingerprint: fingerprint.clone(),
+            fetched_at,
+            offerings: vec![CatalogOffering {
+                provider: "ollama".into(),
+                wire_model_id: "available:tag".into(),
+                endpoint_key: "chat".into(),
+                source: CatalogSource::Live {
+                    base_url_fingerprint: fingerprint,
+                    fetched_at,
+                },
+                ..Default::default()
+            }],
+        },
+    );
+    let available = get_config(&client, &addr).await;
+    assert_eq!(available["model"], "available:tag");
+    assert_eq!(available["model_available"], true);
+    assert_eq!(available["default_model"], DEFAULT_TEXT_MODEL);
+    handle.abort();
+    crate::provider_catalog_live::reset_cache_for_test();
+    crate::provider_lake::clear_live_snapshot();
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_notification_settings_use_the_shared_profile_leaf_writer_and_reload() -> Result<()>
+{
+    let _env = lock_test_env();
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("config.toml");
+    let original = r#"# retained owner comment
+[notifications]
+quiet = true
+sound = "off"
+[profiles.desktop.notifications]
+quiet = false # selected owner
+sound = "off"
+[profiles.other.notifications]
+quiet = true
+[future_plugin]
+keep = "untouched"
+"#;
+    fs::write(&path, original)?;
+    let (addr, _, handle) =
+        spawn_test_server_with_config_path_and_profile(path.clone(), "desktop".into())
+            .await?
+            .expect("loopback Runtime must be available");
+    let client = crate::tls::reqwest_client();
+    let reload = || client.post(format!("http://{addr}/v1/config/reload"));
+    assert_eq!(reload().send().await?.status(), StatusCode::OK);
+    let before = get_config(&client, &addr).await;
+    assert_eq!(before["notifications"].as_object().unwrap().len(), 19);
+    assert_eq!(before["notifications"]["quiet"], "false");
+    for persist in [false, true] {
+        for (key, value) in [
+            ("notifications.quiet", "maybe"),
+            ("notifications.typo", "true"),
+            ("notifications.threshold_secs", "-1"),
+            ("notifications.method", "macos"),
+        ] {
+            let (status, _) = post_set_config(&client, &addr, key, value, persist).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{key}");
+        }
+    }
+    assert_eq!(fs::read_to_string(&path)?, original);
+    let (status, dry) =
+        post_set_config(&client, &addr, "notifications.threshold", "0", false).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(dry["key"], "notifications.threshold_secs");
+    assert_eq!(dry["persisted"], false);
+    assert_eq!(fs::read_to_string(&path)?, original);
+    let (status, saved) = post_set_config(&client, &addr, "notifications.quiet", "on", true).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["value"], "true");
+    assert_eq!(saved["persisted"], true);
+    assert_eq!(saved["requires_reload"], true);
+    assert_eq!(
+        get_config(&client, &addr).await["notifications"]["quiet"],
+        "false",
+        "persist is not apply"
+    );
+    let text = fs::read_to_string(&path)?;
+    assert!(text.contains("# retained owner comment") && text.contains("# selected owner"));
+    let doc: toml::Value = toml::from_str(&text)?;
+    assert_eq!(doc["notifications"]["quiet"].as_bool(), Some(true));
+    assert_eq!(
+        doc["profiles"]["desktop"]["notifications"]["quiet"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        doc["profiles"]["other"]["notifications"]["quiet"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(doc["future_plugin"]["keep"].as_str(), Some("untouched"));
+    assert_eq!(reload().send().await?.status(), StatusCode::OK);
+    assert_eq!(
+        get_config(&client, &addr).await["notifications"]["quiet"],
+        "true"
+    );
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_notification_preparation_authenticates_current_events_and_reuses_live_gates()
+-> Result<()> {
+    let _env = lock_test_env();
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("config.toml");
+    fs::write(
+        &path,
+        "[notifications]\nmethod = 'auto'\ncondition = 'unfocused'\nthreshold_secs = 0\nsound = 'off'\n",
+    )?;
+    let (addr, manager, handle) = spawn_test_server_with_root_token_mobile_workspace_and_overrides(
+        temp.path().join("runtime"),
+        temp.path().join("sessions"),
+        Some("notification-fixture-token".into()),
+        false,
+        temp.path().to_path_buf(),
+        TestServerOverrides {
+            config_path: Some(path),
+            ..Default::default()
+        },
+    )
+    .await?
+    .expect("loopback Runtime must be available");
+    let client = crate::tls::reqwest_client();
+    let token = "notification-fixture-token";
+    let reload = || {
+        client
+            .post(format!("http://{addr}/v1/config/reload"))
+            .bearer_auth(token)
+    };
+    assert_eq!(reload().send().await?.status(), StatusCode::OK);
+    let mut thread = manager
+        .create_thread(crate::runtime_threads::CreateThreadRequest::default())
+        .await?;
+    thread.latest_turn_id = Some("test-turn".into());
+    manager.test_store().save_thread(&thread)?;
+    let mut turn: crate::runtime_threads::TurnRecord = serde_json::from_value(json!({
+        "id": "test-turn", "thread_id": thread.id, "status": "completed", "input_summary": "private user text",
+        "created_at": Utc::now(), "duration_ms": 30000
+    }))?;
+    manager.test_store().save_turn(&turn)?;
+    let event = manager
+        .emit_event_for_test(
+            &thread.id,
+            Some(&turn.id),
+            "turn.completed",
+            json!({"answer": "private answer must not be copied"}),
+        )
+        .await?;
+    let endpoint = format!(
+        "http://{addr}/v1/threads/{}/notifications/prepare",
+        thread.id
+    );
+    let request = |seq, focused, away| json!({"seq":seq,"focused":focused,"unfocused_for_ms":away,"locale":"en"});
+    let post = |value| client.post(&endpoint).bearer_auth(token).json(&value);
+    assert_eq!(
+        client
+            .post(&endpoint)
+            .json(&request(event.seq, false, 2500))
+            .send()
+            .await?
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        post(request(0, false, 2500)).send().await?.status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        post(request(event.seq + 100, false, 2500))
+            .send()
+            .await?
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let mut arbitrary = request(event.seq, false, 2500);
+    arbitrary["body"] = json!("renderer injection");
+    assert_eq!(
+        post(arbitrary).send().await?.status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    for (focused, away, expected) in [
+        (true, 2500, "suppressed"),
+        (false, 1999, "suppressed"),
+        (false, 2500, "prepared"),
+    ] {
+        let result: Value = post(request(event.seq, focused, away))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(result["status"], expected);
+        assert!(!result.to_string().contains("private"));
+        assert_eq!(result["sound"], "off");
+    }
+    for (key, value, expected) in [
+        ("quiet", "true", "suppressed"),
+        ("quiet", "false", "prepared"),
+        ("method", "osc9", "unsupported_method"),
+        ("method", "auto", "prepared"),
+        ("events.turn-complete", "false", "suppressed"),
+        ("events.turn-complete", "true", "prepared"),
+        ("condition", "never", "suppressed"),
+        ("condition", "always", "prepared"),
+    ] {
+        client
+            .post(format!("http://{addr}/v1/config"))
+            .bearer_auth(token)
+            .json(&json!({"key":format!("notifications.{key}"),"value":value,"persist":true}))
+            .send()
+            .await?
+            .error_for_status()?;
+        reload().send().await?.error_for_status()?;
+        let result: Value = post(request(event.seq, false, 2500))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(result["status"], expected, "{key}={value}");
+    }
+    let other = manager
+        .create_thread(crate::runtime_threads::CreateThreadRequest::default())
+        .await?;
+    let other_event = manager
+        .emit_event_for_test(&other.id, None, "turn.completed", json!({}))
+        .await?;
+    assert_eq!(
+        post(request(other_event.seq, false, 2500))
+            .send()
+            .await?
+            .status(),
+        StatusCode::BAD_REQUEST,
+        "an existing sequence in another authenticated thread cannot be selected"
+    );
+    // Age a durable fixture record without a wall-clock wait or production
+    // timeout changes. Restore its original bytes before later settlement cases.
+    let event_path =
+        RuntimeThreadManagerConfig::from_task_data_dir(temp.path().join("runtime/runtime"))
+            .data_dir
+            .join("events")
+            .join(format!("{}.jsonl", thread.id));
+    let original_events = fs::read_to_string(&event_path)?;
+    let mut aged = String::new();
+    for line in original_events.lines() {
+        let mut record: Value = serde_json::from_str(line)?;
+        if record["seq"] == event.seq {
+            record["timestamp"] = json!(Utc::now() - chrono::Duration::seconds(120));
+        }
+        aged.push_str(&serde_json::to_string(&record)?);
+        aged.push('\n');
+    }
+    fs::write(&event_path, aged)?;
+    let expired: Value = post(request(event.seq, false, 2500))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(expired["status"], "expired");
+    fs::write(&event_path, original_events)?;
+    // Approval/input notifications are eligible only while the matching current
+    // request is actionable, even if a stale pending projection survived.
+    turn.status = crate::runtime_threads::RuntimeTurnStatus::InProgress;
+    manager.test_store().save_turn(&turn)?;
+    let (approval_id, _approval) =
+        manager.register_pending_approval_for_thread_for_test(&thread.id, "approval-current");
+    manager.register_pending_user_input_for_thread_for_test(&thread.id, "input-current");
+    let approval = manager
+        .emit_event_for_test(
+            &thread.id,
+            Some(&turn.id),
+            "approval.required",
+            json!({"id": approval_id, "description":"private approval prompt"}),
+        )
+        .await?;
+    let input = manager
+        .emit_event_for_test(
+            &thread.id,
+            Some(&turn.id),
+            "user_input.required",
+            json!({"id":"input-current","questions":["private question"]}),
+        )
+        .await?;
+    for seq in [approval.seq, input.seq] {
+        let value: Value = post(request(seq, false, 2500))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(value["status"], "prepared");
+        assert!(!value.to_string().contains("private"));
+    }
+    turn.status = crate::runtime_threads::RuntimeTurnStatus::Completed;
+    manager.test_store().save_turn(&turn)?;
+    for seq in [approval.seq, input.seq] {
+        let value: Value = post(request(seq, false, 2500))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(value["status"], "settled");
+    }
+    let recovered = manager
+        .emit_event_for_test(
+            &thread.id,
+            Some(&turn.id),
+            "turn.completed",
+            json!({"recovered":true}),
+        )
+        .await?;
+    let value: Value = post(request(recovered.seq, false, 2500))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(value["status"], "expired");
+    thread.latest_turn_id = Some("next-turn".into());
+    manager.test_store().save_thread(&thread)?;
+    let value: Value = post(request(event.seq, false, 2500))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(value["status"], "settled");
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_notification_replay_rechecks_requests_settled_during_the_read() -> Result<()> {
+    let _env = lock_test_env();
+    let temp = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", temp.path().join("home"));
+    let _runtime = EnvVarGuard::set("CODEWHALE_RUNTIME_DIR", temp.path().join("runtime-store"));
+    let _backend = EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+    let _proxy = EnvVarGuard::set("NO_PROXY", "*");
+    let path = temp.path().join("config.toml");
+    fs::write(
+        &path,
+        "[notifications]\nmethod = 'auto'\ncondition = 'always'\nsound = 'off'\n",
+    )?;
+    let (addr, manager, handle) = spawn_test_server_with_root_token_mobile_workspace_and_overrides(
+        temp.path().join("runtime"),
+        temp.path().join("sessions"),
+        Some("notification-race-fixture-token".into()),
+        false,
+        temp.path().to_path_buf(),
+        TestServerOverrides {
+            config_path: Some(path),
+            ..Default::default()
+        },
+    )
+    .await?
+    .expect("loopback Runtime must be available");
+    let client = crate::tls::reqwest_client();
+    let token = "notification-race-fixture-token";
+    client
+        .post(format!("http://{addr}/v1/config/reload"))
+        .bearer_auth(token)
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let mut after_settlement = Vec::new();
+    for event_name in ["approval.required", "user_input.required"] {
+        let mut thread = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        thread.latest_turn_id = Some("test-turn".into());
+        manager.test_store().save_thread(&thread)?;
+        let turn: crate::runtime_threads::TurnRecord = serde_json::from_value(json!({
+            "id": "test-turn", "thread_id": thread.id, "status": "in_progress",
+            "input_summary": "silent settlement fixture", "created_at": Utc::now()
+        }))?;
+        manager.test_store().save_turn(&turn)?;
+        let mock = crate::core::engine::mock_engine_handle();
+        manager
+            .install_test_engine(&thread.id, mock.handle.clone())
+            .await?;
+        let approval = if event_name == "approval.required" {
+            Some(manager.register_pending_approval_for_thread_for_test(&thread.id, "request"))
+        } else {
+            manager.register_pending_user_input_for_thread_for_test(&thread.id, "request");
+            None
+        };
+        // The event has to name the same identity the pending projection holds,
+        // which for an approval is the runtime-minted one.
+        let request_id = approval
+            .as_ref()
+            .map(|(approval_id, _)| approval_id.clone())
+            .unwrap_or_else(|| "request".to_string());
+        let event = manager
+            .emit_event_for_test(
+                &thread.id,
+                Some(&turn.id),
+                event_name,
+                json!({"id": request_id}),
+            )
+            .await?;
+        let endpoint = format!(
+            "http://{addr}/v1/threads/{}/notifications/prepare",
+            thread.id
+        );
+        let request =
+            json!({"seq": event.seq, "focused": false, "unfocused_for_ms": 2500, "locale": "en"});
+        let baseline: Value = client
+            .post(&endpoint)
+            .bearer_auth(token)
+            .json(&request)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(baseline["status"], "prepared", "{event_name}");
+
+        let (hook_tx, mut hook_rx) = mpsc::unbounded_channel();
+        manager.set_replay_test_hook(hook_tx);
+        let pending_request = tokio::spawn(async move {
+            crate::tls::reqwest_client()
+                .post(endpoint)
+                .bearer_auth(token)
+                .json(&request)
+                .send()
+                .await
+        });
+        let point = tokio::time::timeout(ci_scaled(Duration::from_secs(2)), hook_rx.recv())
+            .await
+            .context("notification preparation did not reach the held durable read")?
+            .context("replay hook closed")?;
+        assert_eq!(point.thread_id, thread.id);
+        if let Some((approval_id, approval)) = approval {
+            assert!(manager.deliver_external_approval(
+                &approval_id,
+                ExternalApprovalDecision::Allow { remember: false },
+            ));
+            assert_eq!(
+                approval.await?,
+                ExternalApprovalDecision::Allow { remember: false }
+            );
+        } else {
+            assert!(manager.cancel_user_input(&thread.id, "request").await?);
+        }
+        let settled = manager.get_thread_detail(&thread.id).await?;
+        assert!(settled.pending_approvals.is_empty());
+        assert!(settled.pending_user_inputs.is_empty());
+        assert_eq!(
+            settled.turns[0].status,
+            crate::runtime_threads::RuntimeTurnStatus::InProgress,
+            "settlement must happen within the same active turn"
+        );
+        point
+            .resume
+            .send(())
+            .map_err(|_| anyhow::anyhow!("replay dropped its resume signal"))?;
+        let result: Value =
+            tokio::time::timeout(ci_scaled(Duration::from_secs(2)), pending_request)
+                .await???
+                .error_for_status()?
+                .json()
+                .await?;
+        after_settlement.push((event_name, result));
+        drop(mock);
+    }
+    handle.abort();
+    assert!(
+        after_settlement.iter().all(|(_, result)| {
+            result["status"] != "prepared"
+                && result.get("headline").is_none()
+                && result.get("body").is_none()
+                && result["sound"] == "off"
+        }),
+        "requests settled during replay must stay silent: {after_settlement:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_image_http_rejects_before_dispatch_and_accepts_large_canonical_bytes() -> Result<()>
+{
+    use crate::image_attach::tests::runtime_image_fixture;
+    use base64::Engine as _;
+    let _env = crate::test_support::lock_test_env();
+    let dir = tempfile::tempdir()?;
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+    let mut config = Config {
+        provider: Some("deepseek".into()),
+        default_text_model: Some("deepseek-v4-flash-vision-exp".into()),
+        api_key: Some("synthetic-image-key".into()),
+        ..Default::default()
+    };
+    config.set_provider_model_override(
+        ApiProvider::Deepseek,
+        Some("deepseek-v4-flash-vision-exp".into()),
+    );
+    let (addr, manager, server) = spawn_test_server_with_root_token_mobile_workspace_and_overrides(
+        dir.path().to_path_buf(),
+        dir.path().join("sessions"),
+        None,
+        false,
+        dir.path().join("workspace"),
+        TestServerOverrides {
+            config: Some(config),
+            ..Default::default()
+        },
+    )
+    .await?
+    .context("loopback listener required for image contract proof")?;
+    let thread = manager.create_thread(Default::default()).await?;
+    let mut harness = crate::core::engine::mock_engine_handle();
+    manager
+        .install_test_engine(&thread.id, harness.handle.clone())
+        .await?;
+    let client = crate::tls::reqwest_client();
+    let url = format!("http://{addr}/v1/threads/{}/turns", thread.id);
+    let good = runtime_image_fixture(7);
+    for body in [
+        json!({"prompt":"look", "images":[{"mime":"image/png", "dataBase64":"garbage"}]}),
+        json!({"prompt":"", "images":[good.clone()]}),
+        json!({"prompt":"look", "model":"auto", "images":[good.clone()]}),
+        json!({"prompt":"look", "model":"deepseek-v4-flash", "images":[good.clone()]}),
+        json!({"prompt":"look", "images":[{"mime":"image/png", "dataBase64":good.data_base64, "path":"/private/host-only"}]}),
+    ] {
+        let response = client.post(&url).json(&body).send().await?;
+        assert!(response.status().is_client_error());
+        assert!(
+            harness.rx_op.try_recv().is_err(),
+            "rejection must not dispatch any Engine op"
+        );
+        assert!(
+            manager
+                .get_thread_detail(&thread.id)
+                .await?
+                .turns
+                .is_empty()
+        );
+    }
+    // An actual incompressible PNG crosses the former 2 MiB HTTP ceiling.
+    let mut random = 0x4a11_3317_u32;
+    let bytes: Vec<u8> = (0..768 * 768 * 4)
+        .map(|_| {
+            random ^= random << 13;
+            random ^= random >> 17;
+            random ^= random << 5;
+            random as u8
+        })
+        .collect();
+    let image =
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_raw(768, 768, bytes).unwrap());
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut encoded, image::ImageFormat::Png)?;
+    let large = codewhale_protocol::runtime::RuntimeImageInput {
+        mime: "image/png".into(),
+        data_base64: base64::engine::general_purpose::STANDARD.encode(encoded.into_inner()),
+    };
+    let body = json!({"prompt":"compare screenshot", "operation_key":"http-image-once", "images":[large.clone(),good.clone()]});
+    assert!(serde_json::to_vec(&body)?.len() > 2 * 1024 * 1024);
+    let response = client.post(&url).json(&body).send().await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let accepted: Value = response.json().await?;
+    let Op::SendMessage { images, .. } =
+        harness.rx_op.recv().await.context("accepted Engine op")?
+    else {
+        bail!("expected SendMessage");
+    };
+    assert_eq!(images, [large, good]);
+    let replay: Value = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(replay["turn"]["id"], accepted["turn"]["id"]);
+    assert!(harness.rx_op.try_recv().is_err());
+    harness
+        .tx_event
+        .send(EngineEvent::TurnStarted {
+            turn_id: "image-http-fixture".into(),
+            created_at: Utc::now(),
+            route: None,
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::TurnComplete {
+            usage: Default::default(),
+            parent_route_usage: Default::default(),
+            routed_usage_dropped_records: 0,
+            status: crate::core::events::TurnOutcomeStatus::Completed,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        })
+        .await?;
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_image_stream_rejection_does_not_leave_empty_threads() -> Result<()> {
+    use crate::image_attach::tests::{runtime_image_fixture, runtime_image_fixture_bytes};
+    let _env = crate::test_support::lock_test_env();
+    let dir = tempfile::tempdir()?;
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+    let mut config = Config {
+        provider: Some("deepseek".into()),
+        default_text_model: Some("deepseek-v4-flash-vision-exp".into()),
+        api_key: Some("synthetic-image-key".into()),
+        ..Default::default()
+    };
+    config.set_provider_model_override(
+        ApiProvider::Deepseek,
+        Some("deepseek-v4-flash-vision-exp".into()),
+    );
+    let (addr, manager, server) = spawn_test_server_with_root_token_mobile_workspace_and_overrides(
+        dir.path().to_path_buf(),
+        dir.path().join("sessions"),
+        None,
+        false,
+        dir.path().join("workspace"),
+        TestServerOverrides {
+            config: Some(config),
+            ..Default::default()
+        },
+    )
+    .await?
+    .context("loopback listener required")?;
+    let client = crate::tls::reqwest_client();
+    let good = runtime_image_fixture(3);
+    for body in [
+        json!({"prompt":"look", "images":[{"mime":"image/png","dataBase64":"garbage"}]}),
+        json!({"prompt":"", "images":[good.clone()]}),
+        json!({"prompt":"look", "model":"auto", "images":[good.clone()]}),
+        json!({"prompt":"look", "model":"deepseek-v4-flash", "images":[good]}),
+        json!({"prompt":"look", "images":[runtime_image_fixture_bytes(4 * 1024 * 1024 + 1)]}),
+    ] {
+        let response = client
+            .post(format!("http://{addr}/v1/stream"))
+            .json(&body)
+            .send()
+            .await?;
+        assert!(response.status().is_client_error(), "{}", response.status());
+        assert!(
+            manager
+                .list_threads(
+                    crate::runtime_threads::ThreadListFilter::IncludeArchived,
+                    None
+                )
+                .await?
+                .is_empty(),
+            "failed admission left an empty thread"
+        );
+    }
+    // Cleanup refuses a loaded or accepted session instead of erasing uncertain work.
+    let retained = manager.create_thread(Default::default()).await?;
+    let harness = crate::core::engine::mock_engine_handle();
+    manager
+        .install_test_engine(&retained.id, harness.handle.clone())
+        .await?;
+    assert!(manager.discard_empty_thread(&retained.id).await.is_err());
+    assert!(manager.get_thread(&retained.id).await.is_ok());
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_image_named_catalog_resolves_and_echoes_exact_configured_identity() -> Result<()> {
+    let _env = crate::test_support::lock_test_env();
+    let dir = tempfile::tempdir()?;
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+    let route = crate::config::ProviderConfig {
+        kind: Some("openai-compatible".into()),
+        base_url: Some("http://127.0.0.1:9/v1".into()),
+        model: Some("same-model".into()),
+        ..Default::default()
+    };
+    let config = Config {
+        provider: Some("vision-personal".into()),
+        providers: Some(crate::config::ProvidersConfig {
+            custom: std::collections::HashMap::from([
+                ("vision-personal".into(), route.clone()),
+                ("vision-work".into(), route),
+            ]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let (addr, _, server) = spawn_test_server_with_root_token_mobile_workspace_and_overrides(
+        dir.path().to_path_buf(),
+        dir.path().join("sessions"),
+        None,
+        false,
+        dir.path().join("workspace"),
+        TestServerOverrides {
+            config: Some(config),
+            ..Default::default()
+        },
+    )
+    .await?
+    .context("loopback listener required")?;
+    let client = crate::tls::reqwest_client();
+    for identity in ["vision-personal", "vision-work"] {
+        let response: Value = client
+            .get({
+                let mut url =
+                    reqwest::Url::parse(&format!("http://{addr}/v1/providers/custom/models"))?;
+                url.query_pairs_mut()
+                    .append_pair("model_provider_id", identity);
+                url
+            })
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(response["model_provider_id"], identity);
+        assert_eq!(response["provider"], "custom");
+        assert_eq!(response["models"][0]["id"], "same-model");
+        assert_eq!(response["models"][0]["image_input"], "unknown");
+    }
+    for (kind, identity) in [
+        ("custom", "missing"),
+        ("deepseek", "vision-work"),
+        ("custom", " vision-work"),
+    ] {
+        assert_eq!(
+            client
+                .get({
+                    let mut url =
+                        reqwest::Url::parse(&format!("http://{addr}/v1/providers/{kind}/models"))?;
+                    url.query_pairs_mut()
+                        .append_pair("model_provider_id", identity);
+                    url
+                })
+                .send()
+                .await?
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let legacy: Value = client
+        .get(format!("http://{addr}/v1/providers/custom/models"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert!(legacy.get("model_provider_id").is_none());
+    server.abort();
+    Ok(())
+}
+
+#[test]
+fn runtime_image_named_catalog_cursor_binds_identity_endpoint_and_catalog() -> Result<()> {
+    let models = ["one", "two"]
+        .into_iter()
+        .map(|id| ProviderModelEntry {
+            reasoning_effort: codewhale_config::route::CapabilityState::Unknown,
+            reasoning_effort_levels: Vec::new(),
+            reasoning_effort_source: None,
+            id: id.into(),
+            output_token_limit: codewhale_config::route::CapabilityState::Unknown,
+            image_input: codewhale_config::route::CapabilityState::Supported,
+        })
+        .collect::<Vec<_>>();
+    let fingerprint = |id: &str, base: &str| {
+        crate::hashing::sha256_hex(serde_json::to_vec(&("custom", id, base)).unwrap())
+    };
+    let params = ListProviderModelsParams {
+        model_provider_id: Some("vision-work".into()),
+        limit: Some(1),
+        ..Default::default()
+    };
+    let route = fingerprint("vision-work", "http://127.0.0.1:9/v1");
+    let first = paginate_provider_models("custom", models.clone(), &params, Some(route.clone()))
+        .map_err(|e| anyhow::anyhow!(e.message))?;
+    let mut next = params;
+    next.cursor = first.next_cursor;
+    assert!(paginate_provider_models("custom", models.clone(), &next, Some(route)).is_ok());
+    for changed in [
+        Some(fingerprint("vision-personal", "http://127.0.0.1:9/v1")),
+        Some(fingerprint("vision-work", "http://127.0.0.1:10/v1")),
+        None,
+    ] {
+        assert!(paginate_provider_models("custom", models.clone(), &next, changed).is_err());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_image_saved_session_import_validates_before_creating_a_thread() -> Result<()> {
+    use crate::models::{ContentBlock, ImageUrlContent};
+    let _env = crate::test_support::lock_test_env();
+    let dir = tempfile::tempdir()?;
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+    let sessions_dir = dir.path().join("sessions");
+    fs::create_dir_all(&sessions_dir)?;
+    let (addr, manager, server) =
+        spawn_test_server_with_root(dir.path().to_path_buf(), sessions_dir.clone())
+            .await?
+            .context("loopback listener required")?;
+    let client = crate::tls::reqwest_client();
+    let expected =
+        vec![crate::image_attach::tests::runtime_image_fixture_bytes(3 * 1024 * 1024); 2];
+    let historical = crate::image_attach::prepare_stored_images(&expected)?;
+    let cases = [
+        vec![ContentBlock::ImageUrl {
+            image_url: ImageUrlContent {
+                url: "https://host.invalid/never-fetch".into(),
+            },
+        }],
+        vec![ContentBlock::ImageUrl {
+            image_url: ImageUrlContent {
+                url: "data:image/png;base64,iVBORw0KGgo=".into(),
+            },
+        }],
+        historical,
+    ];
+    for (index, mut content) in cases.into_iter().enumerate() {
+        content.insert(
+            0,
+            ContentBlock::Text {
+                text: "saved image prompt".into(),
+                cache_control: None,
+            },
+        );
+        let id = format!("sess_image_import_{index}");
+        let session = json!({
+            "schema_version": 1,
+            "metadata": { "id": id, "title": "Image import fixture", "created_at": "2026-09-08T00:00:00Z", "updated_at": "2026-09-08T00:00:00Z", "message_count": 1, "total_tokens": 0, "model": "deepseek-v4-pro", "model_provider": "deepseek", "workspace": dir.path(), "mode": "agent" },
+            "messages": [{ "role": "user", "content": content }], "system_prompt": null,
+        });
+        fs::write(
+            sessions_dir.join(format!("{id}.json")),
+            serde_json::to_vec(&session)?,
+        )?;
+        let response = client
+            .post(format!("http://{addr}/v1/sessions/{id}/resume-thread"))
+            .json(&json!({}))
+            .send()
+            .await?;
+        if index < 2 {
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert!(
+                manager
+                    .list_threads(
+                        crate::runtime_threads::ThreadListFilter::IncludeArchived,
+                        None
+                    )
+                    .await?
+                    .is_empty()
+            );
+        } else {
+            assert_eq!(response.status(), StatusCode::CREATED);
+            let response: Value = response.json().await?;
+            let detail = manager
+                .get_thread_detail(
+                    response["thread_id"]
+                        .as_str()
+                        .context("imported thread id")?,
+                )
+                .await?;
+            let item = detail
+                .items
+                .iter()
+                .find(|item| item.kind == crate::runtime_threads::TurnItemKind::UserMessage)
+                .context("imported user item")?;
+            let blocks: Vec<ContentBlock> = serde_json::from_value(
+                item.metadata.as_ref().context("image metadata")?["runtime_image_content"].clone(),
+            )?;
+            assert_eq!(
+                crate::image_attach::runtime_images_from_blocks(&blocks)?,
+                expected
+            );
+            assert_eq!(detail.thread.schema_version, 3);
+        }
+    }
+    server.abort();
+    Ok(())
+}
+
+#[test]
+fn output_cap_catalog_reports_exact_transport_support() {
+    use codewhale_config::route::CapabilityState;
+    let _env = crate::test_support::lock_test_env();
+    let config = Config::default();
+    assert_eq!(
+        provider_model_output_token_limit_for_api(&config, ApiProvider::OpenaiCodex, "gpt-5.5"),
+        CapabilityState::Unsupported
+    );
+    assert_eq!(
+        provider_model_output_token_limit_for_api(
+            &config,
+            ApiProvider::Deepseek,
+            "deepseek-v4-pro"
+        ),
+        CapabilityState::Supported
+    );
+    assert!(default_runtime_capabilities().turn_output_token_limit);
+}
+
+#[tokio::test]
+async fn output_cap_compatibility_stream_rejects_before_thread_creation() -> Result<()> {
+    let _env = lock_test_env();
+    let temp = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", temp.path());
+    let root = temp.path().join("server");
+    let (addr, manager, server) = spawn_test_server_with_root_token_mobile_workspace_and_overrides(
+        root.clone(),
+        root.join("sessions"),
+        None,
+        false,
+        root.join("workspace"),
+        TestServerOverrides {
+            config: Some(Config {
+                provider: Some("openai-codex".into()),
+                default_text_model: Some("gpt-5.5".into()),
+                ..Config::default()
+            }),
+            ..Default::default()
+        },
+    )
+    .await?
+    .context("loopback fixture must bind")?;
+    let client = crate::tls::reqwest_client();
+    for input in [
+        json!({"prompt":"review","model":"gpt-5.5","maxOutputTokens":1500}),
+        json!({"prompt":"review","model":"auto","maxOutputTokens":1500}),
+        json!({"prompt":"review","maxOutputTokens":0}),
+        json!({"prompt":"review","maxOutputTokens":1.5}),
+    ] {
+        let response = client
+            .post(format!("http://{addr}/v1/stream"))
+            .json(&input)
+            .send()
+            .await?;
+        assert!(
+            response.status().is_client_error(),
+            "{:?}",
+            response.status()
+        );
+    }
+    assert!(
+        manager
+            .list_threads(ThreadListFilter::IncludeArchived, None)
+            .await?
+            .is_empty()
+    );
+    server.abort();
     Ok(())
 }

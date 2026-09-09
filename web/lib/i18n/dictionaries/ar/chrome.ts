@@ -77,7 +77,7 @@ export const chrome: ChromeDict = {
   themeTitle: "سمة التوثيق · تلقائي / فاتح / داكن",
 
   footerTagline:
-    "نماذجك. أكثر قدرة معًا. الوثائق والمصدر والمجتمع لبيئة التشغيل مفتوحة المصدر.",
+    "اصنع ما تريد وأتمت العمل اليومي باستخدام النماذج التي تختارها.",
   footerProduct: "المنتج",
   footerProject: "المشروع",
   footerDocs: "التوثيق",
@@ -93,7 +93,7 @@ export const chrome: ChromeDict = {
   footerTerms: "شروط الخدمة",
   footerPrivacy: "الخصوصية",
   footerChangelog: "سجل التغييرات",
-  footerCanonicalSource: "المصدر القانوني: ",
+  footerCanonicalSource: "المصدر الرسمي: ",
   footerReleases: " · الإصدارات: ",
   footerReleasesLink: "إصدارات GitHub",
   footerSecurity: "الأمن",

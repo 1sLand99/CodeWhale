@@ -62,18 +62,32 @@
 
 ## 单一递归轴
 
-worker 在 `spawn_depth = 0` 运行，并且可以在满足 `spawn_depth + 1 ≤ max_spawn_depth` 时派生子级，因此预算 `N` 提供 `N` 层嵌套委派。子代理和 fleet worker 共享**一条**轴，来源是 `codewhale_config`：
+worker 在 `spawn_depth = 0` 运行，并且可以在满足 `spawn_depth + 1 ≤ max_spawn_depth` 时派生子级，因此预算 `N` 提供 `N` 层嵌套委派。子代理和通过 fleet 选择的 Runtime worker 共享**一条**轴，来源是 `codewhale_config`：
 
-- `DEFAULT_SPAWN_DEPTH = 3` —— 独立子代理和 fleet worker 的默认预算（因此它们不会漂移成"两个移动靶"）；
-- `MAX_SPAWN_DEPTH_CEILING = 8` —— 可选上限，每个配置值（fleet 的 `max_spawn_depth`、`agent` 的 `max_depth`）都会被钳制到该值。
+- `DEFAULT_SPAWN_DEPTH = 3` —— 独立子代理和通过 fleet 选择的 Runtime worker 的默认预算；
+- `MAX_SPAWN_DEPTH_CEILING = 8` —— 可选上限，所有 Runtime 配置值（包括 fleet 执行配置中的 `max_spawn_depth`）都会被钳制到该值。
 
-注意解析器和对外公布的 schema 对 `agent` 的 `max_depth` 看法不一致：解析器钳制到 8（`tools/subagent/mod.rs:10601-10617`），而展示给模型的 JSON schema 声明 `"maximum": 3`（`mod.rs:6845-6848`）。因此模型无法请求运行时愿意兑现的深度。这里作为代码差异跟踪，而不是文档差异。
+面向模型的 `agent` schema 有意省略 `max_depth`。解析器仍接受 `max_depth`、`maxDepth` 和 `max_spawn_depth`，以兼容已保存的转录、ACP/MCP 客户端和内部调用，并拒绝大于 8 的值。当前由模型发起的调用继承 Runtime 配置，而不是通过工具 schema 协商递归深度。
+
+Workflow IR 另有默认五层嵌套节点的结构验证限制。该限制约束编排文档的结构，不会授予或消耗 Runtime 的子级委派深度。
 
 根 worker 即使在预算为 0 时也会运行；预算约束的是*子级*委派。默认预算至少提供三层嵌套。
 
 ## 事件词汇
 
 fleet 账本持久化的是 worker 自身的事件流，而不是另一套模拟的分类法。`codewhale exec --output-format stream-json` 会发出 `{"type": "content" | "tool_use" | "tool_result" | "sandbox_denied" | "workflow_event" | "session_capture" | "turn_usage" | "metadata" | "done" | "error"}` 行，它们映射到 fleet 账本的 `FleetWorkerEventPayload`（`RunningTool`、`WorkflowEvent`、`Running`、`Completed`、`Failed` 等）。`workflow_event` 在 Workflow 飞行期间携带类型化的 run/phase/task/gate 回执，并作为类型化的 `WorkflowEvent` 保留在 Fleet 账本中；外层 worker 仍然拥有终态 `done` 或 `error`。一套词汇，两个表面。
+
+`session_capture` 在 exec 运行把自己的对话记录持久化为已保存会话时发出一次，并且只在这一个地方携带可恢复的 id：
+
+```json
+{"type": "session_capture", "schema": "codewhale.exec-stream", "schema_version": 1,
+ "content": "<redacted:…>", "saved_session_id": "01J…"}
+```
+
+- `saved_session_id` 只在会话成功保存后发出。本地 Fleet worker 使用父进程分配的新 id 和 Runtime 现有的会话目录；只有返回的 id 与分配值一致且记录可读取时，执行器才设置 `FleetReceipt.saved_session_id`。有 Runtime API 访问权限的客户端可通过 `GET /v1/sessions/{id}` 读取回复。SSH worker 保留摘录和远程日志，但不会声称存在本地会话链接。id 只是查询键，不能替代 Runtime 身份验证。
+- `content` 是与终态 `metadata.session_id` 相同的脱敏指纹，因此单独截获的 `metadata` 回执仍然可以安全写入日志，两个事件之间也仍可关联。相应地，`metadata.resume_command` 指向该字段（`codewhale exec --resume <session_capture.saved_session_id>`），而不是自己携带 id。
+
+终态 `metadata` 回执还携带 worker 可见的最终回答：`visible_final_answer_chars` 是最终助手回复的真实字符数，`visible_final_answer_excerpt` 是它的有界（4,000 字符，截断时以 `...` 结尾）、已脱敏的摘录；当前轮没有产生可见回答时省略该字段，恢复会话不会重用上一轮的回复。失败或中断的回执可以保留当前轮的部分文本，以回执状态为准。Runtime 执行器从这个回执读取摘录——绝不从流式 `content` 增量读取，那是运行过程中的"边想边说"——并把它附加到 `Completed.summary`；对于没有评分器也没有文件工件的任务，还会作为任务的交付物写入回执备注。生命周期事件标签和 worker 检视摘要只显示短摘录；事件 `payload` 和回执保留完整摘录。
 
 `turn_usage` 是每次模型调用的用量回执，当 provider 为该调用报告了用量时，每个模型请求（turn 步骤）发出一次：
 

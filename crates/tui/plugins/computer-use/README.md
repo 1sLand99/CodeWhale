@@ -42,8 +42,12 @@ stateful remote input needs a persistent session transport before it is ready.
 
 ## Control and session ownership
 
-Select an application before sending input. Prefer accessibility actions and
-background selection; requests that need foreground input report that fact.
+Select an application before sending input. On macOS, background selection
+(`activate:false`) supports process-directed typing and accessibility actions.
+It refuses gestures that would move the shared desktop pointer. Explicit
+foreground selection (`activate:true`) enables guarded shared-desktop input
+when the user has authorized exclusive desktop use. Neither mode is an isolated
+computer; cursor restoration does not make concurrent pointer control safe.
 Screenshots and zoom return actual image content to compatible vision models.
 Preview and recording are explicit opt-ins.
 Application observations return a concise default summary; request full detail

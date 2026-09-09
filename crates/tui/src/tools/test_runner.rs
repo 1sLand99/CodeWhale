@@ -73,6 +73,7 @@ impl ToolSpec for RunTestsTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
+        crate::core::engine::tool_catalog::enforce_tool_denial(context, self.name(), &input)?;
         let all_features = optional_bool(&input, "all_features", false)?;
         let extra_args = optional_str(&input, "args")?
             .map(str::trim)

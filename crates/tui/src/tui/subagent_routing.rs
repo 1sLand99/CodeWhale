@@ -1126,6 +1126,7 @@ mod tests {
 
     fn task_summary(id: &str, status: TaskStatus, duration_ms: Option<u64>) -> TaskSummary {
         TaskSummary {
+            execution_binding_known: true,
             id: id.to_string(),
             status,
             prompt_summary: "Fix task list output".to_string(),
@@ -1376,7 +1377,10 @@ mod tests {
             &MailboxMessage::TokenUsage {
                 agent_id: "agent_route".to_string(),
                 source_id: "response-route".to_string(),
-                route: test_route(crate::config::ApiProvider::Openrouter, "vendor/model-real"),
+                route: Box::new(test_route(
+                    crate::config::ApiProvider::Openrouter,
+                    "vendor/model-real",
+                )),
                 usage: crate::models::Usage::default(),
             },
         );
@@ -1398,7 +1402,7 @@ mod tests {
             &MailboxMessage::TokenUsage {
                 agent_id: "agent_spend".to_string(),
                 source_id: "response-1".to_string(),
-                route: route.clone(),
+                route: Box::new(route.clone()),
                 usage: crate::models::Usage {
                     input_tokens: 1_000,
                     output_tokens: 40,
@@ -1412,7 +1416,7 @@ mod tests {
             &MailboxMessage::TokenUsage {
                 agent_id: "agent_spend".to_string(),
                 source_id: "response-2".to_string(),
-                route,
+                route: Box::new(route),
                 usage: crate::models::Usage {
                     input_tokens: 2_000,
                     output_tokens: 60,

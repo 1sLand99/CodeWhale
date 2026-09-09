@@ -115,7 +115,16 @@ pub enum Op {
     /// and TUI must produce byte-identical `MessageRequest`s for identical
     /// `Op::SendMessage` payloads.
     SendMessage {
+        #[serde(
+            default,
+            rename = "maxOutputTokens",
+            alias = "max_output_tokens",
+            skip_serializing_if = "Option::is_none"
+        )]
+        max_output_tokens: Option<std::num::NonZeroU32>,
         content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<crate::runtime::RuntimeImageInput>,
         /// Effective mode for this turn (`"plan" | "agent" | "operate"` etc).
         #[serde(default = "default_mode")]
         mode: String,
@@ -499,7 +508,9 @@ pub fn headless_send_message_op(thread_id: ThreadId, content: impl Into<String>)
         thread_id: thread_id.clone(),
         session_id: SessionId::new(),
         op: Op::SendMessage {
+            max_output_tokens: None,
             content: content.into(),
+            images: Vec::new(),
             mode: default_mode(),
             model: None,
             model_provider: None,

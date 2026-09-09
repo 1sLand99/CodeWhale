@@ -71,6 +71,8 @@ fn take_state_persist_failure(path: &Path) -> bool {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct RuntimeChatPrompt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<std::num::NonZeroU32>,
     #[serde(rename = "type")]
     pub command_type: String,
     pub run_id: String,
@@ -79,6 +81,8 @@ pub(crate) struct RuntimeChatPrompt {
     pub runtime_binding_id: String,
     pub runtime_thread_id: String,
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<codewhale_protocol::runtime::RuntimeImageInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
     pub model: String,
@@ -758,7 +762,9 @@ impl RuntimeChatRelayHost {
             .start_turn_with_reserved_id(
                 &binding.native_thread_id,
                 StartTurnRequest {
+                    max_output_tokens: command.max_output_tokens,
                     prompt: command.prompt.clone(),
+                    images: command.images.clone(),
                     operation_key: Some(command.operation_key.clone()),
                     input_summary: None,
                     model: Some(command.model.clone()),
@@ -989,8 +995,27 @@ impl RuntimeChatRelayHost {
                 .is_some_and(|models| {
                     models.iter().any(|model| {
                         model.get("id").and_then(Value::as_str) == Some(command.model.as_str())
+                            && (command.images.is_empty()
+                                || model.get("imageInput").and_then(Value::as_str)
+                                    == Some("supported"))
                     })
                 });
+        if command.max_output_tokens.is_some()
+            && !provider
+                .get("models")
+                .and_then(Value::as_array)
+                .is_some_and(|models| {
+                    models.iter().any(|model| {
+                        model.get("id").and_then(Value::as_str) == Some(command.model.as_str())
+                            && model.get("outputTokenLimit").and_then(Value::as_str)
+                                == Some("supported")
+                    })
+                })
+        {
+            return Err(
+                "The selected Runtime Chat route does not support maxOutputTokens.".to_string(),
+            );
+        }
         if !route_matches {
             return Err(
                 "The requested Runtime Chat route is not the active ready route.".to_string(),
@@ -1170,6 +1195,14 @@ impl RuntimeChatRelayHost {
 
 impl RuntimeChatPrompt {
     pub(crate) fn validate_shape(&self) -> Result<(), String> {
+        crate::image_attach::prepare_runtime_images(&self.images)
+            .map_err(|error| error.to_string())?;
+        if !self.images.is_empty() && self.model.trim().eq_ignore_ascii_case("auto") {
+            return Err(
+                "Image inputs require an exact named model; Auto is unavailable for images."
+                    .to_string(),
+            );
+        }
         if self.command_type != "prompt.request" {
             return Err("Codewhale sent an unsupported Runtime Chat command.".to_string());
         }
@@ -1203,10 +1236,7 @@ impl RuntimeChatPrompt {
             return Err("Runtime relay turns must use Chat mode.".to_string());
         }
         if let Some(reasoning) = self.reasoning_effort.as_deref()
-            && !matches!(
-                reasoning,
-                "off" | "low" | "medium" | "high" | "xhigh" | "max"
-            )
+            && crate::tui::app::ReasoningEffort::parse_strict(reasoning).is_err()
         {
             return Err("The Runtime Chat reasoning effort is invalid.".to_string());
         }
@@ -1857,6 +1887,8 @@ mod tests {
     #[test]
     fn chat_command_shape_requires_empty_tools_and_exact_chat_modes() {
         let mut prompt = RuntimeChatPrompt {
+            images: Vec::new(),
+            max_output_tokens: None,
             command_type: "prompt.request".to_string(),
             run_id: "run_fixture".to_string(),
             turn_id: format!("local_turn_{}", "b".repeat(24)),
@@ -1878,6 +1910,13 @@ mod tests {
             },
         };
         prompt.validate_shape().unwrap();
+        for reasoning in ["minimal", "ultra"] {
+            prompt.reasoning_effort = Some(reasoning.into());
+            prompt.validate_shape().unwrap();
+        }
+        prompt.reasoning_effort = Some("invented-effort".into());
+        assert!(prompt.validate_shape().is_err());
+        prompt.reasoning_effort = None;
         prompt.allowed_tools.push("bash".to_string());
         assert!(prompt.validate_shape().is_err());
         prompt.allowed_tools.clear();
@@ -1890,7 +1929,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let config = Config {
             provider: Some("ollama".to_string()),
-            default_text_model: Some(crate::config::DEFAULT_OLLAMA_MODEL.to_string()),
+            default_text_model: Some("relay-local:fixture".to_string()),
             ..Config::default()
         };
         let host = RuntimeChatRelayHost::open(
@@ -1905,6 +1944,8 @@ mod tests {
             .unwrap();
         host.authorize_run("run_fixture").unwrap();
         let prompt = RuntimeChatPrompt {
+            images: Vec::new(),
+            max_output_tokens: None,
             command_type: "prompt.request".to_string(),
             run_id: "run_fixture".to_string(),
             turn_id: format!("local_turn_{}", "e".repeat(24)),
@@ -1913,7 +1954,7 @@ mod tests {
             runtime_thread_id: format!("local_thread_{}", "f".repeat(24)),
             prompt: "hello".to_string(),
             system_prompt: None,
-            model: crate::config::DEFAULT_OLLAMA_MODEL.to_string(),
+            model: "relay-local:fixture".to_string(),
             model_provider: "ollama".to_string(),
             model_provider_id: "ollama".to_string(),
             reasoning_effort: None,
@@ -1970,6 +2011,8 @@ mod tests {
             .unwrap_or_else(|| provider.as_str())
             .to_string();
         let prompt = RuntimeChatPrompt {
+            images: Vec::new(),
+            max_output_tokens: None,
             command_type: "prompt.request".to_string(),
             run_id: "run_fixture".to_string(),
             turn_id: format!("local_turn_{}", "8".repeat(24)),
@@ -2024,6 +2067,8 @@ mod tests {
         config.api_key = Some("must-not-cross".to_string());
         config.base_url = Some("http://127.0.0.1:11434/v1".to_string());
         let challenge = "c".repeat(32);
+        assert!(crate::runtime_api::runtime_chat_relay_catalog(&config, &challenge).is_err());
+        config.default_text_model = Some("relay-local:fixture".to_string());
         let catalog = crate::runtime_api::runtime_chat_relay_catalog(&config, &challenge).unwrap();
         assert_eq!(catalog["protocol"], "codewhale.runtime-chat-relay.v1");
         assert_eq!(catalog["challenge"], challenge);
@@ -2033,7 +2078,11 @@ mod tests {
         assert_eq!(catalog["providers"].as_array().unwrap().len(), 1);
         assert_eq!(
             catalog["providers"][0]["models"][0]["imageInput"],
-            "unsupported"
+            "unknown"
+        );
+        assert_eq!(
+            catalog["runtime"]["capabilities"]["turn_image_inputs"],
+            true
         );
         let serialized = catalog.to_string();
         assert!(!serialized.contains("must-not-cross"));
@@ -2479,5 +2528,32 @@ mod tests {
             .unwrap();
         assert!(!reopened.has_unsettled_authorized_turns());
         reopened.authorize_run("run_other").unwrap();
+    }
+    #[test]
+    fn runtime_image_relay_hash_preserves_text_and_binds_order() {
+        let legacy = json!({"type":"prompt.request","runId":"run_fixture","turnId":format!("local_turn_{}", "b".repeat(24)),"operationKey":"operation-1","runtimeBindingId":"binding_fixture","runtimeThreadId":format!("local_thread_{}", "a".repeat(24)),"prompt":"look","model":"deepseek-v4-flash-vision-exp","modelProvider":"deepseek","modelProviderId":"deepseek","allowedTools":[],"mode":"chat","requestedMode":"chat","workspace":{"id":"workspace_fixture","targetRef":"target_fixture"}});
+        let mut command: RuntimeChatPrompt = serde_json::from_value(legacy.clone()).unwrap();
+        command.validate_shape().unwrap();
+        let expected = hex_digest(Sha256::digest(
+            serde_json::to_vec(&canonical_json_value(&legacy)).unwrap(),
+        ));
+        assert_eq!(
+            runtime_chat_request_fingerprint(&command).unwrap(),
+            expected
+        );
+        let mut with_empty = legacy;
+        with_empty["images"] = json!([]);
+        let empty: RuntimeChatPrompt = serde_json::from_value(with_empty).unwrap();
+        assert_eq!(runtime_chat_request_fingerprint(&empty).unwrap(), expected);
+        command.images = vec![
+            crate::image_attach::tests::runtime_image_fixture(1),
+            crate::image_attach::tests::runtime_image_fixture(2),
+        ];
+        command.validate_shape().unwrap();
+        let first = runtime_chat_request_fingerprint(&command).unwrap();
+        command.images.reverse();
+        assert_ne!(runtime_chat_request_fingerprint(&command).unwrap(), first);
+        command.model = "auto".into();
+        assert!(command.validate_shape().is_err());
     }
 }

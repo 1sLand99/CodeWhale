@@ -4,8 +4,8 @@
 //! configured; the operator model later picks sub-agent routes from that list
 //! only. The store is the selected fleet file (`fleet/store.rs`): its operator
 //! route and every member that pins an exact `provider` + `model`. Nothing
-//! here invents a second member store — a fleet model is a fleet member, and
-//! the roles a model fills are the member rows that pin it.
+//! here invents a second member store. Shortlist rows carry no role; the
+//! roles a model fills are the executable member rows that pin it.
 
 use std::path::Path;
 
@@ -35,10 +35,11 @@ pub struct FleetModel {
 }
 
 impl FleetModel {
+    /// Saved wire IDs are exact. Alias convenience belongs to the bound
+    /// resolver, never to membership mutation or the active-row marker.
     #[must_use]
     pub fn matches(&self, provider: &str, model: &str) -> bool {
-        self.provider.eq_ignore_ascii_case(provider.trim())
-            && self.model.eq_ignore_ascii_case(model.trim())
+        self.provider.eq_ignore_ascii_case(provider.trim()) && self.model == model.trim()
     }
 
     /// `roles` joined for a one-line label, or `member` when none.
@@ -56,7 +57,7 @@ impl FleetModel {
     }
 }
 
-/// Why a membership change wrote nothing.
+/// Why the route's membership remains unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnchangedReason {
     /// The route is the fleet's operator route (your current model while
@@ -82,7 +83,8 @@ pub enum FleetModelChange {
         fleet: String,
         roles: Vec<String>,
     },
-    /// Nothing was written.
+    /// Route membership is unchanged. A redundant shortlist row may have
+    /// been removed while a saved role or operator still pins the route.
     Unchanged {
         fleet: String,
         reason: UnchangedReason,
@@ -95,8 +97,6 @@ pub enum FleetModelChange {
 pub enum FleetModelError {
     /// Provider id or model id was blank.
     NeedsRoute,
-    /// No role was named. A member is a role; a bare model is not one.
-    NeedsRole { route: String },
     /// No fleet is selected, so there is nothing to remove from.
     NoSelection,
     /// The route is the fleet's operator route, which `/fleet save` changes.
@@ -119,9 +119,6 @@ impl FleetModelError {
     pub fn message(&self, locale: Locale) -> String {
         match self {
             Self::NeedsRoute => tr(locale, MessageId::FleetModelErrorNeedsRoute).into_owned(),
-            Self::NeedsRole { route } => {
-                tr(locale, MessageId::FleetModelErrorNeedsRole).replace("{route}", route)
-            }
             Self::NoSelection => tr(locale, MessageId::FleetModelErrorNoSelection).into_owned(),
             Self::OperatorRoute { route, fleet } => {
                 tr(locale, MessageId::FleetModelErrorOperatorRoute)
@@ -199,13 +196,11 @@ fn member_pins(member: &FleetMember, provider: &str, model: &str) -> bool {
         .provider
         .as_deref()
         .is_some_and(|p| p.eq_ignore_ascii_case(provider))
-        && member
-            .model
-            .as_deref()
-            .is_some_and(|id| id.eq_ignore_ascii_case(model))
+        && member.model.as_deref().is_some_and(|id| id == model)
 }
 
-/// Add `provider/model` to the selected fleet, one member row per role.
+/// Add `provider/model` to the selected fleet, one member row per role, or
+/// one explicitly marked shortlist row when no role was requested.
 ///
 /// With no fleet selected, the personal [`DEFAULT_FLEET_NAME`] fleet is used —
 /// loaded when it already exists, created otherwise — and selected only once
@@ -223,15 +218,6 @@ pub fn add_fleet_model(
     if provider.is_empty() || model.is_empty() {
         return Err(FleetModelError::NeedsRoute);
     }
-    // Role is primary (founder, 2026-09-03): a member is a role with a model
-    // and provider as its attributes. A bare model used to become a
-    // role-less member with a slug id, which is how the roster filled with
-    // `glm-52`, `model-a`, `legacy-saved-model` (0.9.12 defect #26).
-    if roles.iter().all(|role| role.trim().is_empty()) {
-        return Err(FleetModelError::NeedsRole {
-            route: format!("{provider}/{model}"),
-        });
-    }
     let target = selected_or_default(workspace)?;
     let SelectedOrDefault {
         mut fleet,
@@ -246,26 +232,44 @@ pub fn add_fleet_model(
         }
     }
     let roles = unique;
+    let shortlist = roles.is_empty();
     let select = |needs_select: bool| -> Result<(), FleetModelError> {
         if needs_select {
             set_selected(DEFAULT_FLEET_NAME, FleetScope::Personal, workspace)?;
         }
         Ok(())
     };
+    if shortlist && is_operator_route(&fleet, provider, model) {
+        select(needs_select)?;
+        return Ok(FleetModelChange::Unchanged {
+            fleet: fleet.name,
+            reason: UnchangedReason::OperatorRoute,
+        });
+    }
     let model_slug = slugify(model);
     let mut added_any = false;
-    for role in &roles {
-        let already = fleet
-            .members
-            .iter()
-            .any(|m| member_pins(m, provider, model) && m.role.eq_ignore_ascii_case(role));
+    for role in roles
+        .iter()
+        .map(String::as_str)
+        .chain(shortlist.then_some(""))
+    {
+        let already = fleet.members.iter().any(|m| {
+            member_pins(m, provider, model)
+                && (shortlist || (!m.shortlist && m.role_label().eq_ignore_ascii_case(role)))
+        });
         if already {
             continue;
         }
-        let id = unique_member_id(&fleet, &slugify(role), &model_slug);
+        let base = if shortlist {
+            model_slug.clone()
+        } else {
+            slugify(role)
+        };
+        let id = unique_member_id(&fleet, &base, &model_slug);
         fleet.members.push(FleetMember {
             id,
             display_name: None,
+            shortlist,
             role: role.to_string(),
             model: Some(model.to_string()),
             provider: Some(provider.to_string()),
@@ -335,16 +339,10 @@ pub fn remove_fleet_model(
     })
 }
 
-/// The role the picker's one-key toggle enrolls a model under. A member is
-/// a role; the picker has no role prompt, so it adds the general-purpose
-/// worker, and the Fleet editor is where the role is refined.
-pub const PICKER_TOGGLE_ROLE: &str = "general";
-
 /// Add when absent, remove when present — the picker's one-key toggle.
 ///
-/// Presence is decided by member rows: any member pinning the route counts,
-/// whatever its role. Only the operator route with no member row of its own
-/// is left alone. Adding enrolls the route as [`PICKER_TOGGLE_ROLE`].
+/// The toggle edits only explicitly marked shortlist rows. Saved role pins
+/// and the operator route remain authoritative and are never removed here.
 pub fn toggle_fleet_model(
     workspace: &Path,
     provider: &str,
@@ -352,17 +350,27 @@ pub fn toggle_fleet_model(
 ) -> Result<FleetModelChange, FleetModelError> {
     let provider = provider.trim();
     let model = model.trim();
-    let picker_role = [PICKER_TOGGLE_ROLE.to_string()];
     let Some(selected) = resolve_selected_fleet(workspace)? else {
-        return add_fleet_model(workspace, provider, model, &picker_role);
+        return add_fleet_model(workspace, provider, model, &[]);
     };
-    let (fleet, _scope) = load_fleet_at(&selected.path)?;
+    let (mut fleet, scope) = load_fleet_at(&selected.path)?;
+    let before = fleet.members.len();
+    fleet
+        .members
+        .retain(|member| !member.shortlist || !member_pins(member, provider, model));
+    let removed_shortlist = fleet.members.len() != before;
+    if removed_shortlist {
+        save_fleet(&fleet, scope, workspace)?;
+    }
     if fleet
         .members
         .iter()
         .any(|m| member_pins(m, provider, model))
     {
-        return remove_fleet_model(workspace, provider, model);
+        return Ok(FleetModelChange::Unchanged {
+            fleet: fleet.name,
+            reason: UnchangedReason::AlreadyPresent,
+        });
     }
     if is_operator_route(&fleet, provider, model) {
         return Ok(FleetModelChange::Unchanged {
@@ -370,13 +378,18 @@ pub fn toggle_fleet_model(
             reason: UnchangedReason::OperatorRoute,
         });
     }
-    add_fleet_model(workspace, provider, model, &picker_role)
+    if removed_shortlist {
+        return Ok(FleetModelChange::Removed {
+            fleet: fleet.name,
+            roles: Vec::new(),
+        });
+    }
+    add_fleet_model(workspace, provider, model, &[])
 }
 
 fn is_operator_route(fleet: &FleetFile, provider: &str, model: &str) -> bool {
     fleet.operator.as_ref().is_some_and(|op| {
-        op.provider.eq_ignore_ascii_case(provider.trim())
-            && op.model.eq_ignore_ascii_case(model.trim())
+        op.provider.eq_ignore_ascii_case(provider.trim()) && op.model == model.trim()
     })
 }
 
@@ -483,7 +496,7 @@ fn selected_or_default(workspace: &Path) -> Result<SelectedOrDefault, FleetStore
     }
 }
 
-fn unique_member_id(fleet: &FleetFile, base: &str, model_slug: &str) -> String {
+pub(crate) fn unique_member_id(fleet: &FleetFile, base: &str, model_slug: &str) -> String {
     let taken = |id: &str| fleet.members.iter().any(|m| m.id.eq_ignore_ascii_case(id));
     if !taken(base) {
         return base.to_string();
@@ -515,6 +528,7 @@ mod tests {
             fleet.members.push(FleetMember {
                 id: (*id).to_string(),
                 display_name: None,
+                shortlist: false,
                 role: (*role).to_string(),
                 model: Some((*model).to_string()),
                 provider: Some("openrouter".to_string()),
@@ -576,11 +590,182 @@ mod tests {
     }
 
     #[test]
+    fn case_distinct_saved_models_survive_add_remove_and_toggle() {
+        let _lock = crate::test_support::lock_test_env();
+        let (_temp, _home, workspace) = isolated_workspace();
+        let upper = "Preview-fixture";
+        let lower = "preview-fixture";
+        for model in [upper, lower] {
+            assert!(matches!(
+                add_fleet_model(&workspace, "openrouter", model, &[]).unwrap(),
+                FleetModelChange::Added { .. }
+            ));
+            assert!(matches!(
+                add_fleet_model(&workspace, "openrouter", model, &["reviewer".into()]).unwrap(),
+                FleetModelChange::Added { .. }
+            ));
+        }
+        let (before, path) = selected_file(&workspace);
+        assert_eq!(before.members.len(), 4);
+        let upper_rows = before
+            .members
+            .iter()
+            .filter(|member| member.model.as_deref() == Some(upper))
+            .cloned()
+            .collect::<Vec<_>>();
+        let lower_rows = before
+            .members
+            .iter()
+            .filter(|member| member.model.as_deref() == Some(lower))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(upper_rows.len(), 2);
+        assert_eq!(lower_rows.len(), 2);
+        let models = fleet_models(&workspace).unwrap();
+        assert_eq!(models.len(), 2);
+        for model in [upper, lower] {
+            assert_eq!(
+                models
+                    .iter()
+                    .filter(|row| row.matches("OPENROUTER", model))
+                    .count(),
+                1,
+                "only the exact saved model gets the active marker"
+            );
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(matches!(
+            add_fleet_model(&workspace, "OPENROUTER", upper, &["reviewer".into()]).unwrap(),
+            FleetModelChange::Unchanged {
+                reason: UnchangedReason::AlreadyPresent,
+                ..
+            }
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert!(matches!(
+            remove_fleet_model(&workspace, "openrouter", "PREVIEW-FIXTURE"),
+            Err(FleetModelError::NotInFleet { .. })
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+
+        // Toggle removes only the exact shortlist row and retains its role pin.
+        assert!(matches!(
+            toggle_fleet_model(&workspace, "OPENROUTER", lower).unwrap(),
+            FleetModelChange::Unchanged {
+                reason: UnchangedReason::AlreadyPresent,
+                ..
+            }
+        ));
+        let (after_toggle, _) = selected_file(&workspace);
+        assert_eq!(
+            after_toggle
+                .members
+                .iter()
+                .filter(|member| member.model.as_deref() == Some(upper))
+                .cloned()
+                .collect::<Vec<_>>(),
+            upper_rows
+        );
+        assert_eq!(
+            after_toggle
+                .members
+                .iter()
+                .filter(|member| member.model.as_deref() == Some(lower))
+                .cloned()
+                .collect::<Vec<_>>(),
+            lower_rows
+                .into_iter()
+                .filter(|member| !member.shortlist)
+                .collect::<Vec<_>>()
+        );
+        assert!(matches!(
+            remove_fleet_model(&workspace, "openrouter", lower).unwrap(),
+            FleetModelChange::Removed { .. }
+        ));
+        assert_eq!(selected_file(&workspace).0.members, upper_rows);
+
+        // Toggling the absent lower spelling adds and removes only that choice.
+        assert!(matches!(
+            toggle_fleet_model(&workspace, "openrouter", lower).unwrap(),
+            FleetModelChange::Added { .. }
+        ));
+        assert_eq!(
+            selected_file(&workspace).0.members.len(),
+            upper_rows.len() + 1
+        );
+        assert!(matches!(
+            toggle_fleet_model(&workspace, "openrouter", lower).unwrap(),
+            FleetModelChange::Removed { .. }
+        ));
+        assert_eq!(selected_file(&workspace).0.members, upper_rows);
+        assert!(matches!(
+            remove_fleet_model(&workspace, "openrouter", upper).unwrap(),
+            FleetModelChange::Removed { .. }
+        ));
+        assert!(selected_file(&workspace).0.members.is_empty());
+    }
+
+    #[test]
+    fn case_distinct_member_does_not_alias_the_saved_operator() {
+        let _lock = crate::test_support::lock_test_env();
+        let (_temp, _home, workspace) = isolated_workspace();
+        let upper = "Preview-fixture";
+        let lower = "preview-fixture";
+        let fleet = fleet_with(Some(("openrouter", upper)), &[]);
+        save_fleet(&fleet, FleetScope::Workspace, &workspace).unwrap();
+        set_selected(&fleet.name, FleetScope::Workspace, &workspace).unwrap();
+        assert!(matches!(
+            add_fleet_model(&workspace, "openrouter", lower, &[]).unwrap(),
+            FleetModelChange::Added { .. }
+        ));
+        assert!(matches!(
+            add_fleet_model(&workspace, "OPENROUTER", upper, &[]).unwrap(),
+            FleetModelChange::Unchanged {
+                reason: UnchangedReason::OperatorRoute,
+                ..
+            }
+        ));
+        let models = fleet_models(&workspace).unwrap();
+        assert_eq!(models.len(), 2);
+        assert!(models[0].matches("OPENROUTER", upper));
+        assert!(!models[1].matches("openrouter", upper));
+        assert!(matches!(
+            remove_fleet_model(&workspace, "openrouter", lower).unwrap(),
+            FleetModelChange::Removed { .. }
+        ));
+        assert_eq!(selected_file(&workspace).0.operator, fleet.operator);
+        assert!(matches!(
+            toggle_fleet_model(&workspace, "openrouter", lower).unwrap(),
+            FleetModelChange::Added { .. }
+        ));
+        assert!(matches!(
+            toggle_fleet_model(&workspace, "openrouter", lower).unwrap(),
+            FleetModelChange::Removed { .. }
+        ));
+        assert_eq!(selected_file(&workspace).0, fleet);
+        let (_, path) = selected_file(&workspace);
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(matches!(
+            toggle_fleet_model(&workspace, "openrouter", upper).unwrap(),
+            FleetModelChange::Unchanged {
+                reason: UnchangedReason::OperatorRoute,
+                ..
+            }
+        ));
+        assert!(matches!(
+            remove_fleet_model(&workspace, "openrouter", upper),
+            Err(FleetModelError::OperatorRoute { .. })
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
     fn inheriting_members_are_not_models_of_their_own() {
         let mut fleet = fleet_with(None, &[]);
         fleet.members.push(FleetMember {
             id: "builder".to_string(),
             display_name: None,
+            shortlist: false,
             role: "builder".to_string(),
             model: None,
             provider: None,
@@ -592,25 +777,20 @@ mod tests {
     }
 
     #[test]
-    fn add_creates_and_selects_a_default_fleet_then_toggle_removes() {
+    fn roleless_add_persists_then_toggle_preserves_explicit_role_pins() {
         let _lock = crate::test_support::lock_test_env();
         let (_temp, _home, workspace) = isolated_workspace();
 
         assert!(fleet_models(&workspace).expect("no selection").is_empty());
-        let change = add_fleet_model(
-            &workspace,
-            "openrouter",
-            "z-ai/glm-5.3-flash",
-            &["general".to_string()],
-        )
-        .expect("add");
+        let change =
+            add_fleet_model(&workspace, "openrouter", "z-ai/glm-5.3-flash", &[]).expect("add");
         assert_eq!(
             change,
             FleetModelChange::Added {
                 fleet: DEFAULT_FLEET_NAME.to_string(),
                 created_fleet: true,
                 selected_fleet: true,
-                roles: vec!["general".to_string()],
+                roles: Vec::new(),
             }
         );
         let receipt = change_receipt(Locale::En, "openrouter", "z-ai/glm-5.3-flash", &change);
@@ -621,7 +801,11 @@ mod tests {
         let models = fleet_models(&workspace).expect("fleet");
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].model, "z-ai/glm-5.3-flash");
-        assert_eq!(models[0].roles, ["general"]);
+        assert!(models[0].roles.is_empty());
+        let (on_disk, _) = selected_file(&workspace);
+        assert_eq!(on_disk.members.len(), 1);
+        assert!(on_disk.members[0].shortlist);
+        assert!(on_disk.members[0].role.is_empty());
 
         // A second add with another role attaches the role instead of
         // duplicating the model.
@@ -629,15 +813,54 @@ mod tests {
             &workspace,
             "openrouter",
             "z-ai/glm-5.3-flash",
-            &["scout".to_string()],
+            &["general".to_string(), "scout".to_string()],
         )
         .expect("add role");
         let models = fleet_models(&workspace).expect("fleet");
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].roles, ["general", "scout"]);
+        let (before, path) = selected_file(&workspace);
+        let explicit_roles: Vec<_> = before
+            .members
+            .into_iter()
+            .filter(|member| !member.shortlist)
+            .collect();
 
         let change =
             toggle_fleet_model(&workspace, "openrouter", "z-ai/glm-5.3-flash").expect("toggle");
+        assert!(matches!(
+            change,
+            FleetModelChange::Unchanged {
+                reason: UnchangedReason::AlreadyPresent,
+                ..
+            }
+        ));
+        let receipt = change_receipt(Locale::En, "openrouter", "z-ai/glm-5.3-flash", &change);
+        assert!(receipt.contains("stays on the team"), "{receipt}");
+        assert!(
+            !receipt.contains("Removed"),
+            "retained role pins must not report removal: {receipt}"
+        );
+        let (on_disk, _) = selected_file(&workspace);
+        assert_eq!(
+            on_disk.members, explicit_roles,
+            "explicit pins survive unchanged"
+        );
+        let bytes = std::fs::read(&path).expect("saved roles");
+        let change = toggle_fleet_model(&workspace, "openrouter", "z-ai/glm-5.3-flash")
+            .expect("pinned toggle");
+        assert!(matches!(
+            change,
+            FleetModelChange::Unchanged {
+                reason: UnchangedReason::AlreadyPresent,
+                ..
+            }
+        ));
+        assert_eq!(std::fs::read(&path).expect("unchanged roles"), bytes);
+
+        // The explicitly named removal command still removes role assignments.
+        let change = remove_fleet_model(&workspace, "openrouter", "z-ai/glm-5.3-flash")
+            .expect("explicit removal");
         assert!(
             matches!(change, FleetModelChange::Removed { ref roles, .. } if roles == &["general", "scout"])
         );
@@ -654,28 +877,52 @@ mod tests {
         );
     }
 
-    /// The picker's ⇧F has no role prompt: it enrolls the route under the
-    /// general role, and a second press removes that row again.
+    /// The picker's ⇧F creates only a persisted model choice, never a role.
     #[test]
-    fn toggle_enrolls_under_the_picker_role_and_toggles_off() {
+    fn toggle_enrolls_without_a_role_or_executable_member_and_toggles_off() {
         let _lock = crate::test_support::lock_test_env();
         let (_temp, _home, workspace) = isolated_workspace();
 
         let change =
             toggle_fleet_model(&workspace, "openrouter", "z-ai/glm-5.3-flash").expect("toggle on");
         assert!(
-            matches!(change, FleetModelChange::Added { ref roles, .. } if roles == &[PICKER_TOGGLE_ROLE]),
+            matches!(change, FleetModelChange::Added { ref roles, .. } if roles.is_empty()),
             "{change:?}"
         );
         let (on_disk, _) = selected_file(&workspace);
         assert_eq!(on_disk.members.len(), 1);
-        assert_eq!(on_disk.members[0].role, PICKER_TOGGLE_ROLE);
-        assert_eq!(on_disk.members[0].id, PICKER_TOGGLE_ROLE);
+        assert!(on_disk.members[0].shortlist);
+        assert!(on_disk.members[0].role.is_empty());
+        assert_eq!(on_disk.members[0].provider.as_deref(), Some("openrouter"));
+        assert_eq!(
+            on_disk.members[0].model.as_deref(),
+            Some("z-ai/glm-5.3-flash")
+        );
+        assert!(
+            fleet_models(&workspace).expect("reloaded models")[0]
+                .roles
+                .is_empty()
+        );
+        let roster = crate::fleet::identity::roster_from_fleet(
+            &on_disk,
+            FleetScope::Personal,
+            Path::new("shortlist.toml"),
+        );
+        assert!(roster.members().is_empty(), "a model choice is not a role");
+        let effective =
+            crate::fleet::identity::load_effective_roster(&Default::default(), &workspace, None);
+        assert!(!effective.is_exact_selection());
+        assert!(
+            effective
+                .members()
+                .iter()
+                .all(|member| member.origin == crate::fleet::roster::ProfileOrigin::BuiltIn)
+        );
 
         let change =
             toggle_fleet_model(&workspace, "openrouter", "z-ai/glm-5.3-flash").expect("toggle off");
         assert!(
-            matches!(change, FleetModelChange::Removed { ref roles, .. } if roles == &[PICKER_TOGGLE_ROLE]),
+            matches!(change, FleetModelChange::Removed { ref roles, .. } if roles.is_empty()),
             "{change:?}"
         );
         let (on_disk, _) = selected_file(&workspace);
@@ -805,14 +1052,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_model_is_not_a_member_and_old_pins_are_purged_on_read() {
-        let _lock = crate::test_support::lock_test_env();
-        let (_temp, _home, workspace) = isolated_workspace();
-
-        let err = add_fleet_model(&workspace, "openrouter", "z-ai/glm-5.3-flash", &[])
-            .expect_err("a model without a role is not a member");
-        assert!(matches!(err, FleetModelError::NeedsRole { .. }), "{err:?}");
-
+    fn legacy_bare_pins_migrate_without_reclassifying_id_only_roles() {
         // A 0.9.12 roster: role members plus model pins promoted to members.
         let text = r#"
 schema = "fleet"
@@ -826,6 +1066,16 @@ model = "deepseek-v4-flash"
 provider = "deepseek"
 
 [[members]]
+id = "general"
+model = "deepseek-v4-pro"
+provider = "deepseek"
+
+[[members]]
+id = "audit-team"
+model = "private-review-model"
+provider = "custom-a"
+
+[[members]]
 id = "glm-52"
 model = "GLM-5.2"
 provider = "zai"
@@ -837,15 +1087,33 @@ provider = "custom-a"
 "#;
         let fleet = FleetFile::parse(text).expect("parse");
         let ids: Vec<&str> = fleet.members.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids, vec!["scout"], "bare model pins are dropped on read");
+        assert_eq!(
+            ids,
+            vec!["scout", "general", "audit-team"],
+            "only legacy bare model pins are dropped"
+        );
+        assert!(fleet.members.iter().all(|member| !member.shortlist));
+        assert_eq!(fleet.member("general").unwrap().role_label(), "general");
+        assert_eq!(
+            fleet.member("audit-team").unwrap().role_label(),
+            "audit-team"
+        );
+        assert!(!fleet.render_toml().unwrap().contains("shortlist"));
     }
 
     #[test]
-    fn toggling_the_operator_route_is_a_no_op_and_never_writes_a_duplicate_row() {
+    fn operator_membership_survives_shortlist_toggle_and_explicit_role_pins() {
         let _lock = crate::test_support::lock_test_env();
         let (_temp, _home, workspace) = isolated_workspace();
         let mut fleet = fleet_with(Some(("openrouter", "z-ai/glm-5.3")), &[]);
         fleet.name = "Ops".to_string();
+        fleet.members.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "choice", "shortlist": true,
+                "provider": "openrouter", "model": "z-ai/glm-5.3",
+            }))
+            .unwrap(),
+        );
         save_fleet(&fleet, FleetScope::Personal, &workspace).expect("save");
         set_selected("Ops", FleetScope::Personal, &workspace).expect("select");
 
@@ -860,10 +1128,15 @@ provider = "custom-a"
         let receipt = change_receipt(Locale::En, "openrouter", "z-ai/glm-5.3", &change);
         assert!(receipt.contains("stays on the team"), "{receipt}");
         assert!(receipt.contains("current model"), "{receipt}");
-        // A role-less /fleet add is refused: a member is a role.
-        let err = add_fleet_model(&workspace, "openrouter", "z-ai/glm-5.3", &[])
-            .expect_err("a model without a role");
-        assert!(matches!(err, FleetModelError::NeedsRole { .. }), "{err:?}");
+        let change = add_fleet_model(&workspace, "openrouter", "z-ai/glm-5.3", &[])
+            .expect("operator is already available");
+        assert!(matches!(
+            change,
+            FleetModelChange::Unchanged {
+                reason: UnchangedReason::OperatorRoute,
+                ..
+            }
+        ));
         let (on_disk, _) = selected_file(&workspace);
         assert!(
             on_disk.members.is_empty(),
@@ -877,8 +1150,8 @@ provider = "custom-a"
             "{err:?}"
         );
 
-        // With a role, the operator route may also fill that role; toggling
-        // then removes the role rows and keeps the operator.
+        // With a role, the operator route may also fill that role; the
+        // shortcut cannot delete either explicit assignment.
         add_fleet_model(
             &workspace,
             "openrouter",
@@ -891,12 +1164,18 @@ provider = "custom-a"
         assert_eq!(models[0].roles, ["operator", "planner"]);
         let change = toggle_fleet_model(&workspace, "openrouter", "z-ai/glm-5.3").expect("toggle");
         assert!(
-            matches!(change, FleetModelChange::Removed { ref roles, .. } if roles == &["planner"]),
+            matches!(
+                change,
+                FleetModelChange::Unchanged {
+                    reason: UnchangedReason::AlreadyPresent,
+                    ..
+                }
+            ),
             "{change:?}"
         );
         assert_eq!(
             fleet_models(&workspace).expect("fleet")[0].roles,
-            ["operator"]
+            ["operator", "planner"]
         );
     }
 

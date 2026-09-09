@@ -116,15 +116,16 @@ pub(super) fn build_responses_body_for_provider(
         }
     }
 
-    // Reasoning configuration. The Codex Responses backend accepts
-    // low/medium/high/xhigh, so provider-aware callers normalize inherited
-    // DeepSeek-only values before request construction: "off" becomes
-    // "low", and CodeWhale's "auto" falls back to "medium". DeepSeek's
-    // Responses API documents `reasoning.effort: "none"` to disable
-    // thinking, so its branch sends "none" for the off tier instead of
-    // collapsing it into low (see `responses_reasoning_effort`).
+    // Preserve the selected Codex tier through the final wire boundary. The
+    // roster owns each model's available levels; this pure builder must not
+    // collapse newer tiers to an older model's xhigh ceiling. Other Responses
+    // providers retain their own compatibility vocabulary.
     if let Some(raw) = request.reasoning_effort.as_deref()
-        && let Some(effort) = responses_reasoning_effort(raw, is_deepseek)
+        && let Some(effort) = if provider == ApiProvider::OpenaiCodex {
+            codex_responses_reasoning_effort(raw)
+        } else {
+            responses_reasoning_effort(raw, is_deepseek)
+        }
     {
         body["reasoning"] = if is_deepseek || is_concentrate {
             json!({ "effort": effort })
@@ -916,6 +917,12 @@ fn tool_to_responses_function(tool: &Tool) -> Value {
 }
 
 fn codex_responses_reasoning_effort(raw: &str) -> Option<&'static str> {
+    crate::tui::app::ReasoningEffort::parse_strict(raw)
+        .unwrap_or(crate::tui::app::ReasoningEffort::Medium)
+        .api_value_for_provider(ApiProvider::OpenaiCodex)
+}
+
+fn compatible_responses_reasoning_effort(raw: &str) -> Option<&'static str> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "off" | "disabled" | "none" | "false" => Some("low"),
         "minimal" => Some("low"),
@@ -936,7 +943,7 @@ fn codex_responses_reasoning_effort(raw: &str) -> Option<&'static str> {
 /// table's default tier rather than writing nothing.
 pub(super) fn responses_reasoning_effort(raw: &str, is_deepseek: bool) -> Option<&'static str> {
     if !is_deepseek {
-        return codex_responses_reasoning_effort(raw);
+        return compatible_responses_reasoning_effort(raw);
     }
     Some(super::deepseek_effort::deepseek_effort_tier_or_default(raw).responses_effort())
 }

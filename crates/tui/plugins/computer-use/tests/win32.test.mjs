@@ -76,3 +76,105 @@ test("win32: every User32 action carries the type prelude in-process", async () 
     assert.ok(call.script.includes("public static class User32"), "each action must redefine User32 in-process");
   }
 });
+
+test("win32: typing rejects timeout, cancellation and process errors even with success output", async () => {
+  const mod = await import("../src/backends/win32.mjs");
+  for (const [result, expected] of [
+    [{ code: 0, timedOut: true }, /timed out/],
+    [{ code: 0, aborted: true }, /cancelled/],
+    [{ code: 1, stderr: "SendInput inserted 0 of 2 events" }, /inserted 0 of 2/],
+  ]) {
+    const b = mod.create({ exec: { run: async () => ({ stdout: '{"ok":true}', stderr: "", ...result }) } });
+    await assert.rejects(b.type({ text: "A中😀" }), expected);
+  }
+});
+
+test("win32: Unicode text is data in the shared input script, including shell-looking text", async () => {
+  const { run, calls } = mockExec();
+  const mod = await import("../src/backends/win32.mjs");
+  const b = mod.create({ exec: { run } });
+  const text = "A中😀'; throw 'should stay text'; $env:SECRET";
+  assert.deepEqual(await b.type({ text }), { action_sent: true, chars: text.length, strategy: "unicode-sendinput" });
+  const script = calls[0].script;
+  assert.ok(!script.includes(text), "text must not become PowerShell source");
+  const encoded = script.match(/FromBase64String\('([^']+)'\)/)?.[1];
+  assert.equal(Buffer.from(encoded, "base64").toString("utf16le"), text);
+  assert.match(script, /\[User32\]::SendString\(\$text\)/);
+  assert.ok(!script.includes("class TypeText"), "typing must use the same full INPUT union as keys");
+  const count = calls.length;
+  assert.equal((await b.type({ text: "" })).action_sent, false);
+  assert.equal(calls.length, count);
+});
+
+test("win32: unsupported characters cannot become unrelated virtual keys", async () => {
+  const { run, calls } = mockExec();
+  const mod = await import("../src/backends/win32.mjs");
+  const b = mod.create({ exec: { run, persistentInputOwner: true } });
+  for (const text of ["!", "_", "中", "ß", "ctrl+!", "bogus+a"]) {
+    await assert.rejects(b.key({ text }), /unknown key combination/);
+    await assert.rejects(b.hold_key({ text, duration: 0.05 }), /unknown key combination/);
+  }
+  assert.equal(calls.length, 0, "refused keys must not spawn input or cleanup");
+  for (const text of ["ctrl+A", "9", "alt+tab", "shift"]) assert.equal((await b.key({ text })).action_sent, true);
+});
+
+test("win32: failed chord delivery releases only owned keys, with no replay", async () => {
+  const mod = await import("../src/backends/win32.mjs");
+  const calls = [];
+  const b = mod.create({ exec: { run: async (_cmd, args) => {
+    calls.push(decodeScript(args));
+    return calls.length === 1
+      ? { code: 1, stdout: "", stderr: "SendInput inserted 1 of 6 events" }
+      : { code: 0, stdout: "", stderr: "" };
+  } } });
+  await assert.rejects(b.key({ text: "ctrl+shift+a" }), /inserted 1 of 6/);
+  assert.equal(calls.length, 2);
+  const cleanup = calls[1].split("'@ -ErrorAction Stop;")[1];
+  assert.match(cleanup, /SendKey\(65, 2\).*SendKey\(16, 2\).*SendKey\(17, 2\)/s);
+  assert.doesNotMatch(cleanup, /SendKey\(\d+, 0\)|SendString|\$seq/, "recovery must not repeat down events");
+  await b.releaseInput();
+  assert.equal(calls.length, 2, "successful cleanup clears ownership");
+});
+
+test("win32: failed cleanup retains ownership and both failures for a later release", async () => {
+  const mod = await import("../src/backends/win32.mjs");
+  const calls = [];
+  const run = async (_cmd, args) => {
+    calls.push(decodeScript(args));
+    return calls.length <= 2
+      ? { code: 1, stdout: "", stderr: calls.length === 1 ? "SendInput inserted 1 of 4 events" : "SendInput inserted 0 of 1 events" }
+      : { code: 0, stdout: "", stderr: "" };
+  };
+  const b = mod.create({ exec: { run } });
+  await assert.rejects(b.key({ text: "ctrl+a" }), (err) => {
+    assert.equal(err.name, "ExecError");
+    assert.match(err.message, /inserted 1 of 4.*release failed:.*inserted 0 of 1/);
+    assert.match(err.cause.message, /inserted 1 of 4/);
+    assert.match(err.cleanupError.message, /inserted 0 of 1/);
+    return true;
+  });
+  await mod.create({ exec: { run } }).releaseInput();
+  assert.equal(calls.length, 2, "another backend must not release this owner's keys");
+  await b.releaseInput();
+  assert.equal(calls.length, 3, "failed releases remain owned for retry");
+  assert.match(calls[2], /SendKey\(65, 2\).*SendKey\(17, 2\)/s);
+  await b.releaseInput();
+  assert.equal(calls.length, 3);
+});
+
+test("win32: wheel packets preserve signed DWORD bits in both axes and clamp notches", async () => {
+  const { run, calls } = mockExec();
+  const mod = await import("../src/backends/win32.mjs");
+  const b = mod.create({ exec: { run } });
+  for (const [direction, amount, vertical, horizontal] of [
+    ["down", 3, "4294966936", "0"], ["up", 3, "360", "0"],
+    ["left", 3, "0", "4294966936"], ["right", 3, "0", "360"],
+    ["down", 100, "4294963696", "0"], ["up", 0, "120", "0"],
+  ]) {
+    await b.scroll({ target: { x: 1, y: 2 }, direction, amount });
+    const script = calls.at(-1).script;
+    assert.ok(script.includes(`::WHEEL, 0, 0, ${vertical}, [UIntPtr]::Zero)`));
+    assert.ok(script.includes(`::HWHEEL, 0, 0, ${horizontal}, [UIntPtr]::Zero)`));
+    assert.doesNotMatch(script, /-band 0xFFFFFFFF/);
+  }
+});

@@ -1,9 +1,11 @@
-<!-- source: README.md sha256:3cc3ffc9b995 -->
+<!-- source: README.md sha256:a446e3921085 -->
 # Codewhale
 
-Codewhale adalah agen pemrograman sumber terbuka untuk terminal Anda, dibuat dengan Rust dan dikembangkan secara terbuka bersama orang-orang yang menggunakannya.
+Codewhale adalah agen sumber terbuka yang membaca proyek, mengedit berkas, menjalankan perintah, dan memeriksa hasil kerjanya dengan model yang dihosting atau model lokal pilihan Anda. Mulailah dengan satu tugas di terminal. Untuk pekerjaan yang lebih besar, bagikan sebagian pekerjaan kepada agen dengan model dan peran yang berbeda.
 
-![Codewhale berjalan di terminal](assets/screenshot.webp)
+![Codewhale berjalan di terminal](web/public/codewhale-tui-171acee.png)
+
+*Pratinjau terminal dari build pengembangan v0.9.12.*
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [हिन्दी](README.hi.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [العربية](README.ar.md) · [Català](README.ca.md)
 
@@ -21,15 +23,17 @@ curl -fsSL https://codewhale.net/install.sh | sh
 "$HOME/.local/bin/codewhale"
 ```
 
+Installer memilih rilis terbaru yang sudah dipublikasikan. [Catatan perubahan](CHANGELOG.md) juga menjelaskan kandidat yang belum dipublikasikan untuk rilis berikutnya; perubahan tersebut baru disertakan dalam unduhan publik setelah rilisnya tersedia.
+
 Di Windows, unduh installer atau arsip yang sesuai dari [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases/latest). Untuk instalasi biner langsung yang sudah ada, jalankan `codewhale update`, atau `codewhale update --check` untuk memeriksa tanpa memasang. Updater menampilkan jalur executable dan mempertahankan build yang lebih baru. npm dan Cargo adalah pilihan sekunder; lihat [panduan instalasi](docs/INSTALL.md) untuk migrasi dari pengelola paket dan pengaturan PATH.
 
-Saat pertama dijalankan, Codewhale membantu Anda menghubungkan penyedia atau tetap bekerja secara luring. Codewhale juga mendukung Cargo, Docker, Nix, Scoop, arsip siap pakai, Android/Termux, dan mirror CNB. Lihat [panduan instalasi](docs/INSTALL.md).
+Saat pertama dijalankan, Codewhale membantu Anda menghubungkan penyedia atau mengonfigurasi Codewhale secara luring. Respons model memerlukan koneksi ke model yang dihosting atau model lokal. Codewhale juga mendukung npm dan Cargo sebagai jalur pengemasan sekunder, serta Docker, Nix, Scoop, Android/Termux, dan mirror CNB opsional. Instalasi yang sudah ada melalui pengelola paket akan menerima petunjuk migrasi. Lihat [bantuan instalasi dan PATH](docs/INSTALL.md).
 
 Penyelesaian Tab cukup diaktifkan dengan satu perintah per shell — `codewhale completion bash|zsh|fish|powershell|elvish`. Lihat [penyelesaian shell](docs/INSTALL.md#8-shell-completions).
 
 ## Penggunaan
 
-Bicaralah dengan Codewhale seperti Anda berbicara dengan rekan satu tim:
+Buka terminal di folder proyek Anda dan jalankan `codewhale`. Pilih penyedia dengan `/provider` dan model dengan `/model`. Lalu jelaskan tugas yang konkret:
 
 ```text
 Fix the failing tests and explain what changed.
@@ -41,16 +45,24 @@ Atau jalankan tugas tanpa membuka TUI:
 codewhale exec "fix the failing tests and explain what changed"
 ```
 
-Codewhale dapat membaca repositori Anda, mengedit berkas, menjalankan perintah, memeriksa hasil, dan terus bekerja menuju tujuan. Anda menentukan seberapa besar akses yang dimilikinya.
+Codewhale dapat membaca repositori Anda, mengedit berkas, menjalankan perintah, memeriksa hasil, dan terus bekerja menuju tujuan. Gunakan `/mode plan` untuk menelusuri tanpa mengubah berkas atau menjalankan perintah shell, dan `/mode work` saat Anda ingin agen melakukan perubahan. Tekan `Shift+Tab` untuk memilih Ask, Auto-Review, atau Full Access; [panduan mode dan izin](docs/MODES.md) menjelaskan tindakan yang diizinkan oleh masing-masing pilihan.
 
-## GUI frontend
+## Terminal, aplikasi, dan Computer Use
 
-Lebih suka antarmuka grafis? Ekstensi CodeWhale for VS Code yang dikelola komunitas membungkus agen yang sama ke dalam sidebar VS Code — obrolan, percakapan berutas, diff langsung, dan pengelolaan tugas melalui Runtime API yang sama, sehingga sesi tetap sinkron dengan terminal. Pasang dari [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=HengQuWorld.brotherwhale-vscode); kode sumber ada di [GitHub](https://github.com/HengQuWorld/CodeWhale-VSCode).
+Terminal dan klien grafis terhubung ke Codewhale Runtime, yang menjalankan agen beserta alatnya:
+
+- **Terminal:** `codewhale` membuka antarmuka interaktif; `codewhale exec` menjalankan tugas dari skrip atau job CI.
+- **Browser lokal:** `codewhale web` membuka [klien web lokal](docs/WEB.md) bawaan untuk Runtime yang sama.
+- **Aplikasi web dan desktop Codewhale:** lingkungan kerja grafis yang sedang dikembangkan. Ketersediaannya tercantum di [halaman produk](https://codewhale.net/en/product).
+
+**Computer Use menambahkan alat untuk mengamati dan berinteraksi dengan aplikasi lain.** Plugin ini disertakan dalam kode sumber saat ini. Tinjau akses yang diminta dan aktifkan plugin sebelum digunakan; izin OS dan persyaratan platform tetap berlaku. Lihat [panduan Computer Use](crates/tui/plugins/computer-use/README.md) yang disertakan dan [pengaturan plugin](docs/PLUGINS.md).
+
+Di VS Code, ekstensi CodeWhale yang dikelola komunitas terhubung ke Runtime lokal melalui sidebar. Pasang dari [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=HengQuWorld.brotherwhale-vscode); kode sumber ada di [GitHub](https://github.com/HengQuWorld/CodeWhale-VSCode).
 
 ## Mengapa Codewhale
 
-- **Gunakan model yang Anda inginkan.** Hubungkan penyedia terkelola atau model lokal melalui Ollama, vLLM, atau SGLang. Ganti penyedia dan model dengan `/model`.
-- **Tetap memegang kendali.** Plan hanya dapat membaca. Ask, Auto-Review, dan Full Access menampilkan perilaku persetujuan dengan jelas. `/undo` membatalkan giliran terakhir dan `/restore` mengembalikan ruang kerja ke snapshot sebelumnya.
+- **Pilih model Anda.** Hubungkan penyedia terkelola atau model lokal melalui Ollama, vLLM, atau SGLang. Gunakan `/provider` untuk mengganti penyedia dan `/model` untuk memilih model.
+- **Tetap memegang kendali.** Periksa tindakan yang diusulkan dan perubahan berkas yang dihasilkannya. Pengaturan persetujuan menentukan kapan peninjauan diperlukan; Full Access tetap mematuhi batas kebijakan yang wajib dipenuhi. `/undo` dan `/restore` membantu memulihkan perubahan ruang kerja.
 - **Jaga agar pekerjaan panjang tetap teratur.** Simpan sesi, tetapkan `/goal` yang bertahan lama, tinjau alur kerja sebelum dijalankan, dan koordinasikan agen tanpa memasukkan instruksi internal mereka ke transkrip Anda.
 - **Perluas agen yang sudah Anda miliki.** Hubungkan server MCP dan keterampilan, konfigurasikan hook, dan simpan peran agen sebagai berkas yang mudah dibaca di proyek atau pengaturan pribadi Anda.
 
@@ -69,10 +81,11 @@ Baca [urutan otorisasi](docs/AUTHORIZATION_ORDER.md) untuk susunan kebijakan yan
 - [MCP](docs/MCP.md), [hook](docs/HOOKS.md), dan [konfigurasi](docs/CONFIGURATION.md)
 - [Klien web lokal](docs/WEB.md)
 - [Semua dokumentasi](docs)
+- [Struktur repositori dan panduan kontribusi](CONTRIBUTING.md#project-structure)
 
 ## Bergabung dengan komunitas
 
-Codewhale menjadi lebih baik ketika orang menggunakannya, melaporkan hal yang terasa kurang tepat, dan membantu memperbaikinya. Jika penyedia belum tersedia, alur kerja terasa janggal, atau UI terminal menghambat Anda, [buat issue](https://github.com/Hmbown/CodeWhale/issues). Jika Anda tahu cara memperbaikinya, [buat pull request](CONTRIBUTING.md). Kontribusi pertama sangat disambut, dan kontributor tetap menerima kredit untuk pekerjaan yang digabungkan.
+**Laporan bug, ide fitur, dan pull request selalu diterima**, baik Anda telah memakai Codewhale selama berbulan-bulan maupun baru mencobanya. Jika penyedia belum tersedia, alur kerja terasa janggal, atau UI terminal menghambat Anda, [buat issue](https://github.com/Hmbown/CodeWhale/issues/new/choose) atau [kirim pull request](CONTRIBUTING.md) agar kita dapat memperbaikinya bersama. Kontribusi pertama sangat disambut, dan kontributor tetap menerima kredit untuk pekerjaan yang digabungkan.
 
 Bergabunglah di [Discord](https://discord.gg/37gfS3ksug), atau tambahkan Hunter di WeChat (`hunterbown`) dan mintalah untuk bergabung dengan grup Whale Brothers.
 

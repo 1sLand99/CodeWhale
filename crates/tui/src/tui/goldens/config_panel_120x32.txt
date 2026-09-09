@@ -2,7 +2,7 @@
    Config  ──────────────────────────────────────────────────────────────────────────────────────────────────────────── 
                                                                                                                         
    Appearance   Models & providers   Work   Tools & MCP   Trust   Motion   Advanced                                     
-   Search: type to filter  (16/51)                                                                                      
+   Search: type to filter  (17/71)                                                                                      
   ❯ Display         │  Display                                                │Theme                                    
                     │❯Theme                              terminal       ‹ ›   │theme                                    
                     │ Language                           auto           ‹ ›   │                                         
@@ -13,20 +13,20 @@
                     │ Thinking Preview Lines             2              ✎     │scope     SAVED                          
                     │ Reasoning background highlight     On             [x]   │apply     applies on save                
                     │ Help Expand Groups                 Off            [ ]   │kind      choice                         
-                    │ Pin Last Prompt                    On             [x]   │available not observed this session      
-                    │ Tool detail level                  Off            [ ]   │                                         
-                    │ Inline file changes                Full diff      ‹ ›   │system | terminal | underwater |         
-                    │ Output pacing                      auto           ‹ ›   │underwater-retro | dark | light |        
-                    │ Cost currency                      usd            ‹ ›   │grayscale | catppuccin-mocha |           
-                    │ Transcript spacing                 comfortable    ‹ ›   │tokyo-night | dracula | gruvbox-dark |   
-                    │ Tool cards                         compact        ‹ ›   │claude | matrix | solarized-light | uwu  
-                    │                                                         │Enter or click again: Enter opens        
+                    │ Contextual tips                    On             [x]   │available not observed this session      
+                    │ Pin Last Prompt                    On             [x]   │                                         
+                    │ Tool detail level                  Off            [ ]   │system | terminal | underwater |         
+                    │ Inline file changes                Full diff      ‹ ›   │underwater-retro | dark | light |        
+                    │ Output pacing                      auto           ‹ ›   │grayscale | catppuccin-mocha |           
+                    │ Cost currency                      usd            ‹ ›   │tokyo-night | dracula | gruvbox-dark |   
+                    │ Transcript spacing                 comfortable    ‹ ›   │claude | matrix | solarized-light | uwu  
+                    │ Tool cards                         compact        ‹ ›   │Enter or click again: Enter opens        
                     │                                                         │choices                                  
                     │                                                         │                                         
                     │                                                         │                                         
   system | terminal | underwater | underwater-retro | dark | light | grayscale | catppuccin-mocha | tokyo-night |…      
   Preview: ▶▶ ask · agent                                                                                               
-  type=filter, Up/Down=select, Enter/e=edit, Esc/q=close                                                                
+  type=filter, Up/Down=select, Enter=edit, Esc=close                                                                    
                                                                                                                         
  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── 
                                                                                                                         

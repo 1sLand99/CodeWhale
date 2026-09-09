@@ -73,7 +73,7 @@ export const chrome: ChromeDict = {
   themeTitle: "文档主题 · 自动 / 浅色 / 深色",
 
   footerTagline:
-    "你的模型，协作更强。开源运行时的文档、源码与社区。",
+    "用你选择的模型构建想做的项目，并自动处理日常工作。",
   footerProduct: "产品",
   footerProject: "项目",
   footerDocs: "文档",

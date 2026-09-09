@@ -2,8 +2,7 @@
 //!
 //! A selected v2 Fleet is the runtime source of truth. Legacy profile layers
 //! are consulted only when no Fleet is selected. The selector resolver feeds
-//! durable Fleet task dispatch; in-process agent spawns resolve roles only
-//! and never consult the roster.
+//! durable Fleet task dispatch and explicit saved-profile agent spawns.
 
 use std::path::Path;
 
@@ -59,12 +58,7 @@ pub fn load_effective_roster(
             ));
         }
     };
-    if fleet.operator.is_none()
-        && fleet
-            .members
-            .iter()
-            .all(|member| member.role.trim().is_empty())
-    {
+    if fleet.operator.is_none() && fleet.members.iter().all(|member| member.shortlist) {
         return plugins.map_or_else(
             || FleetRoster::load(fleet_config, workspace),
             |plugins| FleetRoster::load_with_plugins(fleet_config, workspace, plugins),
@@ -85,6 +79,7 @@ pub fn roster_from_fleet(fleet: &FleetFile, scope: FleetScope, source: &Path) ->
         fleet
             .members
             .iter()
+            .filter(|member| !member.shortlist)
             .map(|member| {
                 let role = member.role.trim();
                 let role = if role.is_empty() {
@@ -326,25 +321,40 @@ pub fn resolve_member_in_profiles<'a>(
         return Ok(Some(member));
     }
 
+    // A saved raw ID or qualified route outranks a coincident friendly label.
+    // Friendly member/model names remain case-insensitive only as a fallback.
+    let exact_match = |member: &AgentProfile| match kind.as_deref() {
+        Some("model") => matches_model(member, value),
+        Some("route") => matches_route(member, value),
+        None => matches_model(member, value) || matches_route(member, value),
+        _ => false,
+    };
+    let prefer_exact = profiles.iter().any(exact_match);
     let mut candidates = Vec::new();
     for member in profiles {
-        let matches = match kind.as_deref() {
-            Some("member" | "id") => false,
-            Some("name") => matches_display_name(member, value),
-            Some("role") => public_role_label(member_role(member))
-                .eq_ignore_ascii_case(&public_role_label(value)),
-            Some("model") => matches_model(member, value),
-            Some("route") => matches_route(member, value),
-            Some(_) => false,
-            None => {
-                matches_display_name(member, value)
-                    || public_role_label(member_role(member))
-                        .eq_ignore_ascii_case(&public_role_label(value))
-                    || matches_model(member, value)
-                    || matches_route(member, value)
-                    || friendly_model_name(member)
-                        .as_deref()
-                        .is_some_and(|name| name.eq_ignore_ascii_case(value))
+        let matches = if prefer_exact {
+            exact_match(member)
+        } else {
+            match kind.as_deref() {
+                Some("member" | "id") => false,
+                Some("name") => matches_display_name(member, value),
+                Some("role") => public_role_label(member_role(member))
+                    .eq_ignore_ascii_case(&public_role_label(value)),
+                Some("model") => friendly_model_name(member)
+                    .as_deref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(value)),
+                Some("route") => matches_route(member, value),
+                Some(_) => false,
+                None => {
+                    matches_display_name(member, value)
+                        || public_role_label(member_role(member))
+                            .eq_ignore_ascii_case(&public_role_label(value))
+                        || matches_model(member, value)
+                        || matches_route(member, value)
+                        || friendly_model_name(member)
+                            .as_deref()
+                            .is_some_and(|name| name.eq_ignore_ascii_case(value))
+                }
             }
         };
         if matches {
@@ -413,10 +423,7 @@ fn matches_model(member: &AgentProfile, value: &str) -> bool {
         .as_deref()
         .map(str::trim)
         .filter(|model| !model.is_empty())
-        .is_some_and(|model| model.eq_ignore_ascii_case(value))
-        || friendly_model_name(member)
-            .as_deref()
-            .is_some_and(|name| name.eq_ignore_ascii_case(value))
+        .is_some_and(|model| model == value)
 }
 
 fn matches_route(member: &AgentProfile, value: &str) -> bool {
@@ -434,7 +441,7 @@ fn matches_route(member: &AgentProfile, value: &str) -> bool {
             .model
             .as_deref()
             .map(str::trim)
-            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(model.trim()))
+            .is_some_and(|candidate| candidate == model.trim())
 }
 
 fn push_unique<'a>(members: &mut Vec<&'a AgentProfile>, member: &'a AgentProfile) {
@@ -488,6 +495,7 @@ mod tests {
         FleetMember {
             id: id.to_string(),
             display_name: display_name.map(str::to_string),
+            shortlist: false,
             role: role.to_string(),
             model: None,
             provider: None,
@@ -508,6 +516,7 @@ mod tests {
             members: vec![FleetMember {
                 id: "Scout-One".to_string(),
                 display_name: Some("Flash Scout".to_string()),
+                shortlist: false,
                 role: "scout".to_string(),
                 model: Some("deepseek-v4-flash".to_string()),
                 provider: Some("deepseek".to_string()),
@@ -538,6 +547,85 @@ mod tests {
     }
 
     #[test]
+    fn selected_shortlist_excludes_model_roles_and_preserves_id_only_members_on_reload() {
+        use crate::fleet::store::{FleetOperator, save_fleet, set_selected};
+        let _lock = crate::test_support::lock_test_env();
+        let workspace = tempfile::tempdir().unwrap();
+        let _home =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", workspace.path().join("home"));
+        let mut fleet = FleetFile::parse(
+            r#"schema = "fleet"
+schema_revision = 2
+name = "Id-only roles"
+
+[[members]]
+id = "general"
+provider = "deepseek"
+model = "deepseek-v4-pro"
+
+[[members]]
+id = "audit-team"
+provider = "custom-a"
+model = "private-review-model"
+
+[[members]]
+id = "model-choice"
+shortlist = true
+provider = "openrouter"
+model = "qwen/qwen3.7-plus"
+"#,
+        )
+        .unwrap();
+        save_fleet(&fleet, FleetScope::Workspace, workspace.path()).unwrap();
+        set_selected(&fleet.name, FleetScope::Workspace, workspace.path()).unwrap();
+        let roster = load_effective_roster(&Default::default(), workspace.path(), None);
+        assert!(
+            roster.is_exact_selection(),
+            "unmarked id-only members are real saved roles"
+        );
+        assert_eq!(roster.members().len(), 2);
+        assert!(roster.get("model-choice").is_none());
+        for (id, provider, model) in [
+            ("general", "deepseek", "deepseek-v4-pro"),
+            ("audit-team", "custom-a", "private-review-model"),
+        ] {
+            let member = roster.get(id).expect("id-only member preserved");
+            assert_eq!(member.profile.role.name, id);
+            assert_eq!(member.profile.provider.as_deref(), Some(provider));
+            assert_eq!(member.profile.model.as_deref(), Some(model));
+        }
+
+        fleet.members.retain(|member| member.shortlist);
+        save_fleet(&fleet, FleetScope::Workspace, workspace.path()).unwrap();
+        let roster = load_effective_roster(&Default::default(), workspace.path(), None);
+        assert!(
+            !roster.is_exact_selection(),
+            "shortlist alone preserves default roles"
+        );
+        assert!(!roster.members().is_empty());
+        assert!(
+            roster
+                .members()
+                .iter()
+                .all(|member| member.origin == ProfileOrigin::BuiltIn)
+        );
+        assert!(roster.get("model-choice").is_none());
+
+        fleet.operator = Some(FleetOperator {
+            provider: "deepseek".into(),
+            model: "deepseek-v4-flash".into(),
+            reasoning: None,
+        });
+        save_fleet(&fleet, FleetScope::Workspace, workspace.path()).unwrap();
+        let roster = load_effective_roster(&Default::default(), workspace.path(), None);
+        assert!(
+            roster.is_exact_selection(),
+            "an explicit operator keeps selected Fleet policy"
+        );
+        assert!(roster.members().is_empty());
+    }
+
+    #[test]
     fn selected_v2_member_route_precedence_is_member_then_operator_then_session() {
         let fleet = FleetFile {
             schema: FLEET_SCHEMA_KIND.to_string(),
@@ -553,6 +641,7 @@ mod tests {
                 FleetMember {
                     id: "inherited".to_string(),
                     display_name: None,
+                    shortlist: false,
                     role: "scout".to_string(),
                     model: None,
                     provider: None,
@@ -563,6 +652,7 @@ mod tests {
                 FleetMember {
                     id: "pinned".to_string(),
                     display_name: None,
+                    shortlist: false,
                     role: "reviewer".to_string(),
                     model: Some("gpt-5.6".to_string()),
                     provider: Some("openrouter".to_string()),
@@ -620,6 +710,70 @@ mod tests {
                 "selector {selector}"
             );
         }
+    }
+
+    #[test]
+    fn saved_case_distinct_model_and_route_selectors_are_exact() {
+        let profiles = vec![
+            member(
+                "upper",
+                Some("Upper label"),
+                "reviewer",
+                Some("openrouter"),
+                Some("Preview-fixture"),
+            ),
+            member(
+                "lower",
+                Some("Lower label"),
+                "reviewer",
+                Some("openrouter"),
+                Some("preview-fixture"),
+            ),
+            member(
+                "label-shadow",
+                Some("preview-fixture"),
+                "scout",
+                Some("openrouter"),
+                Some("unrelated-model"),
+            ),
+        ];
+        for (model, id) in [("Preview-fixture", "upper"), ("preview-fixture", "lower")] {
+            for selector in [
+                model.to_string(),
+                format!("model:{model}"),
+                format!("route:OPENROUTER/{model}"),
+            ] {
+                assert_eq!(
+                    resolve_member_in_profiles(&profiles, &selector)
+                        .unwrap()
+                        .unwrap()
+                        .id,
+                    id
+                );
+            }
+        }
+        for selector in ["model:PREVIEW-FIXTURE", "route:openrouter/PREVIEW-FIXTURE"] {
+            assert!(
+                resolve_member_in_profiles(&profiles, selector)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            resolve_member_in_profiles(&profiles, "name:UPPER LABEL")
+                .unwrap()
+                .unwrap()
+                .id,
+            "upper"
+        );
+        assert_eq!(
+            resolve_member_in_profiles(&profiles, "name:PREVIEW-FIXTURE")
+                .unwrap()
+                .unwrap()
+                .id,
+            "label-shadow"
+        );
+        assert!(resolve_member_in_profiles(&profiles, "role:reviewer").is_err());
     }
 
     #[test]

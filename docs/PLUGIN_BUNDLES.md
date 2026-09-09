@@ -13,6 +13,8 @@ owns how bits get onto and off disk — the `/plugin install`, `update`,
 `uninstall`, and `suggest` on-ramp added in v0.9.4 (#5182). Claude Code
 plugin repositories are a different, unconverted format; that boundary is
 [CLAUDE_PLUGIN_COMPAT.md](CLAUDE_PLUGIN_COMPAT.md).
+For a runnable native example and explicit OpenCode/DSH data conversion, see
+[Write your first plugin](PLUGIN_AUTHORING.md).
 
 ## Discovery and precedence
 
@@ -26,11 +28,31 @@ v0.9.8), or `plugin.toml` (the legacy Codewhale format, still fully readable):
 
 A bundle that publishes multiple formats is read through `plugin.json` first,
 then `kimi.plugin.json`, then the legacy `plugin.toml`.
-No built-in bundle ships as of v0.9.6. The internal precedence order is
+Computer Use ships as a built-in bundle; it still requires review and
+enablement before activation. The internal precedence order is
 built-in, user, then workspace; the first bundle with a given name wins. This
 prevents a repository from shadowing an explicitly installed user bundle.
 Symbolic-link roots, manifests, component paths, and nested component files
 fail closed.
+
+The embedded Computer Use files are materialized under
+`$CODEWHALE_HOME/builtin-plugins/snapshots/computer-use-<bundle-digest>/computer-use`.
+Each process captures only its own embedded digest's discovery root. Concurrent
+builds therefore keep separate, complete source trees; publishers never delete
+or replace an existing snapshot. Reuse checks every embedded byte, directory
+entry, file type, executable flag, and the stamp. A partial or altered snapshot
+is rejected without repair. Interrupted private staging directories are not
+discovered or reused.
+
+The existing path-bound plugin identity and trust rules apply: identical embedded
+bytes at the same home reuse the same identity; changed bytes require a fresh
+review and enablement. Moving from the older mutable
+`builtin-plugins/computer-use` layout also requires one fresh review. Legacy
+bundles and receipts remain intact for running older binaries; no trust is
+migrated. Diagnostics do not create a missing Codewhale home.
+The selected home may itself be a symlink: its resolved directory is pinned
+before creating any built-in paths. Links in the owned built-in cache paths
+still fail closed.
 
 New user and workspace bundles are always untrusted and disabled. Discovery is
 read-only and does not inspect any other application's extension or credential
@@ -362,9 +384,12 @@ one reviewed source, and `/plugin suggest` ranks only what is already
 installed), no ambient compatibility discovery, no automatic trust, no
 plugin-contributed MCP OAuth, no LSP adapter, native extension runtime, or MCP
 subscription adapter, no
-migration of another application's bundle, and no on-disk auto-migration of a
-legacy `plugin.toml` to `plugin.json`. These remain later work rather than
-implied capabilities.
+foreign executable plugin runtime import, and no on-disk auto-migration of a
+legacy `plugin.toml` to `plugin.json`. The explicit offline
+[OpenCode/DSH converter](PLUGIN_AUTHORING.md#convert-an-existing-plugin) supports
+selected portable Skills and static Streamable HTTP MCP declarations; it does
+not migrate arbitrary bundles or reproduce another client's runtime or policy.
+The other capabilities above remain later work rather than implied support.
 
 ## Marketplace catalogs (#5311)
 

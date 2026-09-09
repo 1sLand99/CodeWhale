@@ -76,6 +76,9 @@ The same response advertises `capabilities.account_session: true` and
 `capabilities.turn_operation_idempotency: true`. A client must require the
 latter before relying on `operation_key`; do not infer support from a 2xx turn
 response because an older tolerant reader may ignore an unknown request field.
+`capabilities.turn_operation_lookup: true` separately advertises the read-only
+operation lookup below; clients must require it before relying on GET-based
+recovery of a lost turn response.
 The response also includes a token-free account receipt:
 
 ```json
@@ -692,6 +695,43 @@ resolved, and `auto` remains a per-prompt reasoning decision even when the
 thread uses a fixed model. The request still enters the existing
 `Op::SendMessage` path and the single `Engine::run_turn` loop.
 
+Image input uses the same turn path: `"images": [{"mime": "image/png",
+"dataBase64": "..."}]`. Clients must first observe
+`capabilities.turn_image_inputs: true` in `/v1/runtime/info` (or the isolated
+Runtime Chat relay catalog). Older HTTP runtimes ignore unknown fields, so a
+successful text response is not evidence that an attachment was accepted.
+The field is omitted when empty. It is also accepted by app-server
+`thread/message`, `thread/request` messages, and prompt requests; that bridge
+checks the underlying Runtime capability before forwarding image bytes.
+Legacy remote Work commands do not support images and explicitly refuse them.
+
+New inline images require a named model whose exact resolved route reports
+`image_input: "supported"`; Auto and unknown/unsupported image routes are
+refused before classifier or provider dispatch. This does not change the
+existing trusted-local attachment behavior for routes with unknown capability.
+A nonempty prompt is required. Inputs are limited to 10 images, 4 MiB decoded
+bytes per image, 5 MiB total, and an 8 MiB JSON body. PNG, JPEG, GIF and WebP
+must have matching MIME, canonical padded base64 and valid bounded image
+content: at most 8192 pixels per dimension, 33,554,432 pixels total and 64 MiB
+decoder allocation. The Runtime does not fetch paths or URLs from this field.
+Malformed images refuse the whole turn; callers can retain the draft for
+correction. Relay command polling uses an 8 MiB response budget; the sender
+must paginate by serialized bytes without advancing past unserved commands.
+
+Accepted image bytes and order are retained in the existing turn records and
+reconstructed after restart, import and fork. Retry retains those images even
+when its optional `prompt` changes the text; undo responses include
+`original_user_images` when present. Image-bearing records require schema v3,
+which older readers refuse. Text-only records and operation fingerprints retain
+their prior representation. Validated stored local images retain the existing
+5 MiB per-image ceiling and prior aggregate/count semantics on import/retry;
+this internal storage authority does not
+relax exact model or permission checks. Image bytes, MIME and order participate in request
+identity, so changing an image under the same operation key conflicts.
+Compaction can summarize older context; retaining the original attachment does
+not promise that every later model request includes it. Image pixels are not
+subject to text-secret redaction.
+
 `operation_key` is an optional idempotency key for clients that may lose an
 HTTP response after the Runtime accepted a turn. It is scoped to the current
 Runtime store and thread, may contain at most 128 UTF-8 bytes, and may not be
@@ -714,9 +754,54 @@ persisted or logged, and request bodies, credentials, and attachments are not
 copied into that index. Existing thread/turn persistence remains the source of
 the returned turn after a process restart.
 
+**Exact accepted-turn lookup**
+
+`GET /v1/threads/{id}/turn-operations/{operation_key}` uses the same Runtime
+authentication as turn submission. URL-encode each path segment. It returns
+`200 OK` with the existing bare `TurnRecord` (the `turn` object in the POST
+response), identified by that exact thread and operation key. It does not use
+the thread's latest turn or require the original request body or current route
+settings to match.
+
+- `404 Not Found`: no binding exists for that thread/key, or persisted identities
+  do not match. These cases share a generic response.
+- `409 Conflict`: admission holds the operation claim, or its durable binding
+  is incomplete. Retry the lookup; this response does not authorize another turn.
+- `400 Bad Request`: the thread ID or operation key is malformed. The key uses
+  the same 128-byte and whitespace/control-character rules as POST.
+- `500 Internal Server Error`: storage or the existing claim lock cannot be
+  checked safely. This is not evidence that the operation is absent.
+
+The lookup holds a shared read lock on the existing operation claim while
+reading the binding and turn. It creates no files, starts no engine, emits no
+events, and performs no replay or recovery. Normal Runtime startup may recover
+an incomplete admission before a later lookup, but GET itself never does so.
+
 **Approvals**
 - `POST /v1/approvals/{approval_id}` with body
   `{ "decision": "allow" | "deny", "remember": false }`
+
+`approval_id` is minted by the Runtime, not by the model or the provider. It is
+an opaque `approval_<32 hex>` capability, unique per prompt, bound to the thread
+that raised it, and single-use: the Runtime removes it when the decision is
+delivered, when the prompt times out, or when the turn abandons it. Clients echo
+the value they were given and must not construct, derive, or guess one.
+
+It is deliberately **not** the provider's tool-call ID. Providers restart their
+call-ID counters per response, so two threads can gate calls whose raw IDs are
+byte-equal; keying approvals by that value let one thread's decision settle
+another thread's call. The endpoint therefore performs one exact match on the
+minted ID and has no fallback: a raw tool-call ID, an expired ID, or a replayed
+ID that has already been settled all return `404` and reach no engine. A `404`
+means the capability is not pending — it is not evidence about how the approval
+was resolved; read `approval.decided` for that.
+
+The raw provider call ID travels separately as `tool_call_id` on
+`pending_approvals[]` and on the approval events. It is a correlator for
+attaching a prompt to the tool row it gates, and never accepted as a decision.
+Each thread-detail `pending_approvals[]` entry is
+`{ "id", "turn_id", "tool_name", "description", "intent_summary"?, "tool_call_id"? }`,
+where `id` is the capability above.
 
 **User input**
 - `POST /v1/user-input/{thread_id}/{input_id}` with body
@@ -958,11 +1043,22 @@ non-empty list does not prove that the route can currently serve a request.
   "models": [
     {
       "id": "deepseek-v4-flash-vision-exp",
-      "image_input": "supported"
+      "image_input": "supported",
+      "reasoning_effort": "unknown",
+      "reasoning_effort_levels": [],
+      "reasoning_effort_source": null
     }
   ]
 }
 ```
+
+For an exact configured route, supply `?model_provider_id=vision-work` and
+require the response to echo that same `model_provider_id`. The Runtime resolves
+that identity under the requested provider kind before reading model support.
+Unknown or mismatched identities return `400`. Named pagination cursors bind the
+configuration identity, endpoint and catalog snapshot; changing any of those
+requires restarting pagination. Omitting the query preserves the legacy catalog
+projection and omits the identity echo.
 
 The catalog for one provider. Returns `400` for an unknown id, and for the
 legacy `deepseek-cn` alias, which has no provider metadata — use `deepseek`.
@@ -975,6 +1071,33 @@ provider/model route's capability state: `supported`, `unsupported`, or
 `unknown`. Keep `unknown` unknown rather than inferring from the model name or
 wire protocol. `supported` describes the model route; it does not mean a given
 client implements an image-upload control.
+
+`reasoning_effort` uses the same three capability states and describes whether
+the exact model's metadata publishes a selectable effort ladder.
+`reasoning_effort_levels` contains only canonical, recognized active effort levels
+from that metadata. Off and provider synonyms such as none are excluded: the
+Apps/Chat protocol treats off as omission, which does not prove support for an
+explicit provider disable command. A model capable of reasoning may still have
+an unknown active effort ladder.
+Codex levels are also excluded when native compatibility would change their
+wire value (currently minimal and auto). This projection does not change native
+compatibility behavior or advertise a tier the Runtime cannot send unchanged.
+No levels are inferred from a provider-wide default or a familiar model name
+on a custom endpoint. `reasoning_effort_source` identifies `catalog`,
+`codex_cli_cache`, or `codex_app_server`; missing, stale, and unrecognized model
+metadata stays unknown. Codex roster metadata describes the external CLI's
+roster, not proof that a separately configured Runtime credential belongs to
+the same account or that an authentication boundary is approved.
+
+Pass `?model_provider_id=<exact configured id>` when selecting a named route.
+The Runtime validates the provider kind and exact identity together, returns
+`model_provider_id` alongside that route's model list, and leaves the active
+configuration unchanged. An empty or unknown requested identity, or a mismatched kind, returns
+`400`; it never falls back to another named route.
+
+The Runtime Chat relay publishes the same effort fields in camelCase
+(`reasoningEffort`, `reasoningEffortLevels`, `reasoningEffortSource`). These
+model facts do not enable tool execution or establish account entitlement.
 
 For a thread-scoped choice, send the provider fields from the selected entry
 alongside the selected model. Omit `model_provider_id` when it is null:
@@ -1137,6 +1260,22 @@ cursor include the same materialized prefix.
 `approval.required` events may include a `matched_rule` string when an
 execution-policy rule caused the prompt. This field is explanatory metadata for
 clients and does not grant or persist permissions.
+
+`approval.required`, `approval.decided`, and `approval.timeout` carry two
+distinct identifiers. `approval_id` is the Runtime-minted, single-use capability
+described under **Approvals** — the only value `POST /v1/approvals/{id}` accepts
+— and `approval.required` also repeats it in the legacy `id` field for older
+clients. `tool_call_id` is the provider's raw tool-call ID, present for
+correlation only. Automatically resolved prompts (thread `auto_approve`, and the
+Auto-Review posture, which never opens a modal) mint an `approval_id` as well, so
+the field has one meaning on every path; those IDs register no waiter and are
+inert against the endpoint. Clients must never treat `tool_call_id` as an
+approval capability or assume it is unique across threads.
+
+The thread event stream forwards these payloads intact. The compatibility turn
+stream carries `approval_id`, its `id` alias and `tool_call_id`; the pending
+snapshot carries the same capability and correlator so reconnecting clients can
+attach an approval prompt to its tool row.
 
 ## Security boundary
 

@@ -61,6 +61,12 @@ pub(crate) use composer::{
 };
 pub(crate) use status::StatusToastKind;
 pub use status::{StatusToast, StatusToastLevel};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RedactionGateNotice {
+    EnterGuidance,
+    WriteFailure,
+}
 pub use types::{
     AppAction, AppMode, AppModeUi, AutomationAction, ComposerDensity, ComposerSubmitAction,
     ComposerSubmitChord, InitialInput, McpUiAction, QueuedMessage, ReasoningEffort, ScreenMode,
@@ -1407,37 +1413,34 @@ pub struct PendingRouteSave {
     pub fleet: Option<(String, crate::fleet::store::FleetScope)>,
 }
 
-/// Write `provider_identity`/`model` to `settings.toml` as the route the next
+/// Write `provider_identity`/`model` to the user-global config as the route the next
 /// launch should open with, and return the line to show the operator.
-///
-/// `default_provider` is what `App::new` consults first, so pinning it is the
-/// half that actually survives a restart; the provider-scoped entry carries the
-/// model. `default_model` is a DeepSeek-only legacy key and is written only for
-/// those providers, matching how startup reads it back.
-fn persist_route_as_startup_default(provider_identity: &str, model: &str) -> String {
+fn persist_route_as_startup_default(
+    provider: ApiProvider,
+    provider_identity: &str,
+    model: &str,
+) -> String {
     let route = format!("{provider_identity}/{model}");
-    match try_persist_route_as_startup_default(provider_identity, model) {
-        Ok(()) => format!("Remembered {route} as the startup default (settings.toml)."),
+    match try_persist_route_as_startup_default(provider, provider_identity, model) {
+        Ok(()) => format!("Remembered {route} as the startup default (config.toml)."),
         Err(err) => format!("Save failed: {err}"),
     }
 }
 
 fn try_persist_route_as_startup_default(
+    provider: ApiProvider,
     provider_identity: &str,
     model: &str,
 ) -> anyhow::Result<()> {
-    crate::settings::Settings::transact(|settings| {
-        settings.default_provider = Some(provider_identity.to_string());
-        settings.set_model_for_provider(provider_identity, model);
-        if matches!(
-            crate::config::ApiProvider::parse(provider_identity),
-            Some(crate::config::ApiProvider::Deepseek)
-                | Some(crate::config::ApiProvider::DeepseekCN)
-        ) {
-            settings.set("default_model", model)?;
-        }
-        Ok(())
-    })
+    let path = crate::config::home_config_path()
+        .ok_or_else(|| anyhow::anyhow!("Cannot resolve the user-global model configuration."))?;
+    crate::config_persistence::persist_provider_selection(
+        Some(&path),
+        provider,
+        provider_identity,
+        Some(model),
+    )
+    .map(|_| ())
 }
 
 pub struct App {
@@ -1511,6 +1514,8 @@ pub struct App {
     /// Ghost-text follow-up suggestion shown in the composer when empty.
     /// Generated asynchronously after each completed turn; cleared on new input.
     pub prompt_suggestion: Option<String>,
+    /// Read-only view of the current Config, refreshed by its notification delta owner.
+    pub notification_settings: crate::config::NotificationsConfig,
     /// Monotonic turn counter for stale-suggestion protection. Incremented on
     /// each TurnStarted; background suggestion tasks capture the token and
     /// discard their result if the token no longer matches.
@@ -1541,9 +1546,6 @@ pub struct App {
     pub context_pressure_warning_dismissed: Option<crate::context_budget::PressureLevel>,
     /// Last on-disk plugin catalog stamp we already nudged `/plugin reload` for.
     pub plugin_reload_nudge_stamp: Option<crate::plugins::PluginCatalogStamp>,
-    /// Plugin names already toasted for this session's prompt matching.
-    pub plugin_prompt_suggest_names: HashSet<String>,
-    pub plugin_prompt_suggest_count: u8,
     /// Last idle catalog fingerprint poll, so disk changes can surface between turns.
     pub last_plugin_catalog_poll: Option<Instant>,
     /// Live composer plugin CTA (debounce + one match, never auto-install).
@@ -1556,6 +1558,9 @@ pub struct App {
     /// The catalog remains separately discoverable and selecting from it adds
     /// to this set rather than replacing earlier enabled choices.
     pub enabled_provider_models: HashMap<String, Vec<String>>,
+    /// Non-secret declarations from the loaded config snapshot. Completion
+    /// reads this snapshot without reloading credentials on each keystroke.
+    pub configured_models: Vec<codewhale_config::catalog::configured::ConfiguredModel>,
     /// Exact provider/model pins loaded from settings, in user order.
     pub pinned_models: Vec<crate::settings::PinnedModel>,
     /// When true, the model is auto-selected based on request complexity
@@ -1948,6 +1953,8 @@ pub struct App {
     /// user already pressed 1/Y on the first stage and must confirm once more
     /// before the opt-out actually takes effect.
     pub redaction_gate_confirming: bool,
+    /// Viewport position for the consent text; clamped by the gate renderer.
+    pub redaction_gate_scroll: std::cell::Cell<usize>,
     pub onboarding_needs_api_key: bool,
     pub onboarding_provider: ApiProvider,
     pub onboarding_workspace_trust_gate: bool,
@@ -2334,6 +2341,8 @@ pub struct App {
     pub memory_size_hint: Option<String>,
     /// Cached background tasks for sidebar rendering.
     pub task_panel: Vec<TaskPanelEntry>,
+    pub task_panel_session_id: Option<String>,
+    pub task_panel_unavailable: bool,
     /// Live scheduled-work projection for the activity band
     /// (AUTOMATION-VISIBILITY-SPEC §2.1), refreshed on the task-panel cadence
     /// by `refresh_automation_panel`. The band reads it;
@@ -2555,6 +2564,9 @@ impl App {
     /// composer has text.
     #[must_use]
     pub fn focus(&self) -> Focus {
+        if self.redaction_gate && self.onboarding == OnboardingState::None {
+            return Focus::RedactionGate;
+        }
         if let Some(kind) = self.view_stack.top_kind() {
             return Focus::Modal(kind);
         }
@@ -2674,7 +2686,20 @@ impl App {
                 }
             }
             RouteSaveChoice::SaveAsDefault => {
-                persist_route_as_startup_default(&pending.provider_identity, &pending.model)
+                let active_model = if self.auto_model { "auto" } else { &self.model };
+                if (pending.provider_identity != self.provider_identity_for_persistence()
+                    && Some(pending.provider_identity.as_str())
+                        != self.provider_id_for_persistence())
+                    || pending.model != active_model
+                {
+                    return "Save failed: the pending provider/model route is no longer active."
+                        .to_string();
+                }
+                let provider_id = match self.provider_selector_for_config_persistence() {
+                    Ok(provider_id) => provider_id,
+                    Err(error) => return format!("Save failed: {error}"),
+                };
+                persist_route_as_startup_default(self.api_provider, provider_id, &pending.model)
             }
             RouteSaveChoice::SessionOnly => {
                 format!("Model {route} kept for this session only — nothing was written.")
@@ -2710,12 +2735,16 @@ impl App {
         } else {
             self.model.clone()
         };
-        try_persist_route_as_startup_default(&provider_identity, &model)?;
+        try_persist_route_as_startup_default(
+            self.api_provider,
+            self.provider_selector_for_config_persistence()?,
+            &model,
+        )?;
         // Resolve the prompt only after the write lands. If persistence fails,
         // keep the retry available instead of discarding the operator's route.
         self.pending_route_save = None;
         Ok(format!(
-            "Remembered {provider_identity}/{model} as the startup default (settings.toml)."
+            "Remembered {provider_identity}/{model} as the startup default (config.toml)."
         ))
     }
 
@@ -3207,7 +3236,6 @@ impl App {
                     self.tr(match subject {
                         StartupDefaultSubject::Mode => MessageId::StartupDefaultSubjectMode,
                         StartupDefaultSubject::Thinking => MessageId::StartupDefaultSubjectThinking,
-                        StartupDefaultSubject::Model => MessageId::StartupDefaultSubjectModel,
                     })
                     .into_owned()
                 })
@@ -6005,6 +6033,22 @@ impl App {
     #[must_use]
     pub(crate) fn provider_id_for_persistence(&self) -> Option<&str> {
         self.provider_exact_id.as_deref()
+    }
+
+    /// Config selectors retain the exact saved slot, including legacy hosted
+    /// Ollama's `ollama` slot. Session receipts keep their canonical identity.
+    pub(crate) fn provider_selector_for_config_persistence(&self) -> anyhow::Result<&str> {
+        self.provider_id_for_persistence()
+            .or_else(|| {
+                (self.api_provider == ApiProvider::Custom
+                    && self
+                        .provider_identity
+                        .eq_ignore_ascii_case(ApiProvider::Custom.as_str()))
+                .then(|| self.provider_identity_for_persistence())
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!("The active route has no exact provider config identity.")
+            })
     }
 
     pub(crate) fn set_provider_identity(

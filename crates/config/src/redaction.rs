@@ -14,7 +14,7 @@
 //!   records a *request*.
 //! * The request takes effect only after a restart of the interactive TUI and
 //!   an explicit confirmation on the startup gate screen, which persists a
-//!   receipt in `redaction-state.json` next to `config.toml`.
+//!   receipt next to the config file actually loaded by that launch.
 //! * Non-interactive entry points (`codewhale exec`, hooks, automation) never
 //!   confirm anything; as long as no confirmation receipt exists they resolve
 //!   to the safe default (`Enabled`), whatever the config file says.
@@ -22,9 +22,11 @@
 //!   and the receipt untouched, so the next launch asks again until the user
 //!   confirms or edits the field back to `"enabled"`.
 //!
-//! A confirmation receipt is bound to the `config.toml` it was made against:
-//! it is honored only while (a) the config still requests `"disabled"` and
-//! (b) its contents and modification time match the confirmation receipt.
+//! A confirmation receipt is bound to the loaded config file, including an
+//! explicit `--config` or `CODEWHALE_CONFIG_PATH`. Different config filenames
+//! have independent receipts. A receipt is honored only while the canonical
+//! path, contents and modification time still match and the config requests
+//! `"disabled"`.
 //! Editing the field back to `"enabled"` - or changing `config.toml` in any
 //! way - and later re-requesting `"disabled"` always asks for a fresh
 //! confirmation, even when no process ran in between.
@@ -33,7 +35,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Name of the confirmation-receipt file, stored next to `config.toml` in the
 /// Codewhale home directory.
@@ -111,119 +113,79 @@ impl RedactionToml {
     }
 }
 
-/// Default location of the confirmation-receipt file:
-/// `redaction-state.json` beside the resolved config, including legacy homes.
-pub fn default_model_bound_state_path() -> Option<PathBuf> {
-    crate::default_config_path()
-        .ok()
-        .map(|path| path.with_file_name(MODEL_BOUND_STATE_FILE_NAME))
+/// Receipt belonging to this exact config file. Keep the established name
+/// for config.toml; other filenames get independent receipts even when they
+/// live in the same directory and contain identical configuration.
+pub fn model_bound_state_path(config_path: &Path) -> PathBuf {
+    // --config and environment resolution may spell the same file through
+    // different symlinks (for example /var and /private/var on macOS).
+    let resolved = config_path.canonicalize().ok();
+    let config_path = resolved.as_deref().unwrap_or(config_path);
+    if config_path.file_name() == Some(std::ffi::OsStr::new(crate::CONFIG_FILE_NAME)) {
+        config_path.with_file_name(MODEL_BOUND_STATE_FILE_NAME)
+    } else {
+        let identity: String = Sha256::digest(config_path.as_os_str().as_encoded_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        config_path.with_file_name(format!("redaction-state-{identity}.json"))
+    }
 }
 
-/// Whether a one-time confirmation has already been recorded for disabling
-/// model-bound masking. Absent or unreadable state reads as `false`, which is
-/// the safe answer for every caller.
-pub fn model_bound_disabled_confirmed() -> bool {
-    default_model_bound_state_path()
-        .is_some_and(|path| read_state(&path).model_bound_disabled_confirmed)
-}
-
-/// Clear any recorded confirmation. Used when the config no longer requests
-/// `"disabled"`: the receipt is only meaningful while the request exists, so
-/// an `"enabled"` period must force a fresh confirmation on the next
-/// `"disabled"` request.
-///
-/// The authoritative mechanism is overwriting the receipt with
-/// `confirmed = false` - the same write path that records it, so it cannot be
-/// blocked by the transient file locks that plague deletion on Windows. The
-/// file is then removed when possible; a leftover file whose content is
-/// `false` is harmless and reads as unconfirmed everywhere.
-pub fn clear_model_bound_disabled_confirmation() -> io::Result<()> {
-    let Some(path) = default_model_bound_state_path() else {
-        // No resolvable home means there is no receipt to clear.
-        return Ok(());
-    };
-    // On Windows, real-time AV scanning can briefly hold an exclusive lock on
-    // a file we just wrote, making the immediate overwrite/delete fail. Retry
-    // with backoff; the product flow (clear happens on a later launch) never
-    // needs this, but the confirm->reenable test path does it back-to-back.
-    let mut last_error: Option<io::Error> = None;
+/// Clear only this config's confirmation. A stale receipt is rejected even
+/// when filesystem errors prevent this best-effort sweep.
+pub fn clear_model_bound_disabled_confirmation(config_path: &Path) -> io::Result<()> {
+    let path = model_bound_state_path(config_path);
     for attempt in 0..6 {
-        match write_state(&path, false) {
+        match write_state(&path, config_path, false) {
             Ok(()) => {
-                // Content is now unconfirmed, which is the contract. Removing
-                // the file is best-effort cleanup only.
                 let _ = fs::remove_file(&path);
                 return Ok(());
             }
-            Err(err) if attempt < 5 => {
-                last_error = Some(err);
+            Err(_) if attempt < 5 => {
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
             Err(err) => return Err(err),
         }
     }
-    Err(last_error
-        .unwrap_or_else(|| io::Error::other("failed to clear model-bound redaction confirmation")))
+    unreachable!()
 }
 
-/// Persist a confirmation that the user has accepted disabling model-bound
-/// masking. Returns the written path on success.
-pub fn record_model_bound_disabled_confirmation() -> io::Result<PathBuf> {
-    let path = default_model_bound_state_path().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            "Codewhale home directory not found",
-        )
-    })?;
-    write_state(&path, true)?;
+/// Persist consent for the config that was actually loaded by the caller.
+/// Never infer that source from the receipt directory or the process home.
+pub fn record_model_bound_disabled_confirmation(config_path: &Path) -> io::Result<PathBuf> {
+    let path = model_bound_state_path(config_path);
+    write_state(&path, config_path, true)?;
     Ok(path)
 }
 
-/// Whether the startup gate must ask before a `"disabled"` request can take
-/// effect: the user asked to disable masking and no confirmation exists yet.
-///
-/// A stale receipt (recorded for an earlier `"disabled"` period) is swept
-/// here, so re-enabling and then re-disabling always asks again.
-pub fn confirmation_required(desired: ModelBoundMasking) -> bool {
-    desired.is_disabled() && !confirmed_for_current_request(desired)
+pub fn confirmation_required(desired: ModelBoundMasking, config_path: Option<&Path>) -> bool {
+    desired.is_disabled() && !confirmed_for_current_request(desired, config_path)
 }
 
-/// The masking mode that must actually be applied: a disabled request counts
-/// only once it has been confirmed. Every unconfirmed or absent request, in
-/// every process, resolves to [`ModelBoundMasking::Enabled`].
-///
-/// Also the sweep point for a stale receipt: when the desired mode is
-/// `Enabled` but a confirmation file exists, that file is removed so the next
-/// `Disabled` request cannot ride on an old confirmation.
-pub fn effective_masking(desired: ModelBoundMasking) -> ModelBoundMasking {
-    if desired.is_disabled() && confirmed_for_current_request(desired) {
+/// Unloaded, unreadable, changed and unconfirmed requests remain masked.
+pub fn effective_masking(
+    desired: ModelBoundMasking,
+    config_path: Option<&Path>,
+) -> ModelBoundMasking {
+    if confirmed_for_current_request(desired, config_path) {
         ModelBoundMasking::Disabled
     } else {
         ModelBoundMasking::Enabled
     }
 }
 
-/// Read the confirmation receipt, sweeping it when it no longer matches the
-/// current config. Every decision entry point goes through here so no caller
-/// can accidentally honor a receipt from a previous `"disabled"` era.
-///
-/// The receipt pins both config bytes and modification time. Missing or
-/// unreadable config, old receipts without a binding, and changed contents or
-/// timestamps fail closed. The on-disk config must still request the opt-out.
-fn confirmed_for_current_request(desired: ModelBoundMasking) -> bool {
-    let Some(receipt_path) = default_model_bound_state_path() else {
+fn confirmed_for_current_request(desired: ModelBoundMasking, config_path: Option<&Path>) -> bool {
+    let Some(config_path) = config_path else {
         return false;
     };
-    let receipt = read_state(&receipt_path);
+    let receipt = read_state(&model_bound_state_path(config_path));
     if !receipt.model_bound_disabled_confirmed {
         return false;
     }
-    let current = config_binding(&receipt_path).ok();
-    let stale = !desired.is_disabled() || current.is_none() || current != receipt.config_binding;
-    if stale {
-        // Best-effort sweep; the decision below never honors the stale
-        // receipt even if the sweep itself is blocked.
-        let _ = clear_model_bound_disabled_confirmation();
+    let current = config_binding(config_path).ok();
+    if !desired.is_disabled() || current.is_none() || current != receipt.config_binding {
+        let _ = clear_model_bound_disabled_confirmation(config_path);
         return false;
     }
     true
@@ -240,13 +202,14 @@ struct StateFile {
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct ConfigBinding {
+    config_path: PathBuf,
     sha256: [u8; 32],
     modified: std::time::SystemTime,
 }
 
-fn config_binding(receipt_path: &std::path::Path) -> io::Result<ConfigBinding> {
-    let path = receipt_path.with_file_name(crate::CONFIG_FILE_NAME);
-    let file = fs::File::open(path)?;
+fn config_binding(config_path: &Path) -> io::Result<ConfigBinding> {
+    let config_path = config_path.canonicalize()?;
+    let file = fs::File::open(&config_path)?;
     let modified = file.metadata()?.modified()?;
     let mut body = String::new();
     std::io::Read::read_to_string(&mut &file, &mut body)?;
@@ -258,6 +221,7 @@ fn config_binding(receipt_path: &std::path::Path) -> io::Result<ConfigBinding> {
         ));
     }
     Ok(ConfigBinding {
+        config_path,
         sha256: Sha256::digest(body.as_bytes()).into(),
         modified,
     })
@@ -270,7 +234,7 @@ fn read_state(path: &std::path::Path) -> StateFile {
         .unwrap_or_default()
 }
 
-fn write_state(path: &std::path::Path, confirmed: bool) -> io::Result<()> {
+fn write_state(path: &Path, config_path: &Path, confirmed: bool) -> io::Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -279,7 +243,7 @@ fn write_state(path: &std::path::Path, confirmed: bool) -> io::Result<()> {
     let body = serde_json::to_string_pretty(&StateFile {
         model_bound_disabled_confirmed: confirmed,
         config_binding: if confirmed {
-            Some(config_binding(path)?)
+            Some(config_binding(config_path)?)
         } else {
             None
         },
@@ -288,47 +252,10 @@ fn write_state(path: &std::path::Path, confirmed: bool) -> io::Result<()> {
     fs::write(path, body)
 }
 
-/// Restore the previous value of an environment variable on drop. Kept to a
-/// single test that touches `CODEWHALE_HOME` so parallel unit tests in this
-/// crate cannot fight over the ambient home.
-#[cfg(test)]
-struct EnvGuard(String, Option<std::ffi::OsString>);
-
-#[cfg(test)]
-impl EnvGuard {
-    fn set(key: &str, value: &std::path::Path) -> Self {
-        let previous = std::env::var_os(key);
-        // `std::env::set_var` is unsafe on Rust 2024; the whole point of this
-        // guard is test isolation, and the value is a fresh tempdir.
-        unsafe { std::env::set_var(key, value) };
-        Self(key.to_string(), previous)
-    }
-}
-
-#[cfg(test)]
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match &self.1 {
-            Some(value) => unsafe { std::env::set_var(&self.0, value) },
-            None => unsafe { std::env::remove_var(&self.0) },
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
-
-    /// Serializes the single test that mutates the process-wide
-    /// `CODEWHALE_HOME`: other tests in this crate parse or touch their own
-    /// temp paths, but the env switch is process-global and parallel test
-    /// threads would race each other through it.
-    fn home_env_lock() -> &'static std::sync::Mutex<()> {
-        static HOME_ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
-            std::sync::OnceLock::new();
-        HOME_ENV_LOCK.get_or_init(|| std::sync::Mutex::new(()))
-    }
 
     fn state_path(tmp: &Path) -> PathBuf {
         tmp.join(MODEL_BOUND_STATE_FILE_NAME)
@@ -349,35 +276,51 @@ mod tests {
             "[redaction]\nmodel_bound = \"disabled\"\n",
         )
         .expect("write config");
-        write_state(&path, true).expect("write state");
+        write_state(&path, &tmp.path().join(crate::CONFIG_FILE_NAME), true).expect("write state");
         assert!(read_state(&path).model_bound_disabled_confirmed);
     }
 
-    /// The whole disable-and-confirm lifecycle through the default-path APIs,
-    /// under one explicit `CODEWHALE_HOME` so no parallel test shares it.
+    /// The disable-and-confirm lifecycle belongs to one explicit config.
     #[test]
-    fn default_path_lifecycle_requires_confirmation_before_disabling() {
-        let _env_lock = home_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    fn loaded_path_lifecycle_requires_confirmation_before_disabling() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let _guard = EnvGuard::set("CODEWHALE_HOME", tmp.path());
-        assert!(!model_bound_disabled_confirmed());
+        let config_path = tmp.path().join(crate::CONFIG_FILE_NAME);
+        assert!(!confirmed_for_current_request(
+            ModelBoundMasking::Disabled,
+            Some(&config_path)
+        ));
 
         let desired = ModelBoundMasking::Disabled;
-        assert!(confirmation_required(desired));
-        assert_eq!(effective_masking(desired), ModelBoundMasking::Enabled);
+        assert!(confirmation_required(desired, Some(&config_path)));
+        assert_eq!(
+            effective_masking(desired, Some(&config_path)),
+            ModelBoundMasking::Enabled
+        );
 
         assert!(
-            record_model_bound_disabled_confirmation().is_err(),
+            record_model_bound_disabled_confirmation(&config_path).is_err(),
             "missing config cannot authorize an opt-out"
         );
         let config_path = tmp.path().join(crate::CONFIG_FILE_NAME);
         let disabled_config = "[redaction]\nmodel_bound = \"disabled\"\n";
         fs::write(&config_path, disabled_config).expect("write disabled config");
-        let written = record_model_bound_disabled_confirmation().expect("record");
-        assert_eq!(written, tmp.path().join(MODEL_BOUND_STATE_FILE_NAME));
-        assert!(model_bound_disabled_confirmed());
-        assert!(!confirmation_required(desired));
-        assert_eq!(effective_masking(desired), ModelBoundMasking::Disabled);
+        let written = record_model_bound_disabled_confirmation(&config_path).expect("record");
+        assert_eq!(
+            written,
+            tmp.path()
+                .canonicalize()
+                .unwrap()
+                .join(MODEL_BOUND_STATE_FILE_NAME)
+        );
+        assert!(confirmed_for_current_request(
+            ModelBoundMasking::Disabled,
+            Some(&config_path)
+        ));
+        assert!(!confirmation_required(desired, Some(&config_path)));
+        assert_eq!(
+            effective_masking(desired, Some(&config_path)),
+            ModelBoundMasking::Disabled
+        );
 
         // Windows real-time AV scanning can hold a short exclusive lock on a
         // file we just wrote; the confirm -> re-enable sweep below rewrites
@@ -391,24 +334,30 @@ mod tests {
         // and going back to enabled invalidates the receipt, so the next
         // disabled request must be confirmed again.
         let enabled = ModelBoundMasking::Enabled;
-        assert!(!confirmation_required(enabled));
-        assert_eq!(effective_masking(enabled), ModelBoundMasking::Enabled);
-        clear_model_bound_disabled_confirmation()
+        assert!(!confirmation_required(enabled, Some(&config_path)));
+        assert_eq!(
+            effective_masking(enabled, Some(&config_path)),
+            ModelBoundMasking::Enabled
+        );
+        clear_model_bound_disabled_confirmation(&config_path)
             .expect("explicit clear must succeed after re-enabling");
         assert!(
-            !model_bound_disabled_confirmed(),
+            !confirmed_for_current_request(ModelBoundMasking::Disabled, Some(&config_path)),
             "returning to enabled must clear the confirmation receipt"
         );
 
         // Re-disabling after an enabled period asks again from scratch.
-        assert!(confirmation_required(desired));
-        assert_eq!(effective_masking(desired), ModelBoundMasking::Enabled);
+        assert!(confirmation_required(desired, Some(&config_path)));
+        assert_eq!(
+            effective_masking(desired, Some(&config_path)),
+            ModelBoundMasking::Enabled
+        );
 
         // The receipt is bound to the config it was made against: rewriting
         // config.toml after a fresh confirmation (an enabled -> disabled
         // round trip with zero processes in between) must invalidate it too.
-        record_model_bound_disabled_confirmation().expect("record again");
-        assert!(!confirmation_required(desired));
+        record_model_bound_disabled_confirmation(&config_path).expect("record again");
+        assert!(!confirmation_required(desired, Some(&config_path)));
         // Ensure config.toml is strictly newer than the receipt before the
         // rewrite check runs.
         std::thread::sleep(std::time::Duration::from_millis(30));
@@ -418,12 +367,15 @@ mod tests {
         )
         .expect("touch config after receipt");
         assert!(
-            confirmation_required(desired),
+            confirmation_required(desired, Some(&config_path)),
             "a config rewritten after the receipt must force a fresh confirmation"
         );
-        assert_eq!(effective_masking(desired), ModelBoundMasking::Enabled);
+        assert_eq!(
+            effective_masking(desired, Some(&config_path)),
+            ModelBoundMasking::Enabled
+        );
 
-        record_model_bound_disabled_confirmation().expect("confirm readable config");
+        record_model_bound_disabled_confirmation(&config_path).expect("confirm readable config");
         let original_mtime = fs::metadata(&config_path).unwrap().modified().unwrap();
         fs::write(&config_path, format!("{disabled_config}# changed\n")).unwrap();
         fs::File::options()
@@ -433,30 +385,112 @@ mod tests {
             .set_times(fs::FileTimes::new().set_modified(original_mtime))
             .unwrap();
         assert_eq!(
-            effective_masking(desired),
+            effective_masking(desired, Some(&config_path)),
             ModelBoundMasking::Enabled,
             "changed bytes with preserved timestamps must invalidate confirmation"
         );
 
-        record_model_bound_disabled_confirmation().expect("confirm updated config");
+        record_model_bound_disabled_confirmation(&config_path).expect("confirm updated config");
         fs::remove_file(&config_path).unwrap();
         assert_eq!(
-            effective_masking(desired),
+            effective_masking(desired, Some(&config_path)),
             ModelBoundMasking::Enabled,
             "missing config metadata must fail closed"
         );
         fs::write(&config_path, disabled_config).unwrap();
         fs::write(&written, r#"{"model_bound_disabled_confirmed":true}"#).unwrap();
         assert_eq!(
-            effective_masking(desired),
+            effective_masking(desired, Some(&config_path)),
             ModelBoundMasking::Enabled,
             "legacy receipts without a config binding cannot authorize the opt-out"
         );
         fs::write(&config_path, "[redaction]\nmodel_bound = \"enabled\"\n").unwrap();
         assert!(
-            record_model_bound_disabled_confirmation().is_err(),
+            record_model_bound_disabled_confirmation(&config_path).is_err(),
             "a loaded disabled request cannot confirm an enabled file on disk"
         );
+    }
+
+    #[test]
+    fn custom_configs_cannot_borrow_or_erase_each_others_confirmation() {
+        let temp = tempfile::tempdir().unwrap();
+        let default = temp.path().join("config.toml");
+        let custom = temp.path().join("work.toml");
+        let other = temp.path().join("personal.toml");
+        for path in [&default, &custom, &other] {
+            fs::write(path, "[redaction]\nmodel_bound = \"disabled\"\n").unwrap();
+        }
+        let desired = ModelBoundMasking::Disabled;
+        record_model_bound_disabled_confirmation(&default).unwrap();
+        assert!(confirmation_required(desired, Some(&custom)));
+        record_model_bound_disabled_confirmation(&custom).unwrap();
+        assert!(!confirmation_required(desired, Some(&custom)));
+        assert!(confirmation_required(desired, Some(&other)));
+        assert_ne!(
+            model_bound_state_path(&custom),
+            model_bound_state_path(&other)
+        );
+        assert_ne!(
+            model_bound_state_path(&custom),
+            model_bound_state_path(&default)
+        );
+
+        // Re-enabling one config must not revoke either of the other files.
+        record_model_bound_disabled_confirmation(&other).unwrap();
+        assert_eq!(
+            effective_masking(ModelBoundMasking::Enabled, Some(&custom)),
+            ModelBoundMasking::Enabled
+        );
+        assert!(confirmation_required(desired, Some(&custom)));
+        assert!(!confirmation_required(desired, Some(&default)));
+        assert!(!confirmation_required(desired, Some(&other)));
+        assert!(confirmation_required(desired, None));
+        assert_eq!(effective_masking(desired, None), ModelBoundMasking::Enabled);
+    }
+
+    #[test]
+    fn copied_receipt_cannot_confirm_identical_file_with_identical_timestamp() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("first.toml");
+        let destination = temp.path().join("second.toml");
+        fs::write(&source, "[redaction]\nmodel_bound = \"disabled\"\n").unwrap();
+        fs::copy(&source, &destination).unwrap();
+        let modified = fs::metadata(&source).unwrap().modified().unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&destination)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        let receipt = record_model_bound_disabled_confirmation(&source).unwrap();
+        fs::copy(receipt, model_bound_state_path(&destination)).unwrap();
+        assert!(confirmation_required(
+            ModelBoundMasking::Disabled,
+            Some(&destination)
+        ));
+        assert!(!confirmation_required(
+            ModelBoundMasking::Disabled,
+            Some(&source)
+        ));
+    }
+
+    #[test]
+    fn custom_confirmation_reads_loaded_file_instead_of_sibling_config_toml() {
+        let temp = tempfile::tempdir().unwrap();
+        let custom = temp.path().join("selected.toml");
+        let default = temp.path().join("config.toml");
+        fs::write(&default, "[redaction]\nmodel_bound = \"disabled\"\n").unwrap();
+        assert!(record_model_bound_disabled_confirmation(&custom).is_err());
+        fs::write(&custom, "[redaction]\nmodel_bound = \"enabled\"\n").unwrap();
+        assert!(record_model_bound_disabled_confirmation(&custom).is_err());
+        fs::write(&custom, "[redaction]\nmodel_bound = \"disabled\"\n").unwrap();
+        fs::write(&default, "[redaction]\nmodel_bound = \"enabled\"\n").unwrap();
+        record_model_bound_disabled_confirmation(&custom).unwrap();
+        assert!(!confirmation_required(
+            ModelBoundMasking::Disabled,
+            Some(&custom)
+        ));
+        assert!(!model_bound_state_path(&default).exists());
     }
 
     #[test]

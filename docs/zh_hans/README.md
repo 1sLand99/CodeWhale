@@ -44,6 +44,7 @@
 2. [CONTRIBUTING.md](CONTRIBUTING.md) —— 贡献指南：如何提交 Issue 与 PR、代码约定与验证门禁
 3. [CODE_OF_CONDUCT.md](../../CODE_OF_CONDUCT.md) —— 社区行为准则
 4. [RUNTIME_API.md](../RUNTIME_API.md) —— Runtime API 与集成契约（供集成与二次开发）
+5. [PLUGIN_AUTHORING.md](PLUGIN_AUTHORING.md) —— 从最小 Skills 示例开始编写、审查和启用插件
 
 > 我们强烈建议，成为 Codewhale 贡献者之前，您需要具备一定的英语阅读能力。如果您在英语方面较为薄弱，当然可以使用 LLM 来翻译。但是在 LLM 翻译完原文之后，建议您强忍着看不懂外文的不适，即使皱着眉头，也要审查一遍 LLM 翻译后的语义是否与你的原文语义相同。LLM 幻觉是会把事情搞砸的。
 

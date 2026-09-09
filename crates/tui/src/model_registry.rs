@@ -297,7 +297,7 @@ mod tests {
         let sample = [
             ("deepseek-v4-pro", Some(1_000_000)),
             ("deepseek-v4-flash", Some(1_000_000)),
-            ("deepseek-coder:1.3b", Some(128_000)),
+            ("deepseek-coder:1.3b", None),
             ("claude-opus-4-8", Some(1_000_000)),
             ("claude-opus-5", Some(1_000_000)),
             ("claude-sonnet-4-6", Some(1_000_000)),

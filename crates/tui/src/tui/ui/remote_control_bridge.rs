@@ -262,12 +262,13 @@ pub(crate) async fn drain_remote_control_events(
                             continue;
                         };
                         let result = if approved {
-                            engine_handle.approve_tool_call(tool_id).await
+                            engine_handle.approve_tool_call(tool_id.clone()).await
                         } else {
-                            engine_handle.deny_tool_call(tool_id).await
+                            engine_handle.deny_tool_call(tool_id.clone()).await
                         };
                         match result {
                             Ok(()) => {
+                                app.retire_action_notices(Some(&tool_id));
                                 // First decision wins: the web answered this
                                 // gate, so dismiss exactly the matching card —
                                 // never an unrelated approval that happens to
@@ -276,10 +277,18 @@ pub(crate) async fn drain_remote_control_events(
                                     app.view_stack.pop();
                                     app.needs_redraw = true;
                                 }
-                                app.status_message = Some(format!(
-                                    "Approval decided on the web ({}).",
-                                    if approved { "approved" } else { "denied" }
-                                ));
+                                let (message_id, level) = if approved {
+                                    (
+                                        MessageId::NotificationWebApproved,
+                                        StatusToastLevel::Success,
+                                    )
+                                } else {
+                                    (MessageId::NotificationWebDenied, StatusToastLevel::Warning)
+                                };
+                                app.push_status_toast_record(
+                                    StatusToast::new(app.tr(message_id), level, Some(5_000))
+                                        .for_event(format!("web-decision:{tool_id}")),
+                                );
                                 app.remote_control
                                     .acknowledge(&run_id, seq, &command, "applied", None);
                             }

@@ -11,22 +11,20 @@ import type { HomeDict } from "../types";
  * screenshot is described as the development build it is.
  */
 export const home: HomeDict = {
-  metaTitle: "Codewhale — Your models. More capable together.",
+  metaTitle: "Codewhale — Build and automate with the models you choose",
   metaDescription:
-    "Codewhale is an open-source agentic computing system. Bring the models you already use — hosted, through a gateway, or local — and put them to work together in your terminal, on your machine, with you in control. Rust, MIT.",
+    "Build software, work with your files, and automate everyday tasks using open-source agents and your choice of hosted or local AI models.",
 
-  kicker: "Agentic computing, on your terms",
-  heroTitleA: "Your models.",
-  heroTitleB: "More capable together.",
+  heroTitle: "Build and automate with the models you choose",
   heroIntro:
-    "{brand} puts coding agents in your terminal to read code, edit files, and run checks. Choose supported models and set the session’s permissions. Open source, on your machine.",
+    "{brand} gives you agents that can build software, work with your files, and turn repetitive tasks into reusable workflows. Tell them what you want to accomplish and choose the hosted or local models that suit the job, with the freedom to switch providers as you go.",
   getCodewhale: "Get Codewhale",
   exploreProduct: "Explore the product",
 
   shotPreview: "Terminal preview",
   shotBuild: "v{version} development build",
   screenshotAlt:
-    "Codewhale v0.9.12 development build in a terminal: the braille whale mark, a new session with no recent sessions yet, the message composer, and a footer showing Full Access, Work mode, two scheduled tasks, MCP servers connecting, and the GLM-5.3 model at max effort",
+    "Codewhale v0.9.12 terminal, build 171acee689aa: a new session with the whale mark, message composer, Full Access and Operate mode, two scheduled tasks, 21 MCP servers connecting, and GLM-5.3 at max effort.",
 
   latestRelease: "Latest release {tag}",
   releaseUnavailable: "Release status unavailable",
@@ -37,47 +35,47 @@ export const home: HomeDict = {
   figcaptionSourceCandidate: "unreleased",
 
   chapterTerminal: "Your terminal",
-  chapterTerminalTitle: "A familiar place to begin.",
+  chapterTerminalTitle: "Start with something you want to make",
 
-  gainHeading: "Give your models a job to finish.",
+  gainHeading: "What you can do with Codewhale",
   gainLede:
-    "Start with one model. Use Fleet to save a roster, and delegate parts of a task when the work benefits from more than one agent.",
+    "Start with a project, a question, or a task you want to automate, then work with one agent or give parts of a larger job to several.",
   gain: [
     [
-      "Your models",
-      "Use a supported hosted provider, gateway, or local model server. Fleet stores model choices for reusable agent roles.",
+      "Build something",
+      "Describe what you want to make and work with agents that can read your code, edit files, run commands, and check the result."
     ],
     [
-      "Capable agents",
-      "Plan, Work, and Operate modes; a fleet of sub-agents for one job; tools for files, shell, web, and MCP; sessions that save, resume, and roll back.",
+      "Automate everyday work",
+      "Create scripts and workflows for tasks you repeat, so you can run them again from the terminal whenever you need them."
     ],
     [
-      "Control on your machine",
-      "Ask, Auto-Review, or Full Access — you set how much it does before it asks. Runs locally, sandboxed where the OS allows, with an audit log you can read.",
-    ],
+      "Work with different models",
+      "Use hosted or local models for your agents, with different models and roles handling the parts of a job they are suited to."
+    ]
   ],
 
   chapterModels: "Your models",
-  modelsHeading: "A place for the models you choose.",
+  modelsHeading: "A choice of models for every task",
   modelsBody:
-    "Connect a supported hosted provider, a gateway, or a local model server. Check the selected provider and model before starting work. Local servers may run without an API key, depending on their configuration.",
+    "Connect directly to a hosted provider, use a gateway to access several, or run a model locally, then choose which model each session uses as you work.",
   modelsFacts: [
-    ["Hosted", "Your own API key, saved with codewhale auth set"],
+    ["Hosted", "Your own API key, saved with codewhale auth set --provider <id>"],
     ["Gateway", "One endpoint for many models, provider still chosen by you"],
     ["Local", "vLLM, SGLang, Ollama on localhost — usually no key"],
   ],
-  modelsLink: "Explore provider options",
+  modelsLink: "Explore models and providers",
 
-  startHeading: "Four steps to a first session.",
+  startHeading: "Getting started with Codewhale",
   startLede:
-    "Install, open a session with no key, connect a provider, then set up a fleet when one model is not enough.",
+    "Install the published release, connect a model, then try one task in your project folder. A team of agents is optional; start with one and add more when the work can be split.",
   startGuideLink: "Read the getting-started guide",
   startVocabularyLink: "Look up a term",
 
-  chapterAccount: "Where it runs today",
-  availabilityHeading: "Available now, in development, and not yet — stated plainly.",
+  chapterAccount: "Get Codewhale",
+  availabilityHeading: "Where you can use Codewhale",
   availabilityLede:
-    "The terminal is the released product. Everything else is listed with the state it is actually in.",
+    "You can use Codewhale in your terminal today while we build the web app, desktop app, and cloud computers.",
   availability: [
     [
       "Terminal",
@@ -87,43 +85,43 @@ export const home: HomeDict = {
     [
       "Web app",
       "Development preview",
-      "Account pages and browser pairing are implemented in development. Public end-to-end remote control has not been verified; use the terminal for released task execution.",
+      "Account access and browser pairing in the development preview.",
     ],
     [
       "Desktop",
       "Development build",
-      "A local macOS development build has been tested. There is no released desktop app to download.",
+      "The macOS app is in development; a public download is coming later.",
     ],
     [
       "Cloud computers",
-      "Not available yet",
-      "Running work on a hosted computer is in development. This page will say so when it works.",
+      "In development",
+      "Hosted computers for running your tasks.",
     ],
   ],
   availabilityNote:
-    "The terminal needs no Codewhale account. Hosted model providers bill under your own provider account; creating a Codewhale account does not purchase model access.",
+    "You can use the terminal without a Codewhale account, and any hosted model usage is billed by your provider.",
   accountLink: "Create an account",
 
-  surfacesHeading: "Use it where the work happens.",
+  surfacesHeading: "Ways to work with Codewhale",
   surfaces: [
-    ["TUI", "Interactive terminal work"],
-    ["codewhale exec", "Scripts and CI"],
-    ["Local web client", "Localhost interface; hosted browser workbench in development"],
-    ["Runtime API + MCP", "Local integrations"],
+    ["TUI", "Run codewhale to work interactively in your terminal"],
+    ["codewhale exec", "Run a task from a script or CI job"],
+    ["Local web client", "Run codewhale web to open a browser client for the same local Runtime"],
+    ["Plugins and MCP", "Add tools to the Runtime; review and enable plugins before use"],
     ["Fleet", "Several agents on one job"],
   ],
-  runtimeLink: "Runtime surfaces and what is stable",
+  runtimeLink: "Explore integrations",
 
-  installBandHeading: "Install on macOS or Linux.",
+  installBandHeading: "Install Codewhale on macOS or Linux",
   copy: "Copy",
   copied: "Copied ✓",
   binaries: "Binaries",
   chinaMirrors: "China mirrors",
   installGuideLink: "Read the install guide",
 
-  communityHeading: "Built in public",
+  communityHeading: "Help make Codewhale better",
   communityBody:
-    "MIT license. Contributors work on the runtime, providers, platforms, docs, and tests.",
+    "Whether you have found a bug, have an idea for a feature, or want to send your first pull request, we would like to hear from you and work together on what comes next.",
   communityLinksAria: "Community links",
-  contribute: "Contribute",
+  contribute: "Send a pull request",
 };

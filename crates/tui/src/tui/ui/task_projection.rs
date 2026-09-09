@@ -9,14 +9,39 @@ pub(super) async fn refresh_active_task_panel(
     app: &mut App,
     task_manager: &SharedTaskManager,
 ) -> bool {
+    let namespace_changed = app.task_panel_session_id != app.current_session_id;
+    if namespace_changed {
+        app.task_panel.clear();
+        app.task_panel_session_id = app.current_session_id.clone();
+        app.task_panel_unavailable = false;
+    }
     let tasks = match app.current_session_id.as_deref() {
-        Some(session_id) => {
-            task_manager
-                .list_tasks_for_owner(None, None, session_id)
-                .await
-        }
+        Some(session_id) => match task_manager
+            .list_tasks_for_owner(None, None, session_id)
+            .await
+        {
+            Ok(tasks) => tasks,
+            Err(error) => {
+                let changed = namespace_changed || !app.task_panel_unavailable;
+                if !app.task_panel_unavailable {
+                    app.push_status_toast(
+                        crate::localization::tr(
+                            app.ui_locale,
+                            crate::localization::MessageId::TaskInventoryUnavailable,
+                        )
+                        .to_string(),
+                        crate::tui::app::StatusToastLevel::Warning,
+                        Some(8_000),
+                    );
+                    tracing::warn!(%error, "Task inventory unavailable; preserving scoped snapshot");
+                }
+                app.task_panel_unavailable = true;
+                return changed;
+            }
+        },
         None => Vec::new(),
     };
+    let was_unavailable = std::mem::replace(&mut app.task_panel_unavailable, false);
     let previously_active_durable_ids = app
         .task_panel
         .iter()
@@ -36,6 +61,9 @@ pub(super) async fn refresh_active_task_panel(
         app.current_session_id.as_deref(),
     ) {
         for task in &tasks {
+            if !task.execution_binding_known {
+                continue;
+            }
             let external = format!("task:{}", task.id);
             if !work.has_operation_binding(Some(session_id), &external) {
                 continue;
@@ -65,7 +93,22 @@ pub(super) async fn refresh_active_task_panel(
     let mut entries: Vec<TaskPanelEntry> =
         select_work_sidebar_tasks(tasks, session_started_at, app.current_session_id.as_deref())
             .into_iter()
-            .map(task_summary_to_panel_entry)
+            .map(|summary| {
+                let unverified = !summary.execution_binding_known
+                    && matches!(summary.status, TaskStatus::Queued | TaskStatus::Running);
+                let mut entry = task_summary_to_panel_entry(summary);
+                if unverified {
+                    entry.stale = true;
+                    entry.role = Some(
+                        crate::localization::tr(
+                            app.ui_locale,
+                            crate::localization::MessageId::TaskOwnershipUnverified,
+                        )
+                        .to_string(),
+                    );
+                }
+                entry
+            })
             .collect();
 
     entries.extend(active_rlm_task_entries(app));
@@ -136,7 +179,8 @@ pub(super) async fn refresh_active_task_panel(
     // Report whether anything visible changed so the idle tick can skip the
     // redraw: an unconditional 2.5 s repaint kept the app from ever going
     // quiescent (#3757).
-    let changed = lifecycle_changed || app.task_panel != entries;
+    let changed =
+        namespace_changed || was_unavailable || lifecycle_changed || app.task_panel != entries;
     app.task_panel = entries;
     let tip_shown = (durable_background_completed || shell_background_completed)
         && app.maybe_show_behavioral_tip(

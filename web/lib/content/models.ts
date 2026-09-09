@@ -1,0 +1,38 @@
+import type { LocalizedText } from "./vocabulary";
+
+export const MODELS_COPY = {
+  metaTitle: { en: "Models and providers · Codewhale", zh: "模型与提供商 · Codewhale" },
+  metaDescription: { en: "Choose hosted or local models, connect your provider, and change models as your work changes.", zh: "选择托管或本地模型，连接提供商，并根据工作需要切换模型。" },
+  kicker: { en: "Models and providers", zh: "模型与提供商" },
+  title: { en: "The right model for your next task.", zh: "为下一项任务选择合适的模型。" },
+  lead: { en: "Use a hosted model, connect a local server, or go through a gateway. Change models and providers as your work changes.", zh: "使用托管模型、连接本地服务，或通过网关接入。根据工作需要切换模型和提供商。" },
+  providerDocs: { en: "Provider setup guides", zh: "提供商配置指南" },
+  install: { en: "Install Codewhale", zh: "安装 Codewhale" },
+  setupLabel: { en: "Get connected", zh: "建立连接" },
+  setupTitle: { en: "Connect a provider.", zh: "连接提供商。" },
+  setupLead: { en: "Save your key with codewhale auth set --provider <id>. In a session, use /provider to choose the provider and /model to choose the model. Local servers use the endpoint and authentication you configure.", zh: "用 codewhale auth set --provider <id> 保存密钥。在会话中，用 /provider 选择提供商，用 /model 选择模型。本地服务使用你配置的端点与认证方式。" },
+  patterns: [
+    {
+      title: { en: "DeepSeek", zh: "DeepSeek" },
+      detail: { en: "The default model is {model}. Connect your DeepSeek account with an API key.", zh: "默认模型为 {model}。用 API 密钥连接你的 DeepSeek 账户。" },
+      reference: "DEEPSEEK_API_KEY",
+    },
+    {
+      title: { en: "Local models", zh: "本地模型" },
+      detail: { en: "Run models with Ollama, vLLM, or SGLang. Connect Codewhale to the local server’s endpoint.", zh: "用 Ollama、vLLM 或 SGLang 运行模型，再将 Codewhale 连接到本地服务端点。" },
+      reference: "ollama · vllm · sglang",
+    },
+    {
+      title: { en: "OpenRouter", zh: "OpenRouter" },
+      detail: { en: "Use one gateway to access models from several providers. Choose OpenRouter, then select your model.", zh: "通过一个网关使用多家提供商的模型。选择 OpenRouter 后，再选择模型。" },
+      reference: "OPENROUTER_API_KEY",
+    },
+  ],
+  listTitle: { en: "Supported providers", zh: "支持的提供商" },
+  listLead: { en: "Provider reference for source v{version}. Use /provider to see the choices in your installed version. The setup guides cover credentials, endpoints, and model selection.", zh: "源码 v{version} 的提供商参考。在已安装版本中运行 /provider 查看可选项。配置指南介绍凭据、端点与模型选择。" },
+  provider: { en: "Provider", zh: "提供商" },
+  id: { en: "Provider ID", zh: "提供商 ID" },
+  credential: { en: "Credential setting", zh: "凭据设置" },
+  missing: { en: "Missing your provider?", zh: "没有找到你的提供商？" },
+  request: { en: "Request support", zh: "申请支持" },
+} satisfies Record<string, LocalizedText | { title: LocalizedText; detail: LocalizedText; reference: string }[]>;

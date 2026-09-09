@@ -477,25 +477,32 @@ is reasoning-capable, while Preview is not marked as a thinking model.
 ### OpenRouter vendor pinning
 
 OpenRouter serves each model through several upstream vendors, and Codewhale
-passes the `model` string to OpenRouter verbatim — so OpenRouter's own
-vendor-selection syntax works today in `[providers.openrouter] model` (or
-`/model`), with no extra configuration (#6007):
+can pin requests to a vendor with `[providers.openrouter] vendor` (#6007):
 
 ```toml
 provider = "openrouter"
-model = "deepseek/deepseek-v4-pro:deepinfra"   # pin the DeepInfra upstream
-# model = "deepseek/deepseek-v4-pro:floor"     # cheapest upstream
-# model = "@preset/my-team-preset"             # an account preset from the OpenRouter dashboard
+[providers.openrouter]
+model = "deepseek/deepseek-v4-pro"
+vendor = "deepinfra" # copy the vendor slug from the model's OpenRouter page
 ```
 
-The `:vendor` suffix pins one upstream vendor, `:floor` / `:ceil` bound its
-price tier, and `@preset/...` resolves an account preset. Codewhale does not
-fetch OpenRouter's per-vendor endpoint list and emits no `provider.order`
-request field, so pricing and availability for a pinned vendor come from
-OpenRouter's response, not from Codewhale's catalog: a pinned vendor may
-bill at a different rate than the model's catalog row, in which case cost
-surfaces report the routing-dependent missing-price reason rather than an
-invented number.
+This sends `"provider": {"order": ["deepinfra"], "allow_fallbacks": false}`
+on OpenRouter requests. A base slug can match multiple endpoint variants;
+copy a full slug such as `deepinfra/turbo` to select one variant. An unavailable
+pin fails at OpenRouter. Codewhale's separate `fallback_providers` setting can
+still switch the whole route after a recoverable error.
+
+The pin applies across OpenRouter models, including auxiliary requests on that
+route. Set `vendor = ""` to clear it. Reload config or restart to apply edits;
+requests already in flight keep their captured route. Other providers do not
+inherit the pin. `/preview-request` shows the primary request's routing fields.
+
+Model strings still pass through verbatim: `:floor` sorts by price, `:nitro`
+sorts by throughput, and `@preset/my-team-preset` references an account preset.
+See OpenRouter's [provider routing](https://openrouter.ai/docs/guides/routing/provider-selection)
+and [presets](https://openrouter.ai/docs/guides/features/presets) documentation.
+Codewhale does not fetch per-vendor endpoint prices or availability; pinned
+usage reports a routing-dependent unknown cost instead of a catalog estimate.
 
 ### Custom OpenAI-Compatible Gateways
 
@@ -2075,9 +2082,18 @@ reasoning contract, and all four membership ids omit generic sampling fields.
 - `managed_config_path` (string, optional): managed config file loaded after user/env config.
 - `requirements_path` (string, optional): requirements file used to enforce allowed approval/sandbox values.
 - `max_subagents` (int, optional): defaults to `64` and is clamped to `1..=128`.
-- `subagents.*` (optional compatibility table): per-Fleet-role model defaults
-  for `agent`. Explicit tool `model` values win, then role
-  overrides, then the parent runtime model. Supported convenience keys are
+- `subagents.*` (optional compatibility table): manual per-role model pins
+  for direct and Workflow `agent` starts. An explicit saved profile wins,
+  then a manual role pin, then a unique saved role pin. Conflicting tool
+  `model` or `model_strength` choices are refused before admission. Unpinned
+  roles allow task model/strength choices before inherited defaults.
+  `[subagents.roles.<role>] model = "provider/model"` folds into the existing override
+  map and wins over `[subagents.models]`, then the convenience keys. Structured
+  canonical role keys win over legacy aliases. Only this structured syntax
+  separates the explicit provider from the model suffix; unknown providers
+  fail before admission. Bare structured model ids inherit the active provider.
+  Legacy scalar/map values preserve namespaced provider-owned ids unchanged.
+  Supported convenience keys are
   `default_model`, `worker_model`, `scout_model`, `planner_model`,
   `reviewer_model`, `custom_model`, `max_concurrent`, `max_admitted`,
   `launch_concurrency`, `token_budget`, `api_timeout_secs`, and
@@ -2240,46 +2256,35 @@ reasoning contract, and all four membership ids omit generic sampling fields.
   - `[retry].initial_delay` (float seconds, default `1.0`)
   - `[retry].max_delay` (float seconds, default `60.0`)
   - `[retry].exponential_base` (float, default `2.0`)
-- `[notifications].method` (string, optional): `auto`, `osc9`, `kitty`,
-  `ghostty`, `bel`, or `off`. Defaults to `auto`. The TUI fires this on completed (successful)
-  turns whose elapsed time meets `threshold_secs`; failed and cancelled
-  turns are silent. `auto` resolves to `osc9` for `iTerm.app`, `Ghostty`,
-  and `WezTerm` (detected via `$TERM_PROGRAM`). Unknown terminals fail closed
-  to `off`; Codewhale never invents an audible BEL fallback.
-- `[notifications].threshold_secs` (int, optional): defaults to `30`.
-  Only completed turns whose elapsed time meets or exceeds this fire a
-  notification.
-- `[notifications].include_summary` (bool, optional): defaults to
-  `false`. When `true`, the notification body includes the elapsed
-  duration and the turn's cost in the configured display currency.
-- `[notifications].completion_sound` (string, optional): `off`, `beep`,
-  `bell`, or `file`. Defaults to `off`. This opt-in sound follows the same
-  focus and quiet policy as desktop notifications. `file` plays the WAV path
-  from `[notifications].sound_file` on Windows.
-- `[notifications].sound_file` (path, optional): path to a custom WAV file
-  used when `completion_sound = "file"`.
-- `[notifications].quiet` (bool, optional): defaults to `false`. Quiet
-  mode — suppresses every desktop notification and sound (all categories,
-  all delivery methods) without changing `method`, `completion_sound`, or the
-  per-category switches.
-- `[notifications.events]` (table, optional): per-category
-  desktop-notification switches; every key defaults to `true`. Keys:
-  `turn-complete`, `subagent-terminal`, `approval-needed`,
-  `input-needed`, `elevation-needed`, `model-notify`. A disabled
-  category is suppressed on every delivery mechanism (OSC 9, Kitty,
-  Ghostty, BEL, macOS Notification Center).
-- `[notifications.event_sound]` (table, optional): opt-in, deterministic
-  per-event sound cues. Keys: `enabled` (bool, default `false`), `events`
-  (array of kebab-case event names, default `["turn-complete",
-  "approval-needed"]`), `min_interval_ms` (int, default `2000`), `quiet`
-  (bool, default `false`). See "Event sound cues" below.
+- `[notifications]`: notification delivery, attention, categories and audio share one
+  policy. `quiet = true`, `method = "off"`, `condition = "never"` and disabled
+  categories suppress both the banner and Codewhale's selected sound.
+- `notifications.method`: `auto` (default), `osc9`, `kitty`, `ghostty`, `bel`, `off`.
+- `notifications.condition`: `unfocused` (default), `always`, `never`. When absent,
+  the legacy `tui.notification_condition` remains the fallback. `always` also
+  bypasses the duration threshold; `unfocused` requires two seconds away.
+- `notifications.threshold_secs`: nonnegative integer, default `30`.
+- `notifications.include_summary`: boolean, default `false`.
+- `notifications.sound`: optional `off`, `whale`, `bell`, `beep`, `file`.
+  A selected value controls audio across enabled categories. Absent keeps legacy
+  `completion_sound` and `event_sound` choices; `off` overrides both.
+- `notifications.sound_file`: custom local WAV path for `sound = "file"` or legacy
+  `completion_sound = "file"`.
+- `notifications.subagent_completion`: `always`, `final-only` (default), `off`.
+- `notifications.quiet`: boolean, default `false`.
+- `notifications.events`: six boolean categories, all enabled by default; see below.
+- `notifications.completion_sound`: legacy completion cue, default `off`, with the
+  same values as `sound`. Used only when `sound` is absent.
+- `notifications.event_sound`: legacy `enabled` (default `false`), `events`
+  (default `["turn-complete", "approval-needed"]`), and `quiet` (default `false`).
+  `min_interval_ms` (default `2000`) applies to each category's audio in both modes.
 - `tui.alternate_screen` (string, optional, default `auto`): which screen an interactive session starts on. `auto` and `always` start on the TUI-owned alternate screen; `never` starts in inline mode — a ratatui viewport the full height of the terminal with no alternate screen, so the shell's scrollback survives the session and stays scrollable after exit. `/fullscreen` and `/inline` switch it in-process; a switch that the terminal refuses rolls back and says why. Inline mode paints the whole transcript inside its viewport — nothing is written into the host scrollback while the session runs.
 - `tui.mouse_capture` (bool, optional, default `true` on non-Windows terminals and on Windows Terminal/ConEmu/Cmder when the alternate screen is active; `false` on legacy Windows console and inside JetBrains JediTerm — PyCharm/IDEA/CLion/etc. — where mouse-event escapes leak into the input stream as garbled text, see #878 / #898): enable internal mouse scrolling, transcript selection, right-click context actions, and transcript scrollbar dragging. TUI-owned drag selection copies only transcript text, removes visual wrap-column line breaks from paragraphs, and keeps selection scoped to the transcript pane. Set this to `false` or run with `--no-mouse-capture` for raw terminal selection; set it to `true` or run with `--mouse-capture` to opt in anywhere it's defaulted off. On raw terminal selection, especially on legacy Windows console or when mouse capture is disabled, selection may cross the right workbar and include visual wraps because the terminal, not the TUI, owns the selection.
 - `tui.terminal_probe_timeout_ms` (int, optional, default `500`): startup terminal-mode probe timeout in milliseconds. Values are clamped to `100..=5000`; timeout emits a warning and aborts startup instead of hanging indefinitely.
 - `tui.stream_chunk_timeout_secs` (int, optional, default `900`): per-SSE-chunk idle timeout for streamed model responses. Slow local or compatible servers can raise this with `/config stream_chunk_timeout_secs <seconds>`; `0` maps to the default and explicit values must be `1..=3600`. The legacy `DEEPSEEK_STREAM_IDLE_TIMEOUT_SECS` env var is still honored when this key is omitted.
 - `tui.header_items` (array of strings, optional, default `[]`): opt-in header chips. Set `header_items = ["tokens"]` under `[tui]` to show the session input, cache-hit, and output token counts. Narrow terminals elide the optional chip; wide terminals show it alongside context utilization.
 - `tui.osc8_links` (bool, optional, default on for macOS/Linux, off for Windows): emit OSC 8 escape sequences around URLs in transcript output so supporting terminals (iTerm2, Terminal.app 13+, Ghostty, Kitty, WezTerm, Alacritty, recent gnome-terminal/konsole) can open them with the terminal's link gesture—usually Cmd-click on macOS and Ctrl-click on Linux/Windows. Terminals without OSC 8 support render the plain label and ignore the escape. The escapes are emitted out-of-band (not inside buffer cells), so column corruption is not a concern; set `false` only for terminals that misrender the OSC 8 terminator itself. Windows legacy consoles default off; opt in with `true`.
-- `tui.max_model_steps` (int, optional, default `200`): finite ceiling on model steps one turn may take. A "step" is one accepted provider response, so this bounds how many billable requests a single user message can trigger. Values are clamped to `1..=100000`; `0` (or absent) resolves to the default — there is no `0`-means-unlimited sentinel. At ~80% of the budget the model gets one soft-landing notice to stop exploring and write its final report; at exhaustion the turn ends `Failed` with `Maximum model steps reached before completion (limit: N)` (after one bounded final-report turn when the model still owes work). This is the interactive runaway guard and applies to every turn, including a single goal pass; raise this knob to enlarge one pass — a goal pass that needs more than 200 model steps in one turn (before a terminal `update_goal`) would otherwise fail the turn. Multi-turn goal runs already continue automatically (see the Goal loop section below).
+- `tui.max_model_steps` (int, optional, default uncapped): optional model-step ceiling for one ordinary turn. Omission or `0` leaves model steps uncapped; explicit positive values are clamped to `1..=100000`. Headless `exec` and Fleet workers also have no implicit model-step ceiling; `exec --max-turns N` and positive worker budgets still apply. At ~80% of an explicit step budget the model gets one soft-landing notice; at exhaustion the turn ends `Failed` with `Maximum model steps reached before completion (limit: N)` after one bounded final-report response when needed. Cumulative wall-clock and per-stream limits remain independent. Active interactive goal turns use `goal.max_steps` instead (default `1000`); see the Goal loop section below.
 - `tui.turn_wall_clock_secs` (int, optional, default `3600`): cumulative per-turn wall-clock budget in seconds, measured across every model step of one turn (not per request). Time blocked on a human approval is excluded. Clamped to `30..=86400` (24 hours is the documented ceiling); `0` resolves to the default. When exhausted the turn stops before authorizing another billable request with a message naming the limit and the key to raise.
 - `transcript.prose_measure` (positive integer, optional, default absent = full width): wrap cap, in columns, for prose cells — user messages, assistant answers, and reasoning/thinking blocks — in the live transcript (#5436). Absent (or `0`) spends the full content width, consistent with tool/status cells and the #5322 wide-frame decision; the former 105-column prose rail is gone. Set a positive whole number (e.g. `prose_measure = 120` under `[transcript]`) to restore a bounded reading measure on ultrawide terminals. Narrow terminals always keep their content width — the cap clamps from above only. Tool, diff, and status cells never inherit this cap. Invalid values (negative or non-integer) are rejected at startup with a `transcript.prose_measure` config error. Resolved once per render pass, so the main transcript cache and the full-screen overlay always agree on the effective width.
 - `hooks` (optional): lifecycle hooks configuration (see `config.example.toml`).
@@ -2374,7 +2379,7 @@ When an explicit backstop fires, the goal pauses with a status message naming
 inspecting progress, or raise/disable the backstop.
 
 `[goal] max_steps` governs one engine turn at a time: the ordinary interactive
-ceiling (`max_steps`, default 200) is unchanged, and explicit per-invocation
+turn has no implicit model-step ceiling. Explicit per-invocation
 ceilings — `exec --max-turns N`, child-worker caps — always win over it. At
 about 80% of the selected budget the model is told to land; at exhaustion it
 gets one bounded final report and the turn classifies as budget-exhausted. An
@@ -2424,90 +2429,110 @@ reprompt_message = ""
 
 ### Notifications
 
-The TUI can emit a desktop notification (OSC 9 escape or plain BEL) when a turn **completes successfully** and took longer than a threshold, so you can tab away while a long task runs. Failed or cancelled turns are intentionally silent — the notification is a "your task is ready" cue, not a generic ping. Configuration lives under `[notifications]`:
+Notification controls are available in the existing `/config` settings view,
+from terminal commands, and through the CLI. All write the same `config.toml`
+keys. Terminal changes apply immediately; add `--save` to keep them. CLI writes
+apply when the next process loads its configuration.
+
+```sh
+codewhale config set notifications.sound whale
+codewhale config set notifications.events.approval-needed false
+codewhale config set notifications.quiet true
+codewhale config get notifications
+codewhale config unset notifications.quiet
+```
+
+```text
+/config notifications sound whale --save
+/config notifications condition unfocused --save
+/config notifications quiet true
+/config notifications status
+```
+
+Nested CLI edits preserve TOML types, unrelated keys and comments. Unset removes
+only the selected leaf. `notifications.sound legacy` in the TUI, or CLI unset of
+`notifications.sound`, restores previous sound choices. Invalid values are
+rejected before file or session changes. In an active TUI profile, saved edits
+update its notification table when it owns one; otherwise they update the
+inherited root table. The settings detail keeps saved and current values distinct.
 
 ```toml
 [notifications]
-method          = "auto"  # auto | osc9 | bel | off
-threshold_secs  = 30      # only notify when the turn took >= this many seconds
-include_summary = false   # include elapsed time + cost in the notification body
-completion_sound = "off"  # off | beep | bell | file; sound is opt-in
-sound_file = "E:\\google\\downloads\\notify.wav" # for completion_sound = "file"
-quiet = false             # true suppresses every desktop notification and sound
+method = "auto"        # auto | osc9 | kitty | ghostty | bel | off
+condition = "unfocused" # unfocused | always | never
+threshold_secs = 30
+include_summary = false
+sound = "whale"        # optional; sound is opt-in, not enabled by default
+quiet = false
 
-[notifications.events]    # per-category switches; all default to true
-turn-complete     = true  # an agent turn finished
-subagent-terminal = true  # a sub-agent reached a terminal status
-approval-needed   = true  # a tool call is blocked on your approval
-input-needed      = true  # the agent asked a question and is blocked
-elevation-needed  = true  # the sandbox denied a tool and needs a decision
-model-notify      = true  # the model called the `notify` tool
+[notifications.events]
+turn-complete = true
+subagent-terminal = true
+approval-needed = true
+input-needed = true
+elevation-needed = true
+model-notify = true
 ```
 
-`quiet = true` is the one-flag "stop interrupting me" switch: it silences
-every category on every delivery mechanism while leaving the rest of your
-notification configuration intact, so flipping it back restores your exact
-previous policy. `[notifications.events]` disables single categories the
-same way — a disabled category is suppressed at the emission path, so it
-cannot leak through one specific protocol. A suppressed notification also
-suppresses its paired `[notifications.event_sound]` cue (no orphaned bells
-for events you turned off). The turn-completion chime also respects `quiet`.
+`quiet = true` mutes every category without changing saved choices. `method =
+"off"` also stops both banner and selected audio. Disabling a category stops its
+sound. Attention and duration gates apply before any sink runs. Title animation
+completion is silent; only the authorized notification event can request audio.
+Successful turn completion is a notification category; failed/cancelled turns do
+not create a success notification.
 
-Method semantics:
+`auto` chooses a recognized terminal protocol or the existing macOS native
+fallback; unknown terminals remain unsupported and never invent a bell. `bel`
+is an audio-only transport: one selected cue is dispatched, without a second
+transport bell. With `sound = "off"`, that transport is silent. `osc9`, `kitty`
+and `ghostty` use their terminal notification protocols; tmux passthrough is
+preserved. Terminal/OS notification preferences still govern display, attribution
+and any sound the host itself adds.
 
-- `auto` (default) — picks a supported native or terminal banner transport. Unknown terminals fail closed to `off`; automatic banner selection never invents a BEL sound.
-- `osc9` — emit `\x1b]9;<msg>\x07`. Inside tmux the sequence is wrapped in DCS passthrough so it reaches the outer terminal.
-- `bel` — emit a single `\x07` byte. Use this on Windows only if you actively want the chime back.
-- `off` — disable banners. An explicitly selected completion sound remains an independent control.
+By default the terminal must stay unfocused for two seconds. `condition =
+"always"` allows foreground notifications and bypasses the duration threshold;
+`"never"` suppresses all delivery. The canonical condition takes precedence over
+legacy `[tui].notification_condition`.
 
-By default, delivery is background-only: Codewhale waits until the terminal
-has remained unfocused for two seconds. Set `notification_condition =
-"always"` under `[tui]` to allow configured notifications in the foreground,
-or `"never"` to suppress all operator notifications. macOS native banners are
-silent. `completion_sound` controls the turn-completion cue; the separate,
-opt-in `[notifications.event_sound]` table controls event BEL cues. Explicit
-`method = "bel"` is also audible and should be used only when that is wanted.
+The bundled `whale` is a 1.55-second original whale-inspired cue, with no
+third-party recording. It remains an opt-in candidate pending listening approval.
+WAV playback uses a background worker: macOS `/usr/bin/afplay`, Linux `aplay`
+from [ALSA utilities](https://github.com/alsa-project/alsa-utils), or Windows
+`PlaySoundW`. A missing player/file or unsupported platform has no fallback bell.
+Only one WAV plays at a time. A worker-start receipt is a dispatch attempt, not
+proof of audible playback or OS acceptance. The existing macOS `osascript`
+banner retains Script Editor attribution; this Core change does not provide a
+branded native Apps banner.
 
-Windows users who run inside a known OSC-9 terminal (e.g. WezTerm on Windows) keep getting OSC-9 notifications. Set `method = "off"` to disable threshold-based desktop notifications entirely.
+#### Previous sound settings
 
-`completion_sound = "file"` is for Windows users who want a per-application
-completion sound without changing the global Windows sound scheme. It plays the
-configured WAV `sound_file` asynchronously via the native Windows audio API.
-
-#### Event sound cues
-
-`[notifications.event_sound]` is an opt-in, deterministic policy that emits a
-terminal-bell-level cue when specific notification events fire (approval
-prompts, blocked-on-input, sub-agent completion, and so on). It is **off by
-default**; with `enabled = false` nothing is emitted, which is the
-platform-safe no-op fallback.
+When `notifications.sound` is absent, completion uses a non-off
+`completion_sound` selection, and other events use the existing event allow-list.
+These are compatibility inputs to the same audio decision, not separate playback
+paths. When the global sound is selected, it takes precedence over the previous
+completion/event choices. The default remains silent unless a legacy sound or
+explicit `bel` transport was already selected.
 
 ```toml
 [notifications.event_sound]
-enabled = false                              # default: off (opt-in)
-events = ["turn-complete", "approval-needed"] # default allow-list
-min_interval_ms = 2000                       # per-event rate limit
-quiet = false                                # true silences everything without editing the allow-list
+enabled = false
+events = ["turn-complete", "approval-needed"]
+min_interval_ms = 2000
+quiet = false
 ```
 
-The cue table is fixed — cues are functional BEL-based signals, not
-designed-for-pleasantness audio, and every cue is one or two `\x07` bytes
-(inert on terminals that ignore BEL, so this is a platform-safe no-op
-everywhere):
+Legacy event cues use one bell for completion, subagent completion, input and
+model notices; approval/elevation cues use two. The per-category repeat interval
+survives settings refreshes. Old unknown event names are ignored on load; new
+CLI/TUI edits require names from the six categories above.
 
-| Event | Cue |
-|---|---|
-| `turn-complete` | BEL (`\x07`) |
-| `subagent-terminal` | BEL (`\x07`) |
-| `approval-needed` | double BEL (`\x07\x07`) |
-| `input-needed` | BEL (`\x07`) |
-| `elevation-needed` | double BEL (`\x07\x07`) |
-| `model-notify` | BEL (`\x07`) |
-
-Decision order: disabled → quiet mode → event not in `events` → `turn-complete`
-deferred to the `completion_sound` channel when that is active (so the two
-never double-ding) → per-event rate limit (`min_interval_ms` since the last
-play of that event) → play. Unknown strings in `events` are ignored.
+Local approval/input/elevation prompts and error receipts remain available when
+external notifications are muted. Action prompts use the selected UI language
+and retire when that request settles. Repeated live notices keep their first
+expiry; a later routine update does not hide an unresolved warning at completion.
+Optional plugin suggestion toasts and contextual tips share one session guidance
+budget. `/config contextual_tips off` hides those toasts while preserving
+required notices and explicit plugin review requests.
 
 #### What a notification can contain
 

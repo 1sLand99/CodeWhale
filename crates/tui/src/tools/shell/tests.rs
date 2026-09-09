@@ -30,7 +30,10 @@ fn shell_catalog_guidance_matches_execution() {
         .unwrap();
     let dispatcher = crate::shell_dispatcher::global_dispatcher();
     assert!(command.contains(dispatcher.kind().binary()));
-    assert!(tool.description().contains(command));
+    assert!(
+        !tool.description().contains(command),
+        "the command's interpreter guidance must appear once in each request"
+    );
     assert_eq!(tool.name(), "bash");
     assert!(tool.model_visible());
     assert!(!command.contains("action=run"));
@@ -2920,6 +2923,61 @@ async fn test_exec_shell_foreground_can_move_to_background() {
     assert_eq!(killed.status, ShellStatus::Killed);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn dropped_foreground_wait_kills_descendants_and_retains_unreceived_output() {
+    let tmp = tempdir().unwrap();
+    let pid_file = tmp.path().join("descendant.pid");
+    let command = format!(
+        "printf 'retained-before-drop\\n'; printf '%{}s\\n' x; \
+         CODEWHALE_SHELL_DESCENDANT_HELPER=1 \
+         CODEWHALE_SHELL_DESCENDANT_PID_FILE={} {} --exact \
+         tools::shell::tests::shell_descendant_helper_process --nocapture",
+        RAW_STREAM_SETTLED_TAIL_BYTES + 1024,
+        shell_words::quote(&pid_file.display().to_string()),
+        shell_words::quote(&std::env::current_exe().unwrap().display().to_string()),
+    );
+    let ctx = ToolContext::new(tmp.path()).with_state_namespace("foreground-drop".to_string());
+    let manager = ctx.shell_manager.clone();
+    let task_ctx = ctx.clone();
+    let task = tokio::spawn(async move {
+        BashTool::new("Bash")
+            .execute(
+                json!({"command": command, "timeout_ms": 600_000}),
+                &task_ctx,
+            )
+            .await
+    });
+    let descendant = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(raw) = std::fs::read_to_string(&pid_file)
+                && let Ok(pid) = raw.trim().parse::<libc::pid_t>()
+            {
+                break pid;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("descendant must start");
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(
+        wait_for_shell_pid_exit(descendant),
+        "dropping the wait must stop its descendant"
+    );
+    let mut manager = manager.lock().unwrap();
+    let jobs = manager.list_jobs_for_session("foreground-drop");
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].status, ShellStatus::Killed);
+    let detail = manager
+        .inspect_job(&jobs[0].id)
+        .expect("inspect cancelled job");
+    assert!(detail.stdout.contains("retained-before-drop"));
+    assert!(detail.stdout.len() > RAW_STREAM_SETTLED_TAIL_BYTES);
+    assert!(!manager.has_finished_unreported_jobs_for_session("foreground-drop"));
+}
+
 #[tokio::test]
 async fn lowercase_bash_foreground_detach_is_a_successful_running_receipt() {
     let tmp = tempdir().expect("tempdir");
@@ -4407,6 +4465,30 @@ fn a_finished_job_reports_its_duration_not_a_growing_elapsed() {
 #[cfg(unix)]
 #[tokio::test]
 async fn readonly_pipeline_preserves_arguments_and_disables_git_helpers() {
+    const PROBE: &str = "CODEWHALE_TEST_READONLY_PIPELINE_SHELL";
+    if std::env::var_os(PROBE).is_none() {
+        // The dispatcher is process-pinned. Exercise both the supported shell
+        // and the fail-closed POSIX fallback without inheriting the CI shell.
+        for shell in ["/bin/bash", "/bin/sh"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tools::shell::tests::readonly_pipeline_preserves_arguments_and_disables_git_helpers",
+                    "--test-threads=1",
+                ])
+                .env(PROBE, shell)
+                .env("SHELL", shell)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "read-only pipeline probe failed ({shell})\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        return;
+    }
     let workspace = tempdir().unwrap();
     let outside = tempdir().unwrap();
     let sentinel = outside.path().join("secret");
@@ -4439,6 +4521,15 @@ async fn readonly_pipeline_preserves_arguments_and_disables_git_helpers() {
         .execute(json!({"command": "cat input.txt | wc -l"}), &ctx)
         .await
         .unwrap();
+    if std::env::var(PROBE).as_deref() == Ok("/bin/sh") {
+        assert!(!ordinary.success);
+        assert!(
+            ordinary
+                .content
+                .contains("read-only pipelines require bash or zsh")
+        );
+        return;
+    }
     assert!(ordinary.success, "{}", ordinary.content);
     assert!(
         tool.execute(json!({"command": "cat linked-secret | cat"}), &ctx)

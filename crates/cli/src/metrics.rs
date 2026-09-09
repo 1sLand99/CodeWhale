@@ -11,7 +11,7 @@
 //! excluding records copied across roots. An explicit `CODEWHALE_HOME` never
 //! reads outside that root.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -172,22 +172,73 @@ impl CompactionStats {
     }
 }
 
-/// Sub-agent spawn stats.
+/// Sub-agent lifecycle receipt counts; these are not unique worker totals.
 #[derive(Debug, Default, serde::Serialize)]
 pub struct AgentStats {
     pub spawns: u64,
     pub successes: u64,
     pub failures: u64,
+    pub cancelled: u64,
+    pub interrupted: u64,
+    pub budget_exhausted: u64,
+    /// Terminal receipts with missing, malformed, or unrecognized outcomes.
+    pub unknown_outcomes: u64,
 }
 
 impl AgentStats {
-    fn success_rate_pct(&self) -> Option<f64> {
-        let judged = self.successes + self.failures;
-        if judged == 0 {
-            None
+    fn record_completion(&mut self, event: &Value) {
+        // Runtime's worker_status owns the outcome. A completed status item
+        // means its receipt settled, not that the worker succeeded. Preserve
+        // explicit unknown values instead of falling back to a legacy boolean.
+        let status = event
+            .pointer("/details/worker_status")
+            .or_else(|| event.pointer("/payload/worker_status"))
+            .or_else(|| event.pointer("/details/status"))
+            .or_else(|| event.pointer("/payload/status"));
+        let count = if let Some(status) = status {
+            match status.as_str() {
+                Some("completed") => &mut self.successes,
+                Some("failed") => &mut self.failures,
+                Some("cancelled") => &mut self.cancelled,
+                Some("interrupted") => &mut self.interrupted,
+                Some("budget_exhausted") => &mut self.budget_exhausted,
+                _ => &mut self.unknown_outcomes,
+            }
         } else {
-            Some(self.successes as f64 / judged as f64 * 100.0)
+            match event
+                .pointer("/details/success")
+                .or_else(|| event.pointer("/payload/success"))
+                .and_then(Value::as_bool)
+            {
+                Some(true) => &mut self.successes,
+                Some(false) => &mut self.failures,
+                None => &mut self.unknown_outcomes,
+            }
+        };
+        *count = count.saturating_add(1);
+    }
+
+    fn summary(&self) -> String {
+        let outcomes = [
+            (self.successes, "completed"),
+            (self.failures, "failed"),
+            (self.cancelled, "cancelled"),
+            (self.interrupted, "interrupted"),
+            (self.budget_exhausted, "budget exhausted"),
+            (self.unknown_outcomes, "outcome unconfirmed"),
+        ]
+        .into_iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, label)| format!("{} {label}", fmt_num(count)))
+        .collect::<Vec<_>>();
+        if self.spawns == 0 && outcomes.is_empty() {
+            return "Sub-agents: (no data)".to_string();
         }
+        let mut summary = format!("Sub-agents: {} spawn receipts", fmt_num(self.spawns));
+        if !outcomes.is_empty() {
+            summary.push_str(&format!("; outcomes: {}", outcomes.join(", ")));
+        }
+        summary
     }
 }
 
@@ -205,6 +256,44 @@ pub struct CredentialStats {
     pub clears: u64,
 }
 
+/// Runtime receipts for model-client dispatch and provider-reported usage.
+///
+/// These are deliberately not billing records: the terminal diagnostics count
+/// parent model-client calls, while `turn.usage` exists only when a provider
+/// supplied usage for one call. Client-internal HTTP retries and invoices are
+/// outside both receipts.
+#[derive(Debug, Default, serde::Serialize)]
+pub struct RuntimeRequestStats {
+    /// Distinct durable `turn.completed` receipts with a usable `(thread, turn)` identity.
+    pub terminal_turn_receipts: u64,
+    /// Terminal receipts carrying the optional request diagnostics projection.
+    pub diagnostics_turn_receipts: u64,
+    /// Terminal receipts from older or partial logs with no diagnostics projection.
+    pub diagnostics_unavailable_turn_receipts: u64,
+    /// Present-but-incomplete diagnostics are unknown rather than zero.
+    pub diagnostics_incomplete_turn_receipts: u64,
+    /// Terminal receipts omitted because their identity could not be verified.
+    pub terminal_receipts_without_identity: u64,
+    /// Repeated terminal snapshots for one `(thread, turn)` omitted from the rollup.
+    pub duplicate_terminal_receipts_skipped: u64,
+    /// Parent model-client calls recorded by terminal diagnostics, not HTTP retries or invoices.
+    pub model_requests_started: u64,
+    pub transparent_stream_retries: u64,
+    pub stream_resumes: u64,
+    /// Distinct `turn.usage` receipts with a verified runtime event identity.
+    pub provider_usage_receipts: u64,
+    /// `turn.usage` records that could not be identified, so their values are unknown.
+    pub provider_usage_receipts_without_identity: u64,
+    /// Repeated runtime event identities omitted from provider usage totals.
+    pub duplicate_provider_usage_receipts_skipped: u64,
+    /// `turn.usage` records missing either required token total are not treated as zero.
+    pub provider_usage_receipts_incomplete: u64,
+    /// Provider-reported per-request input tokens only; terminal cumulative snapshots are excluded.
+    pub provider_reported_input_tokens: u64,
+    /// Provider-reported per-request output tokens only; terminal cumulative snapshots are excluded.
+    pub provider_reported_output_tokens: u64,
+}
+
 /// Top-level rollup.
 #[derive(Debug, Default, serde::Serialize)]
 pub struct Rollup {
@@ -218,10 +307,17 @@ pub struct Rollup {
     pub agents: AgentStats,
     pub capacity: CapacityStats,
     pub credentials: CredentialStats,
+    pub runtime_requests: RuntimeRequestStats,
     /// Total lines read across all sources.
     pub total_lines: u64,
     /// Lines successfully parsed.
     pub parsed_lines: u64,
+}
+
+#[derive(Default)]
+struct RuntimeEventDedup {
+    terminal_turns: HashSet<(String, String)>,
+    event_records: HashSet<(String, u64)>,
 }
 
 impl Rollup {
@@ -402,16 +498,7 @@ fn read_audit_log(
                 rollup.agents.spawns += 1;
             }
             "agent.completed" | "subagent.completed" => {
-                let success = v
-                    .pointer("/details/success")
-                    .or_else(|| v.pointer("/payload/success"))
-                    .and_then(|b| b.as_bool())
-                    .unwrap_or(true);
-                if success {
-                    rollup.agents.successes += 1;
-                } else {
-                    rollup.agents.failures += 1;
-                }
+                rollup.agents.record_completion(&v);
             }
             e if e.starts_with("capacity.") => {
                 rollup.capacity.total += 1;
@@ -604,16 +691,22 @@ fn read_runtime_events(events_dir: &Path, since: Option<DateTime<Utc>>, rollup: 
         }
     };
 
+    let mut dedup = RuntimeEventDedup::default();
     for entry in rd.flatten() {
         let path = entry.path();
         if path.extension().map(|e| e != "jsonl").unwrap_or(true) {
             continue;
         }
-        read_events_jsonl(&path, since, rollup);
+        read_events_jsonl(&path, since, rollup, &mut dedup);
     }
 }
 
-fn read_events_jsonl(path: &Path, since: Option<DateTime<Utc>>, rollup: &mut Rollup) {
+fn read_events_jsonl(
+    path: &Path,
+    since: Option<DateTime<Utc>>,
+    rollup: &mut Rollup,
+    dedup: &mut RuntimeEventDedup,
+) {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) => {
@@ -658,6 +751,8 @@ fn read_events_jsonl(path: &Path, since: Option<DateTime<Utc>>, rollup: &mut Rol
         let event = v.get("event").and_then(|e| e.as_str()).unwrap_or("");
 
         match event {
+            "turn.completed" => record_terminal_request_diagnostics(&v, rollup, dedup),
+            "turn.usage" => record_provider_usage_receipt(&v, rollup, dedup),
             "tool.started" | "tool.completed" | "tool.failed" => {
                 let tool_name = v
                     .pointer("/payload/tool_name")
@@ -693,15 +788,7 @@ fn read_events_jsonl(path: &Path, since: Option<DateTime<Utc>>, rollup: &mut Rol
                 rollup.agents.spawns += 1;
             }
             "agent.completed" | "subagent.completed" => {
-                let success = v
-                    .pointer("/payload/success")
-                    .and_then(|b| b.as_bool())
-                    .unwrap_or(true);
-                if success {
-                    rollup.agents.successes += 1;
-                } else {
-                    rollup.agents.failures += 1;
-                }
+                rollup.agents.record_completion(&v);
             }
             e if e.starts_with("capacity.") => {
                 rollup.capacity.total += 1;
@@ -718,6 +805,126 @@ fn read_events_jsonl(path: &Path, since: Option<DateTime<Utc>>, rollup: &mut Rol
             _ => {}
         }
     }
+}
+
+fn runtime_event_identity(v: &Value) -> Option<(String, u64)> {
+    Some((
+        v.get("thread_id")?.as_str()?.to_string(),
+        v.get("seq")?.as_u64()?,
+    ))
+}
+
+fn terminal_turn_identity(v: &Value) -> Option<(String, String)> {
+    Some((
+        v.get("thread_id")?.as_str()?.to_string(),
+        v.get("turn_id")?.as_str()?.to_string(),
+    ))
+}
+
+fn record_terminal_request_diagnostics(
+    v: &Value,
+    rollup: &mut Rollup,
+    dedup: &mut RuntimeEventDedup,
+) {
+    let Some(identity) = terminal_turn_identity(v) else {
+        rollup.runtime_requests.terminal_receipts_without_identity = rollup
+            .runtime_requests
+            .terminal_receipts_without_identity
+            .saturating_add(1);
+        return;
+    };
+    if !dedup.terminal_turns.insert(identity) {
+        rollup.runtime_requests.duplicate_terminal_receipts_skipped = rollup
+            .runtime_requests
+            .duplicate_terminal_receipts_skipped
+            .saturating_add(1);
+        return;
+    }
+
+    let stats = &mut rollup.runtime_requests;
+    stats.terminal_turn_receipts = stats.terminal_turn_receipts.saturating_add(1);
+    let Some(diagnostics) = v.pointer("/payload/turn/modelRequestDiagnostics") else {
+        stats.diagnostics_unavailable_turn_receipts = stats
+            .diagnostics_unavailable_turn_receipts
+            .saturating_add(1);
+        return;
+    };
+    let Some(model_requests_started) = diagnostics
+        .get("modelRequestsStarted")
+        .and_then(Value::as_u64)
+    else {
+        stats.diagnostics_incomplete_turn_receipts =
+            stats.diagnostics_incomplete_turn_receipts.saturating_add(1);
+        return;
+    };
+    let Some(transparent_stream_retries) = diagnostics
+        .get("transparentStreamRetries")
+        .and_then(Value::as_u64)
+    else {
+        stats.diagnostics_incomplete_turn_receipts =
+            stats.diagnostics_incomplete_turn_receipts.saturating_add(1);
+        return;
+    };
+    let Some(stream_resumes) = diagnostics.get("streamResumes").and_then(Value::as_u64) else {
+        stats.diagnostics_incomplete_turn_receipts =
+            stats.diagnostics_incomplete_turn_receipts.saturating_add(1);
+        return;
+    };
+
+    stats.diagnostics_turn_receipts = stats.diagnostics_turn_receipts.saturating_add(1);
+    stats.model_requests_started = stats
+        .model_requests_started
+        .saturating_add(model_requests_started);
+    stats.transparent_stream_retries = stats
+        .transparent_stream_retries
+        .saturating_add(transparent_stream_retries);
+    stats.stream_resumes = stats.stream_resumes.saturating_add(stream_resumes);
+}
+
+fn record_provider_usage_receipt(v: &Value, rollup: &mut Rollup, dedup: &mut RuntimeEventDedup) {
+    let Some(identity) = runtime_event_identity(v) else {
+        rollup
+            .runtime_requests
+            .provider_usage_receipts_without_identity = rollup
+            .runtime_requests
+            .provider_usage_receipts_without_identity
+            .saturating_add(1);
+        return;
+    };
+    if !dedup.event_records.insert(identity) {
+        rollup
+            .runtime_requests
+            .duplicate_provider_usage_receipts_skipped = rollup
+            .runtime_requests
+            .duplicate_provider_usage_receipts_skipped
+            .saturating_add(1);
+        return;
+    }
+
+    let stats = &mut rollup.runtime_requests;
+    let Some(input_tokens) = v
+        .pointer("/payload/usage/input_tokens")
+        .and_then(Value::as_u64)
+    else {
+        stats.provider_usage_receipts_incomplete =
+            stats.provider_usage_receipts_incomplete.saturating_add(1);
+        return;
+    };
+    let Some(output_tokens) = v
+        .pointer("/payload/usage/output_tokens")
+        .and_then(Value::as_u64)
+    else {
+        stats.provider_usage_receipts_incomplete =
+            stats.provider_usage_receipts_incomplete.saturating_add(1);
+        return;
+    };
+    stats.provider_usage_receipts = stats.provider_usage_receipts.saturating_add(1);
+    stats.provider_reported_input_tokens = stats
+        .provider_reported_input_tokens
+        .saturating_add(input_tokens);
+    stats.provider_reported_output_tokens = stats
+        .provider_reported_output_tokens
+        .saturating_add(output_tokens);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -826,19 +1033,7 @@ fn print_human(rollup: &Rollup) {
     }
 
     // ── Sub-agents ─────────────────────────────────────────────────────────
-    if rollup.agents.spawns > 0 {
-        let rate_str = match rollup.agents.success_rate_pct() {
-            Some(pct) => format!(", {pct:.1}% success"),
-            None => String::new(),
-        };
-        println!(
-            "Sub-agents: {} spawns{}",
-            fmt_num(rollup.agents.spawns),
-            rate_str
-        );
-    } else {
-        println!("Sub-agents: (no data)");
-    }
+    println!("{}", rollup.agents.summary());
 
     // ── Capacity interventions ─────────────────────────────────────────────
     if rollup.capacity.total > 0 {
@@ -857,6 +1052,55 @@ fn print_human(rollup: &Rollup) {
         );
     } else {
         println!("Capacity interventions: (no data)");
+    }
+
+    // ── Runtime request and provider-usage receipts ───────────────────────
+    let runtime = &rollup.runtime_requests;
+    if runtime.terminal_turn_receipts == 0 {
+        println!("Runtime requests: (no terminal receipts; model-client counts unknown)");
+    } else if runtime.diagnostics_turn_receipts == 0 {
+        println!(
+            "Runtime requests: (diagnostics unavailable for all {} terminal receipts)",
+            fmt_num(runtime.terminal_turn_receipts)
+        );
+    } else {
+        println!(
+            "Runtime requests: {} model-client calls, {} stream resumes, {} transparent retries (diagnostics for {}/{} terminal receipts; status events excluded)",
+            fmt_num(runtime.model_requests_started),
+            fmt_num(runtime.stream_resumes),
+            fmt_num(runtime.transparent_stream_retries),
+            fmt_num(runtime.diagnostics_turn_receipts),
+            fmt_num(runtime.terminal_turn_receipts),
+        );
+    }
+    if runtime.provider_usage_receipts == 0 {
+        println!("Provider usage receipts: (none recorded; this is not zero usage)");
+    } else {
+        println!(
+            "Provider usage receipts: {} records, {} input tokens, {} output tokens",
+            fmt_num(runtime.provider_usage_receipts),
+            fmt_num(runtime.provider_reported_input_tokens),
+            fmt_num(runtime.provider_reported_output_tokens),
+        );
+    }
+    if runtime.diagnostics_unavailable_turn_receipts > 0
+        || runtime.diagnostics_incomplete_turn_receipts > 0
+        || runtime.terminal_receipts_without_identity > 0
+        || runtime.provider_usage_receipts_without_identity > 0
+        || runtime.provider_usage_receipts_incomplete > 0
+        || runtime.duplicate_terminal_receipts_skipped > 0
+        || runtime.duplicate_provider_usage_receipts_skipped > 0
+    {
+        println!(
+            "Runtime receipt coverage: {} diagnostics unavailable, {} diagnostics incomplete, {} terminal receipts without identity, {} usage receipts without identity, {} usage receipts incomplete, {} duplicate terminal receipts skipped, {} duplicate usage receipts skipped",
+            fmt_num(runtime.diagnostics_unavailable_turn_receipts),
+            fmt_num(runtime.diagnostics_incomplete_turn_receipts),
+            fmt_num(runtime.terminal_receipts_without_identity),
+            fmt_num(runtime.provider_usage_receipts_without_identity),
+            fmt_num(runtime.provider_usage_receipts_incomplete),
+            fmt_num(runtime.duplicate_terminal_receipts_skipped),
+            fmt_num(runtime.duplicate_provider_usage_receipts_skipped),
+        );
     }
 
     // ── Credentials ────────────────────────────────────────────────────────
@@ -914,6 +1158,152 @@ mod tests {
 
     fn read_audit_test_log(path: &Path, since: Option<DateTime<Utc>>, rollup: &mut Rollup) {
         super::read_audit_log(path, since, rollup, &HashMap::new(), &mut HashMap::new());
+    }
+
+    fn read_runtime_test_log(path: &Path, since: Option<DateTime<Utc>>, rollup: &mut Rollup) {
+        super::read_events_jsonl(path, since, rollup, &mut RuntimeEventDedup::default());
+    }
+
+    fn runtime_event(
+        seq: u64,
+        timestamp: &str,
+        thread_id: &str,
+        turn_id: Option<&str>,
+        event: &str,
+        payload: Value,
+    ) -> Value {
+        serde_json::json!({
+            "schema_version": 4,
+            "seq": seq,
+            "timestamp": timestamp,
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "event": event,
+            "payload": payload,
+        })
+    }
+
+    fn write_runtime_events(events: &[Value]) -> tempfile::NamedTempFile {
+        use std::io::Write;
+
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        for event in events {
+            writeln!(tmp, "{event}").unwrap();
+        }
+        tmp
+    }
+
+    #[test]
+    fn runtime_worker_completion_uses_owner_outcome_not_completed_receipt_status() {
+        let statuses = [
+            serde_json::json!("completed"),
+            serde_json::json!("failed"),
+            serde_json::json!("cancelled"),
+            serde_json::json!("interrupted"),
+            serde_json::json!("budget_exhausted"),
+            Value::Null,
+        ];
+        let events: Vec<_> = statuses
+            .into_iter()
+            .enumerate()
+            .map(|(seq, worker_status)| {
+                runtime_event(
+                    seq as u64,
+                    "2026-09-08T10:00:00Z",
+                    "thread-a",
+                    Some("turn-a"),
+                    "agent.completed",
+                    serde_json::json!({
+                        "item": { "kind": "status", "status": "completed" },
+                        "agent_id": format!("worker-{seq}"),
+                        "worker_status": worker_status,
+                        "parent_run_id": "run-a",
+                        "spawn_depth": 1,
+                        "continuable": false,
+                    }),
+                )
+            })
+            .collect();
+        let tmp = write_runtime_events(&events);
+        let mut rollup = Rollup::default();
+        read_runtime_test_log(tmp.path(), None, &mut rollup);
+        let agents = &rollup.agents;
+        assert_eq!(agents.successes, 1, "a settled item is not worker success");
+        assert_eq!(agents.failures, 1);
+        assert_eq!(agents.cancelled, 1);
+        assert_eq!(agents.interrupted, 1);
+        assert_eq!(agents.budget_exhausted, 1);
+        assert_eq!(agents.unknown_outcomes, 1);
+        assert_eq!(agents.spawns, 0);
+        let summary = agents.summary();
+        assert!(summary.contains("1 failed"));
+        assert!(summary.contains("1 outcome unconfirmed"));
+        assert!(
+            !summary.contains("no data"),
+            "terminal-only windows have data"
+        );
+        assert!(
+            !summary.contains("%"),
+            "partial receipts are not a success rate"
+        );
+    }
+
+    #[test]
+    fn runtime_legacy_worker_receipts_require_explicit_success_evidence() {
+        let payloads = [
+            serde_json::json!({ "success": true }),
+            serde_json::json!({ "success": false }),
+            serde_json::json!({}),
+            serde_json::json!({ "success": "true" }),
+            serde_json::json!({ "worker_status": "failed", "success": true }),
+            serde_json::json!({ "worker_status": null, "success": true }),
+            serde_json::json!({ "worker_status": "running", "success": true }),
+            serde_json::json!({ "worker_status": { "completed": true }, "success": true }),
+            serde_json::json!({ "worker_status": "future_outcome", "success": true }),
+        ];
+        let events: Vec<_> = payloads
+            .into_iter()
+            .enumerate()
+            .map(|(seq, payload)| {
+                runtime_event(
+                    seq as u64,
+                    "2026-09-08T10:00:00Z",
+                    "thread-a",
+                    Some("turn-a"),
+                    "agent.completed",
+                    payload,
+                )
+            })
+            .collect();
+        let tmp = write_runtime_events(&events);
+        let mut rollup = Rollup::default();
+        read_runtime_test_log(tmp.path(), None, &mut rollup);
+        assert_eq!(rollup.agents.successes, 1);
+        assert_eq!(rollup.agents.failures, 2);
+        assert_eq!(rollup.agents.unknown_outcomes, 6);
+    }
+
+    #[test]
+    fn audit_worker_receipts_share_typed_and_legacy_outcome_rules() {
+        let events = [
+            serde_json::json!({ "event": "agent.completed", "details": { "worker_status": "failed", "success": true } }),
+            serde_json::json!({ "event": "subagent.completed", "payload": { "status": "cancelled", "success": true } }),
+            serde_json::json!({ "event": "subagent.completed", "details": { "status": "completed" } }),
+            serde_json::json!({ "event": "agent.completed", "details": { "success": false } }),
+            serde_json::json!({ "event": "agent.completed", "payload": { "success": true } }),
+            serde_json::json!({ "event": "agent.completed", "details": { "worker_status": null, "success": true } }),
+            serde_json::json!({ "event": "agent.completed", "details": {} }),
+        ];
+        let tmp = write_runtime_events(&events);
+        let mut rollup = Rollup::default();
+        read_audit_test_log(tmp.path(), None, &mut rollup);
+        assert_eq!(rollup.agents.successes, 2);
+        assert_eq!(rollup.agents.failures, 2);
+        assert_eq!(rollup.agents.cancelled, 1);
+        assert_eq!(rollup.agents.unknown_outcomes, 2);
+        let json = serde_json::to_value(&rollup).unwrap();
+        assert_eq!(json["agents"]["unknown_outcomes"], 2);
+        assert_eq!(json["agents"]["cancelled"], 1);
     }
 
     // ── Duration parser ──
@@ -1077,6 +1467,243 @@ mod tests {
         rollup.tool_mut("read_file").calls = 4_012;
         rollup.tool_mut("exec_shell").calls = 1_118;
         assert_eq!(rollup.total_tool_calls(), 5_130);
+    }
+
+    // ── Runtime request and provider-usage receipts ──
+
+    #[test]
+    fn runtime_receipts_separate_terminal_requests_from_per_request_usage() {
+        let timestamp = "2026-09-08T10:00:00Z";
+        let terminal = runtime_event(
+            2,
+            timestamp,
+            "thread-a",
+            Some("turn-a"),
+            "turn.completed",
+            serde_json::json!({
+                "turn": {
+                    "usage": { "input_tokens": 10_000, "output_tokens": 9_000 },
+                    "modelRequestDiagnostics": {
+                        "modelRequestsStarted": 2,
+                        "transparentStreamRetries": 1,
+                        "streamResumes": 1,
+                    },
+                },
+            }),
+        );
+        let usage_one = runtime_event(
+            3,
+            timestamp,
+            "thread-a",
+            Some("turn-a"),
+            "turn.usage",
+            serde_json::json!({ "usage": { "input_tokens": 7, "output_tokens": 2 } }),
+        );
+        let usage_two = runtime_event(
+            4,
+            timestamp,
+            "thread-a",
+            Some("turn-a"),
+            "turn.usage",
+            serde_json::json!({ "usage": { "input_tokens": 11, "output_tokens": 3 } }),
+        );
+        let duplicate_terminal = runtime_event(
+            5,
+            timestamp,
+            "thread-a",
+            Some("turn-a"),
+            "turn.completed",
+            serde_json::json!({
+                "turn": {
+                    "modelRequestDiagnostics": {
+                        "modelRequestsStarted": 99,
+                        "transparentStreamRetries": 99,
+                        "streamResumes": 99,
+                    },
+                },
+            }),
+        );
+        let legacy_terminal = runtime_event(
+            6,
+            timestamp,
+            "thread-a",
+            Some("turn-b"),
+            "turn.completed",
+            serde_json::json!({ "turn": { "usage": { "input_tokens": 50, "output_tokens": 5 } } }),
+        );
+        let status = runtime_event(
+            7,
+            timestamp,
+            "thread-a",
+            Some("turn-a"),
+            "item.completed",
+            serde_json::json!({ "item": { "kind": "status" } }),
+        );
+        let tmp = write_runtime_events(&[
+            terminal,
+            usage_one,
+            usage_two,
+            duplicate_terminal,
+            legacy_terminal,
+            status,
+        ]);
+        let mut rollup = Rollup::default();
+        read_runtime_test_log(tmp.path(), None, &mut rollup);
+
+        let runtime = &rollup.runtime_requests;
+        assert_eq!(runtime.terminal_turn_receipts, 2);
+        assert_eq!(runtime.diagnostics_turn_receipts, 1);
+        assert_eq!(runtime.diagnostics_unavailable_turn_receipts, 1);
+        assert_eq!(runtime.duplicate_terminal_receipts_skipped, 1);
+        assert_eq!(runtime.model_requests_started, 2);
+        assert_eq!(runtime.transparent_stream_retries, 1);
+        assert_eq!(runtime.stream_resumes, 1);
+        assert_eq!(runtime.provider_usage_receipts, 2);
+        assert_eq!(runtime.provider_reported_input_tokens, 18);
+        assert_eq!(runtime.provider_reported_output_tokens, 5);
+        assert_ne!(runtime.provider_reported_input_tokens, 10_018);
+        assert_eq!(runtime.model_requests_started, 2, "status is not a request");
+    }
+
+    #[test]
+    fn runtime_usage_receipts_deduplicate_by_runtime_event_identity() {
+        let usage = runtime_event(
+            20,
+            "2026-09-08T10:00:00Z",
+            "thread-a",
+            Some("turn-a"),
+            "turn.usage",
+            serde_json::json!({ "usage": { "input_tokens": 7, "output_tokens": 2 } }),
+        );
+        let tmp = write_runtime_events(&[usage.clone(), usage]);
+        let mut rollup = Rollup::default();
+        read_runtime_test_log(tmp.path(), None, &mut rollup);
+
+        let runtime = &rollup.runtime_requests;
+        assert_eq!(runtime.provider_usage_receipts, 1);
+        assert_eq!(runtime.provider_reported_input_tokens, 7);
+        assert_eq!(runtime.provider_reported_output_tokens, 2);
+        assert_eq!(runtime.duplicate_provider_usage_receipts_skipped, 1);
+    }
+
+    #[test]
+    fn runtime_receipt_coverage_marks_unidentified_or_incomplete_old_records_unknown() {
+        let terminal_without_identity = serde_json::json!({
+            "timestamp": "2026-09-08T10:00:00Z",
+            "event": "turn.completed",
+            "payload": {
+                "turn": {
+                    "modelRequestDiagnostics": {
+                        "modelRequestsStarted": 3,
+                        "transparentStreamRetries": 1,
+                        "streamResumes": 2,
+                    },
+                },
+            },
+        });
+        let usage_without_identity = serde_json::json!({
+            "timestamp": "2026-09-08T10:00:00Z",
+            "event": "turn.usage",
+            "payload": { "usage": { "input_tokens": 9, "output_tokens": 4 } },
+        });
+        let incomplete_diagnostics = runtime_event(
+            30,
+            "2026-09-08T10:00:00Z",
+            "thread-a",
+            Some("turn-b"),
+            "turn.completed",
+            serde_json::json!({
+                "turn": { "modelRequestDiagnostics": { "modelRequestsStarted": 3 } },
+            }),
+        );
+        let incomplete_usage = runtime_event(
+            31,
+            "2026-09-08T10:00:00Z",
+            "thread-a",
+            Some("turn-b"),
+            "turn.usage",
+            serde_json::json!({ "usage": { "input_tokens": 9 } }),
+        );
+        let tmp = write_runtime_events(&[
+            terminal_without_identity,
+            usage_without_identity,
+            incomplete_diagnostics,
+            incomplete_usage,
+        ]);
+        let mut rollup = Rollup::default();
+        read_runtime_test_log(tmp.path(), None, &mut rollup);
+
+        let runtime = &rollup.runtime_requests;
+        assert_eq!(runtime.terminal_receipts_without_identity, 1);
+        assert_eq!(runtime.terminal_turn_receipts, 1);
+        assert_eq!(runtime.diagnostics_incomplete_turn_receipts, 1);
+        assert_eq!(runtime.model_requests_started, 0);
+        assert_eq!(runtime.provider_usage_receipts_without_identity, 1);
+        assert_eq!(runtime.provider_usage_receipts_incomplete, 1);
+        assert_eq!(runtime.provider_usage_receipts, 0);
+        assert_eq!(runtime.provider_reported_input_tokens, 0);
+    }
+
+    #[test]
+    fn runtime_receipts_respect_since_cutoff_without_crossing_snapshot_boundaries() {
+        let old_terminal = runtime_event(
+            40,
+            "2026-09-01T10:00:00Z",
+            "thread-a",
+            Some("turn-old"),
+            "turn.completed",
+            serde_json::json!({
+                "turn": { "modelRequestDiagnostics": {
+                    "modelRequestsStarted": 4,
+                    "transparentStreamRetries": 1,
+                    "streamResumes": 2,
+                } },
+            }),
+        );
+        let old_usage = runtime_event(
+            41,
+            "2026-09-01T10:00:00Z",
+            "thread-a",
+            Some("turn-old"),
+            "turn.usage",
+            serde_json::json!({ "usage": { "input_tokens": 40, "output_tokens": 4 } }),
+        );
+        let new_terminal = runtime_event(
+            42,
+            "2026-09-08T10:00:00Z",
+            "thread-a",
+            Some("turn-new"),
+            "turn.completed",
+            serde_json::json!({
+                "turn": { "modelRequestDiagnostics": {
+                    "modelRequestsStarted": 1,
+                    "transparentStreamRetries": 0,
+                    "streamResumes": 0,
+                } },
+            }),
+        );
+        let new_usage = runtime_event(
+            43,
+            "2026-09-08T10:00:00Z",
+            "thread-a",
+            Some("turn-new"),
+            "turn.usage",
+            serde_json::json!({ "usage": { "input_tokens": 10, "output_tokens": 1 } }),
+        );
+        let tmp = write_runtime_events(&[old_terminal, old_usage, new_terminal, new_usage]);
+        let mut rollup = Rollup::default();
+        read_runtime_test_log(
+            tmp.path(),
+            Some("2026-09-08T00:00:00Z".parse().unwrap()),
+            &mut rollup,
+        );
+
+        let runtime = &rollup.runtime_requests;
+        assert_eq!(runtime.terminal_turn_receipts, 1);
+        assert_eq!(runtime.model_requests_started, 1);
+        assert_eq!(runtime.provider_usage_receipts, 1);
+        assert_eq!(runtime.provider_reported_input_tokens, 10);
+        assert_eq!(runtime.provider_reported_output_tokens, 1);
     }
 
     // ── State-root resolution ──

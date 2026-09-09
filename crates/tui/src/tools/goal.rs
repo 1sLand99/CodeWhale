@@ -160,14 +160,16 @@ fn normalize_explicit_goal_objective(raw: &str) -> Option<String> {
 /// an explicit `/goal` declaration always wins, and Plan and Work never call
 /// this.
 ///
-/// The whole "is this real work?" rule lives here: the prompt is work when it
-/// has at least [`OPERATE_GOAL_MIN_WORDS`] words, or opens (after "please")
-/// with an imperative work verb and has at least three words. Greetings,
-/// acknowledgements, and short questions stay chat. The objective is the whole
-/// prompt, whitespace-collapsed and bounded so continuation prompts stay small;
-/// the transcript still holds the full text.
+/// Only a direct work instruction is considered for automatic persistence.
+/// Prompt length alone never authorizes a goal: questions and conversational
+/// followups remain ordinary turns. Ambiguous requests still run normally;
+/// the user can use `/goal` to explicitly request persistent work.
 #[must_use]
 pub fn operate_goal_from_prompt(input: &str) -> Option<ExplicitGoalDirective> {
+    let input = input.trim();
+    if input.starts_with(['"', '\'', '`', '>']) {
+        return None;
+    }
     let words: Vec<&str> = input.split_whitespace().collect();
     if words.len() < 3 {
         return None;
@@ -185,10 +187,10 @@ pub fn operate_goal_from_prompt(input: &str) -> Option<ExplicitGoalDirective> {
         return None;
     }
     let first_line = input.lines().find(|line| !line.trim().is_empty())?.trim();
-    if first_line.ends_with('?') && words.len() < OPERATE_GOAL_QUESTION_WORDS {
+    if first_line.ends_with(['?', '？']) || input.ends_with(['?', '？']) {
         return None;
     }
-    if words.len() < OPERATE_GOAL_MIN_WORDS && !OPERATE_WORK_VERBS.contains(&head.as_str()) {
+    if !OPERATE_WORK_VERBS.contains(&head.as_str()) {
         return None;
     }
     let mut objective = words.join(" ");
@@ -204,8 +206,6 @@ pub fn operate_goal_from_prompt(input: &str) -> Option<ExplicitGoalDirective> {
     Some(ExplicitGoalDirective { objective })
 }
 
-const OPERATE_GOAL_MIN_WORDS: usize = 8;
-const OPERATE_GOAL_QUESTION_WORDS: usize = 12;
 const OPERATE_GOAL_MAX_OBJECTIVE_CHARS: usize = 600;
 const OPERATE_CHAT_OPENERS: &[&str] = &[
     "hi", "hello", "hey", "thanks", "thank", "ok", "okay", "yes", "no", "sure", "great", "cool",
@@ -1448,13 +1448,6 @@ mod tests {
                 .objective,
             "Please fix the flaky CI test"
         );
-        assert!(
-            operate_goal_from_prompt(
-                "Could you look at why the provider table drops rows after a reload and repair it?"
-            )
-            .is_some(),
-            "a long question is still work"
-        );
         for chat in [
             "hi",
             "thanks, looks good",
@@ -1474,6 +1467,40 @@ mod tests {
         let objective = operate_goal_from_prompt(&long).expect("bounded").objective;
         assert!(objective.chars().count() <= OPERATE_GOAL_MAX_OBJECTIVE_CHARS + 1);
         assert!(objective.ends_with('…'));
+    }
+
+    #[test]
+    fn operate_does_not_promote_conversation_by_length_or_quoted_commands() {
+        for prompt in [
+            "what about like rust or docker builds or something",
+            "what about like rust or docker builds or something?",
+            "why did the build fail on the last step when running docker on macos",
+            "Could you look at why the provider table drops rows after reload and repair it?",
+            "the Rust and Docker builds might explain the disk usage we saw",
+            "explain how the goal loop decides whether to continue working",
+            "那 rust 或者 docker 构建呢",
+            "请问这个模块的具体实现原理是什么以及它如何与其他服务交互",
+            "修复这个问题需要什么步骤",
+            "Build the release now?",
+            "Build the release now？",
+            "\"build the release now\"",
+            "`build the release now`",
+            "> build the release now",
+            "in the log it says build failed, what should we do",
+        ] {
+            assert_eq!(operate_goal_from_prompt(prompt), None, "{prompt}");
+        }
+        for prompt in [
+            "Build the release and verify the checksums",
+            "Please fix the flaky CI test",
+            "Fix 中文文档中的链接 and verify them",
+            "run \"cargo build --release\" and verify the result",
+        ] {
+            assert_eq!(
+                operate_goal_from_prompt(prompt).expect(prompt).objective,
+                prompt
+            );
+        }
     }
 
     #[tokio::test]

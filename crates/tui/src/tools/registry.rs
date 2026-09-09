@@ -52,9 +52,14 @@ impl ToolRegistry {
     /// Register a tool in the registry.
     pub fn register(&mut self, tool: Arc<dyn ToolSpec>) {
         let name = tool.name().to_string();
-        if self.tools.insert(name.clone(), tool).is_some() {
-            tracing::warn!("Overwriting existing tool: {}", name);
+        if let Some(previous) = self.tools.get(&name) {
+            tracing::warn!(
+                previous_origin = ?previous.registration_origin(),
+                replacement_origin = ?tool.registration_origin(),
+                "Overwriting existing tool: {}", crate::safe_label::SafeLabel::identifier(&name)
+            );
         }
+        self.tools.insert(name, tool);
         self.invalidate_api_cache();
     }
 
@@ -546,6 +551,7 @@ fn enforce_tool_authority(
     tool: &dyn ToolSpec,
     context: &ToolContext,
 ) -> Result<(), ToolError> {
+    crate::core::engine::tool_catalog::enforce_tool_denial(context, name, input)?;
     let Some(authority) = context.tool_authority.as_ref() else {
         return Ok(());
     };
@@ -568,7 +574,19 @@ fn enforce_tool_authority(
     }
     let capabilities = tool.capabilities();
     if matches!(name, "bash" | "Bash" | "exec_shell") {
-        if tool.is_read_only_for(input) {
+        // Numeric sed inspection already has an execution-time read-only
+        // grammar. Reuse it here without promoting the broader child shell
+        // surface (including pipelines/network reads) into machine authority,
+        // or changing the parent's parallel/approval classification (#6015).
+        let bounded_sed = context.shell_policy == crate::worker_profile::ShellPolicy::ReadOnly
+            && input
+                .get("command")
+                .and_then(Value::as_str)
+                .is_some_and(|command| {
+                    command.split_whitespace().next() == Some("sed") && !command.contains('|')
+                })
+            && super::shell::agent_readonly_bash_input(input);
+        if tool.is_read_only_for(input) || bounded_sed {
             if authority.shell != crate::tools::spec::ToolShellAuthority::ReadOnly {
                 return Err(ToolError::permission_denied(format!(
                     "worker '{}' cannot run {name}: its machine-readable authority envelope does not grant read-only shell access",
@@ -1215,8 +1233,10 @@ impl ToolRegistryBuilder {
         // Snapshot the current tool list from the pool (non-blocking).
         // The adapter lazily resolves at execution time via the pool.
         if let Ok(pool) = mcp_pool.try_lock() {
+            let tool_servers = pool.resolved_tool_servers();
             for (name, tool) in pool.all_tools() {
                 let adapter = Arc::new(McpToolAdapter {
+                    server_name: tool_servers.get(&name).cloned(),
                     name: name.clone(),
                     tool: tool.clone(),
                     pool: mcp_pool.clone(),
@@ -1484,6 +1504,8 @@ fn to_snake_case(s: &str) -> String {
 /// unified `ToolRegistry` alongside native tools (§5.B).
 struct McpToolAdapter {
     name: String,
+    /// Diagnostic snapshot from the pool's exact route projection.
+    server_name: Option<String>,
     tool: crate::mcp::McpTool,
     pool: std::sync::Arc<tokio::sync::Mutex<crate::mcp::McpPool>>,
 }
@@ -1503,6 +1525,23 @@ fn is_mcp_read_helper(name: &str) -> bool {
 impl ToolSpec for McpToolAdapter {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn registration_origin(&self) -> std::borrow::Cow<'_, str> {
+        use crate::safe_label::SafeLabel;
+        match &self.server_name {
+            Some(server) => format!(
+                "MCP server {}, tool {}",
+                SafeLabel::identifier(server),
+                SafeLabel::identifier(&self.tool.name)
+            )
+            .into(),
+            None => format!(
+                "MCP tool {} (server unknown)",
+                SafeLabel::identifier(&self.name)
+            )
+            .into(),
+        }
     }
 
     fn description(&self) -> &str {
@@ -1639,6 +1678,7 @@ pub(crate) fn mcp_result_to_bounded_rich_tool_result(result: Value) -> RichToolR
 pub(super) fn mcp_tool_adapter_for_test(name: &str) -> Arc<dyn ToolSpec> {
     Arc::new(McpToolAdapter {
         name: name.to_string(),
+        server_name: None,
         tool: crate::mcp::McpTool {
             name: name.to_string(),
             description: None,

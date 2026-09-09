@@ -19,6 +19,7 @@ static CGPoint cuLeasePoint;
 #ifdef CU_TEST
 static NSString *cuTestLockDir = nil;
 static NSString *cuTestReleaseFile = nil;
+static CGEventFlags cuTestInheritedTextFlags = 0;
 #endif
 static void cuCancel(int signum) { cuCancelled = 1; }
 static void cuCheckCancelled(void) {
@@ -139,6 +140,13 @@ static NSDictionary *info(AXUIElementRef el, NSInteger index, NSInteger win, NSA
   else d[@"actions"]=@[];
   return d;
 }
+static void cuValidateElementIdentity(AXUIElementRef el, NSDictionary *target) {
+  NSDictionary *current=info(el,0,0,@[]);
+  for(NSString *key in @[@"role",@"label"]) {
+    id expected=target[key]?:NSNull.null, actual=current[key]?:NSNull.null;
+    if(![expected isEqual:actual]) @throw [NSException exceptionWithName:@"stale" reason:[NSString stringWithFormat:@"element changed %@; observe again before acting",key] userInfo:nil];
+  }
+}
 static void walk(AXUIElementRef el, NSInteger win, NSArray *path, NSInteger depth, NSInteger limit, NSInteger max, BOOL depthIsTruncation, NSMutableArray *out, BOOL *truncated) {
   // Breadth first keeps a long file listing from hiding its dialog buttons.
   NSMutableArray *queue=[NSMutableArray arrayWithObject:@{@"el":(__bridge id)el,@"path":path,@"depth":@(depth)}];
@@ -249,10 +257,20 @@ static BOOL axActivate(pid_t pid) {
   return e==kAXErrorSuccess;
 }
 static NSRunningApplication *resolve(NSDictionary *ref) {
-  if(![ref isKindOfClass:NSDictionary.class]) ref=@{};
-  if(!ref.count) return NSWorkspace.sharedWorkspace.frontmostApplication;
-  NSString *bundle=[ref[@"bundle_id"] length]?ref[@"bundle_id"]:nil, *name=[ref[@"name"] length]?ref[@"name"]:nil;
-  if(!ref[@"pid"] && !bundle && !name) return NSWorkspace.sharedWorkspace.frontmostApplication;
+  // Only omission selects the frontmost app. An explicit but malformed
+  // identity must never redirect observation or input to the user's app.
+  if(!ref) return NSWorkspace.sharedWorkspace.frontmostApplication;
+  if(![ref isKindOfClass:NSDictionary.class] || !ref.count) return nil;
+  for(id key in ref) {
+    id value=ref[key];
+    if([key isEqual:@"pid"]) {
+      if(![value isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)value)==CFBooleanGetTypeID()
+         || [value doubleValue]<=0 || [value doubleValue]>INT_MAX || [value doubleValue]!=[value intValue]) return nil;
+    } else if([key isEqual:@"name"] || [key isEqual:@"bundle_id"]) {
+      if(![value isKindOfClass:NSString.class] || ![value stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].length) return nil;
+    } else return nil;
+  }
+  NSString *bundle=ref[@"bundle_id"], *name=ref[@"name"];
   for(NSRunningApplication *a in NSWorkspace.sharedWorkspace.runningApplications) {
     if(ref[@"pid"] && a.processIdentifier!=[ref[@"pid"] intValue]) continue;
     if(bundle && !matchesName(a.bundleIdentifier,bundle)) continue;
@@ -264,6 +282,12 @@ static NSRunningApplication *resolve(NSDictionary *ref) {
 static CGEventRef textEvent(NSString *text, BOOL down) {
   UniChar *chars=calloc(text.length,sizeof(UniChar)); [text getCharacters:chars range:NSMakeRange(0,text.length)];
   CGEventRef event=CGEventCreateKeyboardEvent(NULL,0,down);
+#ifdef CU_TEST
+  // Simulate physical modifier state without posting a system key event.
+  CGEventSetFlags(event,cuTestInheritedTextFlags);
+#endif
+  // Literal text must not inherit the user's held Command/Control/Option/Shift.
+  CGEventSetFlags(event,0);
   CGEventKeyboardSetUnicodeString(event,text.length,chars); free(chars); return event;
 }
 static BOOL cuTextRole(NSString *role) {
@@ -335,6 +359,8 @@ static NSDictionary *cuType(NSDictionary *args, NSRunningApplication *inputApp, 
 }
 static id execute(NSDictionary *p) {
   NSString *tool=p[@"tool"]; NSDictionary *args=p[@"args"]?:@{};
+  if([tool isEqual:@"pointer_sequence"] && ![args[@"foreground_input"] boolValue])
+    @throw [NSException exceptionWithName:@"shared_pointer_required" reason:@"shared macOS pointer input is unavailable in background mode; use an accessibility action or a separate computer" userInfo:nil];
   cuOwnerPipe=[args[@"owner_pipe"] boolValue];
   BOOL mutates=[@[@"type",@"key_event",@"mouse_event",@"scroll",@"pointer_sequence",@"release_input",@"set_value",@"select_text",@"perform_action"] containsObject:tool]
     || ([tool isEqual:@"hit_test"] && [args[@"perform"] boolValue])
@@ -357,10 +383,14 @@ static id execute(NSDictionary *p) {
     return cuPostKey(args,[args[@"input_app_ref"][@"pid"] intValue]);
   }
   cuCheckCancelled();
-  if([tool isEqual:@"input_capabilities"]) return @{@"input_lease":@1,@"owner_pipe":@YES,@"record_owner_pipe":@1,@"window_ocr":@1};
+  if([tool isEqual:@"input_capabilities"]) return @{@"input_lease":@1,@"owner_pipe":@YES,@"record_owner_pipe":@1,@"window_ocr":@1,@"element_identity":@1};
   if([tool isEqual:@"record"]) return cuRecord(args);
   if([tool isEqual:@"recognize_text"]) return cuRecognizeText(args[@"file"]);
 #ifdef CU_TEST
+  if([tool isEqual:@"inspect_element_identity"]) {
+    cuValidateElementIdentity((__bridge AXUIElementRef)args[@"element"],args[@"target"]);
+    return @{@"identity_matches":@YES};
+  }
   if([tool isEqual:@"inspect_window_match"]) {
     NSDictionary *b=args[@"bounds"];
     CGRect bounds=CGRectMake([b[@"x"] doubleValue],[b[@"y"] doubleValue],[b[@"w"] doubleValue],[b[@"h"] doubleValue]);
@@ -381,6 +411,7 @@ static id execute(NSDictionary *p) {
     return @{@"action_sent":@YES};
   }
   if([tool isEqual:@"inspect_text_event"]) {
+    cuTestInheritedTextFlags=[args[@"inherited_flags"] unsignedLongLongValue];
     CGEventRef event=textEvent(args[@"text"],YES); UniChar chars[4096]; UniCharCount length=0;
     CGEventKeyboardGetUnicodeString(event,4096,&length,chars); CGEventFlags flags=CGEventGetFlags(event); CFRelease(event);
     return @{@"text":[NSString stringWithCharacters:chars length:length],@"flags":@(flags)};
@@ -413,7 +444,7 @@ static id execute(NSDictionary *p) {
     return @{@"updated":@YES};
   }
   if([tool isEqual:@"window_info"]) {
-    NSRunningApplication *a=resolve(args[@"app_ref"]?:args[@"input_app_ref"]?:@{});
+    NSRunningApplication *a=resolve(args[@"app_ref"]?:args[@"input_app_ref"]);
     if(!a) @throw [NSException exceptionWithName:@"app" reason:@"application not found" userInfo:nil];
     AXUIElementRef ax=AXUIElementCreateApplication(a.processIdentifier);
     NSArray *axWindows=attr(ax,@"AXWindows");
@@ -455,7 +486,7 @@ static id execute(NSDictionary *p) {
     return @{@"found":@NO,@"skipped":skipped};
   }
   if([tool isEqual:@"app_info"]) {
-    NSRunningApplication *a=resolve(args[@"app_ref"]?:@{});
+    NSRunningApplication *a=resolve(args[@"app_ref"]);
     if(!a) @throw [NSException exceptionWithName:@"app" reason:@"application not found" userInfo:nil];
     if([args[@"activate"] boolValue]) cuLockInput();
     cuCheckCancelled();
@@ -482,12 +513,12 @@ static id execute(NSDictionary *p) {
     CGPoint p=CGPointMake([args[@"x"] doubleValue],[args[@"y"] doubleValue]);
     CGEventRef event=CGEventCreateMouseEvent(NULL,[args[@"type"] unsignedIntValue],p,[args[@"button"] unsignedIntValue]);
     CGEventSetIntegerValueField(event,kCGMouseEventClickState,[args[@"clickState"] longLongValue]);
-    // A pointer event posted to a process carries no window, and AppKit drops
-    // what it cannot route. Naming the window under the point is what lets a
-    // background application receive it without the pointer ever moving.
+    // Address the window as well as the process using public event fields.
+    // Dispatch is not delivery: a toolkit may still discard these events.
+    // This primitive needs effect readback before a caller can rely on it.
     if([args[@"windowNumber"] longLongValue]>0) {
-      CGEventSetIntegerValueField(event,91,[args[@"windowNumber"] longLongValue]);
-      CGEventSetIntegerValueField(event,92,[args[@"windowNumber"] longLongValue]);
+      CGEventSetIntegerValueField(event,kCGMouseEventWindowUnderMousePointer,[args[@"windowNumber"] longLongValue]);
+      CGEventSetIntegerValueField(event,kCGMouseEventWindowUnderMousePointerThatCanHandleThisEvent,[args[@"windowNumber"] longLongValue]);
     }
     cuCheckCancelled();
     CGEventPostToPid(inputApp.processIdentifier,event); CFRelease(event); return @{@"action_sent":@YES};
@@ -562,12 +593,11 @@ static id execute(NSDictionary *p) {
   /**
    * One pointer gesture, posted to the window server.
    *
-   * macOS delivers keyboard events to a process but silently drops pointer and
-   * scroll events posted the same way (measured on CGEventPostToPid with both
-   * event sources and on CGEventPostToPSN), so a pointer gesture that has no
-   * accessibility equivalent has to travel through the shared event tap. That
-   * moves the real cursor, so the whole gesture runs in one call and the
-   * pointer is put back where the user left it.
+   * The tested AppKit fixture dropped process-directed mouse/scroll events.
+   * This qualified raw path therefore uses the shared event tap, requiring
+   * explicit foreground control. It moves the real cursor, so the gesture
+   * runs in one call and restores its starting position when requested.
+   * Restoration does not make concurrent desktop use safe.
    */
   if([tool isEqual:@"pointer_sequence"]) {
     CGEventRef probe=CGEventCreate(NULL); CGPoint home=CGEventGetLocation(probe); CFRelease(probe);
@@ -653,7 +683,7 @@ static id execute(NSDictionary *p) {
   if([tool isEqual:@"cursor_position"]) {
     CGEventRef event=CGEventCreate(NULL); CGPoint p=CGEventGetLocation(event); CFRelease(event); return @{@"x":@(p.x),@"y":@(p.y)};
   }
-  NSRunningApplication *a=resolve(args[@"app_ref"]?:args[@"target"][@"app_ref"]?:@{});
+  NSRunningApplication *a=resolve(args[@"app_ref"]?:args[@"target"][@"app_ref"]);
   if(!a) @throw [NSException exceptionWithName:@"app" reason:@"application not found" userInfo:nil];
   AXUIElementRef app=AXUIElementCreateApplication(a.processIdentifier);
   AXUIElementSetMessagingTimeout(app,2.0);
@@ -689,6 +719,7 @@ static id execute(NSDictionary *p) {
       }
     }
     cuCheckCancelled();
+    if([t[@"type"] isEqual:@"element"]) cuValidateElementIdentity((__bridge AXUIElementRef)el,t);
     AXError e=kAXErrorFailure;
     if([tool isEqual:@"set_value"]) e=AXUIElementSetAttributeValue((__bridge AXUIElementRef)el,kAXValueAttribute,(__bridge CFTypeRef)args[@"value"]);
     else if([tool isEqual:@"select_text"]){ NSArray *r=args[@"text_range"]?:@[@0,@0]; if(r.count!=2 || [r[0] longValue]<0 || [r[1] longValue]<0) @throw [NSException exceptionWithName:@"range" reason:@"text_range must be [start, length], both nonnegative" userInfo:nil]; CFRange range=CFRangeMake([r[0] longValue],[r[1] longValue]); AXValueRef v=AXValueCreate(kAXValueCFRangeType,&range); e=AXUIElementSetAttributeValue((__bridge AXUIElementRef)el,kAXSelectedTextRangeAttribute,v); CFRelease(v); }

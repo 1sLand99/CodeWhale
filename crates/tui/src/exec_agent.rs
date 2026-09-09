@@ -11,15 +11,10 @@ use super::*;
 
 /// Resolve the headless `exec` model-step ceiling.
 ///
-/// R1: omitting `--max-turns` no longer means `u32::MAX`. A non-interactive
-/// run has nobody watching it, so its default bound is the same finite
-/// ceiling the interactive engine uses. Clap already rejects `--max-turns
-/// 0`, so no "0 means unlimited" sentinel can reach here; an explicit value
-/// is still clamped to the documented finite range.
+/// Omission leaves model steps uncapped. Clap rejects `--max-turns 0`;
+/// explicit positive values retain the documented finite range.
 pub(crate) fn exec_max_steps(max_turns: Option<u32>) -> u32 {
-    crate::core::engine::turn_budget::resolve_max_model_steps(max_turns.or(Some(
-        crate::core::engine::turn_budget::DEFAULT_EXEC_MAX_TURNS,
-    )))
+    crate::core::engine::turn_budget::resolve_max_model_steps(max_turns)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -78,6 +73,27 @@ pub(crate) async fn run_exec_agent(
     if let Some(envelope) = fleet_authority {
         crate::tools::spec::install_process_tool_authority(envelope).map_err(anyhow::Error::msg)?;
     }
+
+    let fleet_capture = match (
+        std::env::var("CODEWHALE_FLEET_CAPTURE_ID").ok(),
+        std::env::var_os("CODEWHALE_FLEET_CAPTURE_DIR"),
+    ) {
+        (Some(id), Some(dir)) => {
+            uuid::Uuid::parse_str(&id).context("invalid Fleet session capture id")?;
+            anyhow::ensure!(
+                resume_session.is_none(),
+                "Fleet capture cannot resume a session"
+            );
+            let manager = SessionManager::new(PathBuf::from(dir))?;
+            match manager.load_session(&id) {
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                _ => anyhow::bail!("Fleet session capture id is already in use or unavailable"),
+            }
+            Some((id, manager))
+        }
+        (None, None) => None,
+        _ => anyhow::bail!("incomplete Fleet session capture destination"),
+    };
 
     let route = resolve_cli_exec_route(config, model, prompt, force_configured_route).await?;
     let execution_config = config_for_cli_route(config, &route);
@@ -208,7 +224,7 @@ pub(crate) async fn run_exec_agent(
         model: effective_model.clone(),
         active_route_limits,
         workspace: workspace.clone(),
-        session_id: None,
+        session_id: fleet_capture.as_ref().map(|(id, _)| id.clone()),
         subagent_state_root: None,
         plugin_registry: Some(std::sync::Arc::clone(&engine_plugin_registry)),
         allow_shell: exec_allow_shell,
@@ -407,10 +423,13 @@ pub(crate) async fn run_exec_agent(
 
     engine_handle
         .send(Op::SendMessage {
+            max_output_tokens: None,
             content: prompt.to_string(),
+            images: Vec::new(),
             mode,
             route: Box::new(validated_route.into_resolved()),
             compaction: Box::new(compaction.clone()),
+            initial_routed_usage: Box::default(),
             goal_objective: None,
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
@@ -659,11 +678,18 @@ pub(crate) async fn run_exec_agent(
             {
                 eprintln!("sub-agent {id}: {status}");
             }
-            Event::AgentComplete { id, result, .. }
-                if output_format == ExecOutputFormat::Text && !json_output =>
-            {
+            Event::AgentComplete {
+                id,
+                result,
+                outcome,
+                ..
+            } if output_format == ExecOutputFormat::Text && !json_output => {
                 eprintln!(
-                    "sub-agent {id} completed: {}",
+                    "sub-agent {id} {}: {}",
+                    outcome
+                        .as_ref()
+                        .map(crate::tools::subagent::subagent_status_name)
+                        .unwrap_or("settled (outcome unconfirmed)"),
                     summarize_tool_output(&result)
                 );
             }
@@ -918,6 +944,7 @@ pub(crate) async fn run_exec_agent(
                         &latest_system_prompt,
                         latest_session_id.as_deref(),
                         u64::from(usage.input_tokens) + u64::from(usage.output_tokens),
+                        fleet_capture.as_ref().map(|(_, manager)| manager),
                     ) {
                         Ok(id) => {
                             if output_format == ExecOutputFormat::Text && !json_output {
@@ -929,16 +956,17 @@ pub(crate) async fn run_exec_agent(
                             if output_format == ExecOutputFormat::Text && !json_output {
                                 eprintln!("warning: failed to save exec session: {err}");
                             }
-                            latest_session_id.clone()
+                            None
                         }
                     }
                 } else {
-                    latest_session_id.clone()
+                    None
                 };
                 if output_format == ExecOutputFormat::StreamJson {
                     if let Some(id) = saved_session_id.as_ref() {
                         emit_exec_stream_event(&ExecStreamEvent::SessionCapture {
                             content: exec_stream_session_ref(id),
+                            saved_session_id: id.clone(),
                         })?;
                     }
                     // Resolved output ceiling and its provenance, surfaced so a
@@ -956,6 +984,15 @@ pub(crate) async fn run_exec_agent(
                             &latest_model,
                         )
                         .as_str();
+                    // The deliverable is the final assistant reply of the
+                    // session, not the cumulative stream output: a
+                    // multi-step turn streams pre-tool commentary first,
+                    // and that commentary is not part of the answer.
+                    let final_answer = exec_stream_final_answer_text(
+                        &latest_messages,
+                        !summary.output.trim().is_empty(),
+                    )
+                    .unwrap_or_default();
                     emit_exec_stream_event(&ExecStreamEvent::Metadata {
                         meta: Box::new(ExecStreamMeta {
                             receipt_kind: "terminal",
@@ -990,7 +1027,10 @@ pub(crate) async fn run_exec_agent(
                                 &latest_messages,
                                 latest_system_prompt.as_ref(),
                             ),
-                            visible_final_answer_chars: summary.output.chars().count(),
+                            visible_final_answer_chars: final_answer.chars().count(),
+                            visible_final_answer_excerpt: exec_stream_final_answer_excerpt(
+                                &final_answer,
+                            ),
                             resume_command: saved_session_id
                                 .as_deref()
                                 .map(exec_stream_resume_hint)

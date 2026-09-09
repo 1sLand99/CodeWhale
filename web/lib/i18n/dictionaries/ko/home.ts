@@ -9,20 +9,18 @@ import type { HomeDict } from "../types";
  */
 
 export const home: HomeDict = {
-  metaTitle: "Codewhale — 당신의 모델, 함께라서 더 유능하게.",
+  metaTitle: "Codewhale — 원하는 모델로 개발하고 작업을 자동화하세요",
   metaDescription:
-    "Codewhale은 오픈소스 에이전트 컴퓨팅 시스템입니다. 이미 쓰고 있는 모델(호스팅, 게이트웨이, 로컬)을 터미널로 가져와 당신의 머신에서, 당신의 통제 아래 함께 일하게 하세요. Rust, MIT.",
-  kicker: "에이전트 컴퓨팅, 당신의 조건대로",
-  heroTitleA: "당신의 모델,",
-  heroTitleB: "함께라서 더 유능하게.",
+    "오픈소스 에이전트와 직접 선택한 호스팅형 또는 로컬 AI 모델을 사용해 소프트웨어를 개발하고 파일을 다루며 일상적인 작업을 자동화하세요.",
+  heroTitle: "원하는 모델로 개발하고 작업을 자동화하세요",
   heroIntro:
-    "{brand}은 이미 쓰고 있는 모델들을 하나의 터미널로 모아 한 팀처럼 일하게 합니다. 코드를 읽고, 고치고, 검사를 돌리는 동안 각 모델이 무엇을 해도 되는지는 당신이 정합니다. 오픈소스이며 당신의 머신에서 실행됩니다.",
+    "{brand}은 소프트웨어를 개발하고 파일을 다루며 반복 작업을 재사용 가능한 워크플로로 바꿀 수 있는 에이전트를 제공합니다. 무엇을 이루고 싶은지 알려 주고 작업에 맞는 호스팅형 또는 로컬 모델을 선택하면, 작업을 진행하면서 제공업체도 자유롭게 바꿀 수 있습니다.",
   getCodewhale: "Codewhale 받기",
   exploreProduct: "제품 살펴보기",
   shotPreview: "터미널 미리보기",
   shotBuild: "v{version} 개발 빌드",
   screenshotAlt:
-    "터미널의 Codewhale v0.9.12 개발 빌드: 점자 고래 마크, 아직 기록이 없는 새 세션, 메시지 입력창, 그리고 Full Access, Work 모드, 예약 작업 2개, MCP 서버 연결 중, GLM-5.3 최대 강도를 보여주는 푸터",
+    "Codewhale v0.9.12 터미널, 빌드 171acee689aa: 고래 마크, 메시지 입력창, Full Access와 Operate 모드, 예약된 작업 두 개, 연결 중인 MCP 서버 21개, 추론 강도를 최대로 설정한 GLM-5.3이 표시된 새 세션.",
   latestRelease: "최신 릴리스 {tag}",
   releaseUnavailable: "릴리스 상태를 확인할 수 없음",
   currentSource: "소스",
@@ -31,56 +29,81 @@ export const home: HomeDict = {
   publishedRelease: "공개됨",
   figcaptionSourceCandidate: "미공개",
   chapterTerminal: "당신의 터미널",
-  chapterTerminalTitle: "익숙한 곳에서 시작합니다.",
-  gainHeading: "챗봇이 아니라, 이미 비용을 내고 있는 모델에 대한 지렛대를 얻습니다.",
-  gainLede: "한 세션에 여러 모델을 동시에 두고, 각각에 역할을 맡기고, 같은 저장소에서 같은 규칙으로 일하게 할 수 있습니다.",
+  chapterTerminalTitle: "만들고 싶은 것부터 시작하세요",
+  gainHeading: "Codewhale로 할 수 있는 일",
+  gainLede: "프로젝트나 질문, 자동화하고 싶은 작업에서 시작해 에이전트 하나와 함께 진행하거나 큰 작업의 여러 부분을 여러 에이전트에게 나누어 맡길 수 있습니다.",
   gain: [
-    ["당신의 모델", "호스팅 키, 게이트웨이, 또는 키가 전혀 필요 없는 로컬 런타임. 역할마다 다른 모델을 고정하고, 선택한 제공자는 그대로 유지됩니다. 모델 이름이 제공자를 대신 바꾸지 않습니다."],
-    ["유능한 에이전트", "Plan, Work, Operate 모드. 한 작업을 나눠 맡는 서브에이전트 fleet. 파일, 셸, 웹, MCP 도구. 저장하고 재개하고 되돌릴 수 있는 세션."],
-    ["내 머신에서의 통제", "Ask, Auto-Review, Full Access. 묻기 전에 얼마나 할지는 당신이 정합니다. 로컬에서 실행되고, OS가 허용하는 곳에서는 샌드박스가 적용되며, 감사 로그를 직접 읽을 수 있습니다."],
+    [
+      "만들고 싶은 것을 구현하세요",
+      "만들고 싶은 것을 설명하고 코드를 읽고 파일을 편집하며 명령을 실행하고 결과를 확인할 수 있는 에이전트와 함께 작업하세요."
+    ],
+    [
+      "일상적인 작업을 자동화하세요",
+      "반복하는 작업을 스크립트와 워크플로로 만들어 두면 필요할 때마다 터미널에서 다시 실행할 수 있습니다."
+    ],
+    [
+      "다양한 모델을 사용하세요",
+      "에이전트에 호스팅형 또는 로컬 모델을 사용하고 서로 다른 모델과 역할이 각각 적합한 작업을 맡도록 할 수 있습니다."
+    ]
   ],
   chapterModels: "당신의 모델",
-  modelsHeading: "가진 것을 가져오세요. 고르지 않은 것은 바뀌지 않습니다.",
+  modelsHeading: "작업마다 선택할 수 있는 다양한 모델",
   modelsBody:
-    "지원되는 호스팅 제공업체, 게이트웨이 또는 로컬 모델 서버를 연결하세요. 시작하기 전에 제공업체와 모델을 확인하세요. 로컬 서버도 설정에 따라 인증이 필요할 수 있습니다.",
+    "호스팅형 모델 제공업체에 직접 연결하거나 게이트웨이로 여러 제공업체를 이용하거나 모델을 로컬에서 실행한 뒤, 작업하면서 세션별로 사용할 모델을 선택할 수 있습니다.",
   modelsFacts: [
-    ["호스팅", "codewhale auth set으로 저장한 내 API 키"],
+    ["호스팅", "codewhale auth set --provider <id>으로 저장한 내 API 키"],
     ["게이트웨이", "하나의 엔드포인트로 여러 모델, 제공자는 여전히 내가 선택"],
     ["로컬", "localhost의 vLLM, SGLang, Ollama — 보통 키 불필요"],
   ],
-  modelsLink: "모든 제공자 보기",
-  startHeading: "첫 세션까지 네 단계.",
-  startLede: "설치하고, 키 없이 세션을 열고, 제공자를 연결한 뒤, 모델 하나로 부족할 때 fleet을 설정하세요.",
+  modelsLink: "모델과 제공업체 살펴보기",
+  startHeading: "Codewhale 시작하기",
+  startLede: "Codewhale을 설치하고 모델을 연결하면 터미널에서 첫 작업을 설명할 수 있으며, 여러 에이전트가 작업을 나누어 맡도록 하고 싶을 때 Fleet을 추가할 수 있습니다.",
   startGuideLink: "시작 가이드 읽기",
   startVocabularyLink: "제품 용어 보기",
-  chapterAccount: "지금 실행되는 곳",
-  availabilityHeading: "지금 가능한 것, 개발 중인 것, 아직 아닌 것 — 있는 그대로.",
-  availabilityLede: "터미널이 출시된 제품입니다. 나머지는 실제 상태 그대로 적었습니다.",
+  chapterAccount: "Codewhale 받기",
+  availabilityHeading: "Codewhale을 사용할 수 있는 곳",
+  availabilityLede: "Codewhale은 지금 터미널에서 사용할 수 있으며, 웹 앱과 데스크톱 앱, 클라우드 컴퓨터는 개발 중입니다.",
   availability: [
-    ["터미널", "출시됨", "Linux·macOS·Windows용 GitHub Releases 바이너리를 권장합니다. npm과 Cargo도 사용할 수 있습니다. Android의 Termux는 미리보기입니다."],
-    ["웹 앱", "로그인과 원격 제어 가능", "로그인하거나 계정을 만든 뒤, 실행 중인 로컬 세션에서 /rc를 입력하면 바로 그 세션을 브라우저에서 이어갈 수 있습니다. 브라우저 워크벤치의 나머지는 개발 미리보기입니다."],
-    ["데스크톱", "개발 빌드", "macOS, Linux, Windows용 알파 빌드가 있습니다. 출시된 데스크톱 앱은 아직 없습니다."],
-    ["클라우드 컴퓨터", "아직 이용 불가", "호스팅된 컴퓨터에서 작업을 실행하는 기능은 개발 중입니다. 작동하게 되면 이 페이지에서 알리겠습니다."],
+    [
+      "터미널",
+      "출시됨",
+      "Linux, macOS, Windows용 릴리스 바이너리를 GitHub에서 제공합니다. npm과 Cargo로도 설치할 수 있습니다. Android에서 Termux로 실행하는 버전은 미리보기입니다."
+    ],
+    [
+      "웹 앱",
+      "개발 미리보기",
+      "개발 미리보기에서 계정 접속과 브라우저 페어링을 이용할 수 있습니다."
+    ],
+    [
+      "데스크톱",
+      "개발 빌드",
+      "macOS 앱은 개발 중이며, 공개 다운로드는 추후 제공될 예정입니다."
+    ],
+    [
+      "클라우드 컴퓨터",
+      "개발 중",
+      "작업을 실행할 수 있는 호스팅 컴퓨터."
+    ]
   ],
-  availabilityNote: "터미널에는 계정이 필요 없습니다. 계정 자체가 유료 플랜이 되는 일은 없으며, 이 사이트는 요금을 청구할 수 없습니다.",
+  availabilityNote: "Codewhale 계정 없이도 터미널을 사용할 수 있으며, 호스팅형 모델 사용 요금은 이용하는 제공업체에서 청구합니다.",
   accountLink: "계정 만들기",
-  surfacesHeading: "작업이 일어나는 자리에서 런타임을 사용하세요.",
+  surfacesHeading: "Codewhale로 작업하는 방법",
   surfaces: [
     ["TUI", "대화형 터미널 작업"],
     ["codewhale exec", "스크립트와 CI"],
-    ["웹 클라이언트", "루프백 전용 브라우저 클라이언트"],
+    ["로컬 웹 클라이언트","localhost 인터페이스. 호스팅형 브라우저 작업 공간은 개발 중"],
     ["Runtime API + MCP", "로컬 통합"],
-    ["fleet", "지속형 멀티 에이전트 작업"],
+    ["Fleet","여러 에이전트가 하나의 작업을 함께 수행"],
   ],
-  runtimeLink: "런타임 인터페이스와 안정성 노트 보기",
-  installBandHeading: "명령 하나로 시작하세요.",
+  runtimeLink: "연동 기능 살펴보기",
+  installBandHeading: "macOS 또는 Linux에 Codewhale을 설치하세요",
   copy: "복사",
   copied: "복사됨 ✓",
   binaries: "바이너리",
   chinaMirrors: "중국 미러",
   installGuideLink: "설치 가이드 읽기",
-  communityHeading: "공개적으로 개발합니다",
-  communityBody: "MIT 라이선스로 공개되어 있으며, 런타임과 프로바이더, 플랫폼, 문서, 테스트 전반의 기여자들이 함께 만들어 갑니다.",
+  communityHeading: "Codewhale을 함께 개선해 주세요",
+  communityBody: "버그를 발견했거나 새로운 기능에 대한 아이디어가 있거나 첫 풀 리퀘스트를 보내고 싶다면, 여러분의 이야기를 듣고 앞으로의 작업을 함께 이어 가고 싶습니다.",
   communityLinksAria: "커뮤니티 링크",
-  contribute: "기여하기",
+  contribute: "풀 리퀘스트 보내기",
 };

@@ -674,7 +674,15 @@ fn timeout_secs(input: &serde_json::Value, key: &str) -> Result<Duration, ToolEr
     ))
 }
 
-fn shell_allowed(context: &ToolContext) -> Result<(), ToolError> {
+fn shell_allowed(context: &ToolContext, name: &str) -> Result<(), ToolError> {
+    crate::core::engine::tool_catalog::enforce_tool_denial(context, name, &json!({}))?;
+    if matches!(name, "terminal/run" | "terminal/send" | "terminal/reset")
+        && context.shell_policy != crate::worker_profile::ShellPolicy::Full
+    {
+        return Err(ToolError::permission_denied(
+            "Persistent terminal execution and input require full shell permission.",
+        ));
+    }
     if context.shell_policy.allows_shell() {
         Ok(())
     } else {
@@ -724,7 +732,7 @@ impl ToolSpec for TerminalRunTool {
         input: serde_json::Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        shell_allowed(context)?;
+        shell_allowed(context, self.name())?;
         #[cfg(unix)]
         {
             let command = required_str(&input, "command")?.to_string();
@@ -771,7 +779,7 @@ impl ToolSpec for TerminalSendTool {
         input: serde_json::Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        shell_allowed(context)?;
+        shell_allowed(context, self.name())?;
         #[cfg(unix)]
         {
             let name = session_name(&input, true)?.to_string();
@@ -813,7 +821,7 @@ impl ToolSpec for TerminalWaitTool {
         input: serde_json::Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        shell_allowed(context)?;
+        shell_allowed(context, self.name())?;
         #[cfg(unix)]
         {
             let name = session_name(&input, true)?.to_string();
@@ -852,7 +860,7 @@ impl ToolSpec for TerminalCancelTool {
         input: serde_json::Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        shell_allowed(context)?;
+        shell_allowed(context, self.name())?;
         #[cfg(unix)]
         {
             let name = session_name(&input, true)?.to_string();
@@ -896,7 +904,7 @@ impl ToolSpec for TerminalResetTool {
         input: serde_json::Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        shell_allowed(context)?;
+        shell_allowed(context, self.name())?;
         #[cfg(unix)]
         {
             let name = session_name(&input, true)?.to_string();

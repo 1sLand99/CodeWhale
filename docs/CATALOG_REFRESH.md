@@ -21,26 +21,37 @@ Related docs: [`PROVIDERS.md`](./PROVIDERS.md), RFC
 
 ## Layers (lowest → highest priority)
 
-Effective precedence for model facts (context, output caps, reasoning,
-pricing-ish metadata). Live wins over bundled when present.
+The shared catalog compiler applies these layers from lowest to highest:
 
 ```
-(5) Legacy static completion lists (DEFAULT_* consts)
-      — only if catalog has zero rows for the provider
-(4) Static code tables
-      crates/tui/src/models.rs
-(3) Bundled offline seeds (NOT competing truth)
-      crates/config/assets/models_dev.bundled.json
-      crates/tui/assets/model_catalog.bundled.json
-(2) Live Models.dev catalog (preferred when available)
-      https://models.dev/catalog.json
-      → disk cache ~/.codewhale/catalog/models-dev-catalog.json
-      → 24 h TTL
-(1) User / custom overrides (pinned models, custom endpoints)
-(0) Special: ChatGPT/Codex OAuth roster
-      ~/.codex/models_cache.json
-      — bypasses Models.dev for openai-codex only
+0 bundled Models.dev
+5 bundled Codewhale facts
+10 live Models.dev
+15 verified cloud facts (optional, off by default)
+20 exact provider-owned live roster
+25 Codewhale account roster
+30 config.toml
+40 user overrides
+policy DENY (final)
 ```
+
+Cloud facts use the existing compiler and provider lake, as described in
+[`CLOUD_FACTS.md`](./CLOUD_FACTS.md). Capability provenance and price provenance
+are separate: a capability patch cannot relabel inherited prices. Cloud price
+patches replace the entire price block; unspecified token classes stay unknown.
+
+Route resolution also binds provider kind, configured identity and endpoint.
+A fresh provider-owned roster is authoritative for its exact scope. Explicit
+model selections remain explicit. Codex account observations/native cache and
+Ollama endpoint tags keep their dedicated availability rules; a public catalog
+row does not prove that an account can call that model. The installed Codex
+`account/read` and `model/list` path is documented in
+[`PROVIDERS.md`](./PROVIDERS.md).
+
+Legacy completion lists remain a last fallback where no applicable catalog
+exists. Bundled seeds and static transport/billing rules remain release-owned;
+refreshing catalog metadata does not introduce a new wire dialect or change
+credential/billing ownership.
 
 Key code:
 
@@ -48,8 +59,8 @@ Key code:
 |---|---|---|
 | Live fetch + cache | `crates/tui/src/models_dev_live.rs` | Background refresh, TTL, atomic write, freshness status |
 | Schema / parse | `crates/config/src/models_dev.rs` | Network-free Models.dev JSON shape |
-| Compile + provenance | `crates/config/src/catalog.rs` | Bundled / Live / UserOverride; id normalization |
-| Provider lake merge | `crates/tui/src/provider_lake.rs` | Live-over-bundled by `(provider, wire_model_id)` |
+| Compile + provenance | `crates/config/src/catalog.rs` | Ordered sources, independent price provenance, policy deny, id normalization |
+| Provider lake merge | `crates/tui/src/provider_lake.rs` | Shared catalog projection with exact route-scoped provider authority |
 | Offline seed asset | `crates/config/assets/models_dev.bundled.json` | Compact offline fallback only (`_meta.role` says so) |
 | Validation script | `scripts/catalog_models_dev.py` | Secret-free fetch/validate dry-run (#4117) |
 | Script tests | `scripts/catalog_models_dev_test.py` | Offline shape/scrub checks |
@@ -65,7 +76,11 @@ When the TUI/runtime starts (and is not disabled):
    Models.dev (15 s timeout, explicit Codewhale user-agent, **no credentials**).
 3. On success: atomic write to
    `~/.codewhale/catalog/models-dev-catalog.json` and publish rows into
-   ProviderLake as `CatalogSource::Live`.
+   ProviderLake as `CatalogSource::ModelsDevLive` — layer 10, carrying no
+   endpoint fingerprint. Models.dev is a public catalog describing a model, so
+   a refreshed row is treated exactly like the layer-0 seed it supersedes and
+   stays correctable by layer 15. `CatalogSource::Live` is reserved for a
+   provider's own credential-scoped `/models` answer at layer 20.
 4. On failure: keep prior cache or fall back to the **bundled** seed. Model
    selection never hard-fails because Models.dev is down.
 
@@ -78,7 +93,8 @@ In the TUI:
 ```
 
 That dispatches `AppAction::RefreshModelsDevCatalog` (async; does not block
-the composer). Implementation lives under
+the composer). When admitted cloud-facts settings are enabled, it also requests
+a cloud refresh; hard-disable and trust-key checks still apply. Implementation lives under
 `crates/tui/src/commands/groups/core/core.rs` and
 `crates/tui/src/models_dev_live.rs`.
 

@@ -1257,7 +1257,7 @@ mod tests {
     fn editor_preserves_unknown_schedule_permissions_models_and_unedited_workspace() {
         let _env = crate::test_support::lock_test_env();
         let root = tempfile::tempdir().unwrap();
-        let manager = AutomationManager::open(root.path().join("store")).unwrap();
+        let manager = AutomationManager::open_for_test(root.path().join("store")).unwrap();
         let mut draft = editor(root.path());
         draft.name.insert("original", false);
         draft.prompt.insert("line one\nline two", true);
@@ -1296,7 +1296,7 @@ mod tests {
     fn editor_rejects_invalid_and_conflicting_saves_without_mutation() {
         let _env = crate::test_support::lock_test_env();
         let root = tempfile::tempdir().unwrap();
-        let manager = AutomationManager::open(root.path().join("store")).unwrap();
+        let manager = AutomationManager::open_for_test(root.path().join("store")).unwrap();
         let mut draft = editor(root.path());
         assert!(draft.save(&manager).is_err());
         assert!(manager.list_automations().unwrap().is_empty());
@@ -1343,7 +1343,7 @@ mod tests {
     fn editor_presets_use_canonical_schedules_and_atomic_pause() {
         let _env = crate::test_support::lock_test_env();
         let root = tempfile::tempdir().unwrap();
-        let manager = AutomationManager::open(root.path().join("store")).unwrap();
+        let manager = AutomationManager::open_for_test(root.path().join("store")).unwrap();
         let mut draft = editor(root.path());
         draft.name.insert("scheduled", false);
         draft.prompt.insert("prompt", true);
@@ -1390,7 +1390,7 @@ model = "same-model"
 "#,
         )
         .unwrap();
-        let manager = AutomationManager::open(root.path().join("store")).unwrap();
+        let manager = AutomationManager::open_for_test(root.path().join("store")).unwrap();
         let mut draft = AutomationEditor::new(&config, root.path(), Locale::En, None);
         draft.name.insert("name", false);
         draft.prompt.insert("prompt", true);

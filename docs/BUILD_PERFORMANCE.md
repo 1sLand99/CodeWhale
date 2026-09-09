@@ -35,7 +35,14 @@ Structural facts behind those numbers:
   `sha2` 0.10/0.11) that come from third-party crates, not from workspace
   choices. The global allocator is mimalloc by default; the off-by-default
   `rusty-alloc` cargo feature on `codewhale-tui`/`codewhale-cli` swaps it for
-  the pure-Rust `rusty_alloc` remake (no C toolchain on that path, #5872).
+  the pure-Rust `rusty_alloc` remake (#5872). Use
+  `cargo build -p codewhale-cli --no-default-features --features rusty-alloc`
+  (or `-p codewhale-tui`) to exclude mimalloc and its C build dependency.
+  Cargo features are additive: `--features rusty-alloc` alone retains the
+  default mimalloc dependency even though the Rust allocator handles allocations.
+  This removes the allocator's C build path; other native dependencies may still
+  require a C toolchain. With neither allocator feature, the standard library
+  system allocator is used.
 - `[profile.dev] debug = "line-tables-only"` is already set (#5246) and
   Cargo already uses `split-debuginfo = unpacked` on macOS.
 - `target/debug` grows past 50 GB only through accumulation across

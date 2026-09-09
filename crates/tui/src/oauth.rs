@@ -470,8 +470,24 @@ const OAUTH_REQUEST_TIMEOUT_SECS: u64 = 20;
 const OAUTH_RESPONSE_BODY_LIMIT: u64 = 64 * 1024;
 const OAUTH_ERROR_DETAIL_LIMIT: usize = 256;
 
+/// Apply the existing OAuth browser URI policy to the URL that reqwest will
+/// actually use. Parsing first keeps transport and loopback interpretation
+/// identical; an issuer override does not authorize remote plaintext forms.
+fn oauth_endpoint_url(raw: &str) -> Result<reqwest::Url> {
+    let url = reqwest::Url::parse(raw).context("OAuth endpoint is not a valid URL")?;
+    codewhale_config::device_code::validate_browser_verification_uri(
+        url.as_str(),
+        "OAuth endpoint",
+    )
+    .context("OAuth endpoints require HTTPS, except for local loopback HTTP")?;
+    Ok(url)
+}
+
 fn oauth_http_client(purpose: &str) -> Result<reqwest::blocking::Client> {
     crate::tls::reqwest_blocking_client_builder()
+        // An issuer-approved endpoint cannot delegate credential-bearing forms
+        // to a redirect destination, including HTTPS-to-HTTP downgrades.
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(OAUTH_REQUEST_TIMEOUT_SECS))
         .build()
         .with_context(|| format!("Failed to build OAuth {purpose} client"))
@@ -604,15 +620,15 @@ fn resolve_oauth_endpoints(params: &OAuthProviderParams, issuer: &str) -> OAuthE
 
 fn discover_oauth_endpoints(params: &OAuthProviderParams, issuer: &str) -> Result<OAuthEndpoints> {
     let name = params.display_name;
-    let discovery_url = format!(
+    let discovery_url = oauth_endpoint_url(&format!(
         "{}/.well-known/openid-configuration",
         issuer.trim_end_matches('/')
-    );
+    ))?;
     let client = oauth_http_client("OIDC discovery")?;
     #[cfg(test)]
     crate::external_credentials::record_oauth_network();
     let response = client
-        .get(&discovery_url)
+        .get(discovery_url)
         .header(reqwest::header::ACCEPT, "application/json")
         .send()
         .with_context(|| format!("{name} OIDC discovery request failed"))?;
@@ -652,7 +668,7 @@ fn validate_discovered_issuer(discovered: Option<String>, expected: &str) -> Res
     if discovered.trim_end_matches('/') != expected.trim_end_matches('/') {
         bail!("OIDC discovery issuer does not match the requested issuer");
     }
-    let _ = reqwest::Url::parse(expected).context("OIDC issuer is not a valid URL")?;
+    let _ = oauth_endpoint_url(expected).context("OIDC issuer is not a trusted URL")?;
     Ok(())
 }
 
@@ -673,7 +689,7 @@ fn validate_discovered_oauth_endpoint(
     if !matches!(parsed.scheme(), "http" | "https") {
         bail!("OIDC discovery returned unsupported {field} scheme");
     }
-    let issuer = reqwest::Url::parse(issuer).context("OIDC issuer is not a valid URL")?;
+    let issuer = oauth_endpoint_url(issuer).context("OIDC issuer is not a trusted URL")?;
     if issuer.scheme() == "https" && parsed.scheme() != "https" {
         bail!("OIDC discovery attempted to downgrade {field} from HTTPS");
     }
@@ -683,6 +699,7 @@ fn validate_discovered_oauth_endpoint(
     if parsed.origin() != issuer.origin() {
         bail!("OIDC discovery returned {field} on a different origin than the issuer");
     }
+    let _ = oauth_endpoint_url(parsed.as_str())?;
     Ok(endpoint.to_string())
 }
 
@@ -703,6 +720,7 @@ fn request_device_grant(
     client_id: &str,
     scopes: &str,
 ) -> Result<DeviceGrantResponse> {
+    let device_authorization_endpoint = oauth_endpoint_url(device_authorization_endpoint)?;
     let client = oauth_http_client("device-code")?;
     let params = [("client_id", client_id), ("scope", scopes)];
     #[cfg(test)]
@@ -744,6 +762,7 @@ fn poll_device_grant(
     device_code: &str,
 ) -> Result<codewhale_config::device_code::DevicePollOutcome<OAuthTokenMaterial>> {
     use codewhale_config::device_code::DevicePollOutcome;
+    let token_endpoint = oauth_endpoint_url(token_endpoint)?;
     let client = oauth_http_client("device-code poll")?;
     let params = [
         ("client_id", client_id),
@@ -907,6 +926,7 @@ pub(crate) struct ReqwestOAuthFormClient;
 
 impl OAuthFormClient for ReqwestOAuthFormClient {
     fn post_form(&self, url: &str, form: &[(&str, &str)]) -> Result<(u16, String)> {
+        let url = oauth_endpoint_url(url)?;
         #[cfg(test)]
         crate::external_credentials::record_oauth_network();
         let client = oauth_http_client("form")?;
@@ -1135,14 +1155,14 @@ pub fn build_authorize_url(
         .first()
         .copied()
         .unwrap_or("the issuer environment variable");
-    let mut url = reqwest::Url::parse(&format!(
+    let mut url = oauth_endpoint_url(&format!(
         "{}/{}",
         issuer.trim_end_matches('/'),
         authorize_path
     ))
     .with_context(|| {
         format!(
-            "{} OAuth issuer is not a valid URL ({issuer:?}) — check {issuer_var}",
+            "{} OAuth issuer is not a valid URL or uses an insecure endpoint — check {issuer_var}",
             params.display_name
         )
     })?;
@@ -1793,19 +1813,15 @@ fn entry_access_token_is_fresh(entry: &OwnedAuthEntry) -> bool {
     else {
         return false;
     };
-    if let Some(exp) = entry.expires_at.as_deref().and_then(parse_rfc3339_secs) {
-        let now = now_unix_secs().unwrap_or(0);
-        return exp - now > REFRESH_SKEW_SECS;
-    }
-    // Fall back to the JWT exp claim when expires_at is missing. An
-    // unparseable token cannot prove freshness; treat it as stale.
-    match jwt_expiry_seconds(token) {
-        Some(exp) => {
-            let now = now_unix_secs().unwrap_or(0) as u64;
-            (exp as i64) - (now as i64) > REFRESH_SKEW_SECS
-        }
-        None => false,
-    }
+    let stored_expiry = entry.expires_at.as_deref().and_then(parse_rfc3339_secs);
+    let token_expiry = jwt_expiry_seconds(token).and_then(|exp| i64::try_from(exp).ok());
+    // A later stored expiry must not hide an already-expired access token.
+    // Opaque tokens still use stored expiry; no known expiry remains stale.
+    stored_expiry
+        .into_iter()
+        .chain(token_expiry)
+        .min()
+        .is_some_and(|exp| exp.saturating_sub(now_unix_secs().unwrap_or(0)) > REFRESH_SKEW_SECS)
 }
 
 fn credentials_from_entry(
@@ -2748,6 +2764,74 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
+    #[test]
+    fn oauth_endpoint_requires_https_or_parsed_loopback_http() {
+        for raw in [
+            "https://issuer.example/token",
+            "http://localhost:8123/token",
+            "http://127.0.0.1:8123/token",
+            "http://127.0.0.2/token",
+            "http://[::1]:8123/token",
+        ] {
+            assert!(oauth_endpoint_url(raw).is_ok());
+        }
+        for raw in [
+            "http://issuer.example/token",
+            "http://localhost.example/token",
+            "http://127.0.0.1.example/token",
+            "http://192.0.2.1/token",
+            "https://user:example@issuer.example/token",
+            "file:///tmp/token",
+            "not a URL",
+        ] {
+            assert!(oauth_endpoint_url(raw).is_err());
+        }
+    }
+
+    #[test]
+    fn oauth_discovery_rejects_an_initial_plaintext_remote_issuer() {
+        let issuer = "http://issuer.example";
+        assert!(validate_discovered_issuer(Some(issuer.into()), issuer).is_err());
+        assert!(
+            validate_discovered_oauth_endpoint(
+                Some(format!("{issuer}/token")),
+                "token_endpoint",
+                issuer,
+            )
+            .is_err()
+        );
+        let fallback = fallback_oauth_endpoints(&XAI_OAUTH_PARAMS, issuer);
+        assert!(oauth_endpoint_url(&fallback.token_endpoint).is_err());
+        assert!(
+            oauth_endpoint_url(fallback.device_authorization_endpoint.as_deref().unwrap()).is_err()
+        );
+    }
+
+    #[test]
+    fn oauth_authorize_url_refuses_plaintext_remote_issuer_before_browser_use() {
+        let pkce = PkceChallenge {
+            verifier: "test-verifier".into(),
+            challenge: "test-challenge".into(),
+        };
+        for issuer in [
+            "http://issuer.example",
+            "https://user:example@issuer.example",
+        ] {
+            assert!(
+                build_authorize_url(
+                    &CHATGPT_OAUTH_PARAMS,
+                    issuer,
+                    "test-client",
+                    "openid",
+                    "http://localhost:1455/auth/callback",
+                    "test-state",
+                    &pkce,
+                )
+                .is_err()
+            );
+        }
+    }
+
     fn grant(path: &std::path::Path) -> ExternalCredentialReadGrant {
         codewhale_config::ExternalCredentialConsentToml::read_only(
             codewhale_config::ProviderKind::OpenaiCodex,
@@ -2791,6 +2875,45 @@ mod tests {
         let payload = URL_SAFE_NO_PAD.encode(b"{\"exp\":1000000000}");
         let token = format!("header.{payload}.sig");
         assert!(token_is_expired(&token));
+    }
+
+    #[test]
+    fn owned_token_freshness_honors_both_expiries_and_preserves_fallbacks() {
+        let now = now_unix_secs().expect("clock");
+        let future = rfc3339_from_unix(now + 3600);
+        let past = rfc3339_from_unix(now - 3600);
+        let near = rfc3339_from_unix(now + 30);
+        let fresh_token = jwt_with_exp((now + 3600) as u64);
+        let expired_token = jwt_with_exp((now - 3600) as u64);
+        let near_token = jwt_with_exp((now + 30) as u64);
+
+        for (stored, token, expected) in [
+            (Some(future.as_str()), expired_token.as_str(), false),
+            (Some(past.as_str()), fresh_token.as_str(), false),
+            (Some(future.as_str()), fresh_token.as_str(), true),
+            (Some(future.as_str()), near_token.as_str(), false),
+            (Some(near.as_str()), fresh_token.as_str(), false),
+            (None, fresh_token.as_str(), true),
+            (None, expired_token.as_str(), false),
+            (Some("invalid-date"), fresh_token.as_str(), true),
+            (Some(future.as_str()), "opaque-token", true),
+            (Some(past.as_str()), "opaque-token", false),
+            (None, "opaque-token", false),
+            (Some("invalid-date"), "opaque-token", false),
+            (Some(future.as_str()), "", false),
+        ] {
+            let entry: OwnedAuthEntry = serde_json::from_value(serde_json::json!({
+                "access_token": token,
+                "expires_at": stored,
+            }))
+            .expect("synthetic owned entry");
+            assert_eq!(
+                entry_access_token_is_fresh(&entry),
+                expected,
+                "stored={stored:?}, JWT expiry={:?}",
+                jwt_expiry_seconds(token),
+            );
+        }
     }
 
     #[test]
@@ -3055,6 +3178,67 @@ mod tests {
             error.to_string().contains("no device-code flow"),
             "{error:#}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn oauth_transports_never_forward_forms_to_redirect_destinations() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let issuer = MockServer::start().await;
+        let destination = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "synthetic-access",
+            })))
+            .expect(0)
+            .mount(&destination)
+            .await;
+        for status in [301, 302, 303, 307, 308] {
+            let endpoint = format!("{}/redirect-{status}", issuer.uri());
+            Mock::given(path(format!("/redirect-{status}")))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .insert_header("Location", format!("{}/token", destination.uri()))
+                        .set_body_json(serde_json::json!({})),
+                )
+                .expect(3)
+                .mount(&issuer)
+                .await;
+            tokio::task::block_in_place(|| {
+                assert!(request_device_grant(&endpoint, "synthetic-client", "scope").is_err());
+                assert!(
+                    poll_device_grant(&endpoint, "synthetic-client", "synthetic-device").is_err()
+                );
+                let (actual_status, _) = ReqwestOAuthFormClient
+                    .post_form(&endpoint, &[("refresh_token", "synthetic-refresh")])
+                    .unwrap();
+                assert_eq!(actual_status, status);
+            });
+        }
+        // An explicitly selected issuer remains usable without a redirect.
+        Mock::given(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "device_code": "synthetic-device",
+                "user_code": "synthetic-user",
+                "access_token": "synthetic-access",
+            })))
+            .expect(3)
+            .mount(&issuer)
+            .await;
+        let endpoint = format!("{}/token", issuer.uri());
+        tokio::task::block_in_place(|| {
+            assert!(request_device_grant(&endpoint, "synthetic-client", "scope").is_ok());
+            assert!(poll_device_grant(&endpoint, "synthetic-client", "synthetic-device").is_ok());
+            assert_eq!(
+                ReqwestOAuthFormClient
+                    .post_form(&endpoint, &[("refresh_token", "synthetic-refresh")])
+                    .unwrap()
+                    .0,
+                200
+            );
+        });
+        assert!(destination.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5309,7 +5493,8 @@ consent_version = 1
             &scope: {
                 "access_token": stale,
                 "refresh_token": "refresh-old",
-                "expires_at": "2000-01-01T00:00:00Z",
+                // Conflicting metadata must not suppress the existing refresh.
+                "expires_at": rfc3339_from_now(3600),
                 "oidc_issuer": CHATGPT_OAUTH_ISSUER,
                 "oidc_client_id": CHATGPT_OAUTH_CLIENT_ID,
                 "originator": CHATGPT_OAUTH_ORIGINATOR

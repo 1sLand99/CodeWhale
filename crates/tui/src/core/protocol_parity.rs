@@ -172,8 +172,17 @@ fn route_product_to_wire(product: RouteProduct) -> wire::RouteProduct {
 
 fn billing_to_wire(billing: &RouteBillingEnvelope) -> wire::RouteBillingEnvelope {
     wire::RouteBillingEnvelope {
+        openrouter_vendor: billing
+            .openrouter_vendor
+            .as_deref()
+            .map(crate::cost_status::sanitize_persisted_route_label),
         billing_surface: billing.billing_surface.clone(),
         endpoint_fingerprint: billing.endpoint_fingerprint.clone(),
+        provider_live_pricing: billing
+            .provider_live_pricing
+            .as_ref()
+            .map(to_value)
+            .filter(|v| !v.is_null()),
         billing_mode: billing_mode_str(billing.billing_mode).to_string(),
         dispatched_at: billing.dispatched_at,
     }
@@ -499,6 +508,8 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
         },
         Event::TurnComplete {
             usage,
+            parent_route_usage,
+            routed_usage_dropped_records,
             status,
             error,
             tool_catalog,
@@ -510,17 +521,34 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
             status: outcome_status_to_wire(*status),
             error: error.clone(),
             usage: usage_to_wire(usage),
+            parent_route_usage: Some(usage_to_wire(parent_route_usage)),
+            routed_usage_dropped_records: *routed_usage_dropped_records,
             tool_catalog: tool_catalog
                 .as_ref()
                 .map(|tools| tools.iter().map(to_value).collect()),
             base_url: base_url.clone(),
         },
         Event::TurnUsage {
+            max_output_tokens,
             usage,
             duration_ms,
             first_token_ms,
             request_ms,
         } => wire::EventMsg::TurnUsage {
+            max_output_tokens: *max_output_tokens,
+            thread_id,
+            session_id,
+            usage: usage_to_wire(usage),
+            duration_ms: *duration_ms,
+            first_token_ms: *first_token_ms,
+            request_ms: *request_ms,
+        },
+        Event::RoutedTurnUsage {
+            usage,
+            duration_ms,
+            first_token_ms,
+            request_ms,
+        } => wire::EventMsg::RoutedTurnUsage {
             thread_id,
             session_id,
             usage: usage_to_wire(usage),
@@ -616,6 +644,7 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
             owner_session_id,
             id,
             prompt,
+            worker_status,
             parent_run_id,
             spawn_depth,
             model,
@@ -626,6 +655,7 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
             owner_session_id: owner_session_id.clone(),
             id: id.clone(),
             prompt: prompt.clone(),
+            worker_status: worker_status.map(|status| worker_status_str(status).to_string()),
             parent_run_id: parent_run_id.clone(),
             spawn_depth: *spawn_depth,
             model: model.clone(),
@@ -656,12 +686,22 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
             owner_session_id,
             id,
             result,
+            outcome,
+            parent_run_id,
+            spawn_depth,
+            continuable,
         } => wire::EventMsg::AgentComplete {
             thread_id,
             session_id,
             owner_session_id: owner_session_id.clone(),
             id: id.clone(),
             result: result.clone(),
+            worker_status: outcome
+                .as_ref()
+                .map(|status| crate::tools::subagent::subagent_status_name(status).to_string()),
+            parent_run_id: parent_run_id.clone(),
+            spawn_depth: *spawn_depth,
+            continuable: *continuable,
         },
         Event::SubAgentFollowUp {
             owner_session_id,
@@ -904,10 +944,13 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
 pub fn op_to_protocol(op: &Op) -> wire_op::Op {
     match op {
         Op::SendMessage {
+            max_output_tokens,
             content,
+            images,
             mode,
             route,
             compaction,
+            initial_routed_usage: _, // Host-owned accounting, never model input.
             goal_objective,
             goal_token_budget,
             goal_status,
@@ -926,7 +969,9 @@ pub fn op_to_protocol(op: &Op) -> wire_op::Op {
             verbosity,
             provenance,
         } => wire_op::Op::SendMessage {
+            max_output_tokens: *max_output_tokens,
             content: content.clone(),
+            images: images.clone(),
             mode: app_mode_str(*mode).to_string(),
             model: Some(route.model.clone()),
             model_provider: Some(route.identity.key.clone()),
@@ -1194,6 +1239,148 @@ mod tests {
         }
     }
 
+    #[test]
+    fn worker_lifecycle_wire_preserves_typed_outcomes_without_parsing_result_text() {
+        use crate::tools::subagent::SubAgentStatus;
+        let ids = ids();
+        for (outcome, expected) in [
+            (Some(SubAgentStatus::Completed), Some("completed")),
+            (
+                Some(SubAgentStatus::Failed("private failure".into())),
+                Some("failed"),
+            ),
+            (
+                Some(SubAgentStatus::Interrupted("private reason".into())),
+                Some("interrupted"),
+            ),
+            (Some(SubAgentStatus::Cancelled), Some("cancelled")),
+            (
+                Some(SubAgentStatus::BudgetExhausted),
+                Some("budget_exhausted"),
+            ),
+            (None, None),
+        ] {
+            let event = Event::AgentComplete {
+                owner_session_id: "owner".into(),
+                id: "worker".into(),
+                result: "Completed successfully".into(),
+                outcome,
+                parent_run_id: Some("parent".into()),
+                spawn_depth: Some(2),
+                continuable: Some(false),
+            };
+            let wire = serde_json::to_value(event_to_protocol(&event, &ids)).unwrap();
+            assert_eq!(wire["worker_status"].as_str(), expected);
+            assert_eq!(wire["parent_run_id"], "parent");
+            assert_eq!(wire["spawn_depth"], 2);
+            assert_eq!(wire["continuable"], false);
+            assert!(!wire.to_string().contains("private"));
+        }
+        for status in [
+            AgentWorkerStatus::Queued,
+            AgentWorkerStatus::Starting,
+            AgentWorkerStatus::Running,
+            AgentWorkerStatus::WaitingForUser,
+            AgentWorkerStatus::ModelWait,
+            AgentWorkerStatus::RunningTool,
+            AgentWorkerStatus::Completed,
+            AgentWorkerStatus::Failed,
+            AgentWorkerStatus::Cancelled,
+            AgentWorkerStatus::Interrupted,
+        ] {
+            // Runtime serializes the producer enum; stream-json uses this
+            // exhaustive adapter. Their discriminants must remain identical.
+            assert_eq!(
+                serde_json::to_value(status).unwrap(),
+                worker_status_str(status)
+            );
+        }
+    }
+
+    #[test]
+    fn wire_accounting_preserves_parent_total_and_distinct_routed_telemetry() {
+        let ids = ids();
+        let total = Usage {
+            input_tokens: 49,
+            output_tokens: 19,
+            ..Usage::default()
+        };
+        let parent = Usage {
+            input_tokens: 7,
+            output_tokens: 5,
+            ..Usage::default()
+        };
+        let complete = event_to_protocol(
+            &Event::TurnComplete {
+                usage: total.clone(),
+                parent_route_usage: parent.clone(),
+                routed_usage_dropped_records: 3,
+                status: TurnOutcomeStatus::Completed,
+                error: None,
+                tool_catalog: None,
+                base_url: None,
+            },
+            &ids,
+        );
+        let json = serde_json::to_value(&complete).unwrap();
+        assert_eq!(json["usage"]["input_tokens"], 49);
+        assert_eq!(json["usage"]["output_tokens"], 19);
+        assert_eq!(json["parent_route_usage"]["input_tokens"], 7);
+        assert_eq!(json["parent_route_usage"]["output_tokens"], 5);
+        assert_eq!(json["routed_usage_dropped_records"], 3);
+        assert_eq!(
+            serde_json::from_value::<wire::EventMsg>(json.clone()).unwrap(),
+            complete
+        );
+
+        // A legacy terminal receipt has no parent subset, which differs from
+        // an explicitly reported zero parent on a compaction-only turn.
+        let mut legacy = json;
+        legacy.as_object_mut().unwrap().remove("parent_route_usage");
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("routed_usage_dropped_records");
+        assert!(matches!(
+            serde_json::from_value::<wire::EventMsg>(legacy).unwrap(),
+            wire::EventMsg::TurnComplete {
+                parent_route_usage: None,
+                routed_usage_dropped_records: 0,
+                ..
+            }
+        ));
+
+        for (event, tag) in [
+            (
+                Event::TurnUsage {
+                    max_output_tokens: None,
+                    usage: parent,
+                    duration_ms: 12,
+                    first_token_ms: Some(2),
+                    request_ms: Some(10),
+                },
+                "turn_usage",
+            ),
+            (
+                Event::RoutedTurnUsage {
+                    usage: total,
+                    duration_ms: 27,
+                    first_token_ms: None,
+                    request_ms: None,
+                },
+                "routed_turn_usage",
+            ),
+        ] {
+            let projected = event_to_protocol(&event, &ids);
+            let json = serde_json::to_value(&projected).unwrap();
+            assert_eq!(json["event"], tag);
+            assert_eq!(
+                serde_json::from_value::<wire::EventMsg>(json).unwrap(),
+                projected
+            );
+        }
+    }
+
     /// The guard is the exhaustive `match` in `event_to_protocol`: this test
     /// exists so the guard has a name in the test log and so the projection
     /// is proven to agree with the protocol's wire-tag table.
@@ -1238,12 +1425,21 @@ mod tests {
             },
             Event::TurnComplete {
                 usage: usage.clone(),
+                parent_route_usage: usage.clone(),
+                routed_usage_dropped_records: 0,
                 status: TurnOutcomeStatus::Interrupted,
                 error: Some("stopped".into()),
                 tool_catalog: None,
                 base_url: Some("https://example.invalid".into()),
             },
+            Event::RoutedTurnUsage {
+                usage: usage.clone(),
+                duration_ms: 12,
+                first_token_ms: Some(3),
+                request_ms: None,
+            },
             Event::TurnUsage {
+                max_output_tokens: None,
                 usage,
                 duration_ms: 12,
                 first_token_ms: Some(3),
@@ -1317,7 +1513,11 @@ mod tests {
             serde_json::to_value(events[8].to_protocol(&ids)).unwrap()["status"],
             "interrupted"
         );
-        let error = serde_json::to_value(events[10].to_protocol(&ids)).unwrap();
+        let error = events
+            .iter()
+            .find(|event| matches!(event, Event::Error { .. }))
+            .unwrap();
+        let error = serde_json::to_value(error.to_protocol(&ids)).unwrap();
         assert_eq!(error["category"], "rate_limit");
         assert_eq!(error["severity"], "warning");
     }

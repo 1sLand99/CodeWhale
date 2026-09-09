@@ -950,7 +950,6 @@ impl ModalView for HelpView {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 ViewAction::Close
             }
-            KeyCode::Char('q') | KeyCode::Char('Q') if self.query.is_empty() => ViewAction::Close,
             KeyCode::Up => {
                 self.move_selection_wrapping(-1);
                 ViewAction::None
@@ -1493,16 +1492,46 @@ mod tests {
     }
 
     #[test]
-    fn q_closes_empty_filter_but_types_when_filtering() {
-        let mut view = HelpView::new();
-        let action = view.handle_key(key(KeyCode::Char('q')));
-        assert!(matches!(action, ViewAction::Close));
-
-        let mut view = HelpView::new();
-        type_filter(&mut view, "mod");
-        let action = view.handle_key(key(KeyCode::Char('q')));
-        assert!(matches!(action, ViewAction::None));
-        assert_eq!(view.query, "modq");
+    fn help_search_owns_initial_q() {
+        for query in ["queue", "Queue", "q 队列é"] {
+            let mut stack = crate::tui::views::ViewStack::new();
+            stack.push(HelpView::new());
+            for ch in query.chars() {
+                let modifiers = if ch.is_uppercase() {
+                    KeyModifiers::SHIFT
+                } else {
+                    KeyModifiers::NONE
+                };
+                assert!(
+                    stack
+                        .handle_key(KeyEvent::new(KeyCode::Char(ch), modifiers))
+                        .is_empty()
+                );
+                assert_eq!(stack.top_kind(), Some(ModalKind::Help), "{query:?}");
+            }
+            let mut modal = stack.pop().unwrap();
+            let view = modal.as_any_mut().downcast_mut::<HelpView>().unwrap();
+            assert_eq!(view.query, query);
+            if query.eq_ignore_ascii_case("queue") {
+                assert!(
+                    view.filtered
+                        .iter()
+                        .any(|&i| view.entries[i].label == "/queue")
+                );
+            }
+            view.handle_key(key(KeyCode::Backspace));
+            assert_eq!(
+                view.query,
+                query
+                    .chars()
+                    .take(query.chars().count() - 1)
+                    .collect::<String>()
+            );
+            assert!(matches!(
+                view.handle_key(key(KeyCode::Esc)),
+                ViewAction::Close
+            ));
+        }
     }
 
     #[test]

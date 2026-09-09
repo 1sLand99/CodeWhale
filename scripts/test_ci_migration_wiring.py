@@ -118,10 +118,16 @@ class CiWiringTests(unittest.TestCase):
         start = ci.index("Hermetic safety and authorization tests")
         next_step = ci.index("- name:", start + 1)
         block = ci[start:next_step]
-        self.assertIn("CODEWHALE_HOME:", block)
-        self.assertIn("cw-hermetic-home", block)
-        self.assertIn("unset CODEWHALE_CONFIG_PATH DEEPSEEK_CONFIG_PATH DEEPSEEK_HOME", block)
-        self.assertIn("command_safety auto_review authority sandbox", block)
+        self.assertIn(
+            "sh scripts/with-hermetic-test-home.sh cargo test -p codewhale-tui "
+            "--lib --locked -- command_safety auto_review authority sandbox", block
+        )
+        self.assertIn(
+            "sh scripts/with-hermetic-test-home.sh cargo test -p codewhale-execpolicy --locked",
+            block,
+        )
+        self.assertNotIn("CODEWHALE_HOME:", block)
+        self.assertIn("sh scripts/with-hermetic-test-home.test.sh", ci)
 
     def test_valid_wiring_passes_all_assertions(self) -> None:
         # The live workflow must satisfy every structural invariant above.

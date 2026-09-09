@@ -93,6 +93,7 @@ mod project_context;
 mod project_context_cache;
 mod prompt_zones;
 mod prompts;
+mod provider_catalog_live;
 mod provider_lake;
 mod provider_readiness;
 mod purge;
@@ -108,6 +109,7 @@ mod retry_status;
 pub mod rlm;
 mod route_billing;
 mod route_budget;
+pub mod route_preferences;
 mod route_receipt;
 mod route_runtime;
 mod runtime_api;
@@ -1263,9 +1265,13 @@ struct ReviewArgs {
     /// with "available from configured provider route(s): ...").
     #[arg(long)]
     provider: Option<String>,
-    /// Maximum diff characters to include
+    /// Maximum diff characters; an oversized diff is refused, never truncated
     #[arg(long, default_value_t = 200_000)]
     max_chars: usize,
+    /// Maximum complete PR review passes. Values above 1 explicitly authorize
+    /// additional model requests; the default preserves single-pass behavior.
+    #[arg(long, default_value_t = 1)]
+    max_passes: usize,
     /// Write a durable pre-push review receipt after a successful review
     #[arg(long, default_value_t = false)]
     write_receipt: bool,
@@ -2225,6 +2231,7 @@ async fn run_async_main_dispatch(
             },
             Commands::Models(args) => {
                 let config = load_config_from_cli(&cli)?;
+                initialize_cloud_facts(&config);
                 run_models(&config, args).await
             }
             Commands::Speech(args) => {
@@ -2284,6 +2291,7 @@ async fn run_async_main_dispatch(
                     config.reasoning_effort = normalize_cli_reasoning_effort(reasoning_arg)?;
                     config.reasoning_effort_inferred_from_legacy_alias = false;
                 }
+                initialize_cloud_facts(&config);
                 let prompt = join_prompt_parts(&args.prompt);
                 let resume_session_id = resolve_exec_resume_session_id(&args, &workspace)?;
                 validate_exec_tool_authority_resume(
@@ -2467,6 +2475,7 @@ async fn run_async_main_dispatch(
                 } else if http_selected {
                     let (mut config, config_profile) =
                         load_config_from_cli_with_effective_profile(&cli)?;
+                    initialize_cloud_facts(&config);
                     let explicit_route_override =
                         crate::config::explicit_launch_provider_override().is_some()
                             || crate::config::explicit_launch_model_override().is_some();
@@ -2502,6 +2511,7 @@ async fn run_async_main_dispatch(
                     .await
                 } else if args.acp {
                     let config = load_config_from_cli(&cli)?;
+                    initialize_cloud_facts(&config);
                     let model = config.default_model();
                     acp_server::run_acp_server(config, model, workspace).await
                 } else {
@@ -3263,6 +3273,7 @@ async fn run_fleet_command(workspace: &Path, config: &Config, args: FleetArgs) -
             Ok(())
         }
         FleetCommand::Run(args) => {
+            initialize_cloud_facts(config);
             let max_workers = args.max_workers.clamp(1, 128);
             let manager =
                 manager.with_stale_after(Duration::from_secs(args.stale_after_seconds.max(1)));
@@ -3285,7 +3296,8 @@ async fn run_fleet_command(workspace: &Path, config: &Config, args: FleetArgs) -
             println!(
                 "manager loop running; use `codewhale fleet status`, `inspect`, `interrupt`, or `stop --all` from another terminal."
             );
-            let mut executor = FleetExecutor::new(workspace);
+            let mut executor = FleetExecutor::new(workspace)
+                .with_sessions_dir(session_manager::default_sessions_dir()?);
             let codewhale_binary = fleet::executor::configured_codewhale_binary();
             let status = manager
                 .run_to_completion(
@@ -3346,7 +3358,8 @@ async fn run_fleet_command(workspace: &Path, config: &Config, args: FleetArgs) -
                 "manager loop running for restarted run {}; use `codewhale fleet status`, `inspect`, `interrupt`, or `stop --all` from another terminal.",
                 report.run_id.0
             );
-            let mut executor = FleetExecutor::new(workspace);
+            let mut executor = FleetExecutor::new(workspace)
+                .with_sessions_dir(session_manager::default_sessions_dir()?);
             let codewhale_binary = fleet::executor::configured_codewhale_binary();
             let status = manager
                 .run_to_completion(
@@ -7946,6 +7959,17 @@ fn resolve_workspace(cli: &Cli) -> PathBuf {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
+/// Activate facts only at accepted inference runtime settings boundaries.
+/// Identical settings preserve the shared ticket; readers track its generation.
+pub(crate) fn initialize_cloud_facts(config: &Config) {
+    let settings = config.cloud_facts_config().settings();
+    codewhale_cloud_facts::configure(&settings);
+    codewhale_cloud_facts::maybe_load_persisted_cache(&settings);
+    if tokio::runtime::Handle::try_current().is_ok() {
+        codewhale_cloud_facts::spawn_background_refresh(settings, None);
+    }
+}
+
 fn load_config_from_cli(cli: &Cli) -> Result<Config> {
     load_config_from_cli_with_effective_profile(cli).map(|(config, _)| config)
 }
@@ -8295,12 +8319,14 @@ fn pick_session_id() -> Result<String> {
 }
 
 async fn run_review(config: &Config, args: ReviewArgs) -> Result<()> {
+    initialize_cloud_facts(config);
     use crate::client::DeepSeekClient;
 
     // Resolved before anything is fetched or billed so an unknown
     // `--provider` fails fast with the provider vocabulary hint.
     let (config, force_configured_route) = review_execution_route(config, &args)?;
     let config = &config;
+    validate_review_receipt_args(&args)?;
 
     if args.pr.is_some() && !is_command_available("gh") {
         bail!(
@@ -8315,30 +8341,33 @@ async fn run_review(config: &Config, args: ReviewArgs) -> Result<()> {
         Some(number) => Some((number, run_gh_pr_view(number, args.repo.as_deref())?)),
         None => None,
     };
-    let diff = collect_diff(&args)?;
+    let diff = collect_diff(&args, pr_view.as_ref().map(|(_, view)| view))?;
     if diff.trim().is_empty() {
         bail!("No diff to review.");
     }
-    validate_review_receipt_args(&args)?;
     if args.check_receipt {
-        return run_review_receipt_check(&diff, &args);
+        return run_review_receipt_check(&diff, &args, pr_view.as_ref().map(|(_, view)| view));
     }
 
-    let model = resolve_review_model(config, args.model.as_deref());
-    let route = resolve_cli_exec_route(config, &model, &diff, force_configured_route).await?;
-    let execution_config = config_for_cli_route(config, &route);
-    let route_provider = execution_config.provider_identity_for(route.provider);
-    let model = route.model.clone();
-    // PR reviews run under the structured JSON review contract so findings
-    // carry file/line positions that can be posted as inline review comments.
-    let (user_prompt, system) = if let Some((number, view)) = &pr_view {
+    let pr_plan = pr_view
+        .as_ref()
+        .map(|(_, view)| {
+            crate::tools::review::plan_pr_review(&diff, view, args.max_chars, args.max_passes)
+        })
+        .transpose()?;
+    let (prompts, system) = if let (Some((number, view)), Some(plan)) = (&pr_view, &pr_plan) {
         (
-            format_pr_prompt(*number, view, &diff),
+            plan.passes
+                .iter()
+                .map(|pass| crate::tools::review::build_pr_pass_prompt(*number, view, plan, pass))
+                .collect::<Vec<_>>(),
             SystemPrompt::Text(crate::tools::review::review_system_prompt().to_string()),
         )
     } else {
         (
-            format!("Review the following diff and provide feedback:\n\n{diff}\n\nEnd of diff."),
+            vec![format!(
+                "Review the following diff and provide feedback:\n\n{diff}\n\nEnd of diff."
+            )],
             SystemPrompt::Text(
                 "You are a senior code reviewer. Focus on bugs, risks, behavioral regressions, and missing tests. \
 Provide findings ordered by severity with file references, then open questions, then a brief summary."
@@ -8346,106 +8375,212 @@ Provide findings ordered by severity with file references, then open questions, 
             ),
         )
     };
-    let reasoning_effort = route.reasoning_effort.and_then(|effort| {
-        cli_reasoning_effort_value_for_prompt(&execution_config, &model, effort, &user_prompt)
-    });
-
+    let model = resolve_review_model(config, args.model.as_deref());
+    let route_input = prompts
+        .iter()
+        .max_by_key(|prompt| prompt.chars().count())
+        .expect("review has at least one prompt");
+    let route = resolve_cli_exec_route(config, &model, route_input, force_configured_route).await?;
+    let execution_config = config_for_cli_route(config, &route);
+    let route_provider = execution_config.provider_identity_for(route.provider);
+    let model = route.model.clone();
     let client = DeepSeekClient::new(&execution_config)?;
     let request_route = client.effective_route_envelope(&model, chrono::Utc::now());
-    let request = MessageRequest {
-        model: model.clone(),
-        messages: vec![Message {
-            role: Role::User,
-            content: vec![ContentBlock::Text {
-                text: user_prompt,
-                cache_control: None,
-            }],
-        }],
-        max_tokens: client.effective_max_output_tokens(&request_route.model),
-        system: Some(system),
-        tools: None,
-        tool_choice: None,
-        metadata: None,
-        thinking: None,
-        reasoning_effort,
-        stream: Some(false),
-        temperature: None,
-        top_p: None,
+    let planned_passes = prompts.len();
+    let mut usage = crate::models::Usage::default();
+    let mut publication = if args.post {
+        ReviewPublication::NotAttempted
+    } else {
+        ReviewPublication::NotRequested
     };
-
-    let response = client.create_message(request).await?;
-    let review_stop_reason = response.stop_reason.clone();
-    let review_incomplete = crate::models::is_incomplete_stop_reason(review_stop_reason.as_deref());
-    let mut output = String::new();
-    for block in response.content {
-        if let ContentBlock::Text { text, .. } = block {
-            output.push_str(&text);
-        }
-    }
-    let structured = pr_view
-        .as_ref()
-        .map(|_| crate::tools::review::ReviewOutput::from_str(&output));
-    // A truncated review must not be posted or become a receipt. The partial
-    // text is still printed for diagnostics below.
-    if args.post && !review_incomplete {
-        let (number, view) = pr_view
-            .as_ref()
-            .expect("--post requires --pr (enforced by clap)");
-        let review = structured
-            .as_ref()
-            .expect("structured output exists for PR reviews");
-        post_pr_review(*number, view, args.repo.as_deref(), review, &diff)?;
-    }
-    let receipt = if args.write_receipt && !review_incomplete {
-        let parsed_output = crate::tools::review::ReviewOutput::from_str(&output);
-        let receipt = crate::tools::review::build_review_receipt(
-            review_target_label(&args),
-            &diff,
+    let report_failure = |usage: &crate::models::Usage, completed_passes, publication, message| {
+        report_review_failure(
+            &args,
             &route_provider,
             &model,
-            &parsed_output,
-            &output,
-            Vec::new(),
-        );
-        let path =
-            crate::tools::review::write_review_receipt(&receipt, args.receipt_path.as_deref())?;
-        Some((path, receipt))
-    } else {
-        None
-    };
-    let review_error = review_incomplete.then(|| {
-        format!(
-            "Model response incomplete: provider stop reason `{}`; the partial review was not accepted.",
-            crate::models::stop_reason_detail(review_stop_reason.as_deref())
+            usage,
+            completed_passes,
+            planned_passes,
+            publication,
+            message,
         )
-    });
-    if args.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "mode": "review",
-                "provider": route_provider,
-                "model": model,
-                "success": !review_incomplete,
-                "content": output,
-                "pr": pr_view.as_ref().map(|(number, view)| serde_json::json!({
-                    "number": number,
-                    "url": view.url,
-                    "title": view.title,
-                    "head_sha": view.head_sha,
-                })),
-                "review": structured,
-                "stop_reason": review_stop_reason,
-                "error": review_error,
-                "receipt_path": receipt
-                    .as_ref()
-                    .map(|(path, _)| path.display().to_string()),
-                "receipt": receipt.as_ref().map(|(_, receipt)| receipt),
-            }))?
-        );
-        if let Some(error) = review_error {
-            anyhow::bail!(error);
+    };
+    let mut accumulator = pr_plan
+        .as_ref()
+        .map(crate::tools::review::PrReviewAccumulator::new);
+    let mut output = String::new();
+    let mut review_stop_reason = None;
+    for (index, user_prompt) in prompts.into_iter().enumerate() {
+        let reasoning_effort = route.reasoning_effort.and_then(|effort| {
+            cli_reasoning_effort_value_for_prompt(&execution_config, &model, effort, &user_prompt)
+        });
+        let request = MessageRequest {
+            model: model.clone(),
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: user_prompt,
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: client.effective_max_output_tokens(&request_route.model),
+            system: Some(system.clone()),
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort,
+            stream: Some(false),
+            temperature: None,
+            top_p: None,
+        };
+        let response = match client.create_message(request).await {
+            Ok(response) => response,
+            Err(error) => {
+                return report_failure(
+                    &usage,
+                    index,
+                    publication,
+                    format!(
+                        "Review pass {}/{} request failed: {error}; no partial review was accepted or posted",
+                        index + 1,
+                        planned_passes
+                    ),
+                );
+            }
+        };
+        crate::tools::review::add_review_usage(&mut usage, &response.usage);
+        review_stop_reason = response.stop_reason.clone();
+        if crate::models::is_incomplete_stop_reason(review_stop_reason.as_deref()) {
+            return report_failure(
+                &usage,
+                index,
+                publication,
+                format!(
+                    "Review pass {}/{} incomplete: provider stop reason `{}`; the partial review was not accepted or posted.",
+                    index + 1,
+                    planned_passes,
+                    crate::models::stop_reason_detail(review_stop_reason.as_deref())
+                ),
+            );
         }
+        let mut pass_output = String::new();
+        for block in response.content {
+            if let ContentBlock::Text { text, .. } = block {
+                pass_output.push_str(&text);
+            }
+        }
+        if let (Some(plan), Some(accumulator)) = (&pr_plan, accumulator.as_mut()) {
+            if let Err(error) = accumulator.accept(&plan.passes[index], pass_output) {
+                return report_failure(&usage, index, publication, error.to_string());
+            }
+        } else {
+            output = pass_output;
+        }
+    }
+    let (structured, coverage) = if let Some(accumulator) = accumulator {
+        let (review, content, coverage) = match accumulator.finish(&diff) {
+            Ok(complete) => complete,
+            Err(error) => {
+                return report_failure(&usage, planned_passes, publication, error.to_string());
+            }
+        };
+        output = content;
+        (Some(review), Some(coverage))
+    } else {
+        (None, None)
+    };
+    let finalized = (|| -> Result<_> {
+        if let Some((number, view)) = &pr_view {
+            let cwd = std::env::current_dir().context(
+                "Failed to resolve the current directory before final PR revision check",
+            )?;
+            crate::tools::review_pr::ensure_current(*number, args.repo.as_deref(), &cwd, view)?;
+        }
+        if args.post {
+            let (number, view) = pr_view
+                .as_ref()
+                .expect("--post requires --pr (enforced by clap)");
+            let review = structured
+                .as_ref()
+                .expect("structured output exists for PR reviews");
+            post_pr_review(
+                *number,
+                view,
+                args.repo.as_deref(),
+                review,
+                &diff,
+                &mut publication,
+            )
+            .context("PR review publication failed")?;
+        }
+        let receipt = if args.write_receipt {
+            let parsed_output = structured
+                .clone()
+                .unwrap_or_else(|| crate::tools::review::ReviewOutput::from_str(&output));
+            let mut receipt = crate::tools::review::build_review_receipt(
+                review_target_label(&args),
+                &diff,
+                &route_provider,
+                &model,
+                &parsed_output,
+                &output,
+                Vec::new(),
+            );
+            if let Some(coverage) = coverage {
+                crate::tools::review::attach_pr_review_coverage(&mut receipt, coverage)
+                    .context("Failed to attach complete PR coverage to review receipt")?;
+            }
+            let path =
+                crate::tools::review::write_review_receipt(&receipt, args.receipt_path.as_deref())
+                    .context("Failed to write review receipt")?;
+            Some((path, receipt))
+        } else {
+            None
+        };
+        Ok(receipt)
+    })();
+    let receipt = match finalized {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            return report_failure(&usage, planned_passes, publication, error.to_string());
+        }
+    };
+    if args.json {
+        let payload = serde_json::json!({
+            "mode": "review",
+            "provider": route_provider,
+            "model": model,
+            "success": true,
+            "publication": publication.as_str(),
+            "content": output,
+            "pr": pr_view.as_ref().map(|(number, view)| serde_json::json!({
+                "number": number,
+                "url": view.url,
+                "title": view.title,
+                "head_sha": view.head_sha,
+            })),
+            "review": structured,
+            "stop_reason": review_stop_reason,
+            "usage": usage,
+            "review_passes": pr_plan.as_ref().map(|plan| plan.passes.len()),
+            "receipt_path": receipt
+                .as_ref()
+                .map(|(path, _)| path.display().to_string()),
+            "receipt": receipt.as_ref().map(|(_, receipt)| receipt),
+        });
+        let payload = match serde_json::to_string_pretty(&payload) {
+            Ok(payload) => payload,
+            Err(error) => {
+                return report_failure(
+                    &usage,
+                    planned_passes,
+                    publication,
+                    format!("Failed to serialize completed review output: {error}"),
+                );
+            }
+        };
+        println!("{payload}");
     } else if let Some((number, view)) = &pr_view {
         let review = structured
             .as_ref()
@@ -8457,19 +8592,87 @@ Provide findings ordered by severity with file references, then open questions, 
         if let Some((path, _)) = receipt {
             eprintln!("Review receipt written: {}", path.display());
         }
-        if let Some(error) = review_error {
-            anyhow::bail!(error);
-        }
     } else {
         println!("{output}");
         if let Some((path, _)) = receipt {
             eprintln!("Review receipt written: {}", path.display());
         }
-        if let Some(error) = review_error {
-            anyhow::bail!(error);
-        }
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReviewPublication {
+    NotRequested,
+    NotAttempted,
+    Uncertain,
+    Posted,
+}
+
+impl ReviewPublication {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NotRequested => "not_requested",
+            Self::NotAttempted => "not_attempted",
+            Self::Uncertain => "uncertain",
+            Self::Posted => "posted",
+        }
+    }
+}
+
+fn review_failure_payload(
+    provider: &str,
+    model: &str,
+    usage: &crate::models::Usage,
+    completed_passes: usize,
+    planned_passes: usize,
+    publication: ReviewPublication,
+    message: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "mode": "review",
+        "provider": provider,
+        "model": model,
+        "success": false,
+        "complete": false,
+        "publication": publication.as_str(),
+        "error": message,
+        "usage": usage,
+        "completed_review_passes": completed_passes,
+        "planned_review_passes": planned_passes,
+    })
+}
+
+fn report_review_failure(
+    args: &ReviewArgs,
+    provider: &str,
+    model: &str,
+    usage: &crate::models::Usage,
+    completed_passes: usize,
+    planned_passes: usize,
+    publication: ReviewPublication,
+    message: impl Into<String>,
+) -> Result<()> {
+    let message = message.into();
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&review_failure_payload(
+                provider,
+                model,
+                usage,
+                completed_passes,
+                planned_passes,
+                publication,
+                &message,
+            ))?
+        );
+    }
+    let usage = serde_json::to_string(usage)?;
+    let publication = publication.as_str();
+    bail!(
+        "{message}; publication: {publication}; completed review passes: {completed_passes}/{planned_passes}; accumulated usage: {usage}"
+    )
 }
 
 /// Apply `codewhale review --provider <name>` and decide whether the route is
@@ -8510,10 +8713,23 @@ fn validate_review_receipt_args(args: &ReviewArgs) -> Result<()> {
     if args.write_receipt && args.check_receipt {
         bail!("--write-receipt and --check-receipt are mutually exclusive");
     }
+    if args.pr.is_none() && args.max_passes != 1 {
+        bail!("--max-passes applies only to --pr reviews");
+    }
+    if !(1..=crate::tools::review::MAX_REVIEW_PASSES).contains(&args.max_passes) {
+        bail!(
+            "--max-passes must be from 1 to {}",
+            crate::tools::review::MAX_REVIEW_PASSES
+        );
+    }
     Ok(())
 }
 
-fn run_review_receipt_check(diff: &str, args: &ReviewArgs) -> Result<()> {
+fn run_review_receipt_check(
+    diff: &str,
+    args: &ReviewArgs,
+    pr_view: Option<&GhPullRequest>,
+) -> Result<()> {
     let (path, receipt) = if let Some(path) = args.receipt_path.as_ref() {
         (
             path.clone(),
@@ -8527,8 +8743,16 @@ fn run_review_receipt_check(diff: &str, args: &ReviewArgs) -> Result<()> {
             )
         })?
     };
-    let validation =
+    let mut validation =
         crate::tools::review::validate_review_receipt_for_diff(diff, &receipt, Some(path.clone()));
+    if validation.passed
+        && pr_view
+            .is_some_and(|view| !crate::tools::review::receipt_matches_pr_revision(&receipt, view))
+    {
+        validation.passed = false;
+        validation.reason =
+            "review receipt does not match the current PR base/head revision".into();
+    }
 
     if args.json {
         println!(
@@ -8613,7 +8837,7 @@ async fn run_pr(
     }
 
     let view = run_gh_pr_view(number, repo)?;
-    let diff = run_gh_pr_diff(number, repo)?;
+    let diff = run_gh_pr_diff(number, repo, &view)?;
 
     if checkout {
         match run_gh_pr_checkout(number, repo) {
@@ -8677,69 +8901,14 @@ fn is_command_available(name: &str) -> bool {
     false
 }
 
-#[derive(Debug, Clone, Default)]
-struct GhPullRequest {
-    title: String,
-    body: String,
-    base: String,
-    head: String,
-    url: String,
-    /// Head commit SHA (`headRefOid`). Anchors posted review comments to the
-    /// exact revision that was reviewed.
-    head_sha: String,
-}
+use crate::tools::review_pr::GhPullRequest;
 
 fn run_gh_pr_view(number: u32, repo: Option<&str>) -> Result<GhPullRequest> {
-    let mut cmd = crate::dependencies::Gh::command()
-        .ok_or_else(|| anyhow::anyhow!("gh not found on PATH"))?;
-    cmd.arg("pr").arg("view").arg(number.to_string());
-    if let Some(r) = repo {
-        cmd.arg("--repo").arg(r);
-    }
-    cmd.arg("--json")
-        .arg("title,body,baseRefName,headRefName,url,headRefOid");
-    let output = cmd
-        .output()
-        .map_err(|e| anyhow::anyhow!("Failed to run `gh pr view`: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        bail!("gh pr view #{number} failed: {stderr}");
-    }
-    let raw = String::from_utf8_lossy(&output.stdout).to_string();
-    let value: serde_json::Value = serde_json::from_str(&raw)
-        .map_err(|e| anyhow::anyhow!("gh pr view returned non-JSON output: {e}"))?;
-    let pick = |key: &str| {
-        value
-            .get(key)
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_string()
-    };
-    Ok(GhPullRequest {
-        title: pick("title"),
-        body: pick("body"),
-        base: pick("baseRefName"),
-        head: pick("headRefName"),
-        url: pick("url"),
-        head_sha: pick("headRefOid"),
-    })
+    crate::tools::review_pr::fetch_view(number, repo, &std::env::current_dir()?)
 }
 
-fn run_gh_pr_diff(number: u32, repo: Option<&str>) -> Result<String> {
-    let mut cmd = crate::dependencies::Gh::command()
-        .ok_or_else(|| anyhow::anyhow!("gh not found on PATH"))?;
-    cmd.arg("pr").arg("diff").arg(number.to_string());
-    if let Some(r) = repo {
-        cmd.arg("--repo").arg(r);
-    }
-    let output = cmd
-        .output()
-        .map_err(|e| anyhow::anyhow!("Failed to run `gh pr diff`: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        bail!("gh pr diff #{number} failed: {stderr}");
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+fn run_gh_pr_diff(number: u32, repo: Option<&str>, view: &GhPullRequest) -> Result<String> {
+    crate::tools::review_pr::fetch_diff(number, repo, &std::env::current_dir()?, view)
 }
 
 fn run_gh_pr_checkout(number: u32, repo: Option<&str>) -> Result<()> {
@@ -9166,6 +9335,7 @@ fn run_gh_post_pr_review(
     body: &str,
     commit_id: &str,
     comments: &[serde_json::Value],
+    publication: &mut ReviewPublication,
 ) -> Result<()> {
     let mut payload = serde_json::json!({
         "body": body,
@@ -9191,6 +9361,7 @@ fn run_gh_post_pr_review(
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("Failed to run `gh api`: {e}"))?;
+    *publication = ReviewPublication::Uncertain;
     if let Some(stdin) = child.stdin.as_mut() {
         use std::io::Write;
         stdin
@@ -9204,18 +9375,23 @@ fn run_gh_post_pr_review(
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         bail!("gh api POST repos/{repo}/pulls/{number}/reviews failed: {stderr}");
     }
+    *publication = ReviewPublication::Posted;
     Ok(())
 }
 
-/// Publish a completed PR review: resolve the repository, render the summary,
-/// and post it (with inline comments where the diff confirms the position).
+/// Publish a completed PR review exactly once: resolve the repository, render
+/// the summary, and include every comment whose position the diff confirms.
+/// A failed request can have an uncertain remote outcome, so reconciliation
+/// and any retry stay under the caller's control rather than risking a duplicate.
 fn post_pr_review(
     number: u32,
     view: &GhPullRequest,
     repo: Option<&str>,
     review: &crate::tools::review::ReviewOutput,
     diff: &str,
+    publication: &mut ReviewPublication,
 ) -> Result<()> {
+    crate::tools::review_pr::ensure_current(number, repo, &std::env::current_dir()?, view)?;
     let repo_name = match repo.map(str::trim).filter(|repo| !repo.is_empty()) {
         Some(repo) => repo.to_string(),
         None => run_gh_repo_name()?,
@@ -9224,47 +9400,21 @@ fn post_pr_review(
     if let Some(receipt) = plan.receipt() {
         eprintln!("{receipt}");
     }
-    let inline = plan.comments;
     let body = render_pr_review_markdown(number, view, review, true);
-    if inline.is_empty() {
-        run_gh_post_pr_review(&repo_name, number, &body, &view.head_sha, &[])?;
-    } else if let Err(err) =
-        run_gh_post_pr_review(&repo_name, number, &body, &view.head_sha, &inline)
-    {
-        // Anchors are pre-filtered against the parsed diff hunks, so this
-        // path should now be unreachable in the common case. It stays as a
-        // last resort for anchors GitHub rejects for reasons the diff cannot
-        // show (a stale head SHA, a suppressed large file), and it announces
-        // exactly how many inline comments were lost rather than failing
-        // silently.
-        eprintln!(
-            "warning: {} inline review comment(s) rejected ({err}); retrying summary-only",
-            inline.len()
-        );
-        run_gh_post_pr_review(&repo_name, number, &body, &view.head_sha, &[])?;
-    }
-    Ok(())
+    run_gh_post_pr_review(
+        &repo_name,
+        number,
+        &body,
+        &view.head_sha,
+        &plan.comments,
+        publication,
+    )
 }
 
-/// Format the PR review prompt that lands in the composer. Caps the
-/// diff at 200 KiB so a massive PR doesn't blow the model's context
-/// window before the user even hits Enter — they can always ask the
-/// model to fetch more via `gh pr diff #N` from inside the session.
+/// Both the CLI review and interactive composer receive the complete diff.
+/// Collection and review-budget checks must fail before any partial review.
 fn format_pr_prompt(number: u32, view: &GhPullRequest, diff: &str) -> String {
-    const MAX_DIFF_BYTES: usize = 200 * 1024;
-    let diff_section = if diff.len() > MAX_DIFF_BYTES {
-        let cut = (0..=MAX_DIFF_BYTES)
-            .rev()
-            .find(|&i| diff.is_char_boundary(i))
-            .unwrap_or(0);
-        format!(
-            "{}\n\n[…diff truncated at {} KiB; ask me to fetch more if needed]\n",
-            &diff[..cut],
-            MAX_DIFF_BYTES / 1024
-        )
-    } else {
-        diff.to_string()
-    };
+    let diff_section = crate::tools::review_pr::model_diff(diff);
     let body = if view.body.trim().is_empty() {
         "(no description)".to_string()
     } else {
@@ -9286,6 +9436,8 @@ fn format_pr_prompt(number: u32, view: &GhPullRequest, diff: &str) -> String {
          \n\
          URL: {url}\n\
          Branches: {branches}\n\
+         Revision: {head_sha} (base {base_sha}); {changed_files} file patches.\n\
+         Binary changes are represented by metadata; their contents are not semantically inspected. Exact binary object IDs remain in the review evidence.\n\
          \n\
          ## Description\n\
          \n\
@@ -9296,6 +9448,9 @@ fn format_pr_prompt(number: u32, view: &GhPullRequest, diff: &str) -> String {
          ```diff\n\
          {diff_section}\n\
          ```\n",
+        head_sha = view.head_sha,
+        base_sha = view.base_sha,
+        changed_files = view.changed_files,
         url = if view.url.is_empty() {
             "(unavailable)"
         } else {
@@ -9304,9 +9459,13 @@ fn format_pr_prompt(number: u32, view: &GhPullRequest, diff: &str) -> String {
     )
 }
 
-fn collect_diff(args: &ReviewArgs) -> Result<String> {
-    let mut diff = if let Some(number) = args.pr {
-        run_gh_pr_diff(number, args.repo.as_deref())?
+fn collect_diff(args: &ReviewArgs, pr_view: Option<&GhPullRequest>) -> Result<String> {
+    let diff = if let Some(number) = args.pr {
+        run_gh_pr_diff(
+            number,
+            args.repo.as_deref(),
+            pr_view.context("PR snapshot is required")?,
+        )?
     } else {
         let mut cmd = crate::dependencies::Git::command()
             .ok_or_else(|| anyhow::anyhow!("git not found on PATH"))?;
@@ -9330,10 +9489,20 @@ fn collect_diff(args: &ReviewArgs) -> Result<String> {
         }
         String::from_utf8_lossy(&output.stdout).to_string()
     };
-    if diff.len() > args.max_chars {
-        diff = crate::utils::truncate_with_ellipsis(&diff, args.max_chars, "\n...[truncated]\n");
+    if args.pr.is_none() {
+        ensure_local_review_diff_fits(&diff, args.max_chars)?;
     }
     Ok(diff)
+}
+
+fn ensure_local_review_diff_fits(diff: &str, max_chars: usize) -> Result<()> {
+    let chars = diff.chars().count();
+    if chars > max_chars {
+        bail!(
+            "Complete local diff requires {chars} characters, exceeding the review limit of {max_chars}. No review was run and no receipt was written or accepted. Select an explicit --path scope, or increase --max-chars only if the selected model can accept the complete input."
+        );
+    }
+    Ok(())
 }
 
 fn review_target_label(args: &ReviewArgs) -> String {
@@ -10550,8 +10719,15 @@ fn merge_project_config_with_approval_baseline(
 
     // String fields a project may legitimately override (model,
     // approval/sandbox tightening, notes path, reasoning effort).
+    if !config.environment_model_applied
+        && let Some(model) = table.get("model").and_then(toml::Value::as_str)
+        && !model.is_empty()
+    {
+        config.default_text_model = Some(model.to_string());
+        config.set_provider_model_override(config.api_provider(), Some(model.to_string()));
+        config.remembered_selection_scope = Some(false);
+    }
     for (key, field) in [
-        ("model", &mut config.default_text_model),
         ("reasoning_effort", &mut config.reasoning_effort),
         ("notes_path", &mut config.notes_path),
     ] {
@@ -10859,6 +11035,7 @@ async fn run_interactive_with_notice(
         )?;
     }
     let config = &merged_config;
+    initialize_cloud_facts(config);
 
     if !cli.skip_onboarding {
         match crate::config::ensure_config_file_exists(cli.config.clone()) {
@@ -11397,7 +11574,13 @@ struct ExecStreamMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_catalog_sha256: Option<String>,
     input_analysis: ExecStreamInputAnalysis,
+    /// Real character count of the visible final answer, before any bound.
     visible_final_answer_chars: usize,
+    /// Bounded, secret-redacted excerpt of the visible final answer (see
+    /// [`exec_stream_final_answer_excerpt`]). Omitted when the run produced
+    /// no visible answer.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    visible_final_answer_excerpt: String,
     session_id: String,
     resume_command: String,
     workspace: String,
@@ -11498,7 +11681,17 @@ enum ExecStreamEvent {
         event: serde_json::Value,
     },
     #[serde(rename = "session_capture")]
-    SessionCapture { content: String },
+    SessionCapture {
+        /// Redacted fingerprint for logs/forensics, the same value the
+        /// terminal `metadata.session_id` carries; never the recoverable id.
+        content: String,
+        /// The real saved-session id a caller can resolve via
+        /// `GET /v1/sessions/{id}` to read the worker's full transcript. This
+        /// is the only place the exec stream carries the raw id: `metadata`
+        /// stays fingerprint-only so a captured terminal receipt is safe to
+        /// log on its own.
+        saved_session_id: String,
+    },
     #[serde(rename = "service_released")]
     #[cfg(unix)]
     ServiceReleased {
@@ -11687,6 +11880,7 @@ async fn run_workflow_tool_command_inner(
         }
     }
 
+    initialize_cloud_facts(&config);
     let model = resolve_exec_model(&config, None);
     let route = resolve_cli_exec_route(
         &config,
@@ -11806,6 +12000,7 @@ async fn run_workflow_tool_command_inner(
             tool_catalog_sha256: None,
             input_analysis: ExecStreamInputAnalysis::default(),
             visible_final_answer_chars: result.content.chars().count(),
+            visible_final_answer_excerpt: exec_stream_final_answer_excerpt(&result.content),
             session_id: String::new(),
             resume_command: String::new(),
             workspace: workspace.display().to_string(),
@@ -12220,11 +12415,74 @@ fn exec_stream_session_ref(session_id: &str) -> String {
     crate::utils::redacted_identifier_for_log(session_id)
 }
 
+/// Resume hint for the terminal `metadata` receipt. `metadata` carries only
+/// the session fingerprint, so the hint names the `session_capture` field
+/// that holds the recoverable id instead of pretending to redact one.
 fn exec_stream_resume_hint(session_id: &str) -> String {
     if session_id.trim().is_empty() {
         String::new()
     } else {
-        "codewhale exec --resume <redacted-session-id>".to_string()
+        "codewhale exec --resume <session_capture.saved_session_id>".to_string()
+    }
+}
+
+/// Character bound for `metadata.visible_final_answer_excerpt`. The excerpt
+/// is a status surface (fleet receipts, event labels, runtime API payloads),
+/// not the transcript: the full answer lives in the saved session and the
+/// worker's stream-json log, and `visible_final_answer_chars` carries the real
+/// length so a consumer can tell a bounded excerpt from a short answer.
+const EXEC_STREAM_FINAL_ANSWER_EXCERPT_CHARS: usize = 4_000;
+
+/// The final visible assistant reply for the terminal receipt: the text
+/// blocks of the last assistant-like message after the current user prompt.
+/// Tool results also use the user role, so they must not start a new turn.
+/// A resumed session can be synchronized before its new prompt is accepted;
+/// without current output its old answer must never become a new deliverable.
+fn exec_stream_final_answer_text(
+    messages: &[Message],
+    current_turn_has_output: bool,
+) -> Option<String> {
+    if !current_turn_has_output {
+        return None;
+    }
+    let turn_start = messages.iter().rposition(|message| {
+        message.role == Role::User
+            && !message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+    })?;
+    let text = messages
+        .iter()
+        .skip(turn_start + 1)
+        .rev()
+        .find(|message| message.role.is_assistant_like())?
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+/// Bound and secret-redact the visible final answer once, at the emitter, so
+/// every downstream consumer reads the same excerpt.
+fn exec_stream_final_answer_excerpt(output: &str) -> String {
+    let redacted = codewhale_config::persistence::redact_secrets(output.trim());
+    let mut chars = redacted.chars();
+    let excerpt: String = chars
+        .by_ref()
+        .take(EXEC_STREAM_FINAL_ANSWER_EXCERPT_CHARS)
+        .collect();
+    if chars.next().is_some() {
+        format!("{excerpt}...")
+    } else {
+        excerpt
     }
 }
 
@@ -12242,9 +12500,16 @@ fn persist_exec_session(
     system_prompt: &Option<SystemPrompt>,
     session_id: Option<&str>,
     total_tokens: u64,
+    session_manager: Option<&SessionManager>,
 ) -> Result<String> {
-    let manager =
-        SessionManager::default_location().context("could not open session manager for save")?;
+    let default_manager;
+    let manager = if let Some(manager) = session_manager {
+        manager
+    } else {
+        default_manager = SessionManager::default_location()
+            .context("could not open session manager for save")?;
+        &default_manager
+    };
     let mut saved = if let Some(id) = session_id.filter(|id| !id.trim().is_empty()) {
         match manager.load_session(id) {
             Ok(existing) => session_manager::update_session(
@@ -15415,12 +15680,102 @@ api_key = "test-only-key"
         assert_eq!(args.provider.as_deref(), Some("zai"));
         assert_eq!(args.model.as_deref(), Some("GLM-5.3"));
         assert_eq!(args.pr, Some(5709));
+        assert_eq!(args.max_passes, 1);
         // The threaded id round-trips through the provider vocabulary the
         // override validates against — never a model-id sniff.
         assert_eq!(
             crate::config::ApiProvider::parse(args.provider.as_deref().unwrap()),
             Some(crate::config::ApiProvider::Zai)
         );
+    }
+
+    #[test]
+    fn review_batch_passes_require_explicit_bounded_opt_in() {
+        let args = review_args(&["codewhale", "review", "--pr", "6002", "--max-passes", "31"]);
+        assert_eq!(args.max_passes, 31);
+        assert!(validate_review_receipt_args(&args).is_ok());
+        let too_many = review_args(&["codewhale", "review", "--pr", "6002", "--max-passes", "65"]);
+        assert!(validate_review_receipt_args(&too_many).is_err());
+        let local = review_args(&["codewhale", "review", "--max-passes", "2"]);
+        assert!(validate_review_receipt_args(&local).is_err());
+    }
+
+    #[test]
+    fn review_failure_payload_preserves_usage_without_complete_claim() {
+        let usage = crate::models::Usage {
+            input_tokens: 24,
+            output_tokens: 4,
+            reasoning_tokens: Some(3),
+            ..Default::default()
+        };
+        let payload = review_failure_payload(
+            "fixture-provider",
+            "fixture-model",
+            &usage,
+            1,
+            2,
+            ReviewPublication::NotAttempted,
+            "second pass malformed",
+        );
+        assert_eq!(payload["success"], false);
+        assert_eq!(payload["complete"], false);
+        assert_eq!(payload["completed_review_passes"], 1);
+        assert_eq!(payload["planned_review_passes"], 2);
+        assert_eq!(payload["publication"], "not_attempted");
+        assert_eq!(payload["usage"]["input_tokens"], 24);
+        assert_eq!(payload["usage"]["reasoning_tokens"], 3);
+        assert!(payload.get("review").is_none());
+        assert!(payload.get("receipt").is_none());
+    }
+
+    #[test]
+    fn review_failure_after_publication_preserves_all_usage_and_post_state() {
+        let mut usage = crate::models::Usage::default();
+        for response_usage in [
+            crate::models::Usage {
+                input_tokens: 21,
+                output_tokens: 5,
+                reasoning_tokens: Some(2),
+                ..Default::default()
+            },
+            crate::models::Usage {
+                input_tokens: 34,
+                output_tokens: 8,
+                reasoning_tokens: Some(3),
+                ..Default::default()
+            },
+        ] {
+            crate::tools::review::add_review_usage(&mut usage, &response_usage);
+        }
+
+        for (publication, message) in [
+            (
+                ReviewPublication::Uncertain,
+                "PR review publication failed after request dispatch",
+            ),
+            (
+                ReviewPublication::Posted,
+                "review posted but receipt write failed",
+            ),
+        ] {
+            let payload = review_failure_payload(
+                "fixture-provider",
+                "fixture-model",
+                &usage,
+                2,
+                2,
+                publication,
+                message,
+            );
+            assert_eq!(payload["success"], false);
+            assert_eq!(payload["complete"], false);
+            assert_eq!(payload["publication"], publication.as_str());
+            assert_eq!(payload["usage"]["input_tokens"], 55);
+            assert_eq!(payload["usage"]["output_tokens"], 13);
+            assert_eq!(payload["usage"]["reasoning_tokens"], 5);
+            assert!(payload.get("review").is_none());
+            assert!(payload.get("receipt").is_none());
+        }
     }
 
     #[tokio::test]
@@ -15632,6 +15987,31 @@ api_key = "test-only-key"
     }
 
     #[test]
+    fn local_review_budget_rejects_changes_beyond_a_shared_prefix() {
+        let prefix = review_test_diff();
+        let limit = prefix.chars().count();
+        for tail in ["+safe_change();\n", "+dangerous_change();\n"] {
+            let diff = format!("{prefix}{tail}");
+            let error = ensure_local_review_diff_fits(&diff, limit).unwrap_err();
+            assert!(error.to_string().contains("No review was run"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("no receipt was written or accepted")
+            );
+        }
+    }
+
+    #[test]
+    fn local_review_budget_counts_unicode_characters_without_cutting_input() {
+        let diff = format!("{}+鲸鱼\n", review_test_diff());
+        let limit = diff.chars().count();
+        assert!(diff.len() > limit);
+        ensure_local_review_diff_fits(&diff, limit).unwrap();
+        assert!(ensure_local_review_diff_fits(&diff, limit - 1).is_err());
+    }
+
+    #[test]
     fn inline_review_comments_keep_only_hunk_locatable_issues() {
         let review = review_with(
             vec![
@@ -15654,8 +16034,7 @@ api_key = "test-only-key"
     #[test]
     fn inline_review_comments_drop_one_out_of_hunk_anchor_not_the_whole_review() {
         // Line 25 is inside the file but between the two hunks. Before the
-        // hunk filter this single bad anchor 422'd the review and every inline
-        // comment was lost to the summary-only retry.
+        // hunk filter this single bad anchor 422'd the whole review request.
         let review = review_with(
             vec![
                 review_issue("error", Some("crates/tui/src/lib.rs"), Some(11)),
@@ -15904,6 +16283,25 @@ api_key = "test-only-key"
     }
 
     #[test]
+    fn pr_prompt_preserves_the_last_patch_beyond_the_old_200kib_cutoff() {
+        let diff = format!(
+            "{}\ndiff --git a/last.rs b/last.rs\n+LAST_PATCH\n",
+            "x".repeat(210 * 1024)
+        );
+        let view = GhPullRequest {
+            head_sha: "b".repeat(40),
+            base_sha: "a".repeat(40),
+            changed_files: 301,
+            ..Default::default()
+        };
+        let prompt = format_pr_prompt(6002, &view, &diff);
+        assert!(prompt.contains(&diff));
+        assert!(prompt.contains("+LAST_PATCH"));
+        assert!(prompt.contains(&view.head_sha));
+        assert!(!prompt.contains("diff truncated"));
+    }
+
+    #[test]
     fn pr_review_markdown_shows_the_computed_replacement() {
         // A plain `codewhale review --pr` (no --post) computes and validates
         // the literal fix; the local report must show it, not just the prose.
@@ -15914,6 +16312,7 @@ api_key = "test-only-key"
             head: "feature".to_string(),
             url: "https://example.invalid/pr/1".to_string(),
             head_sha: "abc123".to_string(),
+            ..Default::default()
         };
         let mut single = review_suggestion(
             Some("crates/tui/src/lib.rs"),
@@ -16551,11 +16950,8 @@ api_key = "test-only-key"
         assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
-    /// R1: omitting `--max-turns` used to resolve to `u32::MAX`, i.e. a
-    /// headless run with no bound at all. It now resolves to the finite
-    /// default, and an explicit value still wins.
     #[test]
-    fn exec_defaults_to_a_finite_headless_turn_cap() {
+    fn exec_only_installs_an_explicit_headless_turn_cap() {
         let cli = parse_cli(&["codewhale", "exec", "--auto", "benchmark this"]);
         let Some(Commands::Exec(args)) = cli.command else {
             panic!("expected exec command");
@@ -16565,10 +16961,19 @@ api_key = "test-only-key"
         let defaulted = exec_max_steps(args.max_turns);
         assert_eq!(
             defaulted,
-            crate::core::engine::turn_budget::DEFAULT_EXEC_MAX_TURNS
+            crate::core::engine::turn_budget::DEFAULT_MAX_MODEL_STEPS
         );
-        assert!(defaulted < u32::MAX, "the headless default must be finite");
+        assert_eq!(
+            crate::core::turn::TurnContext::new(defaulted).step_limit(),
+            None
+        );
         assert_eq!(exec_max_steps(Some(7)), 7);
+        let mut capped = crate::core::turn::TurnContext::new(exec_max_steps(Some(7)));
+        for _ in 0..7 {
+            capped.next_step();
+        }
+        assert!(capped.at_max_steps());
+        assert_eq!(capped.stop_diagnostics.effective_max_steps, Some(7));
         assert_eq!(
             exec_max_steps(Some(u32::MAX)),
             crate::core::engine::turn_budget::MAX_MAX_MODEL_STEPS,
@@ -17063,6 +17468,7 @@ api_key = "test-only-key"
             (
                 ExecStreamEvent::SessionCapture {
                     content: "x".to_string(),
+                    saved_session_id: "session-x".to_string(),
                 },
                 "session_capture",
             ),
@@ -17198,6 +17604,7 @@ api_key = "test-only-key"
                 tool_catalog_sha256: Some("sha256:tools".to_string()),
                 input_analysis: ExecStreamInputAnalysis::default(),
                 visible_final_answer_chars: 17,
+                visible_final_answer_excerpt: "the visible reply".to_string(),
                 session_id: exec_stream_session_ref(raw_session_id),
                 resume_command: exec_stream_resume_hint(raw_session_id),
                 workspace: "/tmp/work".to_string(),
@@ -17223,21 +17630,171 @@ api_key = "test-only-key"
         );
         assert_eq!(
             parsed["meta"]["resume_command"],
-            "codewhale exec --resume <redacted-session-id>"
+            "codewhale exec --resume <session_capture.saved_session_id>"
         );
         assert_eq!(parsed["meta"]["workspace"], "/tmp/work");
         assert_eq!(parsed["meta"]["message_count"], 4);
         assert_eq!(parsed["meta"]["visible_final_answer_chars"], 17);
+        assert_eq!(
+            parsed["meta"]["visible_final_answer_excerpt"],
+            "the visible reply"
+        );
 
+        // Contract (#5946): the raw saved-session id is carried by exactly one
+        // field, `session_capture.saved_session_id`. The `metadata` receipt
+        // above stays fingerprint-only, and the capture's own `content` keeps
+        // the same fingerprint so both surfaces can be correlated in a log.
         let capture = ExecStreamEvent::SessionCapture {
             content: exec_stream_session_ref(raw_session_id),
+            saved_session_id: raw_session_id.to_string(),
         };
         let capture_json = serde_json::to_string(&capture).expect("serializes");
-        assert!(!capture_json.contains(raw_session_id));
         let parsed_capture: serde_json::Value =
             serde_json::from_str(&capture_json).expect("valid json");
         assert_eq!(parsed_capture["type"], "session_capture");
+        assert_eq!(parsed_capture["content"], parsed["meta"]["session_id"]);
         assert_ne!(parsed_capture["content"], raw_session_id);
+        assert_eq!(parsed_capture["saved_session_id"], raw_session_id);
+        assert!(parsed_capture.get("session_id").is_none(), "{capture_json}");
+    }
+
+    #[test]
+    fn exec_stream_final_answer_excerpt_is_bounded_and_redacted() {
+        assert_eq!(
+            exec_stream_final_answer_excerpt("  short reply \n"),
+            "short reply"
+        );
+        let long = "x".repeat(EXEC_STREAM_FINAL_ANSWER_EXCERPT_CHARS + 5);
+        let excerpt = exec_stream_final_answer_excerpt(&long);
+        assert_eq!(
+            excerpt.chars().count(),
+            EXEC_STREAM_FINAL_ANSWER_EXCERPT_CHARS + 3
+        );
+        assert!(excerpt.ends_with("..."));
+        let leaked = exec_stream_final_answer_excerpt("token: sk-ant-must-not-leak-1234567890");
+        assert!(!leaked.contains("sk-ant-must-not-leak"), "{leaked}");
+    }
+
+    #[test]
+    fn exec_stream_final_answer_text_is_the_last_assistant_reply() {
+        // Multi-step turn: pre-tool commentary, a tool result, then a
+        // distinct final answer. The receipt must carry only the final
+        // reply, not the cumulative stream output.
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "write the report".to_string(),
+                    cache_control: None,
+                }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "let me check the workspace first".to_string(),
+                    cache_control: None,
+                }],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call-1".to_string(),
+                    content: "listed files".to_string(),
+                    is_error: Some(false),
+                    content_blocks: None,
+                }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::thinking("final reasoning"),
+                    ContentBlock::Text {
+                        text: "the final report".to_string(),
+                        cache_control: None,
+                    },
+                ],
+            },
+        ];
+        assert_eq!(
+            exec_stream_final_answer_text(&messages, true),
+            Some("the final report".to_string())
+        );
+    }
+
+    #[test]
+    fn exec_stream_final_answer_text_never_reuses_a_resumed_turn_reply() {
+        let mut messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "old prompt".into(),
+                    cache_control: None,
+                }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "old reply must not be delivered again".into(),
+                    cache_control: None,
+                }],
+            },
+        ];
+        // The synchronization event can precede acceptance of the new prompt.
+        assert_eq!(exec_stream_final_answer_text(&messages, false), None);
+        messages.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "new prompt that fails before an answer".into(),
+                cache_control: None,
+            }],
+        });
+        assert_eq!(exec_stream_final_answer_text(&messages, true), None);
+        messages.push(Message {
+            role: Role::InterruptedAssistant,
+            content: vec![ContentBlock::Text {
+                text: "current partial reply".into(),
+                cache_control: None,
+            }],
+        });
+        assert_eq!(
+            exec_stream_final_answer_text(&messages, true).as_deref(),
+            Some("current partial reply")
+        );
+        // Tool results are user-role records inside this same turn.
+        messages.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call-current".into(),
+                content: "result".into(),
+                is_error: None,
+                content_blocks: None,
+            }],
+        });
+        assert_eq!(
+            exec_stream_final_answer_text(&messages, true).as_deref(),
+            Some("current partial reply")
+        );
+    }
+
+    #[test]
+    fn exec_stream_final_answer_text_requires_assistant_text() {
+        assert_eq!(exec_stream_final_answer_text(&[], true), None);
+        let user_only = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "prompt".to_string(),
+                cache_control: None,
+            }],
+        }];
+        assert_eq!(exec_stream_final_answer_text(&user_only, true), None);
+        let textless_assistant = vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::thinking("reasoning only")],
+        }];
+        assert_eq!(
+            exec_stream_final_answer_text(&textless_assistant, true),
+            None
+        );
     }
 
     #[test]
@@ -17764,6 +18321,65 @@ mod project_config_tests {
                 Some("deepseek-v4-flash")
             );
         });
+    }
+
+    #[test]
+    fn project_model_overrides_saved_selection_but_yields_to_actual_launch_models() {
+        use crate::test_support::{EnvVarGuard, lock_test_env};
+        let _lock = lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let _overrides: Vec<_> = [
+            "CODEWHALE_CONFIG_PATH",
+            "DEEPSEEK_CONFIG_PATH",
+            "CODEWHALE_PROVIDER",
+            "DEEPSEEK_PROVIDER",
+            "CODEWHALE_MODEL",
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_DEFAULT_TEXT_MODEL",
+            "OPENAI_MODEL",
+        ]
+        .into_iter()
+        .map(EnvVarGuard::remove)
+        .collect();
+        fs::write(
+            home.path().join("config.toml"),
+            "provider = 'openai'\n[providers.openai]\nmodel = 'gpt-5.6-sol'\n",
+        )
+        .unwrap();
+        fs::write(
+            home.path().join("settings.toml"),
+            "[provider_models]\nopenai = 'gpt-5.6-terra'\n",
+        )
+        .unwrap();
+        let workspace = workspace_with_project_config("model = 'gpt-5.6-luna'\n");
+        let mut saved = Config::load(None, None).unwrap();
+        assert_eq!(saved.default_model(), "gpt-5.6-terra");
+        merge_project_config(&mut saved, workspace.path());
+        assert_eq!(saved.default_model(), "gpt-5.6-luna");
+        for key in [
+            "CODEWHALE_MODEL",
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_DEFAULT_TEXT_MODEL",
+            "OPENAI_MODEL",
+        ] {
+            // Equal to the saved model still counts as an explicit request.
+            let _model = EnvVarGuard::set(key, "gpt-5.6-terra");
+            let mut explicit = Config::load(None, None).unwrap();
+            merge_project_config(&mut explicit, workspace.path());
+            assert_eq!(explicit.default_model(), "gpt-5.6-terra", "{key}");
+            assert_eq!(
+                crate::route_runtime::resolve_runtime_route(
+                    &explicit,
+                    crate::config::ApiProvider::Openai,
+                    None
+                )
+                .unwrap()
+                .model,
+                "gpt-5.6-terra",
+                "{key}"
+            );
+        }
     }
 
     #[test]

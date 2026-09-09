@@ -1,9 +1,11 @@
-<!-- source: README.md sha256:3cc3ffc9b995 -->
+<!-- source: README.md sha256:a446e3921085 -->
 # Codewhale
 
-Codewhale 是一款面向终端的开源编程智能体，使用 Rust 构建，并与用户一起在公开协作中不断改进。
+Codewhale 是一款开源智能体，可使用你选择的托管模型或本地模型读取项目、编辑文件、运行命令并检查自己的工作。从终端中的一项任务开始。对于较大的工作，可以将其中的部分任务交给使用不同模型、承担不同角色的智能体。
 
-![Codewhale 在终端中运行](assets/screenshot.webp)
+![Codewhale 在终端中运行](web/public/codewhale-tui-171acee.png)
+
+*终端预览截图来自 v0.9.12 的开发构建。*
 
 [English](README.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [हिन्दी](README.hi.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [العربية](README.ar.md) · [Català](README.ca.md)
 
@@ -21,18 +23,20 @@ curl -fsSL https://codewhale.net/install.sh | sh
 "$HOME/.local/bin/codewhale"
 ```
 
+安装器会选择最新的已发布版本。[更新日志](CHANGELOG.md)也描述了下一版本尚未发布的候选构建；只有在该版本正式发布后，已发布的下载包才会包含这些变更。
+
 Windows 请使用 [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases/latest)
 中的安装器或压缩包。已有的直接安装使用 `codewhale update`；它会显示当前可执行文件路径，
 并保留比已发布版本更新的构建。npm 和 Cargo 是次要打包选项。
 迁移与 PATH 排查见[安装指南](docs/zh_hans/INSTALL.md)。
 
-首次运行会帮助你连接提供商，也可以选择保持离线。Codewhale 还支持 Cargo、Docker、Nix、Scoop、预构建压缩包、Android/Termux 和 CNB 镜像。请参阅[安装指南](docs/INSTALL.md)。
+首次运行会帮助你连接提供商，也可以离线配置 Codewhale。要获得模型回复，必须连接托管模型或本地模型。Codewhale 还支持 npm 和 Cargo 作为次要打包方式，以及 Docker、Nix、Scoop、Android/Termux 和可选的 CNB 镜像。对于现有的软件包管理器安装，系统会提供迁移说明。请参阅[安装与 PATH 帮助](docs/INSTALL.md)。
 
 每种 shell 只需一条命令即可启用 Tab 补全——`codewhale completion bash|zsh|fish|powershell|elvish`。请参阅 [shell 补全](docs/INSTALL.md#8-shell-completions)。
 
 ## 使用
 
-像与队友交流一样向 Codewhale 描述任务：
+在项目文件夹中打开终端并运行 `codewhale`。使用 `/provider` 选择提供商，使用 `/model` 选择模型，然后描述一项具体任务：
 
 ```text
 Fix the failing tests and explain what changed.
@@ -44,16 +48,24 @@ Fix the failing tests and explain what changed.
 codewhale exec "fix the failing tests and explain what changed"
 ```
 
-Codewhale 可以读取你的代码仓库、编辑文件、运行命令、检查结果，并持续推进目标。由你决定授予它多少访问权限。
+Codewhale 可以读取你的代码仓库、编辑文件、运行命令、检查结果，并持续推进目标。使用 `/mode plan` 可以在不修改文件、不执行 shell 命令的情况下进行探索；希望它实施修改时，使用 `/mode work`。按 `Shift+Tab` 可选择 Ask、Auto-Review 或 Full Access；[模式与权限指南](docs/MODES.md)说明了各自允许的操作。
 
-## GUI 前端
+## 终端、应用与 Computer Use
 
-更喜欢图形界面？社区维护的 CodeWhale for VS Code 扩展把同一个智能体放进 VS Code 侧边栏——聊天、线程会话、实时 diff 与任务管理，全部基于同一个 Runtime API，会话与终端保持同步。可从 [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=HengQuWorld.brotherwhale-vscode) 安装；源码见 [GitHub](https://github.com/HengQuWorld/CodeWhale-VSCode)。
+终端和图形客户端连接到 Codewhale Runtime，由它运行智能体及其工具：
+
+- **终端：** `codewhale` 打开交互界面；`codewhale exec` 可从脚本或 CI 作业中运行任务。
+- **本地浏览器：** `codewhale web` 打开随附的[本地 Web 客户端](docs/WEB.md)，使用同一个 Runtime。
+- **Codewhale Web 和桌面应用：** 仍在开发中的图形工作台。其可用情况见[产品页面](https://codewhale.net/en/product)。
+
+**Computer Use 提供观察其他应用并与之交互的工具。** 当前源码已包含此插件。使用前请查看它请求的访问权限并启用它；仍须满足操作系统权限和平台要求。请参阅随附的 [Computer Use 指南](crates/tui/plugins/computer-use/README.md)和[插件设置](docs/PLUGINS.md)。
+
+在 VS Code 中，社区维护的 CodeWhale 扩展通过侧边栏连接本地 Runtime。可从 [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=HengQuWorld.brotherwhale-vscode) 安装；源码见 [GitHub](https://github.com/HengQuWorld/CodeWhale-VSCode)。
 
 ## 为什么选择 Codewhale
 
-- **使用你想要的模型。** 连接托管提供商，或通过 Ollama、vLLM、SGLang 使用本地模型。使用 `/model` 切换提供商和模型。
-- **掌控始终在你手中。** Plan 模式为只读。Ask、Auto-Review 和 Full Access 会清晰展示审批行为。`/undo` 可撤销上一轮操作，`/restore` 可将工作区恢复到较早的快照。
+- **选择你的模型。** 连接托管提供商，或通过 Ollama、vLLM、SGLang 使用本地模型。使用 `/provider` 切换提供商，使用 `/model` 选择模型。
+- **掌控始终在你手中。** 检查拟执行的操作及其造成的文件变更。审批设置决定何时需要审查；Full Access 仍须遵守不可逾越的策略边界。`/undo` 和 `/restore` 可帮助恢复工作区变更。
 - **让长时间任务井然有序。** 保存会话、设置持久的 `/goal`、在工作流运行前进行审查，并协调多个智能体，同时不让其内部指令混入你的对话记录。
 - **扩展你已有的智能体。** 连接 MCP 服务器和技能、配置钩子，并将智能体角色作为可读文件保存在项目或个人设置中。
 
@@ -72,10 +84,11 @@ Codewhale 在你的机器上运行，并仅拥有你授予的访问权限。审�
 - [MCP](docs/MCP.md)、[钩子](docs/HOOKS.md)和[配置](docs/CONFIGURATION.md)
 - [本地 Web 客户端](docs/WEB.md)
 - [全部文档](docs)
+- [仓库结构与贡献指南](CONTRIBUTING.md#project-structure)
 
 ## 加入社区
 
-当人们使用 Codewhale、反馈不顺手之处并帮助修复问题时，它就会变得更好。如果缺少某个提供商、工作流体验不佳，或终端界面妨碍了你，请[提交 issue](https://github.com/Hmbown/CodeWhale/issues)。如果你知道如何改进，请[提交 pull request](CONTRIBUTING.md)。我们欢迎首次贡献，贡献者也会保留已合入工作的署名。
+**欢迎提交错误报告、功能建议和 pull request**，无论你已使用 Codewhale 数月，还是刚刚开始尝试。如果缺少某个提供商、工作流体验不佳，或终端界面妨碍了你，请[提交 issue](https://github.com/Hmbown/CodeWhale/issues/new/choose) 或[提交 pull request](CONTRIBUTING.md)，一起改进。我们欢迎首次贡献，贡献者也会保留已合入工作的署名。
 
 加入 [Discord](https://discord.gg/37gfS3ksug)，或在微信添加 Hunter（`hunterbown`）并申请加入 Whale Brothers 群。
 

@@ -45,6 +45,69 @@ pub struct BoundedString {
     pub truncated: bool,
 }
 
+/// Observed engine exit boundary. This never classifies the assistant's prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnStopReason {
+    ProviderNoToolCall,
+    ProviderToolCallMissing,
+    StepBudgetExhausted,
+    NoProgress,
+    Interrupted,
+    Failed,
+}
+
+/// Terminal facts attached to the existing request inspector, without adding
+/// conversation input or a notice to an ordinary successful response.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct TurnStopDiagnostics {
+    pub status: Option<crate::core::events::TurnOutcomeStatus>,
+    /// None means the precise runtime exit boundary was not observed.
+    pub reason: Option<TurnStopReason>,
+    /// None means the caller did not install a model-step ceiling.
+    pub effective_max_steps: Option<u32>,
+    pub step_budget_source: &'static str,
+    /// Existing zero-based scheduler step; transport retries do not advance it.
+    pub model_step_index: u32,
+    /// Parent streaming ModelClient calls, including stream retries. Excludes
+    /// HTTP retries inside the client, compaction and child calls; not invoices.
+    pub model_requests_started: u32,
+    pub transparent_stream_retries: u32,
+    pub stream_resumes: u32,
+    pub reasoning_only_reprompts: u32,
+    pub soft_landing_sent: bool,
+    pub final_report_requested: bool,
+    pub permission_strategy_switches: u32,
+    /// Denied provider-response batches since the latest useful progress.
+    pub permission_denial_rounds_without_progress: u32,
+    pub last_provider_finish_reason: Option<BoundedString>,
+    /// Structured calls decoded from the stream, before legacy text-call parsing.
+    pub last_response_tool_calls: Option<usize>,
+    /// None means suppression was not counted at this exit boundary.
+    pub last_response_tool_calls_suppressed: Option<usize>,
+    /// Last parent response's reported input tokens, not cumulative billing.
+    pub last_reported_input_tokens: Option<u32>,
+    pub route_context_window_tokens: Option<u64>,
+    /// Engine-prepared output allowance. A transport may omit the field;
+    /// this is budget evidence, not a provider-published capability ceiling.
+    pub last_prepared_output_limit_tokens: Option<u32>,
+    pub automatic_compaction_attempts: u32,
+    pub emergency_compaction_attempts: u32,
+}
+
+impl TurnStopDiagnostics {
+    pub(crate) fn observe_provider_response(
+        &mut self,
+        finish_reason: Option<&str>,
+        tool_calls: usize,
+    ) {
+        self.last_provider_finish_reason =
+            finish_reason.map(|reason| bounded_chars(reason, MAX_NAME_CHARS));
+        self.last_response_tool_calls = Some(tool_calls);
+        self.last_response_tool_calls_suppressed = None;
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Evidence<T> {
@@ -260,6 +323,8 @@ pub struct ToolInspectionSnapshot {
     pub delivery_status: &'static str,
     pub turn_id: BoundedString,
     pub step: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<TurnStopDiagnostics>,
     pub tools_field_present: bool,
     pub tool_count: usize,
     pub rendered_tool_count: usize,
@@ -372,6 +437,7 @@ impl ToolInspectionSnapshot {
             delivery_status: "unknown (capture does not prove provider delivery)",
             turn_id: bounded_chars(turn_id, MAX_AUXILIARY_CHARS),
             step,
+            terminal: None,
             tools_field_present: tools.is_some(),
             tool_count,
             rendered_tool_count: projected.len(),
@@ -408,6 +474,13 @@ impl ToolInspectionSnapshot {
             yes_no(self.turn_id.truncated)
         ));
         out.push_str(&format!("Step: {}\n", self.step));
+        if let Some(terminal) = &self.terminal {
+            out.push_str("Terminal diagnostics (observed facts; effective_max_steps null means uncapped, other nulls mean unknown):\n");
+            if let Ok(json) = serde_json::to_string_pretty(terminal) {
+                out.push_str(&json);
+                out.push('\n');
+            }
+        }
         out.push_str(&format!(
             "Tools field: {}\nTool count: {}\n",
             if self.tools_field_present {

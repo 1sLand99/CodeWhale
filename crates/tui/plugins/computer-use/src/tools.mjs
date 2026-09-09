@@ -8,7 +8,7 @@ const computerParam = {
 
 const strategyParam = {
   enum: ["auto", "a11y", "event"],
-  description: "How the point is dispatched. auto (default): macOS resolves the point against the bound application's accessibility tree first and performs the element's press action, falling back to a raw pointer event; other platforms always use raw events. a11y: require an accessibility press and fail closed otherwise. event: force the raw pointer event.",
+  description: "macOS auto (default): element targets press that exact revalidated element and fail closed, with no coordinate fallback; coordinate targets hit-test the point for an accessibility press, falling back to a guarded raw event. a11y: require an accessibility press and fail closed otherwise. event: force the guarded raw pointer event. Other platforms use raw events. action_sent confirms dispatch, not the effect; observe again before deciding another action.",
 };
 
 const targetSchema = {
@@ -98,7 +98,7 @@ export const TOOLS = [
   },
   {
     name: "list_windows",
-    description: "List windows of an application (or all windows when app_ref is omitted).",
+    description: "List application windows. On macOS, app_ref selects the app; omission selects the frontmost app. Other platforms list all windows and reject app_ref selectors.",
     inputSchema: {
       type: "object",
       properties: {
@@ -120,8 +120,8 @@ export const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        app_ref: { type: "object", properties: { pid: { type: "integer" }, name: { type: "string" }, bundle_id: { type: "string" } }, additionalProperties: false },
-        window_id: { type: "integer", description: "Zero-based window index within the app" },
+        app_ref: { type: "object", properties: { pid: { type: "integer" }, name: { type: "string" }, bundle_id: { type: "string" } }, additionalProperties: false, description: "macOS accepts PID, name and bundle identity. Linux accepts only a unique exact AT-SPI app name. Windows accepts only a unique exact window title in name (from list_windows.title). HarmonyOS rejects explicit app selectors." },
+        window_id: { type: "integer", description: "macOS only: zero-based window index within the app. Other platforms reject this selector." },
         detail: { enum: ["summary", "compact", "full"], default: "summary", description: "Summary is the concise default; full includes nested menus and internal tree structure. Compact is a compatibility alias for summary." },
         include_ocr: { type: "boolean", default: false, description: "On macOS, also recognize visible text locally from the selected app window. Requires Screen Recording permission. Returns text, confidence and raster coordinate targets for UI that accessibility cannot read; no vision model is required." },
         computer: computerParam,
@@ -171,7 +171,7 @@ export const TOOLS = [
       properties: {
         name: { type: "string" }, bundle_id: { type: "string" }, url: { type: "string" },
         pid: { type: "integer", description: "Bind to this exact process. Use when two processes share a bundle id (list_apps shows both); it takes precedence over name and bundle_id and never launches anything." },
-        activate: { type: "boolean", description: "Bring to foreground; defaults to false. On macOS true also selects foreground keyboard delivery for system dialogs, guarded against another app taking focus. Keep false for background work." },
+        activate: { type: "boolean", description: "Bring to foreground; defaults to false. On macOS false keeps process-bound keyboard/accessibility control and refuses shared pointer gestures. True selects shared-desktop control with guarded foreground keys and real pointer gestures; use only when the user has authorized exclusive desktop use. Neither mode is an isolated computer." },
         computer: computerParam,
       },
       additionalProperties: false,

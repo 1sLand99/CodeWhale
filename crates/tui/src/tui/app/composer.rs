@@ -1667,8 +1667,8 @@ impl App {
         if self.startup_input_unproven {
             self.startup_input_unproven = false;
             self.hold_unproven_submit(
-                "Codewhale could not confirm it received everything you typed during startup. \
-                 Check the line above and press Enter again to send it as shown.",
+                "Check the line, then press Enter again to send it. \
+                 Startup may have missed some characters.",
             );
             return None;
         }
@@ -1723,19 +1723,16 @@ impl App {
             );
             return None;
         }
-        if !looks_like_slash_command_input(&input) {
-            self.input_history.push(input.clone());
-            if self.max_input_history == 0 {
-                self.input_history.clear();
-            } else if self.input_history.len() > self.max_input_history {
-                let excess = self.input_history.len() - self.max_input_history;
-                self.input_history.drain(0..excess);
-            }
-            // Mirror to the persisted cross-session history (#366) so
-            // arrow-up recall works across restarts. Best-effort write —
-            // see `composer_history::append_history` for failure modes.
-            crate::composer_history::append_history(&input);
+        crate::composer_history::push_history_entry(&mut self.input_history, &input);
+        if self.max_input_history == 0 {
+            self.input_history.clear();
+        } else if self.input_history.len() > self.max_input_history {
+            let excess = self.input_history.len() - self.max_input_history;
+            self.input_history.drain(0..excess);
         }
+        // Mirror prompts and commands to the persisted cross-session history
+        // so arrow-up recall works across restarts (#366, #6006).
+        crate::composer_history::append_history(&input);
         self.history_index = None;
         self.history_navigation_draft = None;
         self.clear_input();

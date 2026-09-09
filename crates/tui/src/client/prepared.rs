@@ -1313,6 +1313,46 @@ mod dialect_seam_tests {
     }
 
     #[test]
+    fn output_cap_reaches_all_three_wire_dialects_with_reasoning_inside_allowance() {
+        let _env = crate::test_support::lock_test_env();
+        for wire in ["chat-completions", "anthropic-messages", "responses"] {
+            let config = Config {
+                provider: Some("output-cap-fixture".into()),
+                providers: Some(ProvidersConfig {
+                    custom: std::collections::HashMap::from([(
+                        "output-cap-fixture".into(),
+                        ProviderConfig {
+                            kind: Some("openai-compatible".into()),
+                            base_url: Some("http://127.0.0.1:18181/v1".into()),
+                            api_key: Some("fixture-output-cap".into()),
+                            model: Some("fixture-model".into()),
+                            wire: Some(wire.into()),
+                            ..Default::default()
+                        },
+                    )]),
+                    ..Default::default()
+                }),
+                ..Config::default()
+            };
+            let client = DeepSeekClient::new(&config).unwrap();
+            let mut request = request("fixture-model");
+            request.max_tokens = 1500;
+            let prepared = client.prepare_outbound_request(request, true).unwrap();
+            assert_eq!(prepared.wire_output_cap_tokens(), Some(1500), "{wire}");
+            if let Some(thinking) = prepared
+                .body
+                .pointer("/thinking/budget_tokens")
+                .and_then(Value::as_u64)
+            {
+                assert!(
+                    thinking < 1500,
+                    "reasoning must fit inside the shared allowance"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn chat_completions_preview_matches_the_production_chat_builder() {
         let client = client("deepseek", |providers| {
             providers.deepseek = configured("sk-test-deepseek", None, "deepseek-chat");

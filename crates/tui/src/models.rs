@@ -36,6 +36,24 @@ pub const DIRECT_KIMI_K3_MAX_OUTPUT_TOKENS: u32 = 1_048_576;
 /// models resolve to their own scaled value via
 /// `compaction_threshold_for_model` (#664).
 pub const DEFAULT_COMPACTION_TOKEN_THRESHOLD: usize = 102_400;
+pub(crate) fn canonical_official_deepseek_model_id(model: &str) -> Option<&'static str> {
+    match model.trim().to_ascii_lowercase().as_str() {
+        "deepseek-v4-pro"
+        | "deepseek-v4pro"
+        | "deepseek-ai/deepseek-v4-pro"
+        | "deepseek-ai/deepseek-v4pro"
+        | "deepseek/deepseek-v4-pro"
+        | "deepseek/deepseek-v4pro" => Some("deepseek-v4-pro"),
+        "deepseek-v4-flash"
+        | "deepseek-v4flash"
+        | "deepseek-ai/deepseek-v4-flash"
+        | "deepseek-ai/deepseek-v4flash"
+        | "deepseek/deepseek-v4-flash"
+        | "deepseek/deepseek-v4flash" => Some("deepseek-v4-flash"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 const COMPACTION_THRESHOLD_PERCENT: u32 = 80;
 
@@ -156,14 +174,9 @@ pub struct Usage {
 
 /// Map known models to their approximate context window sizes.
 ///
-/// Lookup order:
-/// 1. An explicit `_Nk` suffix in the model name, for **any** vendor. This
-///    lets self-hosted deployments advertise their window through the served
-///    model name (e.g. a vLLM `--served-model-name qwen3-32b-256k`), which is
-///    the only signal we have for non-DeepSeek/Claude models. The 1000-token
-///    approximation is fine for compaction-threshold math.
-/// 2. DeepSeek vendor heuristics (V4 family -> 1M, legacy -> 128K).
-/// 3. Claude -> 200K.
+/// Exact catalog and recognized model facts take precedence. Otherwise an
+/// explicit `_Nk` suffix supplies an unverified hint for self-hosted models.
+/// Unrecognized DeepSeek family names remain unknown.
 #[must_use]
 pub fn context_window_for_model(model: &str) -> Option<u32> {
     if let Some(window) = crate::model_catalog::resolved_context_window(model) {
@@ -175,14 +188,11 @@ pub fn context_window_for_model(model: &str) -> Option<u32> {
     if let Some(window) = known_context_window_for_model(&lower) {
         return Some(window);
     }
+    if canonical_official_deepseek_model_id(&lower).is_some() {
+        return Some(DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS);
+    }
     if let Some(explicit_window) = explicit_context_window_hint(&lower) {
         return Some(explicit_window);
-    }
-    if lower.contains("deepseek") {
-        if lower.contains("v4") {
-            return Some(DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS);
-        }
-        return Some(LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS);
     }
     if is_openai_gpt_55_api_model(&lower) || is_openai_gpt_56_api_model(&lower) {
         return Some(1_050_000);
@@ -346,9 +356,6 @@ pub fn max_output_tokens_for_model(model: &str) -> Option<u32> {
         return Some(max_output);
     }
     let lower = model.to_lowercase();
-    if lower.contains("deepseek") && lower.contains("v4") {
-        return Some(384_000);
-    }
     if is_openai_gpt_55_api_model(&lower)
         || is_openai_gpt_56_api_model(&lower)
         || is_openai_codex_model(&lower)
@@ -440,7 +447,7 @@ pub fn model_supports_reasoning(model: &str) -> bool {
         return supports_reasoning;
     }
     let lower = model.to_lowercase();
-    if lower.contains("deepseek") && lower.contains("v4") {
+    if canonical_official_deepseek_model_id(&lower).is_some() {
         return true;
     }
     // #3016 plus the 2026 Kimi Code K2.7 update: Moonshot-native Kimi IDs,
@@ -863,28 +870,19 @@ mod tests {
     }
 
     #[test]
-    fn v4_snapshots_preserve_context_window() {
-        // v-series snapshots get 1M context since they contain "v4"
-        assert_eq!(
-            context_window_for_model("deepseek-v4-flash-20260423"),
-            Some(DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS)
-        );
-        assert_eq!(
-            context_window_for_model("deepseek-v4-pro-20260423"),
-            Some(DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS)
-        );
-    }
-
-    #[test]
-    fn unknown_legacy_deepseek_models_map_to_128k_context_window() {
-        assert_eq!(
-            context_window_for_model("deepseek-coder"),
-            Some(LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS)
-        );
-        assert_eq!(
-            context_window_for_model("deepseek-v3.2-0324"),
-            Some(LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS)
-        );
+    fn unrecognized_deepseek_models_do_not_inherit_sibling_metadata() {
+        for model in [
+            "deepseek-v4-flash-20260423",
+            "deepseek-v4-pro-20260423",
+            "deepseek-coder",
+            "deepseek-v3.2-0324",
+            "deepseek-v4.1-flash-expires-on-0910",
+        ] {
+            assert_eq!(context_window_for_model(model), None, "{model}");
+        }
+        assert!(!model_supports_reasoning(
+            "deepseek-v4.1-flash-expires-on-0910"
+        ));
     }
 
     #[test]
@@ -901,6 +899,41 @@ mod tests {
             context_window_for_model("deepseek-ai/deepseek-v4-pro"),
             Some(DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS)
         );
+    }
+
+    #[test]
+    fn deepseek_v4_output_caps_require_exact_catalog_metadata() {
+        let _lock = crate::model_catalog::test_catalog_lock();
+        let catalog = crate::model_catalog::MergedCatalog::from_sources(
+            BTreeMap::new(),
+            None,
+            crate::model_catalog::bundled_catalog(),
+            chrono::Utc::now(),
+        );
+        let _guard = crate::model_catalog::replace_active_catalog_for_test(catalog);
+
+        for model in [
+            "deepseek-v4.1-flash-expires-on-0910",
+            "deepseek-v4.1-flash",
+            "deepseek-v4.1-pro",
+            "vendor/deepseek-v4.1-flash",
+            "deepseek-v4-flash-vendor",
+        ] {
+            assert!(
+                crate::model_catalog::resolved_entry(model).is_none(),
+                "{model}"
+            );
+            assert_eq!(max_output_tokens_for_model(model), None, "{model}");
+        }
+
+        for model in [
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
+            "deepseek-v4-flash-vision-exp",
+            "DEEPSEEK-V4-FLASH",
+        ] {
+            assert_eq!(max_output_tokens_for_model(model), Some(384_000), "{model}");
+        }
     }
 
     #[test]
@@ -1364,10 +1397,7 @@ mod tests {
             context_window_for_model("deepseek-v3.2-256k-preview"),
             Some(256_000)
         );
-        assert_eq!(
-            context_window_for_model("deepseek-v3.2-2k-preview"),
-            Some(LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS)
-        );
+        assert_eq!(context_window_for_model("deepseek-v3.2-2k-preview"), None);
     }
 
     #[test]

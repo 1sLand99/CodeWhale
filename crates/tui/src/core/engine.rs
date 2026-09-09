@@ -125,16 +125,16 @@ fn agent_list_event(manager: &SubAgentManager, active_session_id: &str) -> Event
 }
 
 const MCP_REGISTRY_FIRST_INSTRUCTION_SOURCE: &str = "runtime:mcp-registry-first";
-const MCP_REGISTRY_FIRST_INSTRUCTION: &str = "## MCP Registry-first policy\n\nFor any task centered on a specialized capability, including media or document conversion, data transformation, browser automation, database or service access, or a developer utility, you must call `registry_sync` with a `query` describing that capability before `exec_shell`, `fetch_url`, code execution, local programs, custom code, or a manual implementation. It scores the local Registry snapshot host-side and returns at most eight matches; the full catalog never enters the conversation. Treat a returned server as a match when it plausibly covers the core capability; wording need not be exact. If any plausible match exists, you must call `start_registry_mcp_server` with its exact name and inspect its tools before considering a local alternative. If nothing matches, refine the query once; a still-empty refined result means every Registry entry is clearly irrelevant. An installed or familiar shell command is not a reason to skip Registry discovery. Use local tools directly only for ordinary repo-native work and simple file operations, or after the matching server fails to start.";
+const MCP_REGISTRY_FIRST_INSTRUCTION: &str = "## MCP Registry\n\nThe Registry installs and connects a local MCP server when this session lacks a capability. It is a fallback for a capability you do not have, not a step before ordinary work.\n\nPrefer what is already available, in order: tools already in this catalog, the project's own scripts, tests, and dev tooling, and platform capabilities. Creating a file, reading a fixture, running a repo command, and checking your own output are ordinary work — do them directly.\n\nReach for the Registry once you have identified a specific capability that no available tool covers and that you would otherwise install or reimplement, such as a document or media converter, access to an external database or service, or a protocol client. Then call `registry_sync` with a `query` naming that capability; it scores the local Registry snapshot host-side and returns at most eight matches, so the full index never enters the conversation. When a returned server plausibly covers that capability, call `start_registry_mcp_server` with its exact name rather than installing or running its package command through the shell. If nothing matches, refine the query once, then continue with local tools.\n\nBoth Registry tools are deferred: load one with `tool_search` before its first call, and use the returned schema. If a call instead reports that it only loaded the schema, retry once with that schema. Do not go searching for them for work you can already do.";
 const ISOLATED_CHAT_ENGINE_PROMPT: &str = "You are Codewhale Chat. Answer the user's request directly and conversationally. This isolated chat-only session has no local workspace, project, memory, skill, account, credential, path, runtime context, or tools.";
 
-fn sanitize_isolated_chat_attachments(mut text: String) -> String {
+pub(crate) fn sanitize_isolated_chat_attachments(mut text: String) -> String {
     let references = crate::tui::file_mention::media_attachment_references(&text);
     for reference in references.into_iter().rev() {
         let replacement = if text[reference.start_byte..reference.end_byte].ends_with('\n') {
-            "[Attachment omitted: Runtime Chat is text-only.]\n"
+            "[Attachment omitted: Runtime Chat cannot read local file references.]\n"
         } else {
-            "[Attachment omitted: Runtime Chat is text-only.]"
+            "[Attachment omitted: Runtime Chat cannot read local file references.]"
         };
         text.replace_range(reference.start_byte..reference.end_byte, replacement);
     }
@@ -318,7 +318,7 @@ pub struct EngineConfig {
     pub translation_enabled: bool,
     pub verbosity: Option<String>,
     /// Maximum number of assistant steps before stopping. Ordinary interactive
-    /// hosts use [`UNBOUNDED_MODEL_STEPS`]; explicit test/embed callers may
+    /// hosts use [`DEFAULT_MODEL_STEPS`]; explicit test/embed callers may
     /// still install a finite boundary.
     pub max_steps: u32,
     /// Maximum number of concurrently active subagents.
@@ -368,7 +368,7 @@ pub struct EngineConfig {
     /// Durable runtime services exposed to model-visible tools.
     pub runtime_services: RuntimeToolServices,
     /// Per-role/type sub-agent model overrides already resolved from config.
-    pub subagent_model_overrides: HashMap<String, String>,
+    pub subagent_model_overrides: HashMap<String, crate::config::SubagentModelOverride>,
     /// Merged fleet roster (built-ins + config + personal/workspace agent
     /// files) shared by model-spawned sub-agents and fleet dispatch
     /// (#fleet-roster cutover (v0.8.67)). Defaults to built-ins only; the
@@ -518,12 +518,8 @@ pub struct EngineConfig {
     pub advisor_config: crate::tools::subagent::AdvisorConfig,
 }
 
-/// Default model-step ceiling for hosts that do not resolve one from
-/// configuration (R1). Formerly `UNBOUNDED_MODEL_STEPS = u32::MAX`, which
-/// made an unbounded agent loop the default everywhere. It is finite now:
-/// progress/stationarity controls still live at the tool loop, but they are
-/// no longer the *only* thing standing between a stuck loop and unbounded
-/// spend. Overridable via `[tui].max_model_steps`; see
+/// Uncapped model steps for hosts without an explicit configured ceiling.
+/// Wall-clock and stream budgets are independent. See
 /// [`turn_budget::resolve_max_model_steps`].
 pub(crate) const DEFAULT_MODEL_STEPS: u32 = turn_budget::DEFAULT_MAX_MODEL_STEPS;
 
@@ -547,10 +543,7 @@ impl Default for EngineConfig {
             instructions: Vec::new(),
             project_context_pack_enabled: false,
             translation_enabled: false,
-            // R1: every turn carries a finite model-step budget. Callers
-            // that need a different boundary set one explicitly; progress-
-            // based stationarity still belongs at the tool-loop layer, but
-            // it is no longer the only bound on spend.
+            // Callers opt into a finite model-step boundary explicitly.
             max_steps: DEFAULT_MODEL_STEPS,
             max_subagents: DEFAULT_MAX_SUBAGENTS,
             max_admitted_subagents: DEFAULT_MAX_SUBAGENTS,
@@ -684,7 +677,8 @@ pub struct EngineHandle {
     /// Send user input responses to the engine
     tx_user_input: mpsc::Sender<UserInputDecision>,
     /// Send steer input for an in-flight turn.
-    tx_steer: mpsc::Sender<String>,
+    tx_steer: mpsc::Sender<handle::SteerInput>,
+    turn_controls: Arc<StdMutex<handle::TurnControls>>,
     /// Shared pause flag set by the TUI and read by the turn loop.
     shared_paused: Arc<StdMutex<bool>>,
     /// Whether the host must construct the route's concrete provider client
@@ -875,7 +869,9 @@ pub struct Engine {
     /// approval gate still fails closed.
     approval_receipt_store: Result<ApprovalReceiptStore, String>,
     rx_user_input: mpsc::Receiver<UserInputDecision>,
-    rx_steer: mpsc::Receiver<String>,
+    rx_steer: mpsc::Receiver<handle::SteerInput>,
+    turn_controls: Arc<StdMutex<handle::TurnControls>>,
+    admitted_turn_control: Option<handle::TurnControl>,
     tx_event: mpsc::Sender<Event>,
     /// Wakeup channel for the parent turn loop when a direct child sub-agent
     /// terminates (issue #756). Cloned into `SubAgentRuntime` so the runtime
@@ -1188,9 +1184,12 @@ async fn forward_subagent_mailbox_message(
 
 impl Engine {
     /// Surface the snapshots-disabled notice a blocking snapshot task parked
-    /// (#5930). Called at turn boundaries; a workspace yields at most one.
+    /// (#5930). Called at turn boundaries; each session gets its own notice.
     pub(super) async fn emit_pending_snapshot_notices(&self) {
-        for notice in crate::core::turn::take_snapshots_disabled_notices(&self.session.workspace) {
+        for notice in crate::core::turn::take_snapshots_disabled_notices(
+            &self.session.workspace,
+            Some(&self.session.id),
+        ) {
             let _ = self
                 .tx_event
                 .send(Event::SnapshotsDisabled {
@@ -1291,28 +1290,46 @@ impl Engine {
             .finish(id);
     }
 
-    fn reset_cancel_token(&mut self) {
-        let token = CancellationToken::new();
-        self.cancel_token = token.clone();
-        match self.shared_cancel_token.lock() {
-            Ok(mut shared) => {
-                *shared = token;
+    fn begin_turn_control(&mut self) -> handle::TurnControlGuard {
+        let mut controls = self
+            .turn_controls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let control = self
+            .admitted_turn_control
+            .take()
+            .unwrap_or_else(|| controls.fresh());
+        self.cancel_token = control.cancel.clone();
+        self.cancel_reason = Arc::clone(&control.reason);
+        *self
+            .shared_cancel_token
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = control.cancel.clone();
+        *self
+            .shared_paused
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
+        controls.active = Some(control.clone());
+        handle::TurnControlGuard {
+            controls: Arc::clone(&self.turn_controls),
+            id: control.id,
+        }
+    }
+
+    fn next_turn_steer(&mut self) -> Option<String> {
+        let active_id = self
+            .turn_controls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active
+            .as_ref()
+            .map(|control| control.id);
+        while let Ok(steer) = self.rx_steer.try_recv() {
+            if steer.turn_id == active_id {
+                return Some(steer.content);
             }
-            Err(poisoned) => {
-                *poisoned.into_inner() = token;
-            }
         }
-        // Fresh turn → clear any latched cancellation reason from the
-        // previous turn so a downstream "request cancelled" message
-        // doesn't inherit a stale cause.
-        match self.cancel_reason.lock() {
-            Ok(mut slot) => *slot = None,
-            Err(poisoned) => *poisoned.into_inner() = None,
-        }
-        match self.shared_paused.lock() {
-            Ok(mut paused) => *paused = false,
-            Err(poisoned) => *poisoned.into_inner() = false,
-        }
+        None
     }
 
     fn env_only_api_key_recovery_hint(api_config: &Config) -> Option<String> {
@@ -1445,10 +1462,15 @@ impl Engine {
         }
 
         // Unlike a Skill body, this instruction is visible on the first model
-        // request. Keep selection semantic: the host supplies no keywords or
-        // ranking and the model compares the full user context with the full
-        // Registry catalog. Append it after configured instruction sources so
-        // the Registry-first decision sits close to the current user turn.
+        // request. Registry discovery is a fallback for missing capabilities;
+        // result matching stays with the model and the index stays host-side.
+        //
+        // It describes when discovery is worth a turn; it is not a gate ahead
+        // of ordinary work. The earlier "must call `registry_sync` before a
+        // manual implementation" phrasing named two deferred tools as
+        // mandatory, so a plain "write an HTML page and read a fixture" turn
+        // spent its steps on `tool_search` for `registry_sync` and on starting
+        // a browser server instead of writing the file.
         if config.features.enabled(Feature::Mcp) && !api_config.runtime_chat_isolated {
             config
                 .instructions
@@ -1472,6 +1494,7 @@ impl Engine {
         let (tx_approval, rx_approval) = mpsc::channel(64);
         let (tx_user_input, rx_user_input) = mpsc::channel(32);
         let (tx_steer, rx_steer) = mpsc::channel(64);
+        let turn_controls = Arc::new(StdMutex::new(handle::TurnControls::default()));
         let (tx_subagent_completion, rx_subagent_completion) = mpsc::unbounded_channel();
         let cancel_token = CancellationToken::new();
         let shared_cancel_token = Arc::new(StdMutex::new(cancel_token.clone()));
@@ -1726,6 +1749,8 @@ impl Engine {
             approval_receipt_store,
             rx_user_input,
             rx_steer,
+            turn_controls: Arc::clone(&turn_controls),
+            admitted_turn_control: None,
             tx_event,
             tx_subagent_completion,
             rx_subagent_completion,
@@ -1757,6 +1782,7 @@ impl Engine {
             tx_approval,
             tx_user_input,
             tx_steer,
+            turn_controls,
             shared_paused,
             client_preflight_required: true,
             live_runtime_authority,
@@ -1793,7 +1819,7 @@ impl Engine {
         auto_approve: bool,
         approval_mode: crate::tui::approval::ApprovalMode,
     ) {
-        self.reset_cancel_token();
+        let turn_control = self.begin_turn_control();
         self.turn_counter = self.turn_counter.saturating_add(1);
 
         let turn_id = format!(
@@ -1826,7 +1852,6 @@ impl Engine {
                 route: None,
             })
             .await;
-        self.emit_pending_snapshot_notices().await;
 
         if self.config.snapshots_enabled {
             let pre_workspace = self.session.workspace.clone();
@@ -1845,6 +1870,8 @@ impl Engine {
             })
             .await;
         }
+
+        self.emit_pending_snapshot_notices().await;
 
         let _ = self
             .tx_event
@@ -1947,10 +1974,13 @@ impl Engine {
         if status == TurnOutcomeStatus::Interrupted {
             self.emit_interrupted_survivor_status().await;
         }
+        drop(turn_control);
         let _ = self
             .tx_event
             .send(Event::TurnComplete {
                 usage: Usage::default(),
+                parent_route_usage: Usage::default(),
+                routed_usage_dropped_records: 0,
                 status,
                 error,
                 tool_catalog: None,
@@ -2515,6 +2545,7 @@ impl Engine {
                 self.current_mode,
                 route,
                 self.config.compaction.clone(),
+                crate::cost_status::RuntimeUsageBatch::default(),
                 self.config.goal_objective.clone(),
                 self.config.goal_token_budget,
                 self.config.goal_status,
@@ -2531,6 +2562,8 @@ impl Engine {
                 self.config.hook_executor.clone(),
                 self.config.verbosity.clone(),
                 UserInputProvenance::Runtime,
+                Vec::new(),
+                None,
             )
             .await;
     }
@@ -2572,10 +2605,13 @@ impl Engine {
                 }
                 EngineRunInput::Operation(op) => match *op {
                     Op::SendMessage {
+                        max_output_tokens,
                         content,
+                        images,
                         mode,
                         route,
                         compaction,
+                        initial_routed_usage,
                         goal_objective,
                         goal_token_budget,
                         goal_status,
@@ -2593,11 +2629,23 @@ impl Engine {
                         verbosity,
                         provenance,
                     } => {
-                        self.handle_send_message(
+                        self.admitted_turn_control = {
+                            let mut controls = self
+                                .turn_controls
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let control = controls.pending.pop_front();
+                            controls.active = control.clone();
+                            control
+                        };
+                        // Keep the send-message state machine out of this
+                        // event-loop future's stack frame.
+                        Box::pin(self.handle_send_message(
                             content,
                             mode,
                             *route,
                             *compaction,
+                            *initial_routed_usage,
                             goal_objective,
                             goal_token_budget,
                             goal_status,
@@ -2614,7 +2662,9 @@ impl Engine {
                             hook_executor,
                             verbosity,
                             provenance,
-                        )
+                            images,
+                            max_output_tokens,
+                        ))
                         .await;
                     }
                     Op::ContinueGoal {
@@ -2702,6 +2752,7 @@ impl Engine {
                                 self.current_mode,
                                 route,
                                 self.config.compaction.clone(),
+                                crate::cost_status::RuntimeUsageBatch::default(),
                                 goal_snapshot.objective,
                                 goal_snapshot.token_budget,
                                 GoalStatus::Active,
@@ -2718,6 +2769,8 @@ impl Engine {
                                 self.config.hook_executor.clone(),
                                 self.config.verbosity.clone(),
                                 UserInputProvenance::Runtime,
+                                Vec::new(),
+                                None,
                             )
                             .await;
                     }
@@ -3249,6 +3302,7 @@ impl Engine {
                             mode,
                             route,
                             self.config.compaction.clone(),
+                            crate::cost_status::RuntimeUsageBatch::default(),
                             self.config.goal_objective.clone(),
                             self.config.goal_token_budget,
                             self.config.goal_status,
@@ -3265,6 +3319,8 @@ impl Engine {
                             self.config.hook_executor.clone(),
                             self.config.verbosity.clone(),
                             UserInputProvenance::ExternalUser,
+                            Vec::new(),
+                            None,
                         )
                         .await;
                     }
@@ -3659,8 +3715,8 @@ impl Engine {
     /// Whether the model can *see* the result is decided per request, not
     /// here — see `image_attach::strip_images_when_unsupported`.
     fn user_content_blocks(&self, text: String) -> Vec<ContentBlock> {
-        // Managed Chat currently accepts text only. Treat attachment-marker
-        // syntax as an omitted attachment so an account prompt can never make
+        // Managed Chat accepts validated inline bytes, never host paths. Treat
+        // attachment-marker syntax as an omitted attachment so an account prompt can never make
         // this host read a local path or echo that host path to a provider.
         if self.api_config.runtime_chat_isolated {
             return vec![ContentBlock::Text {
@@ -3897,6 +3953,7 @@ impl Engine {
                 self.current_mode,
                 route,
                 self.config.compaction.clone(),
+                crate::cost_status::RuntimeUsageBatch::default(),
                 self.config.goal_objective.clone(),
                 self.config.goal_token_budget,
                 self.config.goal_status,
@@ -3913,6 +3970,8 @@ impl Engine {
                 self.config.hook_executor.clone(),
                 self.config.verbosity.clone(),
                 UserInputProvenance::SubAgentHandoff,
+                Vec::new(),
+                None,
             )
             .await;
         if !outcome.started() {
@@ -4019,6 +4078,8 @@ impl Engine {
             .tx_event
             .send(Event::TurnComplete {
                 usage: Usage::default(),
+                parent_route_usage: Usage::default(),
+                routed_usage_dropped_records: 0,
                 status: TurnOutcomeStatus::Failed,
                 error: Some(message.clone()),
                 tool_catalog: None,
@@ -4598,16 +4659,13 @@ impl Engine {
         let capability = route.capability_profile();
         let always_load = self.config.tools_always_load.clone();
         self.turn_tool_surface_budget = Some(capability.tool_surface_budget);
-        let mut catalog = build_model_tool_catalog_with_surface(
+        let catalog = build_model_tool_catalog_with_surface(
             tool_registry.to_api_tools_with_cache(true),
             mcp_tools,
             input_policy.mode,
             &always_load,
             capability.tool_surface_budget,
         );
-        if self.config.features.enabled(Feature::Mcp) {
-            apply_registry_first_shell_guidance(&mut catalog);
-        }
         let surface = ToolSurfacePolicy::new(
             tool_registry,
             Some(catalog),
@@ -4675,6 +4733,7 @@ impl Engine {
         mode: AppMode,
         route: ResolvedRuntimeRoute,
         compaction: CompactionConfig,
+        initial_routed_usage: crate::cost_status::RuntimeUsageBatch,
         goal_objective: Option<String>,
         goal_token_budget: Option<u32>,
         goal_status: GoalStatus,
@@ -4691,10 +4750,35 @@ impl Engine {
         hook_executor: Option<std::sync::Arc<crate::hooks::HookExecutor>>,
         verbosity: Option<String>,
         provenance: UserInputProvenance,
+        images: Vec<codewhale_protocol::runtime::RuntimeImageInput>,
+        max_output_tokens: Option<std::num::NonZeroU32>,
     ) -> SendMessageOutcome {
+        // All surfaces reuse the same bounded validator. Runtime already checks
+        // before admission; this also protects direct in-process operations.
+        let images = match crate::image_attach::prepare_stored_images(&images) {
+            Ok(images) => images,
+            Err(error) => {
+                let message = error.to_string();
+                let _ = self
+                    .tx_event
+                    .send(Event::error(ErrorEnvelope::new(
+                        crate::error_taxonomy::ErrorCategory::InvalidInput,
+                        crate::error_taxonomy::ErrorSeverity::Error,
+                        true,
+                        "image_input_invalid",
+                        message.clone(),
+                    )))
+                    .await;
+                return SendMessageOutcome::NotStarted {
+                    error: Some(message),
+                };
+            }
+        };
+        let turn_control = self.begin_turn_control();
         let mut goal_objective = goal_objective;
         let mut goal_token_budget = goal_token_budget;
         let mut goal_status = goal_status;
+        let initial_usage_owner = compaction.runtime_cost_owner.clone();
 
         // A literal natural-language `/goal` declaration is control-plane
         // intent, not a suggestion that each provider may acknowledge or
@@ -4779,6 +4863,12 @@ impl Engine {
         let dispatched_product =
             crate::route_billing::capture_product(&route.config, effective_provider);
         if let Err(err) = self.install_resolved_runtime_route(route) {
+            let cost_scope = crate::cost_status::scope_token();
+            crate::cost_status::report_runtime_usage_batch(
+                cost_scope,
+                initial_usage_owner.as_deref(),
+                &initial_routed_usage,
+            );
             let _ = self
                 .tx_event
                 .send(Event::error(ErrorEnvelope::fatal_auth(format!(
@@ -4838,16 +4928,11 @@ impl Engine {
         if let Some(status) = input_policy.status() {
             let _ = self.tx_event.send(Event::status(status)).await;
         }
-        // Reset cancel token for fresh turn (in case previous was cancelled)
-        self.reset_cancel_token();
 
         // Track the complete effective mode policy so mid-turn metadata, `/edit`,
         // idle worker resumptions, and approval gates cannot read a stale policy
         // after the UI changed modes (#3568).
         self.apply_runtime_mode_policy(&input_policy);
-
-        // Drain stale steer messages from previous turns.
-        while self.rx_steer.try_recv().is_ok() {}
 
         // Create turn context first so start event includes a stable turn id.
         // An active goal gets the host's goal allowance (#5994); turns with
@@ -4863,6 +4948,7 @@ impl Engine {
         } else {
             TurnContext::new(self.config.max_steps)
         };
+        turn.max_output_tokens = max_output_tokens;
         self.turn_counter = self.turn_counter.saturating_add(1);
         let turn_started_at = chrono::Utc::now();
         // Mint the route receipt from the client that `install_resolved_runtime_route`
@@ -4890,8 +4976,8 @@ impl Engine {
             model: model.clone(),
             auto_model,
             receipt: route_receipt,
-            // A start is not a dispatch. The billing envelope is attached
-            // below, on the route held for the wire boundary only.
+            // A start is not an application dispatch. The billing envelope is
+            // attached below, then stamped at the pre-permit admission boundary.
             billing: None,
             // The classification receipt, by contrast, is frozen here at the
             // client-freeze boundary and is readable from `TurnStarted` on.
@@ -4905,6 +4991,10 @@ impl Engine {
         // digests the credential an injected client did not use and is therefore
         // withheld above.
         let dispatch_billing = crate::core::events::RouteBillingEnvelope {
+            openrouter_vendor: self
+                .deepseek_client
+                .as_ref()
+                .and_then(|client| client.openrouter_vendor().map(str::to_string)),
             billing_surface: crate::route_billing::billing_surface_for_dispatch(
                 Some(&self.api_config),
                 effective_provider,
@@ -4912,10 +5002,14 @@ impl Engine {
             )
             .map(str::to_string),
             endpoint_fingerprint: route_base_url.and_then(crate::cost_status::endpoint_fingerprint),
+            // A live rate is not evidence at turn creation. `turn_loop`
+            // freezes it from the exact fresh cache scope at CodeWhale's
+            // pre-permit application-dispatch boundary.
+            provider_live_pricing: None,
             // Classified from this turn's own frozen receipt, not from a
             // second ambient `for_route` read. Both halves of the route then
             // answer from the same captured endpoint + credential product, so
-            // the envelope stamped on the wire and the receipt carried on
+            // the application-dispatch envelope and the receipt carried on
             // `TurnRoute` cannot disagree about how this turn bills.
             billing_mode: crate::route_billing::for_dispatched_receipt(
                 crate::route_billing::DispatchedReceipt {
@@ -4926,8 +5020,8 @@ impl Engine {
                 },
             )
             .into(),
-            // Provisional. Replaced with the true wire-boundary instant
-            // when `run_turn` emits `Event::RouteDispatched`.
+            // Provisional. Replaced with the pre-permit application-dispatch
+            // instant when `run_turn` emits `Event::RouteDispatched`.
             dispatched_at: turn_started_at,
         };
         turn.pending_route = Some(TurnRoute {
@@ -4946,32 +5040,58 @@ impl Engine {
                 route: Some(turn_route),
             })
             .await;
-        self.emit_pending_snapshot_notices().await;
+
+        // Auto's classifier completed before this parent turn was admitted.
+        // Bind its exact routed records to the now-accepted turn: total tokens
+        // and model-call telemetry include the work, while parent_route_usage
+        // remains untouched so the parent quote can never price it.
+        turn.add_routed_usages(
+            initial_routed_usage
+                .records
+                .iter()
+                .map(|record| &record.usage.usage),
+        );
+        // Exact missing-usage records are persisted route-aware by the runtime
+        // sink. TurnComplete carries only any count whose exact route record
+        // was truncated, otherwise the terminal merge would count the same
+        // provider response twice and misclassify subscription/local calls.
+        let residual_dropped_records = initial_routed_usage.dropped_records.saturating_sub(
+            u64::try_from(initial_routed_usage.drop_records.len()).unwrap_or(u64::MAX),
+        );
+        turn.add_routed_usage_dropped_records(residual_dropped_records);
+        let initial_cost_scope = crate::cost_status::scope_token();
+        for record in &initial_routed_usage.records {
+            crate::cost_status::report_effective_route_for_runtime(
+                initial_cost_scope,
+                initial_usage_owner.as_deref(),
+                &record.source_id,
+                &record.usage.route,
+                &record.usage.usage,
+            );
+            let _ = self
+                .tx_event
+                .send(Event::RoutedTurnUsage {
+                    usage: record.usage.usage.clone(),
+                    duration_ms: 0,
+                    first_token_ms: None,
+                    request_ms: None,
+                })
+                .await;
+        }
+        for record in &initial_routed_usage.drop_records {
+            crate::cost_status::report_unreceipted_provider_success(
+                initial_cost_scope,
+                initial_usage_owner.as_deref(),
+                &record.source_id,
+                &record.route,
+            );
+        }
 
         // Apply the host-resolved route budget before building the request.
         // The model, limits, and compaction policy arrive in one operation so
         // no provider request can observe a partially updated route.
         self.active_route_limits = route_limits;
         self.config.compaction = compaction;
-        // Headless/runtime hosts supply their durable turn owner. Interactive
-        // turns historically supplied none, leaving a detached child with
-        // only the soon-to-be-sealed mailbox. Give this turn an owner whose
-        // sink folds into the existing session cost pool; cloned child leases
-        // keep it live beyond TurnComplete without reopening the mailbox.
-        let interactive_runtime_cost_owner = if self.config.terminal_chrome_enabled
-            && self.config.compaction.runtime_cost_owner.is_none()
-        {
-            let owner = format!("interactive:{}:{}", self.session.id, turn.id);
-            crate::cost_status::register_interactive_runtime_usage_sink(
-                &owner,
-                crate::cost_status::scope_token(),
-            );
-            self.config.compaction.runtime_cost_owner = Some(owner.clone());
-            Some(owner)
-        } else {
-            None
-        };
-
         // Snapshot the workspace BEFORE we touch a single tool. Run the git
         // work on the blocking pool so the async runtime stays responsive;
         // failure is non-fatal (the helper logs at WARN).
@@ -4998,6 +5118,8 @@ impl Engine {
             .await;
         }
 
+        self.emit_pending_snapshot_notices().await;
+
         // A new turn means any leftover retry banner (success cleared
         // it, failure pinned it) is no longer relevant — reset to idle
         // so the footer doesn't display a stale failure row across
@@ -5022,6 +5144,8 @@ impl Engine {
                 .tx_event
                 .send(Event::TurnComplete {
                     usage: turn.usage.clone(),
+                    parent_route_usage: turn.parent_route_usage.clone(),
+                    routed_usage_dropped_records: turn.routed_usage_dropped_records,
                     status: TurnOutcomeStatus::Failed,
                     error: Some(message.clone()),
                     tool_catalog: None,
@@ -5039,6 +5163,27 @@ impl Engine {
             self.reconcile_non_completed_goal_turn(&outcome).await;
             return outcome;
         }
+
+        // Headless/runtime hosts supply their durable turn owner. Interactive
+        // turns historically supplied none, leaving a detached child with
+        // only the soon-to-be-sealed mailbox. Install this turn-local sink
+        // only after every pre-dispatch failure return, and retire/clear it at
+        // settlement so the next turn always receives a fresh owner.
+        let interactive_runtime_cost_owner = if self.config.terminal_chrome_enabled
+            && self.config.compaction.runtime_cost_owner.is_none()
+        {
+            let owner = format!("interactive:{}:{}", self.session.id, turn.id);
+            crate::cost_status::register_persistent_interactive_runtime_usage_sink(
+                &owner,
+                crate::cost_status::scope_token(),
+                &self.session.id,
+                &turn.id,
+            );
+            self.config.compaction.runtime_cost_owner = Some(owner.clone());
+            Some(owner)
+        } else {
+            None
+        };
 
         let previous_goal_objective = self.config.goal_objective.clone();
         let previous_goal_token_budget = self.config.goal_token_budget;
@@ -5108,7 +5253,7 @@ impl Engine {
         // Add the user message through the same explicit snapshot constructor
         // preview uses. Route limits and mode in resource metadata therefore
         // belong to this turn even when the previous route was different.
-        let user_msg = self.user_text_message_from_snapshot(
+        let mut user_msg = self.user_text_message_from_snapshot(
             content,
             &model,
             auto_model,
@@ -5123,6 +5268,12 @@ impl Engine {
                 policy_narrowing: self.last_policy_narrowing.as_ref(),
             },
         );
+        let image_index = if self.api_config.runtime_chat_isolated {
+            user_msg.content.len()
+        } else {
+            user_msg.content.len().saturating_sub(1)
+        };
+        user_msg.content.splice(image_index..image_index, images);
         self.session.add_message(user_msg);
 
         self.emit_session_updated().await;
@@ -5193,12 +5344,15 @@ impl Engine {
             .as_ref()
             .map(|barrier| Arc::clone(&barrier.foreground_children));
         let turn_result = std::panic::AssertUnwindSafe(async {
-            self.run_turn(
+            // Keep the turn state machine out of the enclosing event-loop
+            // futures. Their nested poll frames must fit ordinary thread
+            // stacks while cloning route config or executing tools.
+            Box::pin(self.run_turn(
                 &mut turn,
                 surface,
                 foreground_children_for_turn,
                 Some(tool_surface),
-            )
+            ))
             .await
         })
         .catch_unwind()
@@ -5252,8 +5406,25 @@ impl Engine {
                 barrier.cancel_and_flush().await;
             }
         }
+        // The advisor is dispatched after TurnComplete, but its usage still
+        // belongs to this originating turn. Acquire the owner lease before an
+        // interactive owner is marked terminal so a late provider response
+        // retains its exact sink instead of falling into a later session.
+        let advisor_usage_context = (self.config.advisor_config.enabled
+            && status == TurnOutcomeStatus::Completed
+            && self.deepseek_client.is_some())
+        .then(|| {
+            crate::tools::subagent::advisor::AdvisorUsageContext::capture(
+                self.config.compaction.runtime_cost_owner.as_deref(),
+            )
+        });
         if let Some(owner) = interactive_runtime_cost_owner.as_deref() {
             crate::cost_status::finish_runtime_usage_owner(owner);
+            // This owner is turn-local. Leaving it in the reusable engine
+            // config makes the next interactive turn skip registration and
+            // route background usage into a retired sink/journal. Host-owned
+            // runtime turn ids never enter this branch and remain untouched.
+            self.config.compaction.runtime_cost_owner = None;
         }
 
         // Emit turn complete event — after all post-turn bookkeeping so
@@ -5262,10 +5433,19 @@ impl Engine {
         if status == TurnOutcomeStatus::Interrupted {
             self.emit_interrupted_survivor_status().await;
         }
+        if let Some(snapshot) = turn.terminal_request_snapshot(status) {
+            let _ = self
+                .tx_event
+                .send(Event::ToolRequestSnapshot { snapshot })
+                .await;
+        }
+        drop(turn_control);
         let turn_complete_delivered = self
             .tx_event
             .send(Event::TurnComplete {
                 usage: turn.usage,
+                parent_route_usage: turn.parent_route_usage,
+                routed_usage_dropped_records: turn.routed_usage_dropped_records,
                 status,
                 error: error.clone(),
                 tool_catalog: tool_catalog_for_event,
@@ -5311,6 +5491,7 @@ impl Engine {
         if self.config.advisor_config.enabled
             && matches!(status, TurnOutcomeStatus::Completed)
             && let Some(client) = self.deepseek_client.clone()
+            && let Some(usage_context) = advisor_usage_context
         {
             // Lazily create the shared emission guard on first use.
             let guard = self
@@ -5324,6 +5505,10 @@ impl Engine {
 
             let advisor_messages: Vec<crate::models::Message> = self.session.messages.to_vec();
             let advisor_config = self.config.advisor_config.clone();
+            // This clone is frozen before the detached task starts and keeps
+            // every configured provider route available for an explicit
+            // cross-provider advisor model without consulting later UI state.
+            let advisor_route_config = self.api_config.clone();
             let advisor_model = self.session.model.clone();
             let advisor_tx = self.tx_event.clone();
             let advisor_turn_id = turn.id.clone();
@@ -5337,7 +5522,9 @@ impl Engine {
                         advisor_messages,
                         advisor_config,
                         client,
+                        advisor_route_config,
                         advisor_model,
+                        usage_context,
                         guard,
                         advisor_tx,
                     )
@@ -5429,6 +5616,8 @@ impl Engine {
                 .tx_event
                 .send(Event::TurnComplete {
                     usage: Usage::default(),
+                    parent_route_usage: Usage::default(),
+                    routed_usage_dropped_records: 0,
                     status: TurnOutcomeStatus::Interrupted,
                     error: None,
                     tool_catalog: None,
@@ -5453,6 +5642,21 @@ impl Engine {
         self.handle_manual_compaction(id, cancel_token).await;
     }
 
+    async fn emit_compaction_usage(&self, usage: &Usage, elapsed: Duration) {
+        if *usage == Usage::default() {
+            return;
+        }
+        let _ = self
+            .tx_event
+            .send(Event::RoutedTurnUsage {
+                usage: usage.clone(),
+                duration_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+                first_token_ms: None,
+                request_ms: None,
+            })
+            .await;
+    }
+
     async fn handle_manual_compaction(&mut self, id: String, cancel_token: CancellationToken) {
         let zero_usage = Usage {
             input_tokens: 0,
@@ -5472,6 +5676,8 @@ impl Engine {
                 .tx_event
                 .send(Event::TurnComplete {
                     usage: zero_usage,
+                    parent_route_usage: Usage::default(),
+                    routed_usage_dropped_records: 0,
                     status: TurnOutcomeStatus::Failed,
                     error: Some(message),
                     tool_catalog: None,
@@ -5491,6 +5697,8 @@ impl Engine {
 
         let prepared = self.prepare_compaction_envelope(self.config.compaction.clone());
 
+        let started = Instant::now();
+        let mut compaction_usage = Usage::default();
         let compaction_result = tokio::select! {
             biased;
             _ = cancel_token.cancelled() => None,
@@ -5499,8 +5707,13 @@ impl Engine {
                 &self.session.messages,
                 self.session.system_prompt.as_ref(),
                 &prepared,
+                &mut compaction_usage,
             ) => Some(result),
         };
+        self.session.total_usage.add(&compaction_usage);
+        self.record_goal_usage_for_turn(&compaction_usage, started.elapsed());
+        self.emit_compaction_usage(&compaction_usage, started.elapsed())
+            .await;
 
         let Some(compaction_result) = compaction_result else {
             self.finish_compaction(&id);
@@ -5513,7 +5726,9 @@ impl Engine {
             let _ = self
                 .tx_event
                 .send(Event::TurnComplete {
-                    usage: zero_usage,
+                    usage: compaction_usage,
+                    parent_route_usage: Usage::default(),
+                    routed_usage_dropped_records: 0,
                     status: TurnOutcomeStatus::Interrupted,
                     error: None,
                     tool_catalog: None,
@@ -5540,7 +5755,9 @@ impl Engine {
                         let _ = self
                             .tx_event
                             .send(Event::TurnComplete {
-                                usage: zero_usage,
+                                usage: compaction_usage,
+                                parent_route_usage: Usage::default(),
+                                routed_usage_dropped_records: 0,
                                 status: TurnOutcomeStatus::Interrupted,
                                 error: None,
                                 tool_catalog: None,
@@ -5605,7 +5822,9 @@ impl Engine {
         let _ = self
             .tx_event
             .send(Event::TurnComplete {
-                usage: zero_usage,
+                usage: compaction_usage,
+                parent_route_usage: Usage::default(),
+                routed_usage_dropped_records: 0,
                 status: turn_status,
                 error: turn_error,
                 tool_catalog: None,
@@ -5631,6 +5850,8 @@ impl Engine {
                 .tx_event
                 .send(Event::TurnComplete {
                     usage: zero_usage,
+                    parent_route_usage: Usage::default(),
+                    routed_usage_dropped_records: 0,
                     status: TurnOutcomeStatus::Failed,
                     error: Some(message),
                     tool_catalog: None,
@@ -5650,6 +5871,7 @@ impl Engine {
         let (status, error) = match run_purge(
             &client,
             self.api_provider,
+            &self.session.id,
             &self.session.messages,
             &self.session.model,
             self.session.reasoning_effort.clone(),
@@ -5664,8 +5886,8 @@ impl Engine {
 
                 let summary = format!(
                     "Purge complete: {messages_before} → {messages_after} messages \
-                         ({} removed, {} condensed)",
-                    result.removed_count, result.replaced_count,
+                         ({} removed, {} condensed, {} offloaded)",
+                    result.removed_count, result.replaced_count, result.offloaded_count,
                 );
                 emit_purge_completed(
                     &self.tx_event,
@@ -5688,6 +5910,8 @@ impl Engine {
             .tx_event
             .send(Event::TurnComplete {
                 usage: zero_usage,
+                parent_route_usage: Usage::default(),
+                routed_usage_dropped_records: 0,
                 status,
                 error,
                 tool_catalog: None,
@@ -5765,6 +5989,7 @@ impl Engine {
         &mut self,
         client: &dyn crate::core::model_client::ModelClient,
         reason: &str,
+        turn: &mut TurnContext,
     ) -> bool {
         let Some(target_budget) = context_input_budget_for_route(
             self.api_provider,
@@ -5776,6 +6001,10 @@ impl Engine {
         };
 
         let id = format!("compact_{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        turn.stop_diagnostics.emergency_compaction_attempts = turn
+            .stop_diagnostics
+            .emergency_compaction_attempts
+            .saturating_add(1);
         let start_message = format!("Emergency context compaction started ({reason})");
         self.emit_compaction_started(id.clone(), true, start_message)
             .await;
@@ -5806,6 +6035,8 @@ impl Engine {
             .max(1);
         let prepared = self.prepare_compaction_envelope(forced_config);
 
+        let started = Instant::now();
+        let mut compaction_usage = Usage::default();
         let (compaction_result, turn_was_canceled) = tokio::select! {
             biased;
             _ = turn_cancel.cancelled() => (None, true),
@@ -5815,8 +6046,12 @@ impl Engine {
                 &self.session.messages,
                 self.session.system_prompt.as_ref(),
                 &prepared,
+                &mut compaction_usage,
             ) => (Some(result), false),
         };
+        turn.add_usage(&compaction_usage);
+        self.emit_compaction_usage(&compaction_usage, started.elapsed())
+            .await;
         let Some(compaction_result) = compaction_result else {
             self.finish_compaction(&id);
             let message = if turn_was_canceled {
@@ -5939,7 +6174,7 @@ impl Engine {
     /// Role/type model map for sub-agent runtimes: roster member pins first,
     /// then explicit `[subagents]` overrides on top so explicit config wins
     /// (#fleet-roster cutover (v0.8.67)).
-    fn subagent_role_models(&self) -> HashMap<String, String> {
+    fn subagent_role_models(&self) -> HashMap<String, crate::config::SubagentModelOverride> {
         let mut models = self.config.fleet_roster.model_overrides();
         models.extend(
             self.config
@@ -6183,33 +6418,46 @@ impl Engine {
         let checked_at = chrono::Utc::now().timestamp_millis();
 
         let mut seen_tasks = HashSet::new();
+        let mut task_inventory_available = false;
         if let Some(task_manager) = self.config.runtime_services.task_manager.as_ref() {
-            for task in task_manager
+            match task_manager
                 .list_tasks_for_owner(None, None, session_id)
                 .await
             {
-                let external = format!("task:{}", task.id);
-                if !candidates.contains(&external) {
-                    continue;
+                Ok(tasks) => {
+                    task_inventory_available = true;
+                    for task in tasks {
+                        let external = format!("task:{}", task.id);
+                        if !candidates.contains(&external) {
+                            continue;
+                        }
+                        seen_tasks.insert(external.clone());
+                        if !task.execution_binding_known {
+                            continue;
+                        }
+                        if let Err(err) = work.reconcile_operation(
+                            session_id,
+                            crate::work_graph::task_owner_snapshot(
+                                &task.id,
+                                task.status,
+                                task.lifecycle_seq,
+                                task.created_at,
+                                task.started_at,
+                                task.ended_at,
+                            ),
+                        ) {
+                            tracing::warn!(task_id = %task.id, error = %err, "failed to reconcile restored task owner");
+                        }
+                    }
                 }
-                seen_tasks.insert(external.clone());
-                if let Err(err) = work.reconcile_operation(
-                    session_id,
-                    crate::work_graph::task_owner_snapshot(
-                        &task.id,
-                        task.status,
-                        task.lifecycle_seq,
-                        task.created_at,
-                        task.started_at,
-                        task.ended_at,
-                    ),
-                ) {
-                    tracing::warn!(task_id = %task.id, error = %err, "failed to reconcile restored task owner");
+                Err(error) => {
+                    tracing::warn!(%error, "Task owner inventory unavailable; retaining Work bindings")
                 }
             }
         }
         for external in candidates
             .iter()
+            .filter(|_| task_inventory_available)
             .filter(|external| external.starts_with("task:"))
             .filter(|external| !seen_tasks.contains(*external))
         {
@@ -7394,12 +7642,13 @@ fn apply_patch_permission_paths(input: &Value) -> Vec<String> {
 pub fn spawn_engine(config: EngineConfig, api_config: &Config) -> EngineHandle {
     let (engine, handle) = Engine::new(config, api_config);
 
+    // Box the run future before supervision. An extra async wrapper embeds
+    // the large engine state again in both its own and the supervisor's poll
+    // frames, which can overflow an ordinary worker-thread stack.
     spawn_supervised(
         "engine-event-loop",
         std::panic::Location::caller(),
-        async move {
-            engine.run().await;
-        },
+        Box::pin(engine.run()),
     );
 
     handle
@@ -7411,19 +7660,17 @@ pub(crate) fn spawn_engine_with_authoritative_route_config(
     config: EngineConfig,
     api_config: &Config,
     authoritative_route_config: Arc<parking_lot::RwLock<Config>>,
-) -> EngineHandle {
+) -> (EngineHandle, tokio::task::JoinHandle<()>) {
     let (mut engine, handle) = Engine::new(config, api_config);
     engine.authoritative_route_config = Some(authoritative_route_config);
 
-    spawn_supervised(
+    let worker = spawn_supervised(
         "engine-event-loop",
         std::panic::Location::caller(),
-        async move {
-            engine.run().await;
-        },
+        Box::pin(engine.run()),
     );
 
-    handle
+    (handle, worker)
 }
 
 #[cfg(test)]
@@ -7432,7 +7679,7 @@ pub(crate) struct MockEngineHandle {
     pub rx_op: mpsc::Receiver<Op>,
     rx_approval: mpsc::Receiver<ApprovalDecision>,
     rx_user_input: mpsc::Receiver<UserInputDecision>,
-    pub rx_steer: mpsc::Receiver<String>,
+    pub rx_steer: mpsc::Receiver<handle::SteerInput>,
     pub tx_event: mpsc::Sender<Event>,
     pub cancel_token: CancellationToken,
 }
@@ -7519,6 +7766,7 @@ pub(crate) fn mock_engine_handle() -> MockEngineHandle {
         tx_approval,
         tx_user_input,
         tx_steer,
+        turn_controls: Arc::new(StdMutex::new(handle::TurnControls::default())),
         shared_paused,
         client_preflight_required: false,
         live_runtime_authority,
@@ -7723,7 +7971,7 @@ pub(crate) struct TurnRouteContext {
     /// never construct child agents from the previously installed config.
     pub(crate) api_config: Box<crate::config::Config>,
     pub(crate) locale_tag: String,
-    pub(crate) role_models: HashMap<String, String>,
+    pub(crate) role_models: HashMap<String, crate::config::SubagentModelOverride>,
     pub(crate) auto_model: bool,
     pub(crate) reasoning_effort: Option<String>,
     pub(crate) reasoning_effort_auto: bool,
@@ -7907,9 +8155,9 @@ use self::streaming::{
 use self::tool_catalog::{
     CODE_EXECUTION_TOOL_NAME, JS_EXECUTION_TOOL_NAME, MULTI_TOOL_PARALLEL_NAME,
     REQUEST_USER_INPUT_NAME, ToolSurfacePolicy, active_tools_for_request,
-    apply_registry_first_shell_guidance, build_model_tool_catalog_with_surface,
-    default_synthetic_catalog_tool_names, execute_code_execution_tool, is_tool_search_tool,
-    maybe_hydrate_requested_deferred_tool, missing_tool_error_message,
+    build_model_tool_catalog_with_surface, default_synthetic_catalog_tool_names,
+    execute_code_execution_tool, is_tool_search_tool, maybe_hydrate_requested_deferred_tool,
+    missing_tool_error_message,
 };
 #[cfg(test)]
 use self::tool_catalog::{

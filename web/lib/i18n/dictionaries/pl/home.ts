@@ -9,20 +9,18 @@ import type { HomeDict } from "../types";
  */
 
 export const home: HomeDict = {
-  metaTitle: "Codewhale — Twoje modele. Razem potrafią więcej.",
+  metaTitle: "Codewhale — Twórz i automatyzuj z wybranymi przez siebie modelami",
   metaDescription:
-    "Codewhale to otwarty system obliczeń agentowych. Weź modele, których już używasz — hostowane, przez bramkę lub lokalne — i pozwól im pracować razem w Twoim terminalu, na Twojej maszynie, pod Twoją kontrolą. Rust, MIT.",
-  kicker: "Obliczenia agentowe na Twoich warunkach",
-  heroTitleA: "Twoje modele.",
-  heroTitleB: "Razem potrafią więcej.",
+    "Twórz oprogramowanie, pracuj ze swoimi plikami i automatyzuj codzienne zadania za pomocą agentów z otwartym kodem i wybranych przez siebie hostowanych lub lokalnych modeli AI.",
+  heroTitle: "Twórz i automatyzuj z wybranymi przez siebie modelami",
   heroIntro:
-    "{brand} zbiera modele, których już używasz, w jednym terminalu i pozwala im pracować jak załodze — czytać kod, edytować pliki, uruchamiać sprawdzenia — a Ty decydujesz, na co każdy z nich ma zgodę. Open source, na Twojej maszynie.",
+    "{brand} daje Ci agentów, którzy mogą tworzyć oprogramowanie, pracować z Twoimi plikami i zamieniać powtarzalne zadania w przepływy pracy, z których można korzystać wielokrotnie. Powiedz, co chcesz osiągnąć, i wybierz hostowane lub lokalne modele odpowiednie do zadania, z możliwością zmiany dostawców w trakcie pracy.",
   getCodewhale: "Pobierz Codewhale",
   exploreProduct: "Poznaj produkt",
   shotPreview: "Podgląd terminala",
   shotBuild: "kompilacja deweloperska v{version}",
   screenshotAlt:
-    "Kompilacja deweloperska Codewhale v0.9.12 w terminalu: znak wieloryba z punktów brajlowskich, nowa sesja bez historii, pole wiadomości oraz stopka pokazująca Full Access, tryb Work, dwa zaplanowane zadania, łączące się serwery MCP i model GLM-5.3 na maksymalnym wysiłku",
+    "Terminal Codewhale v0.9.12, kompilacja 171acee689aa: nowa sesja ze znakiem wieloryba, polem wpisywania wiadomości, Full Access i trybem Operate, dwoma zaplanowanymi zadaniami, 21 serwerami MCP w trakcie łączenia oraz GLM-5.3 z poziomem rozumowania ustawionym na max.",
   latestRelease: "Najnowsze wydanie {tag}",
   releaseUnavailable: "Status wydania niedostępny",
   currentSource: "Źródło",
@@ -31,62 +29,87 @@ export const home: HomeDict = {
   publishedRelease: "wydane",
   figcaptionSourceCandidate: "niewydane",
   chapterTerminal: "Twój terminal",
-  chapterTerminalTitle: "Znajome miejsce na początek.",
+  chapterTerminalTitle: "Zacznij od tego, co chcesz stworzyć",
   gainHeading:
-    "Nie dostajesz chatbota. Dostajesz dźwignię na modele, za które już płacisz.",
+    "Co możesz zrobić z Codewhale",
   gainLede:
-    "Jedna sesja może trzymać kilka modeli naraz, każdy w roli, którą mu nadałeś, wszystkie w tym samym repozytorium i według tych samych reguł.",
+    "Zacznij od projektu, pytania albo zadania, które chcesz zautomatyzować, a następnie pracuj z jednym agentem lub przydziel części większej pracy kilku agentom.",
   gain: [
-    ["Twoje modele", "Klucze hostowane, bramka albo lokalny runtime bez żadnego klucza. Przypnij inny model do każdej roli i zachowaj wybranego dostawcę — nazwa modelu nigdy nie zmieni go za Ciebie."],
-    ["Sprawni agenci", "Tryby Plan, Work i Operate; fleet subagentów do jednego zadania; narzędzia do plików, powłoki, sieci i MCP; sesje, które można zapisać, wznowić i cofnąć."],
-    ["Kontrola na Twojej maszynie", "Ask, Auto-Review lub Full Access — Ty ustalasz, ile zrobi, zanim zapyta. Działa lokalnie, w piaskownicy tam, gdzie pozwala system, z dziennikiem audytu, który możesz przeczytać."],
+    [
+      "Stwórz coś",
+      "Opisz, co chcesz stworzyć, i pracuj z agentami, którzy mogą czytać Twój kod, edytować pliki, uruchamiać polecenia i sprawdzać wynik."
+    ],
+    [
+      "Automatyzuj codzienną pracę",
+      "Twórz skrypty i przepływy pracy dla powtarzających się zadań, aby móc ponownie uruchamiać je z terminala, gdy tylko będą potrzebne."
+    ],
+    [
+      "Pracuj z różnymi modelami",
+      "Korzystaj z hostowanych lub lokalnych modeli dla swoich agentów i dobieraj różne modele oraz role do odpowiednich części zadania."
+    ]
   ],
   chapterModels: "Twoje modele",
-  modelsHeading: "Przynieś to, co masz. Nie zmieniaj niczego, czego nie wybrałeś.",
+  modelsHeading: "Wybór modeli do każdego zadania",
   modelsBody:
-    "Podłącz obsługiwanego dostawcę zdalnego, bramę lub lokalny serwer modeli. Przed rozpoczęciem sprawdź dostawcę i model. Lokalny serwer również może wymagać uwierzytelnienia.",
+    "Połącz się bezpośrednio z dostawcą modeli hostowanych, użyj bramki, by korzystać z kilku dostawców, lub uruchom model lokalnie, a następnie wybieraj w trakcie pracy model dla każdej sesji.",
   modelsFacts: [
-    ["Hostowane", "Twój własny klucz API zapisany przez codewhale auth set"],
+    ["Hostowane", "Twój własny klucz API zapisany przez codewhale auth set --provider <id>"],
     ["Bramka", "Jeden endpoint do wielu modeli, dostawcę nadal wybierasz Ty"],
     ["Lokalne", "vLLM, SGLang, Ollama na localhost — zwykle bez klucza"],
   ],
-  modelsLink: "Zobacz wszystkich dostawców",
-  startHeading: "Cztery kroki do pierwszej sesji.",
+  modelsLink: "Poznaj modele i dostawców",
+  startHeading: "Pierwsze kroki z Codewhale",
   startLede:
-    "Zainstaluj, otwórz sesję bez klucza, podłącz dostawcę, a gdy jeden model nie wystarcza — skonfiguruj fleet.",
+    "Po zainstalowaniu Codewhale i podłączeniu modelu możesz opisać pierwsze zadanie w terminalu, a gdy zechcesz rozdzielić pracę między kilku agentów, dodać Fleet.",
   startGuideLink: "Przeczytaj przewodnik na start",
   startVocabularyLink: "Zobacz słownik produktu",
-  chapterAccount: "Gdzie to dziś działa",
-  availabilityHeading: "Dostępne teraz, w budowie i jeszcze nie — powiedziane wprost.",
+  chapterAccount: "Pobierz Codewhale",
+  availabilityHeading: "Gdzie możesz korzystać z Codewhale",
   availabilityLede:
-    "Terminal jest wydanym produktem. Wszystko inne wymieniamy w stanie, w jakim naprawdę jest.",
+    "Możesz już dziś korzystać z Codewhale w terminalu, a my pracujemy nad aplikacją webową, aplikacją desktopową i komputerami w chmurze.",
   availability: [
-    ["Terminal", "Wydany", "Pliki binarne z GitHub Releases dla Linuksa, macOS i Windows; npm i Cargo to alternatywy. Android w Termuksie to wersja poglądowa."],
-    ["Aplikacja webowa", "Logowanie i zdalne sterowanie dostępne", "Zaloguj się lub załóż konto, a potem wpisz /rc w uruchomionej sesji lokalnej, aby kontynuować dokładnie tę sesję z przeglądarki. Reszta warsztatu w przeglądarce to wciąż podgląd deweloperski."],
-    ["Desktop", "Kompilacja deweloperska", "Istnieją kompilacje alfa dla macOS, Linuksa i Windows. Wydanej aplikacji desktopowej jeszcze nie ma."],
-    ["Komputery w chmurze", "Jeszcze niedostępne", "Uruchamianie pracy na hostowanym komputerze jest w budowie. Ta strona powie, kiedy zacznie działać."],
+    [
+      "Terminal",
+      "Wydany",
+      "Gotowe pliki binarne z wydań GitHub dla systemów Linux, macOS i Windows; npm i Cargo to alternatywy. Android w Termux to wersja podglądowa."
+    ],
+    [
+      "Aplikacja webowa",
+      "Podgląd deweloperski",
+      "Dostęp do konta i parowanie z przeglądarką w podglądzie deweloperskim."
+    ],
+    [
+      "Aplikacja desktopowa",
+      "Kompilacja deweloperska",
+      "Aplikacja na macOS jest w przygotowaniu; publiczna wersja do pobrania pojawi się później."
+    ],
+    [
+      "Komputery w chmurze",
+      "W przygotowaniu",
+      "Komputery w chmurze do wykonywania Twoich zadań."
+    ]
   ],
   availabilityNote:
-    "Terminal nie wymaga konta. Konto samo w sobie nigdy nie jest planem płatnym i nic na tej stronie nie może Cię obciążyć.",
+    "Możesz korzystać z terminala bez konta Codewhale, a opłaty za użycie modeli hostowanych nalicza Twój dostawca.",
   accountLink: "Załóż konto",
-  surfacesHeading: "Używaj runtime'u tam, gdzie odbywa się praca.",
+  surfacesHeading: "Sposoby pracy z Codewhale",
   surfaces: [
     ["TUI", "Interaktywna praca w terminalu"],
     ["codewhale exec", "Skrypty i CI"],
-    ["Klient web", "Klient przeglądarkowy, tylko loopback"],
+    ["Lokalny klient webowy","Interfejs na localhost; hostowane środowisko pracy w przeglądarce jest w przygotowaniu"],
     ["Runtime API + MCP", "Lokalne integracje"],
-    ["fleet", "Trwała praca wielu agentów"],
+    ["Fleet","Kilku agentów przy jednym zadaniu"],
   ],
-  runtimeLink: "Zobacz powierzchnie runtime'u i notatki o stabilności",
-  installBandHeading: "Zacznij jedną komendą.",
+  runtimeLink: "Poznaj integracje",
+  installBandHeading: "Zainstaluj Codewhale w systemie macOS lub Linux",
   copy: "Kopiuj",
   copied: "Skopiowano ✓",
   binaries: "Binarki",
   chinaMirrors: "Mirrory w Chinach",
   installGuideLink: "Przeczytaj przewodnik instalacji",
-  communityHeading: "Budowane jawnie",
+  communityHeading: "Pomóż ulepszać Codewhale",
   communityBody:
-    "Na licencji MIT, kształtowane przez współtwórców od runtime'ów, przez providerów, platformy, dokumentację po testy.",
+    "Niezależnie od tego, czy udało Ci się znaleźć błąd, masz pomysł na funkcję, czy chcesz przesłać swój pierwszy pull request, chętnie Cię wysłuchamy i wspólnie popracujemy nad dalszym rozwojem.",
   communityLinksAria: "Linki społeczności",
-  contribute: "Współtwórz",
+  contribute: "Wyślij pull request",
 };

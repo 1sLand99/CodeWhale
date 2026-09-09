@@ -67,6 +67,7 @@ export function create({ exec }) {
   }
 
   async function native(tool, args = {}) {
+    if (tool === "pointer_sequence") requireSharedPointer();
     const helper = await nativeHelper();
     const r = await runL(helper, [JSON.stringify({ tool, args: { ...args, input_app_ref: state.inputApp, foreground_input: state.foregroundInput, owner_pipe: true } })], { timeoutMs: 20_000, ownerPipe: true });
     if (r.aborted || r.timedOut || r.code !== 0) {
@@ -74,7 +75,7 @@ export function create({ exec }) {
       if (r.aborted) error.code = "cancelled";
       // A deterministic native refusal sent no input. A killed/timed-out
       // helper may have posted the press before losing its response.
-      const postsPress = (tool === "key_event" && args.down) || (tool === "pointer_sequence" && args.steps?.some((step) => [1, 3, 25].includes(step.type)));
+      const postsPress = (tool === "key_event" && args.down) || (tool === "perform_action" && args.action === "AXPress") || (tool === "pointer_sequence" && args.steps?.some((step) => [1, 3, 25].includes(step.type)));
       error.inputMayHaveBeenSent = postsPress && r.spawned === true && (r.aborted || r.timedOut);
       throw error;
     }
@@ -86,6 +87,7 @@ export function create({ exec }) {
   }
 
   async function nativeLease(tool, args) {
+    if (tool === "pointer_sequence") requireSharedPointer();
     if (!exec.runInputLease) throw new ExecError("This executor cannot safely own held input; update Computer Use");
     if ((await native("input_capabilities"))?.input_lease !== 1) throw new ExecError("The native helper needs an update for disconnect-safe held input");
     const helper = await nativeHelper();
@@ -101,18 +103,18 @@ export function create({ exec }) {
     if (r.code !== 0) throw new ExecError(`background preview capture failed: ${r.stderr}`);
     fs.renameSync(temp, file);
     const p = state.pointer;
-    await native("preview_notify", { enabled: true, show, title: `Codewhale · ${win.name}`, x: p ? (p.x-win.points.x)/win.points.w : -1, y: p ? (p.y-win.points.y)/win.points.h : -1 });
+    await native("preview_notify", { enabled: true, show, title: `Codewhale · ${win.name} · ${state.foregroundInput ? "Shared desktop control" : "Background app control"}`, x: p ? (p.x-win.points.x)/win.points.w : -1, y: p ? (p.y-win.points.y)/win.points.h : -1 });
     return { enabled: true, file, app: state.inputApp, pointer: p };
   }
 
   // ---------- pointer input ----------
-  // macOS delivers keyboard events to a chosen process, but not pointer or
-  // scroll events: those are dropped unless they go through the shared event
-  // tap, which moves the user's real cursor. So the pointer path is:
+  // Our qualified raw pointer path uses the shared event tap, which moves
+  // the user's real cursor. Process/window-directed mouse delivery has not
+  // passed the independent fixture. So the pointer path is:
   //   1. accessibility action on the element under the point (quiet, exact),
-  //   2. otherwise a global gesture that is refused unless the bound
-  //      application owns the window under the point, and that puts the
-  //      cursor back where it was.
+  //   2. otherwise refuse in background mode. Explicit foreground control
+  //      permits a global gesture only when the bound application owns the
+  //      window under the point. Restoring the cursor is not isolation.
   // Every receipt says which of the two happened.
   function mouseName(button) { return { left: "left", right: "right", middle: "middle" }[button] ?? "left"; }
 
@@ -121,6 +123,10 @@ export function create({ exec }) {
   }
 
   function buttonCode(button) { return button === "middle" ? 2 : button === "right" ? 1 : 0; }
+
+  function requireSharedPointer() {
+    if (!state.foregroundInput) throw Object.assign(new ExecError("This action needs the shared macOS pointer and was not sent in background mode. Use an accessibility action or a separate computer; foreground control requires exclusive desktop use authorized by the user."), { code: "shared_pointer_required" });
+  }
 
   /** Refuse a global gesture whose landing point belongs to another application. */
   async function assertOwnsPoint(x, y) {
@@ -145,6 +151,7 @@ export function create({ exec }) {
   }
 
   async function gesture(steps, { restore = true, guard = null } = {}) {
+    requireSharedPointer();
     if (guard) await assertOwnsPoint(guard.x, guard.y);
     const r = await native("pointer_sequence", { steps, restore });
     const last = [...steps].reverse().find((s) => s.x != null);
@@ -230,7 +237,7 @@ export function create({ exec }) {
     if (!/\.png$/.test(file)) throw new ExecError("screenshot path must end in .png");
     const args = ["-x", "-t", "png"];
     const disp = display ?? state.activeDisplay;
-    const window = app_ref ? await native("window_info", { app_ref, window_id }) : null;
+    const window = app_ref !== undefined ? await native("window_info", { app_ref, window_id }) : null;
     if (window && region) throw new ExecError("choose app_ref or region, not both");
     if (window) args.push("-o", "-l", String(window.window_id));
     else if (disp && disp !== "all") args.push("-D", String(disp));
@@ -406,7 +413,7 @@ export function create({ exec }) {
   // ---------- apps / windows ----------
   async function listApps() { return native("list_apps"); }
 
-  async function listWindows(appRef) { return native("list_windows", { app_ref: appRef }); }
+  async function listWindows({ app_ref } = {}) { return native("list_windows", { app_ref }); }
 
   async function openApplication({ name, bundle_id: bid, pid, url: urlArg, activate = false } = {}) {
     if (!name && !bid && !pid) throw new ExecError("open_application needs name, bundle_id or pid");
@@ -439,7 +446,7 @@ export function create({ exec }) {
     // identity unmatchable.
     state.inputApp = { pid: p.pid, ...(p.bundle_id ? { bundle_id: p.bundle_id } : {}) };
     state.foregroundInput = !!activate;
-    return { launched: true, activate, keyboard_delivery: activate ? "foreground-guarded" : "process", url: urlArg ?? null, resolved: p?.found ? { name: p.name, pid: p.pid, bundle_id: p.bundle_id, frontmost: p.frontmost } : null };
+    return { launched: true, activate, keyboard_delivery: activate ? "foreground-guarded" : "process", input_scope: activate ? "shared-desktop" : "application", shared_pointer: !!activate, isolated_desktop: false, url: urlArg ?? null, resolved: p?.found ? { name: p.name, pid: p.pid, bundle_id: p.bundle_id, frontmost: p.frontmost } : null };
   }
 
   // ---------- clipboard / cursor / waits ----------
@@ -473,7 +480,7 @@ export function create({ exec }) {
     } catch { perms.screen_capture = "failed"; }
     caps.screenshot = perms.screen_capture === "ok";
     caps.recording = caps.screenshot;
-    return { platform: "darwin", capabilities: caps, permissions: perms, note: "macOS does not expose Screen-Recording TCC state to CLI; a black/empty screenshot means Screen Recording permission is missing. Raw input is bound to the process selected by open_application (activate:false by default). It does not require bringing that app forward. App-specific focus behavior still requires verification." };
+    return { platform: "darwin", capabilities: caps, permissions: perms, note: "macOS does not expose Screen-Recording TCC state to CLI; a black/empty screenshot means Screen Recording permission is missing. Background mode (open_application activate:false) uses process-bound keyboard events and accessibility actions; shared pointer gestures are refused. Foreground control (activate:true) uses the shared desktop and requires exclusive use. Neither mode is an isolated desktop. App-specific behavior still requires verification." };
   }
 
   return {
@@ -517,7 +524,7 @@ export function create({ exec }) {
       return t;
     },
     resolve_element: async ({ app_ref, windowIndex, path: pathArr } = {}) => {
-      const r = await native("resolve_element", { app_ref: app_ref ?? {}, windowIndex: windowIndex ?? 0, path: pathArr ?? [] });
+      const r = await native("resolve_element", { app_ref, windowIndex: windowIndex ?? 0, path: pathArr ?? [] });
       return { found: !!r?.found, element: r?.element ?? null, reason: r?.reason ?? null };
     },
     preview: async ({ enabled = true } = {}) => {
@@ -528,13 +535,31 @@ export function create({ exec }) {
     },
     screenshot,
     zoom,
-    left_click: ({ target, strategy }) => pointerClick("left", target.x, target.y, 1, strategy ?? "auto"),
+    left_click: async ({ target, strategy = "auto" }) => {
+      if (target.type !== "element" || strategy === "event") return pointerClick("left", target.x, target.y, 1, strategy);
+      if (!["auto", "a11y"].includes(strategy)) throw new ExecError(`strategy must be auto, a11y or event (got ${JSON.stringify(strategy)})`);
+      try {
+        if (!state.inputApp || target.app_ref?.pid !== state.inputApp.pid) throw new ExecError("element does not belong to the bound application — open_application and observe again");
+        if (!Array.isArray(target.path) || !Number.isInteger(target.windowIndex) || !target.role) throw new ExecError("element has no resolved accessibility identity");
+        if ((await native("input_capabilities"))?.element_identity !== 1) throw new ExecError("native helper needs an update for element identity validation");
+        const receipt = await native("perform_action", { target, action: "AXPress" });
+        if (!receipt?.action_sent) throw new ExecError("element press was not acknowledged");
+        return { ...receipt, action: "AXPress", strategy: "a11y", pointer_moved: false,
+          element: { role: target.role, label: target.label ?? null }, verified: false, verification_required: "screenshot" };
+      } catch (error) {
+        // An AX frame can cover other controls. Never turn a refused or
+        // ambiguous element press into another element's press or a raw click.
+        error.message += ' — no coordinate fallback was sent; take a fresh screenshot or OCR observation before choosing a coordinate with strategy "event"';
+        throw error;
+      }
+    },
     double_click: ({ target }) => pointerClick("left", target.x, target.y, 2),
     triple_click: ({ target }) => pointerClick("left", target.x, target.y, 3),
     right_click: ({ target }) => pointerClick("right", target.x, target.y, 1),
     middle_click: ({ target }) => pointerClick("middle", target.x, target.y, 1),
     mouse_move: async ({ target }) => {
       assertInScreen(target.x, target.y);
+      requireSharedPointer();
       if (state.pointerLease) {
         try {
           const r = await state.pointerLease.send({ point: target });
@@ -548,6 +573,7 @@ export function create({ exec }) {
     },
     left_mouse_down: async ({ target }) => {
       assertInScreen(target.x, target.y);
+      requireSharedPointer();
       if (state.pointerLease) throw new ExecError("this session already holds the left pointer button; release it first");
       await assertOwnsPoint(target.x, target.y);
       state.pointerLease = await nativeLease("pointer_sequence", { steps: [

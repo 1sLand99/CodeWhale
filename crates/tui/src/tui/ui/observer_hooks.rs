@@ -174,7 +174,8 @@ pub(super) fn session_wait_reason(app: &App) -> Option<SessionWaitReason> {
 
 /// The hook a turn-state edge fires, if any. Pure so the transition table is
 /// directly testable: into `Waiting` is `waiting_for_user`; into `Idle` from
-/// work or a wait is `session_idle`; everything else is silent.
+/// work or a wait is `session_idle`; into `InProgress` is `session_busy`.
+/// Repeated observations of the same state are silent.
 pub(super) fn session_state_transition_event(
     previous: crate::tui::control_socket::TurnState,
     current: crate::tui::control_socket::TurnState,
@@ -187,6 +188,9 @@ pub(super) fn session_state_transition_event(
         (TurnState::Idle | TurnState::InProgress, TurnState::Waiting) => {
             Some(HookEvent::WaitingForUser)
         }
+        (TurnState::Idle | TurnState::Waiting, TurnState::InProgress) => {
+            Some(HookEvent::SessionBusy)
+        }
         _ => None,
     }
 }
@@ -194,7 +198,8 @@ pub(super) fn session_state_transition_event(
 /// Fire the session-state hooks on transitions of the shared
 /// [`crate::tui::control_socket::turn_state_from_app`] projection (#6004):
 /// `waiting_for_user` when a wait begins, `session_idle` when the session
-/// settles back to idle after work or a wait. The first observed state is
+/// settles back to idle after work or a wait, and `session_busy` when work
+/// begins or resumes. The first observed state is
 /// recorded without firing so startup never emits a spurious transition.
 pub(super) fn execute_session_state_transition_hooks(
     app: &App,
@@ -370,25 +375,6 @@ pub(super) fn subagent_failure_notice(result: &str) -> Option<String> {
         })
 }
 
-pub(super) fn subagent_status_from_completion_result(result: &str) -> SubAgentStatus {
-    let reason = result
-        .lines()
-        .find_map(|line| {
-            let trimmed = line.trim();
-            (!trimmed.is_empty() && !trimmed.starts_with("<codewhale:subagent.done>"))
-                .then_some(trimmed.to_string())
-        })
-        .unwrap_or_else(|| "sub-agent finished".to_string());
-    match subagent_completion_status(result).as_deref() {
-        Some("completed") => SubAgentStatus::Completed,
-        Some("cancelled" | "canceled") => SubAgentStatus::Cancelled,
-        Some("failed") => SubAgentStatus::Failed(reason),
-        Some("interrupted") => SubAgentStatus::Interrupted(reason),
-        Some("budget_exhausted") => SubAgentStatus::BudgetExhausted,
-        _ => SubAgentStatus::Completed,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,34 +384,249 @@ mod tests {
     #[test]
     fn session_state_transition_table_fires_only_on_real_edges() {
         use HookEvent::*;
+        use TurnState::{Idle, InProgress, Waiting};
+        let states = [Idle, InProgress, Waiting];
+        let expected = [
+            [None, Some(SessionBusy), Some(WaitingForUser)],
+            [Some(SessionIdle), None, Some(WaitingForUser)],
+            [Some(SessionIdle), Some(SessionBusy), None],
+        ];
+        for (row, previous) in states.into_iter().enumerate() {
+            for (column, current) in states.into_iter().enumerate() {
+                assert_eq!(
+                    session_state_transition_event(previous, current),
+                    expected[row][column],
+                    "{previous:?} -> {current:?}"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_state_transitions_dispatch_real_ordered_payloads_without_duplicates() {
+        use crate::hooks::{Hook, HookExecutor, HooksConfig};
+        use std::path::{Path, PathBuf};
+        use std::time::{Duration, Instant};
+
+        fn paths_with_extension(dir: &Path, extension: &str) -> Vec<PathBuf> {
+            std::fs::read_dir(dir)
+                .expect("receipt directory")
+                .map(|entry| entry.expect("receipt entry").path())
+                .filter(|path| path.extension().is_some_and(|ext| ext == extension))
+                .collect()
+        }
+
+        fn wait_for_paths(
+            dir: &Path,
+            extension: &str,
+            count: usize,
+            deadline: Instant,
+        ) -> Vec<PathBuf> {
+            loop {
+                let paths = paths_with_extension(dir, extension);
+                assert!(
+                    Instant::now() < deadline,
+                    "expected {count} .{extension} receipts, got {}",
+                    paths.len()
+                );
+                if paths.len() >= count {
+                    return paths;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        struct ReleaseBarriers {
+            workspace: PathBuf,
+            submitted: usize,
+        }
+        impl Drop for ReleaseBarriers {
+            fn drop(&mut self) {
+                if std::fs::write(self.workspace.join("release"), "release").is_err() {
+                    return;
+                }
+                // Keep the release file alive during assertion unwinding too.
+                // This wait must not panic, and is bounded beyond the hooks'
+                // own ten-second timeout if a child cannot report completion.
+                let deadline = Instant::now() + Duration::from_secs(12);
+                while Instant::now() < deadline {
+                    let released = std::fs::read_dir(&self.workspace)
+                        .map(|entries| {
+                            entries
+                                .filter_map(Result::ok)
+                                .filter(|entry| {
+                                    entry
+                                        .path()
+                                        .extension()
+                                        .is_some_and(|ext| ext == "released")
+                                })
+                                .count()
+                        })
+                        .unwrap_or_default();
+                    if released >= self.submitted {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+
+        let _env_lock = crate::test_support::lock_test_env();
+        let dir = tempfile::tempdir().expect("isolated workspace");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+        let mut release = ReleaseBarriers {
+            workspace: dir.path().to_path_buf(),
+            submitted: 0,
+        };
+        std::fs::write(
+            dir.path().join("receipt.sh"),
+            r#"set -eu
+if [ "$1" = barrier ]; then
+    barrier=$(mktemp ./barrier.XXXXXX)
+    mv "$barrier" "$barrier.ready"
+    while [ ! -f ./release ]; do sleep 0.01; done
+    mv "$barrier.ready" "$barrier.released"
+    exit 0
+fi
+receipt=$(mktemp ./receipt.XXXXXX)
+{ printf '%s\n' "$1"; cat; } > "$receipt"
+mv "$receipt" "$receipt.done"
+"#,
+        )
+        .expect("receipt command");
+        let mut app = App::new(
+            crate::test_support::test_tui_options(dir.path()),
+            &crate::config::Config::default(),
+        );
+        app.hooks = HookExecutor::new(
+            HooksConfig {
+                enabled: true,
+                hooks: vec![
+                    Hook::new(HookEvent::SessionBusy, "sh ./receipt.sh session_busy"),
+                    Hook::new(
+                        HookEvent::WaitingForUser,
+                        "sh ./receipt.sh waiting_for_user",
+                    ),
+                    Hook::new(HookEvent::SessionIdle, "sh ./receipt.sh session_idle"),
+                    Hook::new(HookEvent::SessionEnd, "sh ./receipt.sh barrier").with_timeout(10),
+                ],
+                ..HooksConfig::default()
+            },
+            dir.path().to_path_buf(),
+        );
+
+        // Startup is silent in every possible initial state, including a
+        // restored busy or waiting session. Repeated observations stay silent.
+        for state in [TurnState::Idle, TurnState::InProgress, TurnState::Waiting] {
+            app.is_loading = state != TurnState::Idle;
+            app.goal_continuation_waiting = state == TurnState::Waiting;
+            let mut previous = None;
+            execute_session_state_transition_hooks(&app, &mut previous);
+            execute_session_state_transition_hooks(&app, &mut previous);
+            assert_eq!(previous, Some(state));
+        }
+        app.is_loading = false;
+        app.goal_continuation_waiting = false;
+        let mut previous = None;
+        execute_session_state_transition_hooks(&app, &mut previous);
+
+        let mut seen = std::collections::HashSet::new();
+        let mut receipts = Vec::new();
+        for state in [
+            TurnState::InProgress,
+            TurnState::Waiting,
+            TurnState::InProgress,
+            TurnState::Idle,
+        ] {
+            app.is_loading = state != TurnState::Idle;
+            app.runtime_turn_status = Some(
+                if state == TurnState::Idle {
+                    "completed"
+                } else {
+                    "in_progress"
+                }
+                .to_string(),
+            );
+            app.pending_user_input_prompt = (state == TurnState::Waiting).then(|| {
+                (
+                    "hook-fixture-question".to_string(),
+                    crate::tools::user_input::UserInputRequest {
+                        questions: Vec::new(),
+                    },
+                )
+            });
+            execute_session_state_transition_hooks(&app, &mut previous);
+            execute_session_state_transition_hooks(&app, &mut previous);
+            assert_eq!(previous, Some(state));
+            // Advance only after this command records its payload. Concurrent
+            // dispatcher workers do not promise command completion order.
+            let paths = wait_for_paths(
+                dir.path(),
+                "done",
+                receipts.len() + 1,
+                Instant::now() + Duration::from_secs(2),
+            );
+            assert_eq!(paths.len(), receipts.len() + 1, "extra transition command");
+            let path = paths
+                .into_iter()
+                .find(|path| !seen.contains(path))
+                .expect("new receipt");
+            let raw = std::fs::read_to_string(&path).expect("atomic receipt");
+            let (event, payload) = raw.split_once('\n').expect("event and JSON stdin");
+            receipts.push((
+                event.to_string(),
+                serde_json::from_str::<serde_json::Value>(payload).expect("JSON stdin"),
+            ));
+            seen.insert(path);
+        }
+
+        // Two foreground barriers park both persistent dispatcher workers.
+        // FIFO receipt of jobs then proves all preceding jobs have completed,
+        // including any erroneous startup or same-state submission. The total
+        // deadline is shorter than either barrier's timeout, so one worker
+        // cannot time out and masquerade as both workers becoming ready.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        for _ in 0..2 {
+            app.hooks
+                .submit_observer(HookEvent::SessionEnd, app.base_hook_context())
+                .expect("barrier submission");
+            release.submitted += 1;
+        }
+        wait_for_paths(dir.path(), "ready", 2, deadline);
+        let completed_count = paths_with_extension(dir.path(), "done").len();
+        drop(release);
+        wait_for_paths(
+            dir.path(),
+            "released",
+            2,
+            Instant::now() + Duration::from_secs(2),
+        );
+
         assert_eq!(
-            session_state_transition_event(TurnState::InProgress, TurnState::Idle),
-            Some(SessionIdle)
+            completed_count, 4,
+            "startup and same-state calls must be silent"
         );
         assert_eq!(
-            session_state_transition_event(TurnState::Waiting, TurnState::Idle),
-            Some(SessionIdle)
-        );
-        assert_eq!(
-            session_state_transition_event(TurnState::Idle, TurnState::Waiting),
-            Some(WaitingForUser)
-        );
-        assert_eq!(
-            session_state_transition_event(TurnState::InProgress, TurnState::Waiting),
-            Some(WaitingForUser)
-        );
-        // No edge, or edges that are not attention transitions: silent.
-        assert_eq!(
-            session_state_transition_event(TurnState::Idle, TurnState::InProgress),
-            None
-        );
-        assert_eq!(
-            session_state_transition_event(TurnState::Idle, TurnState::Idle),
-            None
-        );
-        assert_eq!(
-            session_state_transition_event(TurnState::Waiting, TurnState::InProgress),
-            None
+            receipts,
+            vec![
+                (
+                    "session_busy".to_string(),
+                    serde_json::json!({"from": "idle", "to": "in_progress"})
+                ),
+                (
+                    "waiting_for_user".to_string(),
+                    serde_json::json!({"from": "in_progress", "to": "waiting", "reason": "user_input"})
+                ),
+                (
+                    "session_busy".to_string(),
+                    serde_json::json!({"from": "waiting", "to": "in_progress"})
+                ),
+                (
+                    "session_idle".to_string(),
+                    serde_json::json!({"from": "in_progress", "to": "idle", "last_turn_status": "completed"})
+                ),
+            ]
         );
     }
 
@@ -444,7 +645,7 @@ mod tests {
 
         app.is_loading = true;
         assert_eq!(turn_state_from_app(&app), TurnState::InProgress);
-        app.is_loading = false;
+        app.runtime_turn_status = Some("in_progress".to_string());
 
         app.pending_user_input_prompt = Some((
             "q1".to_string(),
@@ -457,7 +658,12 @@ mod tests {
             session_wait_reason(&app),
             Some(SessionWaitReason::UserInput)
         );
+        assert_eq!(
+            session_state_transition_event(TurnState::InProgress, turn_state_from_app(&app)),
+            Some(crate::hooks::HookEvent::WaitingForUser)
+        );
         app.pending_user_input_prompt = None;
+        assert_eq!(turn_state_from_app(&app), TurnState::InProgress);
 
         app.goal_continuation_waiting = true;
         assert_eq!(turn_state_from_app(&app), TurnState::Waiting);

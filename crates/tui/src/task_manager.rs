@@ -24,8 +24,9 @@ use uuid::Uuid;
 
 use crate::config::Config;
 use crate::runtime_threads::{
-    CreateThreadRequest, RUNTIME_STORE_FAILURE_EVENT, RuntimeEventRecord, RuntimeThreadManager,
-    RuntimeThreadManagerConfig, RuntimeTurnStatus, SharedRuntimeThreadManager, StartTurnRequest,
+    CreateThreadRequest, RUNTIME_STORE_FAILURE_EVENT, RuntimeEventRecord, RuntimeProcessOwnerLock,
+    RuntimeThreadManager, RuntimeThreadManagerConfig, RuntimeTurnStatus,
+    SharedRuntimeThreadManager, StartTurnRequest,
 };
 use crate::utils::spawn_supervised;
 
@@ -38,8 +39,10 @@ const ARTIFACT_THRESHOLD: usize = 1200;
 const TASK_EVENT_CHANNEL_CAPACITY: usize = 256;
 const EVENT_CURSOR_BATCH: usize = 256;
 const EVENT_CATCHUP_POLL: Duration = Duration::from_millis(200);
-// v3 adds a provider pin; older executors must not silently ignore it.
-const CURRENT_TASK_SCHEMA_VERSION: u32 = 3;
+// v4 binds execution to a trusted Runtime scope. Older executors must not
+// ignore its eligibility or generation fence.
+const CURRENT_TASK_SCHEMA_VERSION: u32 = 4;
+const STORE_REFRESH_INTERVAL: Duration = Duration::from_millis(200);
 
 const fn default_task_schema_version() -> u32 {
     CURRENT_TASK_SCHEMA_VERSION
@@ -303,6 +306,14 @@ pub struct TaskRecord {
     pub turn_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_session_id: Option<String>,
+    /// Trusted execution provenance, distinct from model-visible ownership.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_generation: Option<String>,
+    /// Durable cancellation acknowledged by the actual execution owner.
+    #[serde(default)]
+    pub cancel_requested_seq: u64,
     #[serde(default)]
     pub runtime_event_count: usize,
     /// Monotonic owner-lifecycle sequence used by Work Graph reconciliation.
@@ -355,6 +366,7 @@ pub struct TaskSummary {
     pub turn_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_session_id: Option<String>,
+    pub execution_binding_known: bool,
 }
 
 impl From<&TaskRecord> for TaskSummary {
@@ -379,6 +391,8 @@ impl From<&TaskRecord> for TaskSummary {
             thread_id: value.thread_id.clone(),
             turn_id: value.turn_id.clone(),
             owner_session_id: value.owner_session_id.clone(),
+            execution_binding_known: value.execution_scope.is_some()
+                && (value.status != TaskStatus::Running || value.execution_generation.is_some()),
         }
     }
 }
@@ -411,6 +425,22 @@ pub struct NewTaskRequest {
 }
 
 impl NewTaskRequest {
+    /// Preserve values already resolved into a staged or accepted task.
+    pub(crate) fn from_task(task: &TaskRecord) -> Self {
+        Self {
+            prompt: task.prompt.clone(),
+            model: Some(task.model.clone()),
+            model_provider: task.model_provider.clone(),
+            model_provider_id: task.model_provider_id.clone(),
+            workspace: Some(task.workspace.clone()),
+            mode: Some(task.mode.clone()),
+            allow_shell: Some(task.allow_shell),
+            trust_mode: Some(task.trust_mode),
+            auto_approve: Some(task.auto_approve),
+            owner_session_id: task.owner_session_id.clone(),
+        }
+    }
+
     #[cfg(test)]
     #[must_use]
     pub fn from_prompt(prompt: impl Into<String>) -> Self {
@@ -756,6 +786,9 @@ impl TaskExecutor for EngineTaskExecutor {
         events: mpsc::Sender<TaskExecutionEvent>,
         cancel: CancellationToken,
     ) -> TaskExecutionResult {
+        if cancel.is_cancelled() {
+            return TaskExecutionResult::from_reason(TaskTerminalReason::Canceled, None);
+        }
         let thread = match self
             .runtime_threads
             .create_thread(task.thread_request())
@@ -769,6 +802,9 @@ impl TaskExecutor for EngineTaskExecutor {
             }
         };
 
+        if cancel.is_cancelled() {
+            return TaskExecutionResult::from_reason(TaskTerminalReason::Canceled, None);
+        }
         let turn = match self
             .runtime_threads
             .start_turn(
@@ -1135,6 +1171,78 @@ async fn ingest_runtime_event(
 /// Thread-safe task manager.
 pub type SharedTaskManager = Arc<TaskManager>;
 
+pub(crate) struct TaskManagerShutdownGuard(std::sync::Weak<TaskManager>);
+
+impl Drop for TaskManagerShutdownGuard {
+    fn drop(&mut self) {
+        if let Some(manager) = self.0.upgrade() {
+            manager.shutdown();
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    if let Err(error) = manager.shutdown_and_wait().await {
+                        tracing::error!(%error, "Task service shutdown failed");
+                    }
+                });
+            }
+        }
+    }
+}
+
+/// A process generation stays live as long as either the manager or actual
+/// Runtime work retains it. The Runtime's existing scope lock excludes another
+/// executor for that scope; this generation lock proves a particular owner died.
+#[derive(Debug)]
+pub(crate) struct TaskExecutionLease {
+    scope: String,
+    generation: String,
+    _scope_owner: Arc<RuntimeProcessOwnerLock>,
+    _generation_owner: RuntimeProcessOwnerLock,
+}
+
+impl TaskExecutionLease {
+    fn new(
+        root: &Path,
+        scope: String,
+        scope_owner: Arc<RuntimeProcessOwnerLock>,
+    ) -> Result<Arc<Self>> {
+        validate_execution_id(&scope, 64)?;
+        let generation = Uuid::new_v4().simple().to_string();
+        let path = execution_lease_path(root, &scope, &generation)?;
+        let owner = RuntimeProcessOwnerLock::try_acquire_file(&path, true)?
+            .context("Task execution generation is already owned")?;
+        Ok(Arc::new(Self {
+            scope,
+            generation,
+            _scope_owner: scope_owner,
+            _generation_owner: owner,
+        }))
+    }
+}
+
+fn validate_execution_id(value: &str, length: usize) -> Result<()> {
+    if value.len() != length || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("Invalid task execution identity");
+    }
+    Ok(())
+}
+
+fn execution_lease_path(root: &Path, scope: &str, generation: &str) -> Result<PathBuf> {
+    validate_execution_id(scope, 64)?;
+    validate_execution_id(generation, 32)?;
+    Ok(root
+        .join("execution-owners")
+        .join(format!("{scope}.{generation}.lock")))
+}
+
+#[cfg(test)]
+pub(crate) fn test_execution_scope(name: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(name.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 pub struct TaskManager {
     cfg: TaskManagerConfig,
     default_workspace: Mutex<PathBuf>,
@@ -1147,12 +1255,17 @@ pub struct TaskManager {
     state: Mutex<ManagerState>,
     notify: Notify,
     cancel_token: CancellationToken,
+    execution_lease: Arc<TaskExecutionLease>,
+    workers: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    shutdown_drain: Mutex<()>,
 }
 
 struct ManagerState {
     tasks: HashMap<String, TaskRecord>,
     queue: VecDeque<String>,
     running_cancel: HashMap<String, CancellationToken>,
+    /// Uncommitted typed deltas, reapplied to a fresh record before persistence.
+    pending_events: HashMap<String, Vec<TaskExecutionEvent>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -1191,9 +1304,14 @@ impl TaskManager {
             runtime_threads.clone(),
             cfg.execution_limits,
         ));
-        let manager =
-            Self::start_with_executor_and_runtime(cfg, executor, Some(runtime_threads.clone()))
-                .await?;
+        let identity = runtime_threads.task_execution_identity();
+        let manager = Self::start_with_executor_and_runtime(
+            cfg,
+            executor,
+            Some(runtime_threads.clone()),
+            identity,
+        )
+        .await?;
         runtime_threads.attach_task_manager(manager.clone());
         Ok(manager)
     }
@@ -1204,13 +1322,30 @@ impl TaskManager {
         cfg: TaskManagerConfig,
         executor: Arc<dyn TaskExecutor>,
     ) -> Result<SharedTaskManager> {
-        Self::start_with_executor_and_runtime(cfg, executor, None).await
+        Self::start_with_executor_in_scope(cfg, executor, "test").await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn start_with_executor_in_scope(
+        cfg: TaskManagerConfig,
+        executor: Arc<dyn TaskExecutor>,
+        scope: &str,
+    ) -> Result<SharedTaskManager> {
+        let scope = test_execution_scope(scope);
+        let path = cfg
+            .data_dir
+            .join("execution-owners")
+            .join(format!("test-{scope}.lock"));
+        let owner = RuntimeProcessOwnerLock::try_acquire_file(&path, true)?
+            .context("Mock Runtime execution scope is already owned")?;
+        Self::start_with_executor_and_runtime(cfg, executor, None, (scope, Arc::new(owner))).await
     }
 
     async fn start_with_executor_and_runtime(
         cfg: TaskManagerConfig,
         executor: Arc<dyn TaskExecutor>,
         runtime_threads: Option<SharedRuntimeThreadManager>,
+        identity: (String, Arc<RuntimeProcessOwnerLock>),
     ) -> Result<SharedTaskManager> {
         let workers = cfg.worker_count.clamp(1, MAX_WORKERS);
         let tasks_dir = cfg.data_dir.join("tasks");
@@ -1225,12 +1360,7 @@ impl TaskManager {
             )
         })?;
 
-        let LoadedTaskState {
-            tasks,
-            queue,
-            recovered,
-        } = load_state(&tasks_dir, &queue_path)?;
-
+        let execution_lease = TaskExecutionLease::new(&cfg.data_dir, identity.0, identity.1)?;
         let cancel_token = CancellationToken::new();
         let default_workspace = cfg.default_workspace.clone();
         let manager = Arc::new(Self {
@@ -1242,45 +1372,85 @@ impl TaskManager {
             artifacts_dir,
             queue_path,
             state: Mutex::new(ManagerState {
-                tasks,
-                queue,
+                tasks: HashMap::new(),
+                queue: VecDeque::new(),
                 running_cancel: HashMap::new(),
+                pending_events: HashMap::new(),
             }),
             notify: Notify::new(),
             cancel_token: cancel_token.clone(),
+            execution_lease: execution_lease.clone(),
+            workers: Mutex::new(Vec::new()),
+            shutdown_drain: Mutex::new(()),
         });
 
         {
-            // Persist only what boot actually changed: the reconciled queue
-            // and any running->failed recoveries. Rewriting every task record
-            // on every launch was a full-store write storm (#3757).
-            let state = manager.state.lock().await;
+            let mut state = manager.state.lock().await;
+            let _transaction = manager.lock_store().await?;
+            manager.refresh_locked(&mut state)?;
+            manager.recover_dead_executions_locked(&mut state)?;
             manager.persist_queue_locked(&state.queue)?;
-            for id in &recovered {
-                if let Some(task) = state.tasks.get(id) {
-                    manager.persist_task_locked(task)?;
-                }
-            }
+        }
+        if let Some(runtime) = &manager.runtime_threads {
+            runtime.retain_task_execution_lease(execution_lease)?;
         }
 
         for _ in 0..workers {
             let manager_clone = Arc::clone(&manager);
-            spawn_supervised(
+            let worker = spawn_supervised(
                 "task-manager-worker",
                 std::panic::Location::caller(),
                 async move {
                     manager_clone.worker_loop().await;
                 },
             );
+            manager.workers.lock().await.push(worker);
         }
 
         Ok(manager)
     }
 
-    /// Only exercised from automation_manager tests today.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Request shutdown. Ownership remains retained through actual execution.
     pub fn shutdown(&self) {
         self.cancel_token.cancel();
+    }
+
+    pub(crate) fn shutdown_guard(self: &Arc<Self>) -> TaskManagerShutdownGuard {
+        TaskManagerShutdownGuard(Arc::downgrade(self))
+    }
+
+    pub(crate) async fn shutdown_and_wait(&self) -> Result<()> {
+        self.shutdown();
+        let _drain = self.shutdown_drain.lock().await;
+        if let Some(runtime) = &self.runtime_threads {
+            runtime.close_execution_admission().await;
+        }
+        // Waiting through the admission fence settles requests that passed
+        // their admission check before shutdown was requested.
+        {
+            let _transaction = self.lock_store().await?;
+        }
+        let mut failure = None;
+        {
+            let mut workers = self.workers.lock().await;
+            while let Some(worker) = workers.last_mut() {
+                // Await by reference: canceling this caller leaves the join in
+                // the manager, so a later drain still waits for actual exit.
+                let result = worker.await;
+                workers.pop();
+                if let Err(error) = result {
+                    failure = Some(anyhow!("Task worker shutdown failed: {error}"));
+                }
+            }
+        }
+        if let Some(runtime) = &self.runtime_threads {
+            runtime.shutdown_and_wait().await?;
+        }
+        failure.map_or(Ok(()), Err)
+    }
+
+    pub(crate) fn execution_scope(&self) -> &str {
+        &self.execution_lease.scope
     }
 
     pub async fn set_default_workspace(&self, workspace: PathBuf) {
@@ -1304,6 +1474,64 @@ impl TaskManager {
         format!("task_{}", &Uuid::new_v4().simple().to_string()[..16])
     }
 
+    /// Read the exact durable task binding without adopting another process's
+    /// queue. Used by the automation dispatcher while it owns the store claim.
+    pub(crate) fn read_bound_task(&self, task_id: &str) -> Result<Option<TaskRecord>> {
+        if task_id.is_empty()
+            || !task_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            bail!("Invalid durable task id");
+        }
+        read_bound_task_file(&self.tasks_dir.join(format!("{task_id}.json")), task_id)
+    }
+
+    /// Recover a persisted automation admission under its cross-process
+    /// dispatch lock. A promoted task is accepted work, including failed or
+    /// interrupted work; returning it must never enqueue it again.
+    pub(crate) async fn recover_task_admission(
+        &self,
+        request: NewTaskRequest,
+        task_id: String,
+    ) -> Result<TaskRecord> {
+        validate_preallocated_task_id(&task_id)?;
+        if let Some(task) = self.read_bound_task(&task_id)? {
+            validate_bound_task_request(&task, &request)?;
+            return Ok(task);
+        }
+        let staged_path = self.tasks_dir.join(format!(".{task_id}.json.pending"));
+        let admission = if let Some(staged) = read_bound_task_file(&staged_path, &task_id)? {
+            validate_bound_task_request(&staged, &request)?;
+            if staged.status != TaskStatus::Queued
+                || staged.started_at.is_some()
+                || staged.thread_id.is_some()
+                || staged.turn_id.is_some()
+            {
+                bail!("Unpromoted task stage contains execution evidence; refusing to replay it");
+            }
+            // The original resolved settings remain durable in this stage
+            // until promotion, including if recovery itself is interrupted.
+            self.admit_task_record(staged, true).await
+        } else {
+            self.add_task_with_id(request.clone(), task_id.clone())
+                .await
+        };
+        match admission {
+            Ok(task) => Ok(task),
+            Err(error) => {
+                // Preserve a task promoted before a torn response; do not
+                // replace its identity or convert accepted work into a retry.
+                if let Some(task) = self.read_bound_task(&task_id)? {
+                    validate_bound_task_request(&task, &request)?;
+                    Ok(task)
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+
     /// Enqueue using a preallocated id. This is crate-visible only for the
     /// model tool's register-before-work transaction.
     pub(crate) async fn add_task_with_id(
@@ -1323,12 +1551,7 @@ impl TaskManager {
         {
             bail!("A pinned task provider requires an explicit model");
         }
-        if task_id.len() != 21
-            || !task_id.starts_with("task_")
-            || !task_id[5..].chars().all(|ch| ch.is_ascii_hexdigit())
-        {
-            bail!("Invalid preallocated task id: expected task_<16hex>");
-        }
+        validate_preallocated_task_id(&task_id)?;
 
         let task = TaskRecord {
             schema_version: CURRENT_TASK_SCHEMA_VERSION,
@@ -1366,6 +1589,9 @@ impl TaskManager {
             thread_id: None,
             turn_id: None,
             owner_session_id: req.owner_session_id,
+            execution_scope: Some(self.execution_scope().to_string()),
+            execution_generation: None,
+            cancel_requested_seq: 0,
             runtime_event_count: 0,
             lifecycle_seq: 1,
             checklist: TaskChecklistState::default(),
@@ -1382,28 +1608,59 @@ impl TaskManager {
             }],
         };
 
+        self.admit_task_record(task, false).await
+    }
+
+    async fn admit_task_record(&self, task: TaskRecord, recover_stage: bool) -> Result<TaskRecord> {
         {
             let mut state = self.state.lock().await;
+            let _transaction = self.lock_store().await?;
+            self.refresh_locked(&mut state)?;
+            if self.cancel_token.is_cancelled() {
+                bail!("Task manager is shutting down; admission is closed");
+            }
+            if task.execution_scope.as_deref() != Some(self.execution_scope()) {
+                bail!(
+                    "Task execution scope is unverified or belongs to another Runtime; refusing adoption"
+                );
+            }
             let task_path = self.tasks_dir.join(format!("{}.json", task.id));
             // The staged extension is intentionally not `.json`, so startup
             // replay ignores an interrupted create until the queue write has
             // succeeded and this file is atomically promoted.
             let staged_task_path = self.tasks_dir.join(format!(".{}.json.pending", task.id));
-            if state.tasks.contains_key(&task.id) || task_path.exists() || staged_task_path.exists()
+            if recover_stage {
+                if let Some(accepted) = self.read_bound_task(&task.id)? {
+                    validate_bound_task_request(&accepted, &NewTaskRequest::from_task(&task))?;
+                    return Ok(accepted);
+                }
+                let current = read_bound_task_file(&staged_task_path, &task.id)?
+                    .context("Unaccepted task stage disappeared during recovery")?;
+                if serde_json::to_value(&current)? != serde_json::to_value(&task)? {
+                    bail!("Unaccepted task stage changed during recovery");
+                }
+            }
+            if state.tasks.contains_key(&task.id)
+                || task_path.exists()
+                || (!recover_stage && staged_task_path.exists())
             {
                 bail!("Task id already exists: {}", task.id);
             }
             let mut next_queue = state.queue.clone();
-            next_queue.push_back(task.id.clone());
+            if !next_queue.contains(&task.id) {
+                next_queue.push_back(task.id.clone());
+            }
 
             // Stage the owner record, then persist its queue membership, then
             // atomically promote it. A crash before promotion leaves either an
             // ignored staged file or a queue entry with no task (which replay
             // drops); a crash after promotion leaves the complete runnable
             // pair. In-memory scheduling is published only after all three.
-            write_json_atomic(&staged_task_path, &task)?;
+            if !recover_stage {
+                write_json_atomic(&staged_task_path, &task)?;
+            }
             if let Err(err) = self.persist_queue_locked(&next_queue) {
-                if let Err(cleanup_err) = fs::remove_file(&staged_task_path) {
+                if !recover_stage && let Err(cleanup_err) = fs::remove_file(&staged_task_path) {
                     tracing::warn!(
                         task_id = %task.id,
                         error = %cleanup_err,
@@ -1414,7 +1671,11 @@ impl TaskManager {
             }
             if let Err(promote_err) = fs::rename(&staged_task_path, &task_path) {
                 let rollback_error = self.persist_queue_locked(&state.queue).err();
-                let cleanup_error = fs::remove_file(&staged_task_path).err();
+                let cleanup_error = if recover_stage {
+                    None
+                } else {
+                    fs::remove_file(&staged_task_path).err()
+                };
                 let mut message =
                     format!("Failed to promote staged task {}: {promote_err}", task.id);
                 if let Some(rollback_error) = rollback_error {
@@ -1435,7 +1696,7 @@ impl TaskManager {
     }
 
     /// List tasks, newest first.
-    pub async fn list_tasks(&self, limit: Option<usize>) -> Vec<TaskSummary> {
+    pub async fn list_tasks(&self, limit: Option<usize>) -> Result<Vec<TaskSummary>> {
         self.list_tasks_scoped(limit, None).await
     }
 
@@ -1444,7 +1705,7 @@ impl TaskManager {
         &self,
         limit: Option<usize>,
         workspace: Option<&Path>,
-    ) -> Vec<TaskSummary> {
+    ) -> Result<Vec<TaskSummary>> {
         self.list_tasks_visible_to(limit, workspace, None).await
     }
 
@@ -1456,7 +1717,7 @@ impl TaskManager {
         limit: Option<usize>,
         workspace: Option<&Path>,
         owner_session_id: &str,
-    ) -> Vec<TaskSummary> {
+    ) -> Result<Vec<TaskSummary>> {
         self.list_tasks_visible_to(limit, workspace, Some(owner_session_id))
             .await
     }
@@ -1466,8 +1727,10 @@ impl TaskManager {
         limit: Option<usize>,
         workspace: Option<&Path>,
         owner_session_id: Option<&str>,
-    ) -> Vec<TaskSummary> {
-        let state = self.state.lock().await;
+    ) -> Result<Vec<TaskSummary>> {
+        let mut state = self.state.lock().await;
+        let _transaction = self.lock_store().await?;
+        self.refresh_locked(&mut state)?;
         let mut items = state
             .tasks
             .values()
@@ -1483,7 +1746,7 @@ impl TaskManager {
         if let Some(limit) = limit {
             items.truncate(limit);
         }
-        items
+        Ok(items)
     }
 
     /// Retrieve a task by full id or prefix.
@@ -1507,13 +1770,19 @@ impl TaskManager {
     /// Retrieve the exact owned task stamped onto a trusted runtime thread.
     ///
     /// The runtime thread supplies a full durable id rather than model input.
-    /// Legacy ownerless tasks fail closed even when restored as active.
+    /// An ownerless task needs the current trusted execution scope. Legacy
+    /// ownerless tasks without that provenance still fail closed.
     pub(crate) async fn get_task_for_active_runtime(&self, task_id: &str) -> Result<TaskRecord> {
-        let state = self.state.lock().await;
+        let mut state = self.state.lock().await;
+        let _transaction = self.lock_store().await?;
+        self.refresh_locked(&mut state)?;
         state
             .tasks
             .get(task_id)
-            .filter(|task| task.owner_session_id.is_some())
+            .filter(|task| match task.execution_scope.as_deref() {
+                Some(scope) => scope == self.execution_scope(),
+                None => task.owner_session_id.is_some(),
+            })
             .cloned()
             .ok_or_else(|| anyhow!("Task not found: {task_id}"))
     }
@@ -1523,7 +1792,9 @@ impl TaskManager {
         id_or_prefix: &str,
         owner_session_id: Option<&str>,
     ) -> Result<TaskRecord> {
-        let state = self.state.lock().await;
+        let mut state = self.state.lock().await;
+        let _transaction = self.lock_store().await?;
+        self.refresh_locked(&mut state)?;
         let id = resolve_task_id_visible_to(&state.tasks, id_or_prefix, owner_session_id)?;
         state
             .tasks
@@ -1564,6 +1835,8 @@ impl TaskManager {
         owner_session_id: Option<&str>,
     ) -> Result<TaskCancellation> {
         let mut state = self.state.lock().await;
+        let _transaction = self.lock_store().await?;
+        self.refresh_locked(&mut state)?;
         let id = resolve_task_id_visible_to(&state.tasks, id_or_prefix, owner_session_id)?;
         let now = Utc::now();
 
@@ -1594,6 +1867,7 @@ impl TaskManager {
                 TaskStatus::Running => {
                     cancel_running = true;
                     task.lifecycle_seq = task.lifecycle_seq.saturating_add(1);
+                    task.cancel_requested_seq = task.lifecycle_seq;
                     push_timeline_entry(
                         task,
                         TaskTimelineEntry {
@@ -1615,7 +1889,8 @@ impl TaskManager {
             token.cancel();
         }
 
-        self.persist_all_locked(&state)?;
+        self.persist_changed_task_locked(&mut state, &id)?;
+        self.persist_queue_locked(&state.queue)?;
         let task = state
             .tasks
             .get(&id)
@@ -1625,8 +1900,10 @@ impl TaskManager {
     }
 
     /// Return aggregate status counters.
-    pub async fn counts(&self) -> TaskCounts {
-        let state = self.state.lock().await;
+    pub async fn counts(&self) -> Result<TaskCounts> {
+        let mut state = self.state.lock().await;
+        let _transaction = self.lock_store().await?;
+        self.refresh_locked(&mut state)?;
         let mut counts = TaskCounts::default();
         for task in state.tasks.values() {
             match task.status {
@@ -1637,7 +1914,7 @@ impl TaskManager {
                 TaskStatus::Canceled => counts.canceled += 1,
             }
         }
-        counts
+        Ok(counts)
     }
 
     /// Root directory for durable task state.
@@ -1684,6 +1961,8 @@ impl TaskManager {
         metadata: &Value,
     ) -> Result<TaskRecord> {
         let mut state = self.state.lock().await;
+        let _transaction = self.lock_store().await?;
+        self.refresh_locked(&mut state)?;
         let id = resolve_task_id(&state.tasks, id_or_prefix)?;
         let updated = {
             let task = state
@@ -1693,73 +1972,94 @@ impl TaskManager {
             self.apply_task_update_metadata(task, Some(metadata))?;
             task.clone()
         };
-        self.persist_task_locked(&updated)?;
+        self.persist_changed_task_locked(&mut state, &id)?;
         Ok(updated)
+    }
+
+    async fn claim_next_task(&self) -> Result<Option<(String, ExecutionTask, CancellationToken)>> {
+        let mut state = self.state.lock().await;
+        let _transaction = self.lock_store().await?;
+        self.refresh_locked(&mut state)?;
+        if self.cancel_token.is_cancelled() {
+            return Ok(None);
+        }
+        let Some(id) = state
+            .queue
+            .iter()
+            .find(|id| {
+                state.tasks.get(*id).is_some_and(|task| {
+                    task.status == TaskStatus::Queued
+                        && task.execution_scope.as_deref() == Some(self.execution_scope())
+                })
+            })
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        state.queue.retain(|queued| queued != &id);
+        let task = state
+            .tasks
+            .get_mut(&id)
+            .context("Claimed task is missing")?;
+        let now = Utc::now();
+        task.status = TaskStatus::Running;
+        task.execution_generation = Some(self.execution_lease.generation.clone());
+        task.lifecycle_seq = task.lifecycle_seq.saturating_add(1);
+        task.started_at = Some(now);
+        task.ended_at = None;
+        task.duration_ms = None;
+        task.error = None;
+        push_timeline_entry(
+            task,
+            TaskTimelineEntry {
+                timestamp: now,
+                kind: "running".into(),
+                summary: "Task started".into(),
+                detail_path: None,
+            },
+        );
+        let request = ExecutionTask::from(&*task);
+        // Removing queue membership first is recoverable from the still-Queued
+        // record. Executor polling requires BOTH durable writes to succeed.
+        self.persist_queue_locked(&state.queue)?;
+        self.persist_changed_task_locked(&mut state, &id)?;
+        let cancel = CancellationToken::new();
+        state.running_cancel.insert(id.clone(), cancel.clone());
+        Ok(Some((id, request, cancel)))
     }
 
     async fn worker_loop(self: Arc<Self>) {
         loop {
             if self.cancel_token.is_cancelled() {
-                tracing::debug!("Worker exiting due to shutdown");
                 break;
             }
-            let next = {
-                let mut state = self.state.lock().await;
-                match state.queue.pop_front() {
-                    None => None,
-                    Some(task_id) => {
-                        if let Some(task) = state.tasks.get_mut(&task_id) {
-                            if task.status != TaskStatus::Queued {
-                                let _ = self.persist_queue_locked(&state.queue);
-                                None
-                            } else {
-                                let now = Utc::now();
-                                task.status = TaskStatus::Running;
-                                task.lifecycle_seq = task.lifecycle_seq.saturating_add(1);
-                                task.started_at = Some(now);
-                                task.ended_at = None;
-                                task.duration_ms = None;
-                                task.error = None;
-                                push_timeline_entry(
-                                    task,
-                                    TaskTimelineEntry {
-                                        timestamp: now,
-                                        kind: "running".to_string(),
-                                        summary: "Task started".to_string(),
-                                        detail_path: None,
-                                    },
-                                );
-
-                                let request = ExecutionTask::from(&*task);
-                                let cancel = CancellationToken::new();
-                                state.running_cancel.insert(task_id.clone(), cancel.clone());
-
-                                if let Err(err) = self.persist_all_locked(&state) {
-                                    tracing::error!("Failed to persist task start: {err}");
-                                }
-                                Some((task_id, request, cancel))
-                            }
-                        } else {
-                            let _ = self.persist_queue_locked(&state.queue);
-                            None
-                        }
-                    }
+            match self.claim_next_task().await {
+                Ok(Some((id, request, cancel))) => {
+                    self.run_task(id, request, cancel).await;
+                    continue;
                 }
-            };
-
-            let Some((task_id, request, cancel)) = next else {
-                tokio::select! {
-                    _ = self.cancel_token.cancelled() => {
-                        tracing::debug!("Worker exiting during wait");
-                        break;
-                    }
-                    _ = self.notify.notified() => {}
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::error!(%error, "Task claim unavailable; executor was not polled")
                 }
-                continue;
-            };
-
-            self.run_task(task_id, request, cancel).await;
+            }
+            tokio::select! {
+                _ = self.cancel_token.cancelled() => break,
+                _ = self.notify.notified() => {},
+                _ = sleep(STORE_REFRESH_INTERVAL) => {},
+            }
         }
+    }
+
+    fn observe_task_cancellation(&self, task_id: &str, cancel: &CancellationToken) -> Result<()> {
+        let task = self
+            .read_bound_task(task_id)?
+            .context("Running task is missing")?;
+        self.require_execution_owner(&task)?;
+        if task.cancel_requested_seq > 0 {
+            cancel.cancel();
+        }
+        Ok(())
     }
 
     async fn run_task(&self, task_id: String, request: ExecutionTask, cancel: CancellationToken) {
@@ -1774,7 +2074,44 @@ impl TaskManager {
         let mut accumulated_result_text = String::new();
         let persist_debounce = self.cfg.execution_limits.persist_debounce;
 
+        let mut next_store_poll = Instant::now();
+        let mut execution_started = false;
+        let mut blocked_event: Option<TaskExecutionEvent> = None;
+        let mut next_event_retry = Instant::now();
         let (mut result, manager_terminalized) = loop {
+            if Instant::now() >= next_store_poll {
+                if let Err(error) = self.observe_task_cancellation(&task_id, &cancel) {
+                    tracing::error!(%error, "Task ownership unavailable; requesting Runtime cancellation");
+                    cancel.cancel();
+                }
+                next_store_poll = Instant::now() + STORE_REFRESH_INTERVAL;
+            }
+            if !execution_started && (cancel.is_cancelled() || self.cancel_token.is_cancelled()) {
+                let reason = if self.cancel_token.is_cancelled() {
+                    TaskTerminalReason::Shutdown
+                } else {
+                    TaskTerminalReason::Canceled
+                };
+                break (TaskExecutionResult::from_reason(reason, None), true);
+            }
+            if Instant::now() >= next_event_retry {
+                if let Some(event) = blocked_event.take()
+                    && self
+                        .process_execution_event(
+                            &task_id,
+                            event.clone(),
+                            &mut guard,
+                            &mut accumulated_result_text,
+                            &mut dirty,
+                        )
+                        .await
+                        .is_err()
+                {
+                    blocked_event = Some(event);
+                    cancel.cancel();
+                }
+                next_event_retry = Instant::now() + STORE_REFRESH_INTERVAL;
+            }
             let mut action = guard.evaluate(
                 Instant::now(),
                 cancel.is_cancelled(),
@@ -1792,17 +2129,26 @@ impl TaskManager {
                 // wall time, shutdown, or explicit cancellation indefinitely.
                 let queued = event_rx.len();
                 for _ in 0..queued {
+                    if blocked_event.is_some() {
+                        break;
+                    }
                     let Ok(event) = event_rx.try_recv() else {
                         break;
                     };
-                    self.process_execution_event(
-                        &task_id,
-                        event,
-                        &mut guard,
-                        &mut accumulated_result_text,
-                        &mut dirty,
-                    )
-                    .await;
+                    if self
+                        .process_execution_event(
+                            &task_id,
+                            event.clone(),
+                            &mut guard,
+                            &mut accumulated_result_text,
+                            &mut dirty,
+                        )
+                        .await
+                        .is_err()
+                    {
+                        blocked_event = Some(event);
+                        cancel.cancel();
+                    }
                 }
                 action = guard.evaluate(
                     Instant::now(),
@@ -1820,56 +2166,85 @@ impl TaskManager {
                     break (TaskExecutionResult::from_reason(reason, None), true);
                 }
                 GuardAction::Run { wait } => {
+                    execution_started = true;
                     tokio::select! {
                         biased;
                         exec_result = &mut exec_fut => {
                             break (guard.preserve_timeout_reason(exec_result), false);
                         }
-                        maybe_event = event_rx.recv() => {
-                            if let Some(event) = maybe_event {
-                                self.process_execution_event(
-                                    &task_id,
-                                    event,
-                                    &mut guard,
-                                    &mut accumulated_result_text,
-                                    &mut dirty,
-                                )
-                                .await;
+                        maybe_event = event_rx.recv(), if blocked_event.is_none() => {
+                            if let Some(event) = maybe_event
+                                && self.process_execution_event(
+                                    &task_id, event.clone(), &mut guard,
+                                    &mut accumulated_result_text, &mut dirty,
+                                ).await.is_err() {
+                                blocked_event = Some(event);
+                                cancel.cancel();
                             }
                         }
                         _ = self.cancel_token.cancelled(), if !self.cancel_token.is_cancelled() => {
                             cancel.cancel();
                         }
                         _ = sleep(persist_debounce), if dirty => {
-                            if let Err(err) = self.flush_task(&task_id).await {
-                                tracing::error!("Failed to debounce-persist task {task_id}: {err}");
+                            match self.flush_task(&task_id).await {
+                                Ok(()) => dirty = false,
+                                Err(err) => {
+                                    tracing::error!("Failed to debounce-persist task {task_id}: {err}");
+                                    cancel.cancel();
+                                }
                             }
-                            dirty = false;
                         }
-                        _ = sleep(wait) => {}
+                        _ = sleep(wait.min(STORE_REFRESH_INTERVAL)) => {}
                     }
                 }
             }
         };
 
-        while let Ok(event) = event_rx.try_recv() {
-            append_message_delta(&mut accumulated_result_text, &event);
-            if let Err(err) = self.apply_execution_event(&task_id, event).await {
-                tracing::error!("Failed to apply trailing task event for {task_id}: {err}");
+        // Stop accepting producer events while one event cannot be retained.
+        // The pending delta set and channel remain bounded during disk failure;
+        // keep the execution lease until accepted events and the terminal receipt
+        // have actually been persisted. A storage failure is not completion.
+        event_rx.close();
+        loop {
+            let event = blocked_event.take().or_else(|| event_rx.try_recv().ok());
+            let Some(event) = event else {
+                break;
+            };
+            while self
+                .process_execution_event(
+                    &task_id,
+                    event.clone(),
+                    &mut guard,
+                    &mut accumulated_result_text,
+                    &mut dirty,
+                )
+                .await
+                .is_err()
+            {
+                sleep(STORE_REFRESH_INTERVAL).await;
             }
         }
         if manager_terminalized {
             result.result_text = optional_nonzero_text(accumulated_result_text);
         }
-        if dirty && let Err(err) = self.flush_task(&task_id).await {
-            tracing::error!("Failed to flush task {task_id}: {err}");
-        }
-
-        if let Err(err) = self
-            .finish_task(&task_id, result, cancel, &request.mode_label)
-            .await
-        {
-            tracing::error!("Failed to finalize task {task_id}: {err}");
+        loop {
+            match self
+                .finish_task(
+                    &task_id,
+                    result.clone(),
+                    cancel.clone(),
+                    &request.mode_label,
+                )
+                .await
+            {
+                Ok(()) => break,
+                Err(err) => {
+                    tracing::error!(
+                        "Task {task_id} terminal receipt is pending storage recovery: {err}"
+                    );
+                    sleep(STORE_REFRESH_INTERVAL).await;
+                }
+            }
         }
     }
 
@@ -1880,17 +2255,19 @@ impl TaskManager {
         guard: &mut ExecutionGuard,
         accumulated_result_text: &mut String,
         dirty: &mut bool,
-    ) {
-        if execution_event_is_progress(&event) {
-            guard.note_progress(Instant::now());
-        }
-        append_message_delta(accumulated_result_text, &event);
-        match self.apply_execution_event(task_id, event).await {
+    ) -> Result<()> {
+        match self.apply_execution_event(task_id, event.clone()).await {
             Ok(outcome) => {
+                if execution_event_is_progress(&event) {
+                    guard.note_progress(Instant::now());
+                }
+                append_message_delta(accumulated_result_text, &event);
                 *dirty = !outcome.persisted;
+                Ok(())
             }
             Err(err) => {
-                tracing::error!("Failed to apply task event for {task_id}: {err}");
+                tracing::error!("Task {task_id} event is waiting for storage recovery: {err}");
+                Err(err)
             }
         }
     }
@@ -1900,12 +2277,47 @@ impl TaskManager {
         task_id: &str,
         event: TaskExecutionEvent,
     ) -> Result<EventApplyOutcome> {
-        let persist_now = execution_event_persist_urgent(&event);
+        let urgent = execution_event_persist_urgent(&event);
         let mut state = self.state.lock().await;
-        let Some(task) = state.tasks.get_mut(task_id) else {
-            return Ok(EventApplyOutcome { persisted: true });
+        let _transaction = self.lock_store().await?;
+        self.refresh_locked(&mut state)?;
+        if state
+            .pending_events
+            .get(task_id)
+            .is_some_and(|events| events.len() >= TASK_EVENT_CHANNEL_CAPACITY)
+        {
+            self.persist_changed_task_locked(&mut state, task_id)?;
+        }
+        let task = state
+            .tasks
+            .get_mut(task_id)
+            .context("Event task is missing")?;
+        self.require_execution_owner(task)?;
+        self.apply_event_to_task(task, event.clone())?;
+        let pending = state.pending_events.entry(task_id.to_string()).or_default();
+        pending.push(event);
+        let persist_now = urgent || pending.len() >= TASK_EVENT_CHANNEL_CAPACITY;
+        let persisted = if persist_now {
+            match self.persist_changed_task_locked(&mut state, task_id) {
+                Ok(()) => true,
+                Err(error) => {
+                    // This event is already retained in the bounded delta set.
+                    // Return acceptance so the caller must not append it again.
+                    if let Some(cancel) = state.running_cancel.get(task_id) {
+                        cancel.cancel();
+                    }
+                    tracing::error!(%error, "Task event retained pending storage recovery; cancellation requested");
+                    false
+                }
+            }
+        } else {
+            false
         };
+        Ok(EventApplyOutcome { persisted })
+    }
 
+    fn apply_event_to_task(&self, task: &mut TaskRecord, event: TaskExecutionEvent) -> Result<()> {
+        let task_id = task.id.clone();
         match event {
             TaskExecutionEvent::ThreadLinked { thread_id, turn_id } => {
                 task.thread_id = Some(thread_id.clone());
@@ -1993,7 +2405,7 @@ impl TaskManager {
                 metadata,
             } => {
                 let now = Utc::now();
-                let detail_path = self.artifact_if_large(task_id, &name, &output)?;
+                let detail_path = self.artifact_if_large(&task_id, &name, &output)?;
                 let output_summary = summarize_text(&output, TIMELINE_SUMMARY_LIMIT);
                 let patch_ref = if name == "apply_patch" {
                     detail_path.clone()
@@ -2076,20 +2488,19 @@ impl TaskManager {
             }
         }
 
-        if persist_now {
-            self.persist_task_locked(task)?;
-        }
-        Ok(EventApplyOutcome {
-            persisted: persist_now,
-        })
+        Ok(())
     }
 
     async fn flush_task(&self, task_id: &str) -> Result<()> {
-        let state = self.state.lock().await;
-        if let Some(task) = state.tasks.get(task_id) {
-            self.persist_task_locked(task)?;
-        }
-        Ok(())
+        let mut state = self.state.lock().await;
+        let _transaction = self.lock_store().await?;
+        self.refresh_locked(&mut state)?;
+        let task = state
+            .tasks
+            .get(task_id)
+            .context("Flushed task is missing")?;
+        self.require_execution_owner(task)?;
+        self.persist_changed_task_locked(&mut state, task_id)
     }
 
     async fn finish_task(
@@ -2100,13 +2511,19 @@ impl TaskManager {
         mode_label: &str,
     ) -> Result<()> {
         let mut state = self.state.lock().await;
+        let _transaction = self.lock_store().await?;
+        self.refresh_locked(&mut state)?;
         state.running_cancel.remove(task_id);
-        let Some(task) = state.tasks.get_mut(task_id) else {
-            return Ok(());
-        };
+        let task = state
+            .tasks
+            .get_mut(task_id)
+            .context("Finished task is missing")?;
+        self.require_execution_owner(task)?;
 
         let now = Utc::now();
-        if cancel.is_cancelled() && result.status == TaskStatus::Completed {
+        if (cancel.is_cancelled() || task.cancel_requested_seq > 0)
+            && result.status == TaskStatus::Completed
+        {
             result.status = TaskStatus::Canceled;
             result.result_text = None;
             result.error = None;
@@ -2182,7 +2599,7 @@ impl TaskManager {
             task.result_summary = Some("(no textual output)".to_string());
         }
 
-        self.persist_all_locked(&state)?;
+        self.persist_changed_task_locked(&mut state, task_id)?;
         Ok(())
     }
 
@@ -2340,9 +2757,105 @@ impl TaskManager {
         Ok(())
     }
 
-    fn persist_all_locked(&self, state: &ManagerState) -> Result<()> {
-        self.persist_queue_locked(&state.queue)?;
-        for task in state.tasks.values() {
+    async fn lock_store(&self) -> Result<RuntimeProcessOwnerLock> {
+        let path = self.cfg.data_dir.join("task-store.lock");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(owner) = RuntimeProcessOwnerLock::try_acquire_file(&path, true)? {
+                return Ok(owner);
+            }
+            if Instant::now() >= deadline {
+                bail!("Task store is busy; state is unavailable");
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    fn refresh_locked(&self, state: &mut ManagerState) -> Result<()> {
+        let loaded = load_state(&self.tasks_dir, &self.queue_path)?;
+        state.tasks = loaded.tasks;
+        state.queue = loaded.queue;
+        for (id, events) in &state.pending_events {
+            let task = state
+                .tasks
+                .get_mut(id)
+                .context("Pending task disappeared")?;
+            self.require_execution_owner(task)?;
+            for event in events {
+                self.apply_event_to_task(task, event.clone())?;
+            }
+        }
+        Ok(())
+    }
+
+    fn require_execution_owner(&self, task: &TaskRecord) -> Result<()> {
+        if task.execution_scope.as_deref() != Some(self.execution_scope())
+            || task.execution_generation.as_deref() != Some(&self.execution_lease.generation)
+            || task.status != TaskStatus::Running
+        {
+            bail!("Task execution ownership changed; refusing a stale write");
+        }
+        Ok(())
+    }
+
+    fn persist_changed_task_locked(&self, state: &mut ManagerState, id: &str) -> Result<()> {
+        let task = state.tasks.get(id).context("Changed task is missing")?;
+        self.persist_task_locked(task)?;
+        state.pending_events.remove(id);
+        Ok(())
+    }
+
+    fn recover_dead_executions_locked(&self, state: &mut ManagerState) -> Result<()> {
+        for task in state.tasks.values_mut() {
+            // Unknown legacy ownership is preserved, never guessed from the
+            // visibility owner, model spelling, or current process defaults.
+            if task.status != TaskStatus::Running {
+                continue;
+            }
+            let (Some(scope), Some(generation)) =
+                (&task.execution_scope, &task.execution_generation)
+            else {
+                continue;
+            };
+            let path = execution_lease_path(&self.cfg.data_dir, scope, generation)?;
+            let Some(_dead_owner) = RuntimeProcessOwnerLock::try_acquire_file(&path, false)? else {
+                continue;
+            };
+            let now = Utc::now();
+            let duration_ms = task.started_at.and_then(|started| {
+                u64::try_from(now.signed_duration_since(started).num_milliseconds()).ok()
+            });
+            task.status = TaskStatus::Failed;
+            task.lifecycle_seq = task.lifecycle_seq.saturating_add(1);
+            task.ended_at = Some(now);
+            task.duration_ms = duration_ms;
+            task.terminal_reason = Some(TaskTerminalReason::Failed.as_str().to_string());
+            task.error =
+                Some("Interrupted by process restart; prior process is not attached".to_string());
+            for tool in &mut task.tool_calls {
+                if tool.status == TaskToolStatus::Running {
+                    tool.status = TaskToolStatus::Failed;
+                    tool.ended_at = Some(now);
+                    tool.duration_ms = duration_ms.or_else(|| {
+                        u64::try_from(
+                            now.signed_duration_since(tool.started_at)
+                                .num_milliseconds(),
+                        )
+                        .ok()
+                    });
+                }
+            }
+            push_timeline_entry(
+                task,
+                TaskTimelineEntry {
+                    timestamp: now,
+                    kind: "recovered".to_string(),
+                    summary: "Interrupted by process restart; prior process is not attached"
+                        .to_string(),
+                    detail_path: None,
+                },
+            );
+
             self.persist_task_locked(task)?;
         }
         Ok(())
@@ -2375,18 +2888,71 @@ fn normalize_hunt_verdict(raw: &str) -> Result<&'static str> {
     }
 }
 
-/// Outcome of loading the persisted task store at boot: the reconciled task
-/// map + queue, plus the ids whose status was flipped running->failed by
-/// crash recovery (the only records boot needs to re-persist).
+fn validate_preallocated_task_id(task_id: &str) -> Result<()> {
+    if task_id.len() != 21
+        || !task_id.starts_with("task_")
+        || !task_id[5..].chars().all(|ch| ch.is_ascii_hexdigit())
+    {
+        bail!("Invalid preallocated task id: expected task_<16hex>");
+    }
+    Ok(())
+}
+
+fn read_bound_task_file(path: &Path, task_id: &str) -> Result<Option<TaskRecord>> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("read bound task"),
+    };
+    let task: TaskRecord = serde_json::from_slice(&bytes).context("decode bound task")?;
+    if task.id != task_id || task.schema_version > CURRENT_TASK_SCHEMA_VERSION {
+        bail!("Bound task identity or schema does not match its durable admission");
+    }
+    Ok(Some(task))
+}
+
+pub(crate) fn validate_bound_task_request(
+    task: &TaskRecord,
+    request: &NewTaskRequest,
+) -> Result<()> {
+    if task.prompt != request.prompt.trim()
+        || task.owner_session_id != request.owner_session_id
+        || task.model_provider != request.model_provider
+        || task.model_provider_id != request.model_provider_id
+        || request
+            .model
+            .as_ref()
+            .is_some_and(|value| value != &task.model)
+        || request
+            .workspace
+            .as_ref()
+            .is_some_and(|value| value != &task.workspace)
+        || request
+            .mode
+            .as_ref()
+            .is_some_and(|value| value != &task.mode)
+        || request
+            .allow_shell
+            .is_some_and(|value| value != task.allow_shell)
+        || request
+            .trust_mode
+            .is_some_and(|value| value != task.trust_mode)
+        || task.auto_approve != request.auto_approve.unwrap_or(false)
+    {
+        bail!("Task admission replay does not match the bound request");
+    }
+    Ok(())
+}
+
+/// A read-only inventory and reconstructed queue. Execution recovery is a
+/// separate transaction requiring proof that a particular generation died.
 struct LoadedTaskState {
     tasks: HashMap<String, TaskRecord>,
     queue: VecDeque<String>,
-    recovered: Vec<String>,
 }
 
 fn load_state(tasks_dir: &Path, queue_path: &Path) -> Result<LoadedTaskState> {
     let mut tasks = HashMap::new();
-    let mut recovered = Vec::new();
     if tasks_dir.exists() {
         for entry in fs::read_dir(tasks_dir)
             .with_context(|| format!("Failed to read tasks dir {}", tasks_dir.display()))?
@@ -2398,7 +2964,7 @@ fn load_state(tasks_dir: &Path, queue_path: &Path) -> Result<LoadedTaskState> {
             }
             let content = fs::read_to_string(&path)
                 .with_context(|| format!("Failed to read task file {}", path.display()))?;
-            let mut task: TaskRecord = serde_json::from_str(&content)
+            let task: TaskRecord = serde_json::from_str(&content)
                 .with_context(|| format!("Failed to parse task file {}", path.display()))?;
             if task.schema_version > CURRENT_TASK_SCHEMA_VERSION {
                 bail!(
@@ -2407,43 +2973,18 @@ fn load_state(tasks_dir: &Path, queue_path: &Path) -> Result<LoadedTaskState> {
                     CURRENT_TASK_SCHEMA_VERSION
                 );
             }
-            if task.status == TaskStatus::Running {
-                let now = Utc::now();
-                let duration_ms = task.started_at.and_then(|started| {
-                    u64::try_from(now.signed_duration_since(started).num_milliseconds()).ok()
-                });
-                task.status = TaskStatus::Failed;
-                task.lifecycle_seq = task.lifecycle_seq.saturating_add(1);
-                task.ended_at = Some(now);
-                task.duration_ms = duration_ms;
-                task.terminal_reason = Some(TaskTerminalReason::Failed.as_str().to_string());
-                task.error = Some(
-                    "Interrupted by process restart; prior process is not attached".to_string(),
-                );
-                for tool in &mut task.tool_calls {
-                    if tool.status == TaskToolStatus::Running {
-                        tool.status = TaskToolStatus::Failed;
-                        tool.ended_at = Some(now);
-                        tool.duration_ms = duration_ms.or_else(|| {
-                            u64::try_from(
-                                now.signed_duration_since(tool.started_at)
-                                    .num_milliseconds(),
-                            )
-                            .ok()
-                        });
-                    }
+            ensure_safe_storage_id("task id", &task.id)?;
+            if path.file_stem().and_then(|stem| stem.to_str()) != Some(task.id.as_str()) {
+                bail!("Task record identity differs from its path");
+            }
+            if let Some(scope) = &task.execution_scope {
+                validate_execution_id(scope, 64)?;
+            }
+            if let Some(generation) = &task.execution_generation {
+                validate_execution_id(generation, 32)?;
+                if task.execution_scope.is_none() {
+                    bail!("Task generation has no execution scope");
                 }
-                push_timeline_entry(
-                    &mut task,
-                    TaskTimelineEntry {
-                        timestamp: now,
-                        kind: "recovered".to_string(),
-                        summary: "Interrupted by process restart; prior process is not attached"
-                            .to_string(),
-                        detail_path: None,
-                    },
-                );
-                recovered.push(task.id.clone());
             }
             tasks.insert(task.id.clone(), task);
         }
@@ -2476,11 +3017,7 @@ fn load_state(tasks_dir: &Path, queue_path: &Path) -> Result<LoadedTaskState> {
         queue.push_back(id);
     }
 
-    Ok(LoadedTaskState {
-        tasks,
-        queue,
-        recovered,
-    })
+    Ok(LoadedTaskState { tasks, queue })
 }
 
 struct EventApplyOutcome {
@@ -2899,6 +3436,7 @@ mod tests {
             "queued, running, and terminal owner transitions must advance the sequence"
         );
 
+        manager.shutdown_and_wait().await?;
         drop(manager);
 
         let recovered =
@@ -2913,6 +3451,187 @@ mod tests {
         );
         assert!(!loaded.timeline.is_empty());
         assert_eq!(loaded.checklist.items[0].content, "read fixture");
+        Ok(())
+    }
+
+    struct AdmissionCountingExecutor(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl TaskExecutor for AdmissionCountingExecutor {
+        async fn execute(
+            &self,
+            _task: ExecutionTask,
+            _events: mpsc::Sender<TaskExecutionEvent>,
+            _cancel: CancellationToken,
+        ) -> TaskExecutionResult {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            TaskExecutionResult {
+                status: TaskStatus::Completed,
+                result_text: Some("admission fixture completed".into()),
+                error: None,
+                terminal_reason: TaskTerminalReason::Completed,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn interrupted_task_stage_preserves_resolved_request_and_executes_once() -> Result<()> {
+        for queue_was_written in [false, true] {
+            let root = tempfile::tempdir()?;
+            let tasks_dir = root.path().join("tasks");
+            fs::create_dir_all(&tasks_dir)?;
+            let mut staged = sample_task_record();
+            staged.status = TaskStatus::Queued;
+            staged.started_at = None;
+            staged.model = "staged-model".into();
+            staged.workspace = root.path().join("staged-workspace");
+            fs::create_dir(&staged.workspace)?;
+            let mut request = NewTaskRequest::from_task(&staged);
+            request.model = None;
+            request.workspace = None;
+            request.mode = None;
+            request.allow_shell = None;
+            request.trust_mode = None;
+            let staged_path = tasks_dir.join(format!(".{}.json.pending", staged.id));
+            write_json_atomic(&staged_path, &staged)?;
+            if queue_was_written {
+                write_json_atomic(
+                    &root.path().join("queue.json"),
+                    &QueueFile {
+                        queue: vec![staged.id.clone()],
+                    },
+                )?;
+            }
+            let executions = Arc::new(AtomicUsize::new(0));
+            let mut config = test_config(root.path().to_path_buf());
+            config.default_model = "new-default-model".into();
+            config.default_workspace = root.path().join("new-workspace");
+            config.default_mode = "plan".into();
+            config.allow_shell = true;
+            config.trust_mode = true;
+            let manager = TaskManager::start_with_executor(
+                config,
+                Arc::new(AdmissionCountingExecutor(executions.clone())),
+            )
+            .await?;
+            // Interrupt recovery while its admission is waiting for the queue
+            // lock. The resolved intent must remain durable for another retry.
+            let stage_before = fs::read(&staged_path)?;
+            let queue_guard = manager.state.lock().await;
+            let mut recovery =
+                Box::pin(manager.recover_task_admission(request.clone(), staged.id.clone()));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(25), &mut recovery)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                fs::read(&staged_path)?,
+                stage_before,
+                "interrupted recovery must preserve its resolved staged intent"
+            );
+            assert!(manager.read_bound_task(&staged.id)?.is_none());
+            assert_eq!(executions.load(Ordering::SeqCst), 0);
+            drop(recovery);
+            drop(queue_guard);
+            let admitted = manager
+                .recover_task_admission(request.clone(), staged.id.clone())
+                .await?;
+            assert_eq!(admitted.id, staged.id);
+            assert_eq!(admitted.model, staged.model);
+            assert_eq!(admitted.workspace, staged.workspace);
+            assert_eq!(admitted.mode, staged.mode);
+            assert_eq!(admitted.allow_shell, staged.allow_shell);
+            assert_eq!(admitted.trust_mode, staged.trust_mode);
+            assert!(
+                !staged_path.exists(),
+                "unaccepted stage recovered through TaskManager"
+            );
+            let completed =
+                wait_for_terminal_state(&manager, &admitted.id, Duration::from_secs(5)).await?;
+            assert_eq!(completed.status, TaskStatus::Completed);
+            assert!(
+                completed
+                    .result_summary
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("admission fixture completed")
+            );
+            assert_eq!(executions.load(Ordering::SeqCst), 1);
+            let replay = manager
+                .recover_task_admission(request.clone(), staged.id.clone())
+                .await?;
+            assert_eq!(replay.status, TaskStatus::Completed);
+            assert_eq!(replay.id, staged.id);
+            let canonical = tasks_dir.join(format!("{}.json", staged.id));
+            let before = fs::read(&canonical)?;
+            let mut mismatched = request;
+            mismatched.prompt = "a different operation".into();
+            let error = manager
+                .recover_task_admission(mismatched, staged.id)
+                .await
+                .expect_err("mismatched replay must be rejected");
+            assert!(error.to_string().contains("does not match"));
+            assert_eq!(
+                fs::read(canonical)?,
+                before,
+                "replay cannot rewrite accepted work"
+            );
+            assert_eq!(executions.load(Ordering::SeqCst), 1);
+            manager.shutdown();
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn accepted_task_interrupted_by_restart_is_reconciled_without_execution() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let tasks_dir = root.path().join("tasks");
+        fs::create_dir_all(&tasks_dir)?;
+        let mut accepted = sample_task_record();
+        accepted.execution_generation = Some(Uuid::new_v4().simple().to_string());
+        let lease_path = execution_lease_path(
+            root.path(),
+            accepted.execution_scope.as_deref().unwrap(),
+            accepted.execution_generation.as_deref().unwrap(),
+        )?;
+        drop(
+            RuntimeProcessOwnerLock::try_acquire_file(&lease_path, true)?
+                .context("fixture generation")?,
+        );
+        let request = NewTaskRequest::from_task(&accepted);
+        write_json_atomic(&tasks_dir.join(format!("{}.json", accepted.id)), &accepted)?;
+        write_json_atomic(
+            &root.path().join("queue.json"),
+            &QueueFile {
+                queue: vec![accepted.id.clone()],
+            },
+        )?;
+        let executions = Arc::new(AtomicUsize::new(0));
+        let manager = TaskManager::start_with_executor(
+            test_config(root.path().to_path_buf()),
+            Arc::new(AdmissionCountingExecutor(executions.clone())),
+        )
+        .await?;
+        let recovered = manager
+            .recover_task_admission(request, accepted.id.clone())
+            .await?;
+        assert_eq!(recovered.id, accepted.id);
+        assert_eq!(recovered.status, TaskStatus::Failed);
+        assert!(
+            recovered
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Interrupted by process restart")
+        );
+        assert_eq!(manager.list_tasks(None).await?.len(), 1);
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            0,
+            "accepted work cannot be replayed after restart"
+        );
+        manager.shutdown();
         Ok(())
     }
 
@@ -2935,8 +3654,8 @@ mod tests {
             .await?;
         assert_eq!(created.id, id);
         assert_eq!(
-            created.schema_version, 3,
-            "provider pins require readers that preserve the route"
+            created.schema_version, CURRENT_TASK_SCHEMA_VERSION,
+            "execution provenance requires readers that preserve the binding"
         );
         assert_eq!(created.lifecycle_seq, 1);
         let collision = manager
@@ -2947,7 +3666,7 @@ mod tests {
             collision.to_string().contains("already exists"),
             "{collision:#}"
         );
-        assert_eq!(manager.list_tasks(None).await.len(), 1);
+        assert_eq!(manager.list_tasks(None).await?.len(), 1);
         Ok(())
     }
 
@@ -2969,7 +3688,10 @@ mod tests {
             .await
             .expect_err("queue path directory must reject the atomic queue write");
         assert!(error.to_string().contains("queue.json"), "{error:#}");
-        assert!(manager.list_tasks(None).await.is_empty());
+        assert!(
+            manager.list_tasks(None).await.is_err(),
+            "unavailable storage cannot be reported as empty"
+        );
         assert!(!root.join("tasks").join(format!("{id}.json")).exists());
         assert!(
             !root
@@ -3004,7 +3726,7 @@ mod tests {
 
         let scoped = manager
             .list_tasks_scoped(Some(1), Some(Path::new("/tmp/workspace-a")))
-            .await;
+            .await?;
         assert_eq!(scoped.len(), 1);
         assert_eq!(scoped[0].workspace, PathBuf::from("/tmp/workspace-a"));
         Ok(())
@@ -3037,6 +3759,7 @@ mod tests {
         let mut legacy = sample_task_record();
         legacy.id = "task_dead000000000003".to_string();
         legacy.owner_session_id = None;
+        legacy.execution_scope = None;
         legacy.status = TaskStatus::Completed;
         legacy.created_at = Utc::now() - chrono::Duration::seconds(1);
 
@@ -3048,13 +3771,14 @@ mod tests {
                 session_b_newest.clone(),
                 legacy.clone(),
             ] {
+                manager.persist_task_locked(&record)?;
                 state.tasks.insert(record.id.clone(), record);
             }
         }
 
         let session_b_list = manager
             .list_tasks_for_owner(Some(1), None, "session-b")
-            .await;
+            .await?;
         assert_eq!(session_b_list.len(), 1);
         assert_eq!(session_b_list[0].id, session_b_newest.id);
 
@@ -3147,6 +3871,7 @@ mod tests {
             .await?;
         let finished = wait_for_terminal_state(&manager, &task.id, Duration::from_secs(10)).await?;
         assert_eq!(finished.status, TaskStatus::Completed);
+        manager.shutdown_and_wait().await?;
         drop(manager);
 
         let task_file = root.join("tasks").join(format!("{}.json", task.id));
@@ -3168,7 +3893,7 @@ mod tests {
     }
 
     #[test]
-    fn running_tasks_are_not_requeued_after_restart() -> Result<()> {
+    fn legacy_running_tasks_are_preserved_without_assuming_owner_death() -> Result<()> {
         let root = std::env::temp_dir().join(format!("deepseek-task-test-{}", Uuid::new_v4()));
         let tasks_dir = root.join("tasks");
         fs::create_dir_all(&tasks_dir)?;
@@ -3200,6 +3925,9 @@ mod tests {
             thread_id: Some("thr_stale".to_string()),
             turn_id: Some("turn_stale".to_string()),
             owner_session_id: Some("session-old".to_string()),
+            execution_scope: None,
+            execution_generation: None,
+            cancel_requested_seq: 0,
             runtime_event_count: 0,
             lifecycle_seq: 2,
             checklist: TaskChecklistState::default(),
@@ -3242,27 +3970,14 @@ mod tests {
         let recovered = loaded.tasks.get(&task_id).expect("task loaded");
 
         assert!(queue.is_empty(), "stale running task must not be requeued");
-        assert_eq!(recovered.status, TaskStatus::Failed);
-        assert_eq!(recovered.terminal_reason.as_deref(), Some("failed"));
-        assert!(
-            recovered
-                .error
-                .as_deref()
-                .is_some_and(|err| err.contains("prior process is not attached")),
-            "recovered task should explain stale process ownership: {recovered:?}"
-        );
-        assert!(recovered.ended_at.is_some());
-        assert!(recovered.duration_ms.is_some());
-        assert_eq!(recovered.tool_calls[0].status, TaskToolStatus::Failed);
-        assert!(recovered.tool_calls[0].ended_at.is_some());
-        assert!(
-            recovered
-                .timeline
-                .iter()
-                .any(|entry| entry.kind == "recovered"
-                    && entry.summary.contains("prior process is not attached")),
-            "recovery timeline should explain why the task is terminal: {:?}",
-            recovered.timeline
+        assert_eq!(recovered.status, TaskStatus::Running);
+        assert!(recovered.ended_at.is_none());
+        assert!(recovered.error.is_none());
+        assert_eq!(recovered.tool_calls[0].status, TaskToolStatus::Running);
+        assert!(!TaskSummary::from(recovered).execution_binding_known);
+        assert_eq!(
+            fs::read(tasks_dir.join(format!("{task_id}.json")))?,
+            serde_json::to_string_pretty(&task)?.as_bytes()
         );
         Ok(())
     }
@@ -3345,7 +4060,7 @@ mod tests {
             .await?;
 
         assert_eq!(updated.hunt_verdict.as_deref(), Some("wounded"));
-        let summaries = manager.list_tasks(Some(10)).await;
+        let summaries = manager.list_tasks(Some(10)).await?;
         let summary = summaries
             .iter()
             .find(|summary| summary.id == updated.id)
@@ -3460,6 +4175,7 @@ mod tests {
             .add_task(NewTaskRequest::from_prompt("test schema gate"))
             .await?;
         let _ = wait_for_terminal_state(&manager, &task.id, Duration::from_secs(10)).await?;
+        manager.shutdown_and_wait().await?;
         drop(manager);
 
         let task_path = root.join("tasks").join(format!("{}.json", task.id));
@@ -3884,6 +4600,9 @@ mod tests {
             thread_id: None,
             turn_id: None,
             owner_session_id: None,
+            execution_scope: Some(test_execution_scope("test")),
+            execution_generation: None,
+            cancel_requested_seq: 0,
             runtime_event_count: 0,
             lifecycle_seq: 2,
             checklist: TaskChecklistState::default(),
@@ -4529,3 +5248,6 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod ownership_tests;

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use async_stream::stream;
-use axum::extract::{ConnectInfo, Path, Query, Request, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::header;
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use axum::middleware;
@@ -19,6 +19,8 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::Utc;
 use codewhale_protocol::agent_mail::{
     AgentMailDeliveryMode, AgentMailEnvelope, AgentMailMessageId, AgentMailSendRequest,
@@ -35,10 +37,13 @@ use codewhale_secrets::account::{
 use codewhale_secrets::account::{AccountSessionStore, secure_account_session_secrets};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::CorsLayer;
+
+mod notification_delivery;
 
 #[cfg(test)]
 use crate::dependencies::ExternalTool;
@@ -47,9 +52,9 @@ use crate::automation_manager::{
     AutomationManager, AutomationRecord, AutomationRunRecord, AutomationSchedulerConfig,
     CreateAutomationRequest, SharedAutomationManager, UpdateAutomationRequest, spawn_scheduler,
 };
-use crate::config::{
-    ApiProvider, Config, DEFAULT_TEXT_MODEL, normalize_model_name_for_provider, validate_route,
-};
+#[cfg(test)]
+use crate::config::DEFAULT_TEXT_MODEL;
+use crate::config::{ApiProvider, Config, normalize_model_name_for_provider, validate_route};
 use crate::fleet::executor::{FleetExecutor, configured_codewhale_binary};
 use crate::fleet::ledger::{FleetEventReplayError, FleetLedgerState, FleetTaskLedgerStatus};
 use crate::fleet::manager::{
@@ -260,7 +265,11 @@ impl Default for RuntimeApiOptions {
 
 #[derive(Debug, Deserialize)]
 struct StreamTurnRequest {
+    #[serde(default, rename = "maxOutputTokens", alias = "max_output_tokens")]
+    max_output_tokens: Option<std::num::NonZeroU32>,
     prompt: String,
+    #[serde(default)]
+    images: Vec<codewhale_protocol::runtime::RuntimeImageInput>,
     model: Option<String>,
     mode: Option<String>,
     permission_posture: Option<String>,
@@ -536,6 +545,9 @@ fn default_runtime_capabilities() -> RuntimeCapabilities {
         threads: true,
         turns: true,
         turn_operation_idempotency: true,
+        turn_operation_lookup: true,
+        turn_image_inputs: true,
+        turn_output_token_limit: true,
         turn_steer: true,
         turn_interrupt: true,
         event_replay: true,
@@ -830,6 +842,10 @@ fn open_runtime_threads_for_server(
         manager_config,
         plugin_registry,
     )?);
+    // Publish the same exact endpoint-scoped catalog as interactive startup
+    // before the server admits turns. A cached model list alone does not make
+    // its capabilities available to route resolution.
+    crate::provider_catalog_live::maybe_load_persisted_cache_for_config(config);
     Ok((manager, workshop_activation))
 }
 
@@ -842,7 +858,9 @@ pub async fn run_http_server(
 ) -> Result<()> {
     validate_runtime_listener_security(&options)?;
 
-    let task_default_model = config.default_model();
+    // Keep the server usable before a local catalog arrives. Omitted API
+    // requests are checked at admission; background tasks keep the auto sentinel.
+    let task_default_model = runtime_request_model(&config, None).unwrap_or_else(|_| "auto".into());
     let task_cfg = TaskManagerConfig::from_runtime(
         &config,
         workspace.clone(),
@@ -858,7 +876,10 @@ pub async fn run_http_server(
     let task_manager =
         TaskManager::start_with_runtime_manager(task_cfg, config.clone(), runtime_threads.clone())
             .await?;
-    let automations = Arc::new(Mutex::new(AutomationManager::default_location()?));
+    let _task_shutdown = task_manager.shutdown_guard();
+    let mut automation_service = AutomationManager::default_location()?;
+    automation_service.bind_task_manager(&task_manager)?;
+    let automations = Arc::new(Mutex::new(automation_service));
     runtime_threads.attach_automation_manager(automations.clone());
     let scheduler_cancel = CancellationToken::new();
     let scheduler_handle = spawn_scheduler(
@@ -901,7 +922,7 @@ pub async fn run_http_server(
         config: Arc::new(parking_lot::RwLock::new(config.clone())),
         workspace,
         plugin_discovery,
-        task_manager,
+        task_manager: task_manager.clone(),
         runtime_threads,
         cors_origins: options.cors_origins.clone(),
         sessions_dir,
@@ -987,6 +1008,7 @@ pub async fn run_http_server(
     .map_err(|e| anyhow!("Runtime API server error: {e}"));
     scheduler_cancel.cancel();
     scheduler_handle.abort();
+    task_manager.shutdown_and_wait().await?;
     serve_result
 }
 
@@ -1110,7 +1132,12 @@ pub fn build_router(state: RuntimeApiState) -> Router {
             "/v1/fleet/workers/{worker_id}/restart",
             post(restart_fleet_worker),
         )
-        .route("/v1/stream", post(stream_turn))
+        .route(
+            "/v1/stream",
+            post(stream_turn).layer(DefaultBodyLimit::max(
+                codewhale_protocol::runtime::MAX_RUNTIME_IMAGE_BODY_BYTES,
+            )),
+        )
         .route("/v1/threads", get(list_threads).post(create_thread))
         .route("/v1/threads/summary", get(list_threads_summary))
         .route("/v1/threads/{id}", get(get_thread).patch(update_thread))
@@ -1119,7 +1146,16 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .route("/v1/threads/{id}/undo", post(undo_thread_turn))
         .route("/v1/threads/{id}/patch-undo", post(patch_undo_thread_turn))
         .route("/v1/threads/{id}/retry", post(retry_thread_turn))
-        .route("/v1/threads/{id}/turns", post(start_thread_turn))
+        .route(
+            "/v1/threads/{id}/turn-operations/{operation_key}",
+            get(get_thread_turn_operation),
+        )
+        .route(
+            "/v1/threads/{id}/turns",
+            post(start_thread_turn).layer(DefaultBodyLimit::max(
+                codewhale_protocol::runtime::MAX_RUNTIME_IMAGE_BODY_BYTES,
+            )),
+        )
         .route(
             "/v1/threads/{id}/turns/{turn_id}/steer",
             post(steer_thread_turn),
@@ -1268,6 +1304,10 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .route("/v1/providers/{id}/switch", post(switch_provider))
         .route("/v1/config", get(get_config).post(set_config))
         .route("/v1/config/reload", post(reload_config))
+        .route(
+            "/v1/threads/{id}/notifications/prepare",
+            post(notification_delivery::prepare),
+        )
         .route(
             "/v1/memory",
             get(list_memory)
@@ -1514,8 +1554,18 @@ async fn health() -> Json<HealthResponse> {
     })
 }
 
-fn runtime_request_model(config: &Config, requested: Option<&str>) -> String {
-    requested.map_or_else(|| config.default_model(), str::to_string)
+fn runtime_request_model(config: &Config, requested: Option<&str>) -> Result<String, ApiError> {
+    if let Some(model) = requested {
+        return Ok(model.to_string());
+    }
+    let provider = config.api_provider();
+    let model = provider_default_model_for_api(config, provider, provider);
+    if model.is_empty() {
+        return Err(ApiError::bad_request(
+            "The active provider has no available default model; refresh its catalog or select an explicit model.",
+        ));
+    }
+    Ok(model)
 }
 
 async fn create_task(
@@ -1529,7 +1579,7 @@ async fn create_task(
         req.workspace = Some(state.workspace.clone());
     }
     if req.model.is_none() && req.model_provider.is_none() && req.model_provider_id.is_none() {
-        req.model = Some(runtime_request_model(&state.config.read(), None));
+        req.model = Some(runtime_request_model(&state.config.read(), None)?);
     }
     let task = state
         .task_manager
@@ -1999,9 +2049,10 @@ async fn start_fleet_run(
         .unwrap_or_else(|| report.worker_ids.len().max(1));
     let workspace = state.workspace.clone();
     let codewhale_binary = state.fleet_codewhale_binary.clone();
+    let sessions_dir = state.sessions_dir.clone();
     let execution_run_id = run_id.clone();
     tokio::spawn(async move {
-        let mut executor = FleetExecutor::new(&workspace);
+        let mut executor = FleetExecutor::new(&workspace).with_sessions_dir(sessions_dir);
         if let Err(error) = manager
             .run_to_completion(
                 &execution_run_id,
@@ -2312,8 +2363,9 @@ async fn restart_fleet_worker(
     let max_workers = report.max_workers;
     let workspace = state.workspace.clone();
     let codewhale_binary = state.fleet_codewhale_binary.clone();
+    let sessions_dir = state.sessions_dir.clone();
     tokio::spawn(async move {
-        let mut executor = FleetExecutor::new(&workspace);
+        let mut executor = FleetExecutor::new(&workspace).with_sessions_dir(sessions_dir);
         if let Err(err) = manager
             .run_to_completion(
                 &run_id,
@@ -2406,20 +2458,6 @@ async fn get_fleet_run_receipt(
     Ok(Json(fleet_receipt_json(receipt)))
 }
 
-/// Receipt artifact paths are recorded relative to the workspace; an absolute
-/// path (including Windows drive prefixes and root-relative paths) or any `..`
-/// component would escape it.
-fn receipt_evidence_path_is_confined(path: &std::path::Path) -> bool {
-    use std::path::Component;
-    !path.is_absolute()
-        && !path.components().any(|c| {
-            matches!(
-                c,
-                Component::ParentDir | Component::RootDir | Component::Prefix(_)
-            )
-        })
-}
-
 async fn inspect_fleet_run_receipt_evidence(
     State(state): State<RuntimeApiState>,
     Path((run_id, task_id)): Path<(String, String)>,
@@ -2453,29 +2491,20 @@ async fn inspect_fleet_run_receipt_evidence(
             "no verifier evidence file recorded for run '{run_id}' task '{task_id}'"
         )));
     }
-    if !receipt_evidence_path_is_confined(&receipt_artifact.path) {
+    if !crate::fleet::artifacts::path_is_confined(&receipt_artifact.path) {
         return Err(ApiError::bad_request(format!(
             "evidence path for run '{run_id}' task '{task_id}' escapes the workspace"
         )));
     }
-    let abs_path = state.workspace.join(&receipt_artifact.path);
-    let metadata = std::fs::metadata(&abs_path).map_err(|err| {
-        ApiError::not_found(format!(
-            "evidence file not readable for run '{run_id}' task '{task_id}': {err}"
-        ))
+    let (raw, size_bytes) = crate::fleet::artifacts::read_verified(
+        &state.workspace,
+        receipt_artifact,
+        MAX_RECEIPT_EVIDENCE_READ_BYTES,
+    )
+    .map_err(|err| {
+        ApiError::bad_request(format!("Receipt evidence could not be verified: {err}"))
     })?;
-    let size_bytes = metadata.len();
     let truncated = size_bytes > MAX_RECEIPT_EVIDENCE_READ_BYTES;
-    let raw = {
-        use std::io::Read;
-        let file = std::fs::File::open(&abs_path)
-            .map_err(|err| ApiError::internal(format!("Failed to open evidence file: {err}")))?;
-        let mut buf = Vec::new();
-        file.take(MAX_RECEIPT_EVIDENCE_READ_BYTES)
-            .read_to_end(&mut buf)
-            .map_err(|err| ApiError::internal(format!("Failed to read evidence file: {err}")))?;
-        buf
-    };
     // Parse as JSON if possible; fall back to a raw string representation.
     let content: Value = serde_json::from_slice(&raw)
         .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&raw).into_owned()));
@@ -2503,18 +2532,21 @@ fn open_fleet_manager(state: &RuntimeApiState) -> Result<FleetManager, ApiError>
         (
             exec_config,
             config.fleet_config(),
-            config.default_model(),
+            runtime_request_model(&config, None).ok(),
             config.clone(),
         )
     };
     FleetManager::open(&state.workspace)
         .map(|manager| {
-            manager
+            let manager = manager
                 .with_exec_config(exec_config)
                 .with_fleet_config(fleet_config)
                 .with_sub_agent_manager(state.sub_agent_manager.clone())
-                .with_session_model(session_model)
-                .with_route_config(route_config)
+                .with_route_config(route_config);
+            match session_model {
+                Some(model) => manager.with_session_model(model),
+                None => manager,
+            }
         })
         .map_err(|err| ApiError::internal(format!("Failed to open Fleet manager: {err}")))
 }
@@ -2693,6 +2725,7 @@ fn fleet_receipt_json(receipt: &codewhale_protocol::fleet::FleetReceipt) -> Valu
         "retry_eligible": retry_eligible,
         "score": score_json,
         "artifacts": receipt.artifacts.iter().map(fleet_artifact_json).collect::<Vec<_>>(),
+        "saved_session_id": receipt.saved_session_id.clone(),
         "evidence_available": evidence_available,
     })
 }
@@ -2743,6 +2776,9 @@ fn artifact_kind_label(kind: &FleetArtifactKind) -> String {
     }
 }
 
+/// Bound on the `Completed.summary` excerpt inside a lifecycle event label.
+const FLEET_EVENT_LABEL_SUMMARY_CHARS: usize = 160;
+
 fn fleet_event_label(payload: &FleetWorkerEventPayload) -> String {
     match payload {
         FleetWorkerEventPayload::Queued => "queued".to_string(),
@@ -2773,7 +2809,15 @@ fn fleet_event_label(payload: &FleetWorkerEventPayload) -> String {
         FleetWorkerEventPayload::Artifact(artifact) => {
             format!("artifact kind={}", artifact_kind_label(&artifact.kind))
         }
-        FleetWorkerEventPayload::Completed { exit_code, summary } => match (exit_code, summary) {
+        // `summary` may carry the worker's bounded final-answer excerpt (up
+        // to a few thousand chars); the label is a one-line status surface,
+        // so it gets a short excerpt while `payload` keeps the full text.
+        FleetWorkerEventPayload::Completed { exit_code, summary } => match (
+            exit_code,
+            summary
+                .as_deref()
+                .map(|summary| truncate_text(summary, FLEET_EVENT_LABEL_SUMMARY_CHARS)),
+        ) {
             (Some(code), Some(summary)) => format!("completed exit_code={code} {summary}"),
             (Some(code), None) => format!("completed exit_code={code}"),
             (None, Some(summary)) => format!("completed {summary}"),
@@ -4068,8 +4112,11 @@ fn operate_store() -> Result<crate::operate::OperationStore, ApiError> {
         .map_err(|e| ApiError::internal(format!("Failed to open operate store: {e}")))
 }
 
-fn operate_credentials_present(config: &Config) -> bool {
-    crate::operate::operate_credentials_present(config)
+async fn operate_readiness(state: &RuntimeApiState) -> Result<(String, bool), ApiError> {
+    let config = state.config.read().clone();
+    let manager = state.automations.lock().await;
+    crate::operate::keepalive_readiness(&manager, &config, None)
+        .map_err(|error| ApiError::bad_request(format!("Operate route unavailable: {error}")))
 }
 
 fn operate_view(operation: crate::operate::Operation) -> Json<OperateView> {
@@ -4118,18 +4165,19 @@ async fn start_operate(
     // always-on, and a fresh operation has no lead plan yet — kick the first
     // lead run to the next scheduler tick instead of waiting out the hourly
     // recurrence.
-    {
+    let config = state.config.read().clone();
+    let (model, credentials) = {
         let manager = state.automations.lock().await;
-        crate::operate::upsert_keepalive(&manager, &state.workspace, true)
-            .map_err(|e| ApiError::internal(format!("Failed to keep operate alive: {e}")))?;
-    }
-    let config = state.config.read();
+        crate::operate::upsert_keepalive(&manager, &state.workspace, true, &config, None)
+            .map_err(|e| ApiError::bad_request(format!("Failed to keep operate alive: {e}")))?
+    };
     let operation = crate::operate::start_operation(
         &store,
         &state.workspace,
         req.direction,
         burn,
-        operate_credentials_present(&config),
+        credentials,
+        &model,
     )
     .map_err(|e| ApiError::bad_request(e.to_string()))?;
     Ok(operate_view(operation))
@@ -4140,10 +4188,7 @@ async fn patch_operate(
     Json(patch): Json<serde_json::Value>,
 ) -> Result<Json<OperateView>, ApiError> {
     let store = operate_store()?;
-    let credentials = {
-        let config = state.config.read();
-        operate_credentials_present(&config)
-    };
+    let (model, credentials) = operate_readiness(&state).await?;
     // Read-merge-write under the operate store lock: a concurrent keepalive
     // or plan save can no longer be lost by a stale read.
     let direction_changed = std::cell::Cell::new(false);
@@ -4152,6 +4197,7 @@ async fn patch_operate(
             let before = op.direction.clone();
             crate::operate::apply_operate_patch(op, &patch)?;
             direction_changed.set(op.direction != before);
+            op.set_lead_model(&model);
             op.credentials_present = credentials;
             op.project();
             Ok(())
@@ -4179,13 +4225,18 @@ async fn keepalive_operate(
     Json(req): Json<KeepAliveOperateRequest>,
 ) -> Result<Json<OperateView>, ApiError> {
     let store = operate_store()?;
-    let config = state.config.read();
-    let credentials = req
-        .credentials_present
-        .unwrap_or_else(|| operate_credentials_present(&config));
-    drop(config);
+    let (model, credentials) = match req.credentials_present {
+        Some(observed) => (None, observed),
+        None => {
+            let (model, credentials) = operate_readiness(&state).await?;
+            (Some(model), credentials)
+        }
+    };
     let operation = store
         .mutate(|op| {
+            if let Some(model) = &model {
+                op.set_lead_model(model);
+            }
             crate::operate::keep_alive_observation(
                 op,
                 req.observed_burn_usd_per_hour,
@@ -4381,6 +4432,8 @@ struct UndoTurnResponse {
     /// The original user message text from the first dropped turn,
     /// so the GUI can pre-populate the input box.
     original_user_text: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    original_user_images: Vec<codewhale_protocol::runtime::RuntimeImageInput>,
 }
 
 async fn undo_thread_turn(
@@ -4389,7 +4442,7 @@ async fn undo_thread_turn(
     Json(req): Json<UndoTurnRequest>,
 ) -> Result<(StatusCode, Json<UndoTurnResponse>), ApiError> {
     let depth = req.depth.unwrap_or(0);
-    let (forked_thread, original_user_text) = state
+    let (forked_thread, original_user_text, original_user_images, _) = state
         .runtime_threads
         .fork_at_user_message(&id, depth)
         .await
@@ -4399,6 +4452,7 @@ async fn undo_thread_turn(
         Json(UndoTurnResponse {
             thread: forked_thread,
             original_user_text,
+            original_user_images,
         }),
     ))
 }
@@ -4423,6 +4477,8 @@ struct PatchUndoResponse {
     thread: ThreadRecord,
     /// The original user text from the removed turn (for re-editing).
     original_user_text: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    original_user_images: Vec<codewhale_protocol::runtime::RuntimeImageInput>,
 }
 
 async fn patch_undo_thread_turn(
@@ -4441,7 +4497,7 @@ async fn patch_undo_thread_turn(
     let patch_result = patch_undo_workspace_files(&thread.workspace, thread.session_id.as_deref());
 
     // Step 2: Remove the last conversation turn (undo_conversation).
-    let (forked_thread, original_user_text) = state
+    let (forked_thread, original_user_text, original_user_images, _) = state
         .runtime_threads
         .fork_at_user_message(&id, depth)
         .await
@@ -4453,6 +4509,7 @@ async fn patch_undo_thread_turn(
             patch_result,
             thread: forked_thread,
             original_user_text,
+            original_user_images,
         }),
     ))
 }
@@ -4572,7 +4629,7 @@ async fn retry_thread_turn(
     Json(req): Json<RetryTurnRequest>,
 ) -> Result<(StatusCode, Json<RetryTurnResponse>), ApiError> {
     let depth = req.depth.unwrap_or(0);
-    let (forked_thread, original_user_text) = state
+    let (forked_thread, original_user_text, original_user_images, max_output_tokens) = state
         .runtime_threads
         .fork_at_user_message(&id, depth)
         .await
@@ -4587,10 +4644,12 @@ async fn retry_thread_turn(
 
     let turn = state
         .runtime_threads
-        .start_turn(
+        .start_turn_from_stored_images(
             &forked_thread.id,
             StartTurnRequest {
+                max_output_tokens,
                 prompt: retry_prompt,
+                images: original_user_images,
                 operation_key: None,
                 input_summary: None,
                 model: None,
@@ -4636,6 +4695,25 @@ async fn start_thread_turn(
         StatusCode::CREATED,
         Json(StartTurnResponse { thread, turn }),
     ))
+}
+
+async fn get_thread_turn_operation(
+    State(state): State<RuntimeApiState>,
+    Path((id, operation_key)): Path<(String, String)>,
+) -> Result<Json<TurnRecord>, ApiError> {
+    use crate::runtime_threads::RuntimeTurnOperationLookupError;
+    let turn = state
+        .runtime_threads
+        .lookup_turn_operation(&id, &operation_key)
+        .map_err(|error| match error {
+            RuntimeTurnOperationLookupError::InvalidRequest => {
+                ApiError::bad_request(error.to_string())
+            }
+            RuntimeTurnOperationLookupError::Incomplete => ApiError::conflict(error.to_string()),
+            RuntimeTurnOperationLookupError::Unavailable => ApiError::internal(error.to_string()),
+        })?
+        .ok_or_else(|| ApiError::not_found("Turn operation not found"))?;
+    Ok(Json(turn))
 }
 
 #[derive(Debug, Serialize)]
@@ -5022,8 +5100,13 @@ async fn list_tasks(
                 .await
         }
         None => state.task_manager.list_tasks(query.limit).await,
-    };
-    let counts = state.task_manager.counts().await;
+    }
+    .map_err(|error| ApiError::internal(format!("Task inventory unavailable: {error}")))?;
+    let counts = state
+        .task_manager
+        .counts()
+        .await
+        .map_err(|error| ApiError::internal(format!("Task inventory unavailable: {error}")))?;
     Ok(Json(TasksResponse { tasks, counts }))
 }
 
@@ -5210,7 +5293,20 @@ async fn stream_turn(
         return Err(ApiError::bad_request("prompt is required"));
     }
 
-    let model = runtime_request_model(&state.config.read(), req.model.as_deref());
+    crate::image_attach::prepare_runtime_images(&req.images).map_err(map_thread_err)?;
+
+    let model = runtime_request_model(&state.config.read(), req.model.as_deref())?;
+    if req.max_output_tokens.is_some() {
+        let config = state.config.read();
+        if model.eq_ignore_ascii_case("auto")
+            || provider_model_output_token_limit_for_api(&config, config.api_provider(), &model)
+                != codewhale_config::route::CapabilityState::Supported
+        {
+            return Err(ApiError::bad_request(
+                "maxOutputTokens requires an exact model with output-limit support",
+            ));
+        }
+    }
     let workspace = req
         .workspace
         .clone()
@@ -5253,12 +5349,14 @@ async fn stream_turn(
             .map_err(|_| ApiError::internal("Compatibility stream test hook dropped resume"))?;
     }
 
-    let turn = state
+    let turn_result = state
         .runtime_threads
         .start_turn(
             &thread.id,
             StartTurnRequest {
+                max_output_tokens: req.max_output_tokens,
                 prompt,
+                images: req.images,
                 input_summary: None,
                 model: Some(model.clone()),
                 mode: Some(mode.clone()),
@@ -5269,8 +5367,20 @@ async fn stream_turn(
                 ..Default::default()
             },
         )
-        .await
-        .map_err(|e| ApiError::internal(format!("Failed to start stream turn: {e}")))?;
+        .await;
+    let turn = match turn_result {
+        Ok(turn) => turn,
+        Err(error) => {
+            // This helper refuses loaded threads and any thread owning a turn.
+            // A failed/uncertain handoff must remain recoverable; only an empty,
+            // never-loaded admission can be discarded.
+            if let Err(cleanup_error) = state.runtime_threads.discard_empty_thread(&thread.id).await
+            {
+                tracing::warn!(thread_id = %thread.id, %cleanup_error, "Retained stream thread after failed admission");
+            }
+            return Err(map_thread_err(error));
+        }
+    };
 
     // Subscribe before reading the durable replay. Events produced while the
     // replay is loaded then exist in at least one source, and the sequence
@@ -5591,6 +5701,7 @@ fn map_compat_stream_event(event: &crate::runtime_threads::RuntimeEventRecord) -
                 json!({
                     "id": approval_id,
                     "approval_id": approval_id,
+                    "tool_call_id": payload.get("tool_call_id"),
                     "thread_id": event.thread_id,
                     "turn_id": event.turn_id,
                     "tool_name": payload.get("tool_name"),
@@ -5609,6 +5720,7 @@ fn map_compat_stream_event(event: &crate::runtime_threads::RuntimeEventRecord) -
                 json!({
                     "id": approval_id,
                     "approval_id": approval_id,
+                    "tool_call_id": payload.get("tool_call_id"),
                     "thread_id": event.thread_id,
                     "turn_id": event.turn_id,
                     "decision": payload.get("decision"),
@@ -5628,6 +5740,7 @@ fn map_compat_stream_event(event: &crate::runtime_threads::RuntimeEventRecord) -
                 json!({
                     "id": approval_id,
                     "approval_id": approval_id,
+                    "tool_call_id": payload.get("tool_call_id"),
                     "thread_id": event.thread_id,
                     "turn_id": event.turn_id,
                     "timeout_secs": payload.get("timeout_secs"),
@@ -6001,12 +6114,174 @@ struct ProviderModelEntry {
     /// offering. Unknown stays unknown: the API never guesses from a model
     /// name or transport protocol.
     image_input: codewhale_config::route::CapabilityState,
+    output_token_limit: codewhale_config::route::CapabilityState,
+    reasoning_effort: codewhale_config::route::CapabilityState,
+    reasoning_effort_levels: Vec<String>,
+    reasoning_effort_source: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct ProviderModelsResponse {
     provider: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_provider_id: Option<String>,
     models: Vec<ProviderModelEntry>,
+    total: usize,
+    #[serde(rename = "nextCursor", skip_serializing_if = "Option::is_none")]
+    next_cursor: Option<String>,
+}
+
+const DEFAULT_PROVIDER_MODELS_PAGE_SIZE: usize = 100;
+const MAX_PROVIDER_MODELS_PAGE_SIZE: usize = 250;
+const MAX_PROVIDER_MODELS_CATALOG_SIZE: usize = 10_000;
+const PROVIDER_MODELS_CURSOR_VERSION: u8 = 1;
+const MAX_PROVIDER_MODELS_CURSOR_BYTES: usize = 1_024;
+const MAX_PROVIDER_MODELS_FILTER_CHARS: usize = 128;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProviderModelsCursor {
+    version: u8,
+    provider: String,
+    filter: String,
+    catalog_fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    route_fingerprint: Option<String>,
+    offset: usize,
+}
+
+fn normalized_provider_model_filter(filter: Option<&str>) -> Result<String, ApiError> {
+    let filter = filter.unwrap_or_default().trim();
+    if filter.chars().count() > MAX_PROVIDER_MODELS_FILTER_CHARS {
+        return Err(ApiError::bad_request(format!(
+            "Provider model filter exceeds {MAX_PROVIDER_MODELS_FILTER_CHARS} characters"
+        )));
+    }
+    Ok(filter.to_lowercase())
+}
+
+fn encode_provider_models_cursor(cursor: &ProviderModelsCursor) -> Result<String, ApiError> {
+    let bytes = serde_json::to_vec(cursor)
+        .map_err(|error| ApiError::internal(format!("Could not encode model cursor: {error}")))?;
+    if bytes.len() > MAX_PROVIDER_MODELS_CURSOR_BYTES {
+        return Err(ApiError::internal(
+            "Provider model cursor exceeds the safe size limit",
+        ));
+    }
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+fn decode_provider_models_cursor(value: &str) -> Result<ProviderModelsCursor, ApiError> {
+    if value.is_empty() || value.len() > MAX_PROVIDER_MODELS_CURSOR_BYTES.div_ceil(3) * 4 {
+        return Err(ApiError::bad_request("Invalid provider model cursor"));
+    }
+    let bytes = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| ApiError::bad_request("Invalid provider model cursor"))?;
+    if bytes.len() > MAX_PROVIDER_MODELS_CURSOR_BYTES {
+        return Err(ApiError::bad_request("Invalid provider model cursor"));
+    }
+    let cursor: ProviderModelsCursor = serde_json::from_slice(&bytes)
+        .map_err(|_| ApiError::bad_request("Invalid provider model cursor"))?;
+    if cursor.version != PROVIDER_MODELS_CURSOR_VERSION
+        || cursor.provider.is_empty()
+        || cursor.offset == 0
+        || cursor.offset > MAX_PROVIDER_MODELS_CATALOG_SIZE
+        || cursor.catalog_fingerprint.len() != 64
+        || !cursor
+            .catalog_fingerprint
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(ApiError::bad_request("Invalid provider model cursor"));
+    }
+    Ok(cursor)
+}
+
+fn paginate_provider_models(
+    provider: &str,
+    mut models: Vec<ProviderModelEntry>,
+    params: &ListProviderModelsParams,
+    route_fingerprint: Option<String>,
+) -> Result<ProviderModelsResponse, ApiError> {
+    let filter = normalized_provider_model_filter(params.filter.as_deref())?;
+    let limit = params.limit.unwrap_or(DEFAULT_PROVIDER_MODELS_PAGE_SIZE);
+    if limit == 0 || limit > MAX_PROVIDER_MODELS_PAGE_SIZE {
+        return Err(ApiError::bad_request(format!(
+            "Provider model page limit must be between 1 and {MAX_PROVIDER_MODELS_PAGE_SIZE}"
+        )));
+    }
+
+    models.sort_by(|left, right| {
+        left.id
+            .to_lowercase()
+            .cmp(&right.id.to_lowercase())
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    models.dedup_by(|left, right| left.id.eq_ignore_ascii_case(&right.id));
+    if models.len() > MAX_PROVIDER_MODELS_CATALOG_SIZE {
+        return Err(ApiError::internal(format!(
+            "Provider model catalog exceeds the safe {MAX_PROVIDER_MODELS_CATALOG_SIZE}-row limit"
+        )));
+    }
+    if !filter.is_empty() {
+        models.retain(|entry| entry.id.to_lowercase().contains(&filter));
+    }
+
+    // A live catalog can refresh between requests. Bind the opaque position
+    // to the exact sorted projection so additions before the cursor cannot
+    // disappear silently from a multi-page response.
+    let catalog_bytes = serde_json::to_vec(&models).map_err(|error| {
+        ApiError::internal(format!("Could not fingerprint model catalog: {error}"))
+    })?;
+    let catalog_fingerprint = Sha256::digest(catalog_bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let start = if let Some(encoded) = params.cursor.as_deref() {
+        let cursor = decode_provider_models_cursor(encoded)?;
+        if cursor.provider != provider
+            || cursor.filter != filter
+            || cursor.route_fingerprint != route_fingerprint
+        {
+            return Err(ApiError::bad_request(
+                "Provider model cursor does not match this provider, configured route, and filter",
+            ));
+        }
+        if cursor.catalog_fingerprint != catalog_fingerprint {
+            return Err(ApiError::bad_request(
+                "Provider model cursor is stale; restart from the first page",
+            ));
+        }
+        cursor.offset
+    } else {
+        0
+    };
+    let total = models.len();
+    let end = start.saturating_add(limit).min(total);
+    let page = models
+        .get(start..end)
+        .ok_or_else(|| ApiError::bad_request("Provider model cursor is outside the catalog"))?
+        .to_vec();
+    let next_cursor = if end < total {
+        Some(encode_provider_models_cursor(&ProviderModelsCursor {
+            version: PROVIDER_MODELS_CURSOR_VERSION,
+            provider: provider.to_string(),
+            filter,
+            catalog_fingerprint,
+            route_fingerprint,
+            offset: end,
+        })?)
+    } else {
+        None
+    };
+
+    Ok(ProviderModelsResponse {
+        provider: provider.to_string(),
+        model_provider_id: params.model_provider_id.clone(),
+        models: page,
+        total,
+        next_cursor,
+    })
 }
 
 fn push_unique_model(models: &mut Vec<String>, model: &str) {
@@ -6018,10 +6293,6 @@ fn push_unique_model(models: &mut Vec<String>, model: &str) {
     {
         models.push(model.to_string());
     }
-}
-
-fn provider_uses_custom_route_for_api(config: &Config, provider: ApiProvider) -> bool {
-    config.provider_uses_custom_endpoint(provider)
 }
 
 fn provider_models_for_api(
@@ -6037,19 +6308,40 @@ fn provider_models_for_api(
         push_unique_model(&mut models, model);
     }
     if provider == active_provider {
-        let active_model = config.default_model();
+        let active_model = provider_default_model_for_api(config, active_provider, provider);
         if !active_model.trim().eq_ignore_ascii_case("auto") {
             push_unique_model(&mut models, &active_model);
         }
-        if config.model_ids_pass_through() {
-            return models;
+    }
+    let exact_catalog = crate::provider_catalog_live::cached_entry_for_route(
+        provider,
+        &config.provider_identity_for(provider),
+        &config.base_url_for_route(provider),
+    )
+    .ok()
+    .flatten()
+    .is_some_and(|entry| entry.fetched_at > 0);
+    if !config.model_ids_pass_through_for_provider(provider) || exact_catalog {
+        for model in crate::provider_lake::models_for_provider(config, active_provider, provider) {
+            push_unique_model(&mut models, &model);
         }
     }
-    if provider_uses_custom_route_for_api(config, provider) {
-        return models;
+    for model in config.custom_models.as_deref().unwrap_or_default() {
+        if crate::provider_lake::configured_model_for_route(
+            config,
+            provider,
+            &config.provider_identity_for(provider),
+            &config.base_url_for_route(provider),
+            &model.id,
+        )
+        .is_some()
+            && !models.contains(&model.id)
+        {
+            models.push(model.id.clone());
+        }
     }
-    for model in crate::provider_lake::models_for_provider(config, active_provider, provider) {
-        push_unique_model(&mut models, &model);
+    if provider == ApiProvider::Ollama {
+        models.retain(|model| !crate::config::is_unresolved_local_ollama_model(model));
     }
     models
 }
@@ -6064,18 +6356,105 @@ fn provider_model_image_input_for_api(
         .unwrap_or_default()
 }
 
+fn provider_model_output_token_limit_for_api(
+    config: &Config,
+    provider: ApiProvider,
+    model: &str,
+) -> codewhale_config::route::CapabilityState {
+    use codewhale_config::route::CapabilityState;
+    crate::route_runtime::resolve_runtime_route(config, provider, Some(model))
+        .map(|route| {
+            if crate::route_budget::route_supports_output_token_limit(
+                route.identity.provider,
+                route.candidate.protocol(),
+            ) {
+                CapabilityState::Supported
+            } else {
+                CapabilityState::Unsupported
+            }
+        })
+        .unwrap_or_default()
+}
+
+fn provider_model_entry_for_api(
+    config: &Config,
+    provider: ApiProvider,
+    model: String,
+) -> ProviderModelEntry {
+    use crate::tui::app::ReasoningEffort;
+    use codewhale_config::route::CapabilityState;
+
+    let mut entry = ProviderModelEntry {
+        image_input: provider_model_image_input_for_api(config, provider, &model),
+        output_token_limit: provider_model_output_token_limit_for_api(config, provider, &model),
+        id: model,
+        reasoning_effort: CapabilityState::Unknown,
+        reasoning_effort_levels: Vec::new(),
+        reasoning_effort_source: None,
+    };
+    // A provider kind and a familiar model name do not establish the
+    // capabilities of a different endpoint or named compatible route.
+    if provider == ApiProvider::Custom || config.provider_uses_custom_endpoint(provider) {
+        return entry;
+    }
+    if provider == ApiProvider::OpenaiCodex {
+        let roster = crate::codex_model_cache::model_roster();
+        if roster.freshness != crate::codex_model_cache::CodexModelCacheFreshness::Fresh {
+            return entry;
+        }
+        let Some(metadata) = roster.metadata_for(&entry.id) else {
+            return entry;
+        };
+        for effort in metadata
+            .efforts
+            .iter()
+            .filter_map(|raw| ReasoningEffort::from_catalog_token(raw))
+            // This API advertises active effort controls. Apps currently
+            // treats off as omission, not a provider's explicit none value.
+            .filter(|effort| *effort != ReasoningEffort::Off)
+            // Native compatibility still aliases minimal to low (and auto
+            // to medium). Do not advertise a manual tier the wire changes.
+            .filter(|effort| effort.api_value_for_provider(provider) == Some(effort.as_setting()))
+        {
+            let level = effort.as_setting().to_string();
+            if !entry.reasoning_effort_levels.contains(&level) {
+                entry.reasoning_effort_levels.push(level);
+            }
+        }
+        entry.reasoning_effort_source = Some(roster.source);
+        if metadata.reasoning == Some(false) {
+            entry.reasoning_effort = CapabilityState::Unsupported;
+        }
+    } else if let Some(efforts) = ReasoningEffort::catalog_effort_values(provider, &entry.id) {
+        entry.reasoning_effort_levels = efforts
+            .into_iter()
+            .filter(|effort| *effort != ReasoningEffort::Off)
+            .map(|effort| effort.as_setting().to_string())
+            .collect();
+        entry.reasoning_effort_source = Some("catalog");
+    } else if crate::route_runtime::resolve_runtime_route(config, provider, Some(&entry.id))
+        .is_ok_and(|route| route.candidate.capabilities().reasoning == CapabilityState::Unsupported)
+    {
+        entry.reasoning_effort = CapabilityState::Unsupported;
+        entry.reasoning_effort_source = Some("catalog");
+    }
+    if !entry.reasoning_effort_levels.is_empty() {
+        entry.reasoning_effort = CapabilityState::Supported;
+    }
+    entry
+}
+
 fn provider_default_model_for_api(
     config: &Config,
-    active_provider: ApiProvider,
+    _active_provider: ApiProvider,
     provider: ApiProvider,
 ) -> String {
-    if provider == active_provider {
-        return config.default_model();
+    let model = crate::model_inventory::provider_default_model(config, provider);
+    if provider == ApiProvider::Ollama && crate::config::is_unresolved_local_ollama_model(&model) {
+        String::new()
+    } else {
+        model
     }
-    provider_models_for_api(config, active_provider, provider)
-        .into_iter()
-        .next()
-        .unwrap_or_default()
 }
 
 pub(crate) fn runtime_chat_model_id_is_safe(value: &str) -> bool {
@@ -6129,6 +6508,21 @@ pub(crate) fn runtime_chat_route_id_is_safe(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
+fn runtime_chat_safe_models(mut models: Vec<String>) -> Result<Vec<String>, String> {
+    models.retain(|model| runtime_chat_model_id_is_safe(model));
+    models.sort();
+    models.dedup();
+    if models.len() > MAX_PROVIDER_MODELS_CATALOG_SIZE {
+        return Err(format!(
+            "The active Runtime provider catalog exceeds the safe {MAX_PROVIDER_MODELS_CATALOG_SIZE}-model relay limit."
+        ));
+    }
+    if models.is_empty() {
+        return Err("The active Runtime provider has no safe model catalog.".to_string());
+    }
+    Ok(models)
+}
+
 /// Build the deliberately narrow provider projection used by the account-owned
 /// Runtime Chat relay. This is the same active-route truth exposed by the
 /// authenticated native `/v1/runtime/info`, `/v1/providers`, and
@@ -6166,15 +6560,11 @@ pub(crate) fn runtime_chat_relay_catalog(
             }
         };
 
-    let mut models = provider_models_for_api(config, provider, provider);
-    models.retain(|model| runtime_chat_model_id_is_safe(model));
-    models.sort();
-    models.dedup();
-    models.truncate(256);
-    if models.is_empty() {
-        return Err("The active Runtime provider has no safe model catalog.".to_string());
-    }
+    let models = runtime_chat_safe_models(provider_models_for_api(config, provider, provider))?;
     let requested_default = provider_default_model_for_api(config, provider, provider);
+    if provider == ApiProvider::Ollama && requested_default.is_empty() {
+        return Err("The active local provider has no fresh default model catalog.".to_string());
+    }
     let default_model = models
         .iter()
         .find(|model| model.as_str() == requested_default)
@@ -6201,6 +6591,8 @@ pub(crate) fn runtime_chat_relay_catalog(
                 "relay_chat_v1": true,
                 "isolated_chat_threads": true,
                 "turn_operation_idempotency": true,
+                "turn_image_inputs": true,
+                "turn_output_token_limit": true,
                 "tool_execution": false,
                 "stable_event_ids": true,
             },
@@ -6211,13 +6603,17 @@ pub(crate) fn runtime_chat_relay_catalog(
             "displayName": provider.display_name(),
             "defaultModel": default_model,
             "credentialState": credential_state,
-            "models": models.into_iter().map(|model| json!({
-                // Runtime Chat commands currently carry text only. Provider
-                // vision support is not relay capability truth until bounded
-                // image bytes are part of this protocol.
-                "imageInput": "unsupported",
-                "id": model,
-            })).collect::<Vec<_>>(),
+            "models": models.into_iter().map(|model| {
+                let entry = provider_model_entry_for_api(config, provider, model);
+                json!({
+                    "imageInput": entry.image_input,
+                    "outputTokenLimit": entry.output_token_limit,
+                    "id": entry.id,
+                    "reasoningEffort": entry.reasoning_effort,
+                    "reasoningEffortLevels": entry.reasoning_effort_levels,
+                    "reasoningEffortSource": entry.reasoning_effort_source,
+                })
+            }).collect::<Vec<_>>(),
         }],
     }))
 }
@@ -6234,8 +6630,15 @@ async fn list_providers(
     let mut providers = Vec::new();
     for api_provider in ApiProvider::sorted_for_display() {
         let default_model = provider_default_model_for_api(&config, active_provider, api_provider);
-        let has_model_catalog =
-            !crate::provider_lake::all_catalog_models_for_provider(api_provider).is_empty();
+        let identity = config.provider_identity_for(api_provider);
+        let base_url = config.base_url_for_route_identity(api_provider, &identity);
+        let has_model_catalog = !crate::provider_lake::configured_catalog_models_for_route(
+            &config,
+            api_provider,
+            &identity,
+            &base_url,
+        )
+        .is_empty();
         providers.push(ProviderEntry {
             id: api_provider.as_str().to_string(),
             model_provider_id: (api_provider == active_provider)
@@ -6254,23 +6657,28 @@ async fn list_providers(
     Ok(Json(ProvidersResponse { current, providers }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct ListProviderModelsParams {
-    /// Optional filter: when provided, models whose id contains this
-    /// substring (case-insensitive) are returned. Currently informational —
-    /// the catalog is small enough to filter client-side.
+    /// Exact configured provider identity; omission retains the legacy projection.
     #[serde(default)]
-    #[allow(dead_code)]
+    model_provider_id: Option<String>,
+    /// Optional case-insensitive substring filter applied before pagination.
+    #[serde(default)]
     filter: Option<String>,
+    /// Opaque continuation cursor returned as `nextCursor` by the prior page.
+    #[serde(default)]
+    cursor: Option<String>,
+    /// Page size. The bounded default is 100 and the maximum is 250.
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 async fn list_provider_models(
     State(state): State<RuntimeApiState>,
     Path(id): Path<String>,
-    _params: Query<ListProviderModelsParams>,
+    Query(params): Query<ListProviderModelsParams>,
 ) -> Result<Json<ProviderModelsResponse>, ApiError> {
-    let config = state.config.read().clone();
-    let active_provider = config.api_provider();
+    let mut config = state.config.read().clone();
     let api_provider = ApiProvider::parse(&id)
         .ok_or_else(|| ApiError::bad_request(format!("Unknown provider id '{id}'")))?;
     // Reject requests for the legacy deepseek-cn alias that has no
@@ -6280,17 +6688,43 @@ async fn list_provider_models(
             "provider 'deepseek-cn' is a legacy alias; use 'deepseek' instead",
         ));
     }
-    let models = provider_models_for_api(&config, active_provider, api_provider)
+    let route_fingerprint = if let Some(exact_id) = params.model_provider_id.as_deref() {
+        if exact_id.is_empty()
+            || exact_id != exact_id.trim()
+            || exact_id.chars().any(char::is_control)
+        {
+            return Err(ApiError::bad_request(
+                "model_provider_id must be an exact configured identity",
+            ));
+        }
+        let identity = config
+            .resolve_persisted_provider_identity(Some(api_provider.as_str()), Some(exact_id))
+            .map_err(ApiError::bad_request)?;
+        if identity.provider != api_provider || identity.persisted_id() != Some(exact_id) {
+            return Err(ApiError::bad_request(
+                "model_provider_id does not match this provider route",
+            ));
+        }
+        config.scope_to_provider_identity(&identity);
+        // Do not expose the endpoint in an opaque cursor. Its hash binds even
+        // identical catalogs under distinct named routes or a changed base URL.
+        let route = serde_json::to_vec(&(
+            api_provider.as_str(),
+            exact_id,
+            config.base_url_for_route_identity(api_provider, &identity.key),
+        ))
+        .map_err(|error| {
+            ApiError::internal(format!("Could not fingerprint provider route: {error}"))
+        })?;
+        Some(crate::hashing::sha256_hex(route))
+    } else {
+        None
+    };
+    let models = provider_models_for_api(&config, config.api_provider(), api_provider)
         .into_iter()
-        .map(|id| ProviderModelEntry {
-            image_input: provider_model_image_input_for_api(&config, api_provider, &id),
-            id,
-        })
+        .map(|id| provider_model_entry_for_api(&config, api_provider, id))
         .collect();
-    Ok(Json(ProviderModelsResponse {
-        provider: api_provider.as_str().to_string(),
-        models,
-    }))
+    paginate_provider_models(api_provider.as_str(), models, &params, route_fingerprint).map(Json)
 }
 
 /// Request body for `POST /v1/providers/{id}/switch`.
@@ -6300,8 +6734,7 @@ async fn list_provider_models(
 /// the runtime resolves the active model from `[providers.<id>].model` (or
 /// the provider's built-in default) and **does not** persist a `model` key,
 /// so the user's per-provider config is preserved. When provided, the model
-/// is normalized, persisted for the target provider, and (for DeepSeek
-/// providers) also pinned as `default_text_model`.
+/// is normalized and persisted in the target provider's canonical model slot.
 #[derive(Debug, Deserialize, Default)]
 struct SwitchProviderRequest {
     #[serde(default)]
@@ -6320,6 +6753,8 @@ struct SwitchProviderResponse {
     /// not `ProviderEntry.default_model`, to avoid showing the catalog
     /// default when the user has configured a different model.
     model: String,
+    /// False while the selected local endpoint has no executable default.
+    model_available: bool,
     /// Human-readable status message for logging/toasts.
     message: String,
     /// Whether the new provider + model were persisted to config.toml.
@@ -6346,10 +6781,9 @@ struct SwitchProviderResponse {
 /// Persistence mirrors `switch_provider` (ui.rs:9390-9410):
 /// - `provider` is always persisted (root `provider` key).
 /// - `model` is persisted **only** when `model_override.is_some()`, via
-///   `persist_provider_model_key` (writes `[providers.<id>].model`, or the
-///   root `default_text_model` for DeepSeek). The `Settings` provider-model
-///   map is updated the same way, including the DeepSeek-specific
-///   `default_model` pin.
+///   `persist_provider_model_key` (writes `[providers.<id>].model`, retaining
+///   the root field only for a legacy literal custom route). Provider and model
+///   are committed together through the canonical Config writer.
 /// - Config is reloaded from disk and synced to active engines via
 ///   `runtime_threads.reload_config`, exactly like `POST /v1/config/reload`.
 async fn switch_provider(
@@ -6372,16 +6806,27 @@ async fn switch_provider(
     // Mirrors `set_config`'s `model` branch, which validates against the
     // active route — except here we validate against the target provider,
     // because the active route is about to change.
-    let model_override: Option<String> = match req.model.as_deref().map(str::trim) {
-        None | Some("") => None,
-        Some(raw) => Some(normalize_runtime_config_model(target, raw)?),
-    };
-
-    // Resolve the target provider identity *before* mutating config, so
-    // persistence uses the same key the TUI's switch_provider would.
-    let (provider_identity, _active_provider) = {
+    // Read normalization and persistence identity from the same route snapshot.
+    let (target, model_override, provider_identity) = {
         let config = state.config.read();
-        (config.provider_identity_for(target), config.api_provider())
+        let identity = config
+            .resolve_provider_pin_identity(&id)
+            .map_err(ApiError::bad_request)?;
+        let mut scoped = config.clone();
+        scoped.scope_to_provider_identity(&identity);
+        let model = match req.model.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(raw) => Some(normalize_runtime_config_model(
+                &scoped,
+                identity.provider,
+                raw,
+            )?),
+        };
+        (
+            identity.provider,
+            model,
+            identity.persisted_id().unwrap_or(&identity.key).to_string(),
+        )
     };
 
     // Persist `provider` (always) + `model` (only when explicitly given).
@@ -6389,34 +6834,13 @@ async fn switch_provider(
     // model arg) MUST NOT write a `model` key, otherwise the user's
     // per-provider `[providers.<id>].model` config gets overwritten with
     // whatever the runtime resolves as the default.
-    config_persistence::persist_root_string_key(
+    config_persistence::persist_provider_selection(
         state.config_path.as_deref(),
-        "provider",
+        target,
         &provider_identity,
+        model_override.as_deref(),
     )
-    .map_err(|e| ApiError::internal(format!("Failed to persist provider: {e}")))?;
-
-    if let Some(ref model) = model_override {
-        config_persistence::persist_provider_model_key(
-            state.config_path.as_deref(),
-            target,
-            &provider_identity,
-            model,
-        )
-        .map_err(|e| ApiError::internal(format!("Failed to persist model: {e}")))?;
-
-        // Mirror the TUI's Settings update (ui.rs:9398-9406): record the
-        // provider→model mapping, and for DeepSeek also pin the global
-        // `default_model`. Failures here are non-fatal — the config.toml
-        // write above is the source of truth.
-        let _ = crate::settings::Settings::transact(|settings| {
-            settings.set_model_for_provider(target.as_str(), model);
-            if matches!(target, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
-                let _ = settings.set("default_model", model);
-            }
-            Ok(())
-        });
-    }
+    .map_err(|e| ApiError::internal(format!("Failed to persist provider selection: {e}")))?;
 
     // Reload config from disk and sync to active engines. This matches
     // `POST /v1/config/reload` exactly: load → validate thread routes →
@@ -6440,10 +6864,20 @@ async fn switch_provider(
     // default and NOT the previously-active model.
     let (active_provider, active_model) = {
         let config = state.config.read();
-        (config.api_provider(), config.default_model())
+        let provider = config.api_provider();
+        (
+            provider,
+            provider_default_model_for_api(&config, provider, provider),
+        )
     };
 
-    let message = if model_override.is_some() {
+    let model_available = !active_model.is_empty();
+    let message = if !model_available {
+        format!(
+            "Provider switched to {}; refresh its catalog or select an explicit model.",
+            active_provider.as_str()
+        )
+    } else if model_override.is_some() {
         format!(
             "Provider switched to {} (model: {}).",
             active_provider.as_str(),
@@ -6460,6 +6894,7 @@ async fn switch_provider(
     Ok(Json(SwitchProviderResponse {
         provider: active_provider.as_str().to_string(),
         model: active_model,
+        model_available,
         message,
         persisted: true,
     }))
@@ -6471,6 +6906,7 @@ async fn switch_provider(
 #[derive(Debug, Clone, Serialize)]
 struct GuiConfigResponse {
     model: String,
+    model_available: bool,
     provider: String,
     approval_mode: String,
     reasoning_effort: String,
@@ -6497,6 +6933,8 @@ struct GuiConfigResponse {
     memory_enabled: bool,
     search_provider: String,
     prompt_suggestion: bool,
+    /// Effective device settings, using the same leaf vocabulary as CLI/TUI.
+    notifications: std::collections::BTreeMap<String, String>,
 }
 
 /// Request body for `POST /v1/config` (set a single config key).
@@ -6545,7 +6983,9 @@ async fn get_config(
     let settings = crate::settings::Settings::load_persisted().unwrap_or_default();
     let mcp_config_path = config.mcp_config_path().display().to_string();
 
-    let model = config.default_model();
+    let resolved_model = runtime_request_model(&config, None);
+    let model_available = resolved_model.is_ok();
+    let model = resolved_model.unwrap_or_default();
 
     let provider = config.provider_identity_for(config.api_provider());
 
@@ -6557,17 +6997,26 @@ async fn get_config(
     let reasoning_effort = config.reasoning_effort().unwrap_or("auto").to_string();
     let cost_currency = settings.cost_currency.clone();
     let default_mode = settings.default_mode.as_str().to_string();
-    // This field is the legacy root DeepSeek fallback, not the active
-    // provider model above. Keeping the two explicit prevents a Z.ai model
-    // update from silently rewriting a future DeepSeek route.
-    let default_model = config
-        .default_text_model
-        .clone()
-        .unwrap_or_else(|| DEFAULT_TEXT_MODEL.to_string());
+    // This field remains the DeepSeek preference even when another provider
+    // is active, and follows the CN slot while the CN route is active — the CN
+    // route resolves `[providers.deepseek_cn].model`, not the primary slot.
+    // The root field is a legacy fallback for unmigrated configs.
+    let default_provider = if config.api_provider() == ApiProvider::DeepseekCN {
+        ApiProvider::DeepseekCN
+    } else {
+        ApiProvider::Deepseek
+    };
+    let identity = config
+        .resolve_provider_pin_identity(default_provider.as_str())
+        .map_err(ApiError::bad_request)?;
+    let mut deepseek_config = config.clone();
+    deepseek_config.scope_to_provider_identity(&identity);
+    let default_model = deepseek_config.default_model();
     let base_url = config.deepseek_base_url().to_string();
 
     Ok(Json(GuiConfigResponse {
         model,
+        model_available,
         provider,
         approval_mode,
         reasoning_effort,
@@ -6597,6 +7046,15 @@ async fn get_config(
         memory_enabled: config.memory_enabled(),
         search_provider: config.search_provider().as_str().to_string(),
         prompt_suggestion: config.prompt_suggestion_enabled(),
+        notifications: codewhale_config::notifications::NotificationSetting::ALL
+            .into_iter()
+            .map(|setting| {
+                (
+                    setting.key().to_string(),
+                    config.notifications_config().display(setting),
+                )
+            })
+            .collect(),
     }))
 }
 
@@ -6610,23 +7068,69 @@ async fn set_config(
     let mut value = req.value;
     let persist = req.persist;
 
+    // Reuse the shared validator and locked leaf writer, including the active
+    // profile's existing owner. Dry runs validate too; a typo must never look
+    // like an accepted device setting. Reload remains the existing apply step.
+    if codewhale_config::notifications::in_namespace(&key) {
+        use codewhale_config::notifications::{NotificationConfigUpdate, NotificationSetting};
+        let setting = NotificationSetting::required(&key)
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        let update = NotificationConfigUpdate::parse(setting, &value)
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        if persist {
+            let path = config_persistence::config_toml_path(state.config_path.as_deref()).map_err(
+                |error| ApiError::internal(format!("Failed to resolve config: {error}")),
+            )?;
+            update
+                .persist_for_profile(&path, state.config_profile.as_deref())
+                .map_err(|error| {
+                    ApiError::internal(format!("Failed to persist notification setting: {error}"))
+                })?;
+        }
+        return Ok(Json(SetConfigResponse {
+            key: format!("notifications.{}", setting.key()),
+            value: update.display(),
+            message: if persist {
+                "Config persisted. Call /v1/config/reload to apply."
+            } else {
+                "Config not persisted (add persist: true to save)"
+            }
+            .to_string(),
+            persisted: persist,
+            requires_reload: persist,
+        }));
+    }
+
     // Validate model keys even for dry-run requests. Model ids are provider
     // owned; accepting a DeepSeek id while Z.ai is active creates a saved
     // route that cannot execute after reload.
     let active_route = {
         let config = state.config.read();
         let provider = config.api_provider();
-        (provider, config.provider_identity_for(provider))
+        match key.as_str() {
+            "model" => {
+                value = normalize_runtime_config_model(&config, provider, &value)?;
+            }
+            "default_model" => {
+                let default_provider = if provider == ApiProvider::DeepseekCN {
+                    ApiProvider::DeepseekCN
+                } else {
+                    ApiProvider::Deepseek
+                };
+                value = normalize_runtime_config_model(&config, default_provider, &value)?;
+            }
+            _ => {}
+        }
+        let identity = if key == "model" {
+            let identity = config
+                .active_provider_identity(provider)
+                .map_err(ApiError::bad_request)?;
+            identity.persisted_id().unwrap_or(&identity.key).to_string()
+        } else {
+            config.provider_identity_for(provider)
+        };
+        (provider, identity)
     };
-    match key.as_str() {
-        "model" => {
-            value = normalize_runtime_config_model(active_route.0, &value)?;
-        }
-        "default_model" => {
-            value = normalize_runtime_config_model(ApiProvider::Deepseek, &value)?;
-        }
-        _ => {}
-    }
 
     // All persisted config keys require a reload to take effect in the
     // runtime (including syncing to active engines). The caller should
@@ -6645,11 +7149,22 @@ async fn set_config(
                 &active_route.1,
                 &value,
             ),
-            "default_model" => config_persistence::persist_root_string_key(
-                config_path,
-                "default_text_model",
-                &value,
-            ),
+            "default_model" => {
+                // The CN route reads its own `[providers.deepseek_cn]` slot;
+                // writing the primary `deepseek` slot there would be unread.
+                let (default_provider, default_identity) =
+                    if active_route.0 == ApiProvider::DeepseekCN {
+                        (ApiProvider::DeepseekCN, ApiProvider::DeepseekCN.as_str())
+                    } else {
+                        (ApiProvider::Deepseek, ApiProvider::Deepseek.as_str())
+                    };
+                config_persistence::persist_provider_model_key(
+                    config_path,
+                    default_provider,
+                    default_identity,
+                    &value,
+                )
+            }
             "reasoning_effort" => {
                 config_persistence::persist_root_string_key(config_path, "reasoning_effort", &value)
             }
@@ -6666,7 +7181,7 @@ async fn set_config(
                 // GUI gets a clear error instead of silently persisting an
                 // unknown value that `Config::api_provider()` would later
                 // ignore (falling back to DeepSeek).
-                let parsed = ApiProvider::parse(&value).ok_or_else(|| {
+                ApiProvider::parse(&value).ok_or_else(|| {
                     ApiError::bad_request(format!(
                         "Unknown provider '{value}'. Call GET /v1/providers for the list of supported ids."
                     ))
@@ -6677,8 +7192,8 @@ async fn set_config(
                     // Keep the in-memory provider in step with the persisted
                     // value so a following set_config(model) resolves the new
                     // provider's table instead of clobbering the previous
-                    // provider's root default_text_model (#4658 follow-up).
-                    state.config.write().provider = Some(parsed.as_str().to_string());
+                    // provider's model slot (#4658 follow-up).
+                    state.config.write().provider = Some(value.clone());
                 }
                 result
             }
@@ -6824,8 +7339,27 @@ async fn set_config(
     }))
 }
 
-fn normalize_runtime_config_model(provider: ApiProvider, value: &str) -> Result<String, ApiError> {
+fn normalize_runtime_config_model(
+    config: &Config,
+    provider: ApiProvider,
+    value: &str,
+) -> Result<String, ApiError> {
     let value = value.trim();
+    if crate::provider_lake::configured_model_for_route(
+        config,
+        provider,
+        &config.provider_identity_for(provider),
+        &config.base_url_for_route(provider),
+        value,
+    )
+    .is_some()
+    {
+        // The shared resolver preserves exact declarations only after its
+        // protocol and provider allowlist guards. Metadata cannot bypass them.
+        return crate::route_runtime::resolve_runtime_route(config, provider, Some(value))
+            .map(|route| route.model)
+            .map_err(ApiError::bad_request);
+    }
     validate_route(provider, value).map_err(ApiError::bad_request)?;
     if value.eq_ignore_ascii_case("auto") {
         return Ok("auto".to_string());
@@ -7316,3 +7850,741 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod configured_model_api_tests {
+    use super::*;
+    use crate::test_support::{EnvVarGuard, lock_test_env};
+
+    fn fixture(provider: &str, model: &str) -> String {
+        format!(
+            r#"provider = "{provider}"
+default_text_model = "deepseek-v4-pro"
+telemetry = false
+
+[[custom_models]]
+provider = "{provider}"
+base_url = "http://127.0.0.1:9/v1"
+id = "{model}"
+limit = {{ context = 96000, input = 88000, output = 8000 }}
+cost = {{ input = 0.4, output = 1.6 }}
+reasoning = false
+tool_call = false
+
+[providers.{provider}]
+base_url = "http://127.0.0.1:9/v1"
+"#
+        )
+    }
+
+    fn isolate_model_environment() -> Vec<EnvVarGuard> {
+        let mut guards: Vec<_> = [
+            "CODEWHALE_CONFIG_PATH",
+            "DEEPSEEK_CONFIG_PATH",
+            "CODEWHALE_BASE_URL",
+            "DEEPSEEK_BASE_URL",
+            "CODEWHALE_PROVIDER",
+            "DEEPSEEK_PROVIDER",
+            "CODEWHALE_MODEL",
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_DEFAULT_TEXT_MODEL",
+            "OPENROUTER_BASE_URL",
+            "OPENROUTER_MODEL",
+            "TOGETHER_BASE_URL",
+            "TOGETHER_MODEL",
+            "CODEWHALE_PROFILE",
+            "DEEPSEEK_PROFILE",
+            "OLLAMA_MODEL",
+            "OLLAMA_CLOUD_MODEL",
+            "OLLAMA_BASE_URL",
+            "OLLAMA_CLOUD_BASE_URL",
+        ]
+        .into_iter()
+        .map(EnvVarGuard::remove)
+        .collect();
+        guards.push(EnvVarGuard::set("CODEWHALE_DISABLE_CLOUD_FACTS", "1"));
+        guards
+    }
+
+    async fn serve_fixture(
+        config_path: PathBuf,
+    ) -> Result<(SocketAddr, RuntimeApiState, tokio::task::JoinHandle<()>)> {
+        let root = config_path.parent().expect("fixture root");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace)?;
+        let config = Config::load(Some(config_path.clone()), None)?;
+        let runtime_threads = Arc::new(RuntimeThreadManager::open_with_plugin_registry(
+            config.clone(),
+            workspace.clone(),
+            RuntimeThreadManagerConfig::from_task_data_dir(root.join("runtime")),
+            Arc::new(crate::plugins::PluginRegistry::empty(&workspace)),
+        )?);
+        let task_manager = TaskManager::start_with_runtime_manager(
+            TaskManagerConfig {
+                data_dir: root.join("tasks"),
+                worker_count: 1,
+                default_workspace: workspace.clone(),
+                default_model: "auto".to_string(),
+                default_mode: "agent".to_string(),
+                allow_shell: false,
+                trust_mode: false,
+                execution_limits: Default::default(),
+            },
+            config.clone(),
+            runtime_threads.clone(),
+        )
+        .await?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let state = RuntimeApiState {
+            config: Arc::new(parking_lot::RwLock::new(config)),
+            workspace: workspace.clone(),
+            plugin_discovery: crate::plugins::PluginDiscoveryContext::capture_pre_dotenv(),
+            task_manager,
+            runtime_threads,
+            cors_origins: Vec::new(),
+            sessions_dir: root.join("sessions"),
+            config_path: Some(config_path.clone()),
+            config_profile: None,
+            automations: Arc::new(Mutex::new(AutomationManager::open_for_test(
+                root.join("automations"),
+            )?)),
+            sub_agent_manager: runtime_api_sub_agent_manager(&workspace, 2),
+            runtime_token: None,
+            skill_state: Arc::new(Mutex::new(SkillStateStore::load_from(
+                root.join("skills_state.toml"),
+            )?)),
+            auth_required: false,
+            bind_host: "127.0.0.1".to_string(),
+            bind_port: addr.port(),
+            mobile_enabled: false,
+            mobile: None,
+            web: None,
+            fleet_codewhale_binary: "unused-test-binary".to_string(),
+            mcp_pool: Arc::new(Mutex::new(None)),
+            compat_stream_test_hook: None,
+        };
+        let router = build_router(state.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .expect("local fixture server");
+        });
+        Ok((addr, state, server))
+    }
+
+    async fn post_json(addr: SocketAddr, path: &str, body: Value) -> Result<Value> {
+        let response = crate::tls::reqwest_client()
+            .post(format!("http://{addr}{path}"))
+            .json(&body)
+            .send()
+            .await?;
+        let status = response.status();
+        let body = response.json::<Value>().await?;
+        assert_eq!(status, StatusCode::OK, "{path}: {body}");
+        Ok(body)
+    }
+
+    fn assert_declared_route(config_path: &FsPath, provider: ApiProvider, model: &str) {
+        let config = Config::load(Some(config_path.to_path_buf()), None).expect("reloaded config");
+        let persisted = config
+            .provider_config_for(provider)
+            .and_then(|entry| entry.model.as_deref());
+        assert_eq!(persisted, Some(model));
+        let selected = provider_default_model_for_api(&config, provider, provider);
+        assert_eq!(selected, model);
+        let route = crate::route_runtime::resolve_runtime_route(&config, provider, Some(&selected))
+            .expect("saved declared route");
+        assert_eq!(route.model, model);
+        assert!(route.candidate.canonical_model().is_none());
+        assert_eq!(route.candidate.limits().context_tokens, Some(96_000));
+        assert_eq!(
+            route.context_window.source,
+            crate::route_runtime::ContextWindowSource::UserDeclared
+        );
+    }
+
+    fn write_remembered_selection_fixture(home: &FsPath, config_path: &FsPath) -> Result<()> {
+        fs::create_dir_all(home)?;
+        fs::create_dir_all(config_path.parent().expect("config parent"))?;
+        fs::write(
+            home.join("settings.toml"),
+            "default_provider = \"zai\"\n[provider_models]\nzai = \"GLM-5.3\"\n",
+        )?;
+        fs::write(
+            config_path,
+            r#"provider = "deepseek"
+default_text_model = "deepseek-v4-pro"
+telemetry = false
+
+[cloud_facts]
+enabled = false
+
+[providers.zai]
+base_url = "https://api.z.ai/api/coding/paas/v4"
+model = "GLM-5.2"
+"#,
+        )?;
+        Ok(())
+    }
+
+    async fn assert_catalog_and_new_thread_selection(
+        addr: SocketAddr,
+        provider: &str,
+        model: &str,
+    ) -> Result<Value> {
+        let client = crate::tls::reqwest_client();
+        let catalog = client
+            .get(format!("http://{addr}/v1/providers"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        assert_eq!(catalog["current"], provider);
+        let entry = catalog["providers"]
+            .as_array()
+            .expect("provider catalog")
+            .iter()
+            .find(|entry| entry["id"] == provider)
+            .expect("selected provider");
+        assert_eq!(entry["default_model"], model);
+        let config = client
+            .get(format!("http://{addr}/v1/config"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        assert_eq!(config["model"], model);
+        if provider == "deepseek" {
+            assert_eq!(config["default_model"], model);
+        }
+        // Creation only saves the route; this fixture never starts a turn or
+        // contacts any provider, including the official catalog URLs above.
+        let response = client
+            .post(format!("http://{addr}/v1/threads"))
+            .json(&json!({}))
+            .send()
+            .await?;
+        let status = response.status();
+        let thread = response.json::<Value>().await?;
+        assert_eq!(status, StatusCode::CREATED, "{thread}");
+        assert_eq!(thread["model_provider"], provider);
+        assert_eq!(thread["model"], model);
+        assert_eq!(thread["model_provider_id"], entry["model_provider_id"]);
+        Ok(thread)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn remembered_selection_aligns_catalog_and_new_thread_after_load() -> Result<()> {
+        let _env = lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let root = tempfile::tempdir()?;
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", root.path());
+        let _model_environment = isolate_model_environment();
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+        let config_path = root.path().join("config.toml");
+        write_remembered_selection_fixture(root.path(), &config_path)?;
+        let original_config = fs::read(&config_path)?;
+        let original_settings = fs::read(root.path().join("settings.toml"))?;
+        let (addr, state, server) = serve_fixture(config_path.clone()).await?;
+        let _shutdown = state.task_manager.shutdown_guard();
+        assert_catalog_and_new_thread_selection(addr, "zai", "GLM-5.3").await?;
+        post_json(addr, "/v1/config/reload", json!({})).await?;
+        assert_catalog_and_new_thread_selection(addr, "zai", "GLM-5.3").await?;
+        assert_eq!(fs::read(&config_path)?, original_config);
+        assert_eq!(
+            fs::read(root.path().join("settings.toml"))?,
+            original_settings
+        );
+        server.abort();
+        state.task_manager.shutdown_and_wait().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn explicit_runtime_selections_migrate_legacy_memory_into_config_once() -> Result<()> {
+        let _env = lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let root = tempfile::tempdir()?;
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", root.path());
+        let _model_environment = isolate_model_environment();
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+        let config_path = root.path().join("config.toml");
+        write_remembered_selection_fixture(root.path(), &config_path)?;
+        let (addr, state, server) = serve_fixture(config_path.clone()).await?;
+        let _shutdown = state.task_manager.shutdown_guard();
+        let original_thread =
+            assert_catalog_and_new_thread_selection(addr, "zai", "GLM-5.3").await?;
+        let original_settings = fs::read(root.path().join("settings.toml"))?;
+        post_json(
+            addr,
+            "/v1/config",
+            json!({ "key": "model", "value": "GLM-5.2", "persist": false }),
+        )
+        .await?;
+        assert_eq!(
+            fs::read(root.path().join("settings.toml"))?,
+            original_settings
+        );
+        post_json(
+            addr,
+            "/v1/config",
+            json!({ "key": "model", "value": "GLM-5.2", "persist": true }),
+        )
+        .await?;
+        assert_eq!(
+            runtime_request_model(&state.config.read(), None).expect("current default"),
+            "GLM-5.3"
+        );
+        let migrated: toml::Value = toml::from_str(&fs::read_to_string(&config_path)?)?;
+        assert_eq!(migrated["route_preferences_version"].as_integer(), Some(1));
+        assert_eq!(migrated["provider"].as_str(), Some("zai"));
+        assert_eq!(
+            migrated["providers"]["zai"]["model"].as_str(),
+            Some("GLM-5.2")
+        );
+        post_json(addr, "/v1/config/reload", json!({})).await?;
+        assert_catalog_and_new_thread_selection(addr, "zai", "GLM-5.2").await?;
+        let saved_thread = state
+            .runtime_threads
+            .get_thread(original_thread["id"].as_str().expect("thread id"))
+            .await?;
+        assert_eq!(saved_thread.model, "GLM-5.3");
+
+        post_json(
+            addr,
+            "/v1/providers/deepseek/switch",
+            json!({ "model": "deepseek-v4-flash" }),
+        )
+        .await?;
+        assert_catalog_and_new_thread_selection(addr, "deepseek", "deepseek-v4-flash").await?;
+        post_json(
+            addr,
+            "/v1/config",
+            json!({ "key": "default_model", "value": "deepseek-v4-pro", "persist": true }),
+        )
+        .await?;
+        post_json(addr, "/v1/config/reload", json!({})).await?;
+        assert_catalog_and_new_thread_selection(addr, "deepseek", "deepseek-v4-pro").await?;
+
+        for (key, value) in [("provider", "zai"), ("model", "GLM-5.3")] {
+            post_json(
+                addr,
+                "/v1/config",
+                json!({ "key": key, "value": value, "persist": true }),
+            )
+            .await?;
+        }
+        post_json(addr, "/v1/config/reload", json!({})).await?;
+        assert_catalog_and_new_thread_selection(addr, "zai", "GLM-5.3").await?;
+        post_json(addr, "/v1/providers/deepseek/switch", json!({})).await?;
+        post_json(addr, "/v1/config/reload", json!({})).await?;
+        assert_catalog_and_new_thread_selection(addr, "deepseek", "deepseek-v4-pro").await?;
+        // The old Settings selection remains unchanged and cannot reassert
+        // itself once Config owns the migrated route preferences.
+        assert_eq!(
+            fs::read(root.path().join("settings.toml"))?,
+            original_settings
+        );
+        server.abort();
+        state.task_manager.shutdown_and_wait().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_switch_migrates_legacy_selection_before_explicit_choice() -> Result<()> {
+        let _env = lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let root = tempfile::tempdir()?;
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", root.path());
+        let _model_environment = isolate_model_environment();
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+        let config_path = root.path().join("config.toml");
+        write_remembered_selection_fixture(root.path(), &config_path)?;
+        let original_settings = fs::read(root.path().join("settings.toml"))?;
+        let (addr, state, server) = serve_fixture(config_path.clone()).await?;
+        let _shutdown = state.task_manager.shutdown_guard();
+        post_json(
+            addr,
+            "/v1/providers/deepseek/switch",
+            json!({ "model": "deepseek-v4-flash" }),
+        )
+        .await?;
+        let migrated: toml::Value = toml::from_str(&fs::read_to_string(&config_path)?)?;
+        assert_eq!(migrated["route_preferences_version"].as_integer(), Some(1));
+        assert_eq!(migrated["provider"].as_str(), Some("deepseek"));
+        assert_eq!(
+            migrated["providers"]["deepseek"]["model"].as_str(),
+            Some("deepseek-v4-flash")
+        );
+        assert_eq!(
+            migrated["providers"]["zai"]["model"].as_str(),
+            Some("GLM-5.3")
+        );
+        post_json(addr, "/v1/config/reload", json!({})).await?;
+        assert_catalog_and_new_thread_selection(addr, "deepseek", "deepseek-v4-flash").await?;
+        assert_eq!(
+            fs::read(root.path().join("settings.toml"))?,
+            original_settings
+        );
+        server.abort();
+        state.task_manager.shutdown_and_wait().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn runtime_model_writes_keep_legacy_hosted_ollama_identity() -> Result<()> {
+        #[derive(Deserialize)]
+        struct Selection {
+            provider: String,
+            model: String,
+            persisted: bool,
+        }
+
+        let _env = lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let home = tempfile::tempdir()?;
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let _model_environment = isolate_model_environment();
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+        let config_path = home.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "provider = 'ollama'\ntelemetry = false\n[providers.ollama]\nbase_url = 'https://ollama.com/v1'\nmodel = 'old-cloud-model'\n[providers.ollama_cloud]\nmodel = 'explicit-cloud-model'\n",
+        )?;
+        let settings = "default_provider = 'ollama'\n[provider_models]\nollama-cloud = 'remembered-cloud-model'\n";
+        fs::write(home.path().join("settings.toml"), settings)?;
+        let (addr, state, server) = serve_fixture(config_path.clone()).await?;
+        let _shutdown = state.task_manager.shutdown_guard();
+        assert_eq!(
+            state.config.read().default_model(),
+            "remembered-cloud-model"
+        );
+        post_json(
+            addr,
+            "/v1/config",
+            json!({"key": "model", "value": "current-cloud-model", "persist": true}),
+        )
+        .await?;
+        post_json(addr, "/v1/config/reload", json!({})).await?;
+        assert_eq!(state.config.read().default_model(), "current-cloud-model");
+        for (selector, model) in [
+            ("ollama", "legacy-choice"),
+            ("ollama-cloud", "explicit-choice"),
+            ("ollama", "legacy-final"),
+        ] {
+            let selection: Selection = serde_json::from_value(
+                post_json(
+                    addr,
+                    &format!("/v1/providers/{selector}/switch"),
+                    json!({"model": model}),
+                )
+                .await?,
+            )?;
+            assert_eq!(selection.provider, "ollama-cloud");
+            assert_eq!(selection.model, model);
+            assert!(selection.persisted);
+            post_json(addr, "/v1/config/reload", json!({})).await?;
+            let config = state.config.read();
+            let identity = config
+                .active_provider_identity(ApiProvider::OllamaCloud)
+                .map_err(anyhow::Error::msg)?;
+            assert_eq!(identity.persisted_id(), Some(selector));
+            assert_eq!(config.default_model(), model);
+        }
+        let document: toml::Value = toml::from_str(&fs::read_to_string(&config_path)?)?;
+        assert_eq!(document["route_preferences_version"].as_integer(), Some(1));
+        assert_eq!(document["provider"].as_str(), Some("ollama"));
+        assert_eq!(
+            document["providers"]["ollama"]["model"].as_str(),
+            Some("legacy-final")
+        );
+        assert_eq!(
+            document["providers"]["ollama_cloud"]["model"].as_str(),
+            Some("explicit-choice")
+        );
+        assert_eq!(
+            fs::read_to_string(home.path().join("settings.toml"))?,
+            settings
+        );
+        let thread =
+            assert_catalog_and_new_thread_selection(addr, "ollama-cloud", "legacy-final").await?;
+        assert_eq!(thread["model_provider_id"], "ollama");
+        server.abort();
+        state.task_manager.shutdown_and_wait().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn scoped_runtime_selections_leave_device_memory_unchanged() -> Result<()> {
+        let _env = lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let root = tempfile::tempdir()?;
+        let home = root.path().join("home");
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", &home);
+        let _model_environment = isolate_model_environment();
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+        let config_path = root.path().join("project/config.toml");
+        write_remembered_selection_fixture(&home, &config_path)?;
+        let original_settings = fs::read(home.join("settings.toml"))?;
+        let (addr, state, server) = serve_fixture(config_path).await?;
+        let _shutdown = state.task_manager.shutdown_guard();
+        assert_catalog_and_new_thread_selection(addr, "deepseek", "deepseek-v4-pro").await?;
+        for (key, value) in [
+            ("provider", "zai"),
+            ("model", "GLM-5.1"),
+            ("provider", "deepseek"),
+            ("default_model", "deepseek-v4-flash"),
+        ] {
+            post_json(
+                addr,
+                "/v1/config",
+                json!({ "key": key, "value": value, "persist": true }),
+            )
+            .await?;
+        }
+        post_json(
+            addr,
+            "/v1/providers/zai/switch",
+            json!({ "model": "GLM-5.2" }),
+        )
+        .await?;
+        post_json(addr, "/v1/config/reload", json!({})).await?;
+        assert_catalog_and_new_thread_selection(addr, "zai", "GLM-5.2").await?;
+        assert_eq!(fs::read(home.join("settings.toml"))?, original_settings);
+        server.abort();
+        state.task_manager.shutdown_and_wait().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn declared_model_posts_preserve_exact_identity_after_reload() -> Result<()> {
+        let _env = lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let home = tempfile::tempdir()?;
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let _model_environment = isolate_model_environment();
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+        for (provider, model) in [
+            (ApiProvider::Deepseek, "deepseek-v4pro"),
+            (ApiProvider::Openrouter, "deepseek-v4-pro"),
+            (ApiProvider::Together, "deepseek-v4-pro"),
+        ] {
+            let root = tempfile::tempdir()?;
+            let config_path = root.path().join("config.toml");
+            fs::write(&config_path, fixture(provider.as_str(), model))?;
+            let (addr, state, server) = serve_fixture(config_path.clone()).await?;
+            let _shutdown = state.task_manager.shutdown_guard();
+            let body = post_json(
+                addr,
+                &format!("/v1/providers/{}/switch", provider.as_str()),
+                json!({ "model": model }),
+            )
+            .await?;
+            assert_eq!(body["model"], model);
+            assert_declared_route(&config_path, provider, model);
+            let keys = if provider == ApiProvider::Deepseek {
+                vec!["model", "default_model"]
+            } else {
+                vec!["model"]
+            };
+            for key in keys {
+                let body = post_json(
+                    addr,
+                    "/v1/config",
+                    json!({ "key": key, "value": model, "persist": true }),
+                )
+                .await?;
+                assert_eq!(body["value"], model);
+                post_json(addr, "/v1/config/reload", json!({})).await?;
+                assert_declared_route(&config_path, provider, model);
+                let reloaded = state.config.read();
+                let selected = provider_default_model_for_api(&reloaded, provider, provider);
+                let route = crate::route_runtime::resolve_runtime_route(
+                    &reloaded,
+                    provider,
+                    Some(&selected),
+                )
+                .expect("active reloaded route");
+                assert_eq!(route.model, model);
+                assert_eq!(route.candidate.limits().context_tokens, Some(96_000));
+            }
+            server.abort();
+            state.task_manager.shutdown_and_wait().await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn declared_model_posts_do_not_preserve_alias_at_wrong_endpoint() -> Result<()> {
+        let _env = lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let root = tempfile::tempdir()?;
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", root.path().join("home"));
+        let _model_environment = isolate_model_environment();
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+        let config_path = root.path().join("config.toml");
+        let fixture = fixture("deepseek", "deepseek-v4pro").replace(
+            "[providers.deepseek]\nbase_url = \"http://127.0.0.1:9/v1\"",
+            "[providers.deepseek]\nbase_url = \"http://127.0.0.1:10/v1\"",
+        );
+        fs::write(&config_path, fixture)?;
+        let (addr, state, server) = serve_fixture(config_path.clone()).await?;
+        let _shutdown = state.task_manager.shutdown_guard();
+        let body = post_json(
+            addr,
+            "/v1/providers/deepseek/switch",
+            json!({ "model": "deepseek-v4pro" }),
+        )
+        .await?;
+        assert_eq!(body["model"], "deepseek-v4-pro");
+        let body = post_json(
+            addr,
+            "/v1/config",
+            json!({ "key": "model", "value": "deepseek-v4pro", "persist": true }),
+        )
+        .await?;
+        assert_eq!(body["value"], "deepseek-v4-pro");
+        post_json(addr, "/v1/config/reload", json!({})).await?;
+        let config = Config::load(Some(config_path), None)?;
+        assert_eq!(
+            config
+                .provider_config_for(ApiProvider::Deepseek)
+                .and_then(|provider| provider.model.as_deref()),
+            Some("deepseek-v4-pro")
+        );
+        let selected =
+            provider_default_model_for_api(&config, ApiProvider::Deepseek, ApiProvider::Deepseek);
+        let route = crate::route_runtime::resolve_runtime_route(
+            &config,
+            ApiProvider::Deepseek,
+            Some(&selected),
+        )
+        .expect("ordinary saved route");
+        assert_eq!(route.model, "deepseek-v4-pro");
+        assert_ne!(route.candidate.limits().context_tokens, Some(96_000));
+        assert_ne!(
+            route.context_window.source,
+            crate::route_runtime::ContextWindowSource::UserDeclared
+        );
+        server.abort();
+        state.task_manager.shutdown_and_wait().await?;
+        Ok(())
+    }
+
+    #[test]
+    fn declared_model_normalization_keeps_identity_and_protocol_guards() {
+        let _env = lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let root = tempfile::tempdir().expect("test root");
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", root.path());
+        let _model_environment = isolate_model_environment();
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+        let mut config: Config =
+            toml::from_str(&fixture("deepseek", "deepseek-v4pro")).expect("fixture config");
+        config.custom_models.as_mut().unwrap()[0].provider = "other".to_string();
+        assert_eq!(
+            normalize_runtime_config_model(&config, ApiProvider::Deepseek, "deepseek-v4pro")
+                .expect("legacy alias remains accepted"),
+            "deepseek-v4-pro"
+        );
+        for provider in [ApiProvider::OpencodeGo, ApiProvider::OpencodeZen] {
+            let config: Config = toml::from_str(&fixture(provider.as_str(), "unlisted-model"))
+                .expect("fixture config");
+            assert!(
+                normalize_runtime_config_model(&config, provider, "unlisted-model").is_err(),
+                "a declaration cannot expand the {provider:?} protocol roster"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn runtime_default_model_reads_and_writes_the_deepseek_cn_slot() -> Result<()> {
+        let _env = lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let root = tempfile::tempdir()?;
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", root.path());
+        let _model_environment = isolate_model_environment();
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+        let config_path = root.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "provider = 'deepseek-cn'\ntelemetry = false\n[cloud_facts]\nenabled = false\n[providers.deepseek_cn]\nmodel = 'deepseek-v4-pro'\n",
+        )?;
+        let (addr, state, server) = serve_fixture(config_path.clone()).await?;
+        let _shutdown = state.task_manager.shutdown_guard();
+        let client = crate::tls::reqwest_client();
+        // The active CN route resolves `[providers.deepseek_cn].model`; the
+        // runtime default_model surface must report that slot, not the primary.
+        let reported: Value = client
+            .get(format!("http://{addr}/v1/config"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(reported["default_model"], "deepseek-v4-pro");
+
+        post_json(
+            addr,
+            "/v1/config",
+            json!({ "key": "default_model", "value": "deepseek-v4-flash", "persist": true }),
+        )
+        .await?;
+        let saved: toml::Value = toml::from_str(&fs::read_to_string(&config_path)?)?;
+        assert_eq!(
+            saved["providers"]["deepseek_cn"]["model"].as_str(),
+            Some("deepseek-v4-flash")
+        );
+        assert!(
+            saved
+                .get("providers")
+                .and_then(|providers| providers.get("deepseek"))
+                .and_then(|deepseek| deepseek.get("model"))
+                .is_none(),
+            "the CN write must not create an unread primary slot: {saved}"
+        );
+
+        post_json(addr, "/v1/config/reload", json!({})).await?;
+        let reported: Value = client
+            .get(format!("http://{addr}/v1/config"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(reported["default_model"], "deepseek-v4-flash");
+        post_json(
+            addr,
+            "/v1/config",
+            json!({ "key": "default_model", "value": "auto", "persist": true }),
+        )
+        .await?;
+        post_json(addr, "/v1/config/reload", json!({})).await?;
+        let reported: Value = client
+            .get(format!("http://{addr}/v1/config"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(reported["default_model"], "auto");
+        server.abort();
+        state.task_manager.shutdown_and_wait().await?;
+        Ok(())
+    }
+}

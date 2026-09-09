@@ -1,7 +1,7 @@
-// Default allocator: mimalloc. `--features rusty-alloc` swaps it for
-// rusty_alloc (pure-Rust mimalloc v2.4.5 remake, #5872); the default build
-// is unchanged.
-#[cfg(not(feature = "rusty-alloc"))]
+// Default allocator: mimalloc. `--no-default-features --features rusty-alloc`
+// selects the Rust allocator without building the C allocator (#5872).
+// With neither feature the standard library system allocator is used.
+#[cfg(all(feature = "mimalloc-allocator", not(feature = "rusty-alloc")))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

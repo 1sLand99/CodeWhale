@@ -17,6 +17,97 @@ use super::{
     mcp_result_to_bounded_rich_tool_result, mcp_tool_adapter_for_test,
 };
 
+#[tokio::test]
+async fn shell_denial_reaches_registry_and_direct_delegation_sinks() {
+    use crate::tools::run_tool::RunTool;
+    use crate::tools::tasks::{TaskShellStartTool, TasksTool};
+    use crate::tools::terminal_session::{TerminalResetTool, TerminalRunTool, TerminalSendTool};
+    use crate::tools::test_runner::RunTestsTool;
+    use crate::tools::verifier::RunVerifiersTool;
+    let tmp = tempdir().unwrap();
+    let mut context = ToolContext::new(tmp.path());
+    context.auto_approve = true;
+    context.disallowed_tools = vec!["Bash".into()];
+    let command = "printf forbidden > denial-canary.txt";
+    let cases: Vec<(Arc<dyn ToolSpec>, Value)> = vec![
+        (Arc::new(BashTool::new("Bash")), json!({"command":command})),
+        (
+            Arc::new(BashTool::alias("exec_interact", "interact")),
+            json!({"task_id":"missing", "stdin":command, "action":"wait"}),
+        ),
+        (Arc::new(TaskShellStartTool), json!({"command":command})),
+        (
+            Arc::new(TasksTool::new("tasks")),
+            json!({"action":"gate_run", "gate":"custom", "command":command}),
+        ),
+        (
+            Arc::new(TasksTool::alias("task_gate_run", "gate_run")),
+            json!({"action":"list", "gate":"custom", "command":command}),
+        ),
+        (Arc::new(TerminalRunTool), json!({"command":command})),
+        (
+            Arc::new(TerminalSendTool),
+            json!({"session":"missing", "text":command}),
+        ),
+        (Arc::new(TerminalResetTool), json!({"session":"missing"})),
+        (
+            Arc::new(RunTool::new("Run")),
+            json!({"action":"verifiers", "commands":[{"program":"sh", "args":["-c", command]}]}),
+        ),
+        (
+            Arc::new(RunTestsTool),
+            json!({"args":"--config build.rustc=malicious"}),
+        ),
+        (
+            Arc::new(RunVerifiersTool),
+            json!({"commands":[{"program":"sh", "args":["-c",command]}]}),
+        ),
+    ];
+    for (tool, input) in cases {
+        let mut registry = ToolRegistry::new(context.clone());
+        registry.register(tool.clone());
+        for result in [
+            registry.execute_full(tool.name(), input.clone()).await,
+            tool.execute(input, &context).await,
+        ] {
+            let error = result.expect_err(tool.name());
+            assert!(
+                error.to_string().contains("disallowed-tools"),
+                "{}: {error}",
+                tool.name()
+            );
+            assert!(!tmp.path().join("denial-canary.txt").exists());
+        }
+    }
+}
+
+#[test]
+fn shell_denial_keeps_the_existing_bounded_child_read_only_exception() {
+    use crate::core::engine::tool_catalog::enforce_tool_denial;
+    use crate::worker_profile::ShellPolicy;
+    let tmp = tempdir().unwrap();
+    let mut context = ToolContext::new(tmp.path()).with_shell_policy(ShellPolicy::ReadOnly);
+    context.disallowed_tools = vec!["Bash".into()];
+    assert!(enforce_tool_denial(&context, "bash", &json!({"command":"pwd"})).is_err());
+    context = context.with_owner_agent("fixture-child", "fixture");
+    assert!(enforce_tool_denial(&context, "bash", &json!({"command":"pwd"})).is_ok());
+    for (name, input) in [
+        ("Bash", json!({"command":"pwd"})),
+        ("bash", json!({"command":"printf bad > denied"})),
+        ("bash", json!({"command":"pwd", "background":true})),
+        ("task_shell_start", json!({"command":"pwd"})),
+        (
+            "terminal/send",
+            json!({"session":"existing", "text":"pwd\n"}),
+        ),
+    ] {
+        assert!(
+            enforce_tool_denial(&context, name, &input).is_err(),
+            "{name}: {input}"
+        );
+    }
+}
+
 #[test]
 fn mcp_iserror_result_maps_to_tool_error_preserving_text() {
     // #5123-class: MCP servers report tool failure via isError on an
@@ -895,6 +986,11 @@ async fn fleet_authority_allows_scoped_file_writes_and_rejects_outside_paths() {
 async fn fleet_authority_allows_only_classifier_proven_readonly_bash() {
     let tmp = tempdir().expect("tempdir");
     std::fs::create_dir(tmp.path().join("src")).expect("src");
+    std::fs::write(
+        tmp.path().join("src/evidence.txt"),
+        "first\nsecond\nthird\n",
+    )
+    .expect("inspection fixture");
     let registry = ToolRegistryBuilder::new()
         .with_shell_tools()
         .build(readonly_scout_context(tmp.path(), true));
@@ -906,6 +1002,7 @@ async fn fleet_authority_allows_only_classifier_proven_readonly_bash() {
         "rg needle src",
         "gh issue list --limit 10",
         "gh issue view 5287 --json title,state",
+        "sed -n '2,3p' src/evidence.txt",
     ] {
         enforce_tool_authority(
             "Bash",
@@ -922,6 +1019,24 @@ async fn fleet_authority_allows_only_classifier_proven_readonly_bash() {
         .expect("bounded read-only Bash survives machine authority");
     assert!(result.success, "{}", result.content);
 
+    #[cfg(unix)]
+    for name in ["bash", "Bash"] {
+        let result = registry
+            .execute_full(name, json!({"command": "sed -n '2,3p' src/evidence.txt"}))
+            .await
+            .expect("numeric sed inspection survives machine authority");
+        assert!(result.success, "{}", result.content);
+        assert!(
+            result.content.contains("second\nthird"),
+            "{}",
+            result.content
+        );
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("src/evidence.txt")).expect("fixture"),
+            "first\nsecond\nthird\n"
+        );
+    }
+
     for command in [
         "touch src/no.txt",
         "git checkout -- src/lib.rs",
@@ -932,6 +1047,23 @@ async fn fleet_authority_allows_only_classifier_proven_readonly_bash() {
         "gh issue view 5287 > issue.txt",
         "gh issue view 5287 &",
         "bash -lc 'git status'",
+        "sed -i -n '2p' src/evidence.txt",
+        "sed -n '2p' src/evidence.txt -i",
+        "sed -n '2p' src/evidence.txt -e 'w src/no.txt'",
+        "sed -n '2p' src/evidence.txt -f src/evidence.txt",
+        "sed -n 'w src/no.txt' src/evidence.txt",
+        "sed -n 'e touch src/no.txt' src/evidence.txt",
+        "sed -n 's/first/changed/w src/no.txt' src/evidence.txt",
+        "sed -n '2p' $(touch src/no.txt)",
+        "sed -n '2p' src/evidence.txt > src/no.txt",
+        "sed -n '2p' src/evidence.txt && touch src/no.txt",
+        "sed -n '2p' src/evidence.txt | head -n 1",
+        "sed -n '2p' src/evidence.txt | gh issue list",
+        "gh issue list | sed -n '2p'",
+        "npm view codewhale",
+        "find src -name '*.rs'",
+        "find src -delete",
+        "awk '1' src/evidence.txt",
     ] {
         let error = registry
             .execute_full("Bash", json!({"action": "run", "command": command}))
@@ -952,6 +1084,78 @@ async fn fleet_authority_allows_only_classifier_proven_readonly_bash() {
     .expect_err("mutation authority must not imply shell authority")
     .to_string();
     assert!(error.contains("does not grant read-only shell"), "{error}");
+}
+
+#[test]
+fn fleet_authority_sed_inspection_preserves_policy_boundaries() {
+    let tmp = tempdir().expect("tempdir");
+    let context = readonly_scout_context(tmp.path(), false);
+    let registry = ToolRegistryBuilder::new().with_shell_tools().build(context);
+    for name in ["bash", "Bash"] {
+        let shell = registry.get(name).expect("shell tool");
+        let input = if name == "bash" {
+            json!({"command": "sed -n '300,400p' src/lib.rs", "timeout": 10})
+        } else {
+            json!({"action": "run", "command": "sed -n '300,400p' src/lib.rs", "timeout_ms": 10_000})
+        };
+        enforce_tool_authority(name, &input, shell.as_ref(), registry.context())
+            .expect("local numeric sed inspection needs no network grant");
+        assert!(
+            !shell.is_read_only_for(&input),
+            "parent classification stays strict"
+        );
+        assert!(
+            !shell.supports_parallel_for(&input),
+            "parallel policy stays strict"
+        );
+        assert_eq!(
+            shell.approval_requirement_for(&input),
+            ApprovalRequirement::Required
+        );
+
+        let mut denied = registry.context().clone();
+        denied.disallowed_tools = vec!["Bash".into()];
+        assert!(enforce_tool_authority(name, &input, shell.as_ref(), &denied).is_err());
+        assert!(
+            enforce_tool_authority(name, &input, shell.as_ref(), &scoped_context(tmp.path()))
+                .is_err(),
+            "write authority does not grant shell authority"
+        );
+        assert!(
+            enforce_tool_authority(
+                name,
+                &input,
+                shell.as_ref(),
+                &readonly_verifier_context(tmp.path())
+            )
+            .is_err(),
+            "shell-less evidence authority stays shell-less"
+        );
+        for field in [
+            json!({"background": true}),
+            json!({"tty": true}),
+            json!({"interactive": true}),
+            json!({"stdin": ""}),
+            json!({"action": "wait"}),
+            json!({"action": "interact"}),
+            json!({"action": "cancel"}),
+            json!({"action": 3}),
+            json!({"task_id": "shell_1"}),
+            json!({"persist": true}),
+            json!({"sandbox_permissions": "danger-full-access", "justification": "test"}),
+        ] {
+            let mut rejected = input.clone();
+            rejected
+                .as_object_mut()
+                .unwrap()
+                .extend(field.as_object().unwrap().clone());
+            assert!(
+                enforce_tool_authority(name, &rejected, shell.as_ref(), registry.context())
+                    .is_err(),
+                "{name}: {rejected}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -1802,6 +2006,165 @@ fn a_builder_upgrade_replaces_the_tool_instead_of_registering_it_twice() {
             .any(|tool| tool.name() == "apply_patch"),
         "the upgrade still adds apply_patch"
     );
+    let tmp = tempdir().unwrap();
+    let warnings = capture_registration_warnings(|| {
+        let registry = builder.build(ToolContext::new(tmp.path()));
+        assert!(registry.contains("File"));
+        assert!(registry.contains("apply_patch"));
+    });
+    assert!(warnings.is_empty(), "normal File composition: {warnings}");
+}
+
+fn capture_registration_warnings(action: impl FnOnce()) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut output = tempfile::tempfile().unwrap();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(std::sync::Mutex::new(output.try_clone().unwrap()))
+        .finish();
+    tracing::subscriber::with_default(subscriber, action);
+    output.seek(SeekFrom::Start(0)).unwrap();
+    let mut warnings = String::new();
+    output.read_to_string(&mut warnings).unwrap();
+    warnings
+}
+
+#[test]
+fn registration_collisions_name_both_origins_and_preserve_replacement() {
+    use crate::safe_label::SafeLabel;
+    use crate::tools::file_tool::FileTool;
+    let tmp = tempdir().unwrap();
+    let mut registry = ToolRegistryBuilder::new()
+        .with_file_tools()
+        .build(ToolContext::new(tmp.path()));
+    let mut previous_origin = std::any::type_name::<FileTool>().to_string();
+    for source in ["first", "second"] {
+        // Same basename and registered name, different actual plugin origins.
+        let directory = tmp.path().join(source);
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("tool.sh");
+        std::fs::write(&path, format!("# name: File\n# description: {source}\n")).unwrap();
+        let _before = registry.to_api_tools();
+        let warnings = capture_registration_warnings(|| registry.load_plugins(&directory));
+        let replacement_origin = format!(
+            "plugin script tool.sh ({})",
+            SafeLabel::identifier(&path.to_string_lossy())
+        );
+        assert_eq!(warnings.lines().count(), 1, "{warnings}");
+        assert!(
+            warnings.contains("Overwriting existing tool: File"),
+            "{warnings}"
+        );
+        assert!(
+            warnings.contains(&format!("previous_origin={previous_origin:?}")),
+            "{warnings}"
+        );
+        assert!(
+            warnings.contains(&format!("replacement_origin={replacement_origin:?}")),
+            "{warnings}"
+        );
+        assert!(!warnings.contains(&tmp.path().to_string_lossy().to_string()));
+        let installed = registry.get("File").unwrap();
+        assert_eq!(installed.description(), source);
+        assert!(
+            installed
+                .capabilities()
+                .contains(&ToolCapability::RequiresApproval)
+        );
+        assert_eq!(
+            registry
+                .to_api_tools()
+                .iter()
+                .find(|tool| tool.name == "File")
+                .unwrap()
+                .description,
+            source,
+            "replacement still invalidates the catalog cache"
+        );
+        previous_origin = replacement_origin;
+    }
+}
+
+#[test]
+fn registration_adapter_origins_are_bounded_and_exclude_execution_payloads() {
+    use crate::tools::dynamic::RuntimeDynamicTool;
+    use crate::tools::plugin::tool_from_override;
+    use codewhale_protocol::runtime::DynamicToolSpec;
+    let tmp = tempdir().unwrap();
+    let hostile = format!(
+        "\u{1b}[31m\nhttps://private.invalid/token?{}",
+        "x".repeat(500)
+    );
+    let command = "do-not-log-command";
+    let argument = "do-not-log-argument";
+    let schema_payload = "do-not-log-schema";
+    let cases: Vec<(Arc<dyn ToolSpec>, &str)> = vec![
+        (
+            Arc::new(RuntimeDynamicTool::new(DynamicToolSpec {
+                name: hostile.clone(),
+                namespace: Some(hostile.clone()),
+                description: command.into(),
+                input_schema: json!({"description":schema_payload}),
+                defer_loading: false,
+            })),
+            "runtime dynamic namespace sha256:",
+        ),
+        (
+            Arc::new(super::McpToolAdapter {
+                name: hostile.clone(),
+                server_name: Some("plugin-4-demo-server_with_underscores".into()),
+                tool: crate::mcp::McpTool {
+                    name: hostile.clone(),
+                    description: Some(command.into()),
+                    input_schema: json!({"description":schema_payload}),
+                },
+                pool: Arc::new(tokio::sync::Mutex::new(crate::mcp::McpPool::new(
+                    crate::mcp::McpConfig::default(),
+                ))),
+            }),
+            "MCP server plugin-4-demo-server_with_underscores, tool sha256:",
+        ),
+        (
+            tool_from_override(
+                &hostile,
+                &ToolOverride::Command {
+                    command: command.into(),
+                    args: Some(vec![argument.into()]),
+                },
+                tmp.path(),
+            )
+            .unwrap(),
+            "config [tools.overrides.sha256:",
+        ),
+    ];
+    for (replacement, expected_origin) in cases {
+        let mut registry = ToolRegistry::new(ToolContext::new(tmp.path()));
+        registry.register(make_test_tool(&hostile));
+        let warnings = capture_registration_warnings(|| registry.register(replacement.clone()));
+        assert_eq!(warnings.lines().count(), 1, "{warnings}");
+        assert!(
+            warnings.contains("Overwriting existing tool: sha256:"),
+            "{warnings}"
+        );
+        assert!(warnings.contains(expected_origin), "{warnings}");
+        assert!(warnings.len() < 600, "{warnings}");
+        for excluded in [
+            &hostile,
+            command,
+            argument,
+            schema_payload,
+            "https://private.invalid",
+            "\u{1b}",
+        ] {
+            assert!(
+                !warnings.contains(excluded),
+                "unexpected payload: {warnings}"
+            );
+        }
+        assert!(Arc::ptr_eq(&registry.get(&hostile).unwrap(), &replacement));
+    }
 }
 
 /// Regression probe for the fleet-52663788 class of provider 400

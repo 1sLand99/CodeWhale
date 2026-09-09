@@ -37,8 +37,9 @@ filtered out of a child's catalog only when the depth budget is spent —
 grandchildren. The removed `agent_open`/`agent_eval`/`agent_close` lifecycle
 tools are gone from every registry, parent and child alike.
 
-`agent` launches detached background work: cancelling the parent turn stops the
-parent wait path, but it does not kill already-opened child runs.
+`agent` children are owned by the current parent turn by default. Ending or
+cancelling that turn parks its foreground descendants. Explicit `detached=true`
+starts background work with an independent cancellation token.
 
 This doc covers the role taxonomy and current compatibility controls. The active
 orchestration surface is `agent`; see the sub-agent guidance in
@@ -384,17 +385,47 @@ provider's resolved fanout, depth, and timeout profile.
 
 ## Advertised agent-tool fields (v0.9.9)
 
-The model-facing `agent` tool schema advertises exactly **12 fields**
-(#5324, #5123):
+The model-facing `agent` tool schema includes lifecycle, scope and per-task
+routing controls (#5915, #5955):
 
 `action`, `prompt`, `type`, `profile`, `name`, `agent_id`, `message`,
-`until`, `detached`, `worktree`, `write_roots`, `resume_from`
+`until`, `detached`, `worktree`, `write_roots`, `resume_from`, `model`,
+`model_strength`, `thinking`
 
 plus the action-discriminated `dependentSchemas` tree (`start` requires
 `prompt`; `message`/`followup` require a target and `message`; `peek`/
 `interrupt`/`cancel` require a target). The schema change is part of the
 pinned prompt prefix, so upgrading re-fills the provider KV prefix once per
 session (docs/CACHE.md; accepted at the v0.9.9 boundary).
+
+`agent(action="roster")` reports each built-in role's resolved provider, model,
+reasoning effort, known route limits and capability provenance. It uses the
+same resolver as execution. An explicit saved profile wins first, followed by
+a manual role pin in the current configuration, then a unique saved member
+pinning that semantic role. Conflicting task `model` or `model_strength` choices
+fail before admission. For an unpinned role, per-task `model` precedes
+`model_strength`, then inherited role defaults and the session route.
+When a Pod is selected, the `models` rows list its exact routes in saved order.
+Use a listed `provider/model` selector for a task on an unpinned role; the session
+model remains allowed. Off-list choices fail with the allowed routes, and a bare
+model shared by multiple providers requires an exact selector. Without selected
+models, current-provider overrides and `model_strength` retain their behavior;
+foreign-provider requests fail. These choices do not change child authority.
+
+The `profiles` rows expose saved members from the existing selected Fleet or
+trusted config/personal/workspace/plugin layers, with bounded identities and the
+same route/cost evidence. `profile="bug-hunter"` loads that member's instructions,
+role, provider/model pin and depth limit. Conflicting type or model requests are
+refused; explicit `thinking` overrides the saved tier. Missing providers, revoked
+plugin authority and disabled project profiles fail before child admission.
+Discovery never creates a profile or enrolls a model. These identity choices use
+the existing child lifecycle; a saved profile alone does not create a continuing
+Bot conversation or a computer lease.
+
+Cost classes describe current uncached text input/output rates, not the total
+price of a future task. Missing or routing-dependent prices remain unknown;
+subscription/local routes are labelled not money metered. Discovery makes no
+provider request and reports reachability as unverified.
 
 **Parse-accepted but unadvertised (compat).** The following inputs were
 removed from the advertised schema but remain accepted for saved transcripts,
@@ -407,8 +438,6 @@ intersects them with live policy:
 - delegation compatibility: `max_depth`, `maxDepth`, or `max_spawn_depth`;
   values are restricted to 0 through the Runtime hard ceiling of 8. New
   model-authored calls inherit the operator's `[subagents] max_depth` instead.
-- routing: `model`, `model_strength`, `thinking` (a `profile` pins route and
-  thinking tier; without one the child inherits the operator model)
 - workspace/isolation: `workspace_policy`, `write_authority`, `fork_context`,
   `cwd`, `worktree_path`, `worktree_branch`, `worktree_base`
 - spawn contract: `deliberate`, `dependencies`, `acceptance`,
@@ -462,9 +491,11 @@ instead of opening more agents into a spent pool.
 
 ## Per-role models (#3018)
 
-Children can run on a different model than the parent. Two config surfaces
-feed the same override map (`[subagents.models]` keys win on conflict, keys
-are case-insensitive):
+Children can run on a different model than the parent. Structured role pins,
+the legacy model map, and convenience keys feed one override map. Structured
+`[subagents.roles.<role>]` entries win over `[subagents.models]`, which wins over
+the convenience keys. Keys are case-insensitive; within the structured table,
+a canonical role key wins over its legacy alias:
 
 ```toml
 [subagents]
@@ -478,7 +509,25 @@ custom_model   = "deepseek-v4-pro"     # custom
 [subagents.models]
 # Free-form role → model map; any role alias accepted by agent works.
 builder = "deepseek-v4-pro"
+
+[subagents.roles.reviewer]
+model = "deepseek/deepseek-v4-pro"
 ```
+
+These are manual pins for direct and Workflow `agent` starts. A task may restate
+the same model or exact provider/model pair, but cannot change the pin with
+`model` or `model_strength`. An explicit saved profile takes precedence over a
+manual role pin. A type-only start also selects a unique saved role pin when
+there is no manual override; ambiguous saved roles fail instead of choosing one.
+Durable Fleet runs retain their selected member's frozen route.
+
+Structured role pins accept `provider/model`, preserving the configured provider's
+exact identity and the complete model suffix. Unknown providers, empty pairs,
+and cross-provider `auto` choices fail before admission. A bare structured model
+inherits the session provider. For a namespaced model, qualify it explicitly,
+for example `openrouter/deepseek/deepseek-v4-pro`. Legacy scalar and
+`[subagents.models]` values keep their full provider-owned id, including slashes;
+they do not change providers.
 
 The v0.9.x convenience keys `explorer_model`, `awaiter_model`, and
 `review_model` remain accepted as deprecated aliases so existing config files
@@ -510,9 +559,11 @@ network router and keep children on the session model.
 
 ## Per-profile provider routes (#3965)
 
-`[subagents.models]` changes the child model within the active provider. To pin
-a child to a different provider, use a fleet/AgentProfile and pass it to the
-model-facing `agent` tool with `profile`. The profile's explicit `provider` +
+`[subagents.models]` changes the child model within the active provider. A slash
+in that legacy input does not grant another provider. To pin a different provider,
+use a structured `[subagents.roles.<role>]` declaration as above, or use a
+fleet/AgentProfile and select it with `profile` or its unique saved role.
+The profile's explicit `provider` +
 `model` fields win over the parent session route; omitting `provider` preserves
 the existing inherit behavior.
 

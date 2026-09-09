@@ -119,6 +119,44 @@ impl SettingDef {
     }
 }
 
+const NOTIFICATION_SOUNDS: &[SettingOption] = &[
+    SettingOption::new("legacy", "ConfigChoiceNotificationLegacy", ""),
+    SettingOption::new("off", "ConfigValueOff", ""),
+    SettingOption::new("whale", "ConfigChoiceNotificationWhale", ""),
+    SettingOption::new("bell", "ConfigChoiceNotificationBell", ""),
+    SettingOption::new("beep", "ConfigChoiceNotificationBell", ""),
+    SettingOption::new("file", "ConfigChoiceNotificationFile", ""),
+];
+
+const NOTIFICATION_COMPLETION_SOUNDS: &[SettingOption] = &[
+    SettingOption::new("off", "ConfigValueOff", ""),
+    SettingOption::new("whale", "ConfigChoiceNotificationWhale", ""),
+    SettingOption::new("bell", "ConfigChoiceNotificationBell", ""),
+    SettingOption::new("beep", "ConfigChoiceNotificationBell", ""),
+    SettingOption::new("file", "ConfigChoiceNotificationFile", ""),
+];
+
+const NOTIFICATION_CONDITIONS: &[SettingOption] = &[
+    SettingOption::new("always", "ConfigChoiceNotificationAlways", ""),
+    SettingOption::new("unfocused", "ConfigChoiceNotificationUnfocused", ""),
+    SettingOption::new("never", "ConfigChoiceNotificationNever", ""),
+];
+
+const NOTIFICATION_METHODS: &[SettingOption] = &[
+    SettingOption::new("auto", "", ""),
+    SettingOption::new("off", "", ""),
+    SettingOption::new("osc9", "", ""),
+    SettingOption::new("bel", "", ""),
+    SettingOption::new("kitty", "", ""),
+    SettingOption::new("ghostty", "", ""),
+];
+
+const NOTIFICATION_SUBAGENTS: &[SettingOption] = &[
+    SettingOption::new("off", "", ""),
+    SettingOption::new("final-only", "", ""),
+    SettingOption::new("always", "", ""),
+];
+
 const ON_OFF: &[SettingOption] = &[];
 
 const TELEMETRY: &[SettingOption] = &[
@@ -468,6 +506,17 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
         ui(TAB_APPEARANCE, "display", "", "ConfigHintHelpExpandGroups"),
     ),
     def(
+        "contextual_tips",
+        SettingKind::Bool(ON_OFF),
+        "true",
+        ui(
+            TAB_APPEARANCE,
+            "display",
+            "ConfigLabelContextualTips",
+            "ConfigHintContextualTips",
+        ),
+    ),
+    def(
         "pin_last_prompt",
         SettingKind::Bool(ON_OFF),
         "true",
@@ -774,6 +823,215 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
             "workflow",
             "ConfigLabelWorkflow",
             "ConfigHintWorkflow",
+        ),
+    ),
+    def(
+        "notifications.quiet",
+        SettingKind::Bool(ON_OFF),
+        "false",
+        ui(
+            TAB_WORK,
+            "workflow",
+            "ConfigLabelNotificationQuiet",
+            "ConfigHintNotificationPolicy",
+        ),
+    ),
+    def(
+        "notifications.sound",
+        SettingKind::Enum(NOTIFICATION_SOUNDS),
+        "legacy",
+        ui(
+            TAB_WORK,
+            "workflow",
+            "ConfigLabelNotificationSound",
+            "ConfigHintNotificationSound",
+        ),
+    ),
+    def(
+        "notifications.condition",
+        SettingKind::Enum(NOTIFICATION_CONDITIONS),
+        "unfocused",
+        ui(
+            TAB_WORK,
+            "workflow",
+            "ConfigLabelNotificationCondition",
+            "ConfigHintNotificationPolicy",
+        ),
+    ),
+    def(
+        "notifications.method",
+        SettingKind::Enum(NOTIFICATION_METHODS),
+        "auto",
+        ui(
+            TAB_WORK,
+            "workflow",
+            "ConfigLabelNotificationMethod",
+            "ConfigHintNotificationPolicy",
+        ),
+    ),
+    def(
+        "notifications.threshold_secs",
+        SettingKind::Int,
+        "30",
+        ui(
+            TAB_WORK,
+            "workflow",
+            "ConfigLabelNotificationThreshold",
+            "ConfigHintNotificationPolicy",
+        ),
+    ),
+    def(
+        "notifications.include_summary",
+        SettingKind::Bool(ON_OFF),
+        "false",
+        ui(
+            TAB_WORK,
+            "workflow",
+            "ConfigLabelNotificationSummary",
+            "ConfigHintNotificationPolicy",
+        ),
+    ),
+    def(
+        "notifications.subagent_completion",
+        SettingKind::Enum(NOTIFICATION_SUBAGENTS),
+        "final-only",
+        ui(
+            TAB_WORK,
+            "workflow",
+            "ConfigLabelNotificationSubagents",
+            "ConfigHintNotificationPolicy",
+        ),
+    ),
+    def(
+        "notifications.events.turn-complete",
+        SettingKind::Bool(ON_OFF),
+        "true",
+        ui(
+            TAB_WORK,
+            "workflow",
+            "ConfigLabelNotificationTurnComplete",
+            "ConfigHintNotificationPolicy",
+        ),
+    ),
+    def(
+        "notifications.events.subagent-terminal",
+        SettingKind::Bool(ON_OFF),
+        "true",
+        ui(
+            TAB_WORK,
+            "workflow",
+            "ConfigLabelNotificationSubagentTerminal",
+            "ConfigHintNotificationPolicy",
+        ),
+    ),
+    def(
+        "notifications.events.approval-needed",
+        SettingKind::Bool(ON_OFF),
+        "true",
+        ui(
+            TAB_WORK,
+            "workflow",
+            "ConfigLabelNotificationApprovalNeeded",
+            "ConfigHintNotificationPolicy",
+        ),
+    ),
+    def(
+        "notifications.events.input-needed",
+        SettingKind::Bool(ON_OFF),
+        "true",
+        ui(
+            TAB_WORK,
+            "workflow",
+            "ConfigLabelNotificationInputNeeded",
+            "ConfigHintNotificationPolicy",
+        ),
+    ),
+    def(
+        "notifications.events.elevation-needed",
+        SettingKind::Bool(ON_OFF),
+        "true",
+        ui(
+            TAB_WORK,
+            "workflow",
+            "ConfigLabelNotificationElevationNeeded",
+            "ConfigHintNotificationPolicy",
+        ),
+    ),
+    def(
+        "notifications.events.model-notify",
+        SettingKind::Bool(ON_OFF),
+        "true",
+        ui(
+            TAB_WORK,
+            "workflow",
+            "ConfigLabelNotificationModelNotify",
+            "ConfigHintNotificationPolicy",
+        ),
+    ),
+    def(
+        "notifications.completion_sound",
+        SettingKind::Enum(NOTIFICATION_COMPLETION_SOUNDS),
+        "off",
+        ui(
+            TAB_WORK,
+            "workflow",
+            "ConfigLabelNotificationCompletionSound",
+            "ConfigHintNotificationLegacy",
+        ),
+    ),
+    def(
+        "notifications.sound_file",
+        SettingKind::String,
+        "",
+        ui(
+            TAB_WORK,
+            "workflow",
+            "ConfigLabelNotificationSoundFile",
+            "ConfigHintNotificationSound",
+        ),
+    ),
+    def(
+        "notifications.event_sound.enabled",
+        SettingKind::Bool(ON_OFF),
+        "false",
+        ui(
+            TAB_WORK,
+            "workflow",
+            "ConfigLabelNotificationEventSoundEnabled",
+            "ConfigHintNotificationLegacy",
+        ),
+    ),
+    def(
+        "notifications.event_sound.events",
+        SettingKind::String,
+        "[\"turn-complete\", \"approval-needed\"]",
+        ui(
+            TAB_WORK,
+            "workflow",
+            "ConfigLabelNotificationEventSoundEvents",
+            "ConfigHintNotificationLegacy",
+        ),
+    ),
+    def(
+        "notifications.event_sound.min_interval_ms",
+        SettingKind::Int,
+        "2000",
+        ui(
+            TAB_WORK,
+            "workflow",
+            "ConfigLabelNotificationEventSoundInterval",
+            "ConfigHintNotificationPolicy",
+        ),
+    ),
+    def(
+        "notifications.event_sound.quiet",
+        SettingKind::Bool(ON_OFF),
+        "false",
+        ui(
+            TAB_WORK,
+            "workflow",
+            "ConfigLabelNotificationEventSoundQuiet",
+            "ConfigHintNotificationLegacy",
         ),
     ),
     // ── tools & MCP ─────────────────────────────────────────────────────

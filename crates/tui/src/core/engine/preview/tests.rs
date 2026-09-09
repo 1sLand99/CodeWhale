@@ -962,6 +962,7 @@ async fn assert_preview_matches_first_wire_body(
             AppMode::Agent,
             production_route,
             compaction,
+            crate::cost_status::RuntimeUsageBatch::default(),
             goal_objective,
             None,
             goal_status,
@@ -978,6 +979,8 @@ async fn assert_preview_matches_first_wire_body(
             None,
             verbosity,
             UserInputProvenance::ExternalUser,
+            Vec::new(),
+            None,
         )
         .await;
 
@@ -1926,6 +1929,7 @@ async fn provider_reported_usage_is_unavailable_until_a_response_reports_it() {
             AppMode::Agent,
             production_route,
             compaction,
+            crate::cost_status::RuntimeUsageBatch::default(),
             None,
             None,
             GoalStatus::Active,
@@ -1942,6 +1946,8 @@ async fn provider_reported_usage_is_unavailable_until_a_response_reports_it() {
             None,
             None,
             UserInputProvenance::ExternalUser,
+            Vec::new(),
+            None,
         )
         .await;
 

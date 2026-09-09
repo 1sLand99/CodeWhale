@@ -90,14 +90,10 @@ pub(super) fn description() -> &'static str {
     })
 }
 
+// Interpreter syntax lives on the command parameter. Repeating it in the
+// tool description adds the same bytes to every active request.
 pub(super) fn foreground_description() -> &'static str {
-    static DESCRIPTION: OnceLock<String> = OnceLock::new();
-    DESCRIPTION.get_or_init(|| {
-        format!(
-            "{} Execute a shell command in the workspace and return stdout and stderr. Output keeps the last 2000 lines or 50KB. An optional timeout is expressed in seconds; when omitted the command is killed after 120 seconds, so pass an explicit timeout for work expected to take longer. In Ask, after a sandbox denial, retry the exact command once with sandbox_permissions (the narrowest wider mode that suffices) and a one-sentence justification; the approval prompt asks the user.",
-            runtime_command_guidance()
-        )
-    })
+    "Execute a shell command in the workspace and return stdout and stderr. Output keeps the last 2000 lines or 50KB. An optional timeout is expressed in seconds; when omitted the command is killed after 120 seconds, so pass an explicit timeout for work expected to take longer. In Ask, after a sandbox denial, retry the exact command once with sandbox_permissions (the narrowest wider mode that suffices) and a one-sentence justification; the approval prompt asks the user."
 }
 
 #[cfg(test)]

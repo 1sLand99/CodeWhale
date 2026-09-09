@@ -2776,6 +2776,80 @@ fn test_connection(transport: Box<dyn McpTransport>) -> McpConnection {
     }
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn execute_timeout_after_partial_stdio_response_does_not_corrupt_next_call() -> Result<()> {
+    use serde_json::{Value, json};
+    struct SharedStdio(Arc<tokio::sync::Mutex<StdioTransport>>);
+    #[async_trait::async_trait]
+    impl McpTransport for SharedStdio {
+        async fn send(&mut self, bytes: Vec<u8>) -> Result<()> {
+            self.0.lock().await.send(bytes).await
+        }
+        async fn recv(&mut self) -> Result<Vec<u8>> {
+            self.0.lock().await.recv().await
+        }
+    }
+    let dir = tempfile::tempdir()?;
+    let requests = dir.path().join("requests.jsonl");
+    let ready = dir.path().join("ready");
+    let script = r#"
+printf '%s' '{"jsonrpc":"2.0","id":"1","result":'
+: > "$2"
+IFS= read -r first
+printf '%s\n' "$first" >> "$1"
+IFS= read -r second
+printf '%s\n' "$second" >> "$1"
+printf '%s\n' 'null}' '{"jsonrpc":"2.0","id":"2","result":{"ok":true}}'
+IFS= read -r keep_open
+"#;
+    let mut config = test_server_config();
+    config.args = vec![
+        "-c".into(),
+        script.into(),
+        "cw-partial-frame-fixture".into(),
+        requests.display().to_string(),
+        ready.display().to_string(),
+    ];
+    let transport = Arc::new(tokio::sync::Mutex::new(StdioTransport::spawn(
+        "partial-frame",
+        "sh",
+        &config,
+        tokio_util::sync::CancellationToken::new(),
+    )?));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !ready.exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await?;
+    let mut connection = test_connection(Box::new(SharedStdio(Arc::clone(&transport))));
+    let error = connection
+        .call_tool("first", json!({}), 1)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("timed out"), "{error:#}");
+    assert_eq!(
+        transport.lock().await.pending_line,
+        br#"{"jsonrpc":"2.0","id":"1","result":"#
+    );
+    assert!(connection.is_ready());
+    assert_eq!(
+        connection.call_tool("second", json!({}), 5).await?,
+        json!({"ok": true})
+    );
+    let sent = fs::read_to_string(requests)?;
+    let sent = sent
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    assert_eq!(sent.len(), 2, "neither request may be replayed");
+    assert_eq!(sent[0]["id"], "1");
+    assert_eq!(sent[1]["id"], "2");
+    transport.lock().await.shutdown().await;
+    Ok::<_, anyhow::Error>(())
+}
+
 fn json_frame(value: serde_json::Value) -> Vec<u8> {
     serde_json::to_vec(&value).unwrap()
 }
@@ -4688,6 +4762,7 @@ async fn stdio_transport_shutdown_terminates_child() {
         child: Arc::new(tokio::sync::Mutex::new(child)),
         stdin,
         reader: tokio::io::BufReader::new(stdout),
+        pending_line: Vec::new(),
         stderr_tail: StderrTail::new(),
         authority_cancel_watch: None,
         _reviewed_launch: None,
@@ -4816,6 +4891,7 @@ async fn stdio_transport_recv_error_includes_stderr_tail() {
         child: Arc::new(tokio::sync::Mutex::new(child)),
         stdin,
         reader: tokio::io::BufReader::new(stdout),
+        pending_line: Vec::new(),
         stderr_tail,
         authority_cancel_watch: None,
         _reviewed_launch: None,

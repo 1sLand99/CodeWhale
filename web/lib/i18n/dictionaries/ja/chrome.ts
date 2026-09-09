@@ -82,7 +82,7 @@ export const chrome: ChromeDict = {
   themeTitle: "ドキュメントのテーマ · 自動 / ライト / ダーク",
 
   footerTagline:
-    "あなたのモデルを、いっしょに、より強く。オープンソース・ランタイムのドキュメント、ソース、コミュニティ。",
+    "選んだモデルで作りたいものを形にし、日々の作業を自動化できます。",
   footerProduct: "製品",
   footerProject: "プロジェクト",
   footerDocs: "ドキュメント",

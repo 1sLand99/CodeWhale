@@ -461,6 +461,10 @@ fn structural_url_authority_omits_every_secret_capable_component() {
     for sentinel in sentinels {
         assert!(!authority.contains(sentinel));
     }
+    assert_eq!(
+        structural_url_authority("http://[::1]:9000/private?token=review-secret"),
+        "http://[::1]:9000"
+    );
 }
 
 #[test]

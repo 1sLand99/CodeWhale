@@ -1,9 +1,11 @@
-<!-- source: README.md sha256:3cc3ffc9b995 -->
+<!-- source: README.md sha256:a446e3921085 -->
 # Codewhale
 
-Codewhale es un agente de programación de código abierto para tu terminal, desarrollado en Rust y mejorado públicamente junto con las personas que lo usan.
+Codewhale es un agente de código abierto que lee tu proyecto, edita archivos, ejecuta comandos y comprueba su trabajo con un modelo alojado o local que tú eliges. Empieza con una tarea en la terminal. Para un trabajo más grande, asigna partes del trabajo a agentes con distintos modelos y roles.
 
-![Codewhale ejecutándose en una terminal](assets/screenshot.webp)
+![Codewhale ejecutándose en una terminal](web/public/codewhale-tui-171acee.png)
+
+*Vista previa de la terminal de una compilación de desarrollo de v0.9.12.*
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [繁體中文](README.zh-TW.md) · [हिन्दी](README.hi.md) · [Türkçe](README.tr.md) · [Italiano](README.it.md) · [Polski](README.pl.md) · [العربية](README.ar.md) · [Català](README.ca.md)
 
@@ -21,15 +23,17 @@ curl -fsSL https://codewhale.net/install.sh | sh
 "$HOME/.local/bin/codewhale"
 ```
 
+El instalador selecciona la última versión publicada. El [registro de cambios](CHANGELOG.md) también describe la versión candidata aún no publicada de la próxima versión; esos cambios no se incluyen en las descargas publicadas hasta que la versión esté disponible.
+
 En Windows, descarga el instalador o archivo correspondiente de [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases/latest). Para actualizar una instalación directa existente, ejecuta `codewhale update`, o `codewhale update --check` para consultar sin instalar. El actualizador muestra la ruta del ejecutable y conserva las compilaciones más recientes. npm y Cargo son opciones secundarias; consulta la [guía de instalación](docs/INSTALL.md) para migrar desde un gestor de paquetes y configurar PATH.
 
-La primera vez que se ejecuta, Codewhale te ayuda a conectar un proveedor o a seguir sin conexión. También admite Cargo, Docker, Nix, Scoop, archivos precompilados, Android/Termux y un espejo de CNB. Consulta la [guía de instalación](docs/INSTALL.md).
+La primera vez que se ejecuta, Codewhale te ayuda a conectar un proveedor o a configurar Codewhale sin conexión. Las respuestas requieren un modelo alojado o local conectado. Codewhale también admite npm y Cargo como opciones secundarias de distribución, además de Docker, Nix, Scoop, Android/Termux y un espejo opcional de CNB. Las instalaciones existentes gestionadas por paquetes reciben instrucciones de migración. Consulta la [ayuda de instalación y PATH](docs/INSTALL.md).
 
 El completado con Tab se configura con un comando por shell — `codewhale completion bash|zsh|fish|powershell|elvish`. Consulta el [completado de shell](docs/INSTALL.md#8-shell-completions).
 
 ## Uso
 
-Habla con Codewhale como hablarías con alguien de tu equipo:
+Abre una terminal en la carpeta de tu proyecto y ejecuta `codewhale`. Elige tu proveedor con `/provider` y tu modelo con `/model`. Después, describe una tarea concreta:
 
 ```text
 Fix the failing tests and explain what changed.
@@ -41,16 +45,24 @@ También puedes ejecutar una tarea sin abrir la TUI:
 codewhale exec "fix the failing tests and explain what changed"
 ```
 
-Codewhale puede leer tu repositorio, editar archivos, ejecutar comandos, revisar los resultados y seguir trabajando para alcanzar un objetivo. Tú decides cuánto acceso darle.
+Codewhale puede leer tu repositorio, editar archivos, ejecutar comandos, revisar los resultados y seguir trabajando para alcanzar un objetivo. Usa `/mode plan` para explorar sin modificar archivos ni ejecutar comandos de shell, y `/mode work` cuando quieras que haga cambios. Presiona `Shift+Tab` para elegir Ask, Auto-Review o Full Access; la [guía de modos y permisos](docs/MODES.md) explica qué permite cada opción.
 
-## Interfaz gráfica
+## Terminal, aplicaciones y Computer Use
 
-¿Prefieres una interfaz gráfica? La extensión CodeWhale for VS Code, mantenida por la comunidad, envuelve al mismo agente en la barra lateral de VS Code — chat, conversaciones por hilos, diffs en vivo y gestión de tareas sobre la misma Runtime API, para que las sesiones se mantengan sincronizadas con la terminal. Instálala desde el [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=HengQuWorld.brotherwhale-vscode); el código fuente está en [GitHub](https://github.com/HengQuWorld/CodeWhale-VSCode).
+La terminal y los clientes gráficos se conectan al Runtime de Codewhale, que ejecuta el agente y sus herramientas:
+
+- **Terminal:** `codewhale` abre la interfaz interactiva; `codewhale exec` ejecuta una tarea desde un script o un trabajo de CI.
+- **Navegador local:** `codewhale web` abre el [cliente web local](docs/WEB.md) incluido, que usa el mismo runtime.
+- **Aplicaciones web y de escritorio de Codewhale:** entornos de trabajo gráficos en desarrollo. Su disponibilidad se indica en la [página del producto](https://codewhale.net/en/product).
+
+**Computer Use agrega herramientas para observar otras aplicaciones e interactuar con ellas.** El plugin está incluido en el código fuente actual. Revisa el acceso que solicita y habilítalo antes de usarlo; los permisos del sistema operativo y los requisitos de la plataforma siguen siendo necesarios. Consulta la [guía de Computer Use](crates/tui/plugins/computer-use/README.md) incluida y la [configuración de plugins](docs/PLUGINS.md).
+
+Para VS Code, la extensión CodeWhale mantenida por la comunidad se conecta al Runtime local desde una barra lateral. Instálala desde el [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=HengQuWorld.brotherwhale-vscode); el código fuente está en [GitHub](https://github.com/HengQuWorld/CodeWhale-VSCode).
 
 ## Por qué Codewhale
 
-- **Usa el modelo que prefieras.** Conecta proveedores alojados o modelos locales mediante Ollama, vLLM o SGLang. Cambia de proveedor y modelo con `/model`.
-- **Mantén el control.** Plan es de solo lectura. Ask, Auto-Review y Full Access hacen visible el comportamiento de las aprobaciones. `/undo` revierte el último turno y `/restore` devuelve el espacio de trabajo a una instantánea anterior.
+- **Elige tus modelos.** Conecta proveedores alojados o modelos locales mediante Ollama, vLLM o SGLang. Usa `/provider` para cambiar de proveedor y `/model` para elegir un modelo.
+- **Mantén el control.** Revisa las acciones propuestas y los cambios que producen en los archivos. La configuración de aprobaciones determina cuándo se necesita una revisión; Full Access sigue respetando los límites obligatorios de las políticas. `/undo` y `/restore` ayudan a recuperar cambios del espacio de trabajo.
 - **Mantén organizado el trabajo de larga duración.** Guarda sesiones, establece un `/goal` duradero, revisa los flujos de trabajo antes de ejecutarlos y coordina agentes sin convertir sus instrucciones internas en parte de tu conversación.
 - **Amplía el agente que ya tienes.** Conecta servidores MCP y habilidades, configura hooks y conserva los roles de los agentes como archivos legibles en tu proyecto o configuración personal.
 
@@ -69,10 +81,11 @@ Lee el [orden de autorización](docs/AUTHORIZATION_ORDER.md) para conocer la jer
 - [MCP](docs/MCP.md), [hooks](docs/HOOKS.md) y [configuración](docs/CONFIGURATION.md)
 - [Cliente web local](docs/WEB.md)
 - [Toda la documentación](docs)
+- [Estructura del repositorio y guía de contribución](CONTRIBUTING.md#project-structure)
 
 ## Únete a la comunidad
 
-Codewhale mejora cuando las personas lo usan, informan lo que no funciona bien y ayudan a corregirlo. Si falta un proveedor, un flujo de trabajo resulta incómodo o la interfaz de terminal se interpone en tu camino, [abre un issue](https://github.com/Hmbown/CodeWhale/issues). Si sabes cómo mejorarlo, [abre un pull request](CONTRIBUTING.md). Las primeras contribuciones son bienvenidas y quienes contribuyen conservan el crédito por el trabajo que se incorpora.
+**Recibimos con gusto reportes de errores, ideas de funciones y pull requests**, tanto si llevas meses usando Codewhale como si lo pruebas por primera vez. Si falta un proveedor, un flujo de trabajo resulta incómodo o la interfaz de terminal te estorba, [abre un issue](https://github.com/Hmbown/CodeWhale/issues/new/choose) o [envía un pull request](CONTRIBUTING.md) para que podamos mejorarlo juntos. Las primeras contribuciones son bienvenidas y quienes contribuyen conservan el crédito por el trabajo que se incorpora.
 
 Únete a [Discord](https://discord.gg/37gfS3ksug), o agrega a Hunter en WeChat (`hunterbown`) y pide entrar al grupo Whale Brothers.
 

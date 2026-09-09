@@ -22,6 +22,7 @@ use crate::models::DIRECT_KIMI_K3_MAX_OUTPUT_TOKENS;
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ContextWindowSource {
     Configured,
+    UserDeclared,
     ProviderReported,
     StaticKimiCodeSafeFloor,
     Catalog,
@@ -37,8 +38,9 @@ impl ContextWindowSource {
     /// Every rung, in precedence order. The name-suffix hint sits between
     /// catalog data and the conservative fallback: any concrete fact about
     /// the route beats a naming convention.
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::Configured,
+        Self::UserDeclared,
         Self::ProviderReported,
         Self::StaticKimiCodeSafeFloor,
         Self::Catalog,
@@ -50,6 +52,7 @@ impl ContextWindowSource {
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Configured => "configured",
+            Self::UserDeclared => "user declared",
             Self::ProviderReported => "provider-reported",
             Self::StaticKimiCodeSafeFloor => "static Kimi Code safe floor",
             Self::Catalog => "catalog",
@@ -73,7 +76,10 @@ impl ContextWindowSource {
     /// #5441).
     #[must_use]
     pub(crate) const fn is_verified(self) -> bool {
-        !matches!(self, Self::NameSuffixHint | Self::Fallback)
+        !matches!(
+            self,
+            Self::NameSuffixHint | Self::Fallback | Self::UserDeclared
+        )
     }
 
     /// Suffix every rendered window carries: verified rungs stay bare,
@@ -398,6 +404,7 @@ pub(crate) fn validate_unpinned_model_provider(
 /// Resolve a provider-less fixed model to the provider's exact wire id before
 /// child admission. This shares the runtime resolver used by Fleet receipts,
 /// including aggregator alias translation, without making a live request.
+#[cfg(test)]
 pub(crate) fn resolve_unpinned_model_candidate(
     provider: ApiProvider,
     model: &str,
@@ -418,6 +425,35 @@ pub(crate) fn resolve_unpinned_model_candidate(
 /// Code bare-K3 endpoint, only at the documented 1M entitlement, and only
 /// while fresh; this prevents generic Moonshot or stale metadata from being
 /// inherited by a membership-plan route.
+/// Resolve a manual selection from the App's loaded, non-secret metadata
+/// snapshot. This shares the same scoped resolver and limit precedence as
+/// config-backed runtime selection, without loading credentials while typing.
+pub(crate) fn resolve_declared_model_candidate(
+    provider: ApiProvider,
+    identity: &str,
+    model: &str,
+    base_url: &str,
+    context_window: Option<u32>,
+    models: &[codewhale_config::catalog::configured::ConfiguredModel],
+) -> Result<RouteCandidateResolution, String> {
+    let resolver = RouteResolver::new().with_configured_models(
+        models,
+        identity,
+        provider.kind().unwrap_or_default(),
+        base_url,
+    );
+    resolve_route_candidate_with_catalog_resolver(
+        provider,
+        Some(model),
+        None,
+        Some(base_url.into()),
+        context_window,
+        None,
+        &resolver,
+        false,
+    )
+}
+
 pub(crate) fn resolve_route_candidate_with_context_metadata(
     provider: ApiProvider,
     model_selector: Option<&str>,
@@ -426,13 +462,34 @@ pub(crate) fn resolve_route_candidate_with_context_metadata(
     context_window_override: Option<u32>,
     provider_reported_context: Option<ProviderReportedKimiCodeContext>,
 ) -> Result<RouteCandidateResolution, String> {
+    resolve_route_candidate_with_catalog_resolver(
+        provider,
+        model_selector,
+        saved_provider_model,
+        base_url_override,
+        context_window_override,
+        provider_reported_context,
+        &RouteResolver::new(),
+        false,
+    )
+}
+
+fn resolve_route_candidate_with_catalog_resolver(
+    provider: ApiProvider,
+    model_selector: Option<&str>,
+    saved_provider_model: Option<&str>,
+    base_url_override: Option<String>,
+    context_window_override: Option<u32>,
+    provider_reported_context: Option<ProviderReportedKimiCodeContext>,
+    resolver: &RouteResolver,
+    endpoint_catalog_authoritative: bool,
+) -> Result<RouteCandidateResolution, String> {
     let effective_base_url = base_url_override
         .as_deref()
         .unwrap_or_else(|| provider.default_base_url());
     if let Some(model) = model_selector.or(saved_provider_model) {
         validate_kimi_code_api_model_id(provider, effective_base_url, model)?;
     }
-    let resolver = RouteResolver::new();
     let base_request = RouteRequest {
         explicit_provider: provider.kind(),
         model_selector: model_selector.map(|model| LogicalModelRef::from(model.to_string())),
@@ -447,9 +504,14 @@ pub(crate) fn resolve_route_candidate_with_context_metadata(
     // requested through `RouteRequest::limit_overrides` on a second pass; the
     // resolver applies them BEFORE minting the final candidate and records
     // their provenance on it.
-    let resolved = resolver
-        .resolve(&base_request)
-        .map_err(|err| err.to_string())?;
+    let resolve = |request: &RouteRequest| {
+        if endpoint_catalog_authoritative {
+            resolver.resolve_with_endpoint_catalog_authority(request)
+        } else {
+            resolver.resolve(request)
+        }
+    };
+    let resolved = resolve(&base_request).map_err(|err| err.to_string())?;
     let plan = plan_limit_overrides(
         provider,
         &resolved,
@@ -459,12 +521,11 @@ pub(crate) fn resolve_route_candidate_with_context_metadata(
     let candidate = if plan.overrides.is_empty() {
         resolved
     } else {
-        resolver
-            .resolve(&RouteRequest {
-                limit_overrides: plan.overrides,
-                ..base_request
-            })
-            .map_err(|err| err.to_string())?
+        resolve(&RouteRequest {
+            limit_overrides: plan.overrides,
+            ..base_request
+        })
+        .map_err(|err| err.to_string())?
     };
     Ok(RouteCandidateResolution {
         candidate,
@@ -493,13 +554,23 @@ fn plan_limit_overrides(
     provider_reported_context: Option<ProviderReportedKimiCodeContext>,
 ) -> LimitOverridePlan {
     let mut overrides = Vec::new();
+    let declared_field = |field| {
+        resolved
+            .applied_limit_overrides()
+            .iter()
+            .rev()
+            .find(|entry| entry.field == field)
+            .is_some_and(|entry| entry.source == OverrideSource::UserModelMetadata)
+    };
     let configured = context_window_override.filter(|window| *window > 0);
     let mut effective_context = resolved.limits().context_tokens;
-    if is_exact_direct_moonshot_k3_route(
-        provider,
-        &resolved.endpoint().base_url,
-        resolved.wire_model_id().as_str(),
-    ) {
+    if !declared_field(LimitField::OutputTokens)
+        && is_exact_direct_moonshot_k3_route(
+            provider,
+            &resolved.endpoint().base_url,
+            resolved.wire_model_id().as_str(),
+        )
+    {
         overrides.push(SourcedLimitOverride {
             field: LimitField::OutputTokens,
             value: Some(u64::from(DIRECT_KIMI_K3_MAX_OUTPUT_TOKENS)),
@@ -551,6 +622,25 @@ fn plan_limit_overrides(
                 tokens: context_window,
                 source: ContextWindowSource::Configured,
             },
+        };
+    }
+
+    // Exact operator metadata wins over inferred/catalog/provider-family facts.
+    // A missing field remains unknown, with only the conservative budget floor.
+    if declared_field(LimitField::ContextTokens) {
+        let context_window = effective_context
+            .and_then(|tokens| u32::try_from(tokens).ok())
+            .map(|tokens| ContextWindowResolution {
+                tokens,
+                source: ContextWindowSource::UserDeclared,
+            })
+            .unwrap_or(ContextWindowResolution {
+                tokens: 128_000,
+                source: ContextWindowSource::Fallback,
+            });
+        return LimitOverridePlan {
+            overrides,
+            context_window,
         };
     }
 
@@ -669,16 +759,75 @@ pub(crate) fn resolve_runtime_route_for_identity(
     .then(|| model_roster().preferred_model_id().map(str::to_string))
     .flatten();
     let model_selector = model_selector.or(roster_preferred.as_deref());
-    let resolution = resolve_route_candidate_with_context_metadata(
-        provider,
-        model_selector,
-        saved_provider_model,
-        Some(route_config.deepseek_base_url()),
-        route_config.context_window_for_provider_config(provider),
-        None,
-    )?;
+    let base_url = route_config.deepseek_base_url();
+    // Every refreshed provider shares the same exact identity/endpoint gate.
+    // Codex keeps its separate authenticated account roster and protocol seam.
+    let resolution = if provider != ApiProvider::OpenaiCodex {
+        let status =
+            crate::provider_catalog_live::status_for_route(provider, &identity.key, &base_url);
+        let mut catalog = crate::provider_lake::runtime_catalog_resolver_for_identity(
+            provider,
+            Some(&identity.key),
+            &base_url,
+            status,
+        );
+        catalog.resolver = catalog.resolver.with_configured_models(
+            route_config.custom_models.as_deref().unwrap_or_default(),
+            &identity.key,
+            provider.kind().unwrap_or_default(),
+            &base_url,
+        );
+        // Local Ollama's placeholder is never an executable model. Resolve
+        // an unset/auto/placeholder selection from this endpoint's fresh roster,
+        // while preserving an explicit or saved real tag verbatim.
+        let needs_local_default = provider == ApiProvider::Ollama
+            && model_selector.or(saved_provider_model).is_none_or(|model| {
+                model.trim().eq_ignore_ascii_case("auto")
+                    || crate::config::is_unresolved_local_ollama_model(model)
+            });
+        if needs_local_default && !catalog.endpoint_catalog_authoritative {
+            return Err(
+                "Local Ollama has no fresh model catalog for this endpoint; select an explicit model or refresh its catalog."
+                    .to_string(),
+            );
+        }
+        let cloud_default = (model_selector.is_none()
+            && saved_provider_model.is_none()
+            && !catalog.endpoint_catalog_authoritative)
+            .then(|| {
+                provider.kind().and_then(|kind| {
+                    codewhale_config::cloud_facts::cloud_default_model_for_route(kind, &base_url)
+                        .map(|(model, _)| model)
+                })
+            })
+            .flatten();
+        resolve_route_candidate_with_catalog_resolver(
+            provider,
+            model_selector
+                .or(cloud_default.as_deref())
+                .filter(|_| !needs_local_default),
+            saved_provider_model.filter(|_| !needs_local_default),
+            Some(base_url),
+            route_config.context_window_for_provider_config(provider),
+            None,
+            &catalog.resolver,
+            catalog.endpoint_catalog_authoritative,
+        )?
+    } else {
+        resolve_route_candidate_with_context_metadata(
+            provider,
+            model_selector,
+            saved_provider_model,
+            Some(base_url),
+            route_config.context_window_for_provider_config(provider),
+            None,
+        )?
+    };
     let candidate = resolution.candidate;
     let model = candidate.wire_model_id().as_str().to_string();
+    if provider == ApiProvider::Ollama && crate::config::is_unresolved_local_ollama_model(&model) {
+        return Err("Local Ollama did not report an executable default model.".to_string());
+    }
     set_model_for_route(&mut route_config, provider, &model);
 
     Ok(ResolvedRuntimeRoute {
@@ -762,6 +911,58 @@ mod tests {
     use super::*;
     use crate::config::{DEFAULT_TEXT_MODEL, DEFAULT_ZAI_MODEL, ProviderConfig, ProvidersConfig};
 
+    #[test]
+    fn configured_model_limits_precede_provider_defaults() {
+        let _env = crate::test_support::lock_test_env();
+        let _catalog = crate::provider_lake::lock_live_snapshot();
+        for (provider, identity, base, model) in [
+            (
+                ApiProvider::Moonshot,
+                "moonshot",
+                "https://api.moonshot.ai/v1",
+                "kimi-k3",
+            ),
+            (
+                ApiProvider::Moonshot,
+                "moonshot",
+                "https://api.kimi.com/coding/v1",
+                "k3",
+            ),
+            (
+                ApiProvider::DeepseekCN,
+                "deepseek-cn",
+                "https://models.example.test/v1",
+                "deepseek-v4.1-flash-expires-on-0910",
+            ),
+        ] {
+            let mut config: Config = toml::from_str(include_str!(
+                "../../config/tests/fixtures/custom_models.toml"
+            ))
+            .unwrap();
+            config.provider = Some(identity.into());
+            config.base_url = None;
+            config.providers = None;
+            config.set_provider_base_url_override(provider, Some(base.into()));
+            let declaration = &mut config.custom_models.as_mut().unwrap()[0];
+            declaration.provider = identity.into();
+            declaration.base_url = base.into();
+            declaration.id = model.into();
+            let route = resolve_runtime_route(&config, provider, Some(model)).unwrap();
+            assert_eq!(route.model, model);
+            assert_eq!(route.candidate.limits().context_tokens, Some(96000));
+            assert_eq!(route.candidate.limits().output_tokens, Some(8000));
+            assert_eq!(
+                route.context_window.source,
+                ContextWindowSource::UserDeclared
+            );
+            config.custom_models.as_mut().unwrap()[0].limit = None;
+            let unknown = resolve_runtime_route(&config, provider, Some(model)).unwrap();
+            assert_eq!(unknown.candidate.limits().context_tokens, None);
+            assert_eq!(unknown.candidate.limits().output_tokens, None);
+            assert_eq!(unknown.context_window.source, ContextWindowSource::Fallback);
+        }
+    }
+
     /// Every rung keeps its own label and round-trips through it, and only
     /// the guesses read as unverified.  Two rungs sharing a label would let a
     /// guess be displayed as evidence.
@@ -781,7 +982,9 @@ mod tests {
                 source.is_verified(),
                 !matches!(
                     source,
-                    ContextWindowSource::Fallback | ContextWindowSource::NameSuffixHint
+                    ContextWindowSource::Fallback
+                        | ContextWindowSource::NameSuffixHint
+                        | ContextWindowSource::UserDeclared
                 ),
                 "{source:?} misreports whether its window rests on route evidence"
             );
@@ -1519,6 +1722,447 @@ mod tests {
         )
         .expect("a custom endpoint owns its model namespace");
         assert_eq!(custom.wire_model_id().as_str(), "deepseek-v4-pro");
+    }
+
+    fn live_catalog_offering(
+        provider: &str,
+        model: &str,
+        base_url: &str,
+    ) -> codewhale_config::catalog::CatalogOffering {
+        codewhale_config::catalog::CatalogOffering {
+            provider: provider.to_string(),
+            wire_model_id: model.to_string(),
+            endpoint_key: "chat".to_string(),
+            default_for_provider: true,
+            limit: Some(codewhale_config::models_dev::ModelsDevLimit {
+                context: Some(654_321),
+                input: Some(600_000),
+                output: Some(54_321),
+            }),
+            cost: Some(codewhale_config::models_dev::ModelsDevCost {
+                input: Some(1.25),
+                output: Some(3.5),
+                cache_read: None,
+                cache_write: None,
+            }),
+            modalities: Some(codewhale_config::models_dev::ModelsDevModalities {
+                input: vec!["text".to_string(), "image".to_string()],
+                output: vec!["text".to_string()],
+            }),
+            attachment: Some(true),
+            reasoning: Some(true),
+            tool_call: Some(true),
+            structured_output: Some(true),
+            source: codewhale_config::catalog::CatalogSource::Live {
+                base_url_fingerprint: codewhale_config::catalog::base_url_fingerprint(base_url),
+                fetched_at: codewhale_config::catalog::now_unix(),
+            },
+            ..Default::default()
+        }
+    }
+
+    fn assert_live_catalog_route_facts(route: &ResolvedRuntimeRoute) {
+        use codewhale_config::route::{CapabilityState, PricingSku};
+
+        assert_eq!(route.candidate.limits().context_tokens, Some(654_321));
+        assert_eq!(route.candidate.limits().input_tokens, Some(600_000));
+        assert_eq!(route.candidate.limits().output_tokens, Some(54_321));
+        assert_eq!(route.context_window.tokens, 654_321);
+        assert_eq!(route.context_window.source, ContextWindowSource::Catalog);
+        let capabilities = route.candidate.capabilities();
+        assert_eq!(capabilities.attachments, CapabilityState::Supported);
+        assert_eq!(capabilities.image_input, CapabilityState::Supported);
+        assert_eq!(capabilities.reasoning, CapabilityState::Supported);
+        assert_eq!(capabilities.native_tool_calls, CapabilityState::Supported);
+        assert_eq!(capabilities.structured_output, CapabilityState::Supported);
+        match route.candidate.pricing() {
+            Some(PricingSku::Token {
+                input_per_mtok,
+                output_per_mtok,
+            }) => {
+                assert_eq!(*input_per_mtok, Some(1.25));
+                assert_eq!(*output_per_mtok, Some(3.5));
+            }
+            other => panic!("expected provider-live token pricing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn live_only_openrouter_model_facts_reach_runtime_and_fail_closed_on_refresh_error() {
+        use codewhale_config::catalog::{CatalogRefreshError, ProviderCatalogDelta};
+        use codewhale_config::route::{CapabilityState, PricingSku};
+
+        let _env = crate::test_support::lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let home = tempfile::tempdir().expect("home");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+
+        let base_url = "https://synthetic.openrouter.invalid/api/v1";
+        let model = "synthetic/live-only-openrouter-model";
+        let config = Config {
+            provider: Some("openrouter".to_string()),
+            providers: Some(ProvidersConfig {
+                openrouter: ProviderConfig {
+                    base_url: Some(base_url.to_string()),
+                    model: Some(model.to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let fingerprint = codewhale_config::catalog::base_url_fingerprint(base_url);
+        crate::provider_catalog_live::record_success(ProviderCatalogDelta {
+            provider: "openrouter".to_string(),
+            base_url_fingerprint: fingerprint.clone(),
+            fetched_at: codewhale_config::catalog::now_unix(),
+            offerings: vec![live_catalog_offering("openrouter", model, base_url)],
+        });
+
+        let route = resolve_runtime_route(&config, ApiProvider::Openrouter, Some(model))
+            .expect("live-only OpenRouter route resolves");
+        assert_eq!(route.model, model);
+        assert_live_catalog_route_facts(&route);
+
+        crate::provider_catalog_live::record_failure(
+            "openrouter",
+            &fingerprint,
+            CatalogRefreshError::Network,
+        );
+        let failed = resolve_runtime_route(&config, ApiProvider::Openrouter, Some(model))
+            .expect("wire id remains routable after a failed refresh");
+        assert!(!failed.candidate.limits().has_known_limit());
+        assert_eq!(
+            failed.candidate.capabilities().image_input,
+            CapabilityState::Unknown
+        );
+        assert!(matches!(
+            failed.candidate.pricing(),
+            Some(PricingSku::UnknownOrStale)
+        ));
+
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+    }
+
+    #[test]
+    fn unrelated_live_roster_cannot_change_direct_model_ownership() {
+        use codewhale_config::catalog::ProviderCatalogDelta;
+
+        let _env = crate::test_support::lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+        let config = Config {
+            provider: Some("deepseek".into()),
+            ..Default::default()
+        };
+        let model = "unlisted-future-direct-model";
+        let before = resolve_runtime_route(&config, ApiProvider::Deepseek, Some(model)).unwrap();
+        let endpoint = "https://other-provider.catalog.invalid/v1";
+        let ticket = crate::provider_catalog_live::begin_refresh_for_identity(
+            ApiProvider::Telecomjs,
+            "telecomjs",
+            endpoint,
+        );
+        crate::provider_catalog_live::record_success_if_current(
+            &ticket,
+            ProviderCatalogDelta {
+                provider: "telecomjs".into(),
+                base_url_fingerprint: codewhale_config::catalog::base_url_fingerprint(endpoint),
+                fetched_at: codewhale_config::catalog::now_unix(),
+                offerings: vec![live_catalog_offering("telecomjs", model, endpoint)],
+            },
+        );
+        let after = resolve_runtime_route(&config, ApiProvider::Deepseek, Some(model)).unwrap();
+        assert_eq!(after.model, before.model);
+        assert_eq!(
+            after.candidate.endpoint().base_url,
+            before.candidate.endpoint().base_url
+        );
+        assert_eq!(
+            after.candidate.endpoint().endpoint_key,
+            before.candidate.endpoint().endpoint_key
+        );
+        assert_eq!(
+            after.candidate.endpoint().protocol,
+            before.candidate.endpoint().protocol
+        );
+        assert_eq!(after.candidate.limits(), before.candidate.limits());
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+    }
+
+    #[test]
+    fn every_refreshed_provider_uses_fresh_exact_endpoint_route_facts() {
+        use codewhale_config::catalog::{CatalogRefreshError, ProviderCatalogDelta};
+
+        let _env = crate::test_support::lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+        for provider in [
+            ApiProvider::Ollama,
+            ApiProvider::Codewhale,
+            ApiProvider::Concentrate,
+            ApiProvider::Telecomjs,
+            ApiProvider::Edenai,
+        ] {
+            let identity = provider.as_str();
+            let endpoint = format!("https://{identity}.catalog.invalid/v1");
+            let model = "synthetic-live-model";
+            let mut config = Config {
+                provider: Some(identity.into()),
+                ..Default::default()
+            };
+            config.provider_config_for_mut(provider).base_url = Some(endpoint.clone());
+            let ticket = crate::provider_catalog_live::begin_refresh_for_identity(
+                provider, identity, &endpoint,
+            );
+            let fingerprint = codewhale_config::catalog::base_url_fingerprint(&endpoint);
+            assert!(
+                crate::provider_catalog_live::record_success_if_current(
+                    &ticket,
+                    ProviderCatalogDelta {
+                        provider: identity.into(),
+                        base_url_fingerprint: fingerprint.clone(),
+                        fetched_at: codewhale_config::catalog::now_unix(),
+                        offerings: vec![live_catalog_offering(identity, model, &endpoint)],
+                    }
+                )
+                .is_some()
+            );
+            let route = resolve_runtime_route(&config, provider, Some(model)).unwrap();
+            assert_eq!(route.candidate.endpoint().base_url, endpoint);
+            assert_live_catalog_route_facts(&route);
+            let default = resolve_runtime_route(&config, provider, None).unwrap();
+            assert_eq!(
+                default.model, model,
+                "{identity} default must come from its own roster"
+            );
+            let mut other = config.clone();
+            other.provider_config_for_mut(provider).base_url =
+                Some("https://other.catalog.invalid/v1".into());
+            let unowned = resolve_runtime_route(&other, provider, Some(model)).unwrap();
+            assert!(
+                !unowned.candidate.limits().has_known_limit(),
+                "{identity} must not reuse another endpoint's limits"
+            );
+            crate::provider_catalog_live::record_failure_if_current(
+                &ticket,
+                identity,
+                &fingerprint,
+                CatalogRefreshError::Network,
+            );
+            let failed = resolve_runtime_route(&config, provider, Some(model)).unwrap();
+            assert!(
+                !failed.candidate.limits().has_known_limit(),
+                "{identity} failed refresh must revoke executable live facts"
+            );
+        }
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+    }
+
+    #[test]
+    fn ollama_default_requires_fresh_endpoint_tags_and_preserves_explicit_choices() {
+        use codewhale_config::catalog::{CatalogRefreshError, ProviderCatalogDelta};
+
+        let _env = crate::test_support::lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+        let endpoint = "http://localhost:11451/v1";
+        let mut config = Config {
+            provider: Some("ollama".into()),
+            ..Default::default()
+        };
+        config.provider_config_for_mut(ApiProvider::Ollama).base_url = Some(endpoint.into());
+        for selector in [None, Some("auto"), Some("unknown")] {
+            assert!(resolve_runtime_route(&config, ApiProvider::Ollama, selector).is_err());
+        }
+        assert_eq!(
+            resolve_runtime_route(&config, ApiProvider::Ollama, Some("chosen:tag"))
+                .unwrap()
+                .model,
+            "chosen:tag"
+        );
+        let fingerprint = codewhale_config::catalog::base_url_fingerprint(endpoint);
+        let ticket = crate::provider_catalog_live::begin_refresh_for_identity(
+            ApiProvider::Ollama,
+            "ollama",
+            endpoint,
+        );
+        let offerings = ["zeta:tag", "alpha:tag"]
+            .into_iter()
+            .map(|model| {
+                let mut row = live_catalog_offering("ollama", model, endpoint);
+                row.default_for_provider = false; // Real Ollama tags have no default flag.
+                row
+            })
+            .collect();
+        crate::provider_catalog_live::record_success_if_current(
+            &ticket,
+            ProviderCatalogDelta {
+                provider: "ollama".into(),
+                base_url_fingerprint: fingerprint.clone(),
+                fetched_at: codewhale_config::catalog::now_unix(),
+                offerings,
+            },
+        );
+        for selector in [None, Some("auto"), Some("unknown")] {
+            assert_eq!(
+                resolve_runtime_route(&config, ApiProvider::Ollama, selector)
+                    .unwrap()
+                    .model,
+                "alpha:tag"
+            );
+        }
+        config.set_provider_model_override(ApiProvider::Ollama, Some("saved:tag".into()));
+        assert_eq!(
+            resolve_runtime_route(&config, ApiProvider::Ollama, None)
+                .unwrap()
+                .model,
+            "saved:tag"
+        );
+        assert_eq!(
+            resolve_runtime_route(&config, ApiProvider::Ollama, Some("explicit:tag"))
+                .unwrap()
+                .model,
+            "explicit:tag"
+        );
+        config.set_provider_model_override(ApiProvider::Ollama, Some("unknown".into()));
+        assert_eq!(
+            resolve_runtime_route(&config, ApiProvider::Ollama, None)
+                .unwrap()
+                .model,
+            "alpha:tag"
+        );
+        crate::provider_catalog_live::record_failure_if_current(
+            &ticket,
+            "ollama",
+            &fingerprint,
+            CatalogRefreshError::Network,
+        );
+        assert!(resolve_runtime_route(&config, ApiProvider::Ollama, None).is_err());
+        assert_eq!(
+            resolve_runtime_route(&config, ApiProvider::Ollama, Some("explicit:tag"))
+                .unwrap()
+                .model,
+            "explicit:tag"
+        );
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+    }
+
+    #[test]
+    fn named_baseten_live_facts_reach_exact_custom_runtime_without_leaking() {
+        use codewhale_config::catalog::ProviderCatalogDelta;
+
+        let _env = crate::test_support::lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let home = tempfile::tempdir().expect("home");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+
+        let base_url = codewhale_config::BASETEN_BASE_URL;
+        let model = "synthetic-live-baseten-model";
+        let mut custom = std::collections::HashMap::new();
+        custom.insert(
+            codewhale_config::BASETEN_TEMPLATE_ID.to_string(),
+            ProviderConfig {
+                kind: Some("openai-compatible".to_string()),
+                base_url: Some(base_url.to_string()),
+                model: Some(model.to_string()),
+                ..Default::default()
+            },
+        );
+        let config = Config {
+            provider: Some(codewhale_config::BASETEN_TEMPLATE_ID.to_string()),
+            providers: Some(ProvidersConfig {
+                custom,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        crate::provider_catalog_live::record_success(ProviderCatalogDelta {
+            provider: codewhale_config::BASETEN_TEMPLATE_ID.to_string(),
+            base_url_fingerprint: codewhale_config::catalog::base_url_fingerprint(base_url),
+            fetched_at: codewhale_config::catalog::now_unix(),
+            offerings: vec![live_catalog_offering(
+                codewhale_config::BASETEN_TEMPLATE_ID,
+                model,
+                base_url,
+            )],
+        });
+
+        let route = resolve_runtime_route(&config, ApiProvider::Custom, Some(model))
+            .expect("named Baseten route resolves");
+        assert_eq!(route.identity.key, codewhale_config::BASETEN_TEMPLATE_ID);
+        assert_eq!(route.model, model);
+        assert_live_catalog_route_facts(&route);
+
+        let alias_identity = "base-ten";
+        let alias_model = "synthetic-alias-baseten-model";
+        let mut alias_custom = std::collections::HashMap::new();
+        alias_custom.insert(
+            alias_identity.to_string(),
+            ProviderConfig {
+                kind: Some("openai-compatible".to_string()),
+                base_url: Some(base_url.to_string()),
+                model: Some(alias_model.to_string()),
+                ..Default::default()
+            },
+        );
+        let alias_config = Config {
+            provider: Some(alias_identity.to_string()),
+            providers: Some(ProvidersConfig {
+                custom: alias_custom,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        crate::provider_catalog_live::record_success(ProviderCatalogDelta {
+            provider: alias_identity.to_string(),
+            base_url_fingerprint: codewhale_config::catalog::base_url_fingerprint(base_url),
+            fetched_at: codewhale_config::catalog::now_unix(),
+            offerings: vec![live_catalog_offering(alias_identity, alias_model, base_url)],
+        });
+        let alias_route =
+            resolve_runtime_route(&alias_config, ApiProvider::Custom, Some(alias_model))
+                .expect("Baseten schema alias route resolves");
+        assert_eq!(alias_route.identity.key, alias_identity);
+        assert_live_catalog_route_facts(&alias_route);
+        assert!(
+            crate::provider_lake::catalog_offering_for_model_identity(
+                ApiProvider::Custom,
+                Some(codewhale_config::BASETEN_TEMPLATE_ID),
+                alias_model,
+            )
+            .is_none(),
+            "a Baseten schema alias must not share another exact table's live roster"
+        );
+
+        let unrelated = custom_config("https://other-compatible.invalid/v1", model);
+        let unrelated_route = resolve_runtime_route(&unrelated, ApiProvider::Custom, Some(model))
+            .expect("another compatible provider remains routable");
+        assert!(!unrelated_route.candidate.limits().has_known_limit());
+        assert_eq!(
+            unrelated_route.candidate.capabilities(),
+            codewhale_config::route::RouteCapabilities::default()
+        );
+
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
     }
 
     fn custom_config(base_url: &str, model: &str) -> Config {

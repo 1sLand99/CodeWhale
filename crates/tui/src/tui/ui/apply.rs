@@ -4,7 +4,8 @@
 //! Moved verbatim out of `ui.rs`.
 
 use super::observer_hooks::{
-    execute_subagent_observer_hook, surface_observer_hook_submission_failure,
+    execute_subagent_observer_hook, subagent_failure_notice,
+    surface_observer_hook_submission_failure,
 };
 use super::task_projection::refresh_active_task_panel;
 use super::*;
@@ -34,7 +35,18 @@ pub(crate) fn apply_agent_spawned_status_and_observer(
 ) {
     let label = app.ensure_agent_label(agent_id);
     codewhale_telemetry::session_counters().bump(codewhale_telemetry::Counter::SubagentSpawn);
-    app.status_message = Some(format!("{label} starting: {prompt_summary}"));
+    app.push_status_toast_record(
+        StatusToast::new(
+            format!(
+                "{} · {label} · {}",
+                app.tr(MessageId::SubagentsStatusRunning),
+                bound_agent_activity_text(prompt_summary)
+            ),
+            StatusToastLevel::Info,
+            Some(4_000),
+        )
+        .for_event(format!("subagent-start:{agent_id}")),
+    );
     if let Err(error) =
         execute_subagent_observer_hook(app, HookEvent::SubagentSpawn, agent_id, "prompt", prompt)
     {
@@ -47,13 +59,30 @@ pub(crate) fn apply_agent_complete_status_and_observer(
     app: &mut App,
     agent_id: &str,
     result: &str,
-    terminal_verb: &str,
+    status: &SubAgentStatus,
 ) {
     let label = app.agent_display_label(agent_id);
-    app.status_message = Some(format!(
-        "{label} {terminal_verb}: {}",
-        bound_agent_activity_text(result)
-    ));
+    let level = match status {
+        SubAgentStatus::Completed => StatusToastLevel::Success,
+        SubAgentStatus::Failed(_) | SubAgentStatus::BudgetExhausted => StatusToastLevel::Error,
+        SubAgentStatus::Interrupted(_) | SubAgentStatus::Cancelled => StatusToastLevel::Warning,
+        SubAgentStatus::Running => StatusToastLevel::Info,
+    };
+    let failure = subagent_failure_notice(result);
+    let detail = failure.as_deref().unwrap_or(result);
+    let message = format!(
+        "{} · {label} · {}",
+        app.tr(notifications::subagent_terminal_label(status)),
+        bound_agent_activity_text(detail)
+    );
+    if level == StatusToastLevel::Error {
+        app.set_sticky_status(message, level, Some(App::STICKY_ERROR_TTL_MS));
+    } else {
+        app.push_status_toast_record(
+            StatusToast::new(message, level, Some(5_000))
+                .for_event(format!("subagent-terminal:{agent_id}")),
+        );
+    }
     if let Err(error) =
         execute_subagent_observer_hook(app, HookEvent::SubagentComplete, agent_id, "result", result)
     {
@@ -222,11 +251,13 @@ pub(crate) fn apply_engine_error_to_app(
             Ok(None) => "~/.codewhale/config.toml".to_string(),
             Err(error) => error.to_string(),
         };
-        app.status_message = Some(
+        app.push_status_toast(
             tr(app.ui_locale, MessageId::OnboardApiKeyRejectedEnv)
                 .replace("{provider}", provider.as_str())
                 .replace("{env}", &provider.env_vars_label())
                 .replace("{path}", &config_path),
+            StatusToastLevel::Error,
+            Some(App::STICKY_ERROR_TTL_MS),
         );
         return;
     }
@@ -241,11 +272,14 @@ pub(crate) fn apply_engine_error_to_app(
     {
         let position = app.fallback_chain_position().unwrap_or(0);
         let total = app.fallback_chain_len();
-        app.status_message = Some(format!(
-            "Switched to {} (fallback {position}/{}) after recoverable provider error.",
-            app.api_provider.as_str(),
-            total.saturating_sub(1)
-        ));
+        app.push_status_toast(
+            app.tr(MessageId::NotificationProviderFallback)
+                .replace("{provider}", app.api_provider.as_str())
+                .replace("{position}", &position.to_string())
+                .replace("{total}", &total.saturating_sub(1).to_string()),
+            StatusToastLevel::Warning,
+            Some(8_000),
+        );
         return;
     }
     if !recoverable {
@@ -718,13 +752,49 @@ async fn present_operate_board(app: &mut App, config: &Config) {
             return;
         }
     };
-    let credentials = crate::operate::operate_credentials_present(config);
+    let Some(automations) = app
+        .runtime_services
+        .automations
+        .as_ref()
+        .map(std::sync::Arc::clone)
+    else {
+        app.add_message(crate::tui::history::HistoryCell::System {
+            content: "Operate keep-alive not installed: automation service unavailable".to_string(),
+        });
+        return;
+    };
+    let model = app.model_selection_for_persistence();
+    let identity = match config.resolve_persisted_provider_identity(
+        Some(app.api_provider.as_str()),
+        app.provider_id_for_persistence(),
+    ) {
+        Ok(identity) => identity,
+        Err(error) => {
+            app.add_message(crate::tui::history::HistoryCell::System {
+                content: format!("Operate keep-alive not installed: {error}"),
+            });
+            return;
+        }
+    };
+    let (lead_model, credentials) = {
+        let manager = automations.lock().await;
+        match crate::operate::keepalive_readiness(&manager, config, Some((&identity, &model))) {
+            Ok(credentials) => credentials,
+            Err(error) => {
+                app.add_message(crate::tui::history::HistoryCell::System {
+                    content: format!("Operate keep-alive not installed: {error}"),
+                });
+                return;
+            }
+        }
+    };
     let operation = match crate::operate::attach_or_start_operation(
         &store,
         &app.workspace,
         None,
         None,
         credentials,
+        &lead_model,
     ) {
         Ok(mut operation) => {
             if credentials && !operation.direction.is_empty() && operation.lead_plan.is_none() {
@@ -751,16 +821,15 @@ async fn present_operate_board(app: &mut App, config: &Config) {
         .lead_plan
         .as_ref()
         .is_some_and(|plan| !plan.slices.is_empty());
-    if let Some(automations) = app
-        .runtime_services
-        .automations
-        .as_ref()
-        .map(std::sync::Arc::clone)
     {
         let manager = automations.lock().await;
-        if let Err(error) =
-            crate::operate::upsert_keepalive(&manager, &app.workspace, needs_lead_plan)
-        {
+        if let Err(error) = crate::operate::upsert_keepalive(
+            &manager,
+            &app.workspace,
+            needs_lead_plan,
+            config,
+            Some((&identity, &model)),
+        ) {
             app.add_message(crate::tui::history::HistoryCell::System {
                 content: format!("Operate keep-alive not installed: {error}"),
             });
@@ -859,17 +928,7 @@ pub(crate) async fn apply_model_picker_choice(
     let mut resolved_model = model.clone();
     let mut route_base_url = config.deepseek_base_url();
     if !model_is_auto {
-        let saved_provider_model = config
-            .provider_config_for(app.api_provider)
-            .and_then(|provider| provider.model.as_deref());
-        match crate::route_runtime::resolve_route_candidate_with_context_metadata(
-            app.api_provider,
-            Some(&model),
-            saved_provider_model,
-            Some(config.deepseek_base_url()),
-            config.context_window_for_provider_config(app.api_provider),
-            None,
-        ) {
+        match crate::route_runtime::resolve_runtime_route(config, app.api_provider, Some(&model)) {
             Ok(resolution) => {
                 resolved_model = resolution.candidate.wire_model_id().as_str().to_string();
                 route_base_url = resolution.candidate.endpoint().base_url.clone();
@@ -1118,6 +1177,7 @@ pub(crate) async fn apply_provider_fallback_switch(
         return;
     }
     *config = *next_config;
+    app.refresh_notification_settings(config);
     app.set_provider_identity_record(target_identity);
     app.billing_presentation = crate::route_billing::for_route(config, target);
 
@@ -1203,6 +1263,26 @@ pub(super) fn reject_inline_inference_while_runtime_chat_owns_run(
         .replace("{setting}", "Codewhale Runtime");
     app.push_status_toast(notice, crate::tui::app::StatusToastLevel::Info, Some(6_000));
     true
+}
+
+pub(crate) fn apply_notification_update(
+    app: &mut App,
+    config: &mut Config,
+    update: crate::config::NotificationConfigUpdate,
+) -> Result<()> {
+    let mut notifications = config.notifications_config();
+    let setting = update.setting();
+    notifications.apply_update(update).map_err(|_| {
+        anyhow::anyhow!(
+            app.tr(MessageId::ConfigCommandInvalidValue)
+                .replace("{key}", &format!("notifications.{}", setting.key()))
+                .replace("{value}", &app.tr(MessageId::ConfigUnavailable))
+                .replace("{choices}", setting.choices())
+        )
+    })?;
+    config.notifications = Some(notifications);
+    app.refresh_notification_settings(config);
+    Ok(())
 }
 
 pub(crate) async fn apply_command_result(
@@ -1700,6 +1780,26 @@ pub(crate) async fn apply_command_result(
                     content: message.clone(),
                 });
                 app.status_message = Some(message);
+                // `/model refresh` also forces the cloud facts overlay when the
+                // (off-by-default) channel is enabled.
+                let cloud_settings = config.cloud_facts_config().settings();
+                codewhale_cloud_facts::configure(&cloud_settings);
+                if cloud_settings.enabled {
+                    let now = codewhale_config::catalog::now_unix();
+                    let cloud = match codewhale_cloud_facts::refresh(&cloud_settings, true).await {
+                        Ok(outcome) => {
+                            format!(
+                                "Cloud facts refreshed: {outcome:?} ({})",
+                                codewhale_cloud_facts::status().label(now)
+                            )
+                        }
+                        Err(err) => format!(
+                            "Cloud facts refresh failed ({err}); {}",
+                            codewhale_cloud_facts::status().label(now)
+                        ),
+                    };
+                    app.add_message(HistoryCell::System { content: cloud });
+                }
             }
             AppAction::CacheWarmup => {
                 app.status_message = Some("Warming prompt cache...".to_string());
@@ -1837,11 +1937,9 @@ pub(crate) async fn apply_command_result(
                 config.prompt_suggestion = Some(enabled);
             }
             AppAction::UpdateNotification { update } => {
-                config
-                    .notifications
-                    .get_or_insert_with(crate::config::NotificationsConfig::default)
-                    .apply_update(update);
-                let _ = crate::tui::notifications::settings(config);
+                if let Err(error) = apply_notification_update(app, config, update) {
+                    app.push_status_toast(error.to_string(), StatusToastLevel::Error, Some(6_000));
+                }
             }
             AppAction::SetAdvisorEnabled { enabled } => {
                 let _ = engine_handle.send(Op::SetAdvisorEnabled { enabled }).await;
@@ -2243,11 +2341,18 @@ pub(crate) async fn apply_command_result(
                             .list_tasks_for_owner(Some(30), None, session_id)
                             .await
                     }
-                    None => Vec::new(),
+                    None => Ok(Vec::new()),
                 };
                 refresh_active_task_panel(app, task_manager).await;
                 app.add_message(HistoryCell::System {
-                    content: format_task_list(&tasks),
+                    content: match tasks {
+                        Ok(tasks) => format_task_list(&tasks),
+                        Err(_) => crate::localization::tr(
+                            app.ui_locale,
+                            crate::localization::MessageId::TaskInventoryUnavailable,
+                        )
+                        .to_string(),
+                    },
                 });
             }
             AppAction::RemoteControl(action) => match action {
@@ -2322,23 +2427,14 @@ pub(crate) async fn apply_command_result(
                 }) {
                     Ok((new_config, validated_route)) => {
                         let new_model = validated_route.model.clone();
-                        let provider_identity = validated_route.identity.clone();
-                        let route_limits = crate::route_budget::known_route_limits(
-                            validated_route.candidate.limits(),
+                        apply_validated_profile_config(
+                            app,
+                            config,
+                            &profile,
+                            new_config,
+                            &validated_route,
                         );
-                        app.config_profile = Some(profile.clone());
-                        *config = new_config.clone();
-                        app.set_provider_identity_record(provider_identity);
-                        app.billing_presentation =
-                            crate::route_billing::for_route(config, app.api_provider);
-                        app.set_model_selection(new_model.clone());
-                        app.set_active_context_window_override(
-                            config.context_window_for_provider_config(app.api_provider),
-                        );
-                        app.active_route_limits = route_limits;
-                        app.update_model_compaction_budget();
-                        app.session.last_prompt_tokens = None;
-                        app.session.last_completion_tokens = None;
+                        crate::initialize_cloud_facts(config);
                         // Rebuild the engine with the new config so API key/model/base URL take effect.
                         let _ = engine_handle.send(Op::Shutdown).await;
                         let engine_config = build_engine_config(app, config);
@@ -2396,6 +2492,34 @@ pub(crate) async fn apply_command_result(
     }
 
     Ok(false)
+}
+
+/// Commit a successfully loaded profile and its validated route as one snapshot.
+fn apply_validated_profile_config(
+    app: &mut App,
+    config: &mut Config,
+    profile: &str,
+    next_config: Config,
+    route: &crate::route_runtime::ValidatedRuntimeRoute,
+) {
+    *config = next_config;
+    app.config_profile = Some(profile.to_string());
+    app.configured_models = config.custom_models.clone().unwrap_or_default();
+    app.refresh_notification_settings(config);
+    app.set_provider_identity_record(route.identity.clone());
+    app.billing_presentation = crate::route_billing::for_route(config, app.api_provider);
+    app.set_model_selection(route.model.clone());
+    app.set_active_context_window_override(
+        config.context_window_for_provider_config(app.api_provider),
+    );
+    app.set_active_route_resolution(
+        route.candidate.endpoint().base_url.clone(),
+        route.candidate.limits(),
+        route.context_window.source,
+    );
+    app.update_model_compaction_budget();
+    app.session.last_prompt_tokens = None;
+    app.session.last_completion_tokens = None;
 }
 
 /// Open this workspace's `.codewhale/hooks.toml` in `$EDITOR`.
@@ -2563,6 +2687,43 @@ pub(crate) fn apply_hotbar_setup_saved(
     app.needs_redraw = true;
 }
 
+pub(crate) fn settle_user_input_request(app: &mut App, tool_id: &str) {
+    app.retire_action_notices(Some(tool_id));
+    if app
+        .pending_user_input_prompt
+        .as_ref()
+        .is_some_and(|(id, _)| id == tool_id)
+    {
+        app.pending_user_input_prompt = None;
+    }
+}
+
+pub(crate) fn apply_user_input_submission_result(app: &mut App, tool_id: &str, result: Result<()>) {
+    match result {
+        Ok(()) => settle_user_input_request(app, tool_id),
+        Err(error) => {
+            tracing::warn!(tool_id, error = %error, "user input submit failed");
+            if let Some((id, request)) = app
+                .pending_user_input_prompt
+                .as_ref()
+                .filter(|(id, _)| id == tool_id)
+                .cloned()
+            {
+                app.view_stack.push(UserInputView::new(id, request));
+            }
+            app.push_status_toast_record(
+                StatusToast::new(
+                    app.tr(MessageId::NotificationInputSubmitFailed)
+                        .replace("{error}", &error.to_string()),
+                    StatusToastLevel::Error,
+                    Some(App::STICKY_ERROR_TTL_MS),
+                )
+                .for_event(format!("input-submit:{tool_id}")),
+            );
+        }
+    }
+}
+
 pub(crate) async fn apply_approval_decision(
     app: &mut App,
     engine_handle: &mut EngineHandle,
@@ -2601,7 +2762,13 @@ pub(crate) async fn apply_approval_decision(
             // decision acks "no longer pending" instead of double-answering.
             app.remote_control
                 .resolve_pending_approval(&event.tool_id, true);
-            let _ = engine_handle.approve_tool_call(event.tool_id).await;
+            if engine_handle
+                .approve_tool_call(event.tool_id.clone())
+                .await
+                .is_ok()
+            {
+                app.retire_action_notices(Some(&event.tool_id));
+            }
         }
         ReviewDecision::Denied => {
             // Cache the denial so the model retry-loop doesn't re-prompt for
@@ -2613,7 +2780,13 @@ pub(crate) async fn apply_approval_decision(
             }
             app.remote_control
                 .resolve_pending_approval(&event.tool_id, false);
-            let _ = engine_handle.deny_tool_call(event.tool_id).await;
+            if engine_handle
+                .deny_tool_call(event.tool_id.clone())
+                .await
+                .is_ok()
+            {
+                app.retire_action_notices(Some(&event.tool_id));
+            }
         }
         ReviewDecision::Abort => {
             engine_handle.cancel();
@@ -3396,6 +3569,7 @@ pub(crate) fn apply_loaded_session_with_goal(
     // provider response is rejected by `cost_status::report`.
     let _settled_old_cost_scope = crate::cost_status::close_current_scope();
     *config = *restored_route.config;
+    app.refresh_notification_settings(config);
     app.api_messages = crate::runtime_handoff::project_messages_for_restore(&session.messages);
     app.clear_history();
     app.tool_cells.clear();
@@ -3618,5 +3792,92 @@ pub(crate) fn apply_loaded_session_config_snapshot(
             &previous_workspace,
         );
     *config = next_config;
+    app.configured_models = config.custom_models.clone().unwrap_or_default();
+    crate::initialize_cloud_facts(config);
+    app.refresh_notification_settings(config);
     Ok(respawn)
+}
+
+#[cfg(test)]
+mod profile_snapshot_tests {
+    use super::*;
+
+    fn profile_fixture(model: &str, base_url: &str) -> Config {
+        let mut config: Config = toml::from_str(include_str!(
+            "../../../../config/tests/fixtures/custom_models.toml"
+        ))
+        .expect("profile fixture");
+        config.api_key = Some("profile-snapshot-local-fixture".to_string());
+        config.default_text_model = Some(model.to_string());
+        config.providers.as_mut().unwrap().deepseek.base_url = Some(base_url.to_string());
+        let declaration = &mut config.custom_models.as_mut().unwrap()[0];
+        declaration.id = model.to_string();
+        declaration.base_url = base_url.to_string();
+        config
+    }
+
+    #[test]
+    fn profile_switch_replaces_metadata_and_validated_route_snapshot() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _env = crate::test_support::lock_test_env();
+                let home = tempfile::tempdir().unwrap();
+                let _home = crate::test_support::EnvVarGuard::set(
+                    "CODEWHALE_HOME",
+                    home.path().as_os_str(),
+                );
+                let mut config = profile_fixture("old-preview", "https://old.example.test/v1");
+                let mut options = crate::test_support::test_tui_options(home.path());
+                options.model = config.default_model();
+                let mut app = App::new(options, &config);
+                assert_eq!(app.configured_models[0].id, "old-preview");
+
+                let next = profile_fixture("new-preview", "https://new.example.test/v1");
+                let route = validated_profile_default_route(&next).unwrap();
+                assert_eq!(
+                    route.context_window.source,
+                    crate::route_runtime::ContextWindowSource::UserDeclared,
+                );
+                let expected_models = next.custom_models.clone().unwrap();
+                apply_validated_profile_config(&mut app, &mut config, "new", next, &route);
+                assert_eq!(app.config_profile.as_deref(), Some("new"));
+                assert_eq!(app.configured_models, expected_models);
+                assert_eq!(app.configured_models, config.custom_models.clone().unwrap());
+                assert_eq!(app.model, "new-preview");
+                assert_eq!(
+                    app.active_route_base_url,
+                    route.candidate.endpoint().base_url
+                );
+                assert_eq!(app.active_route_limits, Some(route.candidate.limits()));
+                assert_eq!(
+                    app.active_context_window_source,
+                    route.context_window.source
+                );
+
+                let mut empty = profile_fixture("no-metadata", "https://empty.example.test/v1");
+                empty.custom_models = None;
+                let empty_route = validated_profile_default_route(&empty).unwrap();
+                apply_validated_profile_config(&mut app, &mut config, "empty", empty, &empty_route);
+                assert!(app.configured_models.is_empty());
+                assert!(config.custom_models.is_none());
+                assert_eq!(app.config_profile.as_deref(), Some("empty"));
+                assert_eq!(app.model, "no-metadata");
+                assert_eq!(
+                    app.active_route_base_url,
+                    empty_route.candidate.endpoint().base_url
+                );
+                assert_eq!(
+                    app.active_context_window_source,
+                    empty_route.context_window.source
+                );
+                assert_ne!(
+                    app.active_context_window_source,
+                    crate::route_runtime::ContextWindowSource::UserDeclared,
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 }

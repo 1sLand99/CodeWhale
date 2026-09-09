@@ -3239,6 +3239,11 @@ async fn relay_worker(
     runtime_upload_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut runtime_chat_tick = tokio::time::interval(RUNTIME_UPLOAD_RETRY_INTERVAL);
     runtime_chat_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // One deadline across loop iterations. Reconstructing `sleep(SYNC_INTERVAL)`
+    // lets the 250ms Runtime Chat tick reset poll/heartbeat/token refresh.
+    let mut sync_tick =
+        tokio::time::interval_at(tokio::time::Instant::now() + SYNC_INTERVAL, SYNC_INTERVAL);
+    sync_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut runtime_retry_delay = RUNTIME_UPLOAD_RETRY_INTERVAL;
     let mut runtime_retry_not_before = Instant::now();
 
@@ -3389,7 +3394,7 @@ async fn relay_worker(
                         .map_err(|_| "The terminal remote-control owner stopped.".to_string())?;
                 }
             }
-            () = tokio::time::sleep(SYNC_INTERVAL) => {
+            _ = sync_tick.tick() => {
                 if enrollment_needs_refresh(&enrollment) {
                     // Proactive refresh before expiry; reconnect to keep runner lease valid.
                     match refresh_enrollment(&client, enrollment.persisted.clone()).await {
@@ -4404,6 +4409,9 @@ fn parse_remote_command(value: &Value, expected_run_id: &str) -> Result<RemoteCo
     }
     match value.get("type").and_then(Value::as_str) {
         Some("prompt.request") => {
+            if value.get("images").is_some() && value.get("runtimeBindingId").is_none() {
+                return Err("Image input is unavailable for legacy remote Work; use native Runtime or Runtime Chat.".to_string());
+            }
             let exact_legacy_prompt = value.as_object().is_some_and(|record| {
                 record.len() == 4
                     && ["type", "runId", "turnId", "prompt"]
@@ -4585,7 +4593,12 @@ async fn runner_request(
             None => format!("The remote-control server rejected a request ({status})."),
         });
     }
-    read_bounded_json(response).await
+    let limit = if segments.last() == Some(&"commands") {
+        codewhale_protocol::runtime::MAX_RUNTIME_IMAGE_BODY_BYTES
+    } else {
+        MAX_RESPONSE_BYTES
+    };
+    read_bounded_json_with_limit(response, limit).await
 }
 
 async fn public_request(
@@ -4656,18 +4669,29 @@ fn sanitized_rejection_excerpt(body: &[u8]) -> Option<String> {
 }
 
 async fn read_bounded_json(response: reqwest::Response) -> Result<Value, String> {
+    read_bounded_json_with_limit(response, MAX_RESPONSE_BYTES).await
+}
+
+async fn read_bounded_json_with_limit(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<Value, String> {
     if response
         .content_length()
-        .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+        .is_some_and(|length| length > limit as u64)
     {
         return Err("Codewhale returned an oversized remote-control response.".to_string());
     }
-    let bytes = response
-        .bytes()
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|_| "Codewhale returned an unreadable response.".to_string())?;
-    if bytes.len() > MAX_RESPONSE_BYTES {
-        return Err("Codewhale returned an oversized remote-control response.".to_string());
+        .map_err(|_| "Codewhale returned an unreadable response.".to_string())?
+    {
+        if bytes.len().saturating_add(chunk.len()) > limit {
+            return Err("Codewhale returned an oversized remote-control response.".to_string());
+        }
+        bytes.extend_from_slice(&chunk);
     }
     serde_json::from_slice(&bytes)
         .map_err(|_| "Codewhale returned an invalid remote-control response.".to_string())
@@ -4981,7 +5005,10 @@ fn epoch_seconds() -> u64 {
 mod tests {
     use super::*;
     use crate::models::Role;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
     use wiremock::{
         Mock, MockServer, Request, Respond, ResponseTemplate,
         matchers::{body_json, method, path, query_param},
@@ -4990,6 +5017,18 @@ mod tests {
     #[derive(Clone, Default)]
     struct AmbiguousRuntimeResponder {
         bodies: Arc<Mutex<Vec<Value>>>,
+    }
+
+    #[derive(Clone, Default)]
+    struct ControlPollCounter {
+        hits: Arc<AtomicUsize>,
+    }
+
+    impl Respond for ControlPollCounter {
+        fn respond(&self, _request: &Request) -> ResponseTemplate {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_json(json!({ "runs": [] }))
+        }
     }
 
     impl Respond for AmbiguousRuntimeResponder {
@@ -5710,6 +5749,108 @@ mod tests {
         controller.stop_worker();
 
         assert!(!host.projection_is_claimed_for_tests("thr_claimed", 7));
+    }
+
+    #[tokio::test]
+    async fn idle_runtime_chat_ticks_cannot_starve_the_control_poll() {
+        if !cfg!(debug_assertions) {
+            return;
+        }
+        crate::tls::ensure_rustls_crypto_provider();
+        let _env = crate::test_support::lock_test_env();
+        let secrets_root = tempfile::tempdir().expect("isolated remote-control secrets");
+        let _codewhale_home =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", secrets_root.path());
+        let server = MockServer::start().await;
+        let plane = format!("{}/", server.uri().trim_end_matches('/'));
+        let _control_plane =
+            crate::test_support::EnvVarGuard::set("CWC_RUNNER_CONTROL_PLANE_BASE", &plane);
+        let base = runner_control_plane_base().expect("loopback control plane");
+        save_persisted_enrollment(&fixture_enrollment(&base).persisted)
+            .expect("persist matching enrollment");
+
+        let access_token = crate::test_support::future_test_jwt(&"a".repeat(40));
+        Mock::given(method("POST"))
+            .and(path("/api/runner/enrollments/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "enrollment": {
+                    "id": "enrollment_fixture",
+                    "userId": "account_fixture",
+                    "deviceId": "device_fixture",
+                    "runtimeVersion": "0.9.6",
+                    "runtimeCommit": "a".repeat(40),
+                    "capabilities": CAPABILITIES,
+                },
+                "credential": { "accessToken": access_token },
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/local-runners/connect"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(fixture_connection_response()))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/local-runners/runner_fixture/heartbeat"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+        let polls = ControlPollCounter::default();
+        Mock::given(method("GET"))
+            .and(path("/api/local-runners/runner_fixture/runs"))
+            .respond_with(polls.clone())
+            .mount(&server)
+            .await;
+
+        let runtime_root = tempfile::tempdir().expect("idle Runtime Chat host");
+        let host = RuntimeChatRelayHost::open(
+            crate::config::Config::default(),
+            Arc::new(crate::plugins::PluginRegistry::empty(runtime_root.path())),
+            runtime_root.path().to_path_buf(),
+            "target_fixture".to_string(),
+            "session_fixture".to_string(),
+        )
+        .expect("open idle Runtime Chat host");
+        let start = fixture_start();
+        let (_worker_tx, worker_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let worker = tokio::spawn(async move {
+            let mut phase = RelayPhase::Enrolling;
+            relay_worker(start, Some(host), worker_rx, event_tx, &mut phase).await
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match event_rx.recv().await {
+                    Some(RemoteEvent::Connected { .. }) => break,
+                    Some(RemoteEvent::Notice(_)) => {}
+                    Some(RemoteEvent::Failed(error)) => {
+                        panic!("relay worker failed before attach: {error}");
+                    }
+                    Some(RemoteEvent::FailedPreLease(error)) => {
+                        panic!("relay worker failed before attach: {error}");
+                    }
+                    Some(_) => panic!("relay worker emitted an unexpected event before attach"),
+                    None => panic!("relay worker stopped before attach"),
+                }
+            }
+        })
+        .await
+        .expect("relay worker should attach");
+
+        tokio::time::sleep(RUNTIME_UPLOAD_RETRY_INTERVAL.saturating_mul(2)).await;
+        assert_eq!(
+            polls.hits.load(Ordering::SeqCst),
+            0,
+            "the first control poll must still wait SYNC_INTERVAL while idle chat ticks fire"
+        );
+        tokio::time::sleep(SYNC_INTERVAL).await;
+        assert!(
+            polls.hits.load(Ordering::SeqCst) >= 1,
+            "idle Runtime Chat ticks must not reset the control poll"
+        );
+        worker.abort();
+        let _ = worker.await;
     }
 
     #[test]
@@ -7557,6 +7698,8 @@ mod tests {
     fn turn_complete_event() -> EngineEvent {
         EngineEvent::TurnComplete {
             usage: crate::models::Usage::default(),
+            parent_route_usage: crate::models::Usage::default(),
+            routed_usage_dropped_records: 0,
             status: TurnOutcomeStatus::Completed,
             error: None,
             tool_catalog: None,
@@ -8043,6 +8186,8 @@ mod tests {
         };
         controller.observe_engine_event(&EngineEvent::TurnComplete {
             usage: usage.clone(),
+            parent_route_usage: usage.clone(),
+            routed_usage_dropped_records: 0,
             status: TurnOutcomeStatus::Completed,
             error: None,
             tool_catalog: None,
@@ -8624,5 +8769,60 @@ mod tests {
             panic!("the UI poll hands the deferred delta to the transport");
         };
         assert_eq!(envelopes[0]["payload"]["delta"], "again");
+    }
+    #[test]
+    fn runtime_image_legacy_work_never_downgrades_to_text() {
+        let image = crate::image_attach::tests::runtime_image_fixture(1);
+        let command = json!({"type":"prompt.request","runId":"run_fixture","turnId":"turn_fixture","prompt":"look","images":[image]});
+        assert!(
+            parse_remote_command(&command, "run_fixture")
+                .unwrap_err()
+                .contains("legacy remote Work")
+        );
+        let mut text = command;
+        text.as_object_mut().unwrap().remove("images");
+        assert!(matches!(
+            parse_remote_command(&text, "run_fixture").unwrap(),
+            RemoteCommand::Prompt { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn runtime_image_command_response_has_bounded_larger_budget() {
+        use axum::{Router, routing::get};
+        let payload = serde_json::to_string(
+            &json!({"commands":[],"fixture": "x".repeat(MAX_RESPONSE_BYTES + 1)}),
+        )
+        .unwrap();
+        let app = Router::new().route(
+            "/",
+            get(move || {
+                let payload = payload.clone();
+                async move { payload }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = crate::tls::reqwest_client();
+        let url = format!("http://{addr}/");
+        assert!(
+            read_bounded_json(client.get(&url).send().await.unwrap())
+                .await
+                .is_err()
+        );
+        let parsed = read_bounded_json_with_limit(
+            client.get(&url).send().await.unwrap(),
+            codewhale_protocol::runtime::MAX_RUNTIME_IMAGE_BODY_BYTES,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            parsed["fixture"].as_str().unwrap().len(),
+            MAX_RESPONSE_BYTES + 1
+        );
+        server.abort();
     }
 }

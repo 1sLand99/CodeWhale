@@ -178,17 +178,6 @@ pub(crate) fn terminal_probe_timeout(config: &Config) -> Duration {
     Duration::from_millis(timeout_ms)
 }
 
-pub(crate) fn subagent_terminal_verb(status: &SubAgentStatus) -> &'static str {
-    match status {
-        SubAgentStatus::Completed => "completed",
-        SubAgentStatus::Interrupted(_) => "interrupted",
-        SubAgentStatus::Failed(_) => "failed",
-        SubAgentStatus::Cancelled => "cancelled",
-        SubAgentStatus::BudgetExhausted => "exhausted its budget",
-        SubAgentStatus::Running => "finished",
-    }
-}
-
 pub(crate) fn subagent_terminal_projection_from_mailbox(
     message: &MailboxMessage,
 ) -> Option<(&str, SubAgentStatus, Option<String>)> {

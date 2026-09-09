@@ -17,7 +17,8 @@ use crate::tools::subagent::{AgentWorkerStatus, CoordinationDetailProjection, Su
 use crate::tools::user_input::UserInputRequest;
 
 /// Final status for a turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TurnOutcomeStatus {
     Completed,
     Interrupted,
@@ -48,13 +49,15 @@ pub struct TurnRoute {
     /// `None` when no concrete client was installed (injected-client engines,
     /// or a client that failed to construct).
     pub receipt: Option<crate::route_receipt::TurnRouteReceipt>,
-    /// Billing evidence for the request that was actually put on the wire.
+    /// Billing evidence for a request admitted to application dispatch.
     ///
     /// `None` at `TurnStarted`: a lifecycle start is not a dispatch, and a
-    /// route that has not been sent has no billing time, no metering surface,
-    /// and no endpoint to attest. Populated exactly once, at the wire
-    /// boundary, and delivered on `RouteDispatched`. Consumers that price a
-    /// turn must treat `None` as *unknown*, never as a zero-cost turn.
+    /// route that has not reached admission has no billing time, no metering
+    /// surface, and no endpoint to attest. Populated exactly once at the
+    /// pre-permit application-dispatch boundary and delivered on
+    /// `RouteDispatched`. This does not attest network delivery or a provider
+    /// invoice-time rate. Consumers that price a turn must treat `None` as
+    /// *unknown*, never as a zero-cost turn.
     pub billing: Option<RouteBillingEnvelope>,
     /// Endpoint this turn's client was frozen against, verbatim.
     ///
@@ -92,14 +95,17 @@ pub struct TurnRoute {
 ///   it bill* — a [`crate::route_billing::DispatchedReceipt`]. They must be
 ///   readable from `TurnStarted` onward so a child turn arriving mid-flight
 ///   can be billed against the parent's frozen route.
-/// - This envelope is stamped at the **wire** boundary and answers *what was
-///   actually put on the wire, when*. A planned-but-unsent route has no
-///   metering surface and no dispatch instant, so it must be structurally
-///   absent rather than defaulted.
+/// - This envelope is stamped at the **pre-permit application-dispatch**
+///   boundary and answers *what CodeWhale admitted for provider execution,
+///   when*. It does not claim network delivery or provider invoice-time
+///   pricing. A merely planned route has no metering surface or dispatch
+///   instant, so it must be structurally absent rather than defaulted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteBillingEnvelope {
+    pub openrouter_vendor: Option<String>,
     pub billing_surface: Option<String>,
     pub endpoint_fingerprint: Option<String>,
+    pub provider_live_pricing: Option<crate::provider_catalog_live::ProviderLivePricingQuote>,
     pub billing_mode: crate::cost_status::RouteBillingMode,
     pub dispatched_at: DateTime<Utc>,
 }
@@ -115,8 +121,10 @@ impl TurnRoute {
             provider: self.provider,
             provider_identity: self.provider_identity.clone(),
             model: self.model.clone(),
+            openrouter_vendor: billing.openrouter_vendor.clone(),
             billing_surface: billing.billing_surface.clone(),
             endpoint_fingerprint: billing.endpoint_fingerprint.clone(),
+            provider_live_pricing: billing.provider_live_pricing.clone(),
             billing_mode: billing.billing_mode,
             dispatched_at: billing.dispatched_at,
         })
@@ -173,8 +181,8 @@ pub enum Event {
     },
 
     /// Workspace snapshots (undo) could not be enabled for this workspace.
-    /// Emitted once per workspace per process so the operator sees why undo
-    /// is missing and which config key turns it back on (#5930).
+    /// Emitted once per session/workspace so another session cannot consume
+    /// its notice. The disabled state also remains visible in `/status` (#5930).
     SnapshotsDisabled { workspace: String, reason: String },
     // === Streaming Events ===
     /// A new message block has started
@@ -223,7 +231,7 @@ pub enum Event {
         turn_id: String,
         created_at: DateTime<Utc>,
         /// Legacy/non-model hosts may still attach a route at start. Model
-        /// turns emit it separately at the real provider dispatch boundary.
+        /// turns emit it separately at the application dispatch boundary.
         route: Option<TurnRoute>,
     },
 
@@ -233,13 +241,23 @@ pub enum Event {
         snapshot: crate::tool_inspection::ToolInspectionSnapshot,
     },
 
-    /// Immutable billing route captured immediately before the first provider
-    /// request, after snapshots and other potentially slow pre-dispatch work.
+    /// Immutable billing route captured at CodeWhale's pre-permit application
+    /// dispatch boundary, after request preparation. This is admission-time
+    /// evidence, not proof of network delivery or provider invoice-time rates.
     RouteDispatched { turn_id: String, route: TurnRoute },
 
     /// The turn is complete (no more tool calls)
     TurnComplete {
+        /// Total usage for session/goal/token metrics, including programmatic
+        /// child calls performed inline during this turn.
         usage: Usage,
+        /// Usage served by the parent turn's frozen route only. Consumers
+        /// price this under the parent quote and price routed children from
+        /// their own receipts, avoiding double billing without subtraction.
+        parent_route_usage: Usage,
+        /// Provider calls whose execution/usage could not be receipted.
+        /// Non-zero makes cost coverage explicitly incomplete.
+        routed_usage_dropped_records: u64,
         status: TurnOutcomeStatus,
         error: Option<String>,
         /// Tool catalog sent with this turn's model request.
@@ -256,6 +274,8 @@ pub enum Event {
     /// provider never reported usage for the call — absence is honest, and
     /// fields inside `usage` stay `None` when the provider omits them.
     TurnUsage {
+        /// Primary request allowance; not a claim of provider-reported usage.
+        max_output_tokens: Option<u32>,
         usage: Usage,
         /// Wall-clock duration of this model call's stream.
         duration_ms: u64,
@@ -270,6 +290,17 @@ pub enum Event {
         /// only the stream. `None` where an individual request is not
         /// measured (for example an aggregate REPL child receipt). This is
         /// the denominator for effective session-average throughput.
+        request_ms: Option<u64>,
+    },
+
+    /// Usage telemetry for a programmatic provider call whose cost is carried
+    /// by its own routed receipt rather than the active parent route. TUI
+    /// consumers fold this into model-call metrics only; `TurnComplete.usage`
+    /// remains the authoritative total-token reconciliation.
+    RoutedTurnUsage {
+        usage: Usage,
+        duration_ms: u64,
+        first_token_ms: Option<u64>,
         request_ms: Option<u64>,
     },
 
@@ -361,6 +392,7 @@ pub enum Event {
         owner_session_id: String,
         id: String,
         prompt: String,
+        worker_status: Option<AgentWorkerStatus>,
         parent_run_id: Option<String>,
         spawn_depth: u32,
         /// Model the child runtime was actually installed with, after route
@@ -388,6 +420,11 @@ pub enum Event {
         owner_session_id: String,
         id: String,
         result: String,
+        /// Producer-owned outcome. None is a legacy receipt, never success.
+        outcome: Option<crate::tools::subagent::SubAgentStatus>,
+        parent_run_id: Option<String>,
+        spawn_depth: Option<u32>,
+        continuable: Option<bool>,
     },
 
     /// Receipt for an operator follow-up sent to a child (`Op::FollowUpSubAgent`).

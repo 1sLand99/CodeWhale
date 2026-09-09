@@ -314,8 +314,10 @@ fn chat_completions_url(base_url: &str) -> String {
 async fn post_chat_completions(
     api_key: &str,
     base_url: &str,
-    body: serde_json::Value,
+    mut body: serde_json::Value,
+    openrouter_vendor: Option<&str>,
 ) -> Result<serde_json::Value, String> {
+    crate::client::apply_openrouter_vendor(&mut body, openrouter_vendor);
     let _inference = crate::client::acquire_remote_control_inference_participant().await;
     let client = crate::tls::reqwest_client();
     let resp = client
@@ -344,8 +346,16 @@ async fn transcribe(
     api_key: &str,
     base_url: &str,
     audio_samples: &[i16],
+    openrouter_vendor: Option<&str>,
 ) -> Result<String, String> {
-    transcribe_with_model(api_key, base_url, audio_samples, ASR_MODEL).await
+    transcribe_with_model(
+        api_key,
+        base_url,
+        audio_samples,
+        ASR_MODEL,
+        openrouter_vendor,
+    )
+    .await
 }
 
 async fn transcribe_with_model(
@@ -353,6 +363,7 @@ async fn transcribe_with_model(
     base_url: &str,
     audio_samples: &[i16],
     model: &str,
+    openrouter_vendor: Option<&str>,
 ) -> Result<String, String> {
     let wav = encode_wav(audio_samples);
     let data_url = format!("data:audio/wav;base64,{}", base64_encode(&wav));
@@ -377,7 +388,7 @@ async fn transcribe_with_model(
         }
     });
 
-    let data = post_chat_completions(api_key, base_url, body).await?;
+    let data = post_chat_completions(api_key, base_url, body, openrouter_vendor).await?;
     data["choices"][0]["message"]["content"]
         .as_str()
         .map(|s| s.trim().to_string())
@@ -392,6 +403,7 @@ async fn process_voice_control(
     base_url: &str,
     audio_samples: &[i16],
     current_text: &str,
+    openrouter_vendor: Option<&str>,
 ) -> Result<String, String> {
     let wav = encode_wav(audio_samples);
     let data_url = format!("data:audio/wav;base64,{}", base64_encode(&wav));
@@ -419,7 +431,7 @@ async fn process_voice_control(
         "response_format": { "type": "json_object" }
     });
 
-    let data = post_chat_completions(api_key, base_url, body).await?;
+    let data = post_chat_completions(api_key, base_url, body, openrouter_vendor).await?;
     let content = data["choices"][0]["message"]["content"]
         .as_str()
         .ok_or_else(|| "no response content".to_string())?;
@@ -511,7 +523,7 @@ async fn transcribe_local_whisper(audio_samples: &[i16]) -> Result<String, Strin
 async fn transcribe_groq(audio_samples: &[i16]) -> Result<String, String> {
     let api_key = std::env::var("GROQ_API_KEY").map_err(|_| "GROQ_API_KEY not set".to_string())?;
     let base_url = "https://api.groq.com/openai/v1";
-    transcribe_with_model(&api_key, base_url, audio_samples, GROQ_ASR_MODEL).await
+    transcribe_with_model(&api_key, base_url, audio_samples, GROQ_ASR_MODEL, None).await
 }
 
 /// Perform a complete record + transcribe cycle with live interim display.
@@ -559,6 +571,9 @@ pub async fn capture_and_transcribe(
         .deepseek_api_key()
         .map_err(|_| tr(locale, MessageId::VoiceErrNoAuth).to_string())?;
     let base_url = config.deepseek_base_url();
+    let openrouter_vendor = config
+        .openrouter_vendor()
+        .map_err(|error| error.to_string())?;
 
     // Spark-style: show "● Recording (⌥V to finish)" + live interim in composer.
     let original_input = app.composer.input.clone();
@@ -626,7 +641,9 @@ pub async fn capture_and_transcribe(
                     .map_err(|_| String::new())
                 {
                     let url = config.deepseek_base_url();
-                    transcribe(&key, &url, &snapshot).await.unwrap_or_default()
+                    transcribe(&key, &url, &snapshot, openrouter_vendor.as_deref())
+                        .await
+                        .unwrap_or_default()
                 } else {
                     String::new()
                 }
@@ -665,17 +682,24 @@ pub async fn capture_and_transcribe(
     let text = match asr_kind.as_str() {
         "local-whisper" => match transcribe_local_whisper(&samples).await {
             Ok(v) => Ok(v),
-            Err(_) => transcribe(&api_key, &base_url, &samples).await,
+            Err(_) => transcribe(&api_key, &base_url, &samples, openrouter_vendor.as_deref()).await,
         },
         "groq" => match transcribe_groq(&samples).await {
             Ok(v) => Ok(v),
-            Err(_) => transcribe(&api_key, &base_url, &samples).await,
+            Err(_) => transcribe(&api_key, &base_url, &samples, openrouter_vendor.as_deref()).await,
         },
         _ => {
             if app.voice_control_enabled {
-                process_voice_control(&api_key, &base_url, &samples, &original_input).await
+                process_voice_control(
+                    &api_key,
+                    &base_url,
+                    &samples,
+                    &original_input,
+                    openrouter_vendor.as_deref(),
+                )
+                .await
             } else {
-                transcribe(&api_key, &base_url, &samples).await
+                transcribe(&api_key, &base_url, &samples, openrouter_vendor.as_deref()).await
             }
         }
     }
@@ -757,6 +781,55 @@ pub fn voice_control(app: &mut App) -> CommandResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn voice_requests_preserve_openrouter_vendor_pin() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{ "message": { "content": "{\"text\":\"hello\"}" } }]
+            })))
+            .expect(3)
+            .mount(&server)
+            .await;
+        let base_url = format!("{}/v1", server.uri());
+        transcribe(
+            "fixture-key",
+            &base_url,
+            &[0; 16],
+            Some("chutes/region-fixture"),
+        )
+        .await
+        .unwrap();
+        process_voice_control(
+            "fixture-key",
+            &base_url,
+            &[0; 16],
+            "existing text",
+            Some("chutes/region-fixture"),
+        )
+        .await
+        .unwrap();
+        transcribe_with_model("fixture-key", &base_url, &[0; 16], GROQ_ASR_MODEL, None)
+            .await
+            .unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 3);
+        for request in &requests[..2] {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(
+                body["provider"],
+                serde_json::json!({"order": ["chutes/region-fixture"], "allow_fallbacks": false})
+            );
+        }
+        let independent: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
+        assert!(independent.get("provider").is_none());
+    }
 
     #[test]
     fn wav_encoding_produces_valid_header() {

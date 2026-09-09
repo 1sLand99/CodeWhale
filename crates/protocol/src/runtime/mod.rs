@@ -7,6 +7,20 @@ use serde_json::Value;
 pub const RUNTIME_EVENT_ENVELOPE_SCHEMA_VERSION: u32 = 1;
 pub const RUNTIME_API_VERSION: &str = "1.0";
 
+/// Maximum JSON input (including base64 expansion) for an image turn.
+pub const MAX_RUNTIME_IMAGE_BODY_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_RUNTIME_IMAGES: usize = 10;
+pub const MAX_RUNTIME_IMAGE_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_RUNTIME_IMAGE_TOTAL_BYTES: usize = 5 * 1024 * 1024;
+
+/// Inline bytes only: neither host paths nor remote URLs confer attachment authority.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeImageInput {
+    pub mime: String,
+    pub data_base64: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeEventEnvelope {
     #[serde(default = "default_runtime_event_envelope_schema_version")]
@@ -47,6 +61,15 @@ pub struct RuntimeCapabilities {
     /// `operation_key` and returns the original turn for exact retries.
     #[serde(default)]
     pub turn_operation_idempotency: bool,
+    /// Read-only exact accepted-turn lookup by thread and operation key.
+    #[serde(default)]
+    pub turn_operation_lookup: bool,
+    /// Bounded inline image inputs, persisted and replayed with their turn.
+    #[serde(default)]
+    pub turn_image_inputs: bool,
+    /// Per-turn maxOutputTokens is validated and intersected with the route ceiling.
+    #[serde(default)]
+    pub turn_output_token_limit: bool,
     pub turn_steer: bool,
     pub turn_interrupt: bool,
     pub event_replay: bool,
@@ -373,10 +396,13 @@ mod tests {
     #[test]
     fn runtime_capabilities_serializes_expected_shape() {
         let caps = RuntimeCapabilities {
+            turn_output_token_limit: false,
             account_session: true,
             threads: true,
             turns: true,
             turn_operation_idempotency: true,
+            turn_operation_lookup: true,
+            turn_image_inputs: true,
             turn_steer: true,
             turn_interrupt: true,
             event_replay: true,
@@ -400,6 +426,25 @@ mod tests {
         assert_eq!(obj.get("threads").unwrap(), &json!(true));
         assert_eq!(obj.get("account_session").unwrap(), &json!(true));
         assert_eq!(obj.get("turn_operation_idempotency").unwrap(), &json!(true));
+        assert_eq!(obj.get("turn_operation_lookup").unwrap(), &json!(true));
+        let mut without_lookup = value.clone();
+        without_lookup
+            .as_object_mut()
+            .unwrap()
+            .remove("turn_operation_lookup");
+        assert!(
+            !serde_json::from_value::<RuntimeCapabilities>(without_lookup)
+                .unwrap()
+                .turn_operation_lookup
+        );
+        assert_eq!(obj.get("turn_image_inputs").unwrap(), &json!(true));
+        let mut legacy = value.clone();
+        legacy.as_object_mut().unwrap().remove("turn_image_inputs");
+        assert!(
+            !serde_json::from_value::<RuntimeCapabilities>(legacy)
+                .unwrap()
+                .turn_image_inputs
+        );
         assert_eq!(obj.get("external_tools").unwrap(), &json!(false));
         assert!(obj.contains_key("worker_runtime"));
         assert_eq!(obj.get("fleet_run_create").unwrap(), &json!(true));

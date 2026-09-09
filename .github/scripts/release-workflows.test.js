@@ -484,14 +484,35 @@ const cnbRustGates = cnb.match(
 assert.ok(cnbRustGates, "CNB must retain the shared Rust workspace gate");
 assert.match(
   cnbRustGates[1],
-  /timeout: 45m[\s\S]*export CARGO_BUILD_JOBS=1[\s\S]*export CARGO_PROFILE_TEST_DEBUG=0[\s\S]*cargo check --workspace --all-targets --locked[\s\S]*cargo clippy --workspace --all-targets --all-features --locked -- -D warnings[\s\S]*RUST_MIN_STACK=16777216 cargo test --workspace --all-features --locked/,
+  /timeout: 45m[\s\S]*export CARGO_BUILD_JOBS=1[\s\S]*export CARGO_PROFILE_TEST_DEBUG=0[\s\S]*cargo check --workspace --all-targets --locked[\s\S]*cargo clippy --workspace --all-targets --all-features --locked -- -D warnings[\s\S]*RUST_MIN_STACK=16777216 sh scripts\/with-hermetic-test-home.sh cargo test --workspace --all-features --locked/,
   "CNB must serialize the memory-heavy Rust gate and preserve the workspace test stack contract",
 );
-assert.match(
+assert.doesNotMatch(
   cnbRustGates[1],
-  /export HOME="\$\{hermetic_home\}"[\s\S]*export CODEWHALE_HOME="\$\{hermetic_home\}\/\.codewhale"[\s\S]*unset CODEWHALE_CONFIG_PATH DEEPSEEK_CONFIG_PATH DEEPSEEK_HOME/,
-  "CNB workspace tests must not read a populated runner ~/.codewhale (#5355)",
+  /export (?:HOME|USERPROFILE|CODEWHALE_HOME)=/,
+  "CNB must reuse the shared test-home boundary without overriding legacy migration fixtures",
 );
+
+// Cover every test invocation, including named parity and narrow crate gates.
+// These launchers protect production dependencies as well as cfg(test) code.
+let hermeticInvocations = 0;
+for (const [label, workflow, expected] of [["CI", ci, 5], ["release", release, 3], ["CNB", cnb, 3]]) {
+  const commands = workflow.split("\n").filter((line) =>
+    !line.trimStart().startsWith("#") && /\bcargo (?:test|nextest run)\b/.test(line),
+  );
+  assert.equal(commands.length, expected, `${label} must retain every Rust test invocation`);
+  for (const command of commands) {
+    assert.match(command, /sh scripts\/with-hermetic-test-home.sh cargo (?:test|nextest run)\b/,
+      `${label} Rust tests must use the shared test-home boundary`);
+  }
+  hermeticInvocations += commands.length;
+}
+for (const name of ["Run tests", "Run doctests"]) {
+  const step = namedStep(ciTestJob, name);
+  assert.match(step, /shell: bash/, `${name} must invoke the POSIX helper on Windows too`);
+  assert.match(step, /RUST_MIN_STACK: '16777216'/);
+}
+console.log(`Hermetic Rust workflow invocations OK: ${hermeticInvocations} checks passed.`);
 
 const nextest = read(".config/nextest.toml");
 const integrationGroup = nextest.search(/^filter = 'binary\(integration\)'$/m);
@@ -540,6 +561,11 @@ const cnbTagStamp = cnbTagRelease[1].indexOf(
 const cnbTagBuild = cnbTagRelease[1].indexOf(
   "cargo build --jobs 2 --release --locked \\",
 );
+const cnbTagVersionCheck = cnbTagRelease[1].indexOf(
+  "./scripts/release/check-versions.sh --require-dated-release",
+);
+assert.ok(cnbTagVersionCheck >= 0, "CNB publication must reject undated source candidates");
+assert.ok(cnbTagVersionCheck < cnbTagBuild, "CNB must validate release notes before building public assets");
 assert.match(cnbTagRelease[1], /checkout_sha="\$\(git rev-parse 'HEAD\^\{commit\}'\)"/);
 assert.match(cnbTagRelease[1], /commit_sha="\$\{CNB_COMMIT:-\$\{checkout_sha\}\}"/);
 assert.match(cnbTagRelease[1], /CNB_COMMIT[\s\S]*does not match checkout[\s\S]*exit 1/);

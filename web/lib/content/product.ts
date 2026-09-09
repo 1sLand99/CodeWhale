@@ -30,48 +30,48 @@ export const PRODUCT_COPY = {
   metadata: {
     title: { en: "Product · Codewhale", zh: "产品 · Codewhale" },
     description: {
-      en: "What Codewhale is and what a person gains: their own models, capable agents, and control on their own machine — with availability stated per surface.",
-      zh: "Codewhale 是什么、你能得到什么：你自己的模型、能干的智能体、以及在自己机器上的掌控——并按界面如实说明可用状态。",
+      en: "Build projects, research questions, and automate tasks with agents that use your files, tools, and choice of models.",
+      zh: "用你选择的模型，让智能体利用文件和工具，帮你构建项目、研究问题、自动化任务。",
     },
   },
   title: {
-    en: "One terminal. Your models, working as a crew.",
-    zh: "一个终端。你的模型，像一支船员一样协作。",
+    en: "Build and automate with your choice of models.",
+    zh: "用你选择的模型，创造与自动化。",
   },
   lede: {
-    en: "Codewhale is an open-source agentic computing system. It holds the models you already use — hosted, through a gateway, or on your own machine — and lets them work together on a repository under rules you set. You keep the keys, the choice of model, and the last word on what runs.",
-    zh: "Codewhale 是开源的智能体计算系统。它容纳你已经在用的模型——托管、网关或本机——让它们在你设定的规则下协同处理一个仓库。密钥、模型选择和最终决定权都在你手里。",
+    en: "Build projects, research the web, and automate work with agents that use your files and tools. Start with one model, switch providers when you need to, or assign different models to parts of a larger task.",
+    zh: "让智能体利用你的文件和工具，构建项目、检索网页、自动化工作。从一个模型开始，按需切换提供商，也可以让不同模型分担大型任务。",
   },
 
   gainHeading: { en: "What you gain", zh: "你能得到什么" },
   gain: [
     {
-      title: { en: "Supported models, in one place", zh: "支持的模型，都在一处" },
+      title: { en: "Choose your models", zh: "选择你的模型" },
       body: {
-        en: "Connect a supported hosted provider, a gateway, or a local model server. Check the selected provider and model before starting work. Local servers may run without an API key, depending on their configuration.",
-        zh: "连接支持的托管提供商、网关或本地模型服务。开始工作前，检查所选提供商与模型。本地服务是否需要 API 密钥，取决于它的配置。",
+        en: "Connect a supported provider, gateway, or local model server. Change models as the task calls for it.",
+        zh: "连接支持的提供商、网关或本地模型服务，根据任务需要切换模型。",
       },
     },
     {
-      title: { en: "A crew, not a single assistant", zh: "一支船员，而不是一个助手" },
+      title: { en: "Share the work", zh: "分工协作" },
       body: {
-        en: "Pin a different model to each role. Run a fleet of sub-agents on one job. Give them files, a shell, the web, and MCP servers as tools. Sessions save, resume, and roll back.",
-        zh: "给每个角色固定不同的模型。让一支 fleet 子智能体分工处理同一件事。文件、shell、网页和 MCP 服务器都是它们的工具。会话可保存、恢复、回滚。",
+        en: "Give parts of a larger task to agents with different models and roles. Save the team as a Fleet to use again.",
+        zh: "让不同模型和角色的智能体分担大型任务，将团队保存为 Fleet，方便下次使用。",
       },
     },
     {
-      title: { en: "Control that stays on your machine", zh: "掌控权留在你的机器上" },
+      title: { en: "Set the permissions", zh: "设定权限" },
       body: {
-        en: "Plan blocks file mutation and shell execution; permitted research can still contact external services. Work executes tasks. Operate emphasizes delegation. Independently, Ask, Auto-Review, and Full Access set how much happens before it asks you. The OS sandbox is used where the platform provides one, and an audit log records sensitive events.",
-        zh: "Plan 禁止文件修改与 shell 执行；获准的研究仍可访问外部服务。Work 执行任务，Operate 侧重分工。另一维度上，Ask、Auto-Review 和 Full Access 决定它在问你之前能做多少。平台提供沙箱时就启用沙箱，审计日志记录敏感事件。",
+        en: "Choose the session mode and approval settings. Review changes, steer the work, and continue from a saved session.",
+        zh: "选择会话模式与审批设置，检查修改、调整方向，并从保存的会话继续工作。",
       },
     },
   ] satisfies ProductRow[],
 
-  availabilityHeading: { en: "Where it runs today", zh: "现在能在哪里运行" },
+  availabilityHeading: { en: "Where to use Codewhale", zh: "在哪里使用 Codewhale" },
   availabilityLede: {
-    en: "The terminal is the released product. Everything else is listed with the state it is actually in, and this page changes when that state does.",
-    zh: "终端是已发布的产品。其余按实际状态列出；状态变化时，本页也会随之更新。",
+    en: "Start with the published terminal release. The web and desktop workbenches and cloud computers are in development; they have separate availability from the terminal.",
+    zh: "从已发布的终端版开始使用。网页工作台、桌面工作台和云端计算机正在开发中，它们的开放状态与终端版分别说明。",
   },
   availability: [
     {
@@ -88,8 +88,8 @@ export const PRODUCT_COPY = {
       surface: { en: "Web app", zh: "网页应用" },
       status: { en: "Development preview", zh: "开发预览" },
       detail: {
-        en: "Account pages and browser pairing are implemented in development. Public end-to-end remote control has not been verified; use the terminal for released task execution.",
-        zh: "账户页面与浏览器配对已在开发版本中实现。公开服务上的端到端远程控制尚未验证；已发布的任务执行入口是终端。",
+        en: "Account access and browser pairing in the development preview.",
+        zh: "开发预览版提供账户访问与浏览器配对。",
       },
       href: "/signin",
       linkLabel: { en: "Sign in", zh: "登录" },
@@ -98,28 +98,28 @@ export const PRODUCT_COPY = {
       surface: { en: "Desktop", zh: "桌面端" },
       status: { en: "Development build", zh: "开发版本" },
       detail: {
-        en: "A local macOS development build has been tested. There is no released desktop app to download.",
-        zh: "本地 macOS 开发构建已做过测试。尚无已发布的桌面应用可供下载。",
+        en: "The macOS app is in development; a public download is coming later.",
+        zh: "macOS 应用正在开发中，将来会提供公开下载。",
       },
       href: null,
       linkLabel: null,
     },
     {
       surface: { en: "Cloud computers", zh: "云端计算机" },
-      status: { en: "Not available yet", zh: "暂不可用" },
+      status: { en: "In development", zh: "开发中" },
       detail: {
-        en: "Running work on a hosted computer is in development. Codewhale will say so here when it works; a passing local test is not that.",
-        zh: "在托管计算机上运行工作仍在开发中。等它真正可用时，这里会如实说明；本地测试通过不等于可用。",
+        en: "Hosted computers for running your tasks.",
+        zh: "用于运行任务的托管计算机。",
       },
       href: null,
       linkLabel: null,
     },
   ] satisfies ProductAvailabilityRow[],
 
-  controlHeading: { en: "How much it does before it asks", zh: "它在问你之前能做多少" },
+  controlHeading: { en: "Choose how your agents work", zh: "选择智能体的工作方式" },
   controlLede: {
-    en: "Two independent dials. The mode says what kind of work a session may do; the permission says how much of it happens without a question.",
-    zh: "两个独立的旋钮。模式决定会话可以做哪类工作；权限决定其中多少无需询问。",
+    en: "Use Plan to explore, Work to make changes, and Operate to coordinate agents. Approval settings control when actions need review.",
+    zh: "用 Plan 探索方案、Work 执行修改、Operate 协调智能体。审批设置决定哪些操作需要审核。",
   },
   modes: [
     { title: { en: "Plan", zh: "Plan" }, body: { en: "Blocks file mutation and shell execution. Permitted research may contact external services; session state can still be saved.", zh: "禁止文件修改与 shell 执行。获准的研究可访问外部服务；会话状态仍可保存。" } },
@@ -128,16 +128,16 @@ export const PRODUCT_COPY = {
   ] satisfies ProductRow[],
   permissions: [
     { title: { en: "Ask", zh: "Ask" }, body: { en: "Prompts according to the active approval rules; saved permissions and hard policy boundaries still apply.", zh: "按当前审批规则询问；已保存的权限与强制策略边界仍然生效。" } },
-    { title: { en: "Auto-Review", zh: "Auto-Review" }, body: { en: "Uses automated review for eligible actions; unresolved approval decisions return to you.", zh: "对符合条件的操作进行自动审核；未解决的审批仍交给你。" } },
+    { title: { en: "Auto-Review", zh: "Auto-Review" }, body: { en: "Automatically reviews eligible actions and reports any action it cannot approve.", zh: "自动审核符合条件的操作，并报告无法批准的操作。" } },
     { title: { en: "Full Access", zh: "Full Access" }, body: { en: "Reduces approval prompts. It does not bypass hard policy boundaries or grant access outside the allowed scope.", zh: "减少审批提示，但不会绕过强制策略边界，也不会授予允许范围之外的访问权限。" } },
   ] satisfies ProductRow[],
 
-  surfacesHeading: { en: "Surfaces in the released terminal", zh: "已发布终端中的界面" },
+  surfacesHeading: { en: "Use the tools that fit your work", zh: "选择适合工作的工具" },
   surfacesLede: {
-    en: "One runtime, several ways in. Every surface runs the same engine, tools, and permissions on your machine.",
-    zh: "一个运行时，多种入口。每个界面都跑同一套引擎、工具与权限，都在你的机器上。",
+    en: "The Runtime runs the agent and its tools. Terminal and browser clients let you direct that work. The current source includes the Computer Use plugin for interacting with other applications; review and enable it before use.",
+    zh: "Runtime 负责运行智能体及其工具，终端和浏览器客户端让你指挥任务。当前源码包含 Computer Use 插件，用于操作其他应用；使用前需审核并启用。",
   },
-  surfacesLink: { en: "Runtime surfaces and what is stable", zh: "运行时界面与稳定程度" },
+  surfacesLink: { en: "Explore integrations", zh: "查看集成" },
 
   actions: {
     install: { en: "Get Codewhale", zh: "获取 Codewhale" },

@@ -5,7 +5,9 @@
 //! event handling, tool planning/execution, LSP post-edit hooks, capacity
 //! checkpoints, and loop termination.
 
-use super::dispatch::normalize_schema_json_containers;
+use super::dispatch::{
+    FleetDenialAction, FleetDenialBatch, FleetDenialGuard, normalize_schema_json_containers,
+};
 use super::*;
 use crate::core::authority::{ToolPermission, resolve_tool_permission};
 use crate::core::ops::UserInputProvenance;
@@ -15,7 +17,9 @@ use crate::runtime_handoff::{
     shell_completion_runtime_message, subagent_completion_runtime_message,
     subagent_failure_runtime_message, waiting_for_subagents_runtime_message,
 };
+use crate::tool_inspection::TurnStopReason;
 use crate::tools::canonical_action::canonical_action_alias;
+use crate::tools::spec::ToolTerminalStatus;
 use crate::tools::tool_call_budget::ToolCallBudget;
 use codewhale_core::request::{PrimaryTurnRequest, prepare_primary_turn_request};
 
@@ -54,7 +58,9 @@ pub(super) fn initial_stream_error_user_message(
     _locale_tag: &str,
     error: &anyhow::Error,
 ) -> String {
-    error.to_string()
+    // Like preview and child failures, keep anyhow's actionable source chain.
+    // Reuse the log/persistence scrubber before it reaches transcript state.
+    codewhale_config::persistence::redact_secrets(&format!("{error:#}"))
 }
 
 pub(super) fn preview_request_error_user_message(
@@ -579,16 +585,25 @@ impl Engine {
                 context.tool_name
             )))
             .await;
+        let cost_scope = crate::cost_status::scope_token();
+        let review_route = client.effective_route_envelope(client.model(), chrono::Utc::now());
         let started = Instant::now();
         let review =
             super::reviewer::consult_reviewer(client, &context_text, &self.cancel_token).await;
         if let Some(usage) = &review.usage {
             turn.add_usage(usage);
+            crate::cost_status::report_effective_route_for_runtime(
+                cost_scope,
+                self.config.compaction.runtime_cost_owner.as_deref(),
+                &format!("auto-review:{}:{tool_id}", turn.id),
+                &review_route,
+                usage,
+            );
             if usage_has_reported_data(usage) {
                 let request_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 let _ = self
                     .tx_event
-                    .send(Event::TurnUsage {
+                    .send(Event::RoutedTurnUsage {
                         usage: usage.clone(),
                         duration_ms: request_ms,
                         first_token_ms: None,
@@ -596,6 +611,12 @@ impl Engine {
                     })
                     .await;
             }
+        } else if matches!(
+            &review.outcome,
+            super::reviewer::ReviewerOutcome::Unavailable { reason }
+                if reason == "the reviewer timed out" || reason == "the reviewer request failed"
+        ) {
+            turn.add_routed_usage_dropped_records(1);
         }
         let decision = review.outcome.audit_decision();
         let risk = review.outcome.audit_risk();
@@ -699,8 +720,6 @@ impl Engine {
         // Cleared when the loop continues only for optional runtime work
         // (a goal continuation) after the model already delivered an answer.
         let mut step_budget_exhaustion_is_terminal = true;
-        // A1: one soft-landing notice at ~80% of a finite step budget.
-        let mut soft_landing_sent = false;
         // A2: one final report turn after the budget is exhausted, so a child
         // that owes work never finishes silently.
         let mut final_report_sent = false;
@@ -728,6 +747,11 @@ impl Engine {
                 .map(str::to_string),
         );
         let tool_registry = Some(&tool_policy.registry);
+        // Fleet workers already carry the validated outer authority. Keep
+        // their denial guard local: it never pauses/cancels a working sibling.
+        let mut fleet_denial_guard = tool_registry
+            .filter(|registry| registry.context().tool_authority.is_some())
+            .map(|_| FleetDenialGuard::default());
         // #4415: the turn's tool-call admission counter. It lives here —
         // across every model step and batch of this turn — never in the
         // catalog; the policy only carries the declared limit, and `None`
@@ -743,8 +767,8 @@ impl Engine {
         // reasoning — a protocol-complete but answerless response that reaches
         // the failure tail with `stream_errors == 0`, so the transport resume
         // path above never sees it. A clean stop there is almost always
-        // transient; re-request a bounded number of times (the prefix is
-        // cached, so each retry is cheap) before surfacing a hard failure.
+        // transient; re-request a bounded number of times before surfacing
+        // a hard failure. Each retry may incur provider usage and cost.
         let mut reasoning_only_reprompts: u32 = 0;
         // Nudge for the *next* request only. A reasoning-only reply persists
         // nothing (a bare Thinking block is not sendable), so the first retry
@@ -798,6 +822,11 @@ impl Engine {
             }
 
             if self.apply_pending_runtime_authority().await {
+                if let Some(guard) = fleet_denial_guard.as_mut() {
+                    guard.reset();
+                    turn.stop_diagnostics
+                        .permission_denial_rounds_without_progress = 0;
+                }
                 mode = self.current_mode;
                 questions_allowed = crate::core::authority::permission_posture_allows_questions(
                     self.session.approval_mode,
@@ -805,7 +834,7 @@ impl Engine {
             }
 
             let mut accepted_steer = false;
-            while let Ok(steer) = self.rx_steer.try_recv() {
+            while let Some(steer) = self.next_turn_steer() {
                 let steer = steer.trim().to_string();
                 if steer.is_empty() {
                     continue;
@@ -825,6 +854,11 @@ impl Engine {
                     .await;
             }
             if accepted_steer {
+                if let Some(guard) = fleet_denial_guard.as_mut() {
+                    guard.reset();
+                    turn.stop_diagnostics
+                        .permission_denial_rounds_without_progress = 0;
+                }
                 grant_turn_end_steer_response_allowance(
                     turn_end_child_guard_sent,
                     &mut turn_end_child_coordination_responses_remaining,
@@ -861,11 +895,12 @@ impl Engine {
             // spent tell the model once to stop exploring and write its final
             // report. Savings proved out by the grok-style parity work (ops
             // A1): a step-faithful harness ends mid-report far too often.
-            if !soft_landing_sent
-                && turn.max_steps > 0
-                && turn.steps_used() >= ((turn.max_steps as f32 * 0.8).floor() as u32).max(1)
+            if !turn.stop_diagnostics.soft_landing_sent
+                && let Some(step_limit) = turn.step_limit()
+                && step_limit > 0
+                && turn.steps_used() >= ((step_limit as f32 * 0.8).floor() as u32).max(1)
             {
-                soft_landing_sent = true;
+                turn.stop_diagnostics.soft_landing_sent = true;
                 let notice = format!(
                     "Step budget soft landing: you have used about {}% of your {} step budget ({}). Stop exploring; write your final, complete report now, in final form, with evidence.",
                     80,
@@ -883,6 +918,7 @@ impl Engine {
             }
 
             if turn.at_max_steps() && turn_end_child_coordination_responses_remaining == 0 {
+                turn.stop_diagnostics.reason = Some(TurnStopReason::StepBudgetExhausted);
                 if self
                     .request_turn_owned_child_coordination(
                         foreground_children.as_ref(),
@@ -1021,6 +1057,10 @@ impl Engine {
                 && compaction_go
             {
                 let compaction_id = format!("compact_{}", &uuid::Uuid::new_v4().to_string()[..8]);
+                turn.stop_diagnostics.automatic_compaction_attempts = turn
+                    .stop_diagnostics
+                    .automatic_compaction_attempts
+                    .saturating_add(1);
                 let compaction_cancel = self
                     .claim_compaction(&compaction_id)
                     .expect("a fresh automatic compaction id cannot be pre-canceled");
@@ -1033,6 +1073,8 @@ impl Engine {
                 let auto_messages_before = self.session.messages.len();
                 let auto_tokens_before = self.estimated_input_tokens();
                 let turn_cancel = self.cancel_token.clone();
+                let started = Instant::now();
+                let mut compaction_usage = Usage::default();
                 let (compaction_result, turn_was_canceled) = tokio::select! {
                     biased;
                     _ = turn_cancel.cancelled() => (None, true),
@@ -1042,8 +1084,12 @@ impl Engine {
                         &self.session.messages,
                         self.session.system_prompt.as_ref(),
                         &prepared,
+                        &mut compaction_usage,
                     ) => (Some(result), false),
                 };
+                turn.add_usage(&compaction_usage);
+                self.emit_compaction_usage(&compaction_usage, started.elapsed())
+                    .await;
                 let Some(compaction_result) = compaction_result else {
                     self.finish_compaction(&compaction_id);
                     let message = if turn_was_canceled {
@@ -1170,10 +1216,11 @@ impl Engine {
                     resolved_route_window_tokens = budget.window_tokens,
                     resolved_model_output_ceiling_tokens = ?output_ceiling.clamp_tokens(),
                     resolved_model_output_ceiling_source = output_ceiling.as_str(),
-                    effective_request_output_cap_tokens = effective_max_output_tokens_for_route(
+                    effective_request_output_cap_tokens = crate::route_budget::effective_max_output_tokens_for_turn(
                         self.api_provider,
                         &self.session.model,
                         self.active_route_limits,
+                        turn.max_output_tokens,
                     ),
                     reserved_response_headroom_tokens = budget.output_cap_tokens,
                     safety_headroom_tokens = crate::context_budget::CONTEXT_HEADROOM_TOKENS,
@@ -1201,7 +1248,7 @@ impl Engine {
                     }
 
                     if self
-                        .recover_context_overflow(client.as_ref(), "preflight token budget")
+                        .recover_context_overflow(client.as_ref(), "preflight token budget", turn)
                         .await
                     {
                         context_recovery_attempts = context_recovery_attempts.saturating_add(1);
@@ -1377,6 +1424,9 @@ impl Engine {
                 }
             }
 
+            let fleet_report_response = fleet_denial_guard
+                .as_ref()
+                .is_some_and(FleetDenialGuard::report_only);
             let mut request = prepare_primary_turn_request(PrimaryTurnRequest {
                 model: self.session.model.clone(),
                 messages: {
@@ -1388,15 +1438,21 @@ impl Engine {
                     }
                     messages
                 },
-                max_tokens: effective_max_output_tokens_for_route(
+                max_tokens: crate::route_budget::effective_max_output_tokens_for_turn(
                     self.api_provider,
                     &self.session.model,
                     self.active_route_limits,
+                    turn.max_output_tokens,
                 ),
                 system: self.session.system_prompt.clone(),
                 tools: active_tools.clone(),
                 tool_choice: if active_tools.is_some() {
-                    if strict_tool_mode {
+                    if fleet_report_response {
+                        // Keep the pinned tool prefix; only this request's
+                        // choice changes. Admission below also enforces this
+                        // if a provider ignores the report-only request.
+                        Some(json!("none"))
+                    } else if strict_tool_mode {
                         Some(json!("required"))
                     } else {
                         Some(json!({ "type": "auto" }))
@@ -1406,6 +1462,11 @@ impl Engine {
                 },
                 reasoning_effort: effective_reasoning_effort,
             });
+            if turn.max_output_tokens.is_some() {
+                request.max_tokens = request
+                    .max_tokens
+                    .min(client.effective_max_output_tokens(&self.session.model));
+            }
             // Normalize images against the route this request is actually
             // going to. Session history keeps the real image so that switching
             // to a vision-capable model later makes it visible again; only the
@@ -1429,6 +1490,12 @@ impl Engine {
                     request.tools.as_deref(),
                     inspection_surface.as_ref(),
                 );
+            turn.last_request_snapshot = Some(tool_request_snapshot.clone());
+            turn.stop_diagnostics.route_context_window_tokens = self
+                .active_route_limits
+                .and_then(|limits| limits.context_tokens);
+
+            turn.stop_diagnostics.last_prepared_output_limit_tokens = Some(request.max_tokens);
 
             // Stream the response. Keep the request around (cloned into the
             // first call) so we can resend it on a transparent retry below
@@ -1442,7 +1509,26 @@ impl Engine {
                 .await;
             if let Some(mut route) = turn.pending_route.take() {
                 if let Some(billing) = route.billing.as_mut() {
-                    billing.dispatched_at = chrono::Utc::now();
+                    // Freeze the exact provider-live row at CodeWhale's
+                    // pre-permit application-dispatch boundary. This is an
+                    // admission contract, not provider invoice-time evidence;
+                    // a later cancellation/preparation failure has no usage
+                    // and therefore contributes no usage cost.
+                    let dispatched_at = chrono::Utc::now();
+                    billing.dispatched_at = dispatched_at;
+                    billing.provider_live_pricing = u64::try_from(dispatched_at.timestamp())
+                        .ok()
+                        .and_then(|dispatched_at_unix| {
+                            billing.endpoint_fingerprint.as_deref().and_then(|fingerprint| {
+                                crate::provider_catalog_live::fresh_provider_live_pricing_quote_at(
+                                    route.provider,
+                                    &route.provider_identity,
+                                    &route.model,
+                                    fingerprint,
+                                    dispatched_at_unix,
+                                )
+                            })
+                        });
                 }
                 let _ = self
                     .tx_event
@@ -1462,7 +1548,13 @@ impl Engine {
                     let _ = self.tx_event.send(Event::status("Request cancelled")).await;
                     return (TurnOutcomeStatus::Interrupted, None);
                 }
-                result = client.create_message_stream(stream_request.clone()) => result,
+                result = async {
+                    turn.stop_diagnostics.model_requests_started = turn
+                        .stop_diagnostics
+                        .model_requests_started
+                        .saturating_add(1);
+                    client.create_message_stream(stream_request.clone()).await
+                } => result,
             };
             let stream = match stream_result {
                 Ok(s) => {
@@ -1470,15 +1562,16 @@ impl Engine {
                     s
                 }
                 Err(e) => {
-                    let message = self.decorate_auth_error_message(
-                        initial_stream_error_user_message(&self.config.locale_tag, &e),
-                    );
+                    // Recovery/classification keeps its existing input. Expanding
+                    // diagnostics must not introduce another model request.
+                    let message = self.decorate_auth_error_message(e.to_string());
                     if is_context_length_error_message(&message)
                         && context_recovery_attempts < MAX_CONTEXT_RECOVERY_ATTEMPTS
                         && self
                             .recover_context_overflow(
                                 client.as_ref(),
                                 "provider context-length rejection",
+                                turn,
                             )
                             .await
                     {
@@ -1504,13 +1597,13 @@ impl Engine {
                         let _ = self.tx_event.send(Event::status(status)).await;
                         continue;
                     }
-                    turn_error = Some(message.clone());
-                    let _ = self
-                        .tx_event
-                        .send(Event::error(crate::error_taxonomy::envelope_for_llm_error(
-                            e, message,
-                        )))
-                        .await;
+                    let display_message = self.decorate_auth_error_message(
+                        initial_stream_error_user_message(&self.config.locale_tag, &e),
+                    );
+                    let mut envelope = crate::error_taxonomy::envelope_for_llm_error(e, message);
+                    envelope.message = display_message.clone();
+                    turn_error = Some(display_message);
+                    let _ = self.tx_event.send(Event::error(envelope)).await;
                     return (TurnOutcomeStatus::Failed, turn_error);
                 }
             };
@@ -1540,9 +1633,28 @@ impl Engine {
                     &stream_request,
                     request_dispatched_at,
                     stream_retry_budget.spent(),
+                    &mut turn.stop_diagnostics,
                 )
                 .await;
             turn_error = turn_error.or(stream_error);
+            turn.stop_diagnostics
+                .observe_provider_response(stop_reason.as_deref(), tool_uses.len());
+            // Counts and terminal metadata only: never log messages, tool
+            // arguments, credentials, or raw provider bodies.
+            tracing::debug!(
+                target: "provider_response_diagnostics",
+                model_request = turn.stop_diagnostics.model_requests_started,
+                prepared_output_limit_tokens = stream_request.max_tokens,
+                finish_reason = ?turn.stop_diagnostics.last_provider_finish_reason,
+                reported_usage = usage_reported,
+                input_tokens = usage.input_tokens,
+                output_tokens = usage.output_tokens,
+                cached_input_tokens = ?usage.prompt_cache_hit_tokens,
+                reasoning_tokens = ?usage.reasoning_tokens,
+                decoded_tool_calls = tool_uses.len(),
+                visible_text_chars = current_text_visible.chars().count(),
+                "parent model response settled"
+            );
             // These belong to post-stream response assembly, not stream
             // consumption: blocks are built from the completed stream state,
             // and truncation is derived from its terminal stop reason below.
@@ -1559,6 +1671,9 @@ impl Engine {
                 let _ = self
                     .tx_event
                     .send(Event::TurnUsage {
+                        max_output_tokens: turn
+                            .max_output_tokens
+                            .map(|_| stream_request.max_tokens),
                         usage: usage.clone(),
                         duration_ms: u64::try_from(stream_start.elapsed().as_millis())
                             .unwrap_or(u64::MAX),
@@ -1659,6 +1774,8 @@ impl Engine {
             if let Some(resume) = pending_resume
                 && let Some(attempt) = stream_retry_budget.authorize()
             {
+                turn.stop_diagnostics.stream_resumes =
+                    turn.stop_diagnostics.stream_resumes.saturating_add(1);
                 match resume {
                     StreamResume::AfterSleep => {
                         crate::logging::warn(format!(
@@ -1854,6 +1971,40 @@ impl Engine {
                 }
             }
 
+            // A worker may cooperate with the strategy notice by immediately
+            // reporting its blocker. No intervening useful work means that
+            // report must not become a false Completed result.
+            let fleet_no_progress_report = fleet_report_response
+                || tool_uses.is_empty()
+                    && fleet_denial_guard
+                        .as_ref()
+                        .is_some_and(FleetDenialGuard::awaiting_strategy_change);
+
+            // A protocol-level tool stop promises a call, unlike ordinary
+            // text that merely describes an intended action. Keep that
+            // distinction factual; never synthesize a tool or another request.
+            if tool_uses.is_empty()
+                && !fleet_no_progress_report
+                && turn_error.is_none()
+                && matches!(stop_reason.as_deref(), Some("tool_calls" | "tool_use"))
+            {
+                turn.stop_diagnostics.reason = Some(TurnStopReason::ProviderToolCallMissing);
+                turn.stop_diagnostics.last_response_tool_calls_suppressed = Some(0);
+                self.add_interrupted_assistant_text(&current_text_visible)
+                    .await;
+                let reason = stop_reason.as_deref().expect("matched tool stop");
+                return (
+                    TurnOutcomeStatus::Failed,
+                    Some(
+                        crate::localization::tr(
+                            crate::localization::resolve_locale(&self.config.locale_tag),
+                            crate::localization::MessageId::ProviderToolCallMissing,
+                        )
+                        .replace("{reason}", reason),
+                    ),
+                );
+            }
+
             for tool in &mut tool_uses {
                 let Some(schema) = tool_catalog
                     .iter()
@@ -1938,6 +2089,7 @@ impl Engine {
             // and re-issuing it would only reproduce the same stop instead of
             // failing the turn honestly.
             if output_limit_truncated.is_some()
+                && !fleet_no_progress_report
                 && tool_uses.is_empty()
                 && has_sendable_assistant_content
             {
@@ -1971,8 +2123,13 @@ impl Engine {
             // continuation if under cap → resume, 5) one settlement prompt
             // for turn-owned children → resume, 6) else end. No status
             // claims "ending" before step 6.
-            if tool_uses.is_empty() {
+            if tool_uses.is_empty() && !fleet_no_progress_report {
                 if !pending_steers.is_empty() {
+                    if let Some(guard) = fleet_denial_guard.as_mut() {
+                        guard.reset();
+                        turn.stop_diagnostics
+                            .permission_denial_rounds_without_progress = 0;
+                    }
                     for steer in pending_steers.drain(..) {
                         self.session
                             .working_set
@@ -2080,8 +2237,7 @@ impl Engine {
                             1,
                         )
                     });
-                    let bridge_usage_handle =
-                        bridge.as_ref().map(crate::rlm::RlmBridge::usage_handle);
+                    let repl_cost_scope = crate::cost_status::scope_token();
                     let repl_started = Instant::now();
 
                     let mut final_result: Option<String> = None;
@@ -2219,20 +2375,41 @@ impl Engine {
                     // into the parent turn exactly once, including failures
                     // after a partial fan-out, so `/cost`, goals, and the
                     // final receipt cannot undercount the working kernel.
-                    if let Some(usage_handle) = bridge_usage_handle {
-                        let child_usage = usage_handle.lock().await.clone();
-                        turn.add_usage(&child_usage);
-                        if usage_has_reported_data(&child_usage) {
+                    if let Some(bridge) = bridge.as_ref() {
+                        let snapshot = bridge.usage_snapshot().await;
+                        turn.add_usage(&snapshot.usage);
+                        let residual_dropped_records = snapshot.dropped_records.saturating_sub(
+                            u64::try_from(snapshot.drop_records.len()).unwrap_or(u64::MAX),
+                        );
+                        turn.add_routed_usage_dropped_records(residual_dropped_records);
+                        if usage_has_reported_data(&snapshot.usage) {
                             let _ = self
                                 .tx_event
-                                .send(Event::TurnUsage {
-                                    usage: child_usage,
+                                .send(Event::RoutedTurnUsage {
+                                    usage: snapshot.usage.clone(),
                                     duration_ms: u64::try_from(repl_started.elapsed().as_millis())
                                         .unwrap_or(u64::MAX),
                                     first_token_ms: None,
                                     request_ms: None,
                                 })
                                 .await;
+                        }
+                        for record in snapshot.records {
+                            crate::cost_status::report_effective_route_for_runtime(
+                                repl_cost_scope,
+                                self.config.compaction.runtime_cost_owner.as_deref(),
+                                &record.source_id,
+                                &record.usage.route,
+                                &record.usage.usage,
+                            );
+                        }
+                        for record in snapshot.drop_records {
+                            crate::cost_status::report_unreceipted_provider_success(
+                                repl_cost_scope,
+                                self.config.compaction.runtime_cost_owner.as_deref(),
+                                &record.source_id,
+                                &record.route,
+                            );
                         }
                     }
 
@@ -2409,10 +2586,11 @@ impl Engine {
                     // no prefix churn. An output-length stop is excluded above
                     // because retrying would only reproduce it.
                     reasoning_only_reprompts += 1;
+                    turn.stop_diagnostics.reasoning_only_reprompts = reasoning_only_reprompts;
                     let attempt = reasoning_only_reprompts;
                     let max_reprompts = self.config.reasoning_only_max_reprompts;
-                    // Attempt 1 is the free one: the prefix is cached and a
-                    // clean stop here is usually transient. From attempt 2 on,
+                    // Attempt 1 preserves the prefix; a cache hit or lower
+                    // cost is not guaranteed. From attempt 2 on,
                     // an identical request has already failed once, so carry
                     // the nudge rather than reproduce the same answerless reply.
                     let nudged = attempt > 1;
@@ -2459,9 +2637,23 @@ impl Engine {
                         false,
                     )
                 {
-                    let message = if has_provider_reasoning {
-                        "Model returned reasoning but no answer or tool call; the provider response was incomplete."
-                            .to_string()
+                    let message = if has_provider_reasoning
+                        && stop_reason_is_output_limit(stop_reason.as_deref())
+                    {
+                        format!(
+                            "Model reached the response output limit with no answer or tool call (requested allowance: {} tokens, including reasoning).",
+                            stream_request.max_tokens
+                        )
+                    } else if has_provider_reasoning {
+                        let reason = crate::models::stop_reason_detail(stop_reason.as_deref());
+                        format!(
+                            "Model returned reasoning but no answer or tool call; the provider response was incomplete (stop reason: {}).",
+                            reason
+                                .chars()
+                                .flat_map(char::escape_default)
+                                .take(120)
+                                .collect::<String>()
+                        )
                     } else if let Some(reason) = stop_reason.as_deref() {
                         format!(
                             "Model returned terminal stop reason `{reason}` with no answer or tool call."
@@ -2477,6 +2669,13 @@ impl Engine {
                         .await;
                 }
 
+                if turn_error.is_none() {
+                    if !turn.budget_exhausted_final_report {
+                        turn.stop_diagnostics.reason = Some(TurnStopReason::ProviderNoToolCall);
+                    }
+                    // This branch received no calls and dispatches no tools.
+                    turn.stop_diagnostics.last_response_tool_calls_suppressed = Some(0);
+                }
                 break;
             }
 
@@ -2484,7 +2683,16 @@ impl Engine {
             // provider is streaming. Apply the newest typed authority before
             // planning this tool batch; already-running tools are never
             // retroactively reclassified.
-            if self.apply_pending_runtime_authority().await {
+            let authority_changed_before_tools = self.apply_pending_runtime_authority().await;
+            if authority_changed_before_tools {
+                // A response requested as report-only never acquires execution
+                // authority after it streamed. Reset only after pairing its
+                // suppressed calls; the next response can use the new posture.
+                if !fleet_report_response && let Some(guard) = fleet_denial_guard.as_mut() {
+                    guard.reset();
+                    turn.stop_diagnostics
+                        .permission_denial_rounds_without_progress = 0;
+                }
                 mode = self.current_mode;
                 questions_allowed = crate::core::authority::permission_posture_allows_questions(
                     self.session.approval_mode,
@@ -2503,9 +2711,10 @@ impl Engine {
             }
 
             let tool_exec_lock = self.tool_exec_lock.clone();
-            let mcp_pool = if tool_uses
-                .iter()
-                .any(|tool| McpPool::is_mcp_tool(&tool.name))
+            let mcp_pool = if !fleet_report_response
+                && tool_uses
+                    .iter()
+                    .any(|tool| McpPool::is_mcp_tool(&tool.name))
             {
                 match self.ensure_mcp_pool().await {
                     Ok(pool) => Some(pool),
@@ -2537,10 +2746,11 @@ impl Engine {
                     &mut active_tool_names,
                     &mut tool_call_budget,
                     mode,
+                    fleet_denial_guard.as_ref(),
                 )
                 .await;
 
-            let outcomes = self
+            let (outcomes, authority_changed_during_tools) = self
                 .execute_planned_tools(
                     plans,
                     &turn.id,
@@ -2556,14 +2766,24 @@ impl Engine {
                 )
                 .await;
 
-            self.process_tool_results(
-                outcomes,
-                &mut tool_catalog,
-                &mut active_tool_names,
-                &hook_contexts,
-            )
-            .await;
+            let authority_changed =
+                authority_changed_before_tools || authority_changed_during_tools;
+            let denial_action = self
+                .process_tool_results(
+                    outcomes,
+                    turn,
+                    &mut tool_catalog,
+                    &mut active_tool_names,
+                    &hook_contexts,
+                    if authority_changed || fleet_report_response {
+                        None
+                    } else {
+                        fleet_denial_guard.as_mut()
+                    },
+                )
+                .await;
 
+            let accepted_steer_after_tools = !pending_steers.is_empty();
             if !pending_steers.is_empty() {
                 for steer in pending_steers.drain(..) {
                     self.session
@@ -2576,6 +2796,63 @@ impl Engine {
                     turn_end_child_guard_sent,
                     &mut turn_end_child_coordination_responses_remaining,
                 );
+            }
+
+            if authority_changed || accepted_steer_after_tools {
+                if let Some(guard) = fleet_denial_guard.as_mut() {
+                    guard.reset();
+                    turn.stop_diagnostics
+                        .permission_denial_rounds_without_progress = 0;
+                }
+            } else if fleet_no_progress_report {
+                // Exactly one accepted report response, including empty,
+                // reasoning-only, truncated or tool-producing responses.
+                if self.cancel_token.is_cancelled() {
+                    return (TurnOutcomeStatus::Interrupted, None);
+                }
+                turn.stop_diagnostics.last_response_tool_calls_suppressed = Some(tool_uses.len());
+                let error = if turn.budget_exhausted_final_report {
+                    // One response can serve both report requests; the
+                    // explicit budget retains its existing stop provenance.
+                    format!(
+                        "Maximum model steps reached before completion (limit: {}, {})",
+                        turn.max_steps,
+                        turn.budget_source.key_label()
+                    )
+                } else {
+                    turn.stop_diagnostics.reason = Some(TurnStopReason::NoProgress);
+                    "Fleet worker stopped after repeated permission denials without new evidence. Work and tool results are retained in the transcript; review the blocker before resuming.".to_string()
+                };
+                let _ = self.tx_event.send(Event::status(error.clone())).await;
+                return (TurnOutcomeStatus::Failed, Some(error));
+            } else {
+                let notice = match denial_action {
+                    FleetDenialAction::Continue => None,
+                    FleetDenialAction::SwitchStrategy => {
+                        turn.stop_diagnostics.permission_strategy_switches = turn
+                            .stop_diagnostics
+                            .permission_strategy_switches
+                            .saturating_add(1);
+                        Some(
+                            "Fleet strategy switch required: repeated permission denials produced no new evidence. The rejected action is held. Use another permitted tool from the current catalog to make progress, or report completed work and the blocker. Do not work around permissions or request the same approval again.",
+                        )
+                    }
+                    FleetDenialAction::FinalReport => {
+                        turn.stop_diagnostics.final_report_requested = true;
+                        Some(
+                            "Fleet no-progress final report: permission denials continued after the strategy switch without new evidence. Your next response is report-only; no tools will execute. Report what you completed, exact evidence, the permission blocker and remaining work. This is the last response unless the user changes direction or authority.",
+                        )
+                    }
+                };
+                if let Some(notice) = notice {
+                    // Dynamic guard facts are append-only runtime history;
+                    // BASE_PROMPT and the session's pinned prefix stay intact.
+                    self.add_session_message(self.runtime_text_message_with_turn_metadata(
+                        notice.to_string(),
+                        UserInputProvenance::Runtime,
+                    ))
+                    .await;
+                }
             }
 
             // Surface an output-limit truncation after the tool result so the
@@ -2671,6 +2948,7 @@ impl Engine {
         active_tool_names: &mut std::collections::HashSet<String>,
         tool_call_budget: &mut ToolCallBudget,
         mode: AppMode,
+        fleet_denial_guard: Option<&FleetDenialGuard>,
     ) -> PlannedToolCalls {
         let active_tools_at_batch_start = active_tool_names.clone();
         let mut deferred_tools_hydrated_this_batch: std::collections::HashSet<String> =
@@ -2759,6 +3037,12 @@ impl Engine {
             }
 
             if blocked_error.is_none()
+                && let Some(guard) = fleet_denial_guard
+            {
+                blocked_error = guard.admission_error(&tool_name, &tool_input);
+            }
+
+            if blocked_error.is_none()
                 && let Some(error) = tool.input_parse_error.clone()
             {
                 blocked_error = Some(ToolError::invalid_input(error));
@@ -2766,7 +3050,7 @@ impl Engine {
 
             // #3027: deny wins over allow — check the deny-list first so a
             // tool present in both lists is still blocked.
-            if blocked_error.is_none() && tool_policy.denies_tool(&tool_name) {
+            if blocked_error.is_none() && tool_policy.denies_call(&tool_name, &tool_input) {
                 blocked_error = Some(if McpPool::is_mcp_tool(&tool_name) {
                     ToolError::not_available(format!("Unknown MCP tool name: {tool_name}"))
                 } else {
@@ -2815,19 +3099,21 @@ impl Engine {
             // scheduling field has one inspectable owner. Preparation is
             // side-effect free; execution remains below the full gate
             // stack exactly as before.
-            let mut prepared_policy = match prepare_tool_call(
-                &tool_name,
-                tool_input.clone(),
-                tool_registry,
-                self.session.auto_approve,
-            ) {
-                Ok(policy) => Some(policy),
-                Err(error) => {
-                    if blocked_error.is_none() {
+            let mut prepared_policy = if blocked_error.is_none() {
+                match prepare_tool_call(
+                    &tool_name,
+                    tool_input.clone(),
+                    tool_registry,
+                    self.session.auto_approve,
+                ) {
+                    Ok(policy) => Some(policy),
+                    Err(error) => {
                         blocked_error = Some(error);
+                        None
                     }
-                    None
                 }
+            } else {
+                None
             };
             let mut reprepared_after_hook = false;
 
@@ -2869,6 +3155,14 @@ impl Engine {
                     }
                     Err(error) => blocked_error = Some(error),
                 }
+            }
+
+            // A before hook may change the action or verification arguments.
+            // Recheck the same deny boundary on the exact prepared input.
+            if blocked_error.is_none() && tool_policy.denies_call(&tool_name, &tool_input) {
+                blocked_error = Some(ToolError::permission_denied(format!(
+                    "Tool '{tool_name}' or its execution dependency is in the disallowed-tools list"
+                )));
             }
 
             if let Some(prepared) = prepared_policy {
@@ -2934,6 +3228,14 @@ impl Engine {
                     "resources": &resources,
                     "reprepared_after_hook": reprepared_after_hook,
                 }));
+            }
+
+            // Preparation/hooks may rewrite the action. Recheck at the same
+            // admission boundary before ask-rules or model-backed review.
+            if blocked_error.is_none()
+                && let Some(guard) = fleet_denial_guard
+            {
+                blocked_error = guard.admission_error(&tool_name, &tool_input);
             }
 
             if blocked_error.is_none()
@@ -3287,7 +3589,10 @@ impl Engine {
         batch_sandbox_policy: &crate::sandbox::SandboxPolicy,
         mode: &mut AppMode,
         questions_allowed: &mut bool,
-    ) -> Vec<Option<ToolExecOutcome>> {
+    ) -> (Vec<Option<ToolExecOutcome>>, bool) {
+        let mut authority_changed = false;
+        let collect_fleet_evidence =
+            tool_registry.is_some_and(|registry| registry.context().tool_authority.is_some());
         // --- Intent summary for write tools (#2381) ---
         // When the model invokes write tools, extract its preceding text
         // as an "intent summary" so the approval view can show *why* the
@@ -3359,6 +3664,7 @@ impl Engine {
             // stale approval or sandbox facts. Return one typed retry to
             // the model; the next call is planned under the new posture.
             if self.apply_pending_runtime_authority().await {
+                authority_changed = true;
                 *mode = self.current_mode;
                 *questions_allowed = crate::core::authority::permission_posture_allows_questions(
                     self.session.approval_mode,
@@ -3384,6 +3690,7 @@ impl Engine {
                         started_at: Instant::now(),
                         terminal: ToolExecutionOutcome::from_legacy(result),
                         content_blocks: Vec::new(),
+                        original_content_digest: None,
                     });
                 }
                 continue;
@@ -3421,6 +3728,7 @@ impl Engine {
                         started_at: Instant::now(),
                         terminal,
                         content_blocks: Vec::new(),
+                        original_content_digest: None,
                     });
                 }
                 continue;
@@ -3463,6 +3771,7 @@ impl Engine {
                             started_at: Instant::now(),
                             terminal: ToolExecutionOutcome::from_legacy(result),
                             content_blocks: Vec::new(),
+                            original_content_digest: None,
                         });
                         continue;
                     }
@@ -3475,6 +3784,7 @@ impl Engine {
                             started_at: Instant::now(),
                             terminal: ToolExecutionOutcome::from_legacy(Err(err)),
                             content_blocks: Vec::new(),
+                            original_content_digest: None,
                         });
                         continue;
                     }
@@ -3511,6 +3821,18 @@ impl Engine {
                             context_override,
                         )
                         .await;
+
+                        let original_content_digest = result
+                            .as_ref()
+                            .ok()
+                            .filter(|_| collect_fleet_evidence)
+                            .and_then(|result| {
+                                FleetDenialGuard::original_content_digest(
+                                    &plan.name,
+                                    &plan.input,
+                                    &result.result,
+                                )
+                            });
 
                         // #500: spill outsized output before fanout (mirror
                         // of the sequential path below). Emit a
@@ -3554,6 +3876,7 @@ impl Engine {
                             started_at,
                             terminal: ToolExecutionOutcome::from_legacy(legacy_result),
                             content_blocks,
+                            original_content_digest,
                         }
                     });
                 }
@@ -3582,7 +3905,9 @@ impl Engine {
                         if outcomes[index].is_some() {
                             continue;
                         }
-                        let terminal = ToolExecutionOutcome::cancelled(interrupted_tool_result());
+                        let terminal = ToolExecutionOutcome::cancelled(
+                            self.cancelled_active_tool_result(&id, origin_turn_id),
+                        );
                         let result = terminal.legacy_result();
                         let _ = self
                             .tx_event
@@ -3600,6 +3925,7 @@ impl Engine {
                             started_at: Instant::now(),
                             terminal,
                             content_blocks: Vec::new(),
+                            original_content_digest: None,
                         });
                     }
                 }
@@ -3628,6 +3954,7 @@ impl Engine {
                             started_at: Instant::now(),
                             terminal: ToolExecutionOutcome::from_legacy(result),
                             content_blocks: Vec::new(),
+                            original_content_digest: None,
                         });
                         continue;
                     }
@@ -3650,6 +3977,7 @@ impl Engine {
                             started_at: Instant::now(),
                             terminal: ToolExecutionOutcome::from_legacy(result),
                             content_blocks: Vec::new(),
+                            original_content_digest: None,
                         });
                         continue;
                     }
@@ -3661,7 +3989,7 @@ impl Engine {
                             biased;
                             () = cancel_token.cancelled() => {
                                 (
-                                    ToolExecutionOutcome::cancelled(interrupted_tool_result()),
+                                    ToolExecutionOutcome::cancelled(interrupted_active_tool_result()),
                                     Vec::new(),
                                 )
                             },
@@ -3680,6 +4008,13 @@ impl Engine {
                                     Vec::new(),
                                 ),
                             },
+                        };
+                        let terminal = if terminal.status == ToolTerminalStatus::Cancelled {
+                            ToolExecutionOutcome::cancelled(
+                                self.cancelled_active_tool_result(&tool_id, origin_turn_id),
+                            )
+                        } else {
+                            terminal
                         };
                         let result = terminal.legacy_result();
 
@@ -3700,6 +4035,7 @@ impl Engine {
                             started_at,
                             terminal,
                             content_blocks,
+                            original_content_digest: None,
                         });
                         continue;
                     }
@@ -3740,6 +4076,7 @@ impl Engine {
                             started_at,
                             terminal: ToolExecutionOutcome::from_legacy(result),
                             content_blocks: Vec::new(),
+                            original_content_digest: None,
                         });
                         continue;
                     }
@@ -3787,6 +4124,7 @@ impl Engine {
                             started_at,
                             terminal: ToolExecutionOutcome::from_legacy(result),
                             content_blocks: Vec::new(),
+                            original_content_digest: None,
                         });
                         continue;
                     }
@@ -3920,6 +4258,7 @@ impl Engine {
                     // model can retry immediately under the newly applied
                     // authority.
                     let mut result_override = if self.apply_pending_runtime_authority().await {
+                        authority_changed = true;
                         *mode = self.current_mode;
                         *questions_allowed =
                             crate::core::authority::permission_posture_allows_questions(
@@ -3957,6 +4296,7 @@ impl Engine {
                     }
 
                     if self.apply_pending_runtime_authority().await {
+                        authority_changed = true;
                         *mode = self.current_mode;
                         *questions_allowed =
                             crate::core::authority::permission_posture_allows_questions(
@@ -3971,39 +4311,58 @@ impl Engine {
                     }
 
                     let started_at = Instant::now();
-                    let (mut result, cancelled_before_completion) =
-                        if let Some(result_override) = result_override {
-                            (result_override.map(RichToolResult::plain), false)
-                        } else {
-                            tokio::select! {
-                                biased;
-                                () = self.cancel_token.cancelled() => {
-                                    (Ok(RichToolResult::plain(interrupted_tool_result())), true)
-                                },
-                                result = Self::execute_tool_with_lock(
-                                    tool_exec_lock.clone(),
-                                    plan.supports_parallel,
-                                    plan.interactive,
-                                    self.tx_event.clone(),
-                                    Some(self.cancel_token.clone()),
-                                    tool_name.clone(),
-                                    tool_input.clone(),
-                                    self.session.workspace.clone(),
-                                    tool_registry,
-                                    mcp_pool.clone(),
-                                    tool_context_for_call(
-                                        context_override.or_else(|| batch_tool_context.clone()),
-                                        &tool_id,
-                                    ),
-                                ) => (result, false),
-                            }
-                        };
+                    let (mut result, cancelled_before_completion) = if let Some(result_override) =
+                        result_override
+                    {
+                        (result_override.map(RichToolResult::plain), false)
+                    } else {
+                        tokio::select! {
+                            biased;
+                            () = self.cancel_token.cancelled() => {
+                                (Ok(RichToolResult::plain(interrupted_active_tool_result())), true)
+                            },
+                            result = Self::execute_tool_with_lock(
+                                tool_exec_lock.clone(),
+                                plan.supports_parallel,
+                                plan.interactive,
+                                self.tx_event.clone(),
+                                Some(self.cancel_token.clone()),
+                                tool_name.clone(),
+                                tool_input.clone(),
+                                self.session.workspace.clone(),
+                                tool_registry,
+                                mcp_pool.clone(),
+                                tool_context_for_call(
+                                    context_override.or_else(|| batch_tool_context.clone()),
+                                    &tool_id,
+                                ),
+                            ) => (result, false),
+                        }
+                    };
+
+                    if cancelled_before_completion {
+                        result = Ok(RichToolResult::plain(
+                            self.cancelled_active_tool_result(&tool_id, origin_turn_id),
+                        ));
+                    }
 
                     if let Some(approval_stamp) = approval_stamp
                         && let Ok(tool_result) = result.as_mut()
                     {
                         stamp_tool_result_approval(&mut tool_result.result, approval_stamp);
                     }
+
+                    let original_content_digest = result
+                        .as_ref()
+                        .ok()
+                        .filter(|_| collect_fleet_evidence)
+                        .and_then(|result| {
+                            FleetDenialGuard::original_content_digest(
+                                &tool_name,
+                                &tool_input,
+                                &result.result,
+                            )
+                        });
 
                     // #500: spill outsized tool outputs to disk before the
                     // result fans out to the model context and the UI cell.
@@ -4057,11 +4416,56 @@ impl Engine {
                         started_at,
                         terminal,
                         content_blocks,
+                        original_content_digest,
                     });
                 }
             }
         }
-        outcomes
+        (outcomes, authority_changed)
+    }
+
+    /// Read cancellation evidence only after the active future has been dropped,
+    /// so a foreground shell's drop guard has finished its cleanup attempt.
+    fn cancelled_active_tool_result(&self, tool_id: &str, turn_id: &str) -> ToolResult {
+        let jobs = self
+            .shell_manager
+            .lock()
+            .map(|mut manager| manager.list_jobs_for_session(&self.session.id))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|job| {
+                job.origin_tool_call_id.as_deref() == Some(tool_id)
+                    && job.origin_turn_id.as_deref() == Some(turn_id)
+            })
+            .collect::<Vec<_>>();
+        if jobs.is_empty() {
+            return interrupted_active_tool_result();
+        }
+        let states = jobs
+            .iter()
+            .map(|job| format!("{}: {:?}", job.id, job.status))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let cleanup_unconfirmed = jobs
+            .iter()
+            .any(|job| job.status == crate::tools::shell::ShellStatus::Running);
+        let cleanup_note = if cleanup_unconfirmed {
+            " Running jobs have not been stopped; cleanup is unconfirmed."
+        } else {
+            ""
+        };
+        ToolResult::error(format!(
+            "Tool execution was interrupted after shell work started. Shell job state: {states}. \
+             Partial effects may remain; inspect the job output before retrying.{cleanup_note}"
+        ))
+        .with_metadata(json!({
+            "executed": true,
+            "cancelled": true,
+            "shell_jobs": jobs.iter().map(|job| json!({
+                "task_id": job.id,
+                "status": job.status,
+            })).collect::<Vec<_>>(),
+        }))
     }
 
     /// Commit collected tool outcomes to the session and related runtime state.
@@ -4073,10 +4477,13 @@ impl Engine {
     async fn process_tool_results(
         &mut self,
         outcomes: Vec<Option<ToolExecOutcome>>,
+        turn: &mut TurnContext,
         tool_catalog: &mut Vec<crate::models::Tool>,
         active_tool_names: &mut std::collections::HashSet<String>,
         hook_contexts: &std::collections::HashMap<String, String>,
-    ) {
+        mut fleet_denial_guard: Option<&mut FleetDenialGuard>,
+    ) -> FleetDenialAction {
+        let mut denial_batch = FleetDenialBatch::default();
         let active_tool_names_before = active_tool_names.clone();
         let tool_catalog_len_before = tool_catalog.len();
         // #dogfood 0.8.67: if the model mutates the goal mid-turn via
@@ -4090,12 +4497,53 @@ impl Engine {
             let tool_input = outcome.input.clone();
             let tool_name_for_ws = outcome.name.clone();
             let terminal_status = outcome.terminal.status;
+            let routed_duration_ms =
+                u64::try_from(outcome.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
             let result = outcome.terminal.into_legacy_result();
+            if let Some(guard) = fleet_denial_guard.as_deref_mut() {
+                guard.observe(
+                    &mut denial_batch,
+                    &outcome.name,
+                    &tool_input,
+                    terminal_status,
+                    &result,
+                    outcome.original_content_digest,
+                );
+            }
             if matches!(outcome.name.as_str(), "create_goal" | "update_goal") {
                 goal_tool_ran = true;
             }
             match result {
                 Ok(output) => {
+                    let routed_usage = if let Some(metadata) = output.metadata.as_ref()
+                        && let Some(batch) =
+                            crate::cost_status::child_usage_records_from_metadata(metadata)
+                    {
+                        let residual_dropped_records = batch.dropped_records.saturating_sub(
+                            u64::try_from(batch.drop_records.len()).unwrap_or(u64::MAX),
+                        );
+                        turn.add_routed_usage_dropped_records(residual_dropped_records);
+                        turn.add_routed_usages(
+                            batch.records.iter().map(|record| &record.usage.usage),
+                        )
+                    } else if let Some(metadata) = output.metadata.as_ref()
+                        && let Some(usage) = crate::cost_status::child_usage_from_metadata(metadata)
+                    {
+                        turn.add_routed_usages(std::iter::once(&usage))
+                    } else {
+                        Usage::default()
+                    };
+                    if usage_has_reported_data(&routed_usage) {
+                        let _ = self
+                            .tx_event
+                            .send(Event::RoutedTurnUsage {
+                                usage: routed_usage,
+                                duration_ms: routed_duration_ms,
+                                first_token_ms: None,
+                                request_ms: None,
+                            })
+                            .await;
+                    }
                     let mut tool_surface_changed =
                         super::tool_catalog::activate_result_dependencies(
                             tool_catalog,
@@ -4211,7 +4659,7 @@ impl Engine {
                         content: vec![ContentBlock::ToolResult {
                             tool_use_id: outcome.id,
                             content: output_for_context,
-                            is_error: None,
+                            is_error: (!output.success).then_some(true),
                             content_blocks: (!content_blocks.is_empty()).then_some(content_blocks),
                         }],
                     })
@@ -4268,6 +4716,12 @@ impl Engine {
         {
             self.session.pending_prefix_change_reason = Some("tool_surface".to_string());
         }
+        fleet_denial_guard.map_or(FleetDenialAction::Continue, |guard| {
+            let action = guard.finish_batch(denial_batch);
+            turn.stop_diagnostics
+                .permission_denial_rounds_without_progress = guard.denial_rounds_without_progress();
+            action
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4278,6 +4732,7 @@ impl Engine {
         stream_request: &crate::models::MessageRequest,
         mut request_dispatched_at: Instant,
         drop_resumes_spent: u32,
+        diagnostics: &mut crate::tool_inspection::TurnStopDiagnostics,
     ) -> StreamOutcome {
         // The stream value is itself `Pin<Box<dyn Stream + Send>>`, which
         // is `Unpin`, so we can rebind it on a transparent retry without
@@ -4322,8 +4777,8 @@ impl Engine {
         let mut last_text_index: Option<usize> = None;
         let mut stream_errors = 0u32;
         // #103 transparent retry bookkeeping. `any_content_received` flips
-        // on the first non-MessageStart event so we know whether DeepSeek
-        // billed us / the user has seen any output for this turn yet.
+        // on the first actionable content event so we know whether the user
+        // has seen output. Absence of content does not establish zero usage.
         // This is distinct from the outer drop-resume budget (which
         // restarts the whole turn-step when a stream died with no
         // content-block delta delivered to the consumer).
@@ -4386,7 +4841,7 @@ impl Engine {
             let Some(event_result) = poll_outcome else {
                 break;
             };
-            while let Ok(steer) = self.rx_steer.try_recv() {
+            while let Some(steer) = self.next_turn_steer() {
                 let steer = steer.trim().to_string();
                 if steer.is_empty() {
                     continue;
@@ -4470,9 +4925,8 @@ impl Engine {
                     }
                     // #103: when the stream errors before any content was
                     // streamed AND we still have retry budget, transparently
-                    // resend the request. DeepSeek has not billed for any
-                    // output and the user has seen nothing — re-trying is
-                    // the right user-visible behavior.
+                    // resend the request. The user has seen nothing, but the
+                    // provider may already have consumed or billed tokens.
                     if should_transparently_retry_stream(
                         any_content_received,
                         transparent_stream_retries,
@@ -4489,7 +4943,13 @@ impl Engine {
                         let retry_stream_result = tokio::select! {
                             biased;
                             () = self.cancel_token.cancelled() => break,
-                            result = client.create_message_stream(stream_request.clone()) => result,
+                            result = async {
+                                diagnostics.transparent_stream_retries =
+                                    diagnostics.transparent_stream_retries.saturating_add(1);
+                                diagnostics.model_requests_started =
+                                    diagnostics.model_requests_started.saturating_add(1);
+                                client.create_message_stream(stream_request.clone()).await
+                            } => result,
                         };
                         match retry_stream_result {
                             Ok(fresh) => {
@@ -5343,6 +5803,15 @@ fn mode_blocks_write_capable_tool(
 /// step's error counters or trip error-escalation.
 fn interrupted_tool_result() -> ToolResult {
     ToolResult::error("Tool not executed: the request was cancelled before this tool ran.")
+        .with_metadata(json!({"executed": false, "cancelled": true}))
+}
+
+fn interrupted_active_tool_result() -> ToolResult {
+    ToolResult::error(
+        "Tool execution was interrupted before a result was received. Execution and cleanup \
+         are unconfirmed; check for partial effects or running work before retrying.",
+    )
+    .with_metadata(json!({"cancelled": true, "cleanup_confirmed": false}))
 }
 
 #[cfg(test)]
@@ -5354,6 +5823,7 @@ mod cancel_batch_tests {
         let result = interrupted_tool_result();
         // Must not be marked successful (the tool never ran)...
         assert!(!result.success, "interrupted tool must not report success");
+        assert_eq!(result.metadata.as_ref().unwrap()["executed"], false);
         // ...and must clearly explain why, for the resumed transcript.
         assert!(
             result.content.to_lowercase().contains("cancel"),

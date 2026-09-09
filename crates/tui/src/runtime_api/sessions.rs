@@ -290,11 +290,25 @@ pub(super) async fn resume_session_thread(
     Path(id): Path<String>,
     Json(req): Json<ResumeSessionRequest>,
 ) -> Result<(StatusCode, Json<ResumeSessionResponse>), ApiError> {
+    let _checkpoint_admission = state.runtime_threads.session_checkpoint_guard().await;
     let manager = SessionManager::new(state.sessions_dir.clone())
         .map_err(|e| ApiError::internal(format!("Failed to open sessions dir: {e}")))?;
     let session = manager
         .load_session(&id)
         .map_err(|e| map_session_err(&id, e, "read"))?;
+
+    // Validate imported image bytes before allocating a Runtime thread. This
+    // retains local history's existing bounds; invalid content cannot leave an
+    // empty session, and no path or remote image reference is dereferenced.
+    for message in session
+        .messages
+        .iter()
+        .filter(|message| message.role == Role::User)
+    {
+        crate::image_attach::runtime_images_from_blocks(&message.content).map_err(|error| {
+            ApiError::bad_request(format!("Cannot restore session image: {error}"))
+        })?;
+    }
 
     let model = req.model.unwrap_or_else(|| session.metadata.model.clone());
     let mode = req.mode.unwrap_or_else(|| {
@@ -333,19 +347,15 @@ pub(super) async fn resume_session_thread(
 
     // Link the session to the new thread so that `ensure_engine_loaded`
     // can restore the full message history from the session file.
-    if let Err(e) = state
+    state
         .runtime_threads
-        .set_thread_session_id(&thread.id, &id)
+        .set_thread_session_checkpoint(&thread.id, &session)
         .await
-    {
-        let session_ref = crate::utils::redacted_identifier_for_log(&id);
-        tracing::warn!(
-            session = %session_ref,
-            thread_id = %thread.id,
-            error = %e,
-            "Failed to link session to thread"
-        );
-    }
+        .map_err(|e| {
+            ApiError::internal(format!(
+                "Saved session was read but its Runtime checkpoint could not be bound: {e}"
+            ))
+        })?;
 
     let summary = format!(
         "Resumed session '{}' ({} messages) into thread {}",
@@ -367,6 +377,7 @@ pub(super) async fn create_session_from_thread(
     State(state): State<RuntimeApiState>,
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<(StatusCode, Json<CreateSessionResponse>), ApiError> {
+    let _checkpoint_admission = state.runtime_threads.session_checkpoint_guard().await;
     let thread_id = req.thread_id.trim();
     if thread_id.is_empty() {
         return Err(ApiError::bad_request("thread_id is required"));
@@ -435,19 +446,15 @@ pub(super) async fn create_session_from_thread(
 
     // Link the session to the thread so that `ensure_engine_loaded` can
     // restore the full message history from the session file.
-    if let Err(e) = state
+    state
         .runtime_threads
-        .set_thread_session_id(&detail.thread.id, &session_handle)
+        .set_thread_session_checkpoint(&detail.thread.id, &session)
         .await
-    {
-        let session_ref = crate::utils::redacted_identifier_for_log(&session_handle);
-        tracing::warn!(
-            session = %session_ref,
-            thread_id = %detail.thread.id,
-            error = %e,
-            "Failed to link session to thread"
-        );
-    }
+        .map_err(|e| {
+            ApiError::internal(format!(
+                "Session was saved but its Runtime checkpoint could not be bound: {e}"
+            ))
+        })?;
 
     Ok((
         StatusCode::CREATED,
@@ -719,6 +726,7 @@ pub(super) async fn save_current_session(
     State(state): State<RuntimeApiState>,
     Json(req): Json<SaveSessionRequest>,
 ) -> Result<Json<SaveSessionResponse>, ApiError> {
+    let _checkpoint_admission = state.runtime_threads.session_checkpoint_guard().await;
     // Find the thread to save.
     let thread_id = match req.thread_id {
         Some(id) => id,
@@ -826,19 +834,15 @@ pub(super) async fn save_current_session(
     // restore the full message history (including thinking/tool blocks)
     // from the session file instead of reconstructing from turns.
     let session_handle = session.metadata.id.clone();
-    if let Err(e) = state
+    state
         .runtime_threads
-        .set_thread_session_id(&thread_id, &session_handle)
+        .set_thread_session_checkpoint(&thread_id, &session)
         .await
-    {
-        let session_ref = crate::utils::redacted_identifier_for_log(&session_handle);
-        tracing::warn!(
-            session = %session_ref,
-            thread_id = %thread_id,
-            error = %e,
-            "Failed to link session to thread"
-        );
-    }
+        .map_err(|e| {
+            ApiError::internal(format!(
+                "Session was saved but its Runtime checkpoint could not be bound: {e}"
+            ))
+        })?;
 
     Ok(Json(SaveSessionResponse {
         session_id: session_handle,

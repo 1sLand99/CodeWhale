@@ -15,7 +15,7 @@ using System.Runtime.InteropServices;
 public static class User32 {
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
   [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, UIntPtr dwExtraInfo);
-  [DllImport("user32.dll")] public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+  [DllImport("user32.dll", SetLastError = true)] private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
   [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT lpPoint);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
   [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
@@ -31,6 +31,40 @@ public static class User32 {
   }
   public static INPUT KeyInput(ushort vk, ushort scan, uint flags) {
     return new INPUT { type = 1, u = new INPUTUNION { ki = new KEYBDINPUT { wVk = vk, wScan = scan, dwFlags = flags, time = 0, dwExtraInfo = IntPtr.Zero } } };
+  }
+  public sealed class InputDeliveryException : InvalidOperationException {
+    public readonly uint Inserted;
+    public InputDeliveryException(uint inserted, int expected, int error)
+      : base(String.Format("SendInput inserted {0} of {1} events (Win32 error {2})", inserted, expected, error)) { Inserted = inserted; }
+  }
+  public static void SendChecked(INPUT[] inputs) {
+    uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT)));
+    if (sent != (uint)inputs.Length) {
+      int error = Marshal.GetLastWin32Error();
+      throw new InputDeliveryException(sent, inputs.Length, error);
+    }
+  }
+  public static void SendKey(ushort vk, uint flags) {
+    SendChecked(new INPUT[] { KeyInput(vk, 0, flags) });
+  }
+  public static void SendString(string text) {
+    // UTF-16 code units, including both halves of surrogate pairs. UNICODE
+    // requires wVk=0 and may only be combined with KEYUP, never SCANCODE.
+    foreach (char c in text) {
+      INPUT up = KeyInput(0, c, UNICODE | KEYUP);
+      try { SendChecked(new INPUT[] { KeyInput(0, c, UNICODE), up }); }
+      catch (InputDeliveryException failure) {
+        // A partial pair may leave only our down event inserted. Release it
+        // once, never replay text, and still report the original failure.
+        if (failure.Inserted == 1) {
+          try { SendChecked(new INPUT[] { up }); }
+          catch (Exception cleanup) {
+            throw new AggregateException("Unicode input failed: " + failure.Message + "; key-up recovery failed: " + cleanup.Message, failure, cleanup);
+          }
+        }
+        throw;
+      }
+    }
   }
 }`;
 
@@ -50,14 +84,24 @@ const MODVK = { ctrl: 0x11, control: 0x11, alt: 0x12, shift: 0x10, win: 0x5b, me
 
 // Every action runs in a fresh powershell.exe process, so a bootstrap process
 // can never register the User32 type for later spawns. Each User32-backed
-// invocation therefore carries its own type definition via this prelude
-// (Add-Type re-definition is tolerated through -ErrorAction SilentlyContinue).
-const USER32_PRELUDE = `Add-Type -TypeDefinition @'\n${USER32}\n'@ -ErrorAction SilentlyContinue;`;
+// invocation therefore carries its own type definition via this prelude.
+// Compilation, conversion and native-call exceptions must stop before success.
+const USER32_PRELUDE = `$ErrorActionPreference = 'Stop';\nAdd-Type -TypeDefinition @'\n${USER32}\n'@ -ErrorAction Stop;`;
 
 /** Coordinate clicks on this backend are always raw pointer events; strategy="a11y" must fail closed rather than silently degrade. */
 function assertEventStrategy(strategy) {
   if (strategy != null && strategy !== "auto" && strategy !== "event") {
     throw new ExecError(`strategy "${strategy}" is macOS-only; this backend dispatches coordinate clicks as raw pointer events — use an element target for a semantic action`);
+  }
+}
+
+function unsupportedSelector(message) {
+  return Object.assign(new ExecError(message), { code: "unsupported_selector" });
+}
+
+function assertUntargetedElement(target) {
+  if (["app_ref", "windowIndex", "window_id"].some((key) => Object.hasOwn(target, key))) {
+    throw unsupportedSelector("Windows semantic actions do not support explicit application or window selectors");
   }
 }
 
@@ -109,18 +153,36 @@ export function create(opts = {}) {
     if (!buttons.length && !keys.length) return;
     const releases = [
       ...buttons.map((button) => `[User32]::mouse_event([User32]::${button}UP, 0, 0, 0, [UIntPtr]::Zero);`),
-      ...keys.reverse().map((vk) => `[void][User32]::SendInput(1, @([User32]::KeyInput(${vk}, 0, 2)), [System.Runtime.InteropServices.Marshal]::SizeOf([type][User32+INPUT]));`),
+      ...keys.reverse().map((vk) => `[User32]::SendKey(${vk}, 2);`),
     ];
     await withSignal(null, () => withUser32(releases.join("\n"), { timeoutMs: 2_000 }));
     for (const button of buttons) heldButtons.delete(button);
     for (const key of keys) heldKeys.delete(key);
   }
 
+  async function withKeys(keys, action) {
+    throwIfAborted();
+    for (const code of keys) heldKeys.add(code);
+    try {
+      const result = await action();
+      for (const code of keys) heldKeys.delete(code);
+      return result;
+    } catch (failure) {
+      try { await releaseInput({ buttons: [], keys }); }
+      catch (cleanup) {
+        throw Object.assign(new ExecError(`Keyboard input failed: ${failure.message}; release failed: ${cleanup.message}`, failure.result), {
+          code: failure.code, cause: failure, cleanupError: cleanup,
+        });
+      }
+      throw failure;
+    }
+  }
+
   function keyChord(text) {
     const parts = String(text).split("+").map((part) => part.trim().toLowerCase());
     const key = parts.pop();
     const mods = parts.map((part) => MODVK[part]);
-    const vk = VK[key] ?? MODVK[key] ?? (key.length === 1 ? key.toUpperCase().charCodeAt(0) : null);
+    const vk = VK[key] ?? MODVK[key] ?? (/^[a-z0-9]$/.test(key) ? key.toUpperCase().charCodeAt(0) : null);
     if (vk == null || mods.some((mod) => mod == null)) throw new ExecError(`unknown key combination "${text}"`);
     return { key, vk, mods: [...new Set(mods)] };
   }
@@ -161,8 +223,10 @@ if (-not $out) { $out = '[]' }
 Write-Output ('{"apps": ' + $out + '}');`);
       return { apps: (Array.isArray(j.apps) ? j.apps : [j.apps]).map((a) => ({ name: a.name, pid: a.pid2, title: a.title })) };
     },
-    list_windows: async () => {
-      const j = await psJson(`Add-Type -AssemblyName System.Windows.Forms;
+    list_windows: async (args = {}) => {
+      if (Object.hasOwn(args, "app_ref") || Object.hasOwn(args, "window_id")) throw unsupportedSelector("Windows list_windows does not support app_ref or window_id; omit them to list all windows");
+      const j = await psJson(`$ErrorActionPreference = 'Stop';
+Add-Type -AssemblyName System.Windows.Forms;
 Add-Type -TypeDefinition @'
 using System;
 using System.Text;
@@ -194,7 +258,7 @@ public static class WinEnum {
   }
 }
 '@;
-$json = (WinEnum::List() | ForEach-Object { $p = $_.Split('|', 2); $parts = $p[1].Split('|', 2); [pscustomobject]@{ pid2 = [int]$p[0]; geom = $parts[0]; title = $parts[1] } } | ConvertTo-Json -Compress;
+$json = [WinEnum]::List() | ForEach-Object { $p = $_.Split('|', 2); $parts = $p[1].Split('|', 2); [pscustomobject]@{ pid2 = [int]$p[0]; geom = $parts[0]; title = $parts[1] } } | ConvertTo-Json -Compress;
 if (-not $json) { $json = '[]' }
 Write-Output ('{"windows": ' + $json + '}');`, { timeoutMs: 25_000 });
       return {
@@ -211,19 +275,29 @@ Write-Output ('{"windows": ' + $json + '}');`, { timeoutMs: 25_000 });
       if (r.code !== 0) throw new ExecError(`Start-Process failed: ${r.stderr.trim().slice(0, 200)}`, r);
       return { launched: true, name: target, url: urlArg ?? null, activate };
     },
-    get_app_state: async ({ app_ref, detail } = {}) => {
-      const filter = app_ref?.name ? app_ref.name.replace(/'/g, "''") : "";
+    get_app_state: async (args = {}) => {
+      if (Object.hasOwn(args, "window_id")) throw unsupportedSelector("Windows get_app_state does not support window_id");
+      const { app_ref, detail } = args;
+      if (Object.hasOwn(args, "app_ref") && (!app_ref || typeof app_ref !== "object" || Array.isArray(app_ref)
+        || Object.keys(app_ref).length !== 1 || !Object.hasOwn(app_ref, "name") || typeof app_ref.name !== "string" || !app_ref.name.trim())) {
+        throw unsupportedSelector("Windows get_app_state supports only app_ref: { name: exact window title }; PID, bundle_id and other references are unsupported");
+      }
+      const filter = Buffer.from(app_ref?.name ?? "", "utf16le").toString("base64");
       const maxEls = detail === "full" ? 800 : 400;
       const j = await psJson(`Add-Type -AssemblyName UIAutomationClient;
 Add-Type -AssemblyName UIAutomationTypes;
 $max = ${maxEls};
+$filter = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${filter}'));
 $root = [System.Windows.Automation.AutomationElement]::RootElement;
 $els = New-Object System.Collections.ArrayList;
 $found = $false; $truncated = $false; $appName = $null;
-$targets = $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition);
+$targets = @($root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition));
+if ($filter) {
+  $targets = @($targets | Where-Object { [string]::Equals($_.Current.Name, $filter, [StringComparison]::OrdinalIgnoreCase) });
+  if ($targets.Count -gt 1) { throw 'More than one application window has this exact name' }
+}
 foreach ($t in $targets) {
   $nm = $t.Current.Name;
-  if ('${filter}' -and $nm -notlike '*${filter}*') { continue }
   $found = $true; $appName = $nm;
   $stack = New-Object System.Collections.Stack;
   $stack.Push(@($t, @(0)));
@@ -242,10 +316,12 @@ foreach ($t in $targets) {
 }
 $result = [pscustomobject]@{ found = $found; name = $appName; truncated = $truncated; elements = @($els | ForEach-Object { [pscustomobject]@{ index = $_.index; path = $_.path; role = ($_.role -replace 'ControlType.',''); label = $_.label; value = $_.value; enabled = $_.enabled; position = [pscustomobject]@{ x = $_.x; y = $_.y }; size = [pscustomobject]@{ w = $_.w; h = $_.h }; actions = $_.actions } }) };
 Write-Output ($result | ConvertTo-Json -Depth 6 -Compress);`, { timeoutMs: 60_000 });
-      if (!j.found) throw new ExecError("application window not found in UIA tree — pass app_ref.name from list_apps");
+      if (!j.found) throw new ExecError("application window not found in UIA tree — pass app_ref.name as the exact window title from list_windows or list_apps.title");
       return j;
     },
-    screenshot: async ({ display, region, path: outPath } = {}) => {
+    screenshot: async (args = {}) => {
+      if (Object.hasOwn(args, "app_ref") || Object.hasOwn(args, "window_id")) throw unsupportedSelector("Windows screenshot does not support app_ref or window_id; omit them for a desktop screenshot");
+      const { display, region, path: outPath } = args;
       const dir = recordingsDir();
       fs.mkdirSync(dir, { recursive: true });
       const file = outPath || path.join(dir, `shot-${new Date().toISOString().replace(/[:.]/g, "-")}-${crypto.randomBytes(3).toString("hex")}.png`);
@@ -327,80 +403,55 @@ Write-Output '{"ok": true}';`, { timeoutMs: 20_000 });
     },
     scroll: async ({ target, direction = "down", amount = 3 }) => {
       const notches = Math.max(1, Math.min(30, amount));
+      // Preserve signed wheel deltas as DWORD bits before PowerShell converts
+      // the argument: its signed 0xFFFFFFFF literal cannot mask negatives.
       const data = (direction === "down" ? -1 : direction === "up" ? 1 : 0) * notches * 120;
       const hdata = (direction === "right" ? 1 : direction === "left" ? -1 : 0) * notches * 120;
       await withUser32(`[User32]::SetCursorPos(${Math.round(target.x)}, ${Math.round(target.y)}) | Out-Null;
 Start-Sleep -Milliseconds 60;
-[User32]::mouse_event([User32]::WHEEL, 0, 0, [uint32]"$([int64]${data} -band 0xFFFFFFFF)", [UIntPtr]::Zero);
-[User32]::mouse_event([User32]::HWHEEL, 0, 0, [uint32]"$([int64]${hdata} -band 0xFFFFFFFF)", [UIntPtr]::Zero);
+[User32]::mouse_event([User32]::WHEEL, 0, 0, ${data >>> 0}, [UIntPtr]::Zero);
+[User32]::mouse_event([User32]::HWHEEL, 0, 0, ${hdata >>> 0}, [UIntPtr]::Zero);
 Write-Output '{"ok": true}';`);
       return { action_sent: true, direction, amount };
     },
     type: async ({ text }) => {
       if (!text) return { action_sent: false, note: "empty text" };
       const b64 = Buffer.from(String(text), "utf16le").toString("base64");
-      const script = `Add-Type -TypeDefinition @'
-using System;
-using System.Text;
-using System.Runtime.InteropServices;
-public static class TypeText {
-  [DllImport("user32.dll")] public static extern uint SendInput(uint n, INPUT[] inputs, int size);
-  [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT { public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public IntPtr extra; }
-  [StructLayout(LayoutKind.Sequential)] public struct INPUT { public uint type; public KEYBDINPUT ki; }
-  public static void SendString(string s) {
-    foreach (char c in s) {
-      var down = new INPUT { type = 1, ki = new KEYBDINPUT { wScan = c, dwFlags = 0x0008 | 0x0004 } };
-      var up = new INPUT { type = 1, ki = new KEYBDINPUT { wScan = c, dwFlags = 0x0008 | 0x0004 | 0x0002 } };
-      INPUT[] arr = new INPUT[2]; arr[0] = down; arr[1] = up;
-      SendInput(2, arr, System.Runtime.InteropServices.Marshal.SizeOf(typeof(INPUT)));
-    }
-  }
-}
-'@;
-$text = [System.Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${b64}'));
-[TypeText]::SendString($text);
+      const script = `$text = [System.Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${b64}'));
+[User32]::SendString($text);
 Write-Output ('{"ok": true, "chars": ' + $text.Length + '}');`;
-      const r = await ps(script, { timeoutMs: Math.max(20_000, text.length * 60) });
-      if (r.code !== 0) throw new ExecError(`type failed: ${(r.stderr || "").slice(0, 250)}`, r);
+      await withUser32(script, { timeoutMs: Math.max(20_000, text.length * 60) });
       return { action_sent: true, chars: text.length, strategy: "unicode-sendinput" };
     },
     key: async ({ text, repeat = 1 }) => {
       const { key, vk, mods } = keyChord(text);
-      throwIfAborted();
-      for (const code of [...mods, vk]) heldKeys.add(code);
-      try {
-      const n = Math.max(1, Math.min(100, repeat));
-      await withUser32(`$ins = New-Object 'User32+INPUT[]' 0;
-$add = { param($i) };
-$seq = @();
+      return withKeys([...mods, vk], async () => {
+        const n = Math.max(1, Math.min(100, repeat));
+        await withUser32(`$seq = @();
 ${mods.map((m) => `$seq += [User32]::KeyInput(${m}, 0, 0);`).join("\n")}
 for ($i = 0; $i -lt ${n}; $i++) { $seq += [User32]::KeyInput(${vk}, 0, 0); $seq += [User32]::KeyInput(${vk}, 0, 2); }
 ${[...mods].reverse().map((m) => `$seq += [User32]::KeyInput(${m}, 0, 2);`).join("\n")}
-$arr = $seq.ToArray();
-[void][User32]::SendInput($arr.Length, $arr, [System.Runtime.InteropServices.Marshal]::SizeOf([type][User32+INPUT]));
+[User32]::SendChecked([User32+INPUT[]]$seq);
 Write-Output '{"ok": true}';`);
-      for (const code of [...mods, vk]) heldKeys.delete(code);
-      return { action_sent: true, key, repeat: n };
-      } finally { await releaseInput({ buttons: [], keys: [...mods, vk] }); }
+        return { action_sent: true, key, repeat: n };
+      });
     },
     hold_key: async ({ text, duration }) => {
       requireInputOwner();
       const { key, vk, mods } = keyChord(text);
       const d = Math.max(0.05, Math.min(30, Number(duration) || 1));
       const keys = [...mods, vk];
-      throwIfAborted();
-      for (const code of keys) heldKeys.add(code);
-      const event = (code, flags) => `[void][User32]::SendInput(1, @([User32]::KeyInput(${code}, 0, ${flags})), [System.Runtime.InteropServices.Marshal]::SizeOf([type][User32+INPUT]));`;
-      try {
+      const event = (code, flags) => `[User32]::SendKey(${code}, ${flags});`;
+      return withKeys(keys, async () => {
         await withUser32(`${keys.map((code) => event(code, 0)).join("\n")}
 Start-Sleep -Milliseconds ${Math.round(d * 1000)};
 ${[...keys].reverse().map((code) => event(code, 2)).join("\n")}
 Write-Output '{"ok": true}';`, { timeoutMs: Math.max(10_000, d * 1000 + 8000) });
-        for (const code of keys) heldKeys.delete(code);
         return { action_sent: true, key, heldSec: d };
-      } finally { await releaseInput({ buttons: [], keys }); }
+      });
     },
     set_value: async ({ target, value }) => {
+      assertUntargetedElement(target);
       // UIA ValuePattern via a re-walk to target.path from the desktop root.
       const b64path = Buffer.from(JSON.stringify(target.path ?? []), "utf8").toString("base64");
       const b64val = Buffer.from(String(value ?? ""), "utf16le").toString("base64");
@@ -429,6 +480,7 @@ try {
     },
     select_text: async () => { throw new ExecError("select_text is not implemented on the win32 backend yet — fail-closed"); },
     perform_action: async ({ target, action }) => {
+      assertUntargetedElement(target);
       const b64path = Buffer.from(JSON.stringify(target.path ?? []), "utf8").toString("base64");
       const act = String(action ?? "Invoke").replace(/'/g, "");
       const j = await psJson(`Add-Type -AssemblyName UIAutomationClient; Add-Type -AssemblyName UIAutomationTypes;

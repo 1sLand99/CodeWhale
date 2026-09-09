@@ -150,7 +150,7 @@ fn list_show_validate_are_read_only_and_label_legacy_tools() {
     assert!(list.contains(r"computer\-use"), "{list}");
     assert!(list.contains("builtin · not-reviewed"), "{list}");
     assert!(list.contains("disabled"));
-    assert!(list.contains("Legacy executable plugin tools (1)"));
+    assert!(list.contains("Legacy plugin tools (1)"));
 }
 
 #[test]

@@ -7,8 +7,7 @@
 use super::clamp_event_poll_timeout;
 use super::observer_hooks::{
     execute_session_error_hook, execute_session_state_transition_hooks,
-    execute_turn_end_observer_hook, subagent_failure_notice,
-    subagent_status_from_completion_result, surface_observer_hook_submission_failure,
+    execute_turn_end_observer_hook, surface_observer_hook_submission_failure,
 };
 use super::task_projection::{
     refresh_active_task_panel, refresh_automation_panel, refresh_automation_panel_blocking,
@@ -111,6 +110,198 @@ fn current_session_fleet_workers_status(
         crate::localization::MessageId::SubagentsCurrentSessionFleetWorkersStatus,
     )
     .replace("{count}", &count.to_string())
+}
+
+#[derive(Debug)]
+struct TranslationAccountingContext {
+    cost_scope: crate::cost_status::CostScopeToken,
+    origin_session_id: Option<String>,
+    origin_turn_id: Option<String>,
+    source_id: String,
+}
+
+struct SettledTranslation {
+    translated: anyhow::Result<String>,
+    usage: Option<crate::models::Usage>,
+}
+
+impl TranslationAccountingContext {
+    fn capture(app: &App, kind: &str, sequence: u64) -> Self {
+        let raw_source = format!(
+            "translation:{}:{}:{kind}:{sequence}",
+            app.current_session_id.as_deref().unwrap_or("no-session"),
+            app.runtime_turn_id.as_deref().unwrap_or("no-turn")
+        );
+        Self {
+            cost_scope: crate::cost_status::scope_token(),
+            origin_session_id: app.current_session_id.clone(),
+            origin_turn_id: app.runtime_turn_id.clone(),
+            source_id: format!(
+                "translation:{}",
+                crate::cost_status::usage_source_fingerprint(&raw_source)
+            ),
+        }
+    }
+
+    fn settle(
+        self,
+        response: anyhow::Result<crate::client::TranslationProviderResponse>,
+    ) -> SettledTranslation {
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                return SettledTranslation {
+                    translated: Err(error),
+                    usage: None,
+                };
+            }
+        };
+        if let Some(usage) = response.usage.as_ref() {
+            if let (Some(session_id), Some(turn_id)) = (
+                self.origin_session_id.as_deref(),
+                self.origin_turn_id.as_deref(),
+            ) {
+                crate::cost_status::report_effective_route_for_interactive_origin(
+                    self.cost_scope,
+                    session_id,
+                    turn_id,
+                    &self.source_id,
+                    &response.route,
+                    usage,
+                );
+            } else {
+                crate::cost_status::report_effective_route_for_runtime(
+                    self.cost_scope,
+                    None,
+                    &self.source_id,
+                    &response.route,
+                    usage,
+                );
+            }
+        } else {
+            if let (Some(session_id), Some(turn_id)) = (
+                self.origin_session_id.as_deref(),
+                self.origin_turn_id.as_deref(),
+            ) {
+                crate::cost_status::report_unreceipted_for_interactive_origin(
+                    self.cost_scope,
+                    session_id,
+                    turn_id,
+                    &self.source_id,
+                    &response.route,
+                );
+            } else {
+                crate::cost_status::report_unreceipted_provider_success(
+                    self.cost_scope,
+                    None,
+                    &self.source_id,
+                    &response.route,
+                );
+            }
+        }
+        SettledTranslation {
+            translated: response.translated,
+            usage: response.usage,
+        }
+    }
+}
+
+fn accrue_translation_usage(app: &mut App, usage: &crate::models::Usage) {
+    let turn_tokens = usage.input_tokens.saturating_add(usage.output_tokens);
+    app.session.total_tokens = app.session.total_tokens.saturating_add(turn_tokens);
+    app.session.total_conversation_tokens = app
+        .session
+        .total_conversation_tokens
+        .saturating_add(turn_tokens);
+    app.session.total_input_tokens = app
+        .session
+        .total_input_tokens
+        .saturating_add(usage.input_tokens);
+    app.session.total_output_tokens = app
+        .session
+        .total_output_tokens
+        .saturating_add(usage.output_tokens);
+    if usage.prompt_cache_hit_tokens.is_some()
+        || usage.prompt_cache_miss_tokens.is_some()
+        || usage.prompt_cache_write_tokens.is_some()
+    {
+        let classes = crate::pricing::token_usage_for_pricing(usage);
+        app.session.total_cache_hit_tokens = app
+            .session
+            .total_cache_hit_tokens
+            .saturating_add(u32::try_from(classes.cache_read).unwrap_or(u32::MAX));
+        app.session.total_cache_miss_tokens = app
+            .session
+            .total_cache_miss_tokens
+            .saturating_add(u32::try_from(classes.input).unwrap_or(u32::MAX));
+        app.session.total_cache_write_tokens = app
+            .session
+            .total_cache_write_tokens
+            .saturating_add(u32::try_from(classes.cache_write).unwrap_or(u32::MAX));
+    }
+}
+
+fn translation_origin(app: &App) -> (Option<String>, Option<String>) {
+    // Fixed-size one-way identities avoid retaining raw imported ids in a
+    // detached completion envelope without introducing truncation aliases.
+    let fingerprint = |value: Option<&str>| value.map(crate::cost_status::usage_source_fingerprint);
+    (
+        fingerprint(app.current_session_id.as_deref()),
+        fingerprint(app.runtime_turn_id.as_deref()),
+    )
+}
+
+fn translation_origin_is_current(
+    app: &App,
+    origin_session_fingerprint: Option<&str>,
+    origin_turn_fingerprint: Option<&str>,
+) -> bool {
+    let current = translation_origin(app);
+    current.0.as_deref() == origin_session_fingerprint
+        && current.1.as_deref() == origin_turn_fingerprint
+}
+
+fn translation_session_is_current(app: &App, origin_session_fingerprint: Option<&str>) -> bool {
+    translation_origin(app).0.as_deref() == origin_session_fingerprint
+}
+
+fn exact_translation_client(
+    config: &Config,
+    route: &crate::core::events::TurnRoute,
+) -> anyhow::Result<Arc<DeepSeekClient>> {
+    let identity = config
+        .resolve_persisted_provider_identity(
+            Some(route.provider.as_str()),
+            Some(&route.provider_identity),
+        )
+        .map_err(anyhow::Error::msg)?;
+    let validated = crate::route_runtime::resolve_runtime_route_for_identity(
+        config,
+        &identity,
+        Some(&route.model),
+    )
+    .map_err(anyhow::Error::msg)?
+    .validate()
+    .map_err(anyhow::Error::msg)?;
+    if validated.identity.key != route.provider_identity
+        || validated.model != route.model
+        || validated.candidate.endpoint().base_url != route.base_url
+    {
+        anyhow::bail!(
+            "translation route changed after turn dispatch; refusing to reuse a different provider client"
+        );
+    }
+    if let Some(receipt) = route.receipt.as_ref()
+        && &validated
+            .client
+            .turn_route_receipt(&route.provider_identity)
+            != receipt
+    {
+        anyhow::bail!(
+            "translation credential or endpoint changed after turn dispatch; refusing stale completion ownership"
+        );
+    }
+    Ok(Arc::new(validated.client))
 }
 
 /// Bind the Runtime thread store to a session before the process-owner lock
@@ -723,9 +914,10 @@ pub async fn run_tui(
         &session_id,
     )
     .await?;
-    let automations = std::sync::Arc::new(tokio::sync::Mutex::new(
-        AutomationManager::default_location()?,
-    ));
+    let _task_shutdown = task_manager.shutdown_guard();
+    let mut automation_service = AutomationManager::default_location()?;
+    automation_service.bind_task_manager(&task_manager)?;
+    let automations = std::sync::Arc::new(tokio::sync::Mutex::new(automation_service));
     let automation_cancel = tokio_util::sync::CancellationToken::new();
     let automation_scheduler = spawn_scheduler(
         automations.clone(),
@@ -772,10 +964,8 @@ pub async fn run_tui(
     // screen; answering it rebuilds the engine with the confirmed mode.
     app.redaction_gate = crate::tui::redaction_gate::confirmation_required(config);
 
-    let engine_config = build_engine_config(&app, config);
-
-    // Spawn the Engine - it will handle all API communication
-    let engine_handle = spawn_tui_engine(engine_config, config);
+    // Restore before admitting initial input, including resumed conversations.
+    let engine_handle = spawn_tui_engine_with_session(&mut app, config).await?;
     crate::startup_trace::mark("engine_spawned");
     // The translation client is optional: it never crashes the TUI on
     // startup, even when the API key is missing, the base URL is malformed,
@@ -790,28 +980,6 @@ pub async fn run_tui(
             None
         }
     };
-
-    if !app.api_messages.is_empty() {
-        let _ = engine_handle
-            .send(Op::SyncSession {
-                session_id: app.current_session_id.clone(),
-                messages: app.api_messages.clone(),
-                system_prompt: app.system_prompt.clone(),
-                system_prompt_override: false,
-                model: app.model.clone(),
-                workspace: app.workspace.clone(),
-                mode: app.mode,
-            })
-            .await;
-    }
-
-    // The engine owns the canonical model-facing prompt from startup. Mirror
-    // that exact value before the first draw so `/context` never reports an
-    // empty system prompt merely because no user turn has been submitted yet.
-    match engine_handle.get_session_snapshot().await {
-        Ok(snapshot) => app.system_prompt = snapshot.system_prompt,
-        Err(err) => tracing::warn!("could not mirror initial engine system prompt: {err:#}"),
-    }
 
     // Fire session start hook
     {
@@ -903,7 +1071,7 @@ pub async fn run_tui(
         &mut app,
         config,
         engine_handle,
-        task_manager,
+        task_manager.clone(),
         &event_broker,
         translation_client,
         pending_telemetry_notice,
@@ -912,6 +1080,9 @@ pub async fn run_tui(
     .await;
     automation_cancel.cancel();
     automation_scheduler.abort();
+    if let Err(error) = task_manager.shutdown_and_wait().await {
+        tracing::error!(%error, "Task manager shutdown remains incomplete");
+    }
 
     // Join the startup-default writer before anything else tears down.
     //
@@ -1259,6 +1430,10 @@ pub(crate) async fn run_event_loop(
     let mut stream_display_clock = StreamDisplayClock::default();
     let (translation_tx, mut translation_rx) =
         tokio::sync::mpsc::unbounded_channel::<TranslationEvent>();
+    let fallback_translation_client = translation_client;
+    let mut active_translation_client = fallback_translation_client.clone();
+    let mut active_translation_route: Option<crate::core::events::TurnRoute> = None;
+    let mut translation_sequence = 0_u64;
     let mut pending_translations = 0usize;
     // #5931: the background runtime's own store faults arrive on its event
     // channel, which nothing else in this loop reads.
@@ -1459,14 +1634,31 @@ pub(crate) async fn run_event_loop(
         while let Ok(event) = translation_rx.try_recv() {
             match event {
                 TranslationEvent::AssistantMessage {
+                    origin_session_fingerprint,
+                    origin_turn_fingerprint,
                     history_index,
                     original_text,
                     translated,
+                    usage,
                     thinking,
                     tool_uses,
                 } => {
                     pending_translations = pending_translations.saturating_sub(1);
-                    pending_thinking_translations = pending_thinking_translations.saturating_sub(1);
+                    if translation_session_is_current(app, origin_session_fingerprint.as_deref())
+                        && let Some(usage) = usage.as_ref()
+                    {
+                        accrue_translation_usage(app, usage);
+                    }
+                    if !translation_origin_is_current(
+                        app,
+                        origin_session_fingerprint.as_deref(),
+                        origin_turn_fingerprint.as_deref(),
+                    ) {
+                        tracing::debug!(
+                            "discarded assistant translation completed for a stale session/turn"
+                        );
+                        continue;
+                    }
                     let text = match translated {
                         Ok(text) => {
                             app.status_message = Some(
@@ -1511,10 +1703,29 @@ pub(crate) async fn run_event_loop(
                     app.needs_redraw = true;
                 }
                 TranslationEvent::Thinking {
+                    origin_session_fingerprint,
+                    origin_turn_fingerprint,
                     placeholder,
                     translated,
+                    usage,
                 } => {
                     pending_translations = pending_translations.saturating_sub(1);
+                    pending_thinking_translations = pending_thinking_translations.saturating_sub(1);
+                    if translation_session_is_current(app, origin_session_fingerprint.as_deref())
+                        && let Some(usage) = usage.as_ref()
+                    {
+                        accrue_translation_usage(app, usage);
+                    }
+                    if !translation_origin_is_current(
+                        app,
+                        origin_session_fingerprint.as_deref(),
+                        origin_turn_fingerprint.as_deref(),
+                    ) {
+                        tracing::debug!(
+                            "discarded thinking translation completed for a stale session/turn"
+                        );
+                        continue;
+                    }
                     let text = match translated {
                         Ok(text) => {
                             app.status_message = Some(
@@ -1780,7 +1991,7 @@ pub(crate) async fn run_event_loop(
                         if app.translation_enabled
                             && !current_streaming_text.is_empty()
                             && crate::tui::translation::needs_translation(&current_streaming_text)
-                            && let Some(translation_client) = translation_client.as_ref()
+                            && let Some(translation_client) = active_translation_client.as_ref()
                         {
                             app.status_message = Some(
                                 crate::localization::tr(
@@ -1794,24 +2005,38 @@ pub(crate) async fn run_event_loop(
                             let tx = translation_tx.clone();
                             let client = translation_client.clone();
                             let original_text = current_streaming_text.clone();
-                            let translation_model = app
-                                .last_effective_model
-                                .clone()
+                            let translation_model = active_translation_route
+                                .as_ref()
+                                .map(|route| route.model.clone())
+                                .or_else(|| app.last_effective_model.clone())
                                 .unwrap_or_else(|| app.model.clone());
+                            translation_sequence = translation_sequence.saturating_add(1);
+                            let accounting = TranslationAccountingContext::capture(
+                                app,
+                                "assistant",
+                                translation_sequence,
+                            );
+                            let (origin_session_fingerprint, origin_turn_fingerprint) =
+                                translation_origin(app);
                             let target_language =
                                 app.ui_locale.translation_target_name().to_string();
                             tokio::spawn(async move {
-                                let translated = crate::tui::translation::translate_text(
-                                    &original_text,
-                                    &client,
-                                    &translation_model,
-                                    &target_language,
-                                )
-                                .await;
+                                let settled = accounting.settle(
+                                    client
+                                        .translate_with_usage(
+                                            &original_text,
+                                            &translation_model,
+                                            &target_language,
+                                        )
+                                        .await,
+                                );
                                 let _ = tx.send(TranslationEvent::AssistantMessage {
+                                    origin_session_fingerprint,
+                                    origin_turn_fingerprint,
                                     history_index,
                                     original_text,
-                                    translated,
+                                    translated: settled.translated,
+                                    usage: settled.usage,
                                     thinking,
                                     tool_uses,
                                 });
@@ -1868,7 +2093,7 @@ pub(crate) async fn run_event_loop(
                             }
                             if !original_thinking.is_empty()
                                 && crate::tui::translation::needs_translation(&original_thinking)
-                                && let Some(translation_client) = translation_client.as_ref()
+                                && let Some(translation_client) = active_translation_client.as_ref()
                             {
                                 app.status_message = Some(
                                     crate::localization::thinking_translation_in_progress(
@@ -1882,10 +2107,19 @@ pub(crate) async fn run_event_loop(
                                     pending_thinking_translations.saturating_add(1);
                                 let tx = translation_tx.clone();
                                 let client = translation_client.clone();
-                                let translation_model = app
-                                    .last_effective_model
-                                    .clone()
+                                let translation_model = active_translation_route
+                                    .as_ref()
+                                    .map(|route| route.model.clone())
+                                    .or_else(|| app.last_effective_model.clone())
                                     .unwrap_or_else(|| app.model.clone());
+                                translation_sequence = translation_sequence.saturating_add(1);
+                                let accounting = TranslationAccountingContext::capture(
+                                    app,
+                                    "thinking",
+                                    translation_sequence,
+                                );
+                                let (origin_session_fingerprint, origin_turn_fingerprint) =
+                                    translation_origin(app);
                                 let placeholder =
                                     crate::localization::thinking_translation_placeholder(
                                         app.ui_locale,
@@ -1894,16 +2128,21 @@ pub(crate) async fn run_event_loop(
                                 let target_language =
                                     app.ui_locale.translation_target_name().to_string();
                                 tokio::spawn(async move {
-                                    let translated = crate::tui::translation::translate_text(
-                                        &original_thinking,
-                                        &client,
-                                        &translation_model,
-                                        &target_language,
-                                    )
-                                    .await;
+                                    let settled = accounting.settle(
+                                        client
+                                            .translate_with_usage(
+                                                &original_thinking,
+                                                &translation_model,
+                                                &target_language,
+                                            )
+                                            .await,
+                                    );
                                     let _ = tx.send(TranslationEvent::Thinking {
+                                        origin_session_fingerprint,
+                                        origin_turn_fingerprint,
                                         placeholder,
-                                        translated,
+                                        translated: settled.translated,
+                                        usage: settled.usage,
                                     });
                                 });
                             } else {
@@ -2061,7 +2300,7 @@ pub(crate) async fn run_event_loop(
                             subagent_list_refresh_requested = true;
                         }
                     }
-                    EngineEvent::TurnStarted { turn_id, .. } => {
+                    EngineEvent::TurnStarted { turn_id, route, .. } => {
                         // A prior turn that died without its `TurnComplete`
                         // must not leak its provisional estimate into this one.
                         app.clear_pending_turn_cost();
@@ -2101,6 +2340,19 @@ pub(crate) async fn run_event_loop(
                         if app.status_message.is_none() {
                             app.status_message = Some("Press Esc or Ctrl+C to cancel".to_string());
                         }
+                        active_translation_client = match route.as_ref() {
+                            Some(route) => match exact_translation_client(config, route) {
+                                Ok(client) => Some(client),
+                                Err(error) => {
+                                    tracing::warn!(
+                                        "translation client rejected the frozen turn route: {error}"
+                                    );
+                                    None
+                                }
+                            },
+                            None => fallback_translation_client.clone(),
+                        };
+                        active_translation_route = route;
                         app.runtime_turn_id = Some(turn_id);
                         app.runtime_turn_status = Some("in_progress".to_string());
                         app.turn_counter = app.turn_counter.saturating_add(1);
@@ -2130,9 +2382,26 @@ pub(crate) async fn run_event_loop(
                     EngineEvent::ToolRequestSnapshot { snapshot } => {
                         app.session.last_tool_request_snapshot = Some(snapshot);
                     }
-                    EngineEvent::RouteDispatched { .. } => {}
+                    EngineEvent::RouteDispatched { turn_id, route } => {
+                        if app.runtime_turn_id.as_deref() == Some(turn_id.as_str()) {
+                            active_translation_client = match exact_translation_client(
+                                config, &route,
+                            ) {
+                                Ok(client) => Some(client),
+                                Err(error) => {
+                                    tracing::warn!(
+                                        "translation client rejected the dispatched turn route: {error}"
+                                    );
+                                    None
+                                }
+                            };
+                            active_translation_route = Some(route);
+                        }
+                    }
                     EngineEvent::TurnComplete {
                         usage,
+                        parent_route_usage,
+                        routed_usage_dropped_records,
                         status,
                         error,
                         tool_catalog,
@@ -2353,22 +2622,23 @@ pub(crate) async fn run_event_loop(
                             .as_ref()
                             .and_then(|turn| turn.route.as_ref())
                             .and_then(crate::core::events::TurnRoute::cost_envelope)
-                            .map(|route| route.audit(&usage));
+                            .map(|route| route.audit(&parent_route_usage));
                         app.push_turn_cache_record(crate::tui::app::TurnCacheRecord {
                             provider,
                             provider_identity,
                             model,
                             auto_model,
-                            input_tokens: usage.input_tokens,
-                            output_tokens: usage.output_tokens,
-                            cache_hit_tokens: usage.prompt_cache_hit_tokens,
-                            cache_miss_tokens: usage.prompt_cache_miss_tokens,
-                            reasoning_replay_tokens: usage.reasoning_replay_tokens,
-                            cache_write_tokens: usage.prompt_cache_write_tokens,
-                            reasoning_tokens: usage.reasoning_tokens,
+                            input_tokens: parent_route_usage.input_tokens,
+                            output_tokens: parent_route_usage.output_tokens,
+                            cache_hit_tokens: parent_route_usage.prompt_cache_hit_tokens,
+                            cache_miss_tokens: parent_route_usage.prompt_cache_miss_tokens,
+                            reasoning_replay_tokens: parent_route_usage.reasoning_replay_tokens,
+                            cache_write_tokens: parent_route_usage.prompt_cache_write_tokens,
+                            reasoning_tokens: parent_route_usage.reasoning_tokens,
                             cost_audit: cost_audit.clone(),
                             recorded_at: Instant::now(),
                         });
+                        app.retire_action_notices(None);
                         if let Some(error) = error.as_deref() {
                             // Only show "Turn failed:" in the composer status
                             // area when an EngineEvent::Error has NOT already
@@ -2376,7 +2646,14 @@ pub(crate) async fn run_event_loop(
                             // Otherwise the error appears twice: once in a
                             // HistoryCell and again as a redundant status line.
                             if !app.turn_error_posted {
-                                app.status_message = Some(format!("Turn failed: {error}"));
+                                app.set_sticky_status(
+                                    format!(
+                                        "{}: {error}",
+                                        app.tr(MessageId::NotificationTurnFailed)
+                                    ),
+                                    StatusToastLevel::Error,
+                                    None,
+                                );
                             }
                         }
 
@@ -2384,8 +2661,9 @@ pub(crate) async fn run_event_loop(
                         // *not* cover so `/cost` can stay honest about it.
                         //
                         // `cost_audit` above came from `cost_envelope()`, i.e.
-                        // the billing envelope stamped at the wire boundary
-                        // and classified from this turn's frozen receipt. It
+                        // the billing envelope frozen at CodeWhale's
+                        // pre-permit application-dispatch boundary and
+                        // classified from this turn's frozen receipt. It
                         // is `None` for a route that was never dispatched, and
                         // a route whose receipt named no product classified as
                         // Unknown — either way nothing accrues. A `/provider`
@@ -2407,6 +2685,20 @@ pub(crate) async fn run_event_loop(
                         }
                         if let Some(cost) = turn_cost {
                             app.accrue_session_cost_estimate(cost);
+                        }
+                        if routed_usage_dropped_records > 0 {
+                            let dropped =
+                                u32::try_from(routed_usage_dropped_records).unwrap_or(u32::MAX);
+                            app.session.cost_unpriced_turns =
+                                app.session.cost_unpriced_turns.saturating_add(dropped);
+                            app.session.cost_cny_unpriced_turns =
+                                app.session.cost_cny_unpriced_turns.saturating_add(dropped);
+                            app.session
+                                .cost_unpriced_reasons
+                                .insert("routed_usage_receipt_missing".to_string());
+                            app.session
+                                .cost_cny_unpriced_reasons
+                                .insert("routed_usage_receipt_missing".to_string());
                         }
 
                         // Emit OSC 9 / BEL desktop notification for long turns, and
@@ -2487,6 +2779,7 @@ pub(crate) async fn run_event_loop(
                                         &launch.base_url,
                                         &launch.model,
                                         &summary,
+                                        launch.openrouter_vendor.as_deref(),
                                     )
                                     .await
                                     && let Ok(mut guard) = suggestion_cell.lock()
@@ -3006,6 +3299,7 @@ pub(crate) async fn run_event_loop(
                         owner_session_id,
                         id,
                         prompt,
+                        worker_status,
                         parent_run_id,
                         spawn_depth,
                         model,
@@ -3021,12 +3315,14 @@ pub(crate) async fn run_event_loop(
                         let meta = app.agent_progress_meta.entry(id.clone()).or_default();
                         meta.parent_run_id = parent_run_id;
                         meta.spawn_depth = spawn_depth;
-                        meta.current_activity = Some(AgentCurrentActivity::bounded(
-                            AgentCurrentActivityStatus::Starting,
-                            Some(prompt_summary.clone()),
-                            None,
-                            None,
-                        ));
+                        meta.current_activity = worker_status.map(|status| {
+                            AgentCurrentActivity::bounded(
+                                status.into(),
+                                Some(prompt_summary.clone()),
+                                None,
+                                None,
+                            )
+                        });
                         meta.current_tool = None;
                         record_agent_spawned_route(app, &id, &model);
                         if app.agent_activity_started_at.is_none() {
@@ -3114,6 +3410,8 @@ pub(crate) async fn run_event_loop(
                         owner_session_id,
                         id,
                         result,
+                        outcome,
+                        ..
                     } if event_owner_is_active(
                         app.current_session_id.as_deref(),
                         &owner_session_id,
@@ -3131,47 +3429,46 @@ pub(crate) async fn run_event_loop(
                                         && matches!(agent.status, SubAgentStatus::Running)
                                 });
                         app.agent_progress.remove(&id);
-                        let terminal_status = subagent_status_from_completion_result(&result);
-                        let terminal_verb = subagent_terminal_verb(&terminal_status);
-                        apply_subagent_terminal_projection(
-                            app,
-                            &id,
-                            terminal_status.clone(),
-                            Some(bound_agent_activity_text(&result)),
-                        );
-                        // #3030: stable label with raw-id fallback.
-                        apply_agent_complete_status_and_observer(app, &id, &result, terminal_verb);
-                        if let Some(failure) = subagent_failure_notice(&result) {
-                            let message_id =
-                                if matches!(terminal_status, SubAgentStatus::BudgetExhausted) {
-                                    MessageId::NotificationSubagentBudgetExhausted
-                                } else {
-                                    MessageId::NotificationSubagentFailed
-                                };
-                            app.set_sticky_status(
-                                format!("{} · {failure}", app.tr(message_id)),
-                                StatusToastLevel::Error,
-                                None,
+                        let terminal_status = outcome;
+                        if let Some(terminal_status) = terminal_status.as_ref() {
+                            apply_subagent_terminal_projection(
+                                app,
+                                &id,
+                                terminal_status.clone(),
+                                Some(bound_agent_activity_text(&result)),
                             );
+                            apply_agent_complete_status_and_observer(
+                                app,
+                                &id,
+                                &result,
+                                terminal_status,
+                            );
+                        } else {
+                            let label = app.ensure_agent_label(&id);
+                            app.status_message = Some(format!(
+                                "{label} settled; outcome unconfirmed. Refreshing worker state."
+                            ));
                         }
                         let should_recapture_terminal =
                             !has_other_running_subagents && app.use_alt_screen();
                         let subagent_notification_mode =
                             config.notifications_config().subagent_completion;
                         let workflow_tool_running = workflow_tool_is_running(app);
-                        if should_notify_subagent_completion(
-                            subagent_notification_mode,
-                            has_other_running_subagents,
-                            workflow_tool_running,
-                        ) && let Some((method, threshold, include_summary)) =
-                            notifications::settings(config)
+                        if let Some(terminal_status) = terminal_status.as_ref()
+                            && should_notify_subagent_completion(
+                                subagent_notification_mode,
+                                has_other_running_subagents,
+                                workflow_tool_running,
+                            )
+                            && let Some((method, threshold, include_summary)) =
+                                notifications::settings(config)
                         {
                             let in_tmux = std::env::var("TMUX").is_ok_and(|v| !v.is_empty());
                             let payload = notifications::subagent_terminal_payload(
                                 app.ui_locale,
                                 &id,
                                 &result,
-                                &terminal_status,
+                                terminal_status,
                                 include_summary,
                                 subagent_elapsed,
                             );
@@ -3431,7 +3728,10 @@ pub(crate) async fn run_event_loop(
                                 app.add_message(HistoryCell::System {
                                     content: held.clone(),
                                 });
-                                app.status_message = Some(held);
+                                app.push_status_toast_record(
+                                    StatusToast::new(held, StatusToastLevel::Warning, Some(12_000))
+                                        .for_event(format!("approval-held:{id}")),
+                                );
                             }
                             ApprovalRequestDisposition::AutoDenyNeverPosture => {
                                 log_sensitive_event(
@@ -3443,9 +3743,15 @@ pub(crate) async fn run_event_loop(
                                     }),
                                 );
                                 let _ = engine_handle.deny_tool_call(id.clone()).await;
-                                app.status_message = Some(format!(
-                                    "Blocked tool '{tool_name}' (approval_mode=never)"
-                                ));
+                                app.push_status_toast_record(
+                                    StatusToast::new(
+                                        app.tr(MessageId::ApprovalNeverPostureBlocked)
+                                            .replace("{tool}", &tool_name),
+                                        StatusToastLevel::Warning,
+                                        Some(12_000),
+                                    )
+                                    .for_event(format!("approval-blocked:{id}")),
+                                );
                             }
                             ApprovalRequestDisposition::Prompt => {
                                 let tool_input = input;
@@ -3469,6 +3775,10 @@ pub(crate) async fn run_event_loop(
                                         "mode": app.mode.label(),
                                     }),
                                 );
+                                let payload = notifications::approval_needed_payload(
+                                    app.ui_locale,
+                                    &tool_name,
+                                );
                                 if let Some((method, _, _)) =
                                     crate::tui::notifications::settings(config)
                                 {
@@ -3480,10 +3790,6 @@ pub(crate) async fn run_event_loop(
                                     // in context; the banner names only the
                                     // tool. Copy is centralized (#5041) so
                                     // the action-first phrasing is tested.
-                                    let payload =
-                                        crate::tui::notifications::approval_needed_payload(
-                                            &tool_name,
-                                        );
                                     crate::tui::notifications::notify_done(
                                         method,
                                         in_tmux,
@@ -3492,14 +3798,20 @@ pub(crate) async fn run_event_loop(
                                         Duration::ZERO,
                                     );
                                 }
-                                app.status_message = Some(format!(
-                                    "Approval required for '{tool_name}': {description}{}",
-                                    if shared_with_web {
-                                        " — decide here or on the web"
-                                    } else {
-                                        ""
-                                    }
-                                ));
+                                let mut notice = payload.headline().to_string();
+                                if shared_with_web {
+                                    notice.push_str(" · ");
+                                    notice
+                                        .push_str(&app.tr(MessageId::NotificationDecisionWebHint));
+                                }
+                                app.push_status_toast_record(
+                                    StatusToast::new(
+                                        notice,
+                                        StatusToastLevel::Warning,
+                                        Some(12_000),
+                                    )
+                                    .for_action(id.clone()),
+                                );
                             }
                         }
                     }
@@ -3524,11 +3836,11 @@ pub(crate) async fn run_event_loop(
                         } else {
                             app.pending_user_input_prompt = Some((id.clone(), request.clone()));
                             app.view_stack.push(UserInputView::new(id.clone(), request));
+                            let payload = notifications::input_needed_payload(app.ui_locale);
                             if let Some((method, _, _)) =
                                 crate::tui::notifications::settings(config)
                             {
                                 let in_tmux = std::env::var("TMUX").is_ok_and(|v| !v.is_empty());
-                                let payload = crate::tui::notifications::input_needed_payload();
                                 crate::tui::notifications::notify_done(
                                     method,
                                     in_tmux,
@@ -3537,9 +3849,13 @@ pub(crate) async fn run_event_loop(
                                     Duration::ZERO,
                                 );
                             }
-                            app.status_message = Some(
-                                "Action required: answer the popup with 1-4, arrows, or Enter"
-                                    .to_string(),
+                            app.push_status_toast_record(
+                                StatusToast::new(
+                                    payload.headline(),
+                                    StatusToastLevel::Warning,
+                                    Some(12_000),
+                                )
+                                .for_action(id.clone()),
                             );
                         }
                     }
@@ -3590,14 +3906,15 @@ pub(crate) async fn run_event_loop(
                             );
                             app.view_stack
                                 .push(ElevationView::new(request, app.ui_locale));
+                            let payload = notifications::elevation_needed_payload(
+                                app.ui_locale,
+                                &tool_name,
+                                &denial_reason,
+                            );
                             if let Some((method, _, _)) =
                                 crate::tui::notifications::settings(config)
                             {
                                 let in_tmux = std::env::var("TMUX").is_ok_and(|v| !v.is_empty());
-                                let payload = crate::tui::notifications::elevation_needed_payload(
-                                    &tool_name,
-                                    &denial_reason,
-                                );
                                 crate::tui::notifications::notify_done(
                                     method,
                                     in_tmux,
@@ -3606,11 +3923,18 @@ pub(crate) async fn run_event_loop(
                                     Duration::ZERO,
                                 );
                             }
-                            app.status_message =
-                                Some(format!("Sandbox blocked {tool_name}: {denial_reason}"));
+                            app.push_status_toast_record(
+                                StatusToast::new(
+                                    payload.headline(),
+                                    StatusToastLevel::Warning,
+                                    Some(12_000),
+                                )
+                                .for_action(tool_id.clone()),
+                            );
                         }
                     }
                     EngineEvent::TurnUsage {
+                        max_output_tokens: _,
                         usage,
                         duration_ms,
                         first_token_ms,
@@ -3655,6 +3979,24 @@ pub(crate) async fn run_event_loop(
                             app.accrue_pending_turn_cost_estimate(cost);
                         }
                         app.session.accrue_pending_turn_usage(&usage);
+                    }
+                    EngineEvent::RoutedTurnUsage {
+                        usage,
+                        duration_ms,
+                        first_token_ms,
+                        request_ms,
+                    } => {
+                        // Routed calls own separate immutable cost receipts.
+                        // Preserve model-call telemetry without pricing them
+                        // provisionally under the active parent route or
+                        // incrementally adding tokens that TurnComplete will
+                        // reconcile authoritatively.
+                        app.session_metrics.record_model_call(
+                            usage.output_tokens,
+                            duration_ms,
+                            first_token_ms,
+                            request_ms,
+                        );
                     }
                     EngineEvent::AdvisoryNote { note, .. } => {
                         // Advisor background watcher note. Display as a
@@ -4212,6 +4554,24 @@ pub(crate) async fn run_event_loop(
             app.needs_redraw = true;
 
             // Handle bracketed paste events
+            if app.redaction_gate && app.onboarding == OnboardingState::None {
+                if let Event::Mouse(mouse) = &evt {
+                    match mouse.kind {
+                        event::MouseEventKind::ScrollDown => app
+                            .redaction_gate_scroll
+                            .set(app.redaction_gate_scroll.get().saturating_add(1)),
+                        event::MouseEventKind::ScrollUp => app
+                            .redaction_gate_scroll
+                            .set(app.redaction_gate_scroll.get().saturating_sub(1)),
+                        _ => {}
+                    }
+                    app.needs_redraw = true;
+                    continue;
+                }
+                if matches!(&evt, Event::Paste(_)) {
+                    continue;
+                }
+            }
             if let Event::Paste(text) = &evt {
                 handle_bracketed_paste(app, text);
                 continue;
@@ -4483,6 +4843,127 @@ pub(crate) async fn run_event_loop(
             // PTY/raw-mode — and by some kitty-keyboard-protocol terminals —
             // to canonical Ctrl+C so the quit-arm flow always runs (#4090).
             normalize_raw_ctrl_c(&mut key);
+
+            // The `[redaction] model_bound` opt-out gate owns every key until
+            // it is answered, exactly like onboarding above. Enter never
+            // confirms by reflex (same discipline as workspace trust): the
+            // three explicit choices are advertised in the action rail.
+            if app.redaction_gate && app.onboarding == OnboardingState::None {
+                let gate_binding = shell_binding_for_key(app, &key);
+                match key.code {
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        let _ = engine_handle.send(Op::Shutdown).await;
+                        return Ok(());
+                    }
+                    _ if gate_binding == Some(ShellBindingId::RedactionGateConfirm) => {
+                        if !app.redaction_gate_confirming {
+                            // First confirm only advances to the final
+                            // confirmation stage; nothing is persisted yet.
+                            app.retire_redaction_gate_notice(RedactionGateNotice::EnterGuidance);
+                            app.redaction_gate_confirming = true;
+                            app.redaction_gate_scroll.set(0);
+                        } else {
+                            match crate::tui::redaction_gate::record_confirmation(config) {
+                                Ok(_) => {
+                                    // The engine already spawned with masking on
+                                    // (the unconfirmed safe default). Rebuild it so
+                                    // its client picks up the confirmed opt-out.
+                                    let _ = engine_handle.send(Op::Shutdown).await;
+                                    engine_handle =
+                                        spawn_tui_engine_with_session(app, config).await?;
+                                    app.retire_redaction_gate_notice(
+                                        RedactionGateNotice::EnterGuidance,
+                                    );
+                                    app.retire_redaction_gate_notice(
+                                        RedactionGateNotice::WriteFailure,
+                                    );
+                                    app.retire_action_notices(None);
+                                    app.redaction_gate = false;
+                                    app.redaction_gate_confirming = false;
+                                    app.needs_redraw = true;
+                                }
+                                Err(err) => {
+                                    tracing::warn!(
+                                        "redaction confirmation could not be saved: {err}"
+                                    );
+                                    app.push_status_toast_record(
+                                        StatusToast::new(
+                                            app.tr(MessageId::RedactionGateSaveFailed).into_owned(),
+                                            StatusToastLevel::Error,
+                                            None,
+                                        )
+                                        .for_redaction_gate(RedactionGateNotice::WriteFailure),
+                                    );
+                                    app.redaction_gate_scroll.set(0);
+                                }
+                            }
+                        }
+                    }
+                    _ if gate_binding == Some(ShellBindingId::RedactionGateKeepOrBack) => {
+                        if app.redaction_gate_confirming {
+                            // Second-stage "back": return to the first stage
+                            // without recording anything.
+                            app.retire_redaction_gate_notice(RedactionGateNotice::EnterGuidance);
+                            app.redaction_gate_confirming = false;
+                            app.redaction_gate_scroll.set(0);
+                        } else {
+                            // Keep masking on for this launch. Nothing is
+                            // persisted and no config file is rewritten;
+                            // because the config field still requests
+                            // "disabled", the next launch asks again.
+                            app.retire_redaction_gate_notice(RedactionGateNotice::EnterGuidance);
+                            app.retire_redaction_gate_notice(RedactionGateNotice::WriteFailure);
+                            app.redaction_gate = false;
+                            app.needs_redraw = true;
+                        }
+                    }
+                    _ if gate_binding == Some(ShellBindingId::RedactionGateQuit) => {
+                        let _ = engine_handle.send(Op::Shutdown).await;
+                        return Ok(());
+                    }
+                    // Esc on the final-confirmation stage steps back to the
+                    // first stage (the user was mid-decision); on the first
+                    // stage it quits, matching the trust screen.
+                    KeyCode::Esc if app.redaction_gate_confirming => {
+                        app.retire_redaction_gate_notice(RedactionGateNotice::EnterGuidance);
+                        app.redaction_gate_confirming = false;
+                        app.redaction_gate_scroll.set(0);
+                    }
+                    KeyCode::Esc => {
+                        let _ = engine_handle.send(Op::Shutdown).await;
+                        return Ok(());
+                    }
+                    KeyCode::Enter => {
+                        app.push_status_toast_record(
+                            StatusToast::new(
+                                app.tr(MessageId::RedactionGateEnterHint).into_owned(),
+                                StatusToastLevel::Info,
+                                Some(12_000),
+                            )
+                            .for_redaction_gate(RedactionGateNotice::EnterGuidance),
+                        );
+                        app.redaction_gate_scroll.set(0);
+                    }
+                    KeyCode::Down | KeyCode::PageDown
+                        if gate_binding == Some(ShellBindingId::RedactionGateScroll) =>
+                    {
+                        app.redaction_gate_scroll
+                            .set(app.redaction_gate_scroll.get().saturating_add(1))
+                    }
+                    KeyCode::Up | KeyCode::PageUp
+                        if gate_binding == Some(ShellBindingId::RedactionGateScroll) =>
+                    {
+                        app.redaction_gate_scroll
+                            .set(app.redaction_gate_scroll.get().saturating_sub(1))
+                    }
+                    KeyCode::Home => app.redaction_gate_scroll.set(0),
+                    KeyCode::End => app.redaction_gate_scroll.set(usize::MAX),
+                    _ => {}
+                }
+                app.needs_redraw = true;
+                submit_initial_input_if_ready(app, config, &engine_handle).await?;
+                continue;
+            }
 
             // Login cancellation precedes modal/focus dispatch: Extensions
             // must not consume the Esc promised by the authorization notice.
@@ -4764,82 +5245,6 @@ pub(crate) async fn run_event_loop(
                     KeyCode::Esc if app.onboarding == OnboardingState::TrustDirectory => {
                         let _ = engine_handle.send(Op::Shutdown).await;
                         return Ok(());
-                    }
-                    _ => {}
-                }
-                continue;
-            }
-
-            // The `[redaction] model_bound` opt-out gate owns every key until
-            // it is answered, exactly like onboarding above. Enter never
-            // confirms by reflex (same discipline as workspace trust): the
-            // three explicit choices are advertised in the action rail.
-            if app.redaction_gate {
-                match key.code {
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        let _ = engine_handle.send(Op::Shutdown).await;
-                        return Ok(());
-                    }
-                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('1') => {
-                        if !app.redaction_gate_confirming {
-                            // First confirm only advances to the final
-                            // confirmation stage; nothing is persisted yet.
-                            app.redaction_gate_confirming = true;
-                            app.status_message = None;
-                        } else {
-                            match crate::tui::redaction_gate::record_confirmation() {
-                                Ok(_) => {
-                                    // The engine already spawned with masking on
-                                    // (the unconfirmed safe default). Rebuild it so
-                                    // its client picks up the confirmed opt-out.
-                                    let _ = engine_handle.send(Op::Shutdown).await;
-                                    let engine_config = build_engine_config(app, config);
-                                    engine_handle = spawn_tui_engine(engine_config, config);
-                                    app.redaction_gate = false;
-                                    app.redaction_gate_confirming = false;
-                                    app.needs_redraw = true;
-                                }
-                                Err(err) => {
-                                    app.status_message = Some(format!(
-                                        "Failed to record redaction confirmation: {err}"
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                    KeyCode::Char('u') | KeyCode::Char('U') | KeyCode::Char('2') => {
-                        if app.redaction_gate_confirming {
-                            // Second-stage "back": return to the first stage
-                            // without recording anything.
-                            app.redaction_gate_confirming = false;
-                            app.status_message = None;
-                        } else {
-                            // Keep masking on for this launch. Nothing is
-                            // persisted and no config file is rewritten;
-                            // because the config field still requests
-                            // "disabled", the next launch asks again.
-                            app.redaction_gate = false;
-                            app.needs_redraw = true;
-                        }
-                    }
-                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('3') => {
-                        let _ = engine_handle.send(Op::Shutdown).await;
-                        return Ok(());
-                    }
-                    // Esc on the final-confirmation stage steps back to the
-                    // first stage (the user was mid-decision); on the first
-                    // stage it quits, matching the trust screen.
-                    KeyCode::Esc if app.redaction_gate_confirming => {
-                        app.redaction_gate_confirming = false;
-                        app.status_message = None;
-                    }
-                    KeyCode::Esc => {
-                        let _ = engine_handle.send(Op::Shutdown).await;
-                        return Ok(());
-                    }
-                    KeyCode::Enter => {
-                        app.status_message =
-                            Some(app.tr(MessageId::RedactionGateEnterHint).to_string());
                     }
                     _ => {}
                 }
@@ -6663,6 +7068,178 @@ mod session_boot_event_tests {
                 .and_then(|snapshot| snapshot.servers.first())
                 .map(|server| server.name.as_str()),
             Some("fresh")
+        );
+    }
+
+    fn translation_test_route() -> crate::cost_status::EffectiveRouteEnvelope {
+        crate::cost_status::EffectiveRouteEnvelope {
+            provider: crate::config::ApiProvider::Deepseek,
+            provider_identity: "deepseek".to_string(),
+            model: "deepseek-chat".to_string(),
+            openrouter_vendor: None,
+            billing_surface: crate::pricing::billing_surface_for_route(
+                crate::config::ApiProvider::Deepseek,
+                Some("https://api.deepseek.com/v1"),
+            )
+            .map(str::to_string),
+            endpoint_fingerprint: crate::cost_status::endpoint_fingerprint(
+                "https://api.deepseek.com/v1",
+            ),
+            provider_live_pricing: None,
+            billing_mode: crate::cost_status::RouteBillingMode::Metered,
+            dispatched_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn assistant_and_thinking_translation_usage_each_accrue_once() {
+        let _scope = crate::cost_status::test_scope();
+        let mut app = test_app();
+        app.current_session_id = Some("session-translation".to_string());
+        app.runtime_turn_id = Some("turn-translation".to_string());
+        let usage_a = crate::models::Usage {
+            input_tokens: 5,
+            output_tokens: 2,
+            ..crate::models::Usage::default()
+        };
+        let usage_b = crate::models::Usage {
+            input_tokens: 3,
+            output_tokens: 1,
+            ..crate::models::Usage::default()
+        };
+
+        let assistant = TranslationAccountingContext::capture(&app, "assistant", 1).settle(Ok(
+            crate::client::TranslationProviderResponse {
+                translated: Ok("助理".to_string()),
+                route: translation_test_route(),
+                usage: Some(usage_a.clone()),
+            },
+        ));
+        let thinking = TranslationAccountingContext::capture(&app, "thinking", 2).settle(Ok(
+            crate::client::TranslationProviderResponse {
+                translated: Err(anyhow::anyhow!("incomplete: max_tokens")),
+                route: translation_test_route(),
+                usage: Some(usage_b.clone()),
+            },
+        ));
+
+        assert_eq!(assistant.usage.as_ref(), Some(&usage_a));
+        assert_eq!(thinking.usage.as_ref(), Some(&usage_b));
+        assert!(
+            thinking.translated.is_err(),
+            "semantic rejection is preserved"
+        );
+        accrue_translation_usage(&mut app, assistant.usage.as_ref().expect("assistant usage"));
+        accrue_translation_usage(&mut app, thinking.usage.as_ref().expect("thinking usage"));
+        assert_eq!(app.session.total_input_tokens, 8);
+        assert_eq!(app.session.total_output_tokens, 3);
+        assert_eq!(app.session.total_tokens, 11);
+
+        let pending = crate::cost_status::drain();
+        assert_eq!(
+            pending.priced_turns.saturating_add(pending.unpriced_turns),
+            2,
+            "each decoded provider response is audited exactly once"
+        );
+    }
+
+    #[test]
+    fn translation_unreceipted_success_is_marked_once_but_transport_failure_is_not() {
+        let _scope = crate::cost_status::test_scope();
+        let mut app = test_app();
+        app.current_session_id = Some("session-translation-missing-usage".to_string());
+        app.runtime_turn_id = Some("turn-translation-missing-usage".to_string());
+
+        for _ in 0..2 {
+            let settled = TranslationAccountingContext::capture(&app, "assistant", 7).settle(Ok(
+                crate::client::TranslationProviderResponse {
+                    translated: Ok("translation remains usable".to_string()),
+                    route: translation_test_route(),
+                    usage: None,
+                },
+            ));
+            assert_eq!(
+                settled.translated.expect("semantic output remains usable"),
+                "translation remains usable"
+            );
+            assert_eq!(settled.usage, None);
+        }
+        let transport = TranslationAccountingContext::capture(&app, "assistant", 8)
+            .settle(Err(anyhow::anyhow!("HTTP 429")));
+        assert!(transport.translated.is_err());
+        assert_eq!(transport.usage, None);
+
+        let pending = crate::cost_status::drain();
+        assert_eq!(pending.priced_turns, 0);
+        assert_eq!(
+            pending.unpriced_turns, 1,
+            "stable response id dedupes replay"
+        );
+        assert_eq!(pending.cny_unpriced_turns, 1);
+        assert!(
+            pending
+                .unpriced_reasons
+                .contains("provider_success_missing_usage")
+        );
+    }
+
+    #[test]
+    fn late_translation_delivery_isolated_from_new_session_or_turn() {
+        let mut app = test_app();
+        app.current_session_id = Some("session-a".to_string());
+        app.runtime_turn_id = Some("turn-a".to_string());
+        let (session, turn) = translation_origin(&app);
+        assert!(translation_origin_is_current(
+            &app,
+            session.as_deref(),
+            turn.as_deref()
+        ));
+
+        app.current_session_id = Some("session-b".to_string());
+        assert!(!translation_session_is_current(&app, session.as_deref()));
+        assert!(!translation_origin_is_current(
+            &app,
+            session.as_deref(),
+            turn.as_deref()
+        ));
+        app.current_session_id = Some("session-a".to_string());
+        app.runtime_turn_id = Some("turn-b".to_string());
+        assert!(
+            translation_session_is_current(&app, session.as_deref()),
+            "same-session late usage still belongs in session totals"
+        );
+        assert!(!translation_origin_is_current(
+            &app,
+            session.as_deref(),
+            turn.as_deref()
+        ));
+
+        let usage = crate::models::Usage {
+            input_tokens: 4,
+            output_tokens: 2,
+            ..crate::models::Usage::default()
+        };
+        if translation_session_is_current(&app, session.as_deref()) {
+            accrue_translation_usage(&mut app, &usage);
+        }
+        assert_eq!(app.session.total_tokens, 6);
+        app.current_session_id = Some("session-b".to_string());
+        if translation_session_is_current(&app, session.as_deref()) {
+            accrue_translation_usage(&mut app, &usage);
+        }
+        assert_eq!(
+            app.session.total_tokens, 6,
+            "cross-session late usage must not pollute the new session"
+        );
+
+        let shared_prefix = "x".repeat(300);
+        app.current_session_id = Some(format!("{shared_prefix}:old"));
+        app.runtime_turn_id = Some("turn-long".to_string());
+        let (long_session, long_turn) = translation_origin(&app);
+        app.current_session_id = Some(format!("{shared_prefix}:new"));
+        assert!(
+            !translation_origin_is_current(&app, long_session.as_deref(), long_turn.as_deref()),
+            "fixed fingerprints must distinguish ids with the same long prefix"
         );
     }
 }
