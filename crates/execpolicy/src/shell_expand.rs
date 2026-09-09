@@ -110,6 +110,8 @@ impl Expander {
         let mut words: Vec<String> = Vec::new();
         let mut word = String::new();
         let mut started = false;
+        let mut quoted = false;
+        let mut redirect_operand = false;
         let mut nested: Vec<String> = Vec::new();
 
         while i < n {
@@ -123,6 +125,7 @@ impl Expander {
                         if chars[i + 1] != '\n' {
                             word.push(chars[i + 1]);
                             started = true;
+                            quoted = true;
                         }
                         i += 2;
                     } else {
@@ -132,6 +135,7 @@ impl Expander {
                 // Single quotes are fully literal: no substitution, no escapes.
                 '\'' => {
                     started = true;
+                    quoted = true;
                     i += 1;
                     while i < n && chars[i] != '\'' {
                         word.push(chars[i]);
@@ -142,6 +146,7 @@ impl Expander {
                 // Double quotes suppress word splitting but NOT substitution.
                 '"' => {
                     started = true;
+                    quoted = true;
                     i += 1;
                     while i < n && chars[i] != '"' {
                         match chars[i] {
@@ -175,6 +180,7 @@ impl Expander {
                 // `$'…'` (ANSI-C quoting) is literal text with C escapes.
                 '$' if i + 1 < n && chars[i + 1] == '\'' => {
                     started = true;
+                    quoted = true;
                     i += 2;
                     while i < n && chars[i] != '\'' {
                         if chars[i] == '\\' && i + 1 < n {
@@ -191,11 +197,13 @@ impl Expander {
                 // line in its own right; the substitution contributes no text
                 // to the enclosing word (we do not evaluate output).
                 '`' => {
+                    started |= redirect_operand;
                     let (inner, next) = read_backtick(&chars, i);
                     nested.push(inner);
                     i = next;
                 }
                 '$' if i + 1 < n && chars[i + 1] == '(' => {
+                    started |= redirect_operand;
                     let (inner, next) = read_delimited(&chars, i + 1, '(', ')');
                     nested.push(inner);
                     i = next;
@@ -203,33 +211,74 @@ impl Expander {
                 // `${…}` is an expansion, not a command — but it can *contain*
                 // one (`${x:-$(rm -rf /)}`), so the body is rescanned.
                 '$' if i + 1 < n && chars[i + 1] == '{' => {
+                    started |= redirect_operand;
                     let (inner, next) = read_delimited(&chars, i + 1, '{', '}');
                     nested.push(inner);
                     i = next;
                 }
                 // Process substitution `<(…)` / `>(…)` also runs its body.
                 '<' | '>' if i + 1 < n && chars[i + 1] == '(' => {
+                    started |= redirect_operand;
                     let (inner, next) = read_delimited(&chars, i + 1, '(', ')');
                     nested.push(inner);
                     i = next;
                 }
+                // Unquoted redirections are syntax, even without whitespace.
+                // Keep the command words on both sides together, but omit the
+                // descriptor and next operand. Parse that operand normally so
+                // nested substitutions are still checked as commands.
+                '<' | '>' | '&' if redirection_len(&chars[i..]) > 0 => {
+                    if !quoted && is_redirect_descriptor(&word) {
+                        word.clear();
+                        started = false;
+                    }
+                    flush_word(
+                        &mut words,
+                        &mut word,
+                        &mut started,
+                        &mut quoted,
+                        &mut redirect_operand,
+                    );
+                    redirect_operand = true;
+                    i += redirection_len(&chars[i..]);
+                }
                 ' ' | '\t' => {
-                    flush_word(&mut words, &mut word, &mut started);
+                    flush_word(
+                        &mut words,
+                        &mut word,
+                        &mut started,
+                        &mut quoted,
+                        &mut redirect_operand,
+                    );
                     i += 1;
                 }
                 // A subshell boundary. `$(`, `<(` and `>(` were consumed by the
                 // arms above, so a bare paren here is grouping: the body is a
                 // command list of its own, not part of the surrounding word.
                 '(' | ')' => {
-                    flush_word(&mut words, &mut word, &mut started);
+                    flush_word(
+                        &mut words,
+                        &mut word,
+                        &mut started,
+                        &mut quoted,
+                        &mut redirect_operand,
+                    );
                     end_command(&mut commands, &mut words);
+                    redirect_operand = false;
                     i += 1;
                 }
                 // Control operators end the current command line. `&&`, `||`,
                 // `;;`, `|&` and runs of newlines collapse into one break.
                 '\n' | '\r' | ';' | '&' | '|' => {
-                    flush_word(&mut words, &mut word, &mut started);
+                    flush_word(
+                        &mut words,
+                        &mut word,
+                        &mut started,
+                        &mut quoted,
+                        &mut redirect_operand,
+                    );
                     end_command(&mut commands, &mut words);
+                    redirect_operand = false;
                     i += 1;
                     while i < n && matches!(chars[i], '\n' | '\r' | ';' | '&' | '|') {
                         i += 1;
@@ -242,7 +291,13 @@ impl Expander {
                 }
             }
         }
-        flush_word(&mut words, &mut word, &mut started);
+        flush_word(
+            &mut words,
+            &mut word,
+            &mut started,
+            &mut quoted,
+            &mut redirect_operand,
+        );
         end_command(&mut commands, &mut words);
 
         for tokens in &commands {
@@ -281,11 +336,48 @@ impl Expander {
     }
 }
 
-fn flush_word(words: &mut Vec<String>, word: &mut String, started: &mut bool) {
+fn flush_word(
+    words: &mut Vec<String>,
+    word: &mut String,
+    started: &mut bool,
+    quoted: &mut bool,
+    redirect_operand: &mut bool,
+) {
     if *started || !word.is_empty() {
-        words.push(std::mem::take(word));
+        if *redirect_operand {
+            word.clear();
+            *redirect_operand = false;
+        } else {
+            words.push(std::mem::take(word));
+        }
         *started = false;
     }
+    *quoted = false;
+}
+
+fn redirection_len(chars: &[char]) -> usize {
+    match chars {
+        ['&', '>', '>', ..] | ['<', '<', '<' | '-', ..] => 3,
+        ['&', '>', ..] | ['<', '<' | '>' | '&', ..] | ['>', '>' | '&' | '|', ..] => 2,
+        ['<' | '>', ..] => 1,
+        _ => 0,
+    }
+}
+
+fn is_redirect_descriptor(word: &str) -> bool {
+    if !word.is_empty() && word.bytes().all(|b| b.is_ascii_digit()) {
+        return true;
+    }
+    // Bash also accepts an unquoted `{name}` in place of an IO number.
+    word.strip_prefix('{')
+        .and_then(|word| word.strip_suffix('}'))
+        .is_some_and(|name| {
+            let mut chars = name.chars();
+            chars
+                .next()
+                .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+                && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+        })
 }
 
 fn end_command(commands: &mut Vec<Vec<String>>, words: &mut Vec<String>) {
