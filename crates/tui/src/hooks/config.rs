@@ -91,7 +91,6 @@ pub enum HookSteering {
 
 impl HookEvent {
     /// Get string representation for environment variable
-    #[allow(dead_code)] // Used in tests and future hook dispatch
     pub fn as_str(self) -> &'static str {
         match self {
             HookEvent::SessionStart => "session_start",

@@ -4761,7 +4761,6 @@ impl App {
     /// Total number of cells in the *virtual* transcript: `history.len()`
     /// plus active cell entries (if any).
     #[must_use]
-    #[allow(dead_code)] // Reserved for renderers that need a unified cell count.
     pub fn virtual_cell_count(&self) -> usize {
         self.history.len() + self.active_cell.as_ref().map_or(0, ActiveCell::entry_count)
     }
