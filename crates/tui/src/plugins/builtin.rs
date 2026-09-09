@@ -343,7 +343,9 @@ fn publish_snapshot(source: &Path, destination: &Path) -> io::Result<()> {
         unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) };
     #[cfg(target_os = "linux")]
     let result = unsafe {
-        libc::renameat2(
+        // Static musl may lack the libc wrapper; use the same kernel operation.
+        libc::syscall(
+            libc::SYS_renameat2,
             libc::AT_FDCWD,
             source.as_ptr(),
             libc::AT_FDCWD,

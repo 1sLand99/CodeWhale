@@ -5932,9 +5932,17 @@ mod tests {
         assert_eq!(capped.len(), 2);
         assert!(!complete, "a capped scan has not seen the array end");
 
-        let (partial, complete) = extract_leading_messages(&buf[..buf.len() / 2], 24);
+        // The file midpoint depends on metadata path lengths and can already
+        // follow the messages array. Cut inside the third message instead.
+        let marker = b"\"third\"";
+        let cut = buf
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .expect("third message is serialized")
+            + marker.len() / 2;
+        let (partial, complete) = extract_leading_messages(&buf[..cut], 24);
         assert!(!complete);
-        assert!(partial.len() < 3, "a cut prefix cannot yield every message");
+        assert_eq!(partial.len(), 2, "the cut message must remain absent");
     }
 
     #[test]

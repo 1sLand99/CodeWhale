@@ -340,6 +340,7 @@ impl WorkspaceFile {
                 .prefix(".fleet-write-")
                 .make_in(&self.directory, |path| {
                     std::fs::OpenOptions::new()
+                        .write(true)
                         .create_new(true)
                         .access_mode(FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE)
                         .share_mode(FILE_SHARE_READ)
