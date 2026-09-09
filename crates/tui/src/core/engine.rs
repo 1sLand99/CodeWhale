@@ -2424,9 +2424,8 @@ impl Engine {
                         }
                     }
                     // Background shells have no completion channel, so an
-                    // idle engine polls only while a goal is active and a
-                    // background job is outstanding; the arm disarms itself
-                    // the moment either condition clears.
+                    // idle engine polls while background work is outstanding,
+                    // unless the person interrupted the owning turn.
                     () = tokio::time::sleep(Duration::from_millis(SHELL_WAKE_POLL_MS)), if shell_wake_armed => {
                         if self.finished_background_shell_pending() {
                             return Some(EngineRunInput::ShellCompletionWake);
@@ -2469,6 +2468,9 @@ impl Engine {
     /// background task must reach the model without waiting for the user to
     /// type, the same wake an idle sub-agent completion already gets.
     fn idle_shell_wake_armed(&self) -> bool {
+        if self.cancel_token.is_cancelled() {
+            return false;
+        }
         self.shell_manager
             .lock()
             .map(|manager| manager.may_have_undelivered_completion_for_session(&self.session.id))
@@ -2491,6 +2493,12 @@ impl Engine {
     /// follow-up turn reads the completion payload the same way a
     /// user-initiated turn would.
     async fn handle_idle_shell_completion_wake(&mut self) {
+        // Cancellation can arrive after the idle poll selected this wake.
+        // Keep the evidence unclaimed for the next requested turn or /jobs;
+        // a surviving shell must not silently restart an interrupted model.
+        if self.cancel_token.is_cancelled() {
+            return;
+        }
         let goal_active = self
             .config
             .goal_state
@@ -4124,12 +4132,15 @@ impl Engine {
                 // goal Active. pause_reason=User is reserved for explicit
                 // `/goal pause`. Requiring `/goal resume` after every interrupt
                 // was a dogfood lie (2026-07-24).
-                let _ = self
-                    .tx_event
-                    .send(Event::status(
-                        "Turn interrupted; session goal stays active.".to_string(),
-                    ))
-                    .await;
+                let message = if self
+                    .goal_snapshot_for_event()
+                    .is_some_and(|goal| goal.is_active())
+                {
+                    "Turn interrupted; session goal stays active."
+                } else {
+                    "Turn interrupted."
+                };
+                let _ = self.tx_event.send(Event::status(message.to_string())).await;
             }
             SendMessageOutcome::Finished {
                 status: TurnOutcomeStatus::Completed,

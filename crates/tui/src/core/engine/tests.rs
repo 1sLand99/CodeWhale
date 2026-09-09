@@ -23035,7 +23035,7 @@ async fn cacheable_prefix_is_byte_stable_across_unchanged_turns() {
 }
 
 #[tokio::test]
-async fn idle_engine_wakes_for_finished_background_shell_only_while_goal_active() {
+async fn idle_engine_shell_wake_respects_cancellation_and_preserves_completion() {
     // Morning-report continuation gap: background shell completion is
     // pull-only, so an idle engine with an active goal never learned the job
     // finished and the goal sat inert until the user typed something.
@@ -23095,6 +23095,14 @@ async fn idle_engine_wakes_for_finished_background_shell_only_while_goal_active(
         "wake input expected without an active goal"
     );
 
+    // Escape wins even after the poll selected a wake. The shell's result
+    // remains available; cancellation must not start another provider turn.
+    engine.cancel_token.cancel();
+    assert!(!engine.idle_shell_wake_armed());
+    engine.handle_idle_shell_completion_wake().await;
+    assert!(engine.finished_background_shell_pending());
+    assert!(!engine.has_scheduled_goal_continuation());
+
     engine
         .config
         .goal_state
@@ -23105,6 +23113,16 @@ async fn idle_engine_wakes_for_finished_background_shell_only_while_goal_active(
             None,
             crate::tools::goal::GoalStatus::Active,
         );
+
+    // A durable goal is retained, but its presence cannot bypass Escape.
+    engine.handle_idle_shell_completion_wake().await;
+    assert!(!engine.has_scheduled_goal_continuation());
+    assert!(engine.finished_background_shell_pending());
+
+    // The next explicitly requested turn installs a fresh cancellation
+    // control, restoring ordinary delivery without discarding the receipt.
+    let _turn = engine.begin_turn_control();
+    assert!(engine.idle_shell_wake_armed());
 
     let input = tokio::time::timeout(Duration::from_secs(10), engine.next_run_input(false))
         .await
@@ -23120,6 +23138,47 @@ async fn idle_engine_wakes_for_finished_background_shell_only_while_goal_active(
         engine.has_scheduled_goal_continuation(),
         "the wake must queue a goal continuation that will claim the evidence"
     );
+}
+
+#[tokio::test]
+async fn interruption_status_only_claims_an_active_goal_when_one_exists() {
+    for status in [None, Some(GoalStatus::Active), Some(GoalStatus::Paused)] {
+        let (mut engine, handle) = Engine::new(
+            EngineConfig {
+                snapshots_enabled: false,
+                terminal_chrome_enabled: false,
+                ..Default::default()
+            },
+            &Config::default(),
+        );
+        if let Some(status) = status {
+            engine
+                .config
+                .goal_state
+                .lock()
+                .unwrap()
+                .sync_from_host_status(Some("Preserve the user's objective"), None, status);
+        }
+        engine
+            .reconcile_non_completed_goal_turn(&SendMessageOutcome::Finished {
+                status: TurnOutcomeStatus::Interrupted,
+                error: None,
+            })
+            .await;
+        let mut events = handle.rx_event.write().await;
+        let mut messages = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let Event::Status { message } = event {
+                messages.push(message);
+            }
+        }
+        let expected = if status == Some(GoalStatus::Active) {
+            "Turn interrupted; session goal stays active."
+        } else {
+            "Turn interrupted."
+        };
+        assert_eq!(messages, vec![expected]);
+    }
 }
 
 /// The user's prompt reaches the model **exactly once**, on every request of
