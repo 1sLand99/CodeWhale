@@ -22,6 +22,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::config::HeaderItem;
 use crate::localization::{Locale, MessageId, tr};
 use crate::palette::{ChromeInk, chrome_style};
+use crate::tui::ui_text::{semantic_truncate, text_display_width};
 use crate::tui::{
     app::{App, AppMode, HeaderActionTarget, HeaderHitbox, OnboardingState},
     approval::ApprovalMode,
@@ -159,12 +160,58 @@ fn launch_recent_entries(app: &App) -> (Vec<LaunchRecentEntry>, bool) {
     (recent, has_more)
 }
 
-/// The card's rows for live `App` state, for keyboard navigation and
-/// Enter — the same [`launch_card_rows`] order paint and hitboxes share.
+/// The card's rows for live `App` state, for keyboard navigation and Enter.
+///
+/// The painted rows are the authority. Paint sheds the tail of the recent
+/// list to fit a short pane and turns the overflow row on when it does, so a
+/// list built here from scratch would let Up/Down land on — and Enter resume
+/// — a session the screen is not showing. `row_hitboxes` is what the last
+/// frame actually drew, in paint order, and `mouse_ui` indexes that same
+/// list: one ordering for paint, mouse, and keyboard, with no second state.
 #[must_use]
 pub fn launch_rows_for_app(app: &App) -> Vec<LaunchCardRow> {
     let (recent, has_more) = launch_recent_entries(app);
-    launch_card_rows(app.ui_locale, &recent, has_more)
+    if app.launch.row_hitboxes.is_empty() {
+        // Nothing painted yet (first frame): nothing is selected either.
+        return launch_card_rows(app.ui_locale, &recent, has_more);
+    }
+    let superset = launch_card_rows(app.ui_locale, &recent, true);
+    app.launch
+        .row_hitboxes
+        .iter()
+        .filter_map(|(id, _)| superset.iter().find(|row| &row.id == id).cloned())
+        .collect()
+}
+
+/// Re-anchor the card's clickable rows on what `area` just painted.
+///
+/// The frame renderer calls this instead of rebuilding hitboxes inline, so
+/// the row list keyboard and mouse read back cannot describe a row the
+/// transcript did not draw.
+pub fn refresh_launch_row_hitboxes(app: &mut App, area: Rect) {
+    app.launch.row_hitboxes = launch_empty_state(app, area)
+        .rows
+        .into_iter()
+        .filter_map(|(id, row)| {
+            let y = area.y.checked_add(u16::try_from(row).ok()?)?;
+            (y < area.y.saturating_add(area.height))
+                .then_some((id, Rect::new(area.x, y, area.width, 1)))
+        })
+        .collect();
+    // A pane that shrank can leave the highlight past the last painted row.
+    // Clear it rather than clamping: clamping would silently move the
+    // selection onto a different session.
+    let painted = app.launch.row_hitboxes.len();
+    if app
+        .launch
+        .menu_selected
+        .is_some_and(|index| index >= painted)
+    {
+        app.launch.menu_selected = None;
+    }
+    if app.launch.hovered_row.is_some_and(|index| index >= painted) {
+        app.launch.hovered_row = None;
+    }
 }
 
 /// The click twin of [`run_launch_card_row`]: one card row id runs the
@@ -1506,6 +1553,20 @@ pub struct LaunchEmptyState {
 const LAUNCH_BLOCK_INDENT: usize = 2;
 /// Column gap between the mark and the text beside it.
 const LAUNCH_MARK_GAP: usize = 3;
+/// The card's reading measure: a row is a title with its detail set against
+/// it, and without a ceiling the detail right-aligns against the terminal's
+/// far edge. Titles persist at 50 characters, the detail reads ~20.
+const LAUNCH_CARD_MEASURE: usize = 72;
+/// Gap between a row's title and its right-aligned detail.
+const LAUNCH_ROW_GAP: usize = 3;
+/// Below this the row spends its whole lane on the title and sheds the detail.
+const LAUNCH_ROW_MIN_TITLE: usize = 24;
+/// The recent list and its overflow row sit under the `Recent` heading.
+const LAUNCH_LIST_INDENT: usize = 2;
+/// Blank rows the card spends on rhythm when the pane is tall enough.
+const LAUNCH_SEPARATORS: usize = 3;
+/// Below this width the block gives up its left indent.
+const LAUNCH_INDENT_MIN_WIDTH: usize = 12;
 
 pub fn empty_state_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
     if area.width == 0 || area.height == 0 {
@@ -1570,8 +1631,77 @@ pub fn empty_state_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
     lines
 }
 
+/// How much of the card fits the pane. `New session` is never shed: it is the
+/// screen's one actionable choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LaunchFit {
+    brand: bool,
+    help: bool,
+    notice: bool,
+    heading: bool,
+    blanks: usize,
+    shown: usize,
+    see_all: bool,
+}
+
+impl LaunchFit {
+    const fn rows(self) -> usize {
+        (self.brand as usize)
+            + (self.help as usize)
+            + (self.notice as usize)
+            + self.blanks
+            + 1
+            + (self.heading as usize)
+            + self.shown
+            + (self.see_all as usize)
+    }
+}
+
+/// Shed the card down to `height`, in a fixed order: rhythm, the migration
+/// notice, the tail of the recent list — which turns the overflow row on, so
+/// nothing shed becomes unreachable — then chrome.
+fn launch_fit(height: usize, recent: usize, has_more: bool, notice: bool) -> LaunchFit {
+    let mut fit = LaunchFit {
+        brand: true,
+        help: true,
+        notice,
+        heading: true,
+        blanks: LAUNCH_SEPARATORS,
+        shown: recent,
+        see_all: has_more,
+    };
+    let mut step = 0u8;
+    while fit.rows() > height {
+        match step {
+            0 => fit.blanks = 1,
+            1 => fit.blanks = 0,
+            2 => fit.notice = false,
+            3 => {
+                while fit.shown > 0 && fit.rows() > height {
+                    fit.shown -= 1;
+                    fit.see_all = true;
+                }
+            }
+            4 => fit.help = false,
+            5 => fit.heading = false,
+            6 => fit.brand = false,
+            7 => fit.see_all = false,
+            _ => break,
+        }
+        step += 1;
+    }
+    fit
+}
+
 pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
+    if area.width == 0 || area.height == 0 {
+        return LaunchEmptyState {
+            lines: Vec::new(),
+            rows: Vec::new(),
+        };
+    }
     let width = usize::from(area.width);
+    let height = usize::from(area.height);
     let theme = &app.ui_theme;
     let locale = app.ui_locale;
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -1595,52 +1725,86 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
         None => (Vec::new(), 0),
         Some(rung) => (rung.rows().to_vec(), usize::from(rung.cells().0)),
     };
-    let text_indent = LAUNCH_BLOCK_INDENT
+    let block_indent = if width >= LAUNCH_INDENT_MIN_WIDTH {
+        LAUNCH_BLOCK_INDENT
+    } else {
+        0
+    };
+    let text_indent = block_indent
         + if mark_width == 0 {
             0
         } else {
             mark_width + LAUNCH_MARK_GAP
         };
-    let text_width = width.saturating_sub(text_indent).max(8);
+    // The lane is what is left beside the mark; the measure is what the card
+    // uses of it, so a row's detail stays beside its title.
+    let text_width = width.saturating_sub(text_indent).min(LAUNCH_CARD_MEASURE);
+    if text_width == 0 {
+        return LaunchEmptyState {
+            lines: Vec::new(),
+            rows: Vec::new(),
+        };
+    }
 
     let (entries, has_more) = launch_recent_entries(app);
-    let card_rows = launch_card_rows(locale, &entries, has_more);
+    // Whether this workspace has recent work at all, before any is shed for
+    // height: the heading must not say "no recent sessions" about a list that
+    // only ran out of rows.
+    let had_recent = !entries.is_empty();
+    let fit = launch_fit(
+        height,
+        entries.len(),
+        has_more,
+        app.launch.claude_code_detected,
+    );
+    let spacious = fit.blanks == LAUNCH_SEPARATORS;
+    let visible: Vec<LaunchRecentEntry> = entries.into_iter().take(fit.shown).collect();
+    let card_rows = launch_card_rows(locale, &visible, fit.see_all);
 
     // The text column, in order. `None` is a blank row.
     let mut text: Vec<Option<Line<'static>>> = Vec::new();
-    text.push(Some(Line::from(vec![
-        Span::styled(
-            "codewhale ".to_string(),
+    if fit.brand {
+        let brand = "codewhale";
+        let version = format!("v{}", env!("CODEWHALE_BUILD_VERSION"));
+        let mut spans = vec![Span::styled(
+            semantic_truncate(brand, text_width),
             Style::default().fg(theme.accent_primary).bold(),
-        ),
-        Span::styled(
-            format!("v{}", env!("CODEWHALE_BUILD_VERSION")),
-            Style::default().fg(theme.text_muted),
-        ),
-    ])));
+        )];
+        if text_width >= text_display_width(brand) + 1 + text_display_width(&version) {
+            spans.push(Span::styled(
+                format!(" {version}"),
+                Style::default().fg(theme.text_muted),
+            ));
+        }
+        text.push(Some(Line::from(spans)));
+    }
     // What to press, on the one screen where it has not been learned yet.
-    text.push(Some(Line::from(Span::styled(
-        truncate_to_width(
-            &tr(locale, MessageId::LaunchHelpLine).replace(
-                "{dock}",
-                crate::tui::shell_key_routing::binding(
-                    crate::tui::shell_key_routing::ShellBindingId::ViewCycle,
-                )
-                .footer_chord,
+    if fit.help {
+        text.push(Some(Line::from(Span::styled(
+            semantic_truncate(
+                &tr(locale, MessageId::LaunchHelpLine).replace(
+                    "{dock}",
+                    crate::tui::shell_key_routing::binding(
+                        crate::tui::shell_key_routing::ShellBindingId::ViewCycle,
+                    )
+                    .footer_chord,
+                ),
+                text_width,
             ),
-            text_width,
-        ),
-        Style::default().fg(theme.text_hint),
-    ))));
+            Style::default().fg(theme.text_hint),
+        ))));
+    }
     // The migration notice, while there is still a question to answer. It
     // retires for good once `/import-claude` has been run.
-    if app.launch.claude_code_detected {
+    if fit.notice {
         text.push(Some(Line::from(Span::styled(
-            truncate_to_width(&tr(locale, MessageId::LaunchNoticeClaude), text_width),
+            semantic_truncate(&tr(locale, MessageId::LaunchNoticeClaude), text_width),
             Style::default().fg(theme.text_muted),
         ))));
     }
-    text.push(None);
+    if fit.blanks >= 1 {
+        text.push(None);
+    }
 
     for row in &card_rows {
         let style = if row.prominent {
@@ -1648,34 +1812,64 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
         } else {
             Style::default().fg(theme.text_soft)
         };
-        let label = truncate_to_width(
-            &row.label,
-            text_width.saturating_sub(row.detail.width() + 2),
-        );
-        let pad = text_width
-            .saturating_sub(label.width())
-            .saturating_sub(row.detail.width());
-        let mut spans = vec![Span::styled(label, style)];
-        if !row.detail.is_empty() {
-            spans.push(Span::styled(" ".repeat(pad), Style::default()));
+        // The recent list and its overflow hang under the heading.
+        let indent = match row.id {
+            crate::tui::app::LaunchRowId::NewSession => 0,
+            _ => LAUNCH_LIST_INDENT.min(text_width.saturating_sub(1)),
+        };
+        if matches!(row.id, crate::tui::app::LaunchRowId::SeeAll) && spacious {
+            text.push(None);
+        }
+        let lane = text_width.saturating_sub(indent);
+        let detail_width = text_display_width(&row.detail);
+        // Age and message count are context, not the row: when the lane
+        // cannot hold a readable title beside them they are dropped whole
+        // rather than ellipsing the title to a stub. This is also the
+        // fallback for a locale that spends more cells on the same fact.
+        let detail = if row.detail.is_empty()
+            || lane < LAUNCH_ROW_MIN_TITLE + LAUNCH_ROW_GAP + detail_width
+        {
+            ""
+        } else {
+            row.detail.as_str()
+        };
+        let label_budget = if detail.is_empty() {
+            lane
+        } else {
+            lane.saturating_sub(LAUNCH_ROW_GAP + detail_width)
+        };
+        let label = semantic_truncate(&row.label, label_budget);
+        let label_width = text_display_width(&label);
+        let mut spans = Vec::with_capacity(4);
+        if indent > 0 {
+            spans.push(Span::raw(" ".repeat(indent)));
+        }
+        spans.push(Span::styled(label, style));
+        if !detail.is_empty() {
+            let pad = lane
+                .saturating_sub(label_width)
+                .saturating_sub(detail_width);
+            spans.push(Span::raw(" ".repeat(pad)));
             spans.push(Span::styled(
-                row.detail.clone(),
+                detail.to_string(),
                 Style::default().fg(theme.text_dim),
             ));
         }
         rows.push((row.id.clone(), text.len()));
         text.push(Some(Line::from(spans)));
-        if matches!(row.id, crate::tui::app::LaunchRowId::NewSession) {
-            // The `Recent` heading sits above the first recent row; with no
-            // recent work at all the note says so, rather than leaving a gap
-            // that reads as a failure to load.
-            let heading = if entries.is_empty() {
-                MessageId::LaunchNoRecentSessions
-            } else {
+        if matches!(row.id, crate::tui::app::LaunchRowId::NewSession) && fit.heading {
+            // With no recent work at all the heading says so, rather than
+            // leaving a gap that reads as a failure to load.
+            let heading = if had_recent {
                 MessageId::LaunchRecentHeading
+            } else {
+                MessageId::LaunchNoRecentSessions
             };
+            if spacious {
+                text.push(None);
+            }
             text.push(Some(Line::from(Span::styled(
-                truncate_to_width(&tr(locale, heading), text_width),
+                semantic_truncate(&tr(locale, heading), text_width),
                 Style::default().fg(theme.text_muted),
             ))));
         }
@@ -1683,8 +1877,7 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
 
     // The whale still surfaces. It rises by ink rather than by position: at 0
     // it is exactly the water behind it and eases to full over
-    // `MARK_SURFACE_MS` — the same motion the separate launch stage had before
-    // this screen became the ordinary one. Reduced motion gets the endpoint.
+    // `MARK_SURFACE_MS`. Reduced motion gets the endpoint.
     let rise = if app.motion_policy().allows_decorative() && !app.low_motion {
         crate::tui::mark::surface_progress(app.ambient_clock_ms, MARK_SURFACE_MS)
     } else {
@@ -1693,14 +1886,12 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
     let ink_color = crate::tui::mark::lerp_color(theme.surface_bg, theme.accent_primary, rise);
 
     // Compose: the mark column on the left, the text column beside it. The
-    // block is as tall as whichever column is taller.
-    let block_rows = mark_rows.len().max(text.len());
+    // block is as tall as whichever column is taller, and never taller than
+    // the pane it is drawn into.
+    let block_rows = mark_rows.len().max(text.len()).min(height);
     let mut row_offsets: Vec<usize> = Vec::with_capacity(block_rows);
     for row in 0..block_rows {
-        let mut spans = vec![Span::styled(
-            " ".repeat(LAUNCH_BLOCK_INDENT),
-            Style::default(),
-        )];
+        let mut spans = vec![Span::raw(" ".repeat(block_indent))];
         if mark_width > 0 {
             let ink = mark_rows.get(row).copied().unwrap_or("");
             let pad = mark_width.saturating_sub(ink.width());
@@ -1708,10 +1899,7 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
                 ink.to_string(),
                 Style::default().fg(ink_color),
             ));
-            spans.push(Span::styled(
-                " ".repeat(pad + LAUNCH_MARK_GAP),
-                Style::default(),
-            ));
+            spans.push(Span::raw(" ".repeat(pad + LAUNCH_MARK_GAP)));
         }
         if let Some(Some(line)) = text.get(row) {
             spans.extend(line.spans.iter().cloned());
@@ -1720,13 +1908,369 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
         lines.push(Line::from(spans));
     }
 
-    // Re-point the hitboxes at the composed rows.
+    // Re-point the hitboxes at the composed rows. A row the block could not
+    // fit has no offset, so it has no hitbox either.
     let rows = rows
         .into_iter()
         .filter_map(|(id, text_row)| row_offsets.get(text_row).map(|y| (id, *y)))
         .collect();
 
     LaunchEmptyState { lines, rows }
+}
+
+#[cfg(test)]
+mod launch_card_tests {
+    use super::{
+        LAUNCH_CARD_MEASURE, LaunchAction, launch_empty_state, launch_fit, launch_rows_for_app,
+        refresh_launch_row_hitboxes, run_launch_card_row, text_display_width,
+    };
+    use crate::tui::app::{App, LaunchRecentSession, LaunchRowId};
+    use ratatui::layout::Rect;
+    use ratatui::text::Line;
+    use unicode_segmentation::UnicodeSegmentation;
+
+    fn app_with_recent(titles: &[&str], total: usize) -> App {
+        let mut app = crate::test_support::test_app_with_options(
+            crate::test_support::test_tui_options(std::env::temp_dir()),
+        );
+        app.launch.visible = true;
+        app.launch.claude_code_detected = false;
+        app.launch.recent = titles
+            .iter()
+            .enumerate()
+            .map(|(index, title)| LaunchRecentSession {
+                id: format!("{index}0abcdef-session"),
+                title: (*title).to_string(),
+                updated_at: chrono::Utc::now()
+                    - chrono::Duration::hours(i64::try_from(index).unwrap_or(0) + 1),
+                message_count: 40 + index,
+            })
+            .collect();
+        app.launch.total_workspace_sessions = total;
+        app
+    }
+
+    fn flatten(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.to_string())
+            .collect::<String>()
+    }
+
+    fn painted(app: &App, width: u16, height: u16) -> Vec<String> {
+        launch_empty_state(app, Rect::new(0, 0, width, height))
+            .lines
+            .iter()
+            .map(|line| flatten(line).trim_end().to_string())
+            .collect()
+    }
+
+    fn row_ids(app: &App) -> Vec<LaunchRowId> {
+        app.launch
+            .row_hitboxes
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// The recent row's own text, with the block indent stripped. Only used at
+    /// widths narrow enough that the detail has shed, so what remains is the
+    /// title alone.
+    fn recent_row_title(app: &App, width: u16, height: u16) -> String {
+        let state = launch_empty_state(app, Rect::new(0, 0, width, height));
+        let (_, row) = state
+            .rows
+            .iter()
+            .find(|(id, _)| matches!(id, LaunchRowId::Recent(_)))
+            .expect("a recent row painted");
+        flatten(&state.lines[*row]).trim().to_string()
+    }
+
+    fn is_grapheme_prefix(candidate: &str, full: &str) -> bool {
+        let mut source = full.graphemes(true);
+        candidate.graphemes(true).all(|g| source.next() == Some(g))
+    }
+
+    // --- one ordering for paint, mouse, and keyboard -------------------
+
+    #[test]
+    fn keyboard_rows_are_exactly_the_rows_the_pane_painted() {
+        let mut app = app_with_recent(&["one", "two", "three", "four", "five"], 9);
+
+        refresh_launch_row_hitboxes(&mut app, Rect::new(0, 0, 120, 30));
+        let tall = launch_rows_for_app(&app);
+        assert_eq!(
+            tall.iter().map(|row| row.id.clone()).collect::<Vec<_>>(),
+            row_ids(&app),
+            "keyboard list must be the painted list",
+        );
+        assert!(tall.len() >= 7, "{:?}", row_ids(&app));
+
+        // Highlight the last row, then shrink the pane under it.
+        app.launch.menu_selected = Some(tall.len() - 1);
+        refresh_launch_row_hitboxes(&mut app, Rect::new(0, 0, 120, 9));
+        let short = launch_rows_for_app(&app);
+        assert_eq!(
+            short.iter().map(|row| row.id.clone()).collect::<Vec<_>>(),
+            row_ids(&app),
+        );
+        assert!(short.len() < tall.len(), "the short pane shed nothing");
+
+        // The stale highlight is gone, so Enter cannot resume a row that is
+        // no longer on screen.
+        assert_eq!(app.launch.menu_selected, None);
+        assert_eq!(
+            run_launch_card_row(&short, app.launch.menu_selected),
+            LaunchAction::None,
+        );
+    }
+
+    #[test]
+    fn no_keyboard_row_names_a_session_the_pane_is_not_showing() {
+        let mut app = app_with_recent(&["one", "two", "three", "four", "five"], 5);
+        for height in 1u16..=14 {
+            refresh_launch_row_hitboxes(&mut app, Rect::new(0, 0, 120, height));
+            let painted: Vec<LaunchRowId> = row_ids(&app);
+            for row in launch_rows_for_app(&app) {
+                assert!(
+                    painted.contains(&row.id),
+                    "height {height}: {:?} is runnable but was not painted",
+                    row.id,
+                );
+            }
+            // Every arrow position runs a painted row or nothing at all.
+            for index in 0..painted.len() + 3 {
+                let rows = launch_rows_for_app(&app);
+                match run_launch_card_row(&rows, Some(index)) {
+                    LaunchAction::None => {}
+                    LaunchAction::ResumeSession(id) => assert!(
+                        painted.contains(&LaunchRowId::Recent(id.clone())),
+                        "height {height}: Enter at {index} would resume unpainted {id}",
+                    ),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shed_sessions_stay_reachable_through_the_overflow_row() {
+        let mut app = app_with_recent(&["one", "two", "three", "four", "five"], 5);
+        // Five sessions, none behind the inline list: a tall pane needs no
+        // overflow row, a short one sheds and therefore must offer it.
+        refresh_launch_row_hitboxes(&mut app, Rect::new(0, 0, 120, 30));
+        assert!(!row_ids(&app).contains(&LaunchRowId::SeeAll));
+        refresh_launch_row_hitboxes(&mut app, Rect::new(0, 0, 120, 7));
+        let ids = row_ids(&app);
+        assert!(ids.contains(&LaunchRowId::SeeAll), "{ids:?}");
+        assert!(
+            launch_rows_for_app(&app)
+                .iter()
+                .any(|row| row.id == LaunchRowId::SeeAll)
+        );
+    }
+
+    // --- the card fits the pane it is drawn into -----------------------
+
+    #[test]
+    fn the_card_fits_every_pane_it_is_drawn_into() {
+        let app = app_with_recent(&["one", "two", "three", "four", "five"], 9);
+        for width in [0u16, 1, 2, 3, 8, 12, 20, 31, 32, 40, 44, 64, 80, 120, 200] {
+            for height in 0u16..=10 {
+                let state = launch_empty_state(&app, Rect::new(0, 0, width, height));
+                assert!(
+                    state.lines.len() <= usize::from(height),
+                    "{width}x{height}: {} lines",
+                    state.lines.len(),
+                );
+                for line in &state.lines {
+                    let painted = text_display_width(&flatten(line));
+                    assert!(
+                        painted <= usize::from(width),
+                        "{width}x{height}: row of {painted} cells",
+                    );
+                }
+                for (id, row) in &state.rows {
+                    assert!(
+                        *row < state.lines.len(),
+                        "{width}x{height}: hitbox {id:?} has no row",
+                    );
+                }
+                if width > 0 && height > 0 {
+                    assert!(
+                        state
+                            .rows
+                            .iter()
+                            .any(|(id, _)| matches!(id, LaunchRowId::NewSession)),
+                        "{width}x{height}: nothing actionable painted",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_fit_ladder_never_sheds_the_one_actionable_row() {
+        for height in 1usize..=16 {
+            for recent in 0usize..=5 {
+                for has_more in [false, true] {
+                    for notice in [false, true] {
+                        let fit = launch_fit(height, recent, has_more, notice);
+                        assert!(fit.rows() <= height.max(1), "{height} {recent}: {fit:?}");
+                        assert!(fit.shown <= recent);
+                        if fit.shown < recent {
+                            assert!(
+                                fit.see_all || fit.rows() >= height,
+                                "shed rows became unreachable: {fit:?}",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- the row reads as one object -----------------------------------
+
+    #[test]
+    fn a_row_keeps_its_detail_beside_its_title() {
+        let app = app_with_recent(&["Ship the launch card"], 1);
+        let lines = painted(&app, 200, 24);
+        let row = lines
+            .iter()
+            .find(|line| line.contains("Ship the launch card"))
+            .expect("recent row painted");
+        assert!(
+            text_display_width(row) <= LAUNCH_CARD_MEASURE + 32,
+            "row runs to the terminal edge: {row:?}",
+        );
+        assert!(row.contains("msgs"), "row lost its detail: {row:?}");
+    }
+
+    #[test]
+    fn a_narrow_pane_spends_its_lane_on_the_title() {
+        let app = app_with_recent(&["Ship the launch card"], 1);
+        let row = recent_row_title(&app, 40, 24);
+        assert!(!row.contains("msgs"), "detail should have shed: {row:?}");
+        assert!(row.starts_with("Ship the launch"), "{row:?}");
+    }
+
+    // --- scripts --------------------------------------------------------
+
+    #[test]
+    fn titles_truncate_on_grapheme_boundaries_in_several_scripts() {
+        // Not a claim about every script: these are the four shapes that break
+        // char-indexed truncation — wide cells, RTL runs, ZWJ/skin-tone emoji,
+        // and combining marks.
+        let samples = [
+            (
+                "latin",
+                "Ship the launch card and verify truncation behaviour",
+            ),
+            ("cjk", "部署新的会话启动卡片并验证宽字符截断行为"),
+            ("arabic", "تهيئة بطاقة إطلاق الجلسة والتحقق من سلوك الاقتطاع"),
+            ("hebrew", "הגדרת כרטיס פתיחת הפעלה ואימות התנהגות הקיצוץ"),
+            ("emoji", "👩🏽‍🚀 crew 👨‍👩‍👧‍👦 families and flags 🇯🇵 shipping today"),
+            (
+                "combining",
+                "cafe\u{301} de\u{301}ja\u{300} vu\u{308} with combining marks throughout",
+            ),
+        ];
+        for (name, title) in samples {
+            let app = app_with_recent(&[title], 1);
+            for width in [8u16, 12, 20, 32, 40, 60, 80, 120, 200] {
+                for line in painted(&app, width, 24) {
+                    assert!(
+                        text_display_width(&line) <= usize::from(width),
+                        "{name} at {width}: {line:?} overruns the pane",
+                    );
+                }
+            }
+            // At these widths the detail has shed, so the row is the title
+            // alone: what is painted must be whole graphemes off its front.
+            for width in [12u16, 20, 32, 40] {
+                let row = recent_row_title(&app, width, 24);
+                let body = row.strip_suffix('…').unwrap_or(&row);
+                assert!(
+                    is_grapheme_prefix(body, title),
+                    "{name} at {width}: {body:?} splits a grapheme of {title:?}",
+                );
+            }
+        }
+    }
+
+    // --- rhythm ---------------------------------------------------------
+
+    #[test]
+    fn a_tall_pane_breathes_and_a_short_one_gives_the_rhythm_up_first() {
+        // Counting blank *painted* rows would be wrong: the mark column sits
+        // behind the first six of them. The rhythm is the gap between the
+        // new-session entry and the heading below it.
+        let app = app_with_recent(&["one", "two", "three", "four", "five"], 9);
+
+        let tall = painted(&app, 120, 30);
+        let entry = tall
+            .iter()
+            .position(|line| line.contains("New session"))
+            .expect("new-session row painted");
+        assert!(
+            !tall[entry + 1].contains("Recent"),
+            "a tall pane should breathe: {tall:#?}",
+        );
+
+        let tight = painted(&app, 120, 12);
+        let entry = tight
+            .iter()
+            .position(|line| line.contains("New session"))
+            .expect("new-session row painted");
+        assert!(
+            tight[entry + 1].contains("Recent"),
+            "a tight pane kept rhythm it cannot afford: {tight:#?}",
+        );
+    }
+
+    /// Print the card as the renderer actually paints it, for the evidence
+    /// fixture. Ignored by default; run with
+    /// `cargo test -p codewhale-tui --lib render_launch_card_fixture -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "fixture generator, not an assertion"]
+    #[allow(clippy::print_stdout)] // the fixture's whole job is its stdout
+    fn render_launch_card_fixture() {
+        let app = app_with_recent(
+            &[
+                "Fix the diagnostic display",
+                "Hunter has explicitly authorized setting up Codewhale",
+                "部署新的会话启动卡片并验证宽字符截断行为",
+                "👩🏽\u{200d}🚀 crew 👨\u{200d}👩\u{200d}👧\u{200d}👦 families and flags 🇯🇵",
+                "תהיה כרטיס פתיחת הפעלה",
+            ],
+            9,
+        );
+        for (width, height) in [(170u16, 24u16), (120, 24), (80, 24), (40, 12), (20, 8)] {
+            println!("\n{width}x{height}");
+            println!("+{}+", "-".repeat(usize::from(width)));
+            for line in painted(&app, width, height) {
+                let pad = usize::from(width).saturating_sub(text_display_width(&line));
+                println!("|{line}{}|", " ".repeat(pad));
+            }
+            println!("+{}+", "-".repeat(usize::from(width)));
+        }
+    }
+
+    #[test]
+    fn every_hitbox_points_at_the_row_that_painted() {
+        let app = app_with_recent(&["one", "two", "three"], 9);
+        for height in 1u16..=24 {
+            let state = launch_empty_state(&app, Rect::new(0, 0, 120, height));
+            for (id, row) in &state.rows {
+                let text = flatten(&state.lines[*row]);
+                assert!(
+                    !text.trim().is_empty(),
+                    "height {height}: hitbox for {id:?} points at a blank row",
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

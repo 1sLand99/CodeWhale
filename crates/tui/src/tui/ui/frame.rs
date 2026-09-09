@@ -1589,15 +1589,7 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
         // offsets come from the same builder that produced the lines, so a
         // hitbox cannot describe a row the transcript did not draw.
         if app.launch.visible {
-            let rows = crate::tui::underwater::launch_empty_state(app, chat_area).rows;
-            app.launch.row_hitboxes = rows
-                .into_iter()
-                .filter_map(|(id, row)| {
-                    let y = chat_area.y.checked_add(u16::try_from(row).ok()?)?;
-                    (y < chat_area.y.saturating_add(chat_area.height))
-                        .then_some((id, Rect::new(chat_area.x, y, chat_area.width, 1)))
-                })
-                .collect();
+            crate::tui::underwater::refresh_launch_row_hitboxes(app, chat_area);
         } else if !app.launch.row_hitboxes.is_empty() {
             app.launch.row_hitboxes.clear();
         }

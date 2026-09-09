@@ -2390,7 +2390,8 @@ impl SessionManager {
             .take(PREFIX_BYTES as u64)
             .read_to_end(&mut buf)?;
 
-        if let Some(metadata) = extract_top_level_metadata(&buf) {
+        if let Some(mut metadata) = extract_top_level_metadata(&buf) {
+            apply_legacy_title_recovery(&mut metadata, &buf);
             return Ok(metadata);
         }
 
@@ -2400,12 +2401,14 @@ impl SessionManager {
         let mut rest = Vec::new();
         file.read_to_end(&mut rest)?;
         buf.extend_from_slice(&rest);
-        extract_top_level_metadata(&buf).ok_or_else(|| {
+        let mut metadata = extract_top_level_metadata(&buf).ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "session file missing parseable `metadata` block",
             )
-        })
+        })?;
+        apply_legacy_title_recovery(&mut metadata, &buf);
+        Ok(metadata)
     }
 
     /// Delete a session and its recovery checkpoints, retiring its origin.
@@ -2970,6 +2973,74 @@ fn strip_legacy_truncation_note(system_prompt: Option<String>) -> Option<String>
         .map(|pos| trimmed[pos + 7..].to_string())
 }
 
+/// Byte offset of `key` (a quoted JSON key such as `"metadata"`) outside any
+/// string literal. Brace/string-aware so a key name quoted inside an earlier
+/// message body is never matched.
+fn find_json_key(bytes: &[u8], key: &[u8]) -> Option<usize> {
+    let mut idx = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
+    while idx < bytes.len() {
+        let c = bytes[idx];
+        if escape {
+            escape = false;
+        } else if c == b'\\' {
+            escape = true;
+        } else if c == b'"' {
+            if !in_string && bytes[idx..].starts_with(key) {
+                return Some(idx);
+            }
+            in_string = !in_string;
+        }
+        idx += 1;
+    }
+    None
+}
+
+/// Offset of the value opening with `open` that follows the key at
+/// `key_offset`.
+fn json_value_start(bytes: &[u8], key_offset: usize, key_len: usize, open: u8) -> Option<usize> {
+    let mut idx = key_offset + key_len;
+    while idx < bytes.len() && (bytes[idx] as char).is_whitespace() {
+        idx += 1;
+    }
+    if idx >= bytes.len() || bytes[idx] != b':' {
+        return None;
+    }
+    idx += 1;
+    while idx < bytes.len() && (bytes[idx] as char).is_whitespace() {
+        idx += 1;
+    }
+    (idx < bytes.len() && bytes[idx] == open).then_some(idx)
+}
+
+/// Exclusive end of the balanced `{...}` starting at `start`, or `None` when
+/// the buffer is truncated before it closes.
+fn json_object_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    for (offset, &c) in bytes[start..].iter().enumerate() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        match c {
+            b'\\' => escape = true,
+            b'"' => in_string = !in_string,
+            b'{' if !in_string => depth += 1,
+            b'}' if !in_string => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(start + offset + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// String-scan a JSON byte buffer for the top-level `"metadata":{...}`
 /// block and return it parsed. Returns `None` if no balanced metadata
 /// object is present in the buffer.
@@ -2981,97 +3052,109 @@ fn strip_legacy_truncation_note(system_prompt: Option<String>) -> Option<String>
 fn extract_top_level_metadata(buf: &[u8]) -> Option<SessionMetadata> {
     let s = std::str::from_utf8(buf).ok()?;
     let bytes = s.as_bytes();
+    const KEY: &[u8] = b"\"metadata\"";
+    let start = json_value_start(bytes, find_json_key(bytes, KEY)?, KEY.len(), b'{')?;
+    let end = json_object_end(bytes, start)?;
+    serde_json::from_str::<SessionMetadata>(&s[start..end]).ok()
+}
 
-    // Find the FIRST `"metadata"` key that appears outside of any string
-    // literal. Walking with brace/string awareness costs almost nothing
-    // and avoids matching `metadata` inside an earlier message body.
-    let key_pat = b"\"metadata\"";
-    let mut idx = 0usize;
-    let mut in_string = false;
-    let mut escape = false;
-    let key_offset = loop {
-        if idx >= bytes.len() {
-            return None;
-        }
-        let c = bytes[idx];
-        if escape {
-            escape = false;
-            idx += 1;
-            continue;
-        }
-        if c == b'\\' {
-            escape = true;
-            idx += 1;
-            continue;
-        }
-        if c == b'"' {
-            // If we're already in a string, this closes it; otherwise it
-            // opens one. But before flipping we check for the key match
-            // when we're entering a string at exactly this position.
-            if !in_string && bytes[idx..].starts_with(key_pat) {
-                break idx;
-            }
-            in_string = !in_string;
-            idx += 1;
-            continue;
-        }
-        idx += 1;
+/// Complete message objects from the front of the `messages` array, plus
+/// whether the array was seen to end. A message the prefix cut in half is
+/// simply absent; nothing is reconstructed.
+fn extract_leading_messages(buf: &[u8], max: usize) -> (Vec<Message>, bool) {
+    let Ok(s) = std::str::from_utf8(buf) else {
+        return (Vec::new(), false);
     };
+    let bytes = s.as_bytes();
+    const KEY: &[u8] = b"\"messages\"";
+    let Some(key_offset) = find_json_key(bytes, KEY) else {
+        return (Vec::new(), false);
+    };
+    let Some(array_start) = json_value_start(bytes, key_offset, KEY.len(), b'[') else {
+        return (Vec::new(), false);
+    };
+    let mut cursor = array_start + 1;
+    let mut out = Vec::new();
+    loop {
+        while cursor < bytes.len() && matches!(bytes[cursor], b' ' | b'\t' | b'\r' | b'\n' | b',') {
+            cursor += 1;
+        }
+        if cursor < bytes.len() && bytes[cursor] == b']' {
+            return (out, true);
+        }
+        if out.len() >= max || cursor >= bytes.len() || bytes[cursor] != b'{' {
+            return (out, false);
+        }
+        let Some(end) = json_object_end(bytes, cursor) else {
+            return (out, false);
+        };
+        let Ok(message) = serde_json::from_str::<Message>(&s[cursor..end]) else {
+            return (out, false);
+        };
+        out.push(message);
+        cursor = end;
+    }
+}
 
-    // Position past the key.
-    let after_key = key_offset + key_pat.len();
-    // Find the colon that separates key from value (skip whitespace).
-    let mut after_colon = after_key;
-    while after_colon < bytes.len() && (bytes[after_colon] as char).is_whitespace() {
-        after_colon += 1;
-    }
-    if after_colon >= bytes.len() || bytes[after_colon] != b':' {
-        return None;
-    }
-    after_colon += 1;
-    while after_colon < bytes.len() && (bytes[after_colon] as char).is_whitespace() {
-        after_colon += 1;
-    }
-    if after_colon >= bytes.len() || bytes[after_colon] != b'{' {
-        return None;
-    }
+/// How many leading messages the legacy-title recovery will parse. The
+/// enclosing read is already bounded to a 64 KB prefix (#337); this bounds
+/// the parse inside it.
+const LEGACY_TITLE_SCAN_MESSAGES: usize = 24;
 
-    // Walk the object, balancing braces.
-    let mut depth = 0i32;
-    let mut in_string = false;
-    let mut escape = false;
-    let mut end = None;
-    for (i, &c) in bytes[after_colon..].iter().enumerate() {
-        let abs = after_colon + i;
-        if escape {
-            escape = false;
-            continue;
-        }
-        if c == b'\\' {
-            escape = true;
-            continue;
-        }
-        if c == b'"' {
-            in_string = !in_string;
-            continue;
-        }
-        if in_string {
-            continue;
-        }
-        match c {
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    end = Some(abs + 1);
-                    break;
+/// Recover a title that a superseded derivation took from runtime control
+/// traffic, using the session's own first real user prompt.
+///
+/// Provenance is proven, never guessed: the stored title has to be exactly
+/// what the old rule produced — [`truncate_title`] of a message the current
+/// classifier rejects as not a user turn. A renamed session, and a person who
+/// literally typed an envelope as their first message, never match, so their
+/// text is kept. Returns `None` when there is nothing proven to recover.
+fn recovered_legacy_title(
+    stored: &str,
+    messages: &[Message],
+    array_complete: bool,
+) -> Option<String> {
+    let stale = messages.iter().any(|message| {
+        crate::runtime_handoff::classify_user_turn_prompt(message)
+            == crate::runtime_handoff::UserTurnPromptKind::NotPrompt
+            && message.content.iter().any(|block| match block {
+                ContentBlock::Text { text, .. } => {
+                    truncate_title(text, 50) == stored
+                        || truncate_title(extract_user_prompt(text), 50) == stored
                 }
-            }
-            _ => {}
-        }
+                _ => false,
+            })
+    });
+    if !stale {
+        return None;
     }
-    let end = end?;
-    serde_json::from_str::<SessionMetadata>(&s[after_colon..end]).ok()
+    match conversation_derived_title(messages) {
+        Some(title) => Some(title),
+        // No user turn in what we read. Only claim the conversation has none
+        // when the array actually ended inside the prefix; a truncated read
+        // keeps the stored title rather than inventing a neutral one.
+        None if array_complete => Some(DEFAULT_SESSION_TITLE.to_string()),
+        None => None,
+    }
+}
+
+/// Apply [`recovered_legacy_title`] to freshly loaded metadata. In memory
+/// only — the session file is never rewritten, so the stored title (and any
+/// rename) survives on disk.
+fn apply_legacy_title_recovery(metadata: &mut SessionMetadata, buf: &[u8]) {
+    // Cost gate, never the rename decision: an envelope title always opens
+    // with `<`, so this keeps #337's bounded-parse win for ordinary titles.
+    // Whether to rewrite is `recovered_legacy_title`'s proven provenance.
+    if !metadata.title.starts_with('<') {
+        return;
+    }
+    let (messages, complete) = extract_leading_messages(buf, LEGACY_TITLE_SCAN_MESSAGES);
+    if messages.is_empty() {
+        return;
+    }
+    if let Some(title) = recovered_legacy_title(&metadata.title, &messages, complete) {
+        metadata.title = title;
+    }
 }
 
 fn system_prompt_to_string(system_prompt: Option<&SystemPrompt>) -> Option<String> {
@@ -5702,6 +5785,156 @@ mod tests {
         )];
         let session = create_saved_session(&messages, "test-model", tmp.path(), 0, None);
         assert_eq!(session.metadata.title, "<codewhale:runtime_event> example");
+    }
+
+    /// The exact bytes `SessionManager::load_session_metadata` reads.
+    fn session_bytes(session: &SavedSession, stored_title: &str) -> Vec<u8> {
+        let mut stale = session.clone();
+        stale.metadata.title = stored_title.to_string();
+        serde_json::to_vec(&stale).expect("serialize session")
+    }
+
+    fn loaded_title(session: &SavedSession, stored_title: &str) -> String {
+        let buf = session_bytes(session, stored_title);
+        let mut metadata = extract_top_level_metadata(&buf).expect("metadata extractable");
+        assert_eq!(metadata.title, stored_title);
+        apply_legacy_title_recovery(&mut metadata, &buf);
+        metadata.title
+    }
+
+    /// What the superseded derivation stored for an Operate-contract session:
+    /// the first line of the engine envelope, cut at 50 characters.
+    fn legacy_operate_title() -> String {
+        let message = crate::runtime_handoff::operate_contract_runtime_message();
+        let ContentBlock::Text { text, .. } = &message.content[0] else {
+            panic!("operate contract opens with text");
+        };
+        truncate_title(text, 50)
+    }
+
+    #[test]
+    fn legacy_runtime_titles_recover_the_real_user_prompt() {
+        let tmp = tempdir().expect("tempdir");
+        let messages = vec![
+            crate::runtime_handoff::operate_contract_runtime_message(),
+            make_test_message("user", "Fix the diagnostic display"),
+        ];
+        let session = create_saved_session(&messages, "test-model", tmp.path(), 0, None);
+        let stored = legacy_operate_title();
+        assert!(
+            stored.starts_with("<codewhale:runtime_event kind="),
+            "{stored:?}",
+        );
+        assert_eq!(
+            loaded_title(&session, &stored),
+            "Fix the diagnostic display"
+        );
+    }
+
+    #[test]
+    fn legacy_recovery_leaves_renames_and_user_authored_titles_alone() {
+        let tmp = tempdir().expect("tempdir");
+        let messages = vec![
+            crate::runtime_handoff::operate_contract_runtime_message(),
+            make_test_message("user", "Fix the diagnostic display"),
+        ];
+        let session = create_saved_session(&messages, "test-model", tmp.path(), 0, None);
+        // Renames win, including ones that open with `<` and so pay for the
+        // message scan: provenance is proven, never guessed from the shape.
+        for rename in [
+            "Operate contract",
+            "<my own angle-bracket title>",
+            "<codewhale:runtime_event kind=\"operate_contract\" but renamed by me",
+        ] {
+            assert_eq!(loaded_title(&session, rename), rename);
+        }
+    }
+
+    #[test]
+    fn a_user_who_types_an_attributed_envelope_keeps_their_title() {
+        // The one case the earlier substring rule got wrong. The engine's
+        // envelope carries a runtime provenance line; a person's message does
+        // not, and the existing classifier is what tells them apart — so this
+        // title is theirs and survives.
+        let tmp = tempdir().expect("tempdir");
+        let typed = "<codewhale:runtime_event kind=\"operate_contract\" visibility=\"internal\">";
+        let messages = vec![make_test_message("user", typed)];
+        let session = create_saved_session(&messages, "test-model", tmp.path(), 0, None);
+        let stored = truncate_title(typed, 50);
+        assert_eq!(session.metadata.title, stored);
+        assert_eq!(loaded_title(&session, &stored), stored);
+    }
+
+    #[test]
+    fn legacy_recovery_names_a_runtime_only_session_by_the_default() {
+        // Nothing but runtime traffic: there is no user prompt to recover, and
+        // the array ended inside the read, so the neutral default is provable.
+        let tmp = tempdir().expect("tempdir");
+        let messages = vec![crate::runtime_handoff::operate_contract_runtime_message()];
+        let session = create_saved_session(&messages, "test-model", tmp.path(), 0, None);
+        assert_eq!(
+            loaded_title(&session, &legacy_operate_title()),
+            DEFAULT_SESSION_TITLE
+        );
+    }
+
+    #[test]
+    fn legacy_recovery_keeps_the_stored_title_when_the_read_was_truncated() {
+        // A prefix cut before the user's turn must not be read as "this
+        // conversation has no prompt".
+        let tmp = tempdir().expect("tempdir");
+        let messages = vec![
+            crate::runtime_handoff::operate_contract_runtime_message(),
+            make_test_message("user", "Fix the diagnostic display"),
+        ];
+        let session = create_saved_session(&messages, "test-model", tmp.path(), 0, None);
+        let stored = legacy_operate_title();
+        let full = session_bytes(&session, &stored);
+        let messages_at = full
+            .windows(10)
+            .position(|w| w == b"\"messages\"")
+            .expect("messages key present");
+        let cut = &full[..messages_at + 40];
+        let mut metadata = extract_top_level_metadata(cut).expect("metadata precedes messages");
+        apply_legacy_title_recovery(&mut metadata, cut);
+        assert_eq!(metadata.title, stored, "a truncated read must not rename");
+    }
+
+    #[test]
+    fn ordinary_titles_never_pay_for_the_message_scan() {
+        // #337's bounded read is the reason `list_sessions` is cheap. The `<`
+        // gate is a cost filter only; the rename decision is the provenance
+        // check above.
+        let tmp = tempdir().expect("tempdir");
+        let messages = vec![make_test_message("user", "Fix the diagnostic display")];
+        let session = create_saved_session(&messages, "test-model", tmp.path(), 0, None);
+        let mut metadata = session.metadata.clone();
+        assert!(!metadata.title.starts_with('<'));
+        apply_legacy_title_recovery(&mut metadata, &[]);
+        assert_eq!(metadata.title, "Fix the diagnostic display");
+    }
+
+    #[test]
+    fn leading_messages_stop_at_the_edge_of_a_truncated_prefix() {
+        let tmp = tempdir().expect("tempdir");
+        let messages = vec![
+            make_test_message("user", "first"),
+            make_test_message("assistant", "second"),
+            make_test_message("user", "third"),
+        ];
+        let session = create_saved_session(&messages, "test-model", tmp.path(), 0, None);
+        let buf = serde_json::to_vec(&session).expect("serialize");
+        let (all, complete) = extract_leading_messages(&buf, 24);
+        assert!(complete, "a whole file ends its messages array");
+        assert_eq!(all.len(), 3);
+
+        let (capped, complete) = extract_leading_messages(&buf, 2);
+        assert_eq!(capped.len(), 2);
+        assert!(!complete, "a capped scan has not seen the array end");
+
+        let (partial, complete) = extract_leading_messages(&buf[..buf.len() / 2], 24);
+        assert!(!complete);
+        assert!(partial.len() < 3, "a cut prefix cannot yield every message");
     }
 
     #[test]
