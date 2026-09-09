@@ -4399,6 +4399,105 @@ async fn stream_compat_mapping_handles_expected_runtime_events() -> Result<()> {
     Ok(())
 }
 
+/// Renders one mapped SSE frame and returns its `data:` payload as JSON.
+async fn sse_frame_payload(event: SseEvent) -> Result<Value> {
+    let stream = async_stream::stream! {
+        yield Ok::<_, Infallible>(event);
+    };
+    let body =
+        axum::body::to_bytes(Sse::new(stream).into_response().into_body(), usize::MAX).await?;
+    let text = String::from_utf8_lossy(&body).into_owned();
+    let data = text
+        .lines()
+        .find_map(|line| line.strip_prefix("data: "))
+        .context("SSE frame had no data line")?;
+    Ok(serde_json::from_str(data)?)
+}
+
+fn approval_event_record(seq: u64, event: &str, payload: Value) -> RuntimeEventRecord {
+    RuntimeEventRecord {
+        schema_version: 1,
+        seq,
+        timestamp: chrono::Utc::now(),
+        thread_id: "thr_test".to_string(),
+        turn_id: Some("turn_test".to_string()),
+        item_id: None,
+        event: event.to_string(),
+        payload,
+    }
+}
+
+/// Every approval frame an SSE-only client sees identifies the approval by the
+/// runtime-minted capability. A provider tool-call ID must never surface in
+/// `approval_id` or its legacy `id` alias, because those are the fields clients
+/// echo back to `POST /v1/approvals/{id}`.
+#[tokio::test]
+async fn approval_sse_frames_identify_approvals_by_the_opaque_capability() -> Result<()> {
+    const OPAQUE: &str = "approval_0123456789abcdef";
+    const RAW: &str = "call_1";
+
+    // Each arm reads only the identity fields; the rest are the shape a real
+    // payload carries and are ignored by the arms that do not use them.
+    for (seq, event) in ["approval.required", "approval.decided", "approval.timeout"]
+        .into_iter()
+        .enumerate()
+    {
+        let record = approval_event_record(
+            seq as u64 + 1,
+            event,
+            json!({
+                "id": OPAQUE,
+                "approval_id": OPAQUE,
+                "tool_call_id": RAW,
+                "tool_name": "exec_command",
+                "description": "Run tests",
+                "decision": "allow",
+                "timeout_secs": 300,
+            }),
+        );
+        let mapped =
+            map_compat_stream_event(&record).with_context(|| format!("missing {event} frame"))?;
+        let frame = sse_frame_payload(mapped).await?;
+        assert_eq!(frame["approval_id"], OPAQUE, "{event} approval_id");
+        assert_eq!(frame["id"], OPAQUE, "{event} legacy id alias");
+        assert_ne!(frame["approval_id"], RAW, "{event} must not publish raw id");
+        assert_eq!(frame["thread_id"], "thr_test");
+    }
+    Ok(())
+}
+
+/// Companion to the test above: the raw tool-call ID is the only correlator an
+/// SSE-only client can use to attach an approval prompt to the tool row it
+/// gates, so the projection should forward it alongside the capability.
+#[tokio::test]
+async fn approval_sse_frames_forward_the_tool_call_correlator() -> Result<()> {
+    const OPAQUE: &str = "approval_0123456789abcdef";
+    const RAW: &str = "call_1";
+
+    for (seq, event) in ["approval.required", "approval.decided", "approval.timeout"]
+        .into_iter()
+        .enumerate()
+    {
+        let record = approval_event_record(
+            seq as u64 + 1,
+            event,
+            json!({
+                "id": OPAQUE,
+                "approval_id": OPAQUE,
+                "tool_call_id": RAW,
+                "tool_name": "exec_command",
+                "decision": "allow",
+            }),
+        );
+        let mapped =
+            map_compat_stream_event(&record).with_context(|| format!("missing {event} frame"))?;
+        let frame = sse_frame_payload(mapped).await?;
+        assert_eq!(frame["tool_call_id"], RAW, "{event} tool_call_id");
+        assert_eq!(frame["approval_id"], OPAQUE, "{event} approval_id");
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn stream_endpoint_remains_backward_compatible() -> Result<()> {
     let Some((addr, runtime_threads, handle)) = spawn_test_server().await? else {
@@ -7338,16 +7437,28 @@ async fn decide_approval_delivers_to_runtime() -> Result<()> {
         return Ok(());
     };
     let client = crate::tls::reqwest_client();
-    let rx = runtime_threads.register_pending_approval_for_test("ext_id");
+    // The caller never chooses the approval ID; the runtime mints it and the
+    // client echoes it back verbatim.
+    let (approval_id, rx) = runtime_threads.register_pending_approval_for_test("ext_id");
+    assert_ne!(approval_id, "ext_id");
+
+    // A provider-shaped raw ID is not accepted as a fallback for the real one.
+    let raw = client
+        .post(format!("http://{addr}/v1/approvals/ext_id"))
+        .json(&json!({ "decision": "allow", "remember": false }))
+        .send()
+        .await?;
+    assert_eq!(raw.status(), StatusCode::NOT_FOUND);
 
     let resp = client
-        .post(format!("http://{addr}/v1/approvals/ext_id"))
+        .post(format!("http://{addr}/v1/approvals/{approval_id}"))
         .json(&json!({ "decision": "allow", "remember": false }))
         .send()
         .await?;
     assert_eq!(resp.status(), StatusCode::OK);
     let body: serde_json::Value = resp.json().await?;
     assert_eq!(body["ok"], true);
+    assert_eq!(body["approval_id"], approval_id);
     assert_eq!(body["decision"], "allow");
     assert_eq!(body["delivered"], true);
 
@@ -7356,6 +7467,74 @@ async fn decide_approval_delivers_to_runtime() -> Result<()> {
         received,
         ExternalApprovalDecision::Allow { remember: false }
     );
+
+    // The capability is single-use: a duplicate response (retry, double-click,
+    // replayed request) cannot deliver a second decision.
+    let replay = client
+        .post(format!("http://{addr}/v1/approvals/{approval_id}"))
+        .json(&json!({ "decision": "deny", "remember": true }))
+        .send()
+        .await?;
+    assert_eq!(replay.status(), StatusCode::NOT_FOUND);
+
+    handle.abort();
+    Ok(())
+}
+
+/// The snapshot a reconnecting client resumes from must carry both halves of
+/// the approval identity over the wire: the opaque capability it posts back,
+/// and the raw tool-call correlator it matches against the tool row. Only the
+/// first is accepted by `POST /v1/approvals/{id}`.
+#[tokio::test]
+async fn thread_snapshot_separates_approval_capability_from_tool_correlator() -> Result<()> {
+    let Some((addr, runtime_threads, handle)) = spawn_test_server().await? else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+    let thread: serde_json::Value = client
+        .post(format!("http://{addr}/v1/threads"))
+        .json(&json!({}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let thread_id = thread["id"].as_str().context("missing thread id")?;
+
+    let (approval_id, rx) =
+        runtime_threads.register_pending_approval_for_thread_for_test(thread_id, "call_1");
+
+    let detail: serde_json::Value = client
+        .get(format!("http://{addr}/v1/threads/{thread_id}"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let pending = detail["pending_approvals"]
+        .as_array()
+        .context("missing pending_approvals")?;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0]["id"], approval_id);
+    assert_eq!(pending[0]["tool_call_id"], "call_1");
+
+    // A provider call ID is a correlator, not a credential — even now that a
+    // client can read it straight out of the snapshot.
+    let by_correlator = client
+        .post(format!("http://{addr}/v1/approvals/call_1"))
+        .json(&json!({ "decision": "allow", "remember": false }))
+        .send()
+        .await?;
+    assert_eq!(by_correlator.status(), StatusCode::NOT_FOUND);
+
+    let by_capability = client
+        .post(format!("http://{addr}/v1/approvals/{approval_id}"))
+        .json(&json!({ "decision": "deny", "remember": false }))
+        .send()
+        .await?;
+    assert_eq!(by_capability.status(), StatusCode::OK);
+    let received = tokio::time::timeout(ci_scaled(Duration::from_secs(1)), rx).await??;
+    assert_eq!(received, ExternalApprovalDecision::Deny { remember: false });
 
     handle.abort();
     Ok(())
@@ -12975,7 +13154,7 @@ async fn native_notification_preparation_authenticates_current_events_and_reuses
     // request is actionable, even if a stale pending projection survived.
     turn.status = crate::runtime_threads::RuntimeTurnStatus::InProgress;
     manager.test_store().save_turn(&turn)?;
-    let _approval =
+    let (approval_id, _approval) =
         manager.register_pending_approval_for_thread_for_test(&thread.id, "approval-current");
     manager.register_pending_user_input_for_thread_for_test(&thread.id, "input-current");
     let approval = manager
@@ -12983,7 +13162,7 @@ async fn native_notification_preparation_authenticates_current_events_and_reuses
             &thread.id,
             Some(&turn.id),
             "approval.required",
-            json!({"id":"approval-current","description":"private approval prompt"}),
+            json!({"id": approval_id, "description":"private approval prompt"}),
         )
         .await?;
     let input = manager
@@ -13100,12 +13279,18 @@ async fn native_notification_replay_rechecks_requests_settled_during_the_read() 
             manager.register_pending_user_input_for_thread_for_test(&thread.id, "request");
             None
         };
+        // The event has to name the same identity the pending projection holds,
+        // which for an approval is the runtime-minted one.
+        let request_id = approval
+            .as_ref()
+            .map(|(approval_id, _)| approval_id.clone())
+            .unwrap_or_else(|| "request".to_string());
         let event = manager
             .emit_event_for_test(
                 &thread.id,
                 Some(&turn.id),
                 event_name,
-                json!({"id": "request"}),
+                json!({"id": request_id}),
             )
             .await?;
         let endpoint = format!(
@@ -13140,9 +13325,9 @@ async fn native_notification_replay_rechecks_requests_settled_during_the_read() 
             .context("notification preparation did not reach the held durable read")?
             .context("replay hook closed")?;
         assert_eq!(point.thread_id, thread.id);
-        if let Some(approval) = approval {
+        if let Some((approval_id, approval)) = approval {
             assert!(manager.deliver_external_approval(
-                "request",
+                &approval_id,
                 ExternalApprovalDecision::Allow { remember: false },
             ));
             assert_eq!(

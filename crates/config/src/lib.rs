@@ -2736,11 +2736,15 @@ impl ConfigToml {
         self.selected_provider_id
             .as_deref()
             .filter(|id| {
-                if self.providers.extras.contains_key(*id) {
-                    self.provider == ProviderKind::Custom
+                if self.provider == ProviderKind::Custom {
+                    self.providers.extras.contains_key(*id)
                 } else {
-                    self.provider != ProviderKind::Custom
-                        && ProviderKind::parse_config_identity(id) == Some(self.provider)
+                    ProviderKind::parse_config_identity(id) == Some(self.provider)
+                        && self.providers.extras.get(*id).is_none_or(|value| {
+                            value
+                                .as_table()
+                                .is_some_and(|table| !table.contains_key("kind"))
+                        })
                 }
             })
             .unwrap_or_else(|| self.provider.as_str())
@@ -2912,8 +2916,17 @@ impl ConfigToml {
     pub fn bind_persisted_provider_id(&mut self, provider_id: &str) -> Result<()> {
         let provider_id = provider_id.trim();
         let parsed = ProviderKind::parse_config_identity(provider_id);
+        // Kindless tables mirroring a built-in alias remain inert. An explicit
+        // custom declaration must validate; never fall back to a different
+        // credential/endpoint authority when its kind is invalid.
+        let custom_table = self.providers.extras.get(provider_id);
+        let kindless_alias = parsed.is_some()
+            && custom_table
+                .and_then(toml::Value::as_table)
+                .is_some_and(|table| !table.contains_key("kind"));
         let provider = if parsed != Some(ProviderKind::Antigravity)
-            && self.providers.extras.contains_key(provider_id)
+            && custom_table.is_some()
+            && !kindless_alias
         {
             self.named_custom_provider_table(provider_id)?;
             ProviderKind::Custom

@@ -781,6 +781,28 @@ an incomplete admission before a later lookup, but GET itself never does so.
 - `POST /v1/approvals/{approval_id}` with body
   `{ "decision": "allow" | "deny", "remember": false }`
 
+`approval_id` is minted by the Runtime, not by the model or the provider. It is
+an opaque `approval_<32 hex>` capability, unique per prompt, bound to the thread
+that raised it, and single-use: the Runtime removes it when the decision is
+delivered, when the prompt times out, or when the turn abandons it. Clients echo
+the value they were given and must not construct, derive, or guess one.
+
+It is deliberately **not** the provider's tool-call ID. Providers restart their
+call-ID counters per response, so two threads can gate calls whose raw IDs are
+byte-equal; keying approvals by that value let one thread's decision settle
+another thread's call. The endpoint therefore performs one exact match on the
+minted ID and has no fallback: a raw tool-call ID, an expired ID, or a replayed
+ID that has already been settled all return `404` and reach no engine. A `404`
+means the capability is not pending — it is not evidence about how the approval
+was resolved; read `approval.decided` for that.
+
+The raw provider call ID travels separately as `tool_call_id` on
+`pending_approvals[]` and on the approval events. It is a correlator for
+attaching a prompt to the tool row it gates, and never accepted as a decision.
+Each thread-detail `pending_approvals[]` entry is
+`{ "id", "turn_id", "tool_name", "description", "intent_summary"?, "tool_call_id"? }`,
+where `id` is the capability above.
+
 **User input**
 - `POST /v1/user-input/{thread_id}/{input_id}` with body
   `{ "answers": [{ "id": "question-id", "label": "Choice", "value": "Choice" }] }`
@@ -1238,6 +1260,22 @@ cursor include the same materialized prefix.
 `approval.required` events may include a `matched_rule` string when an
 execution-policy rule caused the prompt. This field is explanatory metadata for
 clients and does not grant or persist permissions.
+
+`approval.required`, `approval.decided`, and `approval.timeout` carry two
+distinct identifiers. `approval_id` is the Runtime-minted, single-use capability
+described under **Approvals** — the only value `POST /v1/approvals/{id}` accepts
+— and `approval.required` also repeats it in the legacy `id` field for older
+clients. `tool_call_id` is the provider's raw tool-call ID, present for
+correlation only. Automatically resolved prompts (thread `auto_approve`, and the
+Auto-Review posture, which never opens a modal) mint an `approval_id` as well, so
+the field has one meaning on every path; those IDs register no waiter and are
+inert against the endpoint. Clients must never treat `tool_call_id` as an
+approval capability or assume it is unique across threads.
+
+The thread event stream forwards these payloads intact. The compatibility turn
+stream carries `approval_id`, its `id` alias and `tool_call_id`; the pending
+snapshot carries the same capability and correlator so reconnecting clients can
+attach an approval prompt to its tool row.
 
 ## Security boundary
 

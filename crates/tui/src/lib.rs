@@ -18363,9 +18363,13 @@ mod project_config_tests {
             merge_project_config(&mut explicit, workspace.path());
             assert_eq!(explicit.default_model(), "gpt-5.6-terra", "{key}");
             assert_eq!(
-                crate::route_runtime::resolve_runtime_route(&explicit, ApiProvider::Openai, None)
-                    .unwrap()
-                    .model,
+                crate::route_runtime::resolve_runtime_route(
+                    &explicit,
+                    crate::config::ApiProvider::Openai,
+                    None
+                )
+                .unwrap()
+                .model,
                 "gpt-5.6-terra",
                 "{key}"
             );

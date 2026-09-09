@@ -1,6 +1,6 @@
 //! Durable CLI route edits use the same Config owner as Runtime and the TUI.
 //! `model` and the legacy `default_text_model` address the saved active route;
-//! `default_model` addresses DeepSeek. Project root keys retain their scope.
+//! `default_model` addresses DeepSeek (CN while that route is active). Project root keys retain their scope.
 
 use std::path::Path;
 
@@ -30,7 +30,12 @@ fn parse_config(body: &str) -> Result<Config> {
 
 fn model_identity(config: &Config, key: &str) -> Result<ProviderIdentity> {
     if key == "default_model" {
-        config.resolve_provider_pin_identity("deepseek")
+        let provider = if config.api_provider() == ApiProvider::DeepseekCN {
+            ApiProvider::DeepseekCN
+        } else {
+            ApiProvider::Deepseek
+        };
+        config.resolve_provider_pin_identity(provider.as_str())
     } else if let Some(id) = provider_model_id(key) {
         // Leaf keys name TOML tables, whose canonical spelling can differ
         // from the public provider selector. Exact custom tables still win.
@@ -90,6 +95,165 @@ pub fn model_slot_for_document(body: &str, key: &str) -> Result<Vec<String>> {
         .into_iter()
         .map(str::to_string)
         .collect())
+}
+
+fn document_slot_value(document: &toml::value::Table, slot: &[String]) -> Option<String> {
+    let [root, provider, field] = slot else {
+        return None;
+    };
+    document
+        .get(root)?
+        .as_table()?
+        .get(provider)?
+        .as_table()?
+        .get(field)?
+        .as_str()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string)
+}
+
+fn insert_document_slot_value(
+    document: &mut toml::value::Table,
+    slot: &[String],
+    value: &str,
+) -> bool {
+    let [root, provider, field] = slot else {
+        return false;
+    };
+    let Some(providers) = document
+        .entry(root.clone())
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()))
+        .as_table_mut()
+    else {
+        return false;
+    };
+    let Some(entry) = providers
+        .entry(provider.clone())
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()))
+        .as_table_mut()
+    else {
+        return false;
+    };
+    entry.insert(field.clone(), toml::Value::String(value.to_string()));
+    true
+}
+
+/// Scrub root model aliases from a serialized config document for export.
+///
+/// Root `model`/`default_text_model` address the *active* route on import and
+/// `default_model` addresses DeepSeek (CN when that route is active), so a raw root alias exported next to
+/// the canonical `[providers.<id>].model` leaf fails the importer's replay
+/// check. This rewrites `document` in place:
+///
+/// - A root alias the active route still consumes is shadowed state once the
+///   route's canonical leaf is exported; it is dropped.
+/// - A root alias the active route ignores but DeepSeek recognizes is
+///   DeepSeek's saved fallback; it moves to `providers.deepseek.model` unless
+///   that slot already carries a value. Any other unrecognized value is dead
+///   state that would only conflict on import and is dropped.
+/// - `default_model` folds into the selected DeepSeek region's model slot when
+///   nothing live occupies that slot, and is dropped otherwise.
+///
+/// Only route-selection keys are parsed as `Config` here. Export documents
+/// intentionally preserve unknown or differently typed local-authority
+/// extras, and reparsing them merely to locate the model slot would fail the
+/// whole export.
+pub fn scrub_root_model_aliases_for_export(document: &mut toml::value::Table) -> Result<()> {
+    let mut scratch = toml::value::Table::new();
+    for key in [
+        "provider",
+        "model",
+        "default_text_model",
+        "defaultTextModel",
+        "base_url",
+        "baseUrl",
+        "providers",
+    ] {
+        if let Some(value) = document.get(key) {
+            scratch.insert(key.to_string(), value.clone());
+        }
+    }
+    let body = toml::to_string(&toml::Value::Table(scratch))
+        .context("serializing route selection for export")?;
+    // Slot resolution reuses the exact document identity rules; the extra
+    // parse below only exists so the ownership test can scope a Config clone.
+    let active_slot = model_slot_for_document(&body, "model")?;
+    let deepseek_slot = model_slot_for_document(&body, "default_model")?;
+    let config = parse_config(&body)?;
+    let identity = model_identity(&config, "model")?;
+
+    if document_slot_value(document, &active_slot).is_some() {
+        for root_key in ["model", "default_text_model"] {
+            let Some(value) = document
+                .get(root_key)
+                .and_then(toml::Value::as_str)
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            // Same ownership test as `unset`: scope to the active route with
+            // its canonical leaf cleared and ask whether this root value is
+            // what the route would then resolve. A foreign DeepSeek root
+            // ignored by the active vendor remains DeepSeek's fallback.
+            let mut scoped = config.clone();
+            scoped.scope_to_provider_identity(&identity);
+            scoped.set_provider_model_override(identity.provider, None);
+            scoped.legacy_model = None;
+            scoped.default_text_model = Some(value.to_string());
+            let wire_model = crate::config::wire_model_for_provider_route(
+                identity.provider,
+                &scoped.deepseek_base_url(),
+                &value,
+            );
+            if scoped.default_model() == wire_model {
+                document.remove(root_key);
+                continue;
+            }
+            if crate::config::normalize_model_name(&value).is_none() {
+                document.remove(root_key);
+                continue;
+            }
+            if document_slot_value(document, &deepseek_slot).is_some() {
+                document.remove(root_key);
+                continue;
+            }
+            ensure!(
+                insert_document_slot_value(document, &deepseek_slot, &value),
+                "Cannot export a root model alias into a non-table provider slot"
+            );
+            document.remove(root_key);
+        }
+    }
+
+    match document.get("default_model").and_then(toml::Value::as_str) {
+        Some(value) => {
+            let value = value.trim().to_string();
+            // A root alias the DeepSeek route still consumes lands in this
+            // same slot on import; the live choice wins over the dead alias.
+            let root_covers_slot = active_slot == deepseek_slot
+                && ["model", "default_text_model"]
+                    .iter()
+                    .any(|key| document.get(*key).and_then(toml::Value::as_str).is_some());
+            let folded = !value.is_empty()
+                && !root_covers_slot
+                && document_slot_value(document, &deepseek_slot).is_none();
+            if folded {
+                ensure!(
+                    insert_document_slot_value(document, &deepseek_slot, &value),
+                    "Cannot export default_model into a non-table provider slot"
+                );
+            }
+            document.remove("default_model");
+        }
+        None => {
+            ensure!(
+                !document.contains_key("default_model"),
+                "Cannot export a non-string default_model without losing its value"
+            );
+        }
+    }
+    Ok(())
 }
 
 fn project_root_key<'a>(path: &Path, key: &'a str) -> Option<&'a str> {
@@ -295,6 +459,9 @@ model = "Other-X"
         std::fs::write(home.join("settings.toml"), "default_provider = \"zai\"\n")?;
         let project = root.path().join("project/.codewhale");
         std::fs::create_dir_all(&project)?;
+        // An absolute config outside the process workspace is project-scoped
+        // only when its parent is a checkout, not merely named `.codewhale`.
+        std::fs::create_dir(root.path().join("project/.git"))?;
         let path = project.join("config.toml");
         std::fs::write(&path, "model = \"project-old\"\n")?;
         set(&path, "model", "project-new")?;

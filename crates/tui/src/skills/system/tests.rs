@@ -76,8 +76,9 @@ fn contributor_onboarding_ships_at_generation_8_and_keeps_its_refusals() {
         .expect("contributor-onboarding must be bundled");
     assert_eq!(skill.introduced_in, 8);
     // The pin tracks the current catalog generation: 9 added handoff,
-    // 10 added mcp-discovery (#5238).
-    assert_eq!(BUNDLED_SKILL_VERSION, "10");
+    // 10 added mcp-discovery (#5238), 11 rewrote mcp-discovery from a
+    // Registry-first gate into a missing-capability fallback.
+    assert_eq!(BUNDLED_SKILL_VERSION, "11");
 
     let body = skill.body;
     assert!(body.contains("invocation: explicit-only"));
@@ -480,6 +481,93 @@ fn upgrade_preserves_user_modified_bundled_skill_body() {
         body.contains("customized"),
         "user edit must not be overwritten by name alone"
     );
+}
+
+/// A generation-10 install carries the Registry-first `mcp-discovery` body.
+/// The generation-11 rewrite is only real for existing users if that untouched
+/// copy is actually replaced — the digest allowance is what makes the upgrade
+/// reach them instead of stopping at "body differs, must be the user's".
+#[test]
+fn upgrade_from_generation_10_refreshes_untouched_mcp_discovery() {
+    let tmp = TempDir::new().unwrap();
+    let old = MCP_DISCOVERY_GENERATION_10_BODY;
+    let path = skill_file(&tmp, "mcp-discovery");
+    fs::create_dir_all(skill_dir(&tmp, "mcp-discovery")).unwrap();
+    fs::write(&path, old).unwrap();
+    fs::write(marker_file(&tmp), "10").unwrap();
+
+    install_system_skills(tmp.path()).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        MCP_DISCOVERY_BODY,
+        "an unmodified generation-10 body must upgrade to the shipped body"
+    );
+    assert_eq!(
+        fs::read_to_string(marker_file(&tmp)).unwrap().trim(),
+        BUNDLED_SKILL_VERSION
+    );
+}
+
+#[test]
+fn upgrade_from_generation_10_preserves_user_edited_mcp_discovery() {
+    let tmp = TempDir::new().unwrap();
+    let edited = format!("{MCP_DISCOVERY_GENERATION_10_BODY}\n- my own house rule\n");
+    let path = skill_file(&tmp, "mcp-discovery");
+    fs::create_dir_all(skill_dir(&tmp, "mcp-discovery")).unwrap();
+    fs::write(&path, &edited).unwrap();
+    fs::write(marker_file(&tmp), "10").unwrap();
+
+    install_system_skills(tmp.path()).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        edited,
+        "an edited copy stays the user's, even one derived from a shipped body"
+    );
+}
+
+#[test]
+fn upgrade_preserves_an_intentionally_empty_mcp_discovery() {
+    let tmp = TempDir::new().unwrap();
+    let path = skill_file(&tmp, "mcp-discovery");
+    fs::create_dir_all(skill_dir(&tmp, "mcp-discovery")).unwrap();
+    fs::write(&path, "").unwrap();
+    fs::write(marker_file(&tmp), "10").unwrap();
+    install_system_skills(tmp.path()).unwrap();
+    assert_eq!(fs::read_to_string(path).unwrap(), "");
+}
+
+#[test]
+fn mcp_discovery_deleted_at_generation_10_stays_deleted() {
+    let tmp = TempDir::new().unwrap();
+    fs::write(marker_file(&tmp), "10").unwrap();
+
+    install_system_skills(tmp.path()).unwrap();
+
+    assert!(
+        !skill_file(&tmp, "mcp-discovery").exists(),
+        "the digest allowance must not resurrect a skill the user removed"
+    );
+}
+
+/// The retained body is evidence, not decoration: it must be the superseded
+/// text (Registry-first, `registry_sync {}`, always-present tools), never a
+/// stale copy of the current one, or the allowance would silently do nothing.
+#[test]
+fn retained_generation_10_body_is_the_superseded_one() {
+    let old = MCP_DISCOVERY_GENERATION_10_BODY;
+    assert_ne!(old, MCP_DISCOVERY_BODY);
+    assert!(is_superseded_shipped_body("mcp-discovery", old));
+    assert!(!is_superseded_shipped_body(
+        "mcp-discovery",
+        MCP_DISCOVERY_BODY
+    ));
+    assert!(!is_superseded_shipped_body("debug", old));
+    // The stale generation-10 facts the rewrite exists to remove.
+    assert!(old.contains("registry_sync {}"));
+    assert!(old.contains("available in the active tool"));
+    assert!(MCP_DISCOVERY_BODY.contains("registry_sync {query:"));
 }
 
 #[test]

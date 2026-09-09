@@ -853,25 +853,10 @@ pub fn export_bundle(
 
     let mut document = config_document(config)?;
     if scope == BundleScope::Global {
-        let slot = codewhale_tui::route_preferences::model_slot_for_document(
-            &toml::to_string(&document)?,
-            "model",
-        )?;
-        let has_canonical_model = match slot.as_slice() {
-            [root, provider, field] if root == "providers" => document
-                .get(root)
-                .and_then(|table| table.get(provider.as_str())?.get(field.as_str())?.as_str())
-                .is_some_and(|model| !model.trim().is_empty()),
-            // Literal Custom still owns its root model; it is not shadowed.
-            _ => false,
-        };
-        if has_canonical_model {
-            // These legacy aliases address the active route on import. A
-            // shadowed root must not conflict with the canonical slot in our
-            // own export; inactive providers keep their independent slots.
-            document.remove("model");
-            document.remove("default_text_model");
-        }
+        // Root model aliases are route-relative on import; reconcile them with
+        // the canonical provider slots so the bundle never conflicts with
+        // itself, without reparsing unrelated preserved extras as `Config`.
+        codewhale_tui::route_preferences::scrub_root_model_aliases_for_export(&mut document)?;
     }
     for (key, value) in document {
         if let Some(value) = sanitize_export_value(&key, &value) {
@@ -1023,6 +1008,7 @@ pub struct ImportReceipt {
 /// the prepared candidate is committed through one `ConfigStore::save`, and any failure
 /// restores the backup before returning the error. The receipt redacts by
 /// construction: it carries only key paths and counts, never values.
+#[cfg(test)]
 pub fn apply_bundle(
     bundle: &PortableBundle,
     store: &mut codewhale_config::ConfigStore,
@@ -2273,6 +2259,123 @@ verbosity = "verbose"
                 .get("default_text_model")
                 .and_then(toml::Value::as_str),
             Some("LiteralRootModel")
+        );
+    }
+
+    #[test]
+    fn export_reconciles_a_legacy_root_default_model_with_the_deepseek_slot() {
+        // Migration writes the canonical slot but never removes a legacy root
+        // `default_model`; on import that alias also targets the DeepSeek slot,
+        // so a raw export would conflict with itself.
+        let config: ConfigToml = toml::from_str(
+            "provider = 'deepseek'\ndefault_model = 'deepseek-v4-flash'\n[providers.deepseek]\nmodel = 'deepseek-v4-pro'\n",
+        )
+        .unwrap();
+        let bundle =
+            export_bundle(&config, BundleScope::Global, BundleMetadata::default()).unwrap();
+        assert!(!bundle.global.entries.contains_key("default_model"));
+        let providers = bundle
+            .global
+            .entries
+            .get("providers")
+            .and_then(toml::Value::as_table)
+            .expect("providers table");
+        assert_eq!(
+            providers["deepseek"]["model"].as_str(),
+            Some("deepseek-v4-pro")
+        );
+
+        let dir = tempfile::tempdir().expect("config dir");
+        let mut store = ConfigStore::load(Some(dir.path().join("config.toml"))).unwrap();
+        let receipt = apply_bundle(&bundle, &mut store, BundleScope::Global, dir.path())
+            .expect("export must import without alias conflicts");
+        assert!(receipt.plan.conflicting.is_empty(), "{:?}", receipt.plan);
+        assert_eq!(
+            store
+                .config
+                .get_value("providers.deepseek.model")
+                .as_deref(),
+            Some("deepseek-v4-pro")
+        );
+
+        // Without a canonical slot the root alias folds into the DeepSeek slot.
+        let config: ConfigToml = toml::from_str(
+            "provider = 'zai'\ndefault_model = 'deepseek-v4-flash'\n[providers.zai]\nmodel = 'GLM-5.3'\n",
+        )
+        .unwrap();
+        let bundle =
+            export_bundle(&config, BundleScope::Global, BundleMetadata::default()).unwrap();
+        assert!(!bundle.global.entries.contains_key("default_model"));
+        let providers = bundle
+            .global
+            .entries
+            .get("providers")
+            .and_then(toml::Value::as_table)
+            .expect("providers table");
+        assert_eq!(
+            providers["deepseek"]["model"].as_str(),
+            Some("deepseek-v4-flash")
+        );
+        assert_eq!(providers["zai"]["model"].as_str(), Some("GLM-5.3"));
+    }
+
+    #[test]
+    fn export_preserves_the_deepseek_root_fallback_when_another_route_is_active() {
+        // With Z.ai active, a DeepSeek-id root `default_text_model` is
+        // DeepSeek's saved fallback, not shadowed state; the active route's
+        // canonical slot must not cause it to be dropped.
+        let config: ConfigToml = toml::from_str(
+            "provider = 'zai'\ndefault_text_model = 'deepseek-v4-flash'\n[providers.zai]\nmodel = 'GLM-5.3'\n",
+        )
+        .unwrap();
+        let bundle =
+            export_bundle(&config, BundleScope::Global, BundleMetadata::default()).unwrap();
+        assert!(!bundle.global.entries.contains_key("default_text_model"));
+        let providers = bundle
+            .global
+            .entries
+            .get("providers")
+            .and_then(toml::Value::as_table)
+            .expect("providers table");
+        assert_eq!(
+            providers["deepseek"]["model"].as_str(),
+            Some("deepseek-v4-flash")
+        );
+        assert_eq!(providers["zai"]["model"].as_str(), Some("GLM-5.3"));
+
+        let dir = tempfile::tempdir().expect("config dir");
+        let mut store = ConfigStore::load(Some(dir.path().join("config.toml"))).unwrap();
+        let receipt = apply_bundle(&bundle, &mut store, BundleScope::Global, dir.path())
+            .expect("export must import without alias conflicts");
+        assert!(receipt.plan.conflicting.is_empty(), "{:?}", receipt.plan);
+        assert_eq!(
+            store
+                .config
+                .get_value("providers.deepseek.model")
+                .as_deref(),
+            Some("deepseek-v4-flash")
+        );
+
+        // A root alias the active route still consumes stays shadowed state and
+        // is dropped; a canonical DeepSeek leaf wins over a duplicate root
+        // fallback.
+        let config: ConfigToml = toml::from_str(
+            "provider = 'zai'\ndefault_text_model = 'deepseek-v4-pro'\nmodel = 'GLM-5.1'\n[providers.zai]\nmodel = 'GLM-5.3'\n[providers.deepseek]\nmodel = 'deepseek-v4-flash'\n",
+        )
+        .unwrap();
+        let bundle =
+            export_bundle(&config, BundleScope::Global, BundleMetadata::default()).unwrap();
+        assert!(!bundle.global.entries.contains_key("model"));
+        assert!(!bundle.global.entries.contains_key("default_text_model"));
+        let providers = bundle
+            .global
+            .entries
+            .get("providers")
+            .and_then(toml::Value::as_table)
+            .expect("providers table");
+        assert_eq!(
+            providers["deepseek"]["model"].as_str(),
+            Some("deepseek-v4-flash")
         );
     }
 

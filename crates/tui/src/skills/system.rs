@@ -14,7 +14,13 @@ use std::path::Path;
 /// continuous operate-mode operations).
 /// Generation 10 adds the bundled `mcp-discovery` skill (Registry-first
 /// tool selection).
-const BUNDLED_SKILL_VERSION: &str = "10";
+/// Generation 11 rewrites `mcp-discovery` from a Registry-first gate into a
+/// missing-capability fallback, and corrects two stale facts in its body:
+/// `registry_sync` requires a `query`, and the discovery tools are deferred
+/// rather than always present in the active surface. Because the rewrite
+/// changes an already-installed body, generation 10's exact body is retained in
+/// `SUPERSEDED_BODIES` so unmodified copies upgrade and edited copies do not.
+const BUNDLED_SKILL_VERSION: &str = "11";
 
 // ── system & extension (meta) ───────────────────────────────────────────────
 const SKILL_CREATOR_BODY: &str = include_str!("../../assets/skills/skill-creator/SKILL.md");
@@ -64,6 +70,30 @@ const MCP_DISCOVERY_BODY: &str = include_str!("../../assets/skills/mcp-discovery
 
 // Legacy v4 body retained solely for digest-based safe retirement (#4691).
 const V4_BEST_PRACTICES_BODY: &str = include_str!("../../assets/skills/v4-best-practices/SKILL.md");
+
+// Generation-10 `mcp-discovery` body, retained solely so an unmodified copy of
+// it can be recognized and refreshed on upgrade. Same digest discipline as the
+// v4 retirement above: an exact byte match proves CodeWhale still owns the
+// file, so replacing it loses no user work.
+const MCP_DISCOVERY_GENERATION_10_BODY: &str =
+    include_str!("../../assets/skills/mcp-discovery/SKILL.generation-10.md");
+
+/// Exact bodies a bundled skill shipped in an earlier generation.
+///
+/// The installer refuses to overwrite an installed body it does not recognize,
+/// which is what protects user edits. Without this table that same rule also
+/// pins every unmodified older copy forever: the on-disk body no longer equals
+/// the shipped one, so the skill never upgrades. Listing the previous body
+/// restores the upgrade for exactly the copies CodeWhale wrote itself.
+const SUPERSEDED_BODIES: &[(&str, &str)] = &[("mcp-discovery", MCP_DISCOVERY_GENERATION_10_BODY)];
+
+/// Whether `existing` is byte-for-byte a body CodeWhale previously shipped for
+/// `name` (and therefore safe to replace on upgrade).
+fn is_superseded_shipped_body(name: &str, existing: &str) -> bool {
+    SUPERSEDED_BODIES
+        .iter()
+        .any(|(skill, body)| *skill == name && *body == existing)
+}
 
 struct BundledSkill {
     name: &'static str,
@@ -373,10 +403,12 @@ fn install_one(
 
     if should_install {
         // Never overwrite a user-modified copy that no longer matches a known
-        // shipped body (#4691 non-destructive upgrade table).
+        // shipped body (#4691 non-destructive upgrade table). A body we shipped
+        // in an earlier generation is still a known shipped body, so it may be
+        // refreshed; anything else is the user's.
         if target_file.exists() {
-            let existing = fs::read_to_string(&target_file).unwrap_or_default();
-            if !existing.is_empty() && existing != skill.body {
+            let existing = fs::read_to_string(&target_file)?;
+            if existing != skill.body && !is_superseded_shipped_body(skill.name, &existing) {
                 // Preserve user/compatible-root content; skip replace-by-name.
                 return Ok(false);
             }
@@ -393,7 +425,9 @@ fn install_one(
 /// - Fresh install (no marker, no dir): installs every bundled skill, then
 ///   writes the version marker.
 /// - Version bump (marker present with older version): re-installs any existing
-///   bundled skill and installs newly introduced bundled skills.
+///   bundled skill whose body is still one CodeWhale shipped (current or a
+///   [`SUPERSEDED_BODIES`] entry) and installs newly introduced bundled skills.
+///   A user-edited body is never replaced.
 /// - User deleted a skill dir while marker still present at same version: leaves
 ///   it gone.
 /// - Idempotent: calling twice with no changes is a no-op.

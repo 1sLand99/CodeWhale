@@ -3310,12 +3310,21 @@ pub struct ThreadDetail {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingApprovalRequest {
+    /// Runtime-owned, single-use approval ID. Clients echo this value; it is
+    /// independent of the provider's tool-call ID.
     pub id: String,
     pub turn_id: String,
     pub tool_name: String,
     pub description: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent_summary: Option<String>,
+    /// The provider tool-call ID this approval gates, mirroring the
+    /// `tool_call_id` on `approval.required`. A client resuming from a
+    /// snapshot needs it to attach the prompt to the tool row it belongs to.
+    /// It is a correlator, never a capability: `deliver_external_approval`
+    /// matches `id` only, so this value settles nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4765,21 +4774,36 @@ impl RuntimeThreadManager {
         *self.automations.lock() = Some(automations);
     }
 
+    /// Mints an approval identifier that no provider can predict or collide
+    /// with. Every `approval_id` an external client ever sees comes from here,
+    /// so `approval_id` never carries a provider tool-call ID and a client can
+    /// echo it without inspecting where it came from.
+    fn mint_approval_id() -> String {
+        format!("approval_{}", Uuid::new_v4().simple())
+    }
+
     fn register_pending_approval(
         &self,
         thread_id: &str,
-        request: PendingApprovalRequest,
-    ) -> oneshot::Receiver<ExternalApprovalDecision> {
-        let (tx, rx) = oneshot::channel();
-        self.pending_approvals.lock().insert(
-            request.id.clone(),
-            PendingApprovalEntry {
-                thread_id: thread_id.to_string(),
-                request,
-                sender: tx,
-            },
-        );
-        rx
+        mut request: PendingApprovalRequest,
+    ) -> (String, oneshot::Receiver<ExternalApprovalDecision>) {
+        // Provider call IDs can repeat across sessions and responses. Mint the
+        // external capability here so delivery and cleanup can only settle this
+        // registration, including after the provider reuses a previous ID.
+        let mut pending = self.pending_approvals.lock();
+        loop {
+            let id = Self::mint_approval_id();
+            if let std::collections::hash_map::Entry::Vacant(entry) = pending.entry(id.clone()) {
+                request.id = id.clone();
+                let (tx, rx) = oneshot::channel();
+                entry.insert(PendingApprovalEntry {
+                    thread_id: thread_id.to_string(),
+                    request,
+                    sender: tx,
+                });
+                return (id, rx);
+            }
+        }
     }
 
     fn cancel_pending_approval(&self, approval_id: &str) {
@@ -5336,28 +5360,35 @@ impl RuntimeThreadManager {
         self.pending_dynamic_tools.lock().len()
     }
 
+    /// Registers a pending approval and returns `(minted approval id, waiter)`.
+    /// `label` is only a description and a stand-in provider call ID: the
+    /// caller cannot choose the approval ID, exactly as a provider cannot.
     #[cfg(test)]
     pub(crate) fn register_pending_approval_for_test(
         &self,
-        approval_id: &str,
-    ) -> oneshot::Receiver<ExternalApprovalDecision> {
-        self.register_pending_approval_for_thread_for_test("test-thread", approval_id)
+        label: &str,
+    ) -> (String, oneshot::Receiver<ExternalApprovalDecision>) {
+        self.register_pending_approval_for_thread_for_test("test-thread", label)
     }
 
     #[cfg(test)]
     pub(crate) fn register_pending_approval_for_thread_for_test(
         &self,
         thread_id: &str,
-        approval_id: &str,
-    ) -> oneshot::Receiver<ExternalApprovalDecision> {
+        label: &str,
+    ) -> (String, oneshot::Receiver<ExternalApprovalDecision>) {
         self.register_pending_approval(
             thread_id,
             PendingApprovalRequest {
-                id: approval_id.to_string(),
+                // Overwritten by the mint; a caller-supplied ID is never honored.
+                id: String::new(),
                 turn_id: "test-turn".to_string(),
                 tool_name: "test-tool".to_string(),
-                description: "test approval".to_string(),
+                description: format!("test approval {label}"),
                 intent_summary: None,
+                // Stands in for the provider's raw call ID so tests can prove
+                // the correlator is visible and still not deliverable.
+                tool_call_id: Some(label.to_string()),
             },
         )
     }
@@ -11056,22 +11087,34 @@ impl RuntimeThreadManager {
                     let approval_mode = authority.approval_mode;
 
                     let pending_request = PendingApprovalRequest {
-                        id: id.clone(),
+                        // Replaced by the minted ID at registration. The raw
+                        // provider call ID travels in `tool_call_id`, where it
+                        // is a correlator a snapshot client can match against
+                        // the tool row and never a value the API will accept.
+                        id: String::new(),
                         turn_id: turn_id.clone(),
                         tool_name: tool_name.clone(),
                         description: description.clone(),
                         intent_summary: intent_summary.clone(),
+                        tool_call_id: Some(id.clone()),
                     };
 
                     if auto_approve {
+                        // No waiter is registered on this path, but the emitted
+                        // identity still has to obey the one contract clients
+                        // read: `approval_id` is ours, `tool_call_id` is the
+                        // provider's. Two turns holding the same raw call ID
+                        // therefore stay distinguishable in the event stream.
+                        let approval_id = Self::mint_approval_id();
                         self.emit_event(
                             &thread_id,
                             Some(&turn_id),
                             None,
                             "approval.required",
                             json!({
-                                "id": id,
-                                "approval_id": id,
+                                "id": approval_id,
+                                "approval_id": approval_id,
+                                "tool_call_id": id,
                                 "tool_name": tool_name,
                                 "description": description,
                                 "intent_summary": intent_summary,
@@ -11096,7 +11139,8 @@ impl RuntimeThreadManager {
                             None,
                             "approval.decided",
                             json!({
-                                "approval_id": id,
+                                "approval_id": approval_id,
+                                "tool_call_id": id,
                                 "decision": dec_str,
                                 "remember": false,
                                 "auto": true,
@@ -11124,7 +11168,8 @@ impl RuntimeThreadManager {
                             None,
                             "approval.decided",
                             json!({
-                                "approval_id": id,
+                                "approval_id": Self::mint_approval_id(),
+                                "tool_call_id": id,
                                 "decision": "deny",
                                 "remember": false,
                                 "auto": true,
@@ -11142,7 +11187,8 @@ impl RuntimeThreadManager {
                     // subscribes from an older cursor that will replay it.
                     let projection_lock = self.projection_lock(&thread_id);
                     let projection = projection_lock.lock().await;
-                    let rx = self.register_pending_approval(&thread_id, pending_request);
+                    let (approval_id, rx) =
+                        self.register_pending_approval(&thread_id, pending_request);
                     if let Err(err) = self
                         .emit_event(
                             &thread_id,
@@ -11150,8 +11196,9 @@ impl RuntimeThreadManager {
                             None,
                             "approval.required",
                             json!({
-                                "id": id,
-                                "approval_id": id,
+                                "id": approval_id,
+                                "approval_id": approval_id,
+                                "tool_call_id": id,
                                 "tool_name": tool_name,
                                 "description": description,
                                 "intent_summary": intent_summary,
@@ -11159,7 +11206,7 @@ impl RuntimeThreadManager {
                         )
                         .await
                     {
-                        self.cancel_pending_approval(&id);
+                        self.cancel_pending_approval(&approval_id);
                         drop(projection);
                         let _ = engine.deny_tool_call(&id).await;
                         return Err(err);
@@ -11181,7 +11228,8 @@ impl RuntimeThreadManager {
                                 None,
                                 "approval.decided",
                                 json!({
-                                    "approval_id": id,
+                                    "approval_id": approval_id,
+                                    "tool_call_id": id,
                                     "decision": "allow",
                                     "remember": remember,
                                 }),
@@ -11197,7 +11245,8 @@ impl RuntimeThreadManager {
                                 None,
                                 "approval.decided",
                                 json!({
-                                    "approval_id": id,
+                                    "approval_id": approval_id,
+                                    "tool_call_id": id,
                                     "decision": "deny",
                                     "remember": remember,
                                 }),
@@ -11207,18 +11256,19 @@ impl RuntimeThreadManager {
                             let _ = engine.deny_tool_call(id).await;
                         }
                         Ok(Err(_recv_err)) => {
-                            self.cancel_pending_approval(&id);
+                            self.cancel_pending_approval(&approval_id);
                             let _ = engine.deny_tool_call(id).await;
                         }
                         Err(_timeout) => {
-                            self.cancel_pending_approval(&id);
+                            self.cancel_pending_approval(&approval_id);
                             self.emit_event(
                                 &thread_id,
                                 Some(&turn_id),
                                 None,
                                 "approval.timeout",
                                 json!({
-                                    "approval_id": id,
+                                    "approval_id": approval_id,
+                                    "tool_call_id": id,
                                     "timeout_secs": approval_timeout.map(|wait| wait.as_secs()),
                                 }),
                             )
@@ -11230,7 +11280,8 @@ impl RuntimeThreadManager {
                                 None,
                                 "approval.decided",
                                 json!({
-                                    "approval_id": id,
+                                    "approval_id": approval_id,
+                                    "tool_call_id": id,
                                     "decision": "deny",
                                     "remember": false,
                                     "timeout": true,

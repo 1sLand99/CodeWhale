@@ -2037,6 +2037,7 @@ impl Settings {
     /// Add a model to a provider's enabled chooser set without removing prior
     /// choices. IDs are compared case-insensitively but preserve their wire
     /// spelling on disk.
+    #[cfg(test)]
     pub fn enable_model_for_provider(&mut self, provider: &str, model: &str) {
         let provider = provider.trim();
         let model = model.trim();

@@ -125,7 +125,7 @@ fn agent_list_event(manager: &SubAgentManager, active_session_id: &str) -> Event
 }
 
 const MCP_REGISTRY_FIRST_INSTRUCTION_SOURCE: &str = "runtime:mcp-registry-first";
-const MCP_REGISTRY_FIRST_INSTRUCTION: &str = "## MCP Registry-first policy\n\nFor any task centered on a specialized capability, including media or document conversion, data transformation, browser automation, database or service access, or a developer utility, you must call `registry_sync` with a `query` describing that capability before `exec_shell`, `fetch_url`, code execution, local programs, custom code, or a manual implementation. It scores the local Registry snapshot host-side and returns at most eight matches; the full catalog never enters the conversation. Treat a returned server as a match when it plausibly covers the core capability; wording need not be exact. If any plausible match exists, you must call `start_registry_mcp_server` with its exact name and inspect its tools before considering a local alternative. If nothing matches, refine the query once; a still-empty refined result means every Registry entry is clearly irrelevant. An installed or familiar shell command is not a reason to skip Registry discovery. Use local tools directly only for ordinary repo-native work and simple file operations, or after the matching server fails to start.";
+const MCP_REGISTRY_FIRST_INSTRUCTION: &str = "## MCP Registry\n\nThe Registry installs and connects a local MCP server when this session lacks a capability. It is a fallback for a capability you do not have, not a step before ordinary work.\n\nPrefer what is already available, in order: tools already in this catalog, the project's own scripts, tests, and dev tooling, and platform capabilities. Creating a file, reading a fixture, running a repo command, and checking your own output are ordinary work — do them directly.\n\nReach for the Registry once you have identified a specific capability that no available tool covers and that you would otherwise install or reimplement, such as a document or media converter, access to an external database or service, or a protocol client. Then call `registry_sync` with a `query` naming that capability; it scores the local Registry snapshot host-side and returns at most eight matches, so the full index never enters the conversation. When a returned server plausibly covers that capability, call `start_registry_mcp_server` with its exact name rather than installing or running its package command through the shell. If nothing matches, refine the query once, then continue with local tools.\n\nBoth Registry tools are deferred: load one with `tool_search` before its first call, and use the returned schema. If a call instead reports that it only loaded the schema, retry once with that schema. Do not go searching for them for work you can already do.";
 const ISOLATED_CHAT_ENGINE_PROMPT: &str = "You are Codewhale Chat. Answer the user's request directly and conversationally. This isolated chat-only session has no local workspace, project, memory, skill, account, credential, path, runtime context, or tools.";
 
 pub(crate) fn sanitize_isolated_chat_attachments(mut text: String) -> String {
@@ -1469,10 +1469,15 @@ impl Engine {
         }
 
         // Unlike a Skill body, this instruction is visible on the first model
-        // request. Keep selection semantic: the host supplies no keywords or
-        // ranking and the model compares the full user context with the full
-        // Registry catalog. Append it after configured instruction sources so
-        // the Registry-first decision sits close to the current user turn.
+        // request. Registry discovery is a fallback for missing capabilities;
+        // result matching stays with the model and the index stays host-side.
+        //
+        // It describes when discovery is worth a turn; it is not a gate ahead
+        // of ordinary work. The earlier "must call `registry_sync` before a
+        // manual implementation" phrasing named two deferred tools as
+        // mandatory, so a plain "write an HTML page and read a fixture" turn
+        // spent its steps on `tool_search` for `registry_sync` and on starting
+        // a browser server instead of writing the file.
         if config.features.enabled(Feature::Mcp) && !api_config.runtime_chat_isolated {
             config
                 .instructions
@@ -4661,16 +4666,13 @@ impl Engine {
         let capability = route.capability_profile();
         let always_load = self.config.tools_always_load.clone();
         self.turn_tool_surface_budget = Some(capability.tool_surface_budget);
-        let mut catalog = build_model_tool_catalog_with_surface(
+        let catalog = build_model_tool_catalog_with_surface(
             tool_registry.to_api_tools_with_cache(true),
             mcp_tools,
             input_policy.mode,
             &always_load,
             capability.tool_surface_budget,
         );
-        if self.config.features.enabled(Feature::Mcp) {
-            apply_registry_first_shell_guidance(&mut catalog);
-        }
         let surface = ToolSurfacePolicy::new(
             tool_registry,
             Some(catalog),
@@ -8160,9 +8162,9 @@ use self::streaming::{
 use self::tool_catalog::{
     CODE_EXECUTION_TOOL_NAME, JS_EXECUTION_TOOL_NAME, MULTI_TOOL_PARALLEL_NAME,
     REQUEST_USER_INPUT_NAME, ToolSurfacePolicy, active_tools_for_request,
-    apply_registry_first_shell_guidance, build_model_tool_catalog_with_surface,
-    default_synthetic_catalog_tool_names, execute_code_execution_tool, is_tool_search_tool,
-    maybe_hydrate_requested_deferred_tool, missing_tool_error_message,
+    build_model_tool_catalog_with_surface, default_synthetic_catalog_tool_names,
+    execute_code_execution_tool, is_tool_search_tool, maybe_hydrate_requested_deferred_tool,
+    missing_tool_error_message,
 };
 #[cfg(test)]
 use self::tool_catalog::{

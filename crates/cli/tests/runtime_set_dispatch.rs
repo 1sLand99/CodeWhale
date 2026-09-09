@@ -327,7 +327,9 @@ fn runtime_values_cannot_leak_through_a_command_that_saves_the_store() {
     .unwrap();
     assert_eq!(saved["provider"], "deepseek");
     assert_eq!(saved["sandbox_mode"], "workspace-write");
-    assert_eq!(saved["default_text_model"], "deepseek-v4-pro");
+    // Selected models persist in the canonical per-provider slot; root
+    // default_text_model is legacy fallback only.
+    assert_eq!(saved["providers"]["deepseek"]["model"], "deepseek-v4-pro");
     assert!(
         !fs::read_to_string(&fixture.config)
             .unwrap()

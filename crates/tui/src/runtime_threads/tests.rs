@@ -8058,7 +8058,7 @@ async fn worker_lifecycle_receipts_preserve_owner_outcome_and_durable_replay() -
                         status: "private progress".into(),
                         activity: AgentProgressEventMeta::new(AgentWorkerStatus::RunningTool)
                             .with_step(3)
-                            .with_tool("private_tool".into()),
+                            .with_tool("private_tool"),
                         parent_run_id: Some("parent".into()),
                         spawn_depth: 2,
                     })
@@ -10133,6 +10133,56 @@ async fn approval_required_with_stale_active_turn_is_denied() -> Result<()> {
     Ok(())
 }
 
+/// Reads the approval identity exactly as an external client does: off the
+/// `approval.required` event for `raw_call_id`, returning the opaque ID that
+/// client must echo back. Also pins the two properties every caller below
+/// depends on — the opaque ID is never the provider's call ID, and the legacy
+/// `id` field aliases the opaque ID rather than leaking the raw one.
+async fn await_approval_identity(
+    manager: &RuntimeThreadManager,
+    thread_id: &str,
+    raw_call_id: &str,
+) -> Result<String> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let found = manager
+            .events_since(thread_id, None)?
+            .into_iter()
+            .rev()
+            .find(|event| {
+                event.event == "approval.required"
+                    && event.payload.get("tool_call_id").and_then(Value::as_str)
+                        == Some(raw_call_id)
+            });
+        if let Some(event) = found {
+            let approval_id = event
+                .payload
+                .get("approval_id")
+                .and_then(Value::as_str)
+                .context("approval.required must carry an approval_id")?
+                .to_string();
+            assert_eq!(
+                event.payload.get("id").and_then(Value::as_str),
+                Some(approval_id.as_str()),
+                "the legacy `id` field must alias the opaque approval id"
+            );
+            assert_ne!(
+                approval_id, raw_call_id,
+                "the approval capability must not be the provider's tool-call id"
+            );
+            assert!(
+                approval_id.starts_with("approval_"),
+                "unexpected approval id shape: {approval_id}"
+            );
+            return Ok(approval_id);
+        }
+        if Instant::now() >= deadline {
+            bail!("no approval.required event for tool call '{raw_call_id}' on '{thread_id}'");
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+}
+
 #[tokio::test]
 async fn approval_required_awaits_external_decision_allow() -> Result<()> {
     let manager = test_manager(test_runtime_dir())?;
@@ -10192,11 +10242,21 @@ async fn approval_required_awaits_external_decision_allow() -> Result<()> {
     }
     assert_eq!(manager.pending_approvals_count(), 1);
 
+    let approval_id = await_approval_identity(&manager, &thread.id, "tool_external_allow").await?;
+
+    // The snapshot a reconnecting client resumes from carries the same opaque
+    // capability as the event, so both routes to the ID agree.
     let detail = manager.get_thread_detail(&thread.id).await?;
     assert_eq!(detail.pending_approvals.len(), 1);
-    assert_eq!(detail.pending_approvals[0].id, "tool_external_allow");
+    assert_eq!(detail.pending_approvals[0].id, approval_id);
     assert_eq!(detail.pending_approvals[0].turn_id, _turn.id);
     assert_eq!(detail.pending_approvals[0].tool_name, "exec_command");
+    // The snapshot keeps the raw correlator so a client that reloaded past the
+    // event can still attach this prompt to the tool row it gates.
+    assert_eq!(
+        detail.pending_approvals[0].tool_call_id.as_deref(),
+        Some("tool_external_allow")
+    );
     assert_eq!(detail.pending_user_inputs.len(), 0);
 
     let events = manager.events_since(&thread.id, None)?;
@@ -10213,10 +10273,18 @@ async fn approval_required_awaits_external_decision_allow() -> Result<()> {
         Some("I will update the config file.")
     );
 
-    assert!(manager.deliver_external_approval(
+    // The raw provider ID is not a credential: only the minted one settles.
+    assert!(!manager.deliver_external_approval(
         "tool_external_allow",
         ExternalApprovalDecision::Allow { remember: false },
     ));
+    assert_eq!(manager.pending_approvals_count(), 1);
+
+    assert!(manager.deliver_external_approval(
+        &approval_id,
+        ExternalApprovalDecision::Allow { remember: false },
+    ));
+    // The engine is still addressed by the provider's own call ID.
     assert_eq!(
         harness.recv_approval_event().await,
         Some(MockApprovalEvent::Approved {
@@ -10230,6 +10298,17 @@ async fn approval_required_awaits_external_decision_allow() -> Result<()> {
             .await?
             .pending_approvals
             .is_empty()
+    );
+    assert!(
+        manager.events_since(&thread.id, None)?.iter().any(|event| {
+            event.event == "approval.decided"
+                && event.payload.get("approval_id").and_then(Value::as_str)
+                    == Some(approval_id.as_str())
+                && event.payload.get("tool_call_id").and_then(Value::as_str)
+                    == Some("tool_external_allow")
+                && event.payload.get("decision").and_then(Value::as_str) == Some("allow")
+        }),
+        "approval.decided must correlate the opaque id with the tool call it settled"
     );
 
     harness
@@ -12543,8 +12622,9 @@ async fn approval_required_external_deny_is_denied() -> Result<()> {
     }
     assert_eq!(manager.pending_approvals_count(), 1);
 
+    let approval_id = await_approval_identity(&manager, &thread.id, "tool_external_deny").await?;
     assert!(manager.deliver_external_approval(
-        "tool_external_deny",
+        &approval_id,
         ExternalApprovalDecision::Deny { remember: false },
     ));
     assert_eq!(
@@ -12552,6 +12632,18 @@ async fn approval_required_external_deny_is_denied() -> Result<()> {
         Some(MockApprovalEvent::Denied {
             id: "tool_external_deny".to_string(),
         })
+    );
+
+    // A settled capability is spent: replaying it neither re-decides nor
+    // reaches the engine a second time.
+    assert!(!manager.deliver_external_approval(
+        &approval_id,
+        ExternalApprovalDecision::Allow { remember: true },
+    ));
+    assert_eq!(manager.pending_approvals_count(), 0);
+    assert!(
+        !manager.store.load_thread(&thread.id)?.auto_approve,
+        "a replayed decision must not apply its remember flag"
     );
 
     harness
@@ -12566,6 +12658,147 @@ async fn approval_required_external_deny_is_denied() -> Result<()> {
             base_url: None,
         })
         .await?;
+    Ok(())
+}
+
+/// Providers restart their tool-call ID counters per response, so two threads
+/// can hold gated calls whose raw IDs are byte-equal. While the waiter map was
+/// keyed by that raw ID, the second registration silently evicted the first:
+/// one thread's approval could authorize the other thread's tool call, and the
+/// evicted thread waited out its timeout for a decision that had been made.
+#[tokio::test]
+async fn identical_raw_tool_call_ids_on_two_threads_stay_independently_gated() -> Result<()> {
+    const RAW_CALL_ID: &str = "call_1";
+    let manager = test_manager(test_runtime_dir())?;
+
+    let mut gated = Vec::new();
+    for prompt in ["first gated turn", "second gated turn"] {
+        let thread = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        let mut harness = install_mock_engine(&manager, &thread.id).await;
+        manager
+            .start_turn(
+                &thread.id,
+                StartTurnRequest {
+                    prompt: prompt.to_string(),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        assert!(matches!(
+            harness.rx_op.recv().await,
+            Some(Op::SendMessage { .. })
+        ));
+        harness
+            .tx_event
+            .send(EngineEvent::ApprovalRequired {
+                approval_key: RAW_CALL_ID.to_string(),
+                approval_grouping_key: RAW_CALL_ID.to_string(),
+                id: RAW_CALL_ID.to_string(),
+                tool_name: "exec_command".to_string(),
+                description: format!("gated {prompt}"),
+                input: serde_json::json!({}),
+                intent_summary: None,
+                approval_force_prompt: false,
+            })
+            .await?;
+        let approval_id = await_approval_identity(&manager, &thread.id, RAW_CALL_ID).await?;
+        gated.push((thread, harness, approval_id));
+    }
+
+    // Neither registration evicted the other, and each thread's snapshot shows
+    // only its own capability.
+    assert_eq!(manager.pending_approvals_count(), 2);
+    assert_ne!(
+        gated[0].2, gated[1].2,
+        "each registration must mint its own capability"
+    );
+    for (thread, _, approval_id) in &gated {
+        let pending = manager
+            .get_thread_detail(&thread.id)
+            .await?
+            .pending_approvals;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(&pending[0].id, approval_id);
+        // Both snapshots correlate to the same raw call ID — that is the
+        // provider behavior this fix survives — while the capability that
+        // settles each one is distinct.
+        assert_eq!(pending[0].tool_call_id.as_deref(), Some(RAW_CALL_ID));
+    }
+
+    // The shared correlator is visible to both clients and settles neither.
+    assert!(!manager.deliver_external_approval(
+        RAW_CALL_ID,
+        ExternalApprovalDecision::Allow { remember: false },
+    ));
+    assert_eq!(manager.pending_approvals_count(), 2);
+
+    let mut gated = gated.into_iter();
+    let (thread_a, mut harness_a, approval_a) = gated.next().context("first gated thread")?;
+    let (thread_b, mut harness_b, approval_b) = gated.next().context("second gated thread")?;
+
+    // Deciding the first settles the first, addressed to the engine by the raw
+    // call ID it gated on.
+    assert!(manager.deliver_external_approval(
+        &approval_a,
+        ExternalApprovalDecision::Allow { remember: false },
+    ));
+    assert_eq!(
+        harness_a.recv_approval_event().await,
+        Some(MockApprovalEvent::Approved {
+            id: RAW_CALL_ID.to_string(),
+        })
+    );
+
+    // ...and cross-authorizes nothing: the second thread is still waiting.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), harness_b.recv_approval_event())
+            .await
+            .is_err(),
+        "an approval for one thread must not decide another thread's identical call id"
+    );
+    assert_eq!(manager.pending_approvals_count(), 1);
+    let still_pending = manager
+        .get_thread_detail(&thread_b.id)
+        .await?
+        .pending_approvals;
+    assert_eq!(still_pending.len(), 1);
+    assert_eq!(still_pending[0].id, approval_b);
+    assert!(
+        manager
+            .get_thread_detail(&thread_a.id)
+            .await?
+            .pending_approvals
+            .is_empty()
+    );
+
+    assert!(manager.deliver_external_approval(
+        &approval_b,
+        ExternalApprovalDecision::Deny { remember: false },
+    ));
+    assert_eq!(
+        harness_b.recv_approval_event().await,
+        Some(MockApprovalEvent::Denied {
+            id: RAW_CALL_ID.to_string(),
+        })
+    );
+    assert_eq!(manager.pending_approvals_count(), 0);
+
+    for harness in [&harness_a, &harness_b] {
+        harness
+            .tx_event
+            .send(EngineEvent::TurnComplete {
+                usage: Usage::default(),
+                parent_route_usage: Usage::default(),
+                routed_usage_dropped_records: 0,
+                status: TurnOutcomeStatus::Completed,
+                error: None,
+                tool_catalog: None,
+                base_url: None,
+            })
+            .await?;
+    }
     Ok(())
 }
 
@@ -12620,11 +12853,31 @@ async fn auto_review_force_prompt_is_denied_without_opening_a_modal() -> Result<
         })
     );
     assert_eq!(manager.pending_approvals_count(), 0);
-    assert!(manager.events_since(&thread.id, None)?.iter().any(|event| {
-        event.event == "approval.decided"
-            && event.payload.get("approval_id").and_then(Value::as_str) == Some("tool_auto_hold")
-            && event.payload.get("posture").and_then(Value::as_str) == Some("auto_review")
-    }));
+    let decided = manager
+        .events_since(&thread.id, None)?
+        .into_iter()
+        .find(|event| {
+            event.event == "approval.decided"
+                && event.payload.get("posture").and_then(Value::as_str) == Some("auto_review")
+        })
+        .context("auto-review hold must emit approval.decided")?;
+    assert_eq!(
+        decided.payload.get("tool_call_id").and_then(Value::as_str),
+        Some("tool_auto_hold")
+    );
+    // Even on a path with no waiter, `approval_id` stays a runtime-minted
+    // value so a client never learns a raw call ID through that field.
+    let approval_id = decided
+        .payload
+        .get("approval_id")
+        .and_then(Value::as_str)
+        .context("missing approval_id")?;
+    assert_ne!(approval_id, "tool_auto_hold");
+    assert!(approval_id.starts_with("approval_"));
+    assert!(!manager.deliver_external_approval(
+        approval_id,
+        ExternalApprovalDecision::Allow { remember: false },
+    ));
 
     harness
         .tx_event
@@ -12708,23 +12961,34 @@ async fn approval_timeout_denies_clears_ui_and_next_turn_can_start() -> Result<(
     );
     assert_eq!(manager.pending_approvals_count(), 0);
 
+    let approval_id = await_approval_identity(&manager, &thread.id, "tool_timeout").await?;
     let events = manager.events_since(&thread.id, None)?;
     assert!(
         events.iter().any(|event| {
             event.event == "approval.timeout"
-                && event.payload.get("approval_id").and_then(Value::as_str) == Some("tool_timeout")
+                && event.payload.get("approval_id").and_then(Value::as_str)
+                    == Some(approval_id.as_str())
+                && event.payload.get("tool_call_id").and_then(Value::as_str) == Some("tool_timeout")
         }),
-        "timeout event should be persisted"
+        "timeout event should be persisted against the same opaque id it opened with"
     );
     assert!(
         events.iter().any(|event| {
             event.event == "approval.decided"
-                && event.payload.get("approval_id").and_then(Value::as_str) == Some("tool_timeout")
+                && event.payload.get("approval_id").and_then(Value::as_str)
+                    == Some(approval_id.as_str())
+                && event.payload.get("tool_call_id").and_then(Value::as_str) == Some("tool_timeout")
                 && event.payload.get("decision").and_then(Value::as_str) == Some("deny")
                 && event.payload.get("timeout").and_then(Value::as_bool) == Some(true)
         }),
         "timeout should also emit approval.decided so clients can clear pending UI"
     );
+    // A decision arriving after the timeout cancelled the waiter must not
+    // resurrect it — the engine already has its denial.
+    assert!(!manager.deliver_external_approval(
+        &approval_id,
+        ExternalApprovalDecision::Allow { remember: false },
+    ));
 
     harness
         .tx_event
@@ -12941,8 +13205,9 @@ async fn approval_required_remember_flips_thread_auto_approve() -> Result<()> {
     while Instant::now() < deadline && manager.pending_approvals_count() == 0 {
         sleep(Duration::from_millis(20)).await;
     }
+    let approval_id = await_approval_identity(&manager, &thread.id, "tool_remember").await?;
     assert!(manager.deliver_external_approval(
-        "tool_remember",
+        &approval_id,
         ExternalApprovalDecision::Allow { remember: true },
     ));
     let _ = harness.recv_approval_event().await;

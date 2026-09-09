@@ -4847,6 +4847,7 @@ impl Config {
         Ok(config)
     }
 
+    #[cfg(test)]
     pub(crate) fn remembered_selection_is_applicable(&self) -> bool {
         self.remembered_selection_scope.unwrap_or(true)
     }
@@ -6182,6 +6183,11 @@ impl Config {
             self.provider_config_string_with_runtime_fallback(provider, |entry| entry.model.clone())
         {
             let model = model.trim();
+            // Automatic selection is a saved choice on every route, including
+            // DeepSeek. Resolve it before provider model-name normalization.
+            if model.eq_ignore_ascii_case("auto") {
+                return "auto".to_string();
+            }
             if declared(model)
                 || provider_passes_model_through(provider)
                 || self.active_provider_preserves_custom_base_url_model()

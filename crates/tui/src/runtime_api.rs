@@ -52,9 +52,9 @@ use crate::automation_manager::{
     AutomationManager, AutomationRecord, AutomationRunRecord, AutomationSchedulerConfig,
     CreateAutomationRequest, SharedAutomationManager, UpdateAutomationRequest, spawn_scheduler,
 };
-use crate::config::{
-    ApiProvider, Config, DEFAULT_TEXT_MODEL, normalize_model_name_for_provider, validate_route,
-};
+#[cfg(test)]
+use crate::config::DEFAULT_TEXT_MODEL;
+use crate::config::{ApiProvider, Config, normalize_model_name_for_provider, validate_route};
 use crate::fleet::executor::{FleetExecutor, configured_codewhale_binary};
 use crate::fleet::ledger::{FleetEventReplayError, FleetLedgerState, FleetTaskLedgerStatus};
 use crate::fleet::manager::{
@@ -5701,6 +5701,7 @@ fn map_compat_stream_event(event: &crate::runtime_threads::RuntimeEventRecord) -
                 json!({
                     "id": approval_id,
                     "approval_id": approval_id,
+                    "tool_call_id": payload.get("tool_call_id"),
                     "thread_id": event.thread_id,
                     "turn_id": event.turn_id,
                     "tool_name": payload.get("tool_name"),
@@ -5719,6 +5720,7 @@ fn map_compat_stream_event(event: &crate::runtime_threads::RuntimeEventRecord) -
                 json!({
                     "id": approval_id,
                     "approval_id": approval_id,
+                    "tool_call_id": payload.get("tool_call_id"),
                     "thread_id": event.thread_id,
                     "turn_id": event.turn_id,
                     "decision": payload.get("decision"),
@@ -5738,6 +5740,7 @@ fn map_compat_stream_event(event: &crate::runtime_threads::RuntimeEventRecord) -
                 json!({
                     "id": approval_id,
                     "approval_id": approval_id,
+                    "tool_call_id": payload.get("tool_call_id"),
                     "thread_id": event.thread_id,
                     "turn_id": event.turn_id,
                     "timeout_secs": payload.get("timeout_secs"),
@@ -6995,9 +6998,16 @@ async fn get_config(
     let cost_currency = settings.cost_currency.clone();
     let default_mode = settings.default_mode.as_str().to_string();
     // This field remains the DeepSeek preference even when another provider
-    // is active. The root field is a legacy fallback for unmigrated configs.
+    // is active, and follows the CN slot while the CN route is active — the CN
+    // route resolves `[providers.deepseek_cn].model`, not the primary slot.
+    // The root field is a legacy fallback for unmigrated configs.
+    let default_provider = if config.api_provider() == ApiProvider::DeepseekCN {
+        ApiProvider::DeepseekCN
+    } else {
+        ApiProvider::Deepseek
+    };
     let identity = config
-        .resolve_provider_pin_identity("deepseek")
+        .resolve_provider_pin_identity(default_provider.as_str())
         .map_err(ApiError::bad_request)?;
     let mut deepseek_config = config.clone();
     deepseek_config.scope_to_provider_identity(&identity);
@@ -7102,7 +7112,12 @@ async fn set_config(
                 value = normalize_runtime_config_model(&config, provider, &value)?;
             }
             "default_model" => {
-                value = normalize_runtime_config_model(&config, ApiProvider::Deepseek, &value)?;
+                let default_provider = if provider == ApiProvider::DeepseekCN {
+                    ApiProvider::DeepseekCN
+                } else {
+                    ApiProvider::Deepseek
+                };
+                value = normalize_runtime_config_model(&config, default_provider, &value)?;
             }
             _ => {}
         }
@@ -7134,12 +7149,22 @@ async fn set_config(
                 &active_route.1,
                 &value,
             ),
-            "default_model" => config_persistence::persist_provider_model_key(
-                config_path,
-                ApiProvider::Deepseek,
-                ApiProvider::Deepseek.as_str(),
-                &value,
-            ),
+            "default_model" => {
+                // The CN route reads its own `[providers.deepseek_cn]` slot;
+                // writing the primary `deepseek` slot there would be unread.
+                let (default_provider, default_identity) =
+                    if active_route.0 == ApiProvider::DeepseekCN {
+                        (ApiProvider::DeepseekCN, ApiProvider::DeepseekCN.as_str())
+                    } else {
+                        (ApiProvider::Deepseek, ApiProvider::Deepseek.as_str())
+                    };
+                config_persistence::persist_provider_model_key(
+                    config_path,
+                    default_provider,
+                    default_identity,
+                    &value,
+                )
+            }
             "reasoning_effort" => {
                 config_persistence::persist_root_string_key(config_path, "reasoning_effort", &value)
             }
@@ -8484,5 +8509,82 @@ model = "GLM-5.2"
                 "a declaration cannot expand the {provider:?} protocol roster"
             );
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn runtime_default_model_reads_and_writes_the_deepseek_cn_slot() -> Result<()> {
+        let _env = lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let root = tempfile::tempdir()?;
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", root.path());
+        let _model_environment = isolate_model_environment();
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+        let config_path = root.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "provider = 'deepseek-cn'\ntelemetry = false\n[cloud_facts]\nenabled = false\n[providers.deepseek_cn]\nmodel = 'deepseek-v4-pro'\n",
+        )?;
+        let (addr, state, server) = serve_fixture(config_path.clone()).await?;
+        let _shutdown = state.task_manager.shutdown_guard();
+        let client = crate::tls::reqwest_client();
+        // The active CN route resolves `[providers.deepseek_cn].model`; the
+        // runtime default_model surface must report that slot, not the primary.
+        let reported: Value = client
+            .get(format!("http://{addr}/v1/config"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(reported["default_model"], "deepseek-v4-pro");
+
+        post_json(
+            addr,
+            "/v1/config",
+            json!({ "key": "default_model", "value": "deepseek-v4-flash", "persist": true }),
+        )
+        .await?;
+        let saved: toml::Value = toml::from_str(&fs::read_to_string(&config_path)?)?;
+        assert_eq!(
+            saved["providers"]["deepseek_cn"]["model"].as_str(),
+            Some("deepseek-v4-flash")
+        );
+        assert!(
+            saved
+                .get("providers")
+                .and_then(|providers| providers.get("deepseek"))
+                .and_then(|deepseek| deepseek.get("model"))
+                .is_none(),
+            "the CN write must not create an unread primary slot: {saved}"
+        );
+
+        post_json(addr, "/v1/config/reload", json!({})).await?;
+        let reported: Value = client
+            .get(format!("http://{addr}/v1/config"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(reported["default_model"], "deepseek-v4-flash");
+        post_json(
+            addr,
+            "/v1/config",
+            json!({ "key": "default_model", "value": "auto", "persist": true }),
+        )
+        .await?;
+        post_json(addr, "/v1/config/reload", json!({})).await?;
+        let reported: Value = client
+            .get(format!("http://{addr}/v1/config"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(reported["default_model"], "auto");
+        server.abort();
+        state.task_manager.shutdown_and_wait().await?;
+        Ok(())
     }
 }

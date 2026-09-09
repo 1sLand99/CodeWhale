@@ -700,7 +700,7 @@
   "SettingsTuiPrefsQuarantined": "tui.toml keys with no setting were kept in {path}: {keys}",
   "ClearConversation": "Conversation cleared",
   "ClearConversationBusy": "Nothing cleared — still busy. Try /clear again in a moment.",
-  "ModelChanged": "Model changed: {old} →, {new}",
+  "ModelChanged": "Operator model changed: {old} → {new}",
   "LinksProjectTitle": "Codewhale & community:",
   "LinksDocumentation": "Documentation:",
   "LinksCommunity": "Community & contribution:",

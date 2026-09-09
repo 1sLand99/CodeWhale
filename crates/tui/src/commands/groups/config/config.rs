@@ -1907,14 +1907,35 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
             let model = if value.eq_ignore_ascii_case("auto") {
                 "auto".to_string()
             } else {
-                let Some(model) = normalize_model_name_for_provider(ApiProvider::Deepseek, value)
-                else {
-                    return CommandResult::error(format!("Invalid DeepSeek model '{value}'."));
+                // Route-aware, matching POST /v1/config: a custom DeepSeek
+                // endpoint owns its model namespace, so an id declared for the
+                // saved DeepSeek route validates verbatim before the catalog
+                // normalization runs.
+                let saved = match load_command_config(app) {
+                    Ok(config) => config,
+                    Err(err) => return CommandResult::error(err),
                 };
-                if let Err(error) = validate_route(ApiProvider::Deepseek, &model) {
-                    return CommandResult::error(error);
+                if crate::provider_lake::configured_model_for_route(
+                    &saved,
+                    ApiProvider::Deepseek,
+                    &saved.provider_identity_for(ApiProvider::Deepseek),
+                    &saved.base_url_for_route(ApiProvider::Deepseek),
+                    value.trim(),
+                )
+                .is_some()
+                {
+                    value.trim().to_string()
+                } else {
+                    let Some(model) =
+                        normalize_model_name_for_provider(ApiProvider::Deepseek, value)
+                    else {
+                        return CommandResult::error(format!("Invalid DeepSeek model '{value}'."));
+                    };
+                    if let Err(error) = validate_route(ApiProvider::Deepseek, &model) {
+                        return CommandResult::error(error);
+                    }
+                    model
                 }
-                model
             };
             return match crate::config_persistence::persist_provider_model_key(
                 app.config_path.as_deref(),
@@ -1936,7 +1957,8 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
             // namespace. Provider-only normalization would reject a non-DeepSeek
             // id that the live session is already allowed to use via `/model`.
             // OpenCode Go stays protocol-strict even on a custom host.
-            let model = if value.trim().eq_ignore_ascii_case("auto") {
+            let auto_select = value.trim().eq_ignore_ascii_case("auto");
+            let model = if auto_select {
                 "auto".to_string()
             } else if app.api_provider == ApiProvider::OpencodeGo {
                 let Some(model) = normalize_model_name_for_provider(app.api_provider, value) else {
@@ -4010,6 +4032,103 @@ mod tests {
                 .default_model
                 .is_none()
         );
+    }
+
+    #[test]
+    fn saved_automatic_model_selection_round_trips_every_provider_route() {
+        let temp_root = tempfile::tempdir().expect("isolated configuration");
+        let _guard = EnvGuard::new(temp_root.path());
+        let config_path = crate::config_persistence::config_toml_path(None).unwrap();
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        for (provider, selector, table, initial) in [
+            (
+                ApiProvider::Deepseek,
+                "deepseek",
+                "deepseek",
+                "deepseek-v4-pro",
+            ),
+            (
+                ApiProvider::DeepseekCN,
+                "deepseek-cn",
+                "deepseek_cn",
+                "deepseek-v4-pro",
+            ),
+            (ApiProvider::Zai, "zai", "zai", "GLM-5.3"),
+        ] {
+            fs::write(
+                &config_path,
+                format!("provider = '{selector}'\n[providers.{table}]\nmodel = '{initial}'\n"),
+            )
+            .unwrap();
+            let mut app = create_test_app();
+            app.set_provider_identity(provider, selector);
+            app.model = initial.to_string();
+            app.auto_model = false;
+            let result = set_config_value(&mut app, "model", "auto", true);
+            assert!(!result.is_error, "{:?}", result.message);
+            assert!(app.auto_model);
+            assert!(
+                result
+                    .message
+                    .as_deref()
+                    .is_some_and(|m| m.contains("saved"))
+            );
+            let persisted: toml::Value =
+                toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+            assert_eq!(
+                persisted["providers"][table]["model"].as_str(),
+                Some("auto")
+            );
+            let loaded = Config::load(Some(config_path.clone()), None).unwrap();
+            assert_eq!(
+                loaded.default_model(),
+                "auto",
+                "{selector} must consume its saved choice"
+            );
+        }
+    }
+
+    #[test]
+    fn config_default_model_save_accepts_models_declared_for_the_deepseek_route() {
+        let temp_root = tempfile::tempdir().expect("isolated configuration");
+        let _guard = EnvGuard::new(temp_root.path());
+        // The declaration matches on the saved DeepSeek route's base URL; keep
+        // ambient endpoint overrides out of the comparison.
+        let _base_url_env = [
+            EnvVarGuard::remove("CODEWHALE_BASE_URL"),
+            EnvVarGuard::remove("DEEPSEEK_BASE_URL"),
+        ];
+        let config_path = crate::config_persistence::config_toml_path(None).expect("config path");
+        fs::create_dir_all(config_path.parent().expect("config directory")).expect("mkdir");
+        fs::write(
+            &config_path,
+            "provider = 'zai'\n[providers.zai]\nmodel = 'GLM-5.2'\n[providers.deepseek]\nbase_url = 'https://my-gateway.example/v1'\n[[custom_models]]\nprovider = 'deepseek'\nbase_url = 'https://my-gateway.example/v1'\nid = 'my-llm'\n",
+        )
+        .expect("config");
+
+        let mut app = create_test_app();
+        app.api_provider = ApiProvider::Zai;
+        app.model = crate::config::ZAI_GLM_5_2_MODEL.to_string();
+        app.auto_model = false;
+
+        let result = set_config_value(&mut app, "default_model", "my-llm", true);
+
+        assert!(!result.is_error, "{:?}", result.message);
+        let persisted: toml::Value =
+            toml::from_str(&fs::read_to_string(&config_path).expect("saved config")).expect("toml");
+        assert_eq!(
+            persisted["providers"]["deepseek"]["model"].as_str(),
+            Some("my-llm")
+        );
+        // The same id on a different DeepSeek endpoint is not declared for the
+        // saved route and must still be rejected by catalog normalization.
+        fs::write(
+            &config_path,
+            "provider = 'zai'\n[providers.zai]\nmodel = 'GLM-5.2'\n[providers.deepseek]\nbase_url = 'https://other-gateway.example/v1'\n[[custom_models]]\nprovider = 'deepseek'\nbase_url = 'https://my-gateway.example/v1'\nid = 'my-llm'\n",
+        )
+        .expect("config");
+        let rejected = set_config_value(&mut app, "default_model", "my-llm", true);
+        assert!(rejected.is_error, "{:?}", rejected.message);
     }
 
     #[test]

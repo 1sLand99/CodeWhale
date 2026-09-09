@@ -1,10 +1,10 @@
 use super::{
     CODE_EXECUTION_DESCRIPTION, DEFAULT_ACTIVE_NATIVE_TOOLS,
     allowlist_is_native_file_and_shell_only, apply_mcp_tool_deferral, apply_native_tool_deferral,
-    apply_registry_first_shell_guidance, build_model_tool_catalog_with_surface,
-    default_synthetic_catalog_tool_names, ensure_advanced_tooling, execute_tool_search_with_cache,
-    initial_active_tools, is_synthetic_catalog_tool, remove_evicted_cache_activations,
-    tool_matches_any_rule, touch_cached_tool_after_execution,
+    build_model_tool_catalog_with_surface, default_synthetic_catalog_tool_names,
+    ensure_advanced_tooling, execute_tool_search_with_cache, initial_active_tools,
+    is_synthetic_catalog_tool, remove_evicted_cache_activations, tool_matches_any_rule,
+    touch_cached_tool_after_execution,
 };
 use crate::core::session::ToolActivationCache;
 use crate::models::Tool;
@@ -272,12 +272,24 @@ fn compact_surface_keeps_the_exact_eager_agent_head() {
     );
 }
 
+/// The per-tool Registry paragraph is gone; the catalog builder must leave the
+/// shell tool's description exactly as the registry produced it, so the KV
+/// prefix stays byte-stable and there is one Registry authority (the prompt).
 #[test]
-fn registry_first_guidance_does_not_expand_contract_bash_schema_text() {
-    let mut catalog = vec![tool("bash")];
-    let description = catalog[0].description.clone();
+fn catalog_build_does_not_append_registry_guidance_to_the_shell_tool() {
+    let described = tool("bash");
+    let catalog = build_model_tool_catalog_with_surface(
+        vec![described.clone()],
+        Vec::new(),
+        AppMode::Agent,
+        &HashSet::new(),
+        crate::model_profile::ToolSurfaceBudget::Standard,
+    );
 
-    apply_registry_first_shell_guidance(&mut catalog);
-
-    assert_eq!(catalog[0].description, description);
+    let shell = catalog
+        .iter()
+        .find(|definition| definition.name == "bash")
+        .expect("shell tool");
+    assert_eq!(shell.description, described.description);
+    assert!(!shell.description.contains("registry_sync"));
 }

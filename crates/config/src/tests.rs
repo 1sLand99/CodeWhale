@@ -4721,6 +4721,62 @@ base_url = "https://acme.example/v1"
 }
 
 #[test]
+fn kindless_table_mirroring_a_builtin_alias_keeps_the_builtin_route() {
+    let _lock = env_lock();
+    let _env = EnvGuard::without_deepseek_runtime_overrides();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    // A kindless `[providers.deepseek-cn]` table merely mirrors the regional
+    // selector spelling. It is not an openai-compatible custom provider, so it
+    // must stay inert: the selector still binds the built-in DeepSeek kind and
+    // the load must not fail.
+    fs::write(
+        &path,
+        "provider = 'deepseek-cn'\n[providers.deepseek-cn]\nmodel = 'deepseek-v4-flash'\n",
+    )
+    .expect("kindless alias fixture");
+    let mut store = ConfigStore::load(Some(path.clone())).expect("kindless alias table must load");
+    assert_eq!(store.config.provider, ProviderKind::Deepseek);
+    assert_eq!(store.config.provider_id(), "deepseek-cn");
+    assert!(store.config.named_custom_provider_id().is_none());
+    // An unrelated typed save leaves the inert extras table untouched.
+    store.config.set_value("verbosity", "quiet").unwrap();
+    store.save().unwrap();
+    let saved: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(saved["provider"].as_str(), Some("deepseek-cn"));
+    assert_eq!(
+        saved["providers"]["deepseek-cn"]["model"].as_str(),
+        Some("deepseek-v4-flash")
+    );
+    let reloaded = ConfigStore::load(Some(path.clone())).expect("reload kindless alias config");
+    assert_eq!(reloaded.config.provider, ProviderKind::Deepseek);
+    assert_eq!(reloaded.config.provider_id(), "deepseek-cn");
+
+    // A table that does validate as openai-compatible still takes precedence
+    // over the built-in alias.
+    fs::write(
+        &path,
+        "provider = 'deepseek-cn'\n[providers.deepseek-cn]\nkind = 'openai-compatible'\nbase_url = 'https://gateway.example/v1'\nmodel = 'Exact-CN'\n",
+    )
+    .expect("valid custom table fixture");
+    let store = ConfigStore::load(Some(path)).expect("valid custom table takes precedence");
+    assert_eq!(store.config.provider, ProviderKind::Custom);
+    assert_eq!(store.config.provider_id(), "deepseek-cn");
+    assert_eq!(store.config.named_custom_provider_id(), Some("deepseek-cn"));
+}
+
+#[test]
+fn invalid_custom_kind_never_falls_back_to_a_builtin_alias() {
+    for kind in ["'unsupported'", "42", "false"] {
+        let mut config: ConfigToml = toml::from_str(&format!(
+            "provider = 'deepseek-cn'\n[providers.deepseek-cn]\nkind = {kind}\n"
+        ))
+        .unwrap();
+        assert!(config.bind_persisted_provider_id("deepseek-cn").is_err());
+    }
+}
+
+#[test]
 fn provider_kind_accepts_legacy_deepseek_cn_aliases() {
     for alias in [
         "deepseek-cn",

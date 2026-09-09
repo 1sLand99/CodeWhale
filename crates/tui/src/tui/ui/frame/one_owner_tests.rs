@@ -537,11 +537,17 @@ fn statusline_full_frame_presets_preserve_transcript_composer_and_hitboxes() {
             terminal
                 .backend_mut()
                 .assert_cursor_position(Position::from(cursor));
-            let painted_input = (text.x..cursor.0)
-                .map(|x| terminal.backend().buffer()[(x, cursor.1)].symbol())
-                .collect::<String>();
-            // Ratatui represents each CJK continuation cell as a blank cell.
-            assert_eq!(painted_input.replace(' ', ""), "ab中文", "{evidence}");
+            // Terminal backends skip continuation cells covered by a wide
+            // glyph. TestBackend can retain a prior border in those cells;
+            // it is not visible terminal text after the wide glyph is drawn.
+            let mut painted_input = String::new();
+            let mut x = text.x;
+            while x < cursor.0 {
+                let symbol = terminal.backend().buffer()[(x, cursor.1)].symbol();
+                painted_input.push_str(symbol);
+                x += unicode_width::UnicodeWidthStr::width(symbol).max(1) as u16;
+            }
+            assert_eq!(painted_input, "ab中文", "{evidence}");
             app.viewport.composer_click_trace = None;
             assert!(crate::tui::mouse_ui::handle_composer_mouse(
                 &mut app,
@@ -602,11 +608,23 @@ fn statusline_full_frame_presets_preserve_transcript_composer_and_hitboxes() {
                 }
             }
             if name == "full-restored" {
-                assert_eq!(
-                    terminal.backend().buffer(),
-                    &full_buffer,
-                    "restoration leaves no stale painted row or style"
-                );
+                let restored = terminal.backend().buffer();
+                assert_eq!(restored.area, full_buffer.area);
+                for y in full_buffer.area.y..full_buffer.area.bottom() {
+                    let mut x = full_buffer.area.x;
+                    while x < full_buffer.area.right() {
+                        let expected = &full_buffer[(x, y)];
+                        assert_eq!(
+                            &restored[(x, y)],
+                            expected,
+                            "restoration leaves no stale visible cell or style at ({x}, {y}): {evidence}"
+                        );
+                        // Covered continuation cells are not rendered by a
+                        // terminal, so TestBackend's retained contents there
+                        // are not part of visible restoration.
+                        x += unicode_width::UnicodeWidthStr::width(expected.symbol()).max(1) as u16;
+                    }
+                }
             }
         }
     }

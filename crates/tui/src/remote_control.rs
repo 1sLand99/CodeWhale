@@ -3239,6 +3239,11 @@ async fn relay_worker(
     runtime_upload_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut runtime_chat_tick = tokio::time::interval(RUNTIME_UPLOAD_RETRY_INTERVAL);
     runtime_chat_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // One deadline across loop iterations. Reconstructing `sleep(SYNC_INTERVAL)`
+    // lets the 250ms Runtime Chat tick reset poll/heartbeat/token refresh.
+    let mut sync_tick =
+        tokio::time::interval_at(tokio::time::Instant::now() + SYNC_INTERVAL, SYNC_INTERVAL);
+    sync_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut runtime_retry_delay = RUNTIME_UPLOAD_RETRY_INTERVAL;
     let mut runtime_retry_not_before = Instant::now();
 
@@ -3389,7 +3394,7 @@ async fn relay_worker(
                         .map_err(|_| "The terminal remote-control owner stopped.".to_string())?;
                 }
             }
-            () = tokio::time::sleep(SYNC_INTERVAL) => {
+            _ = sync_tick.tick() => {
                 if enrollment_needs_refresh(&enrollment) {
                     // Proactive refresh before expiry; reconnect to keep runner lease valid.
                     match refresh_enrollment(&client, enrollment.persisted.clone()).await {
@@ -5000,7 +5005,10 @@ fn epoch_seconds() -> u64 {
 mod tests {
     use super::*;
     use crate::models::Role;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
     use wiremock::{
         Mock, MockServer, Request, Respond, ResponseTemplate,
         matchers::{body_json, method, path, query_param},
@@ -5009,6 +5017,18 @@ mod tests {
     #[derive(Clone, Default)]
     struct AmbiguousRuntimeResponder {
         bodies: Arc<Mutex<Vec<Value>>>,
+    }
+
+    #[derive(Clone, Default)]
+    struct ControlPollCounter {
+        hits: Arc<AtomicUsize>,
+    }
+
+    impl Respond for ControlPollCounter {
+        fn respond(&self, _request: &Request) -> ResponseTemplate {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_json(json!({ "runs": [] }))
+        }
     }
 
     impl Respond for AmbiguousRuntimeResponder {
@@ -5729,6 +5749,108 @@ mod tests {
         controller.stop_worker();
 
         assert!(!host.projection_is_claimed_for_tests("thr_claimed", 7));
+    }
+
+    #[tokio::test]
+    async fn idle_runtime_chat_ticks_cannot_starve_the_control_poll() {
+        if !cfg!(debug_assertions) {
+            return;
+        }
+        crate::tls::ensure_rustls_crypto_provider();
+        let _env = crate::test_support::lock_test_env();
+        let secrets_root = tempfile::tempdir().expect("isolated remote-control secrets");
+        let _codewhale_home =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", secrets_root.path());
+        let server = MockServer::start().await;
+        let plane = format!("{}/", server.uri().trim_end_matches('/'));
+        let _control_plane =
+            crate::test_support::EnvVarGuard::set("CWC_RUNNER_CONTROL_PLANE_BASE", &plane);
+        let base = runner_control_plane_base().expect("loopback control plane");
+        save_persisted_enrollment(&fixture_enrollment(&base).persisted)
+            .expect("persist matching enrollment");
+
+        let access_token = crate::test_support::future_test_jwt(&"a".repeat(40));
+        Mock::given(method("POST"))
+            .and(path("/api/runner/enrollments/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "enrollment": {
+                    "id": "enrollment_fixture",
+                    "userId": "account_fixture",
+                    "deviceId": "device_fixture",
+                    "runtimeVersion": "0.9.6",
+                    "runtimeCommit": "a".repeat(40),
+                    "capabilities": CAPABILITIES,
+                },
+                "credential": { "accessToken": access_token },
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/local-runners/connect"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(fixture_connection_response()))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/local-runners/runner_fixture/heartbeat"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+        let polls = ControlPollCounter::default();
+        Mock::given(method("GET"))
+            .and(path("/api/local-runners/runner_fixture/runs"))
+            .respond_with(polls.clone())
+            .mount(&server)
+            .await;
+
+        let runtime_root = tempfile::tempdir().expect("idle Runtime Chat host");
+        let host = RuntimeChatRelayHost::open(
+            crate::config::Config::default(),
+            Arc::new(crate::plugins::PluginRegistry::empty(runtime_root.path())),
+            runtime_root.path().to_path_buf(),
+            "target_fixture".to_string(),
+            "session_fixture".to_string(),
+        )
+        .expect("open idle Runtime Chat host");
+        let start = fixture_start();
+        let (_worker_tx, worker_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let worker = tokio::spawn(async move {
+            let mut phase = RelayPhase::Enrolling;
+            relay_worker(start, Some(host), worker_rx, event_tx, &mut phase).await
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match event_rx.recv().await {
+                    Some(RemoteEvent::Connected { .. }) => break,
+                    Some(RemoteEvent::Notice(_)) => {}
+                    Some(RemoteEvent::Failed(error)) => {
+                        panic!("relay worker failed before attach: {error}");
+                    }
+                    Some(RemoteEvent::FailedPreLease(error)) => {
+                        panic!("relay worker failed before attach: {error}");
+                    }
+                    Some(_) => panic!("relay worker emitted an unexpected event before attach"),
+                    None => panic!("relay worker stopped before attach"),
+                }
+            }
+        })
+        .await
+        .expect("relay worker should attach");
+
+        tokio::time::sleep(RUNTIME_UPLOAD_RETRY_INTERVAL.saturating_mul(2)).await;
+        assert_eq!(
+            polls.hits.load(Ordering::SeqCst),
+            0,
+            "the first control poll must still wait SYNC_INTERVAL while idle chat ticks fire"
+        );
+        tokio::time::sleep(SYNC_INTERVAL).await;
+        assert!(
+            polls.hits.load(Ordering::SeqCst) >= 1,
+            "idle Runtime Chat ticks must not reset the control poll"
+        );
+        worker.abort();
+        let _ = worker.await;
     }
 
     #[test]

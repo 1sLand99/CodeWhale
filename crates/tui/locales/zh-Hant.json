@@ -1162,7 +1162,7 @@
   "LinksTip": "提示：使用所顯示提供商的環境變數，或通過 `codewhale auth set --provider <id>` 儲存金鑰。",
   "LinksTitle": "提供商鏈接：",
   "ModeAlreadyActiveSavedAsDefault": "已處於 {mode} 模式 — 已儲存為啟動預設值。",
-  "ModelChanged": "模型已切換：{old} → {new}",
+  "ModelChanged": "主控模型已切換：{old} → {new}",
   "ModelPickerAutoLastRoute": "上次 {provider} · {model}",
   "ModelPickerAutoLocalHint": "每回合 · 本機啟發式 · 不傳送路由請求",
   "ModelPickerAutoNetworkActiveProviderHint": "每回合 · 僅目前供應商 · 請求與近期內容 → {provider} / {model}",

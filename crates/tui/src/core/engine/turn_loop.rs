@@ -1469,6 +1469,8 @@ impl Engine {
                 .active_route_limits
                 .and_then(|limits| limits.context_tokens);
 
+            turn.stop_diagnostics.last_prepared_output_limit_tokens = Some(request.max_tokens);
+
             // Stream the response. Keep the request around (cloned into the
             // first call) so we can resend it on a transparent retry below
             // when the wire dies before any content was streamed (#103).
@@ -1611,6 +1613,22 @@ impl Engine {
             turn_error = turn_error.or(stream_error);
             turn.stop_diagnostics
                 .observe_provider_response(stop_reason.as_deref(), tool_uses.len());
+            // Counts and terminal metadata only: never log messages, tool
+            // arguments, credentials, or raw provider bodies.
+            tracing::debug!(
+                target: "provider_response_diagnostics",
+                model_request = turn.stop_diagnostics.model_requests_started,
+                prepared_output_limit_tokens = stream_request.max_tokens,
+                finish_reason = ?turn.stop_diagnostics.last_provider_finish_reason,
+                reported_usage = usage_reported,
+                input_tokens = usage.input_tokens,
+                output_tokens = usage.output_tokens,
+                cached_input_tokens = ?usage.prompt_cache_hit_tokens,
+                reasoning_tokens = ?usage.reasoning_tokens,
+                decoded_tool_calls = tool_uses.len(),
+                visible_text_chars = current_text_visible.chars().count(),
+                "parent model response settled"
+            );
             // These belong to post-stream response assembly, not stream
             // consumption: blocks are built from the completed stream state,
             // and truncation is derived from its terminal stop reason below.
@@ -2577,9 +2595,23 @@ impl Engine {
                         false,
                     )
                 {
-                    let message = if has_provider_reasoning {
-                        "Model returned reasoning but no answer or tool call; the provider response was incomplete."
-                            .to_string()
+                    let message = if has_provider_reasoning
+                        && stop_reason_is_output_limit(stop_reason.as_deref())
+                    {
+                        format!(
+                            "Model reached the response output limit with no answer or tool call (requested allowance: {} tokens, including reasoning).",
+                            stream_request.max_tokens
+                        )
+                    } else if has_provider_reasoning {
+                        let reason = crate::models::stop_reason_detail(stop_reason.as_deref());
+                        format!(
+                            "Model returned reasoning but no answer or tool call; the provider response was incomplete (stop reason: {}).",
+                            reason
+                                .chars()
+                                .flat_map(char::escape_default)
+                                .take(120)
+                                .collect::<String>()
+                        )
                     } else if let Some(reason) = stop_reason.as_deref() {
                         format!(
                             "Model returned terminal stop reason `{reason}` with no answer or tool call."

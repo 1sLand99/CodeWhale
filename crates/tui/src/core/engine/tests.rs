@@ -616,58 +616,80 @@ fn ordinary_engine_default_has_a_finite_step_budget() {
 }
 
 #[test]
-fn registry_first_scenario() {
-    // Scenario consolidation of: registry_first_policy_is_in_the_initial_prompt_only_when_mcp_is_enabled, registry_first_guidance_is_attached_to_the_shell_fallback_once
-    // from registry_first_policy_is_in_the_initial_prompt_only_when_mcp_is_enabled
-    {
-        let enabled = EngineConfig::default();
-        let (engine, _handle) = Engine::new(enabled, &Config::default());
-        let prompt = crate::prompts::system_prompt_flat_text(
-            engine
-                .session
-                .system_prompt
-                .as_ref()
-                .expect("system prompt"),
-        );
-        assert!(prompt.contains(MCP_REGISTRY_FIRST_INSTRUCTION_SOURCE));
+fn registry_instruction_is_in_the_initial_prompt_only_when_mcp_is_enabled() {
+    let enabled = EngineConfig::default();
+    let (engine, _handle) = Engine::new(enabled, &Config::default());
+    let prompt = crate::prompts::system_prompt_flat_text(
+        engine
+            .session
+            .system_prompt
+            .as_ref()
+            .expect("system prompt"),
+    );
+    assert!(prompt.contains(MCP_REGISTRY_FIRST_INSTRUCTION_SOURCE));
+    assert!(prompt.contains("registry_sync"));
+    assert!(prompt.contains("start_registry_mcp_server"));
+
+    let mut disabled = EngineConfig::default();
+    disabled.features.disable(Feature::Mcp);
+    let (engine, _handle) = Engine::new(disabled, &Config::default());
+    let prompt = crate::prompts::system_prompt_flat_text(
+        engine
+            .session
+            .system_prompt
+            .as_ref()
+            .expect("system prompt"),
+    );
+    assert!(!prompt.contains(MCP_REGISTRY_FIRST_INSTRUCTION_SOURCE));
+}
+
+/// The regression this test exists for. A real DeepSeek turn — "build a
+/// self-contained HTML focus timer, read a local fixture, verify it" — spent
+/// its steps on five `tool_search` calls for `registry_sync`, a deferred-schema
+/// retry, and reasoning about starting a browser MCP server, because the
+/// always-visible instruction ordered Registry discovery *before* code
+/// execution or a manual implementation and named two tools that are not in the
+/// catalog head.
+///
+/// Two properties keep that from coming back, and both are about this prompt,
+/// not about a second policy surface: discovery is never ordered ahead of
+/// ordinary local work, and the deferred-tool cost of reaching the Registry
+/// tools is stated where the model reads about them.
+#[test]
+fn registry_instruction_does_not_gate_ordinary_local_work() {
+    let (engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    let prompt = crate::prompts::system_prompt_flat_text(
+        engine
+            .session
+            .system_prompt
+            .as_ref()
+            .expect("system prompt"),
+    );
+    assert!(prompt.contains("## MCP Registry"));
+
+    for ordered in [
+        "must call `registry_sync`",
+        "before `exec_shell`",
+        "you must call `start_registry_mcp_server`",
+        "not a reason to skip Registry discovery",
+    ] {
         assert!(
-            prompt.contains("must call `registry_sync` with a `query` describing that capability")
+            !prompt.contains(ordered),
+            "Registry guidance must not order discovery ahead of ordinary work: {ordered:?}"
         );
-
-        let mut disabled = EngineConfig::default();
-        disabled.features.disable(Feature::Mcp);
-        let (engine, _handle) = Engine::new(disabled, &Config::default());
-        let prompt = crate::prompts::system_prompt_flat_text(
-            engine
-                .session
-                .system_prompt
-                .as_ref()
-                .expect("system prompt"),
-        );
-        assert!(!prompt.contains(MCP_REGISTRY_FIRST_INSTRUCTION_SOURCE));
     }
-    // from registry_first_guidance_is_attached_to_the_shell_fallback_once
-    {
-        let mut catalog = vec![api_tool("read_file"), api_tool("exec_shell")];
 
-        apply_registry_first_shell_guidance(&mut catalog);
-        let after_first = catalog
-            .iter()
-            .find(|tool| tool.name == "exec_shell")
-            .expect("shell tool")
-            .description
-            .clone();
-        apply_registry_first_shell_guidance(&mut catalog);
+    // Available capability comes first, and the deferred cost is disclosed
+    // where the model reads about the two tools it would have to hunt for.
+    assert!(prompt.contains("Prefer what is already available"));
+    assert!(prompt.contains("not a step before ordinary work"));
+    assert!(prompt.contains("Both Registry tools are deferred"));
+    assert!(prompt.contains("load one with `tool_search`"));
 
-        let after_second = &catalog
-            .iter()
-            .find(|tool| tool.name == "exec_shell")
-            .expect("shell tool")
-            .description;
-        assert_eq!(after_second, &after_first);
-        assert!(after_second.contains("registry_sync"));
-        assert!(after_second.contains("start_registry_mcp_server"));
-    }
+    // The trust boundary the instruction is actually load-bearing for: a
+    // Registry package is started through the approved host path, never
+    // installed or run through the shell.
+    assert!(prompt.contains("rather than installing or running its package command"));
 }
 
 #[test]
@@ -21336,6 +21358,28 @@ async fn reasoning_only_clean_stop_is_retried_and_recovers() {
 #[tokio::test]
 async fn reasoning_only_length_stop_fails_without_retry() {
     let (model, events) = run_reasoning_only_turn(1, "length").await;
+
+    let diagnostic = events
+        .iter()
+        .find_map(|event| match event {
+            Event::ToolRequestSnapshot { snapshot } => snapshot.terminal.as_ref(),
+            _ => None,
+        })
+        .expect("terminal request diagnostics");
+    assert!(
+        diagnostic
+            .last_prepared_output_limit_tokens
+            .is_some_and(|tokens| tokens > 0)
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Error { envelope, .. }
+                if envelope.message.contains("response output limit")
+                    && envelope.message.contains("including reasoning")
+        )),
+        "a length stop must explain the actual output constraint"
+    );
 
     assert_eq!(
         model.calls.load(std::sync::atomic::Ordering::SeqCst),

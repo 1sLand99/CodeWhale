@@ -83,6 +83,9 @@ pub struct TurnStopDiagnostics {
     /// Last parent response's reported input tokens, not cumulative billing.
     pub last_reported_input_tokens: Option<u32>,
     pub route_context_window_tokens: Option<u64>,
+    /// Engine-prepared output allowance. A transport may omit the field;
+    /// this is budget evidence, not a provider-published capability ceiling.
+    pub last_prepared_output_limit_tokens: Option<u32>,
     pub automatic_compaction_attempts: u32,
     pub emergency_compaction_attempts: u32,
 }
