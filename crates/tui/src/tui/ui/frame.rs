@@ -355,8 +355,10 @@ fn render_info_row(f: &mut Frame, app: &mut App, area: Rect) -> InfoLineInteract
             })
             .map(|hb| hb.id)
     });
-    let help_hint = crate::tui::shell_key_routing::info_help_hint(app.ui_locale);
-    let info = InfoLine::new(&app.ui_theme, &help_hint, &segments)
+    // The permanent `/help` pin left the metrics line (founder, 2026-09-08):
+    // an always-on key hint is noise. Contextual hints and retiring status
+    // toasts live in the posture bar above, which already owns them.
+    let info = InfoLine::new(&app.ui_theme, "", &segments)
         .ascii_safe(crate::tui::color_compat::ascii_safe_enabled())
         .hovered(hovered)
         .compact(app.metrics_line == crate::config::ChromeRowPreset::Compact);
