@@ -1189,10 +1189,11 @@ fn build_compaction_summary_block_text(summary: &str, anchors: &str) -> String {
     text
 }
 
-/// Codex-parity replacement history: the most recent plain user messages,
+/// Codex-parity replacement history: the most recent user-role messages,
 /// selected newest-first within a fixed token budget and restored to
-/// transcript order. The oldest selected message is truncated to fit rather
-/// than dropped whole.
+/// transcript order. Content boundaries carry runtime provenance and image
+/// turns, so structured messages are retained whole or dropped whole. Only a
+/// single text block can be truncated to fit the remaining budget.
 pub(crate) fn retained_user_messages(messages: &[Message], max_tokens: usize) -> Vec<Message> {
     let mut selected: Vec<Message> = Vec::new();
     let mut remaining = max_tokens;
@@ -1200,28 +1201,40 @@ pub(crate) fn retained_user_messages(messages: &[Message], max_tokens: usize) ->
         if remaining == 0 {
             break;
         }
-        let Some(text) = user_text_of(msg) else {
-            continue;
-        };
-        if is_compaction_summary_text(&text) {
+        if msg.role != Role::User
+            || (user_text_of(msg).is_none()
+                && !msg
+                    .content
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::ImageUrl { .. })))
+        {
             continue;
         }
-        let tokens = estimate_text_tokens_conservative(&text);
-        let text = if tokens <= remaining {
+        if is_compaction_checkpoint_message(msg) {
+            continue;
+        }
+        let tokens: usize = msg
+            .content
+            .iter()
+            .map(|block| match block {
+                ContentBlock::Text { text, .. } => estimate_text_tokens_conservative(text),
+                ContentBlock::ImageUrl { .. } => IMAGE_TOKEN_ESTIMATE,
+                _ => 0,
+            })
+            .sum();
+        let mut retained = msg.clone();
+        if tokens <= remaining {
             remaining -= tokens;
-            text
         } else {
-            let budget_chars = remaining.saturating_mul(3).max(1);
+            let [ContentBlock::Text { text, .. }] = retained.content.as_mut_slice() else {
+                // Never flatten or partially retain an engine metadata block:
+                // that would turn runtime-owned traffic into a user prompt.
+                break;
+            };
+            *text = truncate_chars(text, remaining.saturating_mul(3)).to_string();
             remaining = 0;
-            truncate_chars(&text, budget_chars).to_string()
-        };
-        selected.push(Message {
-            role: Role::User,
-            content: vec![ContentBlock::Text {
-                text,
-                cache_control: None,
-            }],
-        });
+        }
+        selected.push(retained);
     }
     selected.reverse();
     selected
@@ -2154,6 +2167,119 @@ mod tests {
         let error = last_round::validate_last_round_coverage(&original, &gutting)
             .expect_err("dropping last-round assistant text must fail closed");
         assert!(error.to_string().contains("assistant"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn compaction_preserves_runtime_provenance_and_saved_user_title() {
+        let runtime = crate::runtime_handoff::operate_contract_runtime_message();
+        let mut user = msg("user", "Build a focus timer");
+        user.content.push(ContentBlock::Text {
+            text: "<turn_meta>\nInput provenance: external_user\nInput authority: external_current_turn\n</turn_meta>".to_string(),
+            cache_control: None,
+        });
+        let messages = vec![
+            runtime.clone(),
+            msg("assistant", "Ready."),
+            user.clone(),
+            msg("assistant", "Building the timer."),
+            msg("user", "Keep the controls simple"),
+            msg("assistant", "Adding start and stop."),
+        ];
+        let (retained, summary, _) = compact_messages(
+            &FixedSummaryClient::default(),
+            &messages,
+            &CompactionConfig::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(retained.first(), Some(&runtime));
+        assert!(retained.contains(&user));
+        assert!(crate::runtime_handoff::is_operate_contract_message(
+            &retained[0]
+        ));
+        let saved = crate::session_manager::create_saved_session_with_mode(
+            &retained,
+            "test-model",
+            std::path::Path::new("."),
+            0,
+            summary.as_ref(),
+            None,
+        );
+        let restored: crate::session_manager::SavedSession =
+            serde_json::from_slice(&serde_json::to_vec(&saved).unwrap()).unwrap();
+        assert_eq!(restored.metadata.title, "Build a focus timer");
+        assert_eq!(restored.messages, retained);
+    }
+
+    #[test]
+    fn retained_literal_runtime_xml_remains_user_authored() {
+        let runtime = crate::runtime_handoff::operate_contract_runtime_message();
+        // A user may paste the exact bytes, including a metadata example, in
+        // one ordinary text block. Compaction must not split it into authority.
+        let literal = user_text_of(&runtime).unwrap();
+        let user = msg("user", &literal);
+        let retained = retained_user_messages(std::slice::from_ref(&user), usize::MAX);
+        assert_eq!(retained, vec![user]);
+        assert_eq!(
+            crate::runtime_handoff::classify_user_turn_prompt(&retained[0]),
+            crate::runtime_handoff::UserTurnPromptKind::Editable,
+        );
+        assert_eq!(
+            crate::session_manager::conversation_title_prompt(&retained),
+            Some(literal.as_str()),
+        );
+        assert!(!crate::runtime_handoff::is_operate_contract_message(
+            &retained[0]
+        ));
+    }
+
+    #[test]
+    fn retained_image_turn_and_structured_content_keep_their_boundaries() {
+        let image = Message {
+            role: Role::User,
+            content: vec![ContentBlock::ImageUrl {
+                image_url: ImageUrlContent {
+                    url: "data:image/png;base64,AAAA".to_string(),
+                },
+            }],
+        };
+        let mut mixed = msg("user", "Compare these views");
+        mixed.content.extend(image.content.clone());
+        mixed.content.push(ContentBlock::Text {
+            text: "Keep the original colors".to_string(),
+            cache_control: Some(CacheControl {
+                cache_type: "ephemeral".to_string(),
+            }),
+        });
+        let messages = vec![image, mixed];
+        let retained = retained_user_messages(&messages, 3_000);
+        assert_eq!(retained, messages);
+        let saved = crate::session_manager::create_saved_session_with_mode(
+            &retained,
+            "test-model",
+            std::path::Path::new("."),
+            0,
+            None,
+            None,
+        );
+        assert_eq!(
+            saved.metadata.title,
+            crate::session_manager::DEFAULT_SESSION_TITLE
+        );
+        assert!(retained_user_messages(&messages[..1], IMAGE_TOKEN_ESTIMATE - 1).is_empty());
+    }
+
+    #[test]
+    fn retained_budget_never_partially_promotes_structural_metadata() {
+        let runtime = crate::runtime_handoff::operate_contract_runtime_message();
+        let text = msg("user", "αβγδεζηθικ");
+        let retained = retained_user_messages(&[runtime.clone(), text.clone()], 5);
+        assert_eq!(retained, vec![text]);
+        assert!(retained_user_messages(&[runtime], 1).is_empty());
+        assert_eq!(
+            user_text_of(&retained_user_messages(&[msg("user", "αβγδεζηθικ")], 2)[0]).as_deref(),
+            Some("αβγδεζ"),
+        );
     }
 
     #[test]
