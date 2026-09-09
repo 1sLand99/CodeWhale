@@ -78,7 +78,12 @@ fn offline_queue_late_unbracketed_submit_keeps_composer_and_commands_responsive(
                 .expect("raw prompt bytes");
             std::thread::sleep(Duration::from_millis(delay_ms));
             tui.send(keys::key::enter()).expect("late submit");
-            wait_or_panic(&mut tui, "Queued #1", STARTUP_WAIT, "offline queue receipt");
+            wait_or_panic(
+                &mut tui,
+                "Queued #1",
+                STARTUP_WAIT,
+                &format!("offline queue receipt ({cols}x{rows}, {delay_ms}ms submit)"),
+            );
 
             tui.send(keys::key::ctrl('u')).expect("clear queued draft");
             tui.send(keys::key::text("input is still live"))

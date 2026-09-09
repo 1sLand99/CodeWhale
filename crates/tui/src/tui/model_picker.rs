@@ -3863,6 +3863,8 @@ mod tests {
         reloaded.custom_models.as_mut().unwrap()[0].modalities = None;
         config.refresh_provider_routes_from(&reloaded);
         let unknown = effective_picker_metadata(&config, Some(ApiProvider::Deepseek), id);
+        // An automatic request allowance is policy, not discovered metadata.
+        // Its limits are covered by route_budget; the picker must stay unknown.
         assert_eq!(unknown.context_window, None);
         assert_eq!(unknown.max_output, None);
         assert_eq!(unknown.tool_calls, None);
@@ -3870,14 +3872,6 @@ mod tests {
         assert_eq!(unknown.pricing, PickerPricing::Unknown);
         row.metadata = unknown;
         assert!(model_row_meta_chips(&row).contains(&"reasoning unknown".to_string()));
-        assert_eq!(
-            crate::route_budget::effective_max_output_tokens_for_route(
-                ApiProvider::Deepseek,
-                id,
-                None
-            ),
-            8192
-        );
     }
 
     fn model_row(provider: ApiProvider, enabled: bool) -> ModelPickerRow {
