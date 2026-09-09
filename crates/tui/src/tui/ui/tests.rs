@@ -16781,6 +16781,26 @@ fn steer_reuses_queued_echo_cell_instead_of_doubling() {
 }
 
 #[test]
+fn bare_y_yank_requires_work_surface_focus() {
+    let mut app = create_test_app();
+    app.runtime_turn_id = Some("turn_123".to_string());
+    app.work_surface.panel = crate::tui::work_surface::RailPanel::Tasks;
+    app.work_surface.last_area = Some(Rect::new(0, 0, 80, 24));
+    app.input.clear();
+
+    assert!(
+        !super::event_loop::tasks_panel_owns_bare_yank(&app),
+        "an ambient Tasks panel must not swallow the first typed character"
+    );
+
+    app.work_surface.focused = true;
+    assert!(
+        super::event_loop::tasks_panel_owns_bare_yank(&app),
+        "a focused Tasks panel owns the bare-y yank"
+    );
+}
+
+#[test]
 fn engine_drain_budget_respects_event_and_time_limits() {
     let start = Instant::now();
     assert!(!engine_drain_budget_exhausted(0, start, start));

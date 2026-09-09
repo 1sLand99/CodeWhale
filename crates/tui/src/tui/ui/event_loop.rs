@@ -454,6 +454,15 @@ pub(super) fn flush_paste_burst_before_composer(app: &mut App, now: Instant) -> 
 /// Every seam below calls this instead of re-deriving focus from
 /// `view_stack`, `launch.visible`, or — the bug this replaces — whether the
 /// composer happens to hold text.
+pub(crate) fn tasks_panel_owns_bare_yank(app: &App) -> bool {
+    app.view_stack.is_empty()
+        && app.work_surface.panel == crate::tui::work_surface::RailPanel::Tasks
+        && app.work_surface.last_area.is_some()
+        && app.work_surface.focused
+        && app.input.is_empty()
+        && !app.runtime_turn_id.as_deref().unwrap_or("").is_empty()
+}
+
 pub(crate) fn shell_binding_for_key(app: &App, key: &KeyEvent) -> Option<ShellBindingId> {
     crate::tui::shell_key_routing::route(app.focus(), key)
 }
@@ -5491,14 +5500,10 @@ pub(crate) async fn run_event_loop(
 
             // y / Y in the rail's Tasks panel: yank the current turn id (y)
             // or copy full task detail (Y) to the system clipboard.
-            // Only active when the composer is empty to avoid stealing
-            // keystrokes from typed input (#2000).
-            if app.view_stack.is_empty()
-                && app.work_surface.panel == crate::tui::work_surface::RailPanel::Tasks
-                && app.work_surface.last_area.is_some()
-                && app.input.is_empty()
-                && !app.runtime_turn_id.as_deref().unwrap_or("").is_empty()
-            {
+            // Only when the work surface owns keyboard focus, so an ambiently
+            // visible Tasks panel cannot swallow the first keystroke of typed
+            // input (an empty composer used to be enough to steal "y").
+            if tasks_panel_owns_bare_yank(app) {
                 if key.code == KeyCode::Char('y') && key.modifiers == KeyModifiers::NONE {
                     if let Some(turn_id) = app.runtime_turn_id.as_ref()
                         && app.clipboard.write_text(turn_id).is_ok()
