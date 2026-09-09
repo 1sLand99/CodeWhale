@@ -944,7 +944,7 @@ async fn exact_turn_snapshot_restores_custom_endpoint_and_turn_receipt_after_bui
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
@@ -1317,7 +1317,7 @@ async fn goal_continuation_preserves_goal_and_resolves_updated_authoritative_rou
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
@@ -1599,7 +1599,7 @@ async fn saturated_mailbox_does_not_deadlock_goal_continuation_self_dispatch() {
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
@@ -1730,7 +1730,7 @@ async fn queued_ordinary_turn_does_not_multiply_engine_goal_continuations() {
         allow_shell: false,
         trust_mode: false,
         auto_approve: false,
-        approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+        approval_mode: ApprovalMode::Suggest,
         translation_enabled: false,
         allowed_tools: None,
         dynamic_tools: Vec::new(),
@@ -2930,7 +2930,7 @@ async fn cross_turn_token_budget_exhaustion_does_not_pause_goal() {
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
@@ -3390,7 +3390,7 @@ async fn explicit_natural_goal_activates_before_provider_request() {
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
@@ -3503,7 +3503,7 @@ async fn operate_goal_probe(mode: AppMode, prompt: &str) -> (Option<String>, boo
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
@@ -3679,7 +3679,7 @@ async fn operate_contract_is_appended_once_and_an_existing_goal_is_never_replace
         allow_shell: false,
         trust_mode: false,
         auto_approve: false,
-        approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+        approval_mode: ApprovalMode::Suggest,
         translation_enabled: false,
         allowed_tools: None,
         dynamic_tools: Vec::new(),
@@ -4367,7 +4367,7 @@ async fn host_managed_engine_does_not_self_dispatch_goal_continuation() {
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
@@ -4494,7 +4494,7 @@ async fn host_managed_engine_defers_idle_subagent_completion_to_explicit_turn() 
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
@@ -4863,7 +4863,7 @@ fn shell_denial_filters_search_catalog_without_expanding_allow_grants() {
             raw_names.into_iter().map(catalog_tool).collect(),
             None,
             Some(vec![rule.into()]),
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
         );
         for name in raw_names {
             assert!(surface.denies_call(name, &json!({})), "{rule}: {name}");
@@ -4877,7 +4877,7 @@ fn shell_denial_filters_search_catalog_without_expanding_allow_grants() {
         raw_names.into_iter().map(catalog_tool).collect(),
         Some(vec!["Bash".into()]),
         None,
-        crate::tui::approval::ApprovalMode::Suggest,
+        ApprovalMode::Suggest,
     );
     for name in raw_names.into_iter().skip(3) {
         assert!(
@@ -4901,7 +4901,7 @@ fn shell_denial_preserves_task_reads_and_bounded_verification_actions() {
         ],
         None,
         Some(vec!["Bash".into()]),
-        crate::tui::approval::ApprovalMode::Suggest,
+        ApprovalMode::Suggest,
     );
     let tasks = surface
         .catalog
@@ -4976,7 +4976,7 @@ fn policy_for_catalog(
     catalog: Vec<Tool>,
     allowed_tools: Option<Vec<String>>,
     disallowed_tools: Option<Vec<String>>,
-    approval_mode: crate::tui::approval::ApprovalMode,
+    approval_mode: ApprovalMode,
 ) -> ToolSurfacePolicy {
     ToolSurfacePolicy::new(
         crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(PathBuf::from("."))),
@@ -5008,7 +5008,7 @@ fn tool_catalog_scenario() {
             catalog,
             Some(vec!["read_file".to_string(), "exec_shell".to_string()]),
             Some(vec!["exec_shell".to_string()]),
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
         );
         let names: Vec<&str> = surface.catalog.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, ["read_file"]);
@@ -5019,7 +5019,7 @@ fn tool_catalog_scenario() {
             vec![catalog_tool("read_file"), catalog_tool("exec_shell")],
             None,
             None,
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
         );
         assert!(surface.catalog.iter().any(|tool| tool.name == "read_file"));
         assert!(surface.catalog.iter().any(|tool| tool.name == "exec_shell"));
@@ -5048,7 +5048,7 @@ fn tool_catalog_shell_only_benchmark_surface_hides_native_tools() {
         catalog,
         Some(shell_only.to_vec()),
         None,
-        crate::tui::approval::ApprovalMode::Suggest,
+        ApprovalMode::Suggest,
     );
 
     let names: Vec<&str> = surface.catalog.iter().map(|t| t.name.as_str()).collect();
@@ -5077,7 +5077,7 @@ fn tool_surface_policy_never_reintroduces_denied_synthetic_tools() {
             JS_EXECUTION_TOOL_NAME.to_string(),
         ]),
         Some(denied),
-        crate::tui::approval::ApprovalMode::Suggest,
+        ApprovalMode::Suggest,
     );
 
     for denied_name in [
@@ -5122,7 +5122,7 @@ async fn denied_synthetic_tool_is_blocked_by_the_same_turn_policy_at_execution()
         vec![catalog_tool("read_file")],
         Some(vec![TOOL_SEARCH_NAME.to_string()]),
         Some(vec![TOOL_SEARCH_NAME.to_string()]),
-        crate::tui::approval::ApprovalMode::Suggest,
+        ApprovalMode::Suggest,
     );
     assert!(!policy.allows_tool(TOOL_SEARCH_NAME));
     let mut turn = crate::core::turn::TurnContext::new(4);
@@ -5931,7 +5931,7 @@ fn empty_allowed_tools_surface_is_empty_and_sends_no_tools_field() {
         vec![catalog_tool("read_file")],
         Some(Vec::new()),
         None,
-        crate::tui::approval::ApprovalMode::Suggest,
+        ApprovalMode::Suggest,
     );
 
     assert!(surface.catalog.is_empty());
@@ -6148,7 +6148,7 @@ fn active_goal_message_op(
         allow_shell: false,
         trust_mode: false,
         auto_approve: false,
-        approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+        approval_mode: ApprovalMode::Suggest,
         translation_enabled: false,
         allowed_tools: None,
         dynamic_tools: Vec::new(),
@@ -6187,7 +6187,7 @@ fn external_user_message_op(content: &str, mode: AppMode, config: &Config) -> Op
         allow_shell: true,
         trust_mode: false,
         auto_approve: false,
-        approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+        approval_mode: ApprovalMode::Suggest,
         translation_enabled: false,
         allowed_tools: None,
         dynamic_tools: Vec::new(),
@@ -6215,7 +6215,7 @@ fn auto_review_message_op(content: &str, config: &Config) -> Op {
         allow_shell: true,
         trust_mode: false,
         auto_approve: false,
-        approval_mode: crate::tui::approval::ApprovalMode::Auto,
+        approval_mode: ApprovalMode::Auto,
         translation_enabled: false,
         allowed_tools: None,
         dynamic_tools: Vec::new(),
@@ -7400,13 +7400,13 @@ async fn sandbox_escalation_fails_closed_when_the_posture_cannot_prompt() {
 
     for (approval_mode, auto_approve, posture, expected_denial) in [
         (
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
             false,
             "Auto-Review",
             "Sandbox escalation requires a one-shot user approval",
         ),
         (
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
             true,
             "Full Access",
             "requires a one-shot user approval",
@@ -7421,7 +7421,7 @@ async fn sandbox_escalation_fails_closed_when_the_posture_cannot_prompt() {
             ),
             canned::simple_text_turn("Escalation was unavailable."),
         ]));
-        if matches!(approval_mode, crate::tui::approval::ApprovalMode::Auto) {
+        if matches!(approval_mode, ApprovalMode::Auto) {
             // Let Auto-Review's independent guardian approve the bounded
             // fixture call so this test reaches the separate rule under test:
             // unattended postures still cannot mint a sandbox escalation.
@@ -8900,7 +8900,7 @@ fn auto_review_plan_decision(
     tool_name: &str,
     tool_input: &Value,
     run_origin: crate::tui::auto_review::RunOrigin,
-    approval_mode: crate::tui::approval::ApprovalMode,
+    approval_mode: ApprovalMode,
     workspace_trusted: bool,
     workspace: Option<&Path>,
 ) -> (AutoReviewPlanDecision, Value) {
@@ -8925,7 +8925,7 @@ fn auto_review_scenario() {
             "exec_shell",
             &json!({"command": "git push origin main"}),
             crate::tui::auto_review::RunOrigin::Interactive,
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
             true,
             None,
         );
@@ -8947,7 +8947,7 @@ fn auto_review_scenario() {
             "read_file",
             &json!({"path": "Cargo.toml"}),
             crate::tui::auto_review::RunOrigin::Interactive,
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
             true,
             None,
         );
@@ -8962,7 +8962,7 @@ fn auto_review_scenario() {
             "exec_shell",
             &json!({"command": "git remote -v && git rev-parse --show-toplevel && git branch --show-current && git rev-parse HEAD && git tag --list 'v0.8.65'"}),
             crate::tui::auto_review::RunOrigin::Interactive,
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
             true,
             None,
         );
@@ -8978,7 +8978,7 @@ fn auto_review_scenario() {
             "mystery_tool",
             &json!({"value": true}),
             crate::tui::auto_review::RunOrigin::Interactive,
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
             true,
             None,
         );
@@ -8998,7 +8998,7 @@ fn auto_review_scenario() {
             "github_publish_release",
             &json!({"tag": "v0.8.64"}),
             crate::tui::auto_review::RunOrigin::Interactive,
-            crate::tui::approval::ApprovalMode::Never,
+            ApprovalMode::Never,
             true,
             None,
         );
@@ -9020,7 +9020,7 @@ fn auto_review_scenario() {
             "exec_shell",
             &json!({"command": "cargo test"}),
             crate::tui::auto_review::RunOrigin::Interactive,
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
             true,
             None,
         );
@@ -9039,7 +9039,7 @@ fn auto_review_scenario() {
             "write_file",
             &json!({"path": "src/lib.rs", "content": "pub fn ready() {}\n"}),
             crate::tui::auto_review::RunOrigin::Interactive,
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
             true,
             Some(tmp.path()),
         );
@@ -9058,7 +9058,7 @@ fn auto_review_scenario() {
                 "write_file",
                 &json!({"path": path, "content": "blocked"}),
                 crate::tui::auto_review::RunOrigin::Interactive,
-                crate::tui::approval::ApprovalMode::Auto,
+                ApprovalMode::Auto,
                 true,
                 Some(tmp.path()),
             );
@@ -9073,7 +9073,7 @@ fn auto_review_scenario() {
 
 #[test]
 fn repo_law_asks_only_in_ask_posture() {
-    use crate::tui::approval::ApprovalMode;
+    use ApprovalMode;
 
     assert!(!repo_law_must_block_without_prompt(
         ApprovalMode::Suggest,
@@ -9325,11 +9325,7 @@ fn workspace_write_carve_out_covers_the_default_ask_posture_only() {
     let tmp = tempdir().expect("tempdir");
     std::fs::create_dir(tmp.path().join(".git")).expect("git marker");
     let workspace = tmp.path();
-    let ask = (
-        crate::tui::app::AppMode::Agent,
-        crate::tui::approval::ApprovalMode::Suggest,
-        false,
-    );
+    let ask = (AppMode::Agent, ApprovalMode::Suggest, false);
     let carve_out = |tool: &str, input: &serde_json::Value| {
         workspace_write_carve_out_applies(
             ask.0,
@@ -9369,26 +9365,10 @@ fn workspace_write_carve_out_covers_the_default_ask_posture_only() {
 
     // Full Access, Auto-Review, Never, and Plan are untouched by the carve-out.
     for (mode, approval_mode, auto_approve) in [
-        (
-            crate::tui::app::AppMode::Agent,
-            crate::tui::approval::ApprovalMode::Bypass,
-            true,
-        ),
-        (
-            crate::tui::app::AppMode::Agent,
-            crate::tui::approval::ApprovalMode::Auto,
-            false,
-        ),
-        (
-            crate::tui::app::AppMode::Agent,
-            crate::tui::approval::ApprovalMode::Never,
-            false,
-        ),
-        (
-            crate::tui::app::AppMode::Plan,
-            crate::tui::approval::ApprovalMode::Suggest,
-            false,
-        ),
+        (AppMode::Agent, ApprovalMode::Bypass, true),
+        (AppMode::Agent, ApprovalMode::Auto, false),
+        (AppMode::Agent, ApprovalMode::Never, false),
+        (AppMode::Plan, ApprovalMode::Suggest, false),
     ] {
         assert!(
             !workspace_write_carve_out_applies(
@@ -9525,7 +9505,7 @@ fn auto_review_scenario_2() {
             "exec_shell",
             &json!({"command": "rm -rf /"}),
             crate::tui::auto_review::RunOrigin::Interactive,
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
             true,
             None,
         );
@@ -9550,7 +9530,7 @@ fn auto_review_scenario_2() {
                 tool_name,
                 &input,
                 crate::tui::auto_review::RunOrigin::Interactive,
-                crate::tui::approval::ApprovalMode::Auto,
+                ApprovalMode::Auto,
                 true,
                 None,
             );
@@ -9583,7 +9563,7 @@ fn auto_review_scenario_2() {
             "exec_shell",
             &json!({"command": "rm -rf ~/", "background": true}),
             crate::tui::auto_review::RunOrigin::Background,
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
             true,
             None,
         );
@@ -9605,7 +9585,7 @@ fn auto_review_scenario_2() {
             "exec_shell",
             &json!({"command": "rm -rf ~/", "background": true}),
             crate::tui::auto_review::RunOrigin::Background,
-            crate::tui::approval::ApprovalMode::Never,
+            ApprovalMode::Never,
             true,
             None,
         );
@@ -9649,7 +9629,7 @@ fn auto_review_routes_shell_commands_requiring_approval_to_reviewer() {
             "exec_shell",
             &json!({"command": command}),
             crate::tui::auto_review::RunOrigin::Interactive,
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
             true,
             None,
         );
@@ -9673,7 +9653,7 @@ fn full_access_blocks_detached_catastrophic_tools_without_prompting() {
             "exec_shell",
             &json!({"command": "rm -rf ~/", "background": true}),
             run_origin,
-            crate::tui::approval::ApprovalMode::Bypass,
+            ApprovalMode::Bypass,
             true,
             None,
         );
@@ -9709,7 +9689,7 @@ fn auto_review_plan_decision_uses_configured_policy() {
         "exec_shell",
         &json!({"command": "cargo test"}),
         crate::tui::auto_review::RunOrigin::Interactive,
-        crate::tui::approval::ApprovalMode::Auto,
+        ApprovalMode::Auto,
         true,
         None,
     );
@@ -9740,7 +9720,7 @@ fn exec_shell_scenario() {
             "exec_shell",
             &json!({"command": "cargo test --workspace"}),
             Path::new("/repo"),
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
         );
 
         assert_eq!(
@@ -9763,7 +9743,7 @@ fn exec_shell_scenario() {
             "exec_shell",
             &json!({"command": "cargo test --workspace"}),
             Path::new("/repo"),
-            crate::tui::approval::ApprovalMode::Never,
+            ApprovalMode::Never,
         );
 
         assert_eq!(
@@ -9785,7 +9765,7 @@ fn exec_shell_scenario() {
             "exec_shell",
             &json!({"command": "git status"}),
             Path::new("/repo"),
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
         );
 
         assert_eq!(decision, None);
@@ -9804,7 +9784,7 @@ fn canonical_bash_run_honors_legacy_typed_ask_rules() {
         "Bash",
         &json!({"action": "run", "command": "cargo test --workspace"}),
         Path::new("/repo"),
-        crate::tui::approval::ApprovalMode::Auto,
+        ApprovalMode::Auto,
     );
 
     assert_eq!(
@@ -9832,7 +9812,7 @@ fn exec_shell_allow_rule_decision_allows_only_exact_command_in_scoped_repo() {
             "exec_shell",
             &json!({"command": "cargo test"}),
             Path::new("/repo"),
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
         ),
         Some(ToolAskRuleDecision::Allow)
     );
@@ -9842,7 +9822,7 @@ fn exec_shell_allow_rule_decision_allows_only_exact_command_in_scoped_repo() {
             "exec_shell",
             &json!({"command": "cargo test --workspace"}),
             Path::new("/repo"),
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
         ),
         None
     );
@@ -9852,7 +9832,7 @@ fn exec_shell_allow_rule_decision_allows_only_exact_command_in_scoped_repo() {
             "exec_shell",
             &json!({"command": "cargo test"}),
             Path::new("/other"),
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
         ),
         None
     );
@@ -9873,7 +9853,7 @@ fn file_ask_scenario() {
             "read_file",
             &json!({"path": "secrets/api_key.txt"}),
             Path::new("/repo"),
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
         );
 
         assert_eq!(
@@ -9896,7 +9876,7 @@ fn file_ask_scenario() {
             "read_file",
             &json!({"path": "/repo/secrets/api_key.txt"}),
             Path::new("/repo"),
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
         );
 
         assert_eq!(
@@ -9919,7 +9899,7 @@ fn file_ask_scenario() {
             "read_file",
             &json!({"path": "secrets/api_key.txt"}),
             Path::new("/repo"),
-            crate::tui::approval::ApprovalMode::Never,
+            ApprovalMode::Never,
         );
 
         assert_eq!(
@@ -9941,7 +9921,7 @@ fn file_ask_scenario() {
             "read_file",
             &json!({"path": "docs/readme.md"}),
             Path::new("/repo"),
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
         );
 
         assert_eq!(decision, None);
@@ -9960,7 +9940,7 @@ fn canonical_file_action_honors_legacy_path_ask_rules() {
         "File",
         &json!({"action": "write", "path": "src/lib.rs", "content": "new\n"}),
         Path::new("/repo"),
-        crate::tui::approval::ApprovalMode::Auto,
+        ApprovalMode::Auto,
     );
 
     assert_eq!(
@@ -9997,7 +9977,7 @@ fn apply_patch_allow_requires_every_touched_path_to_match() {
             ]
         }),
         Path::new("/repo"),
-        crate::tui::approval::ApprovalMode::Suggest,
+        ApprovalMode::Suggest,
     );
     assert_eq!(fully_allowed, Some(ToolAskRuleDecision::Allow));
 
@@ -10011,7 +9991,7 @@ fn apply_patch_allow_requires_every_touched_path_to_match() {
             ]
         }),
         Path::new("/repo"),
-        crate::tui::approval::ApprovalMode::Suggest,
+        ApprovalMode::Suggest,
     );
     assert_eq!(partially_allowed, None);
 }
@@ -11083,7 +11063,7 @@ async fn measure_production_mode_tool_catalogs() -> serde_json::Value {
             true,
             false,
             false,
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
         );
         let build = engine
             .build_turn_tool_registry_and_catalog(
@@ -11832,7 +11812,7 @@ fn request_user_input_stays_deferred_but_can_be_dynamically_activated() {
 
 #[test]
 fn auto_review_hides_question_tool_while_other_postures_keep_it() {
-    use crate::tui::approval::ApprovalMode;
+    use ApprovalMode;
 
     for (posture, expected) in [
         (ApprovalMode::Suggest, true),
@@ -11868,12 +11848,9 @@ fn legacy_full_access_bit_keeps_question_tool_as_effective_full_access() {
         true,
         true,
         true,
-        crate::tui::approval::ApprovalMode::Auto,
+        ApprovalMode::Auto,
     );
-    assert_eq!(
-        authority.approval_mode_for_session(),
-        crate::tui::approval::ApprovalMode::Bypass
-    );
+    assert_eq!(authority.approval_mode_for_session(), ApprovalMode::Bypass);
 
     let surface = policy_for_catalog(
         vec![api_tool("read_file"), api_tool(REQUEST_USER_INPUT_NAME)],
@@ -12146,7 +12123,7 @@ async fn run_shell_command_op_executes_without_approval_modal() {
             true,
             false,
             false,
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
         )
         .await;
 
@@ -12237,7 +12214,7 @@ async fn run_shell_command_op_skips_approval_when_auto_approved() {
             true,
             true,
             true,
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
         )
         .await;
 
@@ -12302,7 +12279,7 @@ async fn run_shell_command_op_allows_readonly_shell_in_auto_mode() {
                 true,
                 false,
                 false,
-                crate::tui::approval::ApprovalMode::Auto,
+                ApprovalMode::Auto,
             )
             .await;
     });
@@ -12363,7 +12340,7 @@ async fn yolo_mode_does_not_prompt_for_typed_ask_rule() {
             true,
             true,
             true,
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
         )
         .await;
 
@@ -12520,7 +12497,7 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
             allow_shell: true,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
@@ -12691,7 +12668,7 @@ async fn full_access_subagent_handoff_keeps_model_shell_free_of_approval_prompts
             // Exercise the valid legacy/host shape where the named posture is
             // authoritative but the redundant bit is stale.
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            approval_mode: ApprovalMode::Bypass,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
@@ -12828,7 +12805,7 @@ async fn assert_full_access_model_tool_batch_is_blocked(
             allow_shell: true,
             trust_mode: true,
             auto_approve: true,
-            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            approval_mode: ApprovalMode::Bypass,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
@@ -13036,7 +13013,7 @@ async fn assert_full_access_model_tool_batch_runs(
             allow_shell: true,
             trust_mode: true,
             auto_approve: true,
-            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            approval_mode: ApprovalMode::Bypass,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
@@ -13184,7 +13161,7 @@ async fn full_access_permission_allow_cannot_bypass_repo_law() {
             "write_file",
             &tool_input,
             workspace.path(),
-            crate::tui::approval::ApprovalMode::Bypass,
+            ApprovalMode::Bypass,
         ),
         Some(ToolAskRuleDecision::Allow),
         "precondition: the remembered grant must match before repo law tightens the plan"
@@ -13315,7 +13292,7 @@ async fn auto_review_auto_resolves_hallucinated_question_without_prompting() {
             allow_shell: true,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Auto,
+            approval_mode: ApprovalMode::Auto,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
@@ -13478,7 +13455,7 @@ async fn full_access_permission_allow_cannot_bypass_background_catastrophic_floo
             "exec_shell",
             &tool_input,
             workspace.path(),
-            crate::tui::approval::ApprovalMode::Bypass,
+            ApprovalMode::Bypass,
         ),
         Some(ToolAskRuleDecision::Allow),
         "precondition: the remembered grant must match before the safety floor tightens the plan"
@@ -13504,7 +13481,7 @@ async fn full_access_permission_allow_cannot_bypass_background_catastrophic_floo
             allow_shell: true,
             trust_mode: true,
             auto_approve: true,
-            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            approval_mode: ApprovalMode::Bypass,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
@@ -13647,7 +13624,7 @@ async fn yolo_mode_does_not_prompt_for_background_shell() {
             allow_shell: true,
             trust_mode: true,
             auto_approve: true,
-            approval_mode: crate::tui::approval::ApprovalMode::Auto,
+            approval_mode: ApprovalMode::Auto,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
@@ -13786,7 +13763,7 @@ async fn yolo_mode_executes_publish_like_shell_without_prompt() {
             allow_shell: true,
             trust_mode: true,
             auto_approve: true,
-            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            approval_mode: ApprovalMode::Bypass,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
@@ -13929,7 +13906,7 @@ async fn yolo_mode_does_not_prompt_for_mcp_action() {
             allow_shell: true,
             trust_mode: true,
             auto_approve: true,
-            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            approval_mode: ApprovalMode::Bypass,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
@@ -13992,7 +13969,7 @@ async fn run_shell_command_op_preserves_plan_mode_shell_block() {
             false,
             false,
             false,
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
         )
         .await;
 
@@ -14288,8 +14265,8 @@ fn plan_mode_registry_can_expose_agent_launcher_without_shell_tools() {
 #[test]
 fn mode_invariant_matrix_covers_context_catalog_subagents_and_prompt_metadata() {
     use crate::sandbox::SandboxPolicy;
-    use crate::tui::approval::ApprovalMode;
     use crate::worker_profile::ShellPolicy;
+    use ApprovalMode;
 
     #[derive(Clone, Copy)]
     enum ExpectedSandbox {
@@ -14513,7 +14490,7 @@ fn mode_invariant_matrix_covers_context_catalog_subagents_and_prompt_metadata() 
 #[test]
 fn engine_context_honors_stricter_config_under_full_access() {
     use crate::sandbox::SandboxPolicy;
-    use crate::tui::approval::ApprovalMode;
+    use ApprovalMode;
 
     let tmp = tempdir().expect("tempdir");
     let config = EngineConfig {
@@ -14538,7 +14515,7 @@ fn engine_context_honors_stricter_config_under_full_access() {
 
 #[test]
 fn mode_invariant_matrix_covers_provenance_authority_narrowing() {
-    use crate::tui::approval::ApprovalMode;
+    use ApprovalMode;
 
     struct ProvenanceCase {
         name: &'static str,
@@ -14722,7 +14699,7 @@ fn turn_tool_context_uses_planned_authority_and_route_not_installed_session() {
         true,
         true,
         true,
-        crate::tui::approval::ApprovalMode::Bypass,
+        ApprovalMode::Bypass,
     );
     let route = TurnRouteContext {
         provider: ApiProvider::Deepseek,
@@ -14847,7 +14824,7 @@ fn agent_mode_elevates_writes_without_granting_network() {
 fn sandbox_policy_for_turn_returns_correct_default_policy_per_mode() {
     use crate::core::authority::{SandboxNetworkAccess, sandbox_policy_for_turn};
     use crate::sandbox::SandboxPolicy;
-    use crate::tui::approval::ApprovalMode;
+    use ApprovalMode;
 
     let workspace = PathBuf::from("/tmp/example-workspace");
 
@@ -15022,7 +14999,7 @@ async fn change_mode_refreshes_session_prompt_and_updates_session() {
             allow_shell: true,
             trust_mode: true,
             auto_approve: true,
-            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            approval_mode: ApprovalMode::Bypass,
             configured_sandbox_mode: None,
         })
         .await
@@ -15064,7 +15041,7 @@ async fn change_mode_refreshes_session_prompt_and_updates_session() {
 #[tokio::test]
 async fn live_runtime_authority_applies_latest_posture_and_sandbox_before_tools() {
     use crate::sandbox::SandboxPolicy;
-    use crate::tui::approval::ApprovalMode;
+    use ApprovalMode;
 
     let tmp = tempdir().expect("tempdir");
     let config = EngineConfig {
@@ -15133,7 +15110,7 @@ async fn live_runtime_authority_applies_latest_posture_and_sandbox_before_tools(
 
 #[test]
 fn turn_approval_mode_prefers_auto_approve_flag() {
-    use crate::tui::approval::ApprovalMode;
+    use ApprovalMode;
 
     assert_eq!(
         agent_approval_mode_for_turn(true, ApprovalMode::Suggest),
@@ -15147,7 +15124,7 @@ fn turn_approval_mode_prefers_auto_approve_flag() {
 
 #[test]
 fn messages_with_turn_metadata_returns_stored_session_messages() {
-    use crate::tui::approval::ApprovalMode;
+    use ApprovalMode;
 
     let tmp = tempdir().expect("tempdir");
     let config = EngineConfig {
@@ -15667,7 +15644,7 @@ async fn change_mode_op_updates_current_mode_and_emits_status() {
             allow_shell: true,
             trust_mode: true,
             auto_approve: true,
-            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            approval_mode: ApprovalMode::Bypass,
             configured_sandbox_mode: None,
         })
         .await
@@ -15715,14 +15692,14 @@ fn runtime_mode_policy_updates_engine_session_mirrors() {
     engine.session.allow_shell = false;
     engine.session.trust_mode = false;
     engine.session.auto_approve = false;
-    engine.session.approval_mode = crate::tui::approval::ApprovalMode::Suggest;
+    engine.session.approval_mode = ApprovalMode::Suggest;
 
     let agent_authority = crate::core::authority::TurnAuthority::from_effective_fields(
         AppMode::Agent,
         true,
         false,
         false,
-        crate::tui::approval::ApprovalMode::Never,
+        ApprovalMode::Never,
     );
     engine.apply_runtime_mode_policy(&agent_authority);
 
@@ -15732,17 +15709,14 @@ fn runtime_mode_policy_updates_engine_session_mirrors() {
     assert!(!engine.session.trust_mode);
     assert!(!engine.config.trust_mode);
     assert!(!engine.session.auto_approve);
-    assert_eq!(
-        engine.session.approval_mode,
-        crate::tui::approval::ApprovalMode::Never
-    );
+    assert_eq!(engine.session.approval_mode, ApprovalMode::Never);
 
     let full_access_authority = crate::core::authority::TurnAuthority::from_effective_fields(
         AppMode::Agent,
         true,
         true,
         true,
-        crate::tui::approval::ApprovalMode::Bypass,
+        ApprovalMode::Bypass,
     );
     engine.apply_runtime_mode_policy(&full_access_authority);
 
@@ -15751,10 +15725,7 @@ fn runtime_mode_policy_updates_engine_session_mirrors() {
     assert!(engine.session.trust_mode);
     assert!(engine.config.trust_mode);
     assert!(engine.session.auto_approve);
-    assert_eq!(
-        engine.session.approval_mode,
-        crate::tui::approval::ApprovalMode::Bypass
-    );
+    assert_eq!(engine.session.approval_mode, ApprovalMode::Bypass);
 }
 
 #[tokio::test]
@@ -16297,7 +16268,7 @@ async fn edit_last_turn_preserves_current_mode() {
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             configured_sandbox_mode: None,
         })
         .await
@@ -18112,7 +18083,7 @@ fn provenance_gate_preserves_standing_yolo_for_runtime_and_subagent_continuation
             true,
             true,
             true,
-            crate::tui::approval::ApprovalMode::Auto,
+            ApprovalMode::Auto,
         );
 
         if inheriting_provenances.contains(&provenance) {
@@ -18120,11 +18091,7 @@ fn provenance_gate_preserves_standing_yolo_for_runtime_and_subagent_continuation
             assert!(policy.allow_shell, "{provenance:?}");
             assert!(policy.trust_mode, "{provenance:?}");
             assert!(policy.auto_approve, "{provenance:?}");
-            assert_eq!(
-                policy.approval_mode,
-                crate::tui::approval::ApprovalMode::Auto,
-                "{provenance:?}"
-            );
+            assert_eq!(policy.approval_mode, ApprovalMode::Auto, "{provenance:?}");
             assert!(policy.status().is_none(), "{provenance:?}");
         } else {
             assert_eq!(policy.mode, AppMode::Agent, "{provenance:?}");
@@ -18133,7 +18100,7 @@ fn provenance_gate_preserves_standing_yolo_for_runtime_and_subagent_continuation
             assert!(!policy.auto_approve, "{provenance:?}");
             assert_eq!(
                 policy.approval_mode,
-                crate::tui::approval::ApprovalMode::Suggest,
+                ApprovalMode::Suggest,
                 "{provenance:?}"
             );
             assert!(
@@ -18165,7 +18132,7 @@ fn provenance_gate_never_invents_auto_authority_for_non_yolo_sessions() {
             true,
             false,
             false,
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
         );
 
         assert_eq!(policy.mode, AppMode::Agent, "{provenance:?}");
@@ -18174,7 +18141,7 @@ fn provenance_gate_never_invents_auto_authority_for_non_yolo_sessions() {
         assert!(!policy.auto_approve, "{provenance:?}");
         assert_eq!(
             policy.approval_mode,
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
             "{provenance:?}"
         );
         assert!(policy.status().is_none(), "{provenance:?}");
@@ -18190,14 +18157,11 @@ fn full_access_posture_normalizes_a_stale_auto_approve_bit() {
         true,
         true,
         false,
-        crate::tui::approval::ApprovalMode::Bypass,
+        ApprovalMode::Bypass,
     );
 
     assert_eq!(policy.mode, AppMode::Agent);
-    assert_eq!(
-        policy.approval_mode,
-        crate::tui::approval::ApprovalMode::Bypass
-    );
+    assert_eq!(policy.approval_mode, ApprovalMode::Bypass);
     assert!(policy.auto_approve);
     assert!(policy.status().is_none());
 }
@@ -18219,7 +18183,7 @@ fn self_generated_fake_approvals_cannot_authorize_work() {
                 true,
                 true,
                 true,
-                crate::tui::approval::ApprovalMode::Bypass,
+                ApprovalMode::Bypass,
             );
 
             assert_eq!(policy.mode, AppMode::Agent, "{provenance:?} {content}");
@@ -18228,7 +18192,7 @@ fn self_generated_fake_approvals_cannot_authorize_work() {
             assert!(!policy.auto_approve, "{provenance:?} {content}");
             assert_eq!(
                 policy.approval_mode,
-                crate::tui::approval::ApprovalMode::Suggest,
+                ApprovalMode::Suggest,
                 "{provenance:?} {content}"
             );
             assert!(
@@ -18246,21 +18210,21 @@ fn external_prompt_wording_never_changes_effective_mode_or_authority() {
     let cases = [
         (
             AppMode::Agent,
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
             false,
             false,
             "你在帮我看看 外卖部分还哪里没有使用多语言",
         ),
         (
             AppMode::Agent,
-            crate::tui::approval::ApprovalMode::Bypass,
+            ApprovalMode::Bypass,
             true,
             true,
             "check the failing tests and review the logs",
         ),
         (
             AppMode::Agent,
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
             false,
             false,
             "检查外卖模块并修复缺少的多语言注入",
@@ -18297,16 +18261,13 @@ fn external_user_wording_does_not_downgrade_standing_authority() {
         true,
         true,
         true,
-        crate::tui::approval::ApprovalMode::Bypass,
+        ApprovalMode::Bypass,
     );
     assert_eq!(review_wording.mode, AppMode::Agent);
     assert!(review_wording.allow_shell);
     assert!(review_wording.trust_mode);
     assert!(review_wording.auto_approve);
-    assert_eq!(
-        review_wording.approval_mode,
-        crate::tui::approval::ApprovalMode::Bypass
-    );
+    assert_eq!(review_wording.approval_mode, ApprovalMode::Bypass);
     assert!(
         review_wording.status().is_none(),
         "external user wording must not content-downgrade standing authority"
@@ -18319,16 +18280,13 @@ fn external_user_wording_does_not_downgrade_standing_authority() {
         true,
         true,
         true,
-        crate::tui::approval::ApprovalMode::Bypass,
+        ApprovalMode::Bypass,
     );
     assert_eq!(later_user_instruction.mode, AppMode::Agent);
     assert!(later_user_instruction.allow_shell);
     assert!(later_user_instruction.trust_mode);
     assert!(later_user_instruction.auto_approve);
-    assert_eq!(
-        later_user_instruction.approval_mode,
-        crate::tui::approval::ApprovalMode::Bypass
-    );
+    assert_eq!(later_user_instruction.approval_mode, ApprovalMode::Bypass);
     assert!(
         later_user_instruction.status().is_none(),
         "a fresh external write instruction must not inherit the prior review-only downgrade"
@@ -18379,7 +18337,7 @@ fn turn_metadata_projects_permission_posture_as_fact_only() {
     // #4780 + turn-meta diet: the active posture remains an actionable fact.
     // Never adds one actionable constraint so the model cannot waste a turn
     // asking for an approval the host is configured not to provide.
-    use crate::tui::approval::ApprovalMode;
+    use ApprovalMode;
 
     let cases = [
         (ApprovalMode::Suggest, "Ask"),
@@ -18430,7 +18388,7 @@ fn turn_metadata_projects_permission_posture_as_fact_only() {
 
 #[test]
 fn turn_metadata_preserves_standing_full_access_for_subagent_handoff() {
-    use crate::tui::approval::ApprovalMode;
+    use ApprovalMode;
 
     let tmp = tempdir().expect("tempdir");
     let config = EngineConfig {
@@ -20351,7 +20309,7 @@ async fn run_headless_turn_with_flaky_network(
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
@@ -20532,7 +20490,7 @@ async fn terminal_output_limit_followed_by_stream_error_is_charged_and_not_retri
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
@@ -20639,7 +20597,7 @@ async fn midstream_error_frame_stops_the_stream_and_drops_trailing_deltas() {
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
@@ -20890,7 +20848,7 @@ async fn run_interactive_turn_with_flaky_network(
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
@@ -21121,7 +21079,7 @@ async fn interactive_thinking_only_drop_preserves_nothing_and_never_claims_it_di
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
@@ -21371,7 +21329,7 @@ async fn run_reasoning_only_turn_with_reprompts(
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             translation_enabled: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
@@ -21916,7 +21874,7 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
                 false,
                 false,
                 false,
-                crate::tui::approval::ApprovalMode::Suggest,
+                ApprovalMode::Suggest,
                 None,
             ),
         ))),
@@ -21937,7 +21895,7 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
         allow_shell: true,
         trust_mode: false,
         auto_approve: false,
-        approval_mode: crate::tui::approval::ApprovalMode::Auto,
+        approval_mode: ApprovalMode::Auto,
         configured_sandbox_mode: None,
     });
     let error = result.expect_err("try_send should fail when channel is full");
@@ -21946,10 +21904,7 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
         Some(mpsc::error::TrySendError::Full(Op::ChangeMode { .. }))
     ));
     let authority = handle.runtime_permission_authority();
-    assert_eq!(
-        authority.approval_mode,
-        crate::tui::approval::ApprovalMode::Auto
-    );
+    assert_eq!(authority.approval_mode, ApprovalMode::Auto);
     assert!(!authority.auto_approve);
 
     handle
@@ -21974,7 +21929,7 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
 
 #[tokio::test]
 async fn full_mailbox_posture_update_supersedes_queued_change_mode() {
-    use crate::tui::approval::ApprovalMode;
+    use ApprovalMode;
 
     let tmp = tempdir().expect("tempdir");
     let config = EngineConfig {
@@ -22185,7 +22140,7 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
         false,
         false,
         false,
-        crate::tui::approval::ApprovalMode::Suggest,
+        ApprovalMode::Suggest,
     );
     let build = {
         let build = engine.build_turn_tool_registry_and_catalog(
@@ -22270,7 +22225,7 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
         ]),
         Some(vec!["mcp_slow_denied".into()]),
         None,
-        crate::tui::approval::ApprovalMode::Suggest,
+        ApprovalMode::Suggest,
     );
     let mut catalog = policy.catalog.clone();
     let mut active = policy.active_names.clone();
@@ -22722,13 +22677,13 @@ fn every_effective_mode_change_carries_a_structured_narrowing_event() {
             true,
             true,
             true,
-            crate::tui::approval::ApprovalMode::Bypass,
+            ApprovalMode::Bypass,
         );
         // The posture actually changed...
         assert_eq!(policy.mode, AppMode::Agent, "{provenance:?}");
         assert_eq!(
             policy.approval_mode,
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
             "{provenance:?}"
         );
         // ...so a structured event must exist to explain it.
@@ -22759,7 +22714,7 @@ fn every_effective_mode_change_carries_a_structured_narrowing_event() {
         true,
         true,
         true,
-        crate::tui::approval::ApprovalMode::Bypass,
+        ApprovalMode::Bypass,
     );
     assert!(unchanged.narrowing.is_none());
     assert!(unchanged.status().is_none());
@@ -22777,7 +22732,7 @@ fn ui_status_and_model_metadata_render_the_same_narrowing_sentence() {
         true,
         true,
         true,
-        crate::tui::approval::ApprovalMode::Bypass,
+        ApprovalMode::Bypass,
     );
     let event = policy.narrowing.as_ref().expect("narrowed");
     let ui_status = policy.status().expect("status for a narrowed turn");
@@ -22804,7 +22759,7 @@ fn narrowing_is_not_reported_when_there_was_no_authority_to_lose() {
         true,
         false,
         false,
-        crate::tui::approval::ApprovalMode::Suggest,
+        ApprovalMode::Suggest,
     );
     assert_eq!(policy.mode, AppMode::Agent);
     assert!(policy.narrowing.is_none());
@@ -22846,7 +22801,7 @@ fn turn_metadata_carries_the_narrowing_only_on_a_narrowed_turn() {
         true,
         true,
         true,
-        crate::tui::approval::ApprovalMode::Bypass,
+        ApprovalMode::Bypass,
     );
     let event = policy.narrowing.clone().expect("narrowed");
     engine.last_policy_narrowing = Some(event.clone());

@@ -8522,7 +8522,7 @@ async fn start_turn_passes_effective_auto_approve_to_engine() -> Result<()> {
             ..
         }) => {
             assert!(auto_approve);
-            assert_eq!(approval_mode, crate::tui::approval::ApprovalMode::Bypass);
+            assert_eq!(approval_mode, ApprovalMode::Bypass);
         }
         other => panic!("expected SendMessage op, got {other:?}"),
     }
@@ -8575,7 +8575,7 @@ async fn start_turn_can_override_thread_auto_approve_to_false() -> Result<()> {
             ..
         }) => {
             assert!(!auto_approve);
-            assert_eq!(approval_mode, crate::tui::approval::ApprovalMode::Suggest);
+            assert_eq!(approval_mode, ApprovalMode::Suggest);
         }
         other => panic!("expected SendMessage op, got {other:?}"),
     }
@@ -8622,7 +8622,7 @@ async fn start_turn_enforces_and_records_auto_review_without_legacy_bypass() -> 
             ..
         }) => {
             assert!(!auto_approve);
-            assert_eq!(approval_mode, crate::tui::approval::ApprovalMode::Auto);
+            assert_eq!(approval_mode, ApprovalMode::Auto);
         }
         other => panic!("expected SendMessage op, got {other:?}"),
     }
@@ -8651,30 +8651,15 @@ async fn active_turn_permission_posture_switches_use_the_engine_live_authority()
     assert!(matches!(
         harness.rx_op.recv().await,
         Some(Op::SendMessage {
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             ..
         })
     ));
 
     for (requested, canonical, expected_auto, expected_approval) in [
-        (
-            "auto-review",
-            "auto_review",
-            false,
-            crate::tui::approval::ApprovalMode::Auto,
-        ),
-        (
-            "full-access",
-            "full_access",
-            true,
-            crate::tui::approval::ApprovalMode::Bypass,
-        ),
-        (
-            "ask",
-            "ask",
-            false,
-            crate::tui::approval::ApprovalMode::Suggest,
-        ),
+        ("auto-review", "auto_review", false, ApprovalMode::Auto),
+        ("full-access", "full_access", true, ApprovalMode::Bypass),
+        ("ask", "ask", false, ApprovalMode::Suggest),
     ] {
         let updated = manager
             .update_thread(
@@ -12834,7 +12819,7 @@ async fn auto_review_force_prompt_is_denied_without_opening_a_modal() -> Result<
     assert!(matches!(
         harness.rx_op.recv().await,
         Some(Op::SendMessage {
-            approval_mode: crate::tui::approval::ApprovalMode::Auto,
+            approval_mode: ApprovalMode::Auto,
             ..
         })
     ));
@@ -15800,7 +15785,7 @@ mod runtime_image_inputs {
                 system_prompt_override: false,
                 model: stored_thread.model.clone(),
                 workspace: stored_thread.workspace.clone(),
-                mode: crate::tui::app::AppMode::Agent,
+                mode: AppMode::Agent,
             })
             .await?;
         let followup = reopened

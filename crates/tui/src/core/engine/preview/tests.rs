@@ -311,7 +311,7 @@ fn turn_metadata_uses_planned_cross_route_limits_not_installed_limits() {
         TurnMetadataSnapshot {
             prompt_context: &prompt_context,
             system_prompt: system_prompt.as_ref(),
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             working_set: &engine.session.working_set,
             policy_narrowing: None,
         },
@@ -609,7 +609,7 @@ async fn planned_route_builds_subagent_catalog_without_installed_client() {
         false,
         false,
         false,
-        crate::tui::approval::ApprovalMode::Suggest,
+        ApprovalMode::Suggest,
     );
     let build = engine
         .build_turn_tool_registry_and_catalog(
@@ -669,7 +669,7 @@ async fn auto_route_without_a_prompt_omits_every_final_fact() {
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             provenance: UserInputProvenance::ExternalUser,
@@ -843,7 +843,7 @@ fn inputs(
         allow_shell: false,
         trust_mode: false,
         auto_approve: false,
-        approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+        approval_mode: ApprovalMode::Suggest,
         allowed_tools: None,
         dynamic_tools: Vec::new(),
         provenance: UserInputProvenance::ExternalUser,
@@ -972,7 +972,7 @@ async fn assert_preview_matches_first_wire_body(
             false,
             false,
             false,
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
             translation_enabled,
             None,
             Vec::new(),
@@ -1939,7 +1939,7 @@ async fn provider_reported_usage_is_unavailable_until_a_response_reports_it() {
             false,
             false,
             false,
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
             false,
             None,
             Vec::new(),
@@ -2163,7 +2163,7 @@ async fn preview_tool_snapshot_has_no_mcp_or_event_side_effects() {
         false,
         false,
         false,
-        crate::tui::approval::ApprovalMode::Suggest,
+        ApprovalMode::Suggest,
     );
     let build = engine
         .build_turn_tool_registry_and_catalog(

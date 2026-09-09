@@ -16,7 +16,8 @@ use crate::mcp::McpPool;
 use crate::model_profile::ToolSurfaceBudget;
 use crate::models::Tool;
 use crate::tools::spec::{ToolError, ToolResult, optional_str, optional_u64, required_str};
-use crate::tui::app::AppMode;
+use codewhale_config::AppMode;
+use codewhale_execpolicy::ApprovalMode;
 
 use crate::core::session::ToolActivationCache;
 use crate::dependencies::ExternalTool;
@@ -484,7 +485,7 @@ impl ToolSurfacePolicy {
         allowed_tools: Option<Vec<String>>,
         disallowed_tools: Option<Vec<String>>,
         max_tool_calls: Option<u32>,
-        approval_mode: crate::tui::approval::ApprovalMode,
+        approval_mode: ApprovalMode,
     ) -> Self {
         let mut catalog = tools.unwrap_or_default();
         if !catalog.is_empty() {

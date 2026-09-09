@@ -58,6 +58,8 @@ use crate::models::{
 use crate::tools::spec::{ApprovalRequirement, PreparedToolCall, RichToolResult, ToolError};
 use crate::tools::{ToolContext, ToolRegistry, ToolRegistryBuilder};
 use crate::worker_profile::ShellPolicy;
+use codewhale_config::AppMode;
+use codewhale_execpolicy::ApprovalMode;
 
 const ACP_PROTOCOL_VERSION: u64 = 1;
 
@@ -692,7 +694,7 @@ fn prepare_acp_tool_admission(
     }
     let mut permission_reason =
         (prepared.approval != ApprovalRequirement::Auto).then(|| prepared.description.clone());
-    let approval_mode = crate::tui::approval::ApprovalMode::Suggest;
+    let approval_mode = ApprovalMode::Suggest;
     let workspace = registry.context().workspace.as_path();
 
     let typed_rule = exec_shell_ask_rule_decision_for_policy(
@@ -1634,10 +1636,10 @@ impl AcpServer {
         let mut modes = vec![
             json!({"id": "plan", "name": tr(locale, MessageId::AppModePlan), "description": tr(locale, MessageId::AppModePlanHint)}),
         ];
-        if acp_mode(&self.config) != crate::tui::app::AppMode::Plan {
+        if acp_mode(&self.config) != AppMode::Plan {
             modes.insert(0, json!({"id": "agent", "name": tr(locale, MessageId::AppModeAgent), "description": tr(locale, MessageId::AppModeAgentHint)}));
         }
-        let current_mode = if acp_mode(&session.config) == crate::tui::app::AppMode::Plan {
+        let current_mode = if acp_mode(&session.config) == AppMode::Plan {
             "plan"
         } else {
             "agent"
@@ -2060,11 +2062,11 @@ fn build_acp_system_prompt(
     )
 }
 
-fn acp_mode(config: &Config) -> crate::tui::app::AppMode {
+fn acp_mode(config: &Config) -> AppMode {
     if config.sandbox_mode.as_deref() == Some("read-only") {
-        crate::tui::app::AppMode::Plan
+        AppMode::Plan
     } else {
-        crate::tui::app::AppMode::Agent
+        AppMode::Agent
     }
 }
 
@@ -2104,7 +2106,7 @@ fn build_acp_tool_registry(
     // it cannot be constructed, omit Bash instead of silently running the
     // command on the local host.
     let sandbox_backend_ready = !external_sandbox_requested || sandbox_backend.is_some();
-    let allow_shell = acp_mode(config) != crate::tui::app::AppMode::Plan
+    let allow_shell = acp_mode(config) != AppMode::Plan
         && client_supports_terminal
         && config.allow_shell()
         && features.enabled(crate::features::Feature::ShellTool)
@@ -2116,7 +2118,7 @@ fn build_acp_tool_registry(
     };
     let sandbox_policy = crate::core::authority::sandbox_policy_for_turn(
         acp_mode(config),
-        crate::tui::approval::ApprovalMode::Suggest,
+        ApprovalMode::Suggest,
         config.sandbox_mode.as_deref(),
         workspace,
         crate::core::authority::SandboxNetworkAccess::from_config(config.sandbox_network_access),
@@ -2124,7 +2126,7 @@ fn build_acp_tool_registry(
     let mut context = ToolContext::new(workspace)
         .with_shell_policy(shell_policy)
         .with_elevated_sandbox_policy(sandbox_policy);
-    if acp_mode(config) == crate::tui::app::AppMode::Plan {
+    if acp_mode(config) == AppMode::Plan {
         // Use the shared headless authority cap for file/Git dispatch too:
         // an OS shell sandbox alone cannot prevent in-process tool writes.
         context.tool_authority = Some(Arc::new(crate::tools::spec::ToolAuthorityEnvelope {
@@ -2805,7 +2807,7 @@ mod tests {
             prepared.model, alternative,
             "provider request receives the session model"
         );
-        assert_eq!(acp_mode(&prepared.config), crate::tui::app::AppMode::Plan);
+        assert_eq!(acp_mode(&prepared.config), AppMode::Plan);
         server
             .handle_request(
                 "session/set_mode",

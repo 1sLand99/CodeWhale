@@ -293,8 +293,8 @@ mod tests {
     use crate::tools::spec::{
         ApprovalRequirement, ToolCapability, ToolContext, ToolResult, ToolSpec,
     };
-    use crate::tui::app::AppMode;
-    use crate::tui::approval::ApprovalMode;
+    use codewhale_config::AppMode;
+    use codewhale_execpolicy::ApprovalMode;
     use serde_json::{Value, json};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};

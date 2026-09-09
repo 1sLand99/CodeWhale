@@ -1,3 +1,4 @@
+pub mod context_reference;
 pub mod fragments;
 pub mod ids;
 pub mod journal;
@@ -5,6 +6,11 @@ pub mod request;
 pub mod role;
 pub mod session;
 pub mod tool_parser;
+
+pub use context_reference::{
+    ContextReference, ContextReferenceKind, ContextReferenceSource, MediaAttachmentReference,
+    media_attachment_references,
+};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

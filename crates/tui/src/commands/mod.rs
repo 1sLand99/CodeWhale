@@ -44,6 +44,7 @@ pub use groups::project::share;
 pub use groups::core::voice;
 
 use crate::tui::app::{App, AppAction};
+use codewhale_config::AppMode;
 
 /// Result of executing a command
 #[derive(Debug, Clone)]
@@ -354,7 +355,7 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
 }
 
 /// Switch the interaction mode (plan / work / operate).
-pub fn switch_mode(app: &mut App, mode: crate::tui::app::AppMode) -> String {
+pub fn switch_mode(app: &mut App, mode: AppMode) -> String {
     groups::config::config::switch_mode(app, mode)
 }
 

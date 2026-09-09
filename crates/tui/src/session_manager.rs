@@ -16,10 +16,12 @@ use crate::session_tree::{SessionEntry, SessionImportContainer, SessionJournal};
 use crate::tools::goal::{GoalPauseReason, GoalSnapshot};
 use crate::tools::plan::PlanSnapshot;
 use crate::tools::todo::TodoListSnapshot;
-use crate::tui::file_mention::ContextReference;
 use crate::utils::write_atomic;
 use crate::work_graph::ReasoningEffortTier;
 use chrono::{DateTime, Utc};
+use codewhale_core::ContextReference;
+#[cfg(test)]
+use codewhale_core::{ContextReferenceKind, ContextReferenceSource};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
@@ -6554,8 +6556,8 @@ mod tests {
         session.context_references.push(SessionContextReference {
             message_index: 0,
             reference: ContextReference {
-                kind: crate::tui::file_mention::ContextReferenceKind::File,
-                source: crate::tui::file_mention::ContextReferenceSource::AtMention,
+                kind: ContextReferenceKind::File,
+                source: ContextReferenceSource::AtMention,
                 badge: "file".to_string(),
                 label: "src/main.rs".to_string(),
                 target: tmp.path().join("src/main.rs").display().to_string(),

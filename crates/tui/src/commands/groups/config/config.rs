@@ -22,8 +22,8 @@ use crate::tui::app::{
     App, AppAction, AppMode, OnboardingState, ReasoningEffort, ScreenMode, SettingSelection,
     VimMode,
 };
-use crate::tui::approval::ApprovalMode;
 use anyhow::Result;
+use codewhale_execpolicy::ApprovalMode;
 use std::path::{Path, PathBuf};
 
 /// Open the interactive config editor.
@@ -3242,7 +3242,6 @@ mod tests {
     use crate::config::NotificationMethod;
     use crate::test_support::{EnvVarGuard, TestEnvLock, lock_test_env};
     use crate::tui::app::{App, TuiOptions};
-    use crate::tui::approval::ApprovalMode;
     use std::env;
     use std::fs;
     use std::path::Path;

@@ -66,10 +66,11 @@ use crate::tools::subagent::{
 use crate::tools::todo::{SharedTodoList, new_shared_todo_list};
 use crate::tools::user_input::{UserInputRequest, UserInputResponse};
 use crate::tools::{ToolContext, ToolRegistryBuilder};
-use crate::tui::app::AppMode;
 use crate::utils::spawn_supervised;
 use crate::worker_profile::WorkerRuntimeProfile;
 use crate::working_set::WorkingSet;
+use codewhale_config::AppMode;
+use codewhale_execpolicy::ApprovalMode;
 
 #[cfg(test)]
 use super::authority::agent_approval_mode_for_turn;
@@ -129,7 +130,7 @@ const MCP_REGISTRY_FIRST_INSTRUCTION: &str = "## MCP Registry\n\nThe Registry in
 const ISOLATED_CHAT_ENGINE_PROMPT: &str = "You are Codewhale Chat. Answer the user's request directly and conversationally. This isolated chat-only session has no local workspace, project, memory, skill, account, credential, path, runtime context, or tools.";
 
 pub(crate) fn sanitize_isolated_chat_attachments(mut text: String) -> String {
-    let references = crate::tui::file_mention::media_attachment_references(&text);
+    let references = codewhale_core::media_attachment_references(&text);
     for reference in references.into_iter().rev() {
         let replacement = if text[reference.start_byte..reference.end_byte].ends_with('\n') {
             "[Attachment omitted: Runtime Chat cannot read local file references.]\n"
@@ -955,7 +956,7 @@ struct LiveRuntimeAuthority {
     allow_shell: bool,
     trust_mode: bool,
     auto_approve: bool,
-    approval_mode: crate::tui::approval::ApprovalMode,
+    approval_mode: ApprovalMode,
     configured_sandbox_mode: Option<String>,
 }
 
@@ -965,7 +966,7 @@ impl LiveRuntimeAuthority {
         allow_shell: bool,
         trust_mode: bool,
         auto_approve: bool,
-        approval_mode: crate::tui::approval::ApprovalMode,
+        approval_mode: ApprovalMode,
         configured_sandbox_mode: Option<String>,
     ) -> Self {
         let authority = TurnAuthority::from_effective_fields(
@@ -987,8 +988,7 @@ impl LiveRuntimeAuthority {
             mode: authority.mode,
             allow_shell: authority.allow_shell,
             trust_mode: authority.trust_mode,
-            auto_approve: authority.auto_approve
-                || approval_mode == crate::tui::approval::ApprovalMode::Bypass,
+            auto_approve: authority.auto_approve || approval_mode == ApprovalMode::Bypass,
             approval_mode,
             configured_sandbox_mode,
         }
@@ -1025,7 +1025,7 @@ impl LiveRuntimeAuthorityState {
 pub(crate) struct RuntimePermissionAuthority {
     pub(crate) auto_approve: bool,
     pub(crate) trust_mode: bool,
-    pub(crate) approval_mode: crate::tui::approval::ApprovalMode,
+    pub(crate) approval_mode: ApprovalMode,
 }
 
 fn claim_subagent_completion(
@@ -1506,7 +1506,7 @@ impl Engine {
                 config.allow_shell,
                 config.trust_mode,
                 false,
-                crate::tui::approval::ApprovalMode::Suggest,
+                ApprovalMode::Suggest,
                 api_config.sandbox_mode.clone(),
             ),
         )));
@@ -1817,7 +1817,7 @@ impl Engine {
         allow_shell: bool,
         trust_mode: bool,
         auto_approve: bool,
-        approval_mode: crate::tui::approval::ApprovalMode,
+        approval_mode: ApprovalMode,
     ) {
         let turn_control = self.begin_turn_control();
         self.turn_counter = self.turn_counter.saturating_add(1);
@@ -2015,7 +2015,7 @@ impl Engine {
         allow_shell: bool,
         trust_mode: bool,
         auto_approve: bool,
-        approval_mode: crate::tui::approval::ApprovalMode,
+        approval_mode: ApprovalMode,
         configured_sandbox_mode: Option<String>,
     ) {
         let authority = TurnAuthority::from_effective_fields(
@@ -2030,8 +2030,7 @@ impl Engine {
             || self.session.allow_shell != authority.allow_shell
             || self.session.trust_mode != authority.trust_mode
             || self.session.auto_approve
-                != (authority.auto_approve
-                    || effective_approval == crate::tui::approval::ApprovalMode::Bypass)
+                != (authority.auto_approve || effective_approval == ApprovalMode::Bypass)
             || self.session.approval_mode != effective_approval
             || self.api_config.sandbox_mode != configured_sandbox_mode;
         self.api_config.sandbox_mode = configured_sandbox_mode;
@@ -2121,8 +2120,8 @@ impl Engine {
         self.session.trust_mode = authority.trust_mode;
         self.config.trust_mode = authority.trust_mode;
         self.session.approval_mode = authority.approval_mode_for_session();
-        self.session.auto_approve = authority.auto_approve
-            || self.session.approval_mode == crate::tui::approval::ApprovalMode::Bypass;
+        self.session.auto_approve =
+            authority.auto_approve || self.session.approval_mode == ApprovalMode::Bypass;
         self.record_applied_runtime_authority(authority);
     }
 
@@ -3649,7 +3648,7 @@ impl Engine {
                 )
             ),
         ];
-        if approval_mode == crate::tui::approval::ApprovalMode::Never {
+        if approval_mode == ApprovalMode::Never {
             lines.push(
                 "Approval prompts are disabled; do not request escalation for this turn."
                     .to_string(),
@@ -4754,7 +4753,7 @@ impl Engine {
         allow_shell: bool,
         trust_mode: bool,
         auto_approve: bool,
-        approval_mode: crate::tui::approval::ApprovalMode,
+        approval_mode: ApprovalMode,
         translation_enabled: bool,
         allowed_tools: Option<Vec<String>>,
         dynamic_tools: Vec<DynamicToolSpec>,
@@ -7404,7 +7403,7 @@ pub(crate) fn auto_review_plan_decision_for_context(
 ) -> (AutoReviewPlanDecision, Value) {
     let decision = policy.evaluate(context);
     let audit_event = policy.audit_event(context, &decision);
-    let plan_decision = if context.approval_mode == crate::tui::approval::ApprovalMode::Auto
+    let plan_decision = if context.approval_mode == ApprovalMode::Auto
         && context.tool_name == REQUEST_USER_INPUT_NAME
     {
         // This synthetic tool does not execute user work. Let the turn loop
@@ -7414,7 +7413,7 @@ pub(crate) fn auto_review_plan_decision_for_context(
     } else {
         match decision.action {
             crate::tui::auto_review::AutoReviewAction::Allow
-                if context.approval_mode == crate::tui::approval::ApprovalMode::Auto =>
+                if context.approval_mode == ApprovalMode::Auto =>
             {
                 AutoReviewPlanDecision::Allow
             }
@@ -7427,9 +7426,7 @@ pub(crate) fn auto_review_plan_decision_for_context(
                 );
                 if matches!(
                     context.approval_mode,
-                    crate::tui::approval::ApprovalMode::Auto
-                        | crate::tui::approval::ApprovalMode::Never
-                        | crate::tui::approval::ApprovalMode::Bypass
+                    ApprovalMode::Auto | ApprovalMode::Never | ApprovalMode::Bypass
                 ) {
                     // Auto-Review, Never, and Full Access are non-interactive for
                     // approval holds. Full Access auto-runs ordinary calls, but a
@@ -7440,7 +7437,7 @@ pub(crate) fn auto_review_plan_decision_for_context(
                 }
             }
             crate::tui::auto_review::AutoReviewAction::AskUser
-                if context.approval_mode == crate::tui::approval::ApprovalMode::Auto =>
+                if context.approval_mode == ApprovalMode::Auto =>
             {
                 AutoReviewPlanDecision::ConsultReviewer(decision.reason.clone())
             }
@@ -7461,7 +7458,7 @@ pub(super) fn exec_shell_ask_rule_decision(
     tool_name: &str,
     tool_input: &Value,
     workspace: &Path,
-    approval_mode: crate::tui::approval::ApprovalMode,
+    approval_mode: ApprovalMode,
 ) -> Option<ToolAskRuleDecision> {
     exec_shell_ask_rule_decision_for_policy(
         &config.exec_policy_engine,
@@ -7480,7 +7477,7 @@ pub(crate) fn exec_shell_ask_rule_decision_for_policy(
     tool_name: &str,
     tool_input: &Value,
     workspace: &Path,
-    approval_mode: crate::tui::approval::ApprovalMode,
+    approval_mode: ApprovalMode,
 ) -> Option<ToolAskRuleDecision> {
     let policy_tool_name =
         crate::tools::canonical_action::canonical_action_alias(tool_name, tool_input);
@@ -7503,7 +7500,7 @@ pub(super) fn file_tool_ask_rule_decision(
     tool_name: &str,
     tool_input: &Value,
     workspace: &Path,
-    approval_mode: crate::tui::approval::ApprovalMode,
+    approval_mode: ApprovalMode,
 ) -> Option<ToolAskRuleDecision> {
     file_tool_ask_rule_decision_for_policy(
         &config.exec_policy_engine,
@@ -7522,7 +7519,7 @@ pub(crate) fn file_tool_ask_rule_decision_for_policy(
     tool_name: &str,
     tool_input: &Value,
     workspace: &Path,
-    approval_mode: crate::tui::approval::ApprovalMode,
+    approval_mode: ApprovalMode,
 ) -> Option<ToolAskRuleDecision> {
     let policy_tool_name =
         crate::tools::canonical_action::canonical_action_alias(tool_name, tool_input);
@@ -7575,14 +7572,14 @@ fn tool_ask_rule_decision_for_context(
     command: &str,
     path: Option<&str>,
     workspace: &Path,
-    approval_mode: crate::tui::approval::ApprovalMode,
+    approval_mode: ApprovalMode,
 ) -> Option<ToolAskRuleDecision> {
     let cwd = workspace.to_string_lossy();
     let ask_for_approval = match approval_mode {
-        crate::tui::approval::ApprovalMode::Never => AskForApproval::Never,
-        crate::tui::approval::ApprovalMode::Auto
-        | crate::tui::approval::ApprovalMode::Bypass
-        | crate::tui::approval::ApprovalMode::Suggest => AskForApproval::OnFailure,
+        ApprovalMode::Never => AskForApproval::Never,
+        ApprovalMode::Auto | ApprovalMode::Bypass | ApprovalMode::Suggest => {
+            AskForApproval::OnFailure
+        }
     };
     let decision = exec_policy_engine
         .check(ExecPolicyContext {
@@ -7763,7 +7760,7 @@ pub(crate) fn mock_engine_handle() -> MockEngineHandle {
             false,
             false,
             false,
-            crate::tui::approval::ApprovalMode::Suggest,
+            ApprovalMode::Suggest,
             None,
         ),
     )));
@@ -7803,7 +7800,7 @@ pub(crate) fn mock_engine_handle() -> MockEngineHandle {
 pub(crate) struct TurnMetadataSnapshot<'a> {
     pub(crate) prompt_context: &'a NextTurnPromptContext,
     pub(crate) system_prompt: Option<&'a SystemPrompt>,
-    pub(crate) approval_mode: crate::tui::approval::ApprovalMode,
+    pub(crate) approval_mode: ApprovalMode,
     pub(crate) working_set: &'a crate::working_set::WorkingSet,
     pub(crate) policy_narrowing: Option<&'a PolicyNarrowingEvent>,
 }

@@ -12,6 +12,7 @@
 
 use crate::models::{SystemBlock, SystemPrompt};
 use crate::project_context::load_project_context_with_parents;
+use codewhale_config::AppMode;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
@@ -53,7 +54,7 @@ pub struct PromptSessionContext<'a> {
     /// Active runtime mode. Retained in the session contract for embedders;
     /// bundled prompt text deliberately ignores it because policy and the live
     /// tool catalog already express the mode.
-    pub mode: crate::tui::app::AppMode,
+    pub mode: AppMode,
 }
 
 impl Default for PromptSessionContext<'_> {
@@ -69,7 +70,7 @@ impl Default for PromptSessionContext<'_> {
             verbosity: None,
             skills_scan_codewhale_only: false,
             plugin_registry: None,
-            mode: crate::tui::app::AppMode::Agent,
+            mode: AppMode::Agent,
         }
     }
 }
@@ -1020,7 +1021,7 @@ pub fn system_prompt_for_mode_with_context_and_skills(
             verbosity: None,
             skills_scan_codewhale_only: false,
             plugin_registry: None,
-            mode: crate::tui::app::AppMode::Agent,
+            mode: AppMode::Agent,
         },
     )
 }
@@ -1573,12 +1574,7 @@ mod tests {
         )
         .expect("write project instruction");
         for host in [PromptHost::Interactive, PromptHost::Headless] {
-            let prompts = [
-                crate::tui::app::AppMode::Plan,
-                crate::tui::app::AppMode::Agent,
-                crate::tui::app::AppMode::Operate,
-            ]
-            .map(|mode| {
+            let prompts = [AppMode::Plan, AppMode::Agent, AppMode::Operate].map(|mode| {
                 system_prompt_flat_text(
                     &system_prompt_for_mode_with_context_skills_session_and_approval_for_host(
                         tmp.path(),
@@ -1720,7 +1716,7 @@ mod tests {
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
-                    mode: crate::tui::app::AppMode::Agent,
+                    mode: AppMode::Agent,
                 },
             ),
         );
@@ -2143,7 +2139,7 @@ mod tests {
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
-                    mode: crate::tui::app::AppMode::Agent,
+                    mode: AppMode::Agent,
                 },
             ),
         );
@@ -2268,7 +2264,7 @@ mod tests {
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
-                    mode: crate::tui::app::AppMode::Agent,
+                    mode: AppMode::Agent,
                 },
             ),
         );
@@ -2315,7 +2311,7 @@ mod tests {
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
-                    mode: crate::tui::app::AppMode::Agent,
+                    mode: AppMode::Agent,
                 },
             ),
         );
@@ -2408,7 +2404,7 @@ mod tests {
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
-                    mode: crate::tui::app::AppMode::Agent,
+                    mode: AppMode::Agent,
                 },
             ));
         assert!(prompt.contains("## Environment"));
@@ -2589,7 +2585,7 @@ mod tests {
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
-                    mode: crate::tui::app::AppMode::Agent,
+                    mode: AppMode::Agent,
                 },
             ));
         assert!(
@@ -2619,7 +2615,7 @@ mod tests {
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
-                    mode: crate::tui::app::AppMode::Agent,
+                    mode: AppMode::Agent,
                 },
             ));
         let mem_at = prompt.find("User Memory").expect("user memory present");
@@ -2663,7 +2659,7 @@ mod tests {
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
-                    mode: crate::tui::app::AppMode::Agent,
+                    mode: AppMode::Agent,
                 },
             ));
         assert!(prompt.contains("<continual_harness trust=\"untrusted\">"));
@@ -2793,7 +2789,7 @@ mod tests {
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
-                    mode: crate::tui::app::AppMode::Agent,
+                    mode: AppMode::Agent,
                 },
             ));
         assert!(!prompt.contains("<project_context_pack>"));
@@ -2824,7 +2820,7 @@ mod tests {
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
-                    mode: crate::tui::app::AppMode::Agent,
+                    mode: AppMode::Agent,
                 },
             ));
         assert!(prompt.contains("<project_context_pack>"));
@@ -3046,7 +3042,7 @@ mod tests {
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
-                    mode: crate::tui::app::AppMode::Agent,
+                    mode: AppMode::Agent,
                 },
             ));
 
@@ -3080,7 +3076,7 @@ mod tests {
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
-                    mode: crate::tui::app::AppMode::Agent,
+                    mode: AppMode::Agent,
                 },
             ));
 
@@ -3171,7 +3167,7 @@ mod tests {
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
-                    mode: crate::tui::app::AppMode::Agent,
+                    mode: AppMode::Agent,
                 },
             ));
 
@@ -3694,7 +3690,7 @@ mod tests {
                     verbosity: Some(" Concise "),
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
-                    mode: crate::tui::app::AppMode::Agent,
+                    mode: AppMode::Agent,
                 },
             ),
         );
@@ -3738,7 +3734,7 @@ mod tests {
                 verbosity: Some("concise"),
                 skills_scan_codewhale_only: false,
                 plugin_registry: None,
-                mode: crate::tui::app::AppMode::Agent,
+                mode: AppMode::Agent,
             },
         );
 
@@ -3791,7 +3787,7 @@ mod tests {
             verbosity: None,
             skills_scan_codewhale_only: false,
             plugin_registry: None,
-            mode: crate::tui::app::AppMode::Agent,
+            mode: AppMode::Agent,
         };
         let first = system_prompt_for_mode_with_context_skills_session_and_approval(
             tmp.path(),

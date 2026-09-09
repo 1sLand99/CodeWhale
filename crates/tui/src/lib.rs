@@ -12108,7 +12108,8 @@ async fn build_direct_workflow_tool(
     use crate::tools::goal::new_shared_goal_state;
     use crate::tools::subagent::{SubAgentRuntime, new_shared_subagent_manager_with_timeout};
     use crate::tools::todo::new_shared_todo_list;
-    use crate::tui::app::AppMode;
+    use codewhale_config::AppMode;
+    use codewhale_execpolicy::ApprovalMode;
 
     let provider = config.api_provider();
     if !config.subagents_enabled_for_provider(provider) {
@@ -12144,9 +12145,9 @@ async fn build_direct_workflow_tool(
     .with_elevated_sandbox_policy(crate::core::authority::sandbox_policy_for_turn(
         mode,
         if yolo {
-            crate::tui::approval::ApprovalMode::Bypass
+            ApprovalMode::Bypass
         } else {
-            crate::tui::approval::ApprovalMode::Suggest
+            ApprovalMode::Suggest
         },
         config.sandbox_mode.as_deref(),
         workspace,

@@ -69,7 +69,6 @@ use crate::tools::spec::{
 use crate::tools::todo::SharedTodoList;
 #[cfg(test)]
 use crate::tools::todo::TodoList;
-use crate::tui::app::AppMode;
 use crate::tui::app::ReasoningEffort;
 use crate::utils::spawn_supervised;
 use crate::work_graph::{
@@ -79,6 +78,8 @@ use crate::work_graph::{
 use crate::worker_profile::{
     ChildLaunchManifest, ModelRoute, ShellPolicy, ToolScope, WorkerRuntimeProfile,
 };
+use codewhale_config::AppMode;
+use codewhale_execpolicy::ApprovalMode;
 use coord::{
     CoordinationDetailMetrics, CoordinationHotPath, CoordinationLedger, DecisionRecord,
     DecisionStatus, PersistedWriteClaim, ReconciliationReceipt, WriteScopeClaim,
@@ -2601,7 +2602,7 @@ pub struct SubAgentRuntime {
     /// guardian that gate the parent gate the child's held calls; under Ask a
     /// held call is routed to the parent's approval UI when one exists;
     /// Full Access still fails closed on the non-bypassable safety floor.
-    pub approval_mode: crate::tui::approval::ApprovalMode,
+    pub approval_mode: ApprovalMode,
     /// The session's deterministic Auto-Review policy (configured allow/block
     /// rules plus the built-in safety floor), shared with every descendant.
     pub auto_review_policy: std::sync::Arc<crate::tui::auto_review::AutoReviewPolicy>,
@@ -2666,7 +2667,7 @@ impl SubAgentRuntime {
             speech_output_dir: None,
             todos: crate::tools::todo::new_shared_todo_list(),
             parent_mode: AppMode::Agent,
-            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            approval_mode: ApprovalMode::Suggest,
             auto_review_policy: std::sync::Arc::new(
                 crate::tui::auto_review::AutoReviewPolicy::default(),
             ),
@@ -2698,7 +2699,7 @@ impl SubAgentRuntime {
     #[must_use]
     pub fn with_permission_posture(
         mut self,
-        approval_mode: crate::tui::approval::ApprovalMode,
+        approval_mode: ApprovalMode,
         auto_review_policy: std::sync::Arc<crate::tui::auto_review::AutoReviewPolicy>,
         parent_can_prompt: bool,
     ) -> Self {
@@ -15233,7 +15234,6 @@ impl SubAgentToolRegistry {
     ) -> ChildGateVerdict {
         use crate::core::engine::{AutoReviewPlanDecision, auto_review_plan_decision_for_context};
         use crate::core::events::{ToolGate, ToolGateVerdict};
-        use crate::tui::approval::ApprovalMode;
         use crate::tui::auto_review::{AutoReviewContext, RunOrigin};
 
         let approval_mode = if self.auto_approve {

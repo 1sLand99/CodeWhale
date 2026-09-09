@@ -14,6 +14,9 @@ use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use codewhale_config::AppMode;
+use codewhale_execpolicy::ApprovalMode;
+
 use super::approval::{ApprovalDecision, UserInputDecision};
 use super::{
     CancelReason, EngineHandle, LiveRuntimeAuthority, Op, RuntimePermissionAuthority,
@@ -229,11 +232,11 @@ impl EngineHandle {
 
     pub(crate) fn publish_turn_authority(
         &self,
-        mode: crate::tui::app::AppMode,
+        mode: AppMode,
         allow_shell: bool,
         trust_mode: bool,
         auto_approve: bool,
-        approval_mode: crate::tui::approval::ApprovalMode,
+        approval_mode: ApprovalMode,
         configured_sandbox_mode: Option<String>,
     ) {
         self.publish_runtime_authority(LiveRuntimeAuthority::from_fields(

@@ -4665,7 +4665,7 @@ mod tests {
     fn project_adapter_share_projection_maps_history_model_and_mode() {
         let mut app = test_app();
         app.model = "deepseek-v4-pro".to_string();
-        app.mode = crate::tui::app::AppMode::Agent;
+        app.mode = codewhale_config::AppMode::Agent;
         let mut bundle = app.command_contexts();
         let project = bundle
             .parts()
@@ -4695,7 +4695,7 @@ mod tests {
         assert!(!share.history_is_empty);
         assert_eq!(share.history_len, 2);
         assert_eq!(share.model, "deepseek-v4-pro");
-        assert_eq!(share.mode_label, crate::tui::app::AppMode::Agent.label());
+        assert_eq!(share.mode_label, codewhale_config::AppMode::Agent.label());
     }
 
     #[test]

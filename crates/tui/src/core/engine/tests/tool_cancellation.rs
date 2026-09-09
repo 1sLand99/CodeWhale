@@ -64,7 +64,7 @@ async fn engine_cancel_stops_started_foreground_descendants_and_preserves_backgr
     {
         *trust_mode = true;
         *auto_approve = true;
-        *approval_mode = crate::tui::approval::ApprovalMode::Bypass;
+        *approval_mode = ApprovalMode::Bypass;
     }
     handle.send(op).await.expect("dispatch real shell tool");
     let descendant: libc::pid_t = tokio::time::timeout(Duration::from_secs(10), async {

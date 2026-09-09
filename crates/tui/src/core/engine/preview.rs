@@ -74,7 +74,7 @@ pub struct PreviewRequestInputs {
     pub allow_shell: bool,
     pub trust_mode: bool,
     pub auto_approve: bool,
-    pub approval_mode: crate::tui::approval::ApprovalMode,
+    pub approval_mode: ApprovalMode,
     pub allowed_tools: Option<Vec<String>>,
     pub dynamic_tools: Vec<DynamicToolSpec>,
     pub provenance: UserInputProvenance,

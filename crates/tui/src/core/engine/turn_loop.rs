@@ -120,7 +120,7 @@ pub(super) fn registered_tool_approval_required(
 #[must_use]
 pub(super) fn workspace_write_carve_out_applies(
     mode: AppMode,
-    approval_mode: crate::tui::approval::ApprovalMode,
+    approval_mode: ApprovalMode,
     auto_approve: bool,
     workspace: &std::path::Path,
     tool_name: &str,
@@ -149,10 +149,10 @@ pub(super) fn registered_tool_forces_prompt(
 /// Repo-law `ask` rules require a human decision. Only Ask posture can open
 /// that decision; every autonomous or no-prompt posture must fail closed.
 pub(super) fn repo_law_must_block_without_prompt(
-    approval_mode: crate::tui::approval::ApprovalMode,
+    approval_mode: ApprovalMode,
     auto_approve: bool,
 ) -> bool {
-    auto_approve || approval_mode != crate::tui::approval::ApprovalMode::Suggest
+    auto_approve || approval_mode != ApprovalMode::Suggest
 }
 
 pub(super) fn requested_sandbox_escalation(
@@ -3472,7 +3472,7 @@ impl Engine {
             if blocked_error.is_none() {
                 match requested_sandbox_escalation(&tool_name, &tool_input, &batch_sandbox_policy) {
                     Ok(Some((_policy, justification)))
-                        if batch_approval_mode == crate::tui::approval::ApprovalMode::Suggest =>
+                        if batch_approval_mode == ApprovalMode::Suggest =>
                     {
                         let escalation_description = format!(
                             "Sandbox escalation to '{}' for this exact call: {justification}",

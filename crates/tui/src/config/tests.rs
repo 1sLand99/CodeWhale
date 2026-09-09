@@ -907,7 +907,7 @@ reason = "read_file is allowed"
         "exec_shell",
         &serde_json::json!({"command": "cargo test"}),
         crate::tui::auto_review::RunOrigin::Interactive,
-        crate::tui::approval::ApprovalMode::Auto,
+        codewhale_execpolicy::ApprovalMode::Auto,
         true,
         None,
     );
@@ -922,7 +922,7 @@ reason = "read_file is allowed"
         "read_file",
         &serde_json::json!({"path": "README.md"}),
         crate::tui::auto_review::RunOrigin::Interactive,
-        crate::tui::approval::ApprovalMode::Auto,
+        codewhale_execpolicy::ApprovalMode::Auto,
         true,
         None,
     );

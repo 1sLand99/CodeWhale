@@ -81,7 +81,8 @@ pub(crate) async fn run_exec_agent(
     use crate::core::ops::Op;
     use crate::tools::plan::new_shared_plan_state;
     use crate::tools::todo::new_shared_todo_list;
-    use crate::tui::app::AppMode;
+    use codewhale_config::AppMode;
+    use codewhale_execpolicy::ApprovalMode;
 
     // Headless exec registers the model-facing notify tool too. Project the
     // final merged config before tool setup so `off`, quiet/category gates,
@@ -481,12 +482,12 @@ pub(crate) async fn run_exec_agent(
             auto_approve,
             translation_enabled: false,
             approval_mode: if auto_approve {
-                crate::tui::approval::ApprovalMode::Bypass
+                ApprovalMode::Bypass
             } else {
                 execution_config
                     .approval_policy
                     .as_deref()
-                    .and_then(crate::tui::approval::ApprovalMode::from_config_value)
+                    .and_then(ApprovalMode::from_config_value)
                     .unwrap_or_default()
             },
             verbosity: execution_config.verbosity.clone(),

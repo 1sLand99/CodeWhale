@@ -8,7 +8,7 @@ use super::{
 };
 use crate::core::session::ToolActivationCache;
 use crate::models::Tool;
-use crate::tui::app::AppMode;
+use codewhale_config::AppMode;
 use serde_json::json;
 use std::collections::{BTreeSet, HashSet};
 

@@ -55,7 +55,8 @@ use crate::tools::plan::new_shared_plan_state;
 use crate::tools::subagent::SubAgentStatus;
 use crate::tools::todo::new_shared_todo_list;
 #[cfg(test)]
-use crate::tui::app::AppMode;
+use codewhale_config::AppMode;
+use codewhale_execpolicy::ApprovalMode;
 use codewhale_protocol::agent_mail::{
     AGENT_MAIL_EVENT_DELIVERED, AGENT_MAIL_EVENT_DELIVERING, AGENT_MAIL_EVENT_DELIVERY_FAILED,
     AGENT_MAIL_EVENT_QUEUED, AGENT_MAIL_EVENT_READ, AGENT_MAIL_SCHEMA_VERSION, AgentMailAddress,
@@ -11209,7 +11210,7 @@ impl RuntimeThreadManager {
                     // this branch means a host injected the event directly:
                     // fail closed (the audit trail stays authoritative)
                     // instead of pausing the turn.
-                    if approval_mode == crate::tui::approval::ApprovalMode::Auto {
+                    if approval_mode == ApprovalMode::Auto {
                         self.emit_event(
                             &thread_id,
                             Some(&turn_id),
@@ -11365,7 +11366,7 @@ impl RuntimeThreadManager {
                         .unwrap_or(crate::core::engine::RuntimePermissionAuthority {
                             auto_approve: false,
                             trust_mode: false,
-                            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+                            approval_mode: ApprovalMode::Suggest,
                         });
                     let auto_approve = authority.auto_approve;
                     let trust_mode = authority.trust_mode;

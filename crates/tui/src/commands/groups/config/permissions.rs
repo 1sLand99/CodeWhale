@@ -1,7 +1,7 @@
 //! Numbered, confirmation-gated editor for the active `permissions.toml`.
 
 use codewhale_config::{PermissionsFileState, PermissionsSnapshot, ToolAskRule};
-use codewhale_execpolicy::PermissionAction;
+use codewhale_execpolicy::{ApprovalMode, PermissionAction};
 
 use crate::commands::CommandResult;
 use crate::localization::{MessageId, tr};
@@ -118,10 +118,10 @@ fn format_posture_explainer(app: &App) -> String {
     text.push_str(&tr(
         app.ui_locale,
         match posture {
-            crate::tui::approval::ApprovalMode::Suggest => MessageId::PermissionsPostureAsk,
-            crate::tui::approval::ApprovalMode::Auto => MessageId::PermissionsPostureAuto,
-            crate::tui::approval::ApprovalMode::Bypass => MessageId::PermissionsPostureBypass,
-            crate::tui::approval::ApprovalMode::Never => MessageId::PermissionsPostureNever,
+            ApprovalMode::Suggest => MessageId::PermissionsPostureAsk,
+            ApprovalMode::Auto => MessageId::PermissionsPostureAuto,
+            ApprovalMode::Bypass => MessageId::PermissionsPostureBypass,
+            ApprovalMode::Never => MessageId::PermissionsPostureNever,
         },
     ));
     text.push('\n');

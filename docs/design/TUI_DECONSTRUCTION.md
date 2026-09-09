@@ -1,91 +1,223 @@
 # TUI deconstruction
 
-Stop paying the monolith tax by **consolidating then extracting**, never the reverse. This is the playbook. It is not permission to open a crate per file.
+The deliverable is an independently buildable headless runtime and a terminal
+client of that runtime. Preserve working behavior while moving ownership out
+of `codewhale-tui`. A lower line count alone does not establish the split.
 
-## Invariants (mechanical, every PR)
+## Audited baseline, 2026-09-09
 
-- Runtime-contract receipt (`python3 scripts/measure-runtime-contract.py` / `check-runtime-contract-budget.py`) is **byte-identical** before and after. That is the KV-cache prefix made checkable.
-- `crates/core/tests/single_turn_loop.rs` stays green. There is one turn loop: `Engine::run_turn`. Do not add a second.
-- `BASE_PROMPT` in `crates/tui/src/prompts/text.rs` is the sole base prompt. Tool catalog order is a cache-prefix fact; do not shuffle it as a drive-by.
-- Dead-code / file-size / persistence budgets may go **down**, never up, unless the PR names why.
-- Clippy/fmt + targeted tests via `scripts/dev-test.sh <area> [filter]`. Do not `cargo test --workspace` for a single-area edit.
-- Never merge `#5576` or `#5628`. Never add `target-*` at the repo root.
+Source inspection and offline Cargo metadata at `ce737266683b` found:
 
-## Anti-goal
+| Source | Physical Rust lines |
+| --- | ---: |
+| `crates/tui/src` | 971,321 in 817 files |
+| `crates/tui/src/tui` | 266,378 |
+| `crates/tui/src/tools` | 153,713 |
+| `crates/tui/src/core` | 58,378 |
+| `crates/tui/src/commands` | 60,951 |
+| `crates/tui/src/lib.rs` | 20,327 |
+| All of `crates/core/src` | 5,475 |
 
-No micro-crates. No "extract because the file is large." A new crate exists only when it has **more than one production consumer** already, or when the extraction is the last step of a finished consolidation.
+Counts include comments, blank lines, tests, and source files that may not be
+compiled. Dedicated test-source files account for 191,058 lines within the
+TUI total; additional inline tests remain in other files. The directory named
+`tui` also contains domain logic. These are ownership clues, not production
+LOC, a complete compiler dependency graph, or a language-port estimate.
 
-## Target topology
+The current dependencies explain the blockage:
 
-| Lives in | Owns |
+- CLI imports TUI for runtime dispatch and route preferences.
+- `core/engine.rs` imports approval policy, context thresholds, attachment
+  parsing, and roster construction from `tui/`.
+- `core/events.rs` carries `tui::agent_roster::AgentRosterRow`.
+- `session_manager.rs` persists `tui::file_mention::ContextReference`.
+- `tools/subagent` imports engine policy/catalog functions, and implements
+  its own repeated model-request/tool-result cycle in `run_subagent`.
+- `crates/core` owns request construction and some runtime/session services;
+  the main `Engine::run_turn` remains inside the TUI crate. The comment in
+  `tui/src/core/mod.rs` claiming the engine has moved is incorrect.
+- `core/protocol_parity.rs` exhaustively projects internal operations/events,
+  but explicitly has no production consumers. Reuse or retire it during the
+  migration; its existence does not establish client convergence.
+
+`single_turn_loop.rs` currently counts functions named `run_turn`. It does
+not detect `run_subagent`'s execution cycle. A passing name scan is therefore
+insufficient evidence of one execution implementation.
+
+## Intended ownership
+
+This is the proposed destination, not a claim that the boundaries exist now.
+Reuse existing crates; introduce only the three cohesive runtime libraries
+below, with real consumers and all replaced paths migrated in each slice.
+
+| Owner | Responsibility |
 | --- | --- |
-| `crates/tui` | UI, slash commands, process entry. Target: **&lt;150K lines**. |
-| `crates/mcp`, `crates/tools`, `crates/state` | Grow in place. One MCP client (the rmcp stack). |
-| **new** `codewhale-models` | After catalog/config consolidation (C3): client, one catalog, pricing, credentials, routing. |
-| **Decision A** | Thread store + HTTP automation either becomes `codewhale-runtime` **or** folds into `crates/app-server`. Pick one; do not ship both. |
-| `codewhale-engine` | Extracted **last**. Today the engine still lives in `tui/src/core`. |
+| `codewhale-tui` | Terminal lifecycle, rendering, input, pickers, terminal command presentation. No provider I/O, policy decisions, durable store, or agent loop. |
+| `codewhale-cli` | Argument parsing, launch/composition, headless command presentation. Existing binary names remain compatible. |
+| `codewhale-app-server` | HTTP/SSE and stdio transport adapters over the same runtime. Reconcile the embedded Runtime API and existing app-server; preserve external routes and auth. |
+| New `codewhale-runtime` | Session/thread lifecycle, scheduling, recovery, child supervision, and composition of engine and stores. No model/tool execution loop. Used in process by terminal and server hosts. |
+| New `codewhale-engine` | The shared parent/child execution implementation, context/compaction, tool dispatch, cancellation, approvals, and typed events. |
+| New `codewhale-models` | Provider clients, live catalog/pricing resolution, and model routing against canonical config facts. Consolidate existing `agent` catalog consumers instead of retaining a second seeded registry. |
+| Existing `config`, `secrets`, `execpolicy` | Canonical schema/route identity, credential storage/access, and policy decisions. UI labels stay outside these owners. |
+| Existing `tools`, `mcp`, `hooks` | Tool contracts and implementations, extension transports, and hook execution. Agent/task tools call runtime capabilities; they do not own another agent loop. |
+| Existing `state`, `protocol`, `core` | Persistence, shared wire/domain records, and request construction. Move the existing core runtime service owner into the runtime library as its callers migrate. |
 
-`crates/core` already owns request construction, bounded fragments, and thread/session types. It does not run turns. Do not rename it as a substitute for extracting the engine.
+Dependency direction: terminal/server -> runtime -> engine -> provider/tool
+implementations and shared lower-level crates. Tools must not import the
+concrete engine or runtime host. Use narrow service capabilities at the
+composition boundary where a tool needs scheduling or agent control; do not
+introduce a generic service-locator framework or a trait for every helper.
 
-## Sequencing
+The TUI can retain in-process channels through the existing `EngineHandle`,
+`Op`, and `Event` seams. HTTP remains a transport for external clients, not a
+mandatory hop for local terminal use. Keep wire DTOs separate from internal
+operations containing reply channels or resolved capabilities.
 
-### Phase 0 — preconditions (do these first; they are the audit's C1–C4)
+## Model judgment and test-time compute
 
-Never extract a crate before these finish. Extraction-before-consolidation relocates the mess.
+Founder clarification, September 9: the harness should let the model decide
+when a goal, plan, delegation, further investigation, or verification is useful.
+Provide enough reasoning and tool-feedback opportunities for that judgment.
+Do not interpret unwanted automatic goals as a request to forbid inferred goals.
 
-1. **C1 MCP unification** — one client. Move the rmcp stack down, delete the hand-rolled stdio client.
-2. **C2 Config mirror deletion** — one schema crate owns `config.toml`. TUI's `Config` becomes a resolved view. One struct pair per PR.
-3. **C3 Model-facts unification** — config crate catalog is the single source. Delete the seeded `model_registry` table and its drift-guard test. Prices become data.
-4. **C4 Test-giant migration** — move the six `>10K` `tests.rs` files out via the existing `#[path = "tests/..."]` pattern. Test count identical before/after.
+The current goal path has conflicting authorities: `operate_goal_from_prompt`
+classifies an instruction with verb/question heuristics before inference, while
+`CreateGoalTool::description` tells the model to require explicit goal requests.
+`runtime_handoff` additionally tells the model the host already created a goal.
+Those three policies must become one model-facing contract with runtime-owned
+state transitions. Explicit `/goal` commands remain a direct user control.
 
-Off-ramp: stop after Phase 0 if that is all 0.9.12 can hold. That is a legitimate ship.
+Reference inspection was local, not a claim about every upstream version:
 
-### Phase 1 — dismember `lib.rs` intra-crate
+| Snapshot | Useful evidence |
+| --- | --- |
+| Codex `45eec73b11` (2026-09-09) | `ext/goal/src/spec.rs` leaves goal tool selection to the model but instructs explicit user/system intent. Base instructions let the model choose when planning helps. Goal state and continuation live outside the terminal renderer. |
+| Kimi Code `1414d4602` (2026-08-13; older snapshot) | `agent-core` exposes `CreateGoal` with completion criteria and a separate reusable turn loop. Creation guidance accepts explicit autonomous-outcome requests or host goal intake. Thinking effort is mapped against model capabilities. |
+| DSH `c389f96bf3` (2026-09-08) | `goal/tool-goal` explicitly permits inferring a long-running objective from a direct human request. Execution validates top-level human-turn provenance and exact state revisions. Goal state, goal tools, and continuation scheduling are separate consumers. |
 
-Stay inside `crates/tui`. Follow `scripts/command-migration-topology.json`. Order: `cli_args` → `doctor` → subcommands → tests out.
+DSH most directly matches the requested goal discretion. Its runtime validates
+who may mutate state; the model judges whether persistence benefits the task.
+Codewhale should preserve that distinction without copying DSH's package count.
 
-Gate: `crates/tui/src/lib.rs` **&lt; 2,000 lines**.
+Implementation packet, to coordinate separately from mechanical extraction:
 
-### Phase 2 — leaf extractions, fewest-dependents first
+1. Remove host-side semantic goal classification. Present the request, session
+   state, tools, and existing goal to the model before deciding on persistence.
+2. Revise the existing goal-tool and Operate guidance together: infer a goal
+   when the requested outcome warrants durable continuation and has a useful
+   completion criterion; answer, investigate, or perform ordinary multi-step
+   work without a goal when that suffices. Honor corrections and opt-outs.
+   Explicit user controls and model actions use the same goal state owner.
+3. Treat test-time compute as reasoning effort, useful tool-feedback rounds,
+   and evidence-driven revision. `auto_reasoning::select` currently chooses
+   effort using message keywords; this is another semantic heuristic to
+   replace. Preserve explicit route/effort choices. Let the lead allocate
+   supported effort and execution budgets to work, with additional effort
+   requested for later steps when new evidence makes that useful. Reuse
+   `RequestTuning` and existing runtime/tool contracts; do not add an
+   always-on classifier or a second agent loop ahead of every prompt.
+4. Keep accounting, supported provider limits, permission checks, input
+   provenance, durable state, and cancellation in Rust. Emit current state,
+   remaining authorized resources, and tool/test results as compact feedback.
+   A goal does not grant new spend or execution authority. Preserve the pinned
+   prefix and append changing feedback to history.
+5. Qualify judgment with model-driven sessions, not only deterministic mocks.
+   Compare matched tasks at explicit effort/resource settings: a greeting,
+   architecture discussion, one-file repair, large migration, unrelated followup,
+   mid-run correction, false success evidence, cancellation, and repeated
+   failure. Judge objective quality, useful continuation, task completion,
+   verification quality, latency, tokens/cost, and correct stopping. Do not
+   score a run better merely for creating a goal or taking more steps.
 
-Always **two PRs per extraction**:
+Start with the existing model's ordinary reasoning/tool loop. Add independent
+review or multiple candidate attempts only where measured failures and task
+stakes justify the extra compute. No model-evaluation runs, provider spend, or
+performance gains were established by this source audit.
 
-1. Pure `git mv` + re-export shims. Zero logic edits. Receipt identical.
-2. Repoint consumers, delete shims, `cargo machete`. Shims get a removal issue at merge.
+## Implementation order
 
-Never mix a move with an edit.
+Every packet names the predecessor, all consumers, changed dependency edges,
+and its verification. One owner handles shared manifests and integration.
+Keep unrelated active work intact; follow the current workspace authority.
 
-### Phase 3 — engine last
+1. **Remove upward domain dependencies.** Finish the existing `AppMode` and
+   `ApprovalMode` migration by pointing runtime consumers at their actual
+   `config`/`execpolicy` owners. Move durable context-reference records out of
+   file-mention UI; retain composer completion there. Separate worker receipt
+   data from roster glyphs/layout. Move reasoning preference and approval
+   policy out of UI modules, preserving exact route/credential identity.
+   `ApiProvider` and `ProviderKind` currently differ for legacy table identity;
+   do not replace one with the other through a lossy cast.
+2. **Extract provider and tool foundations by cohesive subsystem.** Consolidate
+   config schema and catalog facts as each affected consumer migrates. Move
+   provider adapters with their tests into `codewhale-models`; reuse the
+   existing model-client seam. Grow `tools`, `mcp`, `hooks`, and `state` in
+   place. Move ordinary file/shell/MCP capabilities first. Leave agent
+   orchestration with the execution owner until step 3; moving all of
+   `tools/subagent` into a leaf tool crate would preserve a dependency cycle.
+3. **Converge parent and child execution.** Inventory and preserve child
+   budgets, route pins, permissions, tool activation, steering, parking,
+   checkpoints, nested work, and terminal fan-in. Adapt children to the
+   existing engine, then remove the old child model/tool cycle. Use actual
+   parent/child call-path and behavior evidence; the function-name guard
+   alone is not acceptance. Do not couple this semantic migration with the
+   mechanical engine file move.
+4. **Move the engine and shared host.** Once the runtime-to-UI dependencies
+   are gone, move the existing execution implementation into
+   `codewhale-engine`, with its owning unit tests. Establish one runtime host
+   for terminal, exec, server, scheduling, and recovery. Migrate the existing
+   core runtime and thread-manager consumers fully, preserving on-disk
+   formats, replay cursors, locks, authority, and exact-once terminal events.
+   No second runtime store or speculative replacement turn loop.
+5. **Finish the clients.** Fold the embedded HTTP API into the existing
+   app-server transport surface over `codewhale-runtime`. Move argument parsing
+   and headless command presentation out of TUI `lib.rs` into CLI. Slash
+   commands retain presentation in TUI and call the same runtime operations.
+   Prune dependencies, temporary re-exports, and obsolete implementations.
+   Only then resize remaining UI files according to actual responsibilities.
 
-Extract `Engine` / `run_turn` only after C4 (suite builds fast) and after the leaves are gone. Freeze behavior with the existing runtime-contract receipt. Introduce `TurnLoopState` as a field grouping, not a second loop.
+The first bounded source packet is step 1's existing mode imports and durable
+context-reference records, including every caller. Subsequent packets are
+chosen from the remaining dependency graph, not from a target crate count.
 
-Off-ramp after "2e" (leaves extracted, engine still in tui) is allowed.
+Moving a definition and repointing its internal callers belong to one complete
+packet. Mechanical movement and behavioral changes should remain separately
+reviewable, but do not land temporary re-export shims with their last consumers
+left for an unspecified future migration. Keep shims only for genuine external
+compatibility contracts and identify that contract.
 
-## Contributor loop (already exists — do not add a second script)
+## Verification and completion
 
-```sh
-./scripts/dev-test.sh config
-./scripts/dev-test.sh tui session_metrics::
-./scripts/dev-test.sh tui-integration
-./scripts/dev-test.sh crates/tui/src/elapsed.rs
-```
+- Preserve the model-facing runtime receipt, prompt/cache-prefix semantics,
+  tool names/order, serialized records, and public commands for mechanical
+  moves. A deliberate behavior fix names and tests the intended difference.
+- Move private unit tests with their implementation. A `#[path]` module split
+  remains in the same compilation unit; it does not reduce the test binary or
+  establish faster builds. Do not make internals public just to relocate tests.
+- Exercise local mock-provider parent and child turns, tool approval and
+  denial, streaming, cancel/steer, explicit goals, pause/resume, reconnect,
+  restart recovery, and terminal fan-in at the affected boundaries.
+- Goal persistence is independent of Plan/Act/Operate. Let the model decide
+  when persistent tracking benefits the requested work, using context and
+  adequate reasoning time. Remove the host verb heuristic; do not replace it
+  with a blanket explicit-command-only restriction. Explicit user opt-outs,
+  cancellation, and authorized resource limits remain binding.
+- The headless runtime and its tests must build with **no transitive dependency
+  on `codewhale-tui`, ratatui, or crossterm**. Desktop and terminal consume the
+  same lifecycle and execution authority.
+- Measure warmed edit/build/test cycles and peak memory for a provider edit,
+  tool edit, terminal-renderer edit, and locale edit before and after. Record
+  compiler/profile/features/cache state. A leaf change must not recompile the
+  unrelated TUI library test unit to run that leaf's own tests. Relinking a
+  final application is a separate cost; no unmeasured speedup promises.
+- Use existing `scripts/dev-test.sh` / `scripts/dev-cargo.sh` and focused checks
+  during packets. Integration uses the required repository gates with actual
+  counts. Local tests, full gates, hosted CI, installed artifacts, and PTY
+  behavior remain separate evidence. Follow the workspace's human gates for
+  publication, deploys, and spend.
 
-- Incremental by default. Isolated build-dir via `scripts/dev-cache.sh`.
-- Prints the exact `cargo` / `nextest` command (`+ cargo …`).
-- `CODEWHALE_DEV_NEXTEST=0` forces libtest. There is no `CARGO_INCREMENTAL=0` requirement for ordinary targeted work.
-- `--lib` does not cover `crates/tui/tests/`. Use `tui-integration` / `tui-cucumber`.
-- Full CI remains the release gate. Local `tui` is `--lib` on purpose.
-
-If a `tui full` alias is needed, add it to **this** script, not a new one.
-
-## Providers (OMP / OpenCode, not a new enum)
-
-Hosted OpenAI Chat Completions backends (Baseten, Groq, Cerebras, SenseNova) are **data rows** in `crates/config/src/provider_templates.rs` (`ProviderSetupApply::Compatible`). They persist as `[providers.<id>] kind = "openai-compatible"`. They do **not** get a `ProviderKind` / `ApiProvider` variant.
-
-Add a new hosted Chat Completions host by appending one template (id, URL, env, default model, docs). Enum variants stay for distinct **wires**: Anthropic Messages, Codex Responses, Google thought signatures, OAuth-only import.
-
-OMP does the same: one catalog descriptor + one auth file. OpenCode does models.dev + named `provider` config + plugins. Neither adds a 15-arm match.
-
-## Recipe reminder
-
-Add a layer only when the PR **names or deletes** the layer it replaces. Before adding `model_*`, `*_config`, `provider_*`, or anything that "bridges" / "mirrors" / "stages", grep the existing thing and edit it.
+`docs/BUILD_PERFORMANCE.md` retains historical measurements. Its older B3 and
+micro-crate candidate lists are superseded by this dependency-led sequence.
+The old all-at-once preconditions, test-file-move speed claim, and mandatory
+uncompleted two-PR shim sequence are retired. A paused migration reports the
+remaining monolith and unresolved consumers explicitly.

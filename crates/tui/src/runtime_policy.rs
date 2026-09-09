@@ -7,8 +7,8 @@
 
 use anyhow::{Result, bail};
 
-use crate::tui::app::AppMode;
-use crate::tui::approval::ApprovalMode;
+use codewhale_config::AppMode;
+use codewhale_execpolicy::ApprovalMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RuntimePolicyProjection {

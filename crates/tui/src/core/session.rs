@@ -6,8 +6,8 @@ use crate::models::{Message, SystemPrompt, Usage};
 use crate::prefix_cache::PrefixStabilityManager;
 use crate::project_context::{ProjectContext, load_project_context_with_parents};
 use crate::prompt_zones::{AppendLog, FrozenPrefix};
-use crate::tui::approval::ApprovalMode;
 use crate::working_set::WorkingSet;
+use codewhale_execpolicy::ApprovalMode;
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 

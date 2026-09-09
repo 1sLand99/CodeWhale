@@ -17,6 +17,7 @@ use crate::models::{CacheControl, ContentBlock, Message, SystemPrompt, Tool};
 use crate::prompts::{CORE_EXECUTION_PROFILE_PROMPT, Personality};
 use crate::route_budget::route_context_window_tokens;
 use crate::tui::app::App;
+use codewhale_config::AppMode;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PromptSourceMap {
@@ -336,7 +337,7 @@ pub fn build_headless_context_report(config: &Config, workspace: &Path) -> Promp
         config.project_context_pack_enabled(),
         config.skills_config().scan_codewhale_only(),
         "en",
-        crate::tui::app::AppMode::Agent,
+        AppMode::Agent,
         None,
         Some(context_window.tokens),
     );
@@ -401,7 +402,7 @@ fn base_source_entries(
     project_pack_enabled: bool,
     skills_scan_codewhale_only: bool,
     locale_tag: &str,
-    mode: crate::tui::app::AppMode,
+    mode: AppMode,
     plugin_registry: Option<&crate::plugins::PluginRegistry>,
     context_window_tokens: Option<u32>,
 ) -> ReportBuilder {

@@ -8,8 +8,8 @@ use super::CommandResult;
 use crate::compaction::estimate_input_tokens_conservative;
 use crate::localization::{Locale, MessageId, tr};
 use crate::tui::app::{App, AppModeUi};
-use crate::tui::approval::ApprovalMode;
 use crate::utils::{display_path, estimate_message_chars};
+use codewhale_execpolicy::ApprovalMode;
 
 /// Show a compact runtime status report for the current TUI session.
 pub fn status(app: &mut App) -> CommandResult {
@@ -861,7 +861,7 @@ mod tests {
             assert!(agent.contains("sandbox workspace-write, network off"));
         }
 
-        app.approval_mode = crate::tui::approval::ApprovalMode::Bypass;
+        app.approval_mode = ApprovalMode::Bypass;
         let full_access = format_status(&app);
         assert!(full_access.contains("sandbox disabled, network unrestricted"));
 

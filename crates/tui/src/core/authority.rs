@@ -9,9 +9,9 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::sandbox::SandboxPolicy;
 use crate::tools::spec::{ApprovalRequirement, normalize_path};
-use crate::tui::app::AppMode;
-use crate::tui::approval::ApprovalMode;
 use crate::worker_profile::ShellPolicy;
+use codewhale_config::AppMode;
+use codewhale_execpolicy::ApprovalMode;
 
 use super::ops::UserInputProvenance;
 

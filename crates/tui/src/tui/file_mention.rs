@@ -25,8 +25,6 @@ use std::fmt::Write;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
-
 use crate::tui::app::{App, MentionCompletionCache};
 use crate::tui::git_mention::{self, GitMentionCache, GitMentionKind};
 use crate::tui::mention_completion::{MentionDiscoveryBehavior, MentionDiscoveryKey};
@@ -57,46 +55,10 @@ pub struct FileMentionPreview {
 }
 
 /// Durable, compact metadata for a user-visible context reference.
-///
-/// The transcript keeps the user's compact text (`@path` or `[Attached ...]`)
-/// readable. This record preserves the exact target and inclusion state for
-/// the context inspector and for session resume without leaking raw metadata
-/// into the visible history cell.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextReference {
-    pub kind: ContextReferenceKind,
-    pub source: ContextReferenceSource,
-    /// Short badge for terminal display, e.g. `file`, `dir`, `image`.
-    pub badge: String,
-    /// Compact display label from the transcript, without the leading `@`.
-    pub label: String,
-    /// Resolved target path or URI-equivalent string.
-    pub target: String,
-    pub included: bool,
-    pub expanded: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextReferenceKind {
-    File,
-    Directory,
-    Missing,
-    Unsupported,
-    MediaMention,
-    MediaAttachment,
-    /// `@git` / `@diff` — curated git context rather than a path (#4067).
-    GitContext,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextReferenceSource {
-    AtMention,
-    Attachment,
-}
+pub use codewhale_core::{
+    ContextReference, ContextReferenceKind, ContextReferenceSource, MediaAttachmentReference,
+    media_attachment_references,
+};
 
 // ---------------------------------------------------------------------------
 //  Tab-completion
@@ -744,47 +706,6 @@ fn context_reference_for_mention(
         expanded: true,
         detail: detail.or_else(|| Some(display_path.to_string())),
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MediaAttachmentReference {
-    pub kind: String,
-    pub path: String,
-    pub start_byte: usize,
-    pub end_byte: usize,
-}
-
-pub fn media_attachment_references(input: &str) -> Vec<MediaAttachmentReference> {
-    let mut out = Vec::new();
-    let mut offset = 0usize;
-    for line in input.split_inclusive('\n') {
-        let start_byte = offset;
-        let end_byte = offset + line.len();
-        offset = end_byte;
-        let trimmed = line.trim();
-        let Some(body) = trimmed
-            .strip_prefix("[Attached ")
-            .and_then(|value| value.strip_suffix(']'))
-        else {
-            continue;
-        };
-        let Some((kind, rest)) = body.split_once(": ") else {
-            continue;
-        };
-        let path = rest
-            .rsplit_once(" at ")
-            .map_or(rest, |(_, path)| path)
-            .trim();
-        if !path.is_empty() {
-            out.push(MediaAttachmentReference {
-                kind: kind.trim().to_string(),
-                path: path.to_string(),
-                start_byte,
-                end_byte,
-            });
-        }
-    }
-    out
 }
 
 fn extract_media_attachment_references(input: &str) -> Vec<MediaAttachmentReference> {

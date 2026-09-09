@@ -15,7 +15,7 @@ use crate::models::ContentBlock;
 use crate::tui::app::WORKFLOW_DRAFT_INSTRUCTION_PREFIX;
 use crate::tui::app::{App, AppAction, AppMode};
 #[cfg(test)]
-use crate::tui::approval::ApprovalMode;
+use codewhale_execpolicy::ApprovalMode;
 
 use super::CommandResult;
 

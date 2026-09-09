@@ -13664,8 +13664,8 @@ pub(crate) fn stub_runtime() -> SubAgentRuntime {
         parent_agent_id: None,
         parent_completion_tx: None,
         fork_context: None,
-        parent_mode: crate::tui::app::AppMode::Agent,
-        approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+        parent_mode: AppMode::Agent,
+        approval_mode: ApprovalMode::Suggest,
         auto_review_policy: std::sync::Arc::new(
             crate::tui::auto_review::AutoReviewPolicy::default(),
         ),
@@ -13683,7 +13683,7 @@ pub(crate) fn stub_runtime() -> SubAgentRuntime {
 #[test]
 fn root_operate_dispatch_delegates_file_edits_without_bypassing_required_tools() {
     let mut runtime = stub_runtime();
-    runtime.parent_mode = crate::tui::app::AppMode::Operate;
+    runtime.parent_mode = AppMode::Operate;
     assert!(!runtime.accept_edits);
     assert!(!runtime.accept_verification);
     assert!(!runtime.context.auto_approve);
@@ -13716,7 +13716,7 @@ async fn root_operate_dispatch_delegates_builtin_verification_but_not_shell() {
     let mut runtime = stub_runtime();
     runtime.context = ToolContext::new(tmp.path().to_path_buf());
     runtime.context.auto_approve = false;
-    runtime.parent_mode = crate::tui::app::AppMode::Operate;
+    runtime.parent_mode = AppMode::Operate;
     apply_session_spawn_defaults(&mut runtime);
     let registry = SubAgentToolRegistry::new(
         runtime.clone(),
@@ -18693,7 +18693,7 @@ async fn read_only_web_evidence_keeps_the_parent_approval_gate() {
         let mut runtime =
             stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
         runtime.context = ToolContext::new(tmp.path());
-        runtime.approval_mode = crate::tui::approval::ApprovalMode::Never;
+        runtime.approval_mode = ApprovalMode::Never;
         runtime.worker_profile = WorkerRuntimeProfile::for_role(role.clone());
         runtime.worker_profile.permissions.network = true;
         let registry = SubAgentToolRegistry::new(
@@ -21022,7 +21022,6 @@ mod child_permission_gate {
     use super::*;
     use crate::approval_log::{ApprovalOutcome, ApprovalReceipt, ApprovalReceiptStore};
     use crate::core::events::{Event, ToolGate, ToolGateVerdict};
-    use crate::tui::approval::ApprovalMode;
 
     /// A Worker registry with `bash` available, the given posture installed,
     /// and an event channel so gate receipts and prompts can be observed.

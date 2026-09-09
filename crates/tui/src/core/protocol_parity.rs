@@ -44,8 +44,8 @@ use crate::tools::spec::ToolError;
 use crate::tools::subagent::AgentWorkerStatus;
 use crate::tools::user_input::UserInputRequest;
 use crate::tui::agent_roster::{AgentRosterRow, RosterState};
-use crate::tui::app::AppMode;
-use crate::tui::approval::ApprovalMode;
+use codewhale_config::AppMode;
+use codewhale_execpolicy::ApprovalMode;
 use codewhale_protocol::ResponseChannel;
 
 /// Routing ids the engine does not carry on each event; the emitter supplies

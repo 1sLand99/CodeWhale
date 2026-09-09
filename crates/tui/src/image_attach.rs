@@ -593,7 +593,7 @@ pub struct ExpandedAttachments {
 /// sent, with the failure stated in-band rather than swallowed.
 #[must_use]
 pub fn expand_attachment_blocks(text: &str) -> ExpandedAttachments {
-    let references = crate::tui::file_mention::media_attachment_references(text);
+    let references = codewhale_core::media_attachment_references(text);
     let mut out = ExpandedAttachments::default();
     for reference in references {
         if reference.kind != "image" {
