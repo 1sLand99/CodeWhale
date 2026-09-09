@@ -866,7 +866,7 @@ async fn drive_engine_turn(
 ) -> TaskExecutionResult {
     let mut subscription = runtime_threads.subscribe_events();
     let mut guard = ExecutionGuard::new(limits, Instant::now());
-    let mut final_text = String::new();
+    let mut final_text = RuntimeTaskOutput::default();
     let mut cursor = 0u64;
     let mut terminal_status: Option<RuntimeTurnStatus> = None;
     let mut terminal_error: Option<String> = None;
@@ -883,7 +883,7 @@ async fn drive_engine_turn(
             Err(err) => {
                 return TaskExecutionResult {
                     status: TaskStatus::Failed,
-                    result_text: optional_nonzero_text(final_text),
+                    result_text: final_text.into_result(true),
                     error: Some(format!("Failed to read runtime events: {err}")),
                     terminal_reason: TaskTerminalReason::Failed,
                 };
@@ -930,7 +930,7 @@ async fn drive_engine_turn(
                 guard.note_interrupt(Instant::now(), reason);
             }
             GuardAction::Terminalize { reason } => {
-                return TaskExecutionResult::from_reason(reason, optional_nonzero_text(final_text));
+                return TaskExecutionResult::from_reason(reason, final_text.into_result(true));
             }
             GuardAction::Run { wait } => {
                 if more_pending {
@@ -948,20 +948,20 @@ async fn drive_engine_turn(
     let result = match terminal_status.unwrap_or(RuntimeTurnStatus::Failed) {
         RuntimeTurnStatus::Completed => TaskExecutionResult {
             status: TaskStatus::Completed,
-            result_text: optional_nonzero_text(final_text),
+            result_text: final_text.into_result(false),
             error: None,
             terminal_reason: TaskTerminalReason::Completed,
         },
         RuntimeTurnStatus::Interrupted | RuntimeTurnStatus::Canceled => TaskExecutionResult {
             status: TaskStatus::Canceled,
-            result_text: optional_nonzero_text(final_text),
+            result_text: final_text.into_result(true),
             error: None,
             terminal_reason: TaskTerminalReason::Canceled,
         },
         RuntimeTurnStatus::Queued | RuntimeTurnStatus::InProgress | RuntimeTurnStatus::Failed => {
             TaskExecutionResult {
                 status: TaskStatus::Failed,
-                result_text: optional_nonzero_text(final_text),
+                result_text: final_text.into_result(true),
                 error: terminal_error
                     .or_else(|| Some(TaskTerminalReason::Failed.receipt_message())),
                 terminal_reason: TaskTerminalReason::Failed,
@@ -983,6 +983,22 @@ fn optional_nonzero_text(text: String) -> Option<String> {
     }
 }
 
+/// A task result is the last message, not concatenated progress commentary.
+/// Only interrupted/failed execution may return a still-streaming message.
+#[derive(Default)]
+struct RuntimeTaskOutput {
+    text: String,
+    completed: bool,
+}
+
+impl RuntimeTaskOutput {
+    fn into_result(self, allow_partial: bool) -> Option<String> {
+        (self.completed || allow_partial)
+            .then(|| optional_nonzero_text(self.text))
+            .flatten()
+    }
+}
+
 fn append_message_delta(result_text: &mut String, event: &TaskExecutionEvent) {
     if let TaskExecutionEvent::MessageDelta { content } = event {
         result_text.push_str(content);
@@ -998,7 +1014,7 @@ fn runtime_event_is_progress(event: &RuntimeEventRecord) -> bool {
 
 async fn ingest_runtime_event(
     event: &RuntimeEventRecord,
-    final_text: &mut String,
+    final_text: &mut RuntimeTaskOutput,
     events: &mpsc::Sender<TaskExecutionEvent>,
 ) -> Option<(RuntimeTurnStatus, Option<String>)> {
     emit_task_event(
@@ -1020,7 +1036,8 @@ async fn ingest_runtime_event(
                 .unwrap_or_default();
             if kind == "agent_message" {
                 if let Some(content) = event.payload.get("delta").and_then(Value::as_str) {
-                    final_text.push_str(content);
+                    final_text.text.push_str(content);
+                    final_text.completed = false;
                     emit_task_event(
                         events,
                         TaskExecutionEvent::MessageDelta {
@@ -1048,6 +1065,10 @@ async fn ingest_runtime_event(
             None
         }
         "item.started" => {
+            if event.payload.pointer("/item/kind").and_then(Value::as_str) == Some("agent_message")
+            {
+                *final_text = RuntimeTaskOutput::default();
+            }
             if let Some(tool) = event.payload.get("tool") {
                 let id = tool
                     .get("id")
@@ -1068,26 +1089,40 @@ async fn ingest_runtime_event(
             if let Some(item) = event.payload.get("item") {
                 let kind = item.get("kind").and_then(Value::as_str).unwrap_or_default();
                 if kind == "tool_call" || kind == "file_change" || kind == "command_execution" {
-                    let id = item
-                        .get("id")
+                    let metadata = item.get("metadata");
+                    // Starts carry the provider call ID; item.id is Runtime's
+                    // separate receipt ID. Runtime preserves the call identity
+                    // in terminal metadata, including errors and redacted input.
+                    let id = metadata
+                        .and_then(|meta| {
+                            meta.get("tool_result_for")
+                                .or_else(|| meta.get("tool_use_id"))
+                                .or_else(|| meta.get("tool_call_id"))
+                        })
                         .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                        .or_else(|| item.get("id").and_then(Value::as_str))
                         .unwrap_or_default()
                         .to_string();
-                    let name = item
-                        .get("summary")
+                    let name = metadata
+                        .and_then(|meta| meta.get("tool_name"))
                         .and_then(Value::as_str)
-                        .unwrap_or("tool")
-                        .split(':')
-                        .next()
-                        .unwrap_or("tool")
-                        .trim()
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or_else(|| {
+                            item.get("summary")
+                                .and_then(Value::as_str)
+                                .unwrap_or("tool")
+                                .split(':')
+                                .next()
+                                .unwrap_or("tool")
+                                .trim()
+                        })
                         .to_string();
                     let output = item
                         .get("detail")
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string();
-                    let metadata = item.get("metadata").cloned();
                     emit_task_event(
                         events,
                         TaskExecutionEvent::ToolCompleted {
@@ -1095,10 +1130,20 @@ async fn ingest_runtime_event(
                             name,
                             success: event.event == "item.completed",
                             output,
-                            metadata,
+                            metadata: metadata.cloned(),
                         },
                     )
                     .await;
+                } else if kind == "agent_message" {
+                    // The completed item is authoritative even when catch-up
+                    // did not receive its deltas. Replacing avoids duplication.
+                    final_text.text = item
+                        .get("detail")
+                        .and_then(Value::as_str)
+                        .or_else(|| item.get("summary").and_then(Value::as_str))
+                        .unwrap_or_default()
+                        .to_string();
+                    final_text.completed = event.event == "item.completed";
                 } else if kind == "status" {
                     let message = item
                         .get("detail")
@@ -5054,6 +5099,176 @@ mod tests {
         while rx.recv().await.is_some() {}
     }
 
+    struct RuntimeProjectionExecutor(Vec<(&'static str, Value)>);
+
+    #[async_trait]
+    impl TaskExecutor for RuntimeProjectionExecutor {
+        async fn execute(
+            &self,
+            _task: ExecutionTask,
+            events: mpsc::Sender<TaskExecutionEvent>,
+            cancel: CancellationToken,
+        ) -> TaskExecutionResult {
+            let runtime = test_runtime_manager().await.expect("fixture runtime");
+            let thread = runtime
+                .create_thread(CreateThreadRequest::default())
+                .await
+                .expect("fixture thread");
+            for (event, payload) in &self.0 {
+                runtime
+                    .emit_event_for_test(
+                        &thread.id,
+                        Some("turn_projection"),
+                        event,
+                        payload.clone(),
+                    )
+                    .await
+                    .expect("persist fixture runtime event");
+            }
+            drive_engine_turn(
+                &runtime,
+                &thread.id,
+                "turn_projection",
+                events,
+                cancel,
+                TaskExecutionLimits::default(),
+            )
+            .await
+        }
+    }
+
+    async fn project_runtime_task(events: Vec<(&'static str, Value)>) -> Result<TaskRecord> {
+        let root = tempfile::tempdir()?;
+        let manager = TaskManager::start_with_executor(
+            test_config(root.path().to_path_buf()),
+            Arc::new(RuntimeProjectionExecutor(events)),
+        )
+        .await?;
+        let task = manager
+            .add_task(NewTaskRequest::from_prompt("runtime projection fixture"))
+            .await?;
+        wait_for_terminal_state(&manager, &task.id, Duration::from_secs(10)).await?;
+        manager.shutdown_and_wait().await?;
+        // Assert the durable task projection, not just an adapter event.
+        let path = root.path().join("tasks").join(format!("{}.json", task.id));
+        Ok(serde_json::from_slice(&fs::read(path)?)?)
+    }
+
+    #[tokio::test]
+    async fn runtime_task_projection_preserves_provider_ids_and_terminal_tool_statuses()
+    -> Result<()> {
+        let mut events = Vec::new();
+        for (item, provider) in [
+            ("item_a", "call_a"),
+            ("item_b", "call_b"),
+            ("item_c", "call_c"),
+        ] {
+            events.push((
+                "item.started",
+                json!({
+                    "item": { "id": item, "kind": "tool_call" },
+                    "tool": { "id": provider, "name": "read", "input": {} }
+                }),
+            ));
+        }
+        // Parallel same-name calls finish out of order. Success preserves
+        // tool_result_for; errors retain tool_use_id; redaction uses tool_call_id.
+        for (item, provider, identity_key, terminal) in [
+            ("item_c", "call_c", "tool_use_id", "item.failed"),
+            ("item_b", "call_b", "tool_call_id", "item.completed"),
+            ("item_a", "call_a", "tool_result_for", "item.completed"),
+        ] {
+            events.push((
+                terminal,
+                json!({ "item": {
+                    "id": item, "kind": "tool_call", "summary": "redacted receipt",
+                    "detail": format!("result for {provider}"),
+                    "metadata": { identity_key: provider, "tool_name": "read" }
+                }}),
+            ));
+        }
+        // Old event shapes with no metadata retain their existing identity.
+        events.extend([
+            ("item.started", json!({ "tool": { "id": "legacy", "name": "read", "input": {} } })),
+            ("item.completed", json!({ "item": { "id": "legacy", "kind": "tool_call", "summary": "read: ok", "detail": "ok" } })),
+            ("turn.completed", json!({ "turn": { "status": "completed" } })),
+        ]);
+        let task = project_runtime_task(events).await?;
+        assert_eq!(task.status, TaskStatus::Completed);
+        assert_eq!(task.tool_calls.len(), 4);
+        for (call, expected_id, expected_status) in [
+            (&task.tool_calls[0], "call_a", TaskToolStatus::Success),
+            (&task.tool_calls[1], "call_b", TaskToolStatus::Success),
+            (&task.tool_calls[2], "call_c", TaskToolStatus::Failed),
+            (&task.tool_calls[3], "legacy", TaskToolStatus::Success),
+        ] {
+            assert_eq!(call.id, expected_id);
+            assert_eq!(call.status, expected_status);
+            assert!(call.ended_at.is_some());
+            assert!(call.duration_ms.is_some());
+        }
+        assert_eq!(
+            task.tool_calls[0].output_summary.as_deref(),
+            Some("result for call_a")
+        );
+        assert_eq!(
+            task.tool_calls[2].output_summary.as_deref(),
+            Some("result for call_c")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_task_projection_uses_last_completed_message_without_delta_duplication()
+    -> Result<()> {
+        let commentary = "Checking fixture state. ".repeat(20);
+        let task = project_runtime_task(vec![
+            ("item.started", json!({ "item": { "id": "commentary", "kind": "agent_message" } })),
+            ("item.delta", json!({ "kind": "agent_message", "delta": commentary })),
+            ("item.completed", json!({ "item": { "id": "commentary", "kind": "agent_message", "detail": commentary } })),
+            ("item.started", json!({ "item": { "id": "final", "kind": "agent_message" } })),
+            ("item.delta", json!({ "kind": "agent_message", "delta": "NOTHING_" })),
+            ("item.completed", json!({ "item": { "id": "final", "kind": "agent_message", "detail": "NOTHING_TO_REPORT" } })),
+            ("turn.completed", json!({ "turn": { "status": "completed" } })),
+        ]).await?;
+        assert_eq!(task.result_summary.as_deref(), Some("NOTHING_TO_REPORT"));
+        assert!(task.result_detail_path.is_none());
+        assert!(
+            task.timeline.iter().any(|entry| entry.kind == "message"
+                && entry.summary.starts_with("Checking fixture state."))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_task_projection_preserves_partial_output_only_for_unfinished_results()
+    -> Result<()> {
+        for (status, expected) in [
+            ("interrupted", "partial final"),
+            ("failed", "partial final"),
+            ("completed", "(no textual output)"),
+        ] {
+            let task = project_runtime_task(vec![
+                (
+                    "item.completed",
+                    json!({ "item": { "kind": "agent_message", "detail": "earlier commentary" } }),
+                ),
+                (
+                    "item.started",
+                    json!({ "item": { "kind": "agent_message" } }),
+                ),
+                (
+                    "item.delta",
+                    json!({ "kind": "agent_message", "delta": "partial final" }),
+                ),
+                ("turn.completed", json!({ "turn": { "status": status } })),
+            ])
+            .await?;
+            assert_eq!(task.result_summary.as_deref(), Some(expected), "{status}");
+        }
+        Ok(())
+    }
+
     #[tokio::test]
     async fn engine_turn_without_terminal_event_idle_times_out() -> Result<()> {
         let runtime = test_runtime_manager().await?;
@@ -5199,7 +5414,7 @@ mod tests {
         // #5931: the runtime's own store fault lands in the task timeline,
         // and a terminal one stops the driver instead of idling it out.
         let (tx, mut rx) = mpsc::channel(8);
-        let mut final_text = String::new();
+        let mut final_text = RuntimeTaskOutput::default();
         let path = "/tmp/runtime/turns/turn_store.json";
         let event = RuntimeEventRecord {
             schema_version: 1,
