@@ -9360,7 +9360,14 @@ fn first_run_ollama_choice_survives_restart_from_canonical_config() {
     app.finish_onboarding_without_feature_intro();
     drop(app);
     let restart_config = Config::load(Some(config_path), None).expect("reload restart config");
-    let restarted = Box::new(App::new(create_test_options(), &restart_config));
+    // The CLI builds TuiOptions.model from Config::default_model. The generic
+    // test helper instead pins an explicit DeepSeek model for other UI tests.
+    let options = TuiOptions {
+        model: restart_config.default_model(),
+        ..create_test_options()
+    };
+    assert_eq!(options.model, crate::config::DEFAULT_OLLAMA_MODEL);
+    let restarted = Box::new(App::new(options, &restart_config));
     assert_eq!(restarted.api_provider, ApiProvider::Ollama);
     assert_eq!(restarted.model, crate::config::DEFAULT_OLLAMA_MODEL);
     assert_ne!(

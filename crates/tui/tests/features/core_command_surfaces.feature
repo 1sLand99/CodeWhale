@@ -19,7 +19,7 @@ Feature: Core command visible surfaces
   Scenario: Core state commands report visible changes
     Given a CodeWhale core command workspace
     When the user runs the core command "/model auto"
-    Then the message window should include "Model changed:"
+    Then the message window should include "Operator model changed:"
     And the message window should include "auto"
     When the user runs the core command "/translate"
     Then the message window should include "Translation on"

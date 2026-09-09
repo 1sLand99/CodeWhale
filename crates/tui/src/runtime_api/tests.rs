@@ -9708,12 +9708,9 @@ async fn switch_provider_rejects_legacy_deepseek_cn_alias() -> Result<()> {
 }
 
 #[tokio::test]
-async fn switch_provider_with_deepseek_and_explicit_model_updates_default_text_model() -> Result<()>
-{
-    // When switching TO a DeepSeek provider with an explicit model, the
-    // endpoint must persist `default_text_model` (the DeepSeek-specific
-    // root key) in addition to the provider change, mirroring
-    // `switch_provider` in ui.rs which pins `default_model` for DeepSeek.
+async fn switch_provider_with_deepseek_and_explicit_model_preserves_root_fallback() -> Result<()> {
+    // Every provider saves an explicit model in its own slot. A legacy root
+    // fallback must neither be overwritten nor invalidate the selected slot.
     let root = std::env::temp_dir().join(format!(
         "codewhale-switch-deepseek-model-{}",
         Uuid::new_v4()
@@ -9753,18 +9750,27 @@ model = "glm-2"
         "switch to deepseek with model should succeed, body: {body}"
     );
 
-    // The persisted config must have provider = "deepseek" and
-    // default_text_model updated to the explicit model.
+    assert_eq!(body["provider"], "deepseek");
+    assert_eq!(body["model"], "deepseek-v4-pro");
+
     let persisted = fs::read_to_string(&config_file)?;
-    assert!(
-        persisted.contains("provider = \"deepseek\""),
-        "provider should be persisted as deepseek. Actual config:\n{persisted}"
+    let saved: toml::Value = toml::from_str(&persisted)?;
+    assert_eq!(saved["provider"].as_str(), Some("deepseek"));
+    assert_eq!(saved["default_text_model"].as_str(), Some("old-model"));
+    assert_eq!(
+        saved["providers"]["deepseek"]["model"].as_str(),
+        Some("deepseek-v4-pro")
     );
-    assert!(
-        persisted.contains("default_text_model = \"deepseek-v4-pro\""),
-        "DeepSeek explicit model must be persisted as default_text_model. \
-         Actual config:\n{persisted}"
+    assert_eq!(
+        saved["providers"]["volcengine"]["model"].as_str(),
+        Some("glm-2")
     );
+    let reloaded = Config::load(Some(config_file.clone()), None)?;
+    assert_eq!(
+        reloaded.api_provider(),
+        crate::config::ApiProvider::Deepseek
+    );
+    assert_eq!(reloaded.default_model(), "deepseek-v4-pro");
 
     handle.abort();
     Ok(())

@@ -1182,12 +1182,16 @@ action = "mode.plan"
         let _guard = EnvGuard::new(&temp_root);
         let path = temp_root.join(".deepseek").join("config.toml");
         write_golden_config(&path);
+        // This fixture isolates a value edit after the one-time migration.
+        // Migration itself is covered by the legacy preference regressions.
+        let source = GOLDEN_CONFIG.replacen("model =", "route_preferences_version = 1\nmodel =", 1);
+        fs::write(&path, &source).unwrap();
 
         persist_root_string_key(Some(&path), "model", "deepseek-v4-flash")
             .expect("persist should succeed");
 
         let body = fs::read_to_string(&path).unwrap();
-        let expected = GOLDEN_CONFIG.replace(
+        let expected = source.replace(
             "model = \"deepseek-v4-pro\" # pinned for release QA",
             "model = \"deepseek-v4-flash\" # pinned for release QA",
         );
@@ -1720,11 +1724,14 @@ slot = 1
         let path = home.path().join("config.toml");
         let source = "provider = 'zai'\n[providers.zai]\nmodel = 'GLM-5.2'\n";
         fs::write(&path, source).unwrap();
-        fs::write(home.path().join("settings.toml"), "default_provider = [\n").unwrap();
-        assert!(
+        let settings_path = home.path().join("settings.toml");
+        let malformed = "default_provider = [\n";
+        fs::write(&settings_path, malformed).unwrap();
+        let error =
             persist_provider_selection(Some(&path), ApiProvider::Zai, "zai", Some("GLM-5.3"))
-                .is_err()
-        );
+                .expect_err("unreadable legacy preferences must block the entire save");
+        assert!(error.to_string().contains("configuration was not changed"));
         assert_eq!(fs::read_to_string(&path).unwrap(), source);
+        assert_eq!(fs::read_to_string(&settings_path).unwrap(), malformed);
     }
 }

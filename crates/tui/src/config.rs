@@ -5065,10 +5065,25 @@ impl Config {
         // with the DeepSeek-only `normalize_model_name` bricked every config
         // whose provider owns a non-DeepSeek family — including ones our own
         // setup wizard writes (`provider = "zai"`, `GLM-5.2`). (#4829)
-        if let Some(model) = self.default_text_model.as_deref()
+        // Provider-scoped choices own the active route. A retained root
+        // fallback can belong to a different provider after a saved switch.
+        let configured_model = self
+            .provider_config_string_with_runtime_fallback(active_provider, |entry| {
+                entry.model.clone()
+            })
+            .or_else(|| self.default_text_model.clone());
+        if let Some(model) = configured_model.as_deref()
             && !model.trim().eq_ignore_ascii_case("auto")
             && !provider_passes_model_through(self.api_provider())
             && !self.active_provider_preserves_custom_base_url_model()
+            && crate::provider_lake::configured_model_for_route(
+                self,
+                active_provider,
+                &self.provider_identity_for(active_provider),
+                &self.base_url_for_route(active_provider),
+                model,
+            )
+            .is_none()
             && canonical_model_id_for_provider(self.api_provider(), model).is_none()
         {
             let provider = self.api_provider();
@@ -5079,7 +5094,7 @@ impl Config {
                 format!(" (for example: {})", known.join(", "))
             };
             anyhow::bail!(
-                "Invalid default_text_model '{model}' for provider '{}': expected auto or a model ID this provider serves{hint}.",
+                "Invalid configured model '{model}' for provider '{}': expected auto or a model ID this provider serves{hint}.",
                 provider.as_str()
             );
         }
