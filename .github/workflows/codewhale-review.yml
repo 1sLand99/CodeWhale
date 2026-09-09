@@ -17,8 +17,8 @@ name: Codewhale PR Review
 #
 # CODEWHALE_REVIEW_MAX_CHARS bounds each complete ordered review pass
 # (normally 200000). CODEWHALE_REVIEW_MAX_PASSES normally defaults to 1.
-# PR #6002 has an explicitly approved 500000-char / 16-pass / 65536-output
-# DeepSeek Pro budget below; other PRs retain the conservative defaults.
+# PR #6002 is configured for 500000-char / 16-pass / 65536-output
+# DeepSeek Pro review below; other PRs retain the conservative defaults.
 # Exceeding either coverage bound never posts a prefix.
 # Missing keys and provider outages keep the existing advisory policy, and
 # their explicit non-run receipts must never be counted as completed reviews.
