@@ -388,7 +388,7 @@ foreign executable plugin runtime import, and no on-disk auto-migration of a
 legacy `plugin.toml` to `plugin.json`. The explicit offline
 [OpenCode/DSH converter](PLUGIN_AUTHORING.md#convert-an-existing-plugin) supports
 selected portable Skills, static Streamable HTTP MCP declarations, and
-explicitly packaged Node `.mjs` MCP servers selected with `--stdio-root`.
+explicitly packaged Node `.mjs`, `.js`, or `.cjs` MCP servers selected with `--stdio-root`.
 Local source and dependencies are copied for the same native installation,
 capability review, hash-bound trust and enable flow; conversion executes no
 code or package manager. It does not migrate arbitrary bundles or reproduce

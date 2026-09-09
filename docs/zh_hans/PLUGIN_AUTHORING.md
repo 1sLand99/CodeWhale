@@ -250,8 +250,8 @@ python3 scripts/convert-plugin.py --format opencode-v1 \
 OpenCode 环境引用解释。DSH/v2 的 `cwd` 只能省略、为空或为 `.`；选定目录明确
 指定原进程的工作目录。只有远程 OpenCode 服务器需要 `oauth: false`。
 
-仅支持 `node` 加一个相对 `.mjs` 入口。原生 macOS 经审查启动适配器保留 `.mjs`
-的同级模块导入；此转换器尚未验证 `.js` 和 `.cjs` 入口，需手工移植。依赖和只读资源必须
+支持 `node` 加一个相对 `.mjs`、`.js` 或 `.cjs` 入口。原生启动适配器保留包的模块类型
+和同级模块导入。TypeScript 需先编译为 JavaScript；转换器不会运行编译器。依赖和只读资源必须
 预先打包在该目录内；转换时不运行包管理器、安装脚本、模块加载器或服务器。
 符号链接/reparse point、硬链接文件、隐藏文件或目录（包括 `.gitignore`、
 `.env*`、`.npmrc` 和 `node_modules/.bin`）、常见凭据文件名及私钥容器会被拒绝。

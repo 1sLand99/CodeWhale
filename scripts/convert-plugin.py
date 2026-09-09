@@ -273,14 +273,14 @@ def stdio_server(config, dialect, defaults, name, root):
             allowed.add("cwd")
         mapping(config, allowed)
         argv = config.get("command")
-        require(isinstance(argv, list) and len(argv) == 2, "Local MCP command must be exactly [\"node\", \"relative-entry.mjs\"].")
+        require(isinstance(argv, list) and len(argv) == 2, "Local MCP command must be exactly [\"node\", \"relative-entry.js\"].")
         command, arguments = argv[0], argv[1:]
         environment = mapping(config.get("environment", {}))
     require(command == "node" and isinstance(arguments, list) and len(arguments) == 1,
-            "Only node with one packaged .mjs entry is supported; no launcher flags, package managers or shell commands.")
+            "Only node with one packaged .mjs, .js or .cjs entry is supported; no launcher flags, package managers or shell commands.")
     entry = arguments[0]
-    require(isinstance(entry, str) and re.fullmatch(r"(?:\./)?[A-Za-z0-9_][A-Za-z0-9_./-]*\.mjs", entry)
-            and ".." not in entry.split("/"), "Node entry must be a contained relative .mjs file; other entry formats require a manual port.")
+    require(isinstance(entry, str) and re.fullmatch(r"(?:\./)?[A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:mjs|js|cjs)", entry)
+            and ".." not in entry.split("/"), "Node entry must be a contained relative .mjs, .js or .cjs file; compile other entry formats before packaging.")
     require(config.get("cwd", "") in ("", "."), "Select the original process working directory with --stdio-root; other cwd values require a manual port.")
     require(plain_path(root / entry).is_file(), "Packaged Node entry does not exist.")
     require(len(environment) <= 64, "At most 64 environment mappings are supported.")

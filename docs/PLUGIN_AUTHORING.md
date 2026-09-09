@@ -265,9 +265,9 @@ must be absent or empty because its literals/expressions are not OpenCode
 environment references. Optional DSH/v2 `cwd` must be absent, empty, or `.`;
 the selected root explicitly supplies the original working directory.
 
-Only `node` plus one relative `.mjs` entry is supported. The native macOS
-reviewed-launch adapter preserves sibling imports for `.mjs`; `.js` and `.cjs`
-entrypoints are not qualified by this converter and require a manual port.
+Use `node` plus one relative `.mjs`, `.js`, or `.cjs` entry. Package module
+type and sibling imports are preserved by the native launch adapter. Compile
+TypeScript to JavaScript before packaging; the converter does not run a compiler.
 Package dependencies and read-only resources first, inside the selected root.
 No package manager, install script, module loader or server runs during
 conversion. Links/reparse points, hard-linked files, hidden files/directories

@@ -220,10 +220,36 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
         self.assertEqual(responses[1]["result"]["tools"][0]["name"], "fixture_answer")
         self.assertEqual(responses[2]["result"]["content"], [{"type": "text", "text": "42"}])
 
+    @unittest.skipUnless(shutil.which("node"), "Node is needed for the synthetic module fixture")
+    def test_packaged_js_and_cjs_preserve_node_module_context(self):
+        for entry, package_type, esm in (("server.js", "module", True),
+                                         ("server.js", "commonjs", False),
+                                         ("server.cjs", "module", False)):
+            with self.subTest(entry=entry, package_type=package_type):
+                root = self.fresh("module-context")
+                root.mkdir()
+                (root / "package.json").write_text(json.dumps({"type": package_type}))
+                (root / "resource.json").write_text('{"answer":42}')
+                (root / "helper.cjs").write_text("exports.answer = 7;\n")
+                imports = ("import fs from 'node:fs'; import helper from './helper.cjs';\n" if esm else
+                           "const fs = require('node:fs'); const helper = require('./helper.cjs');\n")
+                (root / entry).write_text(imports +
+                    "console.log(JSON.stringify([helper.answer, JSON.parse(fs.readFileSync('resource.json', 'utf8')).answer]));\n")
+                args = self.args(config=self.config({"mcp": {"docs": self.local(command=["node", entry])}}),
+                                 stdio_roots=[f"docs={root}"])
+                self.assertEqual(converter.convert(args), (0, 1, 0))
+                (root / "resource.json").write_text('{"answer":99}')
+                server = self.servers(args.output)["docs"]
+                result = subprocess.run([shutil.which("node"), *server["args"]],
+                    cwd=args.output / server["cwd"], text=True, capture_output=True, timeout=10,
+                    check=False, env={"PATH": str(Path(shutil.which("node")).parent)})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), [7, 42])
+
     def test_local_node_requires_matching_explicit_roots_and_safe_launcher(self):
         root = self.node_source()
         for command in (["node", "../server.mjs"], ["node", "/server.mjs"], ["node", "C:\\server.mjs"],
-                        ["node", "server.js"], ["node", "server.cjs"],
+                        ["node", "server.ts"], ["node", "server.py"],
                         ["node", "--eval", "process.exit()"], ["node", "server.mjs", CANARY],
                         ["npx", "some-server"], ["sh", "server.mjs"], ["node", "https://example.invalid/server.mjs"],
                         ["node", "{env:ENTRY}.mjs"], ["node", 1]):
