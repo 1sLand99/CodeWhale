@@ -1297,10 +1297,9 @@ async fn dispatch_launch_composer_submit(
     chord: ComposerSubmitChord,
 ) -> Result<bool> {
     let action = app.decide_composer_submit(chord);
-    if !app.composer_enter_would_submit() {
-        // The paste-burst window owns this Enter (or the composer is
-        // empty): perform exactly what the composer would have done and
-        // stay on the startup screen.
+    if app.startup_input_unproven || !app.composer_enter_would_submit() {
+        // A paste burst, empty composer or startup integrity hold owns this
+        // Enter. Apply that guard without creating an empty session.
         app.handle_composer_enter();
         return Ok(false);
     }

@@ -368,9 +368,8 @@ fn query_terminal_inner(
     timeout: std::time::Duration,
     stop_at_csi_final: bool,
 ) -> Option<Vec<u8>> {
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::os::fd::AsRawFd;
-    use std::time::Instant;
 
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
@@ -390,20 +389,32 @@ fn query_terminal_inner(
         out.flush().ok()?;
     }
 
+    let (answered, reply, carried) = read_terminal_reply(in_fd, query, timeout, stop_at_csi_final);
+    carry_typed_ahead(&carried);
+    if !answered {
+        // An incomplete control reply is not safe to replay as typing.
+        note_consumed_unreplayable(&reply);
+        return None;
+    }
+    Some(reply)
+}
+
+#[cfg(unix)]
+fn read_terminal_reply(
+    in_fd: std::os::fd::RawFd,
+    query: &[u8],
+    timeout: std::time::Duration,
+    stop_at_csi_final: bool,
+) -> (bool, Vec<u8>, Vec<u8>) {
+    use std::time::Instant;
+
     let deadline = Instant::now() + timeout;
     let mut split = ProbeSplit::for_query(query, stop_at_csi_final);
-    let mut stdin = stdin.lock();
-    let mut byte = [0u8; 1];
     let answered = loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() || !wait_readable(in_fd, remaining) {
+        let Some(byte) = read_terminal_byte(in_fd, deadline) else {
             break false;
-        }
-        match stdin.read(&mut byte) {
-            Ok(1) => {}
-            _ => break false,
-        }
-        match split.feed(byte[0]) {
+        };
+        match split.feed(byte) {
             ProbeStep::Continue => {}
             ProbeStep::Done => break true,
             ProbeStep::Overflow => break false,
@@ -411,10 +422,9 @@ fn query_terminal_inner(
                 // Consume the `\` of an `ESC \` terminator so it cannot
                 // surface later as a keypress once the event loop owns
                 // stdin. Anything else is the user's next keystroke.
-                if wait_readable(in_fd, std::time::Duration::from_millis(5))
-                    && stdin.read(&mut byte).is_ok_and(|n| n == 1)
-                {
-                    split.finish_string_terminator(byte[0]);
+                let terminator_deadline = Instant::now() + std::time::Duration::from_millis(5);
+                if let Some(byte) = read_terminal_byte(in_fd, terminator_deadline) {
+                    split.finish_string_terminator(byte);
                 }
                 break true;
             }
@@ -422,17 +432,37 @@ fn query_terminal_inner(
     };
 
     let (reply, carried) = split.finish();
-    carry_typed_ahead(&carried);
-    if !answered {
-        // A reply we started reading and never finished cannot be replayed
-        // as keystrokes — it is terminal chatter, not typing — but it was
-        // consumed, so it belongs in the startup receipt.
-        note_consumed_unreplayable(&reply);
-        return None;
-    }
-
-    Some(reply)
+    (answered, reply, carried)
 }
+
+/// Poll and read the same unbuffered descriptor. `StdinLock` reads ahead into
+/// Rust's shared buffer: polling the tty afterward misses those bytes, and
+/// crossterm's later fd reader cannot recover them either.
+#[cfg(unix)]
+fn read_terminal_byte(fd: std::os::fd::RawFd, deadline: std::time::Instant) -> Option<u8> {
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() || !wait_readable(fd, remaining) {
+            return None;
+        }
+        let mut byte = 0u8;
+        // SAFETY: the caller owns the open fd throughout the startup probe;
+        // `byte` is writable for exactly the single byte requested. The input
+        // pump has not started, so there is no competing reader.
+        let count = unsafe { libc::read(fd, std::ptr::addr_of_mut!(byte).cast(), 1) };
+        if count == 1 {
+            return Some(byte);
+        }
+        if count != -1 || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+        {
+            return None;
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+#[path = "osc11_tests.rs"]
+mod tests;
 
 /// Block until `fd` has data or `timeout` elapses. `true` means readable.
 #[cfg(unix)]

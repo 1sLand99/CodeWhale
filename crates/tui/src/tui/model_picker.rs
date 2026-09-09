@@ -191,6 +191,7 @@ pub struct ModelPickerView {
     /// instead of being misclassified as "unchanged".
     previous_model: String,
     initial_provider: ApiProvider,
+    initial_provider_identity: String,
     /// Raw preference before the picker opened. An absent explicit preference
     /// is represented by Auto so applying a visible fixed-route tier is still
     /// recognized as an intentional picker choice.
@@ -356,7 +357,12 @@ impl ModelPickerView {
         let mut default_visible_rows: Vec<_> = model_rows
             .iter()
             .filter(|row| {
-                model_row_visible_in_view(row, ModelListView::Configured, app.api_provider)
+                model_row_visible_in_view(
+                    row,
+                    ModelListView::Configured,
+                    app.api_provider,
+                    app.provider_identity_for_persistence(),
+                )
             })
             .collect();
         // Selection indices must be calculated in the same order that the
@@ -373,7 +379,11 @@ impl ModelPickerView {
         );
         let mut selected_model_idx = default_visible_rows.iter().position(|row| {
             row.id == initial_model
-                && (row.provider.is_none() || row.provider == Some(app.api_provider))
+                && model_row_matches_route(
+                    row,
+                    app.api_provider,
+                    app.provider_identity_for_persistence(),
+                )
         });
         let show_custom_model_row = selected_model_idx.is_none();
         if show_custom_model_row {
@@ -416,6 +426,7 @@ impl ModelPickerView {
             initial_model,
             previous_model,
             initial_provider: app.api_provider,
+            initial_provider_identity: app.provider_identity_for_persistence().to_string(),
             initial_effort,
             selected_effort_request,
             active_accepts_custom_model_ids: app.accepts_custom_model_ids(),
@@ -457,15 +468,33 @@ impl ModelPickerView {
         } else if memory.catalog_view {
             self.view = ModelListView::Catalog;
         }
-        if let Some(remembered_id) = memory.selected_row_id.as_deref() {
-            let position = self
-                .visible_model_rows()
-                .iter()
-                .position(|row| row.id == remembered_id);
-            if let Some(position) = position {
-                self.selected_model_idx = position;
-                self.select_effort_for_current_model();
-            }
+        // Older picker memory stores only a model id. An ambiguous id must
+        // not move the selection onto a different configured route. Resolve
+        // the active row again because a restored view can change row order.
+        let position = {
+            let rows = self.visible_model_rows();
+            let remembered = memory.selected_row_id.as_deref().and_then(|remembered_id| {
+                let mut matches = rows
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, row)| row.id == remembered_id);
+                let first = matches.next().map(|(index, _)| index);
+                first.filter(|_| matches.next().is_none())
+            });
+            remembered.or_else(|| {
+                rows.iter().position(|row| {
+                    row.id == self.initial_model
+                        && model_row_matches_route(
+                            row,
+                            self.initial_provider,
+                            &self.initial_provider_identity,
+                        )
+                })
+            })
+        };
+        if let Some(position) = position {
+            self.selected_model_idx = position;
+            self.select_effort_for_current_model();
         }
         self.clamp_model_selection();
     }
@@ -483,7 +512,12 @@ impl ModelPickerView {
             .enumerate()
             .filter_map(|(index, row)| {
                 let visible = if query.is_empty() {
-                    model_row_visible_in_view(row, self.view, self.initial_provider)
+                    model_row_visible_in_view(
+                        row,
+                        self.view,
+                        self.initial_provider,
+                        &self.initial_provider_identity,
+                    )
                 } else {
                     model_row_matches_query(row, query, self.initial_provider)
                 };
@@ -557,7 +591,7 @@ impl ModelPickerView {
                     .provider
                     .map(|provider| {
                         route_labels
-                            .get(provider.as_str())
+                            .get(row_provider_identity(row).unwrap_or(provider.as_str()))
                             .cloned()
                             .unwrap_or_else(|| provider.display_name().to_string())
                     })
@@ -579,7 +613,11 @@ impl ModelPickerView {
                     })
                     .flatten(),
                 active: row.id == self.initial_model
-                    && (row.provider.is_none() || row.provider == Some(self.initial_provider)),
+                    && model_row_matches_route(
+                        row,
+                        self.initial_provider,
+                        &self.initial_provider_identity,
+                    ),
                 locked: !row.selectable,
             })
             .collect();
@@ -664,6 +702,17 @@ impl ModelPickerView {
         } else {
             row.hint.clone()
         };
+        // The provider auth event identifies only an enum. Sending Custom
+        // would open the first custom route's key editor, not this row's.
+        if row.provider == Some(ApiProvider::Custom) {
+            let identity = row_provider_identity(row).unwrap_or("custom");
+            return ViewAction::Emit(ViewEvent::StatusMessage {
+                message: format!(
+                    "🔒 {identity}/{} is locked — {reason}. Open /provider and select {identity} to repair or authenticate this route.",
+                    row.id
+                ),
+            });
+        }
         let message = format!(
             "🔒 {} is locked — {reason}. Open /provider to authenticate, then refresh.",
             row.id
@@ -677,6 +726,12 @@ impl ModelPickerView {
             });
         }
         ViewAction::Emit(ViewEvent::StatusMessage { message })
+    }
+
+    /// Exact route identity of the highlighted row, when it names one.
+    fn resolved_provider_identity(&self) -> Option<String> {
+        let rows = self.visible_model_rows();
+        rows.get(self.selected_model_idx)?.provider_identity.clone()
     }
 
     fn resolved_provider(&self) -> Option<ApiProvider> {
@@ -709,6 +764,13 @@ impl ModelPickerView {
     }
 
     fn resolved_base_url_for_provider(&self, provider: ApiProvider, model: &str) -> String {
+        if provider == ApiProvider::Custom
+            && let Some(identity) = self.resolved_provider_identity()
+        {
+            return self
+                .route_config
+                .base_url_for_route_identity(provider, &identity);
+        }
         crate::route_runtime::resolve_runtime_route(&self.route_config, provider, Some(model))
             .map(|route| route.candidate.endpoint().base_url.clone())
             .unwrap_or_else(|_| provider.default_base_url().to_string())
@@ -883,8 +945,14 @@ impl ModelPickerView {
     fn build_event_with_startup_default(&self, save_as_startup_default: bool) -> ViewEvent {
         let resolved_provider = self.resolved_provider().unwrap_or(self.initial_provider);
         let provider = (resolved_provider != self.initial_provider).then_some(resolved_provider);
-        let provider_id = (resolved_provider == ApiProvider::Custom)
-            .then(|| self.route_config.provider_identity_for(resolved_provider));
+        // The selected row's own identity, never the config's currently
+        // selected custom route: applying a row must switch to the route that
+        // row describes (#6016). Only the typed custom-model row, which names
+        // no route, falls back to the configured identity.
+        let provider_id = (resolved_provider == ApiProvider::Custom).then(|| {
+            self.resolved_provider_identity()
+                .unwrap_or_else(|| self.route_config.provider_identity_for(resolved_provider))
+        });
         ViewEvent::ModelPickerApplied {
             model: self.resolved_model(),
             provider,
@@ -1613,7 +1681,12 @@ fn picker_model_rows_for_app(app: &App, config: &Config) -> Vec<ModelPickerRow> 
             push_model_id(&mut active_model_ids, id);
         }
     }
-    push_configured_provider_model(&mut active_model_ids, config, app.api_provider);
+    push_configured_provider_model(
+        &mut active_model_ids,
+        config,
+        app.api_provider,
+        app.provider_identity_for_persistence(),
+    );
     push_provider_model_rows(
         &mut rows,
         app.api_provider,
@@ -1626,48 +1699,34 @@ fn picker_model_rows_for_app(app: &App, config: &Config) -> Vec<ModelPickerRow> 
     );
 
     for provider in ApiProvider::sorted_for_display() {
+        // Every named custom route shares `ApiProvider::Custom`, so the enum
+        // alone can neither name a route nor say which ones are already
+        // listed. Enumerate the configured tables by exact identity (#6016):
+        // a session resumed on another provider still sees every custom route
+        // it has configured, and one custom route never stands in for another.
+        if provider == ApiProvider::Custom {
+            for identity in inactive_custom_route_identities(app, config) {
+                push_inactive_route_rows(
+                    &mut rows,
+                    app,
+                    config,
+                    provider,
+                    &identity,
+                    &codex_roster,
+                );
+            }
+            continue;
+        }
         if provider == app.api_provider {
             continue;
         }
-        let mut model_ids = if provider == ApiProvider::OpenaiCodex {
-            codex_roster.model_ids()
-        } else {
-            provider_catalog_model_ids(
-                provider,
-                &config.provider_identity_for(provider),
-                &config.base_url_for_route(provider),
-            )
-        };
-        if let Some(model) = app
-            .provider_models
-            .get(provider.as_str())
-            .map(|model| model.trim())
-            .filter(|model| !model.is_empty())
-        {
-            push_model_id(
-                &mut model_ids,
-                picker_visible_model_id(
-                    provider,
-                    model,
-                    config.model_ids_pass_through_for_provider(provider),
-                ),
-            );
-        }
-        if let Some(enabled) = app.enabled_provider_models.get(provider.as_str()) {
-            for id in enabled {
-                push_model_id(&mut model_ids, id);
-            }
-        }
-        push_configured_provider_model(&mut model_ids, config, provider);
-        push_provider_model_rows(
+        push_inactive_route_rows(
             &mut rows,
-            provider,
-            None,
-            model_ids,
-            app.api_provider,
+            app,
             config,
+            provider,
+            provider.as_str(),
             &codex_roster,
-            &app.provider_health,
         );
     }
 
@@ -1724,6 +1783,114 @@ fn picker_model_rows_for_app(app: &App, config: &Config) -> Vec<ModelPickerRow> 
     rows
 }
 
+/// Every configured custom route except the one this session is actually on.
+///
+/// Ordered by identity so the picker's row order is stable across rebuilds;
+/// case-distinct tables stay distinct routes, exactly as the catalog and
+/// credential stores treat them.
+fn inactive_custom_route_identities(app: &App, config: &Config) -> Vec<String> {
+    let active =
+        (app.api_provider == ApiProvider::Custom).then(|| app.provider_identity_for_persistence());
+    let mut identities: Vec<String> = config
+        .providers
+        .as_ref()
+        .map(|providers| {
+            providers
+                .custom
+                .iter()
+                .filter(|(_, entry)| entry.is_openai_compatible_custom())
+                .map(|(identity, _)| identity.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    // The legacy root-field `provider = "custom"` shape owns no
+    // `[providers.<name>]` table but is still a real route.
+    if config.uses_legacy_literal_custom_route() {
+        let literal = ApiProvider::Custom.as_str().to_string();
+        if !identities.contains(&literal) {
+            identities.push(literal);
+        }
+    }
+    identities.sort();
+    identities.retain(|identity| active != Some(identity.as_str()));
+    identities
+}
+
+/// Rows for one route that is not the session's active route.
+///
+/// `identity` is the exact persistence key — the `[providers.<name>]` table
+/// for a named custom route, the provider slug otherwise — and every lookup
+/// here is made against it, so two routes that expose the same model id keep
+/// separate rows, separate remembered choices, and separate enablement.
+fn push_inactive_route_rows(
+    rows: &mut Vec<ModelPickerRow>,
+    app: &App,
+    config: &Config,
+    provider: ApiProvider,
+    identity: &str,
+    codex_roster: &CodexModelRoster,
+) {
+    let mut model_ids = if provider == ApiProvider::OpenaiCodex {
+        codex_roster.model_ids()
+    } else {
+        provider_catalog_model_ids(
+            provider,
+            identity,
+            &config.base_url_for_route_identity(provider, identity),
+        )
+    };
+    if let Some(model) = app
+        .provider_models
+        .get(identity)
+        .map(|model| model.trim())
+        .filter(|model| !model.is_empty())
+    {
+        push_model_id(
+            &mut model_ids,
+            picker_visible_model_id(
+                provider,
+                model,
+                config.model_ids_pass_through_for_provider(provider),
+            ),
+        );
+    }
+    if let Some(enabled) = app.enabled_provider_models.get(identity) {
+        for id in enabled {
+            push_model_id(&mut model_ids, id);
+        }
+    }
+    push_configured_provider_model(&mut model_ids, config, provider, identity);
+    push_provider_model_rows(
+        rows,
+        provider,
+        (provider == ApiProvider::Custom).then_some(identity),
+        model_ids,
+        app.api_provider,
+        config,
+        codex_roster,
+        &app.provider_health,
+    );
+}
+
+/// The `[providers.…]` table that owns this exact route.
+///
+/// [`Config::provider_config_for`] resolves `Custom` through the *selected*
+/// `provider = "<name>"`, which cannot describe a custom route the session is
+/// not on — and must never answer for one (#6016).
+fn route_provider_config<'a>(
+    config: &'a Config,
+    provider: ApiProvider,
+    identity: &str,
+) -> Option<&'a crate::config::ProviderConfig> {
+    if provider == ApiProvider::Custom {
+        return config
+            .providers
+            .as_ref()?
+            .custom_provider_config(identity.trim());
+    }
+    config.provider_config_for(provider)
+}
+
 fn model_row_enabled_for_app(app: &App, config: &Config, row: &ModelPickerRow) -> bool {
     if matches!(row.metadata.source, Some(CatalogSource::ConfigOverride)) {
         return true;
@@ -1731,20 +1898,25 @@ fn model_row_enabled_for_app(app: &App, config: &Config, row: &ModelPickerRow) -
     let Some(provider) = row.provider else {
         return true;
     };
-    if provider == app.api_provider {
+    if model_row_matches_route(
+        row,
+        app.api_provider,
+        app.provider_identity_for_persistence(),
+    ) {
         let current =
             picker_visible_model_id(app.api_provider, &app.model, app.accepts_custom_model_ids());
         if row.id.eq_ignore_ascii_case(current) {
             return true;
         }
     }
-    let provider_identity = row_provider_identity(row).unwrap_or_else(|| {
-        if provider == app.api_provider {
-            app.provider_identity_for_persistence()
-        } else {
-            provider.as_str()
-        }
-    });
+    // A `Custom` row that carries no identity names no route. The enum key
+    // `custom` is not a stand-in: it would let one named route's saved model
+    // enable another route's identically-named model (#6016).
+    let Some(provider_identity) = row_provider_identity(row).or_else(|| {
+        (provider == app.api_provider).then(|| app.provider_identity_for_persistence())
+    }) else {
+        return false;
+    };
     if app.provider_model_is_enabled(provider_identity, &row.id)
         || app
             .provider_models
@@ -1753,8 +1925,7 @@ fn model_row_enabled_for_app(app: &App, config: &Config, row: &ModelPickerRow) -
     {
         return true;
     }
-    let configured_model = config
-        .provider_config_for(provider)
+    let configured_model = route_provider_config(config, provider, provider_identity)
         .and_then(|entry| entry.model.as_deref());
     if configured_model.is_some_and(|model| model.eq_ignore_ascii_case(&row.id)) {
         return true;
@@ -1794,6 +1965,24 @@ fn push_provider_model_rows(
     let identity = provider_identity
         .map(str::to_string)
         .unwrap_or_else(|| config.provider_identity_for(provider));
+    // Readiness resolves a custom route's endpoint, auth class and credentials
+    // through the selected `provider = "<name>"`, so an inactive named route
+    // would otherwise be judged by the active route's credentials. Scope one
+    // copy to this exact identity — the same re-pointing the provider
+    // dashboard uses for its per-route rows.
+    let scoped_config;
+    let config = if provider == ApiProvider::Custom
+        && config.provider.as_deref().map(str::trim) != Some(identity.as_str())
+    {
+        scoped_config = {
+            let mut scoped = config.clone();
+            scoped.provider = Some(identity.clone());
+            scoped
+        };
+        &scoped_config
+    } else {
+        config
+    };
     let base_url = config.base_url_for_route_identity(provider, &identity);
     for declaration in config.custom_models.as_deref().unwrap_or_default() {
         if crate::provider_lake::configured_model_for_route(
@@ -1965,9 +2154,9 @@ fn push_configured_provider_model(
     models: &mut Vec<String>,
     config: &Config,
     provider: ApiProvider,
+    identity: &str,
 ) {
-    if let Some(model) = config
-        .provider_config_for(provider)
+    if let Some(model) = route_provider_config(config, provider, identity)
         .and_then(|entry| entry.model.as_deref())
         .map(str::trim)
         .filter(|model| !model.is_empty())
@@ -2431,9 +2620,12 @@ fn model_row_visible_in_view(
     row: &ModelPickerRow,
     view: ModelListView,
     active_provider: ApiProvider,
+    active_provider_identity: &str,
 ) -> bool {
     match view {
-        ModelListView::Configured => model_row_visible_by_default(row, active_provider),
+        ModelListView::Configured => {
+            model_row_visible_by_default(row, active_provider, active_provider_identity)
+        }
         ModelListView::Catalog => true,
         ModelListView::Recent
         | ModelListView::Coding
@@ -2450,8 +2642,17 @@ fn model_row_visible_in_view(
 /// (#3830): `auto`, every catalog row for the active provider, and rows for
 /// other providers once those providers are configured — the selected route
 /// stays complete while cross-provider choices remain conservative.
-fn model_row_visible_by_default(row: &ModelPickerRow, active_provider: ApiProvider) -> bool {
-    row.provider.is_none() || row.provider == Some(active_provider) || row.enabled
+fn model_row_visible_by_default(
+    row: &ModelPickerRow,
+    active_provider: ApiProvider,
+    active_provider_identity: &str,
+) -> bool {
+    model_row_matches_route(row, active_provider, active_provider_identity) || row.enabled
+}
+
+fn model_row_matches_route(row: &ModelPickerRow, provider: ApiProvider, identity: &str) -> bool {
+    row.provider.is_none()
+        || (row.provider == Some(provider) && row_provider_identity(row) == Some(identity))
 }
 
 fn sort_model_rows_for_view<'a, T>(
@@ -3888,6 +4089,7 @@ mod tests {
             initial_model: "model".to_string(),
             previous_model: "model".to_string(),
             initial_provider: ApiProvider::Openai,
+            initial_provider_identity: ApiProvider::Openai.as_str().to_string(),
             initial_effort: ReasoningEffort::Auto,
             selected_effort_request: ReasoningEffort::Auto,
             active_accepts_custom_model_ids: false,
@@ -3938,8 +4140,16 @@ mod tests {
     fn configured_view_keeps_active_provider_catalog_models_visible() {
         let row = model_row(ApiProvider::Deepseek, false);
 
-        assert!(model_row_visible_by_default(&row, ApiProvider::Deepseek));
-        assert!(!model_row_visible_by_default(&row, ApiProvider::Openai));
+        assert!(model_row_visible_by_default(
+            &row,
+            ApiProvider::Deepseek,
+            "deepseek"
+        ));
+        assert!(!model_row_visible_by_default(
+            &row,
+            ApiProvider::Openai,
+            "openai"
+        ));
     }
 
     #[test]
@@ -4527,6 +4737,63 @@ mod tests {
     }
 
     #[test]
+    fn same_model_on_distinct_custom_routes_keeps_readiness_and_applied_identity() {
+        let _env = crate::test_support::lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let (config, app, home, _workspace) = resumed_openrouter_session_with_named_custom_routes();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+
+        const MODEL: &str = "deepseek/deepseek-v4-flash";
+        let mut picker = ModelPickerView::new(&app, &config);
+        let shared: Vec<(usize, Option<String>, bool)> = picker
+            .visible_model_rows()
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.provider == Some(ApiProvider::Custom) && row.id == MODEL)
+            .map(|(index, row)| (index, row.provider_identity.clone(), row.selectable))
+            .collect();
+        assert_eq!(
+            shared.len(),
+            2,
+            "one shared model id on two routes must not collapse: {shared:?}"
+        );
+
+        for (index, identity, selectable) in shared {
+            let identity = identity.expect("custom rows carry their exact route identity");
+            // Each route is judged by its own table: only the credentialed one
+            // can be attempted, even though neither is the selected provider.
+            assert_eq!(
+                selectable,
+                identity == "command_code",
+                "{identity} readiness must come from its own route"
+            );
+            picker.selected_model_idx = index;
+            match picker.build_event() {
+                ViewEvent::ModelPickerApplied {
+                    model,
+                    provider,
+                    provider_id,
+                    ..
+                } => {
+                    assert_eq!(model, MODEL);
+                    assert_eq!(provider, Some(ApiProvider::Custom));
+                    assert_eq!(
+                        provider_id.as_deref(),
+                        Some(identity.as_str()),
+                        "applying a row must switch to the route that row describes"
+                    );
+                }
+                other => panic!("unexpected picker event: {other:?}"),
+            }
+        }
+
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+    }
+
+    #[test]
     fn model_rows_keep_case_distinct_custom_identities() {
         let mut rows = Vec::new();
         for identity in ["CustomA", "customa"] {
@@ -4542,5 +4809,217 @@ mod tests {
             );
         }
         assert_eq!(rows.len(), 2);
+    }
+
+    /// #6016 fixture: a session resumed on OpenRouter while two named custom
+    /// routes are configured, neither of them the config's selected provider.
+    fn resumed_openrouter_session_with_named_custom_routes()
+    -> (Config, App, tempfile::TempDir, tempfile::TempDir) {
+        let config: Config = toml::from_str(
+            r#"
+provider = "openrouter"
+
+[providers.openrouter]
+api_key = "fixture-openrouter-key"
+
+[providers.command_code]
+kind = "openai-compatible"
+base_url = "https://command.example.test/v1"
+model = "deepseek/deepseek-v4-flash"
+api_key = "fixture-command-key"
+
+# Same model id on a second route, deliberately without credentials: the two
+# routes must stay separate rows with separate readiness.
+[providers.other_code]
+kind = "openai-compatible"
+base_url = "https://other.example.test/v1"
+model = "deepseek/deepseek-v4-flash"
+"#,
+        )
+        .expect("named custom fixture");
+
+        let home = tempfile::tempdir().expect("test home");
+        let workspace = tempfile::tempdir().expect("test workspace");
+        let options = crate::test_support::test_tui_options(workspace.path());
+        let mut app = App::new(options, &config);
+        // The resumed session stays on the provider it was created with.
+        app.api_provider = ApiProvider::Openrouter;
+        app.provider_identity = ApiProvider::Openrouter.as_str().to_string();
+        app.provider_exact_id = None;
+        app.model = "z-ai/glm-5.3".to_string();
+        app.active_route_base_url = crate::config::DEFAULT_OPENROUTER_BASE_URL.to_string();
+        (config, app, home, workspace)
+    }
+
+    #[test]
+    fn resumed_session_lists_every_configured_custom_route_by_identity() {
+        let _env = crate::test_support::lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let (config, app, home, _workspace) = resumed_openrouter_session_with_named_custom_routes();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+
+        let rows = picker_model_rows_for_app(&app, &config);
+        let custom: Vec<_> = rows
+            .iter()
+            .filter(|row| row.provider == Some(ApiProvider::Custom))
+            .collect();
+        let identities: Vec<_> = custom
+            .iter()
+            .filter_map(|row| row.provider_identity.as_deref())
+            .collect();
+        assert!(
+            identities.contains(&"command_code"),
+            "configured custom route B must stay visible in a resumed session: {custom:#?}"
+        );
+        assert!(
+            identities.contains(&"other_code"),
+            "every configured custom route keeps its own rows: {custom:#?}"
+        );
+        for identity in ["command_code", "other_code"] {
+            let row = custom
+                .iter()
+                .find(|row| {
+                    row.provider_identity.as_deref() == Some(identity)
+                        && row.id == "deepseek/deepseek-v4-flash"
+                })
+                .unwrap_or_else(|| panic!("{identity} row missing: {custom:#?}"));
+            assert!(
+                model_row_visible_by_default(row, ApiProvider::Openrouter, "openrouter"),
+                "{identity} must appear in the Configured view: {row:#?}"
+            );
+        }
+
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+    }
+
+    #[test]
+    fn shared_custom_model_opens_on_exact_active_route_despite_other_route_pin() {
+        let _env = crate::test_support::lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let (mut config, mut app, home, _workspace) =
+            resumed_openrouter_session_with_named_custom_routes();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+
+        const MODEL: &str = "deepseek/deepseek-v4-flash";
+        config.provider = Some("other_code".to_string());
+        config
+            .providers
+            .as_mut()
+            .unwrap()
+            .custom
+            .get_mut("other_code")
+            .unwrap()
+            .api_key = Some("fixture-other-key".to_string());
+        app.set_provider_identity(ApiProvider::Custom, "other_code");
+        app.set_model_selection(MODEL.to_string());
+        app.active_route_base_url = "https://other.example.test/v1".to_string();
+        app.pinned_models = vec![PinnedModel {
+            provider: "command_code".to_string(),
+            model: MODEL.to_string(),
+            label: None,
+        }];
+
+        // Opening a picker must keep the current route even if a different
+        // credentialed route exposing the same wire model sorts first.
+        let mut picker = ModelPickerView::new(&app, &config);
+        assert_eq!(
+            picker.resolved_provider_identity().as_deref(),
+            Some("other_code")
+        );
+        picker.ensure_projection();
+        {
+            let projection = picker.projection.borrow();
+            let rows = &projection.as_ref().unwrap().rows;
+            assert!(rows.iter().any(|row| row.route == "Command Code"));
+            assert!(rows.iter().any(|row| row.route == "other_code"));
+            let active: Vec<_> = rows.iter().filter(|row| row.active).collect();
+            assert_eq!(active.len(), 1);
+            assert_eq!(active[0].route, "other_code");
+        }
+        let rendered = render_text(&picker, 140, 40);
+        assert!(rendered.contains("Command Code"), "{rendered}");
+        assert!(rendered.contains("other_code"), "{rendered}");
+
+        // Legacy memory has no route identity; ambiguity must preserve the
+        // active route instead of resurrecting the first same-named model.
+        picker.restore_memory(Some(&crate::tui::app::ModelPickerMemory {
+            catalog_view: true,
+            view: Some("catalog".to_string()),
+            selected_row_id: Some(MODEL.to_string()),
+        }));
+        assert!(matches!(
+            picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            ViewAction::EmitAndClose(ViewEvent::ModelPickerApplied {
+                provider: None,
+                provider_id: Some(identity),
+                model,
+                save_as_startup_default: false,
+                ..
+            }) if identity == "other_code" && model == MODEL
+        ));
+        assert!(matches!(
+            picker.build_event_with_startup_default(true),
+            ViewEvent::ModelPickerApplied {
+                provider: None,
+                provider_id: Some(identity),
+                save_as_startup_default: true,
+                ..
+            } if identity == "other_code"
+        ));
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+    }
+
+    #[test]
+    fn locked_custom_model_names_exact_auth_route_without_opening_another_key_editor() {
+        let mut picker = test_picker();
+        let mut row = model_row(ApiProvider::Custom, true);
+        row.provider_identity = Some("other_code".to_string());
+        row.selectable = false;
+        picker.model_rows = vec![row];
+        assert!(matches!(
+            picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            ViewAction::Emit(ViewEvent::StatusMessage { message })
+                if message.contains("other_code/model")
+                    && message.contains("Open /provider and select other_code")
+        ));
+
+        // Built-in providers retain their existing guided-auth handoff.
+        let mut picker = test_picker();
+        picker.model_rows[0].selectable = false;
+        assert!(matches!(
+            picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            ViewAction::Emit(ViewEvent::ModelPickerNeedsAuth {
+                provider: ApiProvider::Openai,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn configured_custom_catalog_visibility_is_scoped_to_exact_active_route() {
+        let mut row = model_row(ApiProvider::Custom, false);
+        row.provider_identity = Some("other_code".to_string());
+        assert!(model_row_visible_by_default(
+            &row,
+            ApiProvider::Custom,
+            "other_code"
+        ));
+        assert!(!model_row_visible_by_default(
+            &row,
+            ApiProvider::Custom,
+            "command_code"
+        ));
+        row.enabled = true;
+        assert!(model_row_visible_by_default(
+            &row,
+            ApiProvider::Custom,
+            "command_code"
+        ));
     }
 }

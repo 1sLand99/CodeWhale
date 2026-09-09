@@ -144,7 +144,13 @@ pub(crate) fn decode(bytes: &[u8]) -> DecodedTypeAhead {
                     })
                     .and_then(osc11::parse_osc11_reply)
                     .is_some();
-                if !color_reply {
+                // Focus notifications and the successful answer to our exact
+                // kitty probe can also arrive during a later startup query.
+                // They carry no composer input. Unknown or incomplete escape
+                // strings still retain the lost-input guard below.
+                let terminal_reply = color_reply
+                    || matches!(sequence, b"\x1b[I" | b"\x1b[O" | b"\x1b_Gi=31;OK\x1b\\");
+                if !terminal_reply {
                     decoded.undecodable.extend_from_slice(sequence);
                 }
                 index = end;
@@ -330,10 +336,24 @@ mod tests {
             "\x1b^payload\r\r\x1b\\",
             "\x1bXpayload\r\r\x1b\\",
             "\x1b]11;rgb:1e/1e/1e",
+            "\x1b_Gi=31;OK",
+            "\x1b_Gi=32;OK\x1b\\",
+            "\x1b_Gi=31;OK\r\r\x1b\\",
         ] {
             let decoded = decode(sequence.as_bytes());
             assert!(decoded.events.is_empty(), "{sequence:?}: {decoded:?}");
             assert_eq!(decoded.undecodable, sequence.as_bytes());
+        }
+    }
+
+    #[test]
+    fn complete_focus_and_kitty_probe_replies_do_not_damage_input() {
+        for reply in ["\x1b[I", "\x1b[O", "\x1b_Gi=31;OK\x1b\\"] {
+            assert_eq!(
+                decode(format!("/plugin{reply} list\r").as_bytes()),
+                decode(b"/plugin list\r"),
+                "terminal metadata: {reply:?}"
+            );
         }
     }
 

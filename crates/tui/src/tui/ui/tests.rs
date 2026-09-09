@@ -26886,6 +26886,49 @@ fn delayed_terminal_color_reply_preserves_actual_composer_command_dispatch() {
 }
 
 #[test]
+fn startup_terminal_replies_allow_a_fresh_long_paste_to_send_once() {
+    let _lock = startup_input_test_lock();
+    let _home = SettingsHomeGuard::new();
+    crate::palette::osc11::carry_typed_ahead(
+        b"\x1b[I\x1b]11;rgb:1e1e/1e1e/1e1e\x07\x1b_Gi=31;OK\x1b\\",
+    );
+    let mut pending = VecDeque::new();
+    let receipt = crate::tui::startup_input::replay_into(&mut pending);
+    assert!(receipt.whole_line_proven(), "{receipt:?}");
+    assert!(pending.is_empty(), "terminal replies are not user text");
+
+    let mut app = App::new(create_test_options(), &Config::default());
+    app.startup_input_unproven = !receipt.whole_line_proven();
+    let prompt = "Keep the complete pasted draft: 日本語, café, العربية.\n".repeat(30);
+    handle_bracketed_paste(&mut app, &prompt);
+    assert!(app.composer_enter_would_submit());
+    assert_eq!(app.handle_composer_enter(), Some(prompt));
+    assert!(app.handle_composer_enter().is_none(), "no double send");
+}
+
+#[test]
+fn startup_integrity_hold_keeps_send_available_for_acknowledgement() {
+    let _home = SettingsHomeGuard::new();
+    let mut app = App::new(create_test_options(), &Config::default());
+    app.startup_input_unproven = true;
+    app.insert_paste_text("gin install /tmp/bundle");
+    assert!(
+        app.startup_input_unproven,
+        "pasting cannot erase known loss"
+    );
+    assert!(
+        app.composer_enter_would_submit(),
+        "the send button must remain usable to acknowledge an integrity hold"
+    );
+    assert!(app.handle_composer_enter().is_none());
+    assert_eq!(app.input, "gin install /tmp/bundle");
+    assert!(
+        app.composer_enter_would_submit(),
+        "fresh acknowledgement can send"
+    );
+}
+
+#[test]
 fn a_command_line_that_stops_looking_like_one_is_held_not_reinterpreted() {
     let _home = SettingsHomeGuard::new();
     let mut app = App::new(create_test_options(), &Config::default());
