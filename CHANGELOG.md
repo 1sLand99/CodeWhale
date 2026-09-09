@@ -123,6 +123,28 @@ with an accessibility-first pointer.
   and when it is not, so the model stops guessing at discoverable facts.
 - `config.example.toml` states the real search default (keyless Firecrawl, not
   DuckDuckGo) and the preferred `CODEWHALE_SEARCH_*` environment names.
+- Startup type-ahead is preserved whole, and a slash command interrupted by
+  startup keystrokes is no longer re-read as prose and sent to the model
+  (#5925).
+- The model picker renders a large catalog without lag and supports per-column
+  sort and mouse selection (#5975).
+- Session metrics report effective request throughput from provider receipts
+  instead of a live estimate divided by the whole turn, and cost stays honest
+  when a route has no price reading (#5976, #5977).
+- An offline-queue submit delivered as late raw keystrokes no longer wedges the
+  composer behind stacked session notices (#5999).
+- Fleet setup with a model filter that matches nothing renders a hint instead
+  of panicking (#5953), and shortlist enrollment plus authoritative role pins
+  are honored on dispatch (#5915).
+- A mid-turn MCP catalog refresh keeps the tool pool deferred and the active
+  set narrow (#5939).
+- Computer Use on macOS verifies application activation before sending
+  keystrokes and guards input by the frontmost app (#5927).
+- Onboarding tests isolate `CODEWHALE_HOME`, so a fixture provider can no
+  longer leak into the real setup state (#5932).
+- Snapshot availability is retained with one warning per session, and a
+  diverged engine session id is a visible notice rather than a log line
+  (#5930).
 
 ### Changed
 
