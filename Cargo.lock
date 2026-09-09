@@ -966,9 +966,11 @@ name = "codewhale-mcp"
 version = "0.9.13"
 dependencies = [
  "anyhow",
+ "libc",
  "serde",
  "serde_json",
  "tracing",
+ "windows",
 ]
 
 [[package]]
