@@ -1567,6 +1567,10 @@ mod tests {
             ..crate::test_support::test_tui_options(workspace.clone())
         };
         let app = App::new(options, &Config::default());
+        assert!(
+            app.dispatch_completion_tx.is_none(),
+            "dispatch smoke fixtures must not permit native window mutations"
+        );
         (app, tmpdir, guard)
     }
 
@@ -1595,18 +1599,11 @@ mod tests {
     /// against parallel-running tests). Skip it here so this smoke test
     /// stays parallel-safe.
     ///
-    /// `/pin` is skipped on Windows only. Its handler is not a state toggle:
-    /// it drives the *host terminal window* through Win32 (see
-    /// `tui::window_control`), and the resolved `HWND` belongs to another
-    /// process. `SetWindowPos`/`ShowWindow` against a foreign window are
-    /// delivered to that window's thread and block until it pumps them, so on
-    /// a headless CI window station the call never returns — this is the
-    /// 600 s nextest timeout in #5919 (the CI breadcrumb stalled on `/pin`
-    /// and on its `/mini` alias, the same handler). On macOS and Linux
-    /// `toggle_pin()` is a compiled-out no-op, so dispatch coverage for
-    /// `/pin` is kept there.
+    /// `/pin` is covered on every platform. The headless fixture has no
+    /// completion mailbox, so Windows rejects it before resolving or changing
+    /// a host window; the former synchronous message-pump wait cannot occur.
     fn skip_in_dispatch_smoke(name: &str) -> bool {
-        name == "restore" || (cfg!(windows) && name == "pin")
+        name == "restore"
     }
 
     /// Upper bound on a single command dispatch in the smoke tests.
