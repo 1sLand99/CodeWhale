@@ -763,12 +763,16 @@ impl Settings {
     /// settings or runtime environment overlays, and must not migrate files.
     pub(crate) fn load_legacy_route_preferences_read_only() -> Result<Self> {
         let (primary, legacy_home, legacy_config_dir) = settings_path_candidates_for_scope(false);
-        Self::load_persisted_from_candidates_with_migration(
+        let settings = Self::load_persisted_from_candidates_with_migration(
             primary,
             legacy_home,
             legacy_config_dir,
             false,
-        )
+        )?;
+        // Interactive readers may recover with defaults, but migration must
+        // not commit those defaults as if the archived selection were read.
+        anyhow::ensure!(settings.load_error.is_none(), "settings.toml: invalid TOML");
+        Ok(settings)
     }
 
     /// Load the normalized values stored on disk without terminal/runtime

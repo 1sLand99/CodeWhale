@@ -13311,6 +13311,54 @@ fn validate_still_rejects_unknown_model_on_official_deepseek() {
 }
 
 #[test]
+fn validate_checks_the_selected_provider_model_before_the_root_fallback() {
+    for (model, root, valid) in [
+        ("deepseek-v4-pro", "old-provider-model", true),
+        ("auto", "old-provider-model", true),
+        ("not-a-deepseek-model", "deepseek-v4-pro", false),
+        ("", "deepseek-v4-pro", false),
+        ("   ", "deepseek-v4-pro", false),
+    ] {
+        let mut config = Config {
+            provider: Some("deepseek".to_string()),
+            default_text_model: Some(root.to_string()),
+            ..Default::default()
+        };
+        config.provider_config_for_mut(ApiProvider::Deepseek).model = Some(model.to_string());
+        let result = config.validate();
+        assert_eq!(
+            result.is_ok(),
+            valid,
+            "selected {model:?}, root {root:?}: {result:?}"
+        );
+        if valid {
+            assert_eq!(config.default_model(), model);
+        }
+        assert_eq!(config.default_text_model.as_deref(), Some(root));
+    }
+
+    // Exact route declarations remain first-class; a declaration for another
+    // provider cannot make an unknown model valid on this route.
+    let mut declared: Config = toml::from_str(
+        r#"provider = "deepseek"
+default_text_model = "old-provider-model"
+[providers.deepseek]
+base_url = "https://api.deepseek.com"
+model = "account-model"
+[[custom_models]]
+provider = "deepseek"
+base_url = "https://api.deepseek.com"
+id = "account-model"
+"#,
+    )
+    .unwrap();
+    declared.validate().expect("matching declared model");
+    assert_eq!(declared.default_model(), "account-model");
+    declared.custom_models.as_mut().unwrap()[0].provider = "zai".to_string();
+    assert!(declared.validate().is_err());
+}
+
+#[test]
 fn native_memory_scenario() {
     // Scenario consolidation of: native_memory_backend_owns_explicit_path, native_memory_path_honours_an_already_native_setting
     // from native_memory_backend_owns_explicit_path

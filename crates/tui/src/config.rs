@@ -1792,10 +1792,9 @@ pub struct TuiConfig {
     /// Per-SSE-chunk idle timeout in seconds. Defaults to 900 seconds when
     /// omitted. `0` maps to the default; values clamp to `1..=3600`.
     pub stream_chunk_timeout_secs: Option<u64>,
-    /// R1: ceiling on model steps in a single turn. Omitted or `0` resolve
-    /// to the finite default (200); explicit values clamp to
-    /// `1..=100_000`. There is deliberately no "unlimited" value — `0` is
-    /// an invalid setting, not a sentinel that disables the cap.
+    /// Optional ceiling on model steps in a single turn. Omitted or `0`
+    /// leaves model steps uncapped; explicit positive values clamp to
+    /// `1..=100_000`. Wall-clock and stream budgets remain independent.
     pub max_model_steps: Option<u32>,
     /// R1: cumulative wall-clock budget for a single turn, in seconds.
     /// Omitted or `0` resolve to the finite default (3600); explicit values
@@ -5066,8 +5065,26 @@ impl Config {
         // with the DeepSeek-only `normalize_model_name` bricked every config
         // whose provider owns a non-DeepSeek family — including ones our own
         // setup wizard writes (`provider = "zai"`, `GLM-5.2`). (#4829)
-        if let Some(model) = self.default_text_model.as_deref()
-            && !self.active_route_serves_root_model(model)
+        // Provider-scoped choices own the active route. A retained root
+        // fallback can belong to a different provider after a saved switch.
+        let configured_model = self
+            .provider_config_string_with_runtime_fallback(active_provider, |entry| {
+                entry.model.clone()
+            })
+            .or_else(|| self.default_text_model.clone());
+        if let Some(model) = configured_model.as_deref()
+            && !model.trim().eq_ignore_ascii_case("auto")
+            && !provider_passes_model_through(self.api_provider())
+            && !self.active_provider_preserves_custom_base_url_model()
+            && crate::provider_lake::configured_model_for_route(
+                self,
+                active_provider,
+                &self.provider_identity_for(active_provider),
+                &self.base_url_for_route(active_provider),
+                model,
+            )
+            .is_none()
+            && canonical_model_id_for_provider(self.api_provider(), model).is_none()
         {
             let provider = self.api_provider();
             let known = model_completion_names_for_provider(provider);
@@ -5077,7 +5094,7 @@ impl Config {
                 format!(" (for example: {})", known.join(", "))
             };
             anyhow::bail!(
-                "Invalid default_text_model '{model}' for provider '{}': expected auto or a model ID this provider serves{hint}.",
+                "Invalid configured model '{model}' for provider '{}': expected auto or a model ID this provider serves{hint}.",
                 provider.as_str()
             );
         }
@@ -6672,20 +6689,6 @@ impl Config {
         self.provider_uses_custom_endpoint(self.api_provider())
     }
 
-    /// Whether the active route can serve `model` as a root `model` /
-    /// `default_text_model` alias.
-    ///
-    /// [`Config::validate`] rejects a root alias that fails this, so a writer
-    /// that changes the active route must clear or relocate an alias the new
-    /// route cannot serve — otherwise it commits a file that no longer loads.
-    /// One predicate, so the writer and the validator cannot disagree.
-    pub(crate) fn active_route_serves_root_model(&self, model: &str) -> bool {
-        model.trim().eq_ignore_ascii_case("auto")
-            || provider_passes_model_through(self.api_provider())
-            || self.active_provider_preserves_custom_base_url_model()
-            || canonical_model_id_for_provider(self.api_provider(), model).is_some()
-    }
-
     /// Whether `provider`'s effective endpoint is a custom host rather than its
     /// shipped one. Resolved through the same identity-aware resolver the
     /// client is built from, so this predicate cannot disagree with the URL the
@@ -7897,12 +7900,11 @@ impl Config {
         raw.clamp(MIN_STREAM_CHUNK_TIMEOUT_SECS, MAX_STREAM_CHUNK_TIMEOUT_SECS)
     }
 
-    /// R1: resolved ceiling on model steps in a single turn.
+    /// Resolved optional ceiling on model steps in a single turn.
     ///
     /// Reads `[tui].max_model_steps`, falling back to the
-    /// `CODEWHALE_MAX_MODEL_STEPS` env var, then to the finite default.
-    /// `0` — from either source — is treated as an invalid value and
-    /// resolves to the default; it never means "unlimited".
+    /// `CODEWHALE_MAX_MODEL_STEPS` env var, then to the uncapped default.
+    /// `0` from either source also selects the uncapped default.
     #[must_use]
     pub fn max_model_steps(&self) -> u32 {
         let raw = self

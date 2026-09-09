@@ -131,7 +131,7 @@ transcripts, ACP/MCP clients, and internal compatibility callers, and rejects
 values above 8. Current model-authored calls inherit the Runtime configuration
 instead of negotiating recursion depth in the tool schema.
 
-Workflow IR has a separate structural validation limit of five nested nodes.
+Workflow IR has a separate default structural validation limit of five nested nodes.
 That limit constrains the orchestration document's shape; it does not grant or
 consume Runtime child-delegation depth.
 

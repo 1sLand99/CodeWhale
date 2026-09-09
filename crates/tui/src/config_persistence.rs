@@ -224,57 +224,116 @@ pub(crate) fn persist_provider_selection(
             &["provider"],
             identity.persisted_id().unwrap_or(&identity.key),
         )?;
-        // Root `model`/`default_text_model` address the *active* route, so a
-        // provider switch leaves them naming the route that is on its way out.
-        // The incoming route usually cannot serve that id, and `Config::load`
-        // then rejects the file this function just wrote — the caller commits a
-        // switch and gets an unloadable config. Move the outgoing choice onto
-        // its own canonical leaf while that leaf is free, since it is real saved
-        // state, and clear the root alias, which no longer addresses its route.
-        let outgoing = config.active_provider_identity(config.api_provider()).ok();
-        for root_key in ["default_text_model", "model"] {
-            let Some(value) = doc
-                .get(root_key)
-                .and_then(toml_edit::Item::as_str)
-                .map(str::to_owned)
-            else {
-                continue;
-            };
-            // Reparsed per key: relocating the first alias can fill the leaf the
-            // second one would otherwise be moved onto.
-            let switched: crate::config::Config = toml::from_str(&doc.to_string())
-                .map_err(|_| anyhow::anyhow!("Could not parse switched route; contents omitted"))?;
-            if switched.active_route_serves_root_model(&value) {
-                continue;
-            }
-            // An unnamed custom route stores its model in the root alias
-            // itself, so there is no leaf to move it to; that value is dropped
-            // with the route it belonged to.
-            if let Some(outgoing) = outgoing.as_ref().filter(|outgoing| {
-                **outgoing != identity
-                    && !(outgoing.provider == ApiProvider::Custom
-                        && outgoing.persisted_id().is_none())
-            }) {
-                let mut scoped = switched.clone();
-                scoped.scope_to_provider_identity(outgoing);
-                if scoped
-                    .provider_config_for(outgoing.provider)
-                    .and_then(|entry| entry.model.as_deref())
-                    .is_none()
-                {
-                    set_provider_model_document(
-                        doc,
-                        outgoing.provider,
-                        outgoing.persisted_id().unwrap_or(&outgoing.key),
-                        &value,
-                    )?;
-                }
-            }
-            unset_document_value(doc, &[root_key])?;
-        }
-        Ok(())
+        reconcile_root_model_aliases(doc, &config, &identity)
     })?;
     Ok(path)
+}
+
+/// Keep a root `default_text_model` alias from stranding a route switch,
+/// without discarding the choice it holds.
+///
+/// The root alias is the *active* route's fallback: `Config` resolves it only
+/// when the selected route has no model of its own. A switch that leaves the
+/// incoming route without a leaf therefore hands it an alias naming the route
+/// on its way out, and `Config::load` rejects the file the caller just wrote —
+/// a committed switch that produces an unloadable config.
+///
+/// Relocate that value onto the outgoing route's own canonical leaf, because
+/// it is real saved state, and only then clear the alias. An alias the
+/// incoming route already shadows with its own leaf is inert and stays:
+/// deleting a saved choice to satisfy validation of a value nothing resolves
+/// is data loss, not a repair. Likewise an unnamed custom route stores its
+/// model in the alias itself and has no leaf to receive it. If the incoming
+/// route cannot shadow that value, refuse the switch atomically and ask for an
+/// explicit destination model instead of saving an unloadable configuration.
+///
+/// `previous` is the document's configuration before the switch; `incoming` is
+/// the identity now selected. Every route writer calls this, so no writer can
+/// keep a private rule about which route owns the root alias.
+pub(crate) fn reconcile_root_model_aliases(
+    doc: &mut toml_edit::DocumentMut,
+    previous: &crate::config::Config,
+    incoming: &crate::config::ProviderIdentity,
+) -> anyhow::Result<()> {
+    // When the *incoming* route is an unnamed custom one the root alias is its
+    // own model slot (see `set_provider_model_document`), never the outgoing
+    // route's leftovers.
+    if incoming.provider == ApiProvider::Custom && incoming.persisted_id().is_none() {
+        return Ok(());
+    }
+    // Only `default_text_model` is read here. The legacy root `model` key is
+    // never what blocks a load: `Config::default_model` already refuses to
+    // route a foreign legacy value to a provider that cannot serve it, and
+    // `Config::validate` does not consult it, so relocating it would move a
+    // value nothing is asking about.
+    const ROOT_KEY: &str = "default_text_model";
+    let Some(value) = doc
+        .get(ROOT_KEY)
+        .and_then(toml_edit::Item::as_str)
+        .map(str::to_owned)
+    else {
+        return Ok(());
+    };
+    let switched: crate::config::Config = toml::from_str(&doc.to_string())
+        .map_err(|_| anyhow::anyhow!("Could not parse switched route; contents omitted"))?;
+    // `Config::validate` is the single authority on what the incoming route can
+    // serve, so a writer cannot disagree with the loader. Act only when this
+    // alias is what the loader rejects: a document already broken for an
+    // unrelated reason is not this writer's to rewrite.
+    let mut without_alias = switched.clone();
+    without_alias.default_text_model = None;
+    if switched
+        .provider_config_for(incoming.provider)
+        .and_then(|entry| entry.model.as_deref())
+        .is_some()
+        || switched.validate().is_ok()
+        || without_alias.validate().is_err()
+    {
+        return Ok(());
+    }
+    // An empty or control-bearing alias names no saved model. Nothing to
+    // relocate, and clearing it loses nothing.
+    if value.trim().is_empty() || value.chars().any(char::is_control) {
+        unset_document_value(doc, &[ROOT_KEY])?;
+        return Ok(());
+    }
+    // No leaf can hold this value. Keep the only copy of the user's choice
+    // rather than discard it for a document the incoming route loads as soon as
+    // it saves a model of its own.
+    let outgoing = previous
+        .active_provider_identity(previous.api_provider())
+        .ok();
+    if outgoing.as_ref().is_some_and(|outgoing| {
+        outgoing != incoming
+            && outgoing.provider == ApiProvider::Custom
+            && outgoing.persisted_id().is_none()
+    }) {
+        anyhow::bail!(
+            "Choose a model for the destination provider before switching from a legacy custom connection; the saved configuration was not changed"
+        );
+    }
+    let Some(outgoing) = outgoing.as_ref().filter(|outgoing| *outgoing != incoming) else {
+        return Ok(());
+    };
+    let mut scoped = switched;
+    scoped.scope_to_provider_identity(outgoing);
+    if scoped
+        .provider_config_for(outgoing.provider)
+        .and_then(|entry| entry.model.as_deref())
+        .is_none()
+    {
+        set_provider_model_document(
+            doc,
+            outgoing.provider,
+            outgoing.persisted_id().unwrap_or(&outgoing.key),
+            &value,
+        )?;
+    }
+    // The outgoing route either already saved its own choice or has just
+    // received this one, so the alias is now a shadowed duplicate that only
+    // blocks the incoming route.
+    unset_document_value(doc, &[ROOT_KEY])?;
+    Ok(())
 }
 
 /// Atomically replace `path` with `body` via a same-directory temp file and
@@ -1728,7 +1787,7 @@ slot = 1
     }
 
     #[test]
-    fn switching_provider_preserves_the_outgoing_root_model_without_overwriting_its_leaf() {
+    fn switching_provider_away_and_back_preserves_every_route_selection() {
         use crate::test_support::{EnvVarGuard, lock_test_env};
         let _lock = lock_test_env();
         let home = tempfile::tempdir().unwrap();
@@ -1751,20 +1810,149 @@ slot = 1
                     Some("deepseek-v4-pro"),
                 )
                 .unwrap();
-                let body = fs::read_to_string(&path).unwrap();
-                let doc: toml::Value = toml::from_str(&body).unwrap();
-                assert!(doc.get(root_key).is_none());
+                let doc: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+                // The incoming route owns its own leaf, so the outgoing root
+                // alias is inert. It is a saved choice: deleting it to satisfy
+                // validation of a value nothing resolves would be data loss.
                 assert_eq!(
-                    doc["providers"]["zai"]["model"].as_str(),
-                    Some(existing.unwrap_or("GLM-4.6")),
-                    "switching routes must preserve the outgoing selection"
+                    doc[root_key].as_str(),
+                    Some("GLM-4.6"),
+                    "an inert root fallback must survive the switch"
+                );
+                assert_eq!(
+                    doc["providers"]["deepseek"]["model"].as_str(),
+                    Some("deepseek-v4-pro")
                 );
                 let restored = crate::config::Config::load(Some(path.clone()), None)
                     .expect("saved provider switch must remain loadable");
                 assert_eq!(restored.api_provider(), ApiProvider::Deepseek);
                 assert_eq!(restored.default_model(), "deepseek-v4-pro");
+
+                // Switching back must find the choice this route had, whether
+                // it was stored on its own leaf or in the root fallback.
+                persist_provider_selection(Some(&path), ApiProvider::Zai, "zai", None).unwrap();
+                let returned = crate::config::Config::load(Some(path.clone()), None)
+                    .expect("switching back must remain loadable");
+                assert_eq!(returned.api_provider(), ApiProvider::Zai);
+                assert_eq!(
+                    returned.default_model(),
+                    existing.unwrap_or("GLM-4.6"),
+                    "switching away and back must restore the outgoing selection"
+                );
             }
         }
+    }
+
+    #[test]
+    fn a_bare_switch_relocates_a_root_alias_the_incoming_route_cannot_serve() {
+        use crate::test_support::{EnvVarGuard, lock_test_env};
+        let _lock = lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let _model_guard = ModelEnvGuard::new();
+        let path = home.path().join("config.toml");
+        // No model argument, and the outgoing route keeps its only model in the
+        // root fallback. Official DeepSeek cannot serve that id, so leaving it
+        // behind would commit a switch whose config no longer loads.
+        fs::write(
+            &path,
+            "route_preferences_version = 1\nprovider = 'volcengine'\ndefault_text_model = 'ark-private-id'\n",
+        )
+        .unwrap();
+        persist_provider_selection(Some(&path), ApiProvider::Deepseek, "deepseek", None).unwrap();
+
+        let doc: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(
+            doc.get("default_text_model").is_none(),
+            "an alias the incoming route cannot serve must not be left behind"
+        );
+        assert_eq!(
+            doc["providers"]["volcengine"]["model"].as_str(),
+            Some("ark-private-id"),
+            "the displaced choice moves onto its own route's leaf, it is not dropped"
+        );
+        crate::config::Config::load(Some(path.clone()), None)
+            .expect("a bare provider switch must remain loadable");
+
+        persist_provider_selection(Some(&path), ApiProvider::Volcengine, "volcengine", None)
+            .unwrap();
+        let returned = crate::config::Config::load(Some(path.clone()), None)
+            .expect("switching back must remain loadable");
+        assert_eq!(returned.api_provider(), ApiProvider::Volcengine);
+        assert_eq!(returned.default_model(), "ark-private-id");
+    }
+
+    #[test]
+    fn bare_switch_from_legacy_custom_never_commits_an_unloadable_config() {
+        use crate::test_support::{EnvVarGuard, lock_test_env};
+        let _lock = lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let _model_guard = ModelEnvGuard::new();
+        let path = home.path().join("config.toml");
+        let original = "route_preferences_version = 1\nprovider = 'custom'\nbase_url = 'https://proxy.example.test/v1'\ndefault_text_model = 'proxy-wire-id'\n[providers.deepseek]\nbase_url = 'https://api.deepseek.com/beta'\n";
+        fs::write(&path, original).unwrap();
+        crate::config::Config::load(Some(path.clone()), None).unwrap();
+        let error =
+            persist_provider_selection(Some(&path), ApiProvider::Deepseek, "deepseek", None)
+                .unwrap_err();
+        assert!(error.to_string().contains("Choose a model"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        assert_eq!(
+            crate::config::Config::load(Some(path.clone()), None)
+                .unwrap()
+                .default_model(),
+            "proxy-wire-id"
+        );
+        let error = crate::route_preferences::set(&path, "provider", "deepseek").unwrap_err();
+        assert!(error.to_string().contains("Choose a model"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn an_unnamed_custom_route_keeps_its_root_model_across_a_switch() {
+        use crate::test_support::{EnvVarGuard, lock_test_env};
+        let _lock = lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let _model_guard = ModelEnvGuard::new();
+        let path = home.path().join("config.toml");
+        // An unnamed custom route stores its model in the root alias itself, so
+        // there is no leaf to relocate it to. Dropping it would destroy the
+        // only copy of the user's choice.
+        fs::write(
+            &path,
+            "route_preferences_version = 1\nprovider = 'custom'\nbase_url = 'https://proxy.example.test/v1'\ndefault_text_model = 'proxy-wire-id'\n",
+        )
+        .unwrap();
+        persist_provider_selection(
+            Some(&path),
+            ApiProvider::Deepseek,
+            "deepseek",
+            Some("deepseek-v4-pro"),
+        )
+        .unwrap();
+        let doc: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            doc["default_text_model"].as_str(),
+            Some("proxy-wire-id"),
+            "the custom route's only saved model must survive the switch"
+        );
+        let restored = crate::config::Config::load(Some(path.clone()), None)
+            .expect("the switched config must remain loadable");
+        assert_eq!(restored.default_model(), "deepseek-v4-pro");
+
+        // Nothing can re-select an unnamed custom route by identity once the
+        // selector names another provider, so restoring it is a `provider`
+        // edit. The model has to still be there when it happens.
+        let returning = fs::read_to_string(&path)
+            .unwrap()
+            .replace("provider = 'deepseek'", "provider = 'custom'")
+            .replace("provider = \"deepseek\"", "provider = 'custom'");
+        fs::write(&path, returning).unwrap();
+        let returned = crate::config::Config::load(Some(path.clone()), None)
+            .expect("returning to the custom route must remain loadable");
+        assert_eq!(returned.default_model(), "proxy-wire-id");
     }
 
     #[test]
@@ -1826,11 +2014,14 @@ slot = 1
         let path = home.path().join("config.toml");
         let source = "provider = 'zai'\n[providers.zai]\nmodel = 'GLM-5.2'\n";
         fs::write(&path, source).unwrap();
-        fs::write(home.path().join("settings.toml"), "default_provider = [\n").unwrap();
-        assert!(
+        let settings_path = home.path().join("settings.toml");
+        let malformed = "default_provider = [\n";
+        fs::write(&settings_path, malformed).unwrap();
+        let error =
             persist_provider_selection(Some(&path), ApiProvider::Zai, "zai", Some("GLM-5.3"))
-                .is_err()
-        );
+                .expect_err("unreadable legacy preferences must block the entire save");
+        assert!(error.to_string().contains("configuration was not changed"));
         assert_eq!(fs::read_to_string(&path).unwrap(), source);
+        assert_eq!(fs::read_to_string(&settings_path).unwrap(), malformed);
     }
 }

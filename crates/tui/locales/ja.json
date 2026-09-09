@@ -808,7 +808,7 @@
   "OnboardTrustUntrustedNotice": "ワークスペースを信頼せずに続行します — ツールとフックは制限されたままです。",
   "RedactionGateActionConfirm": "確認して無効化",
   "RedactionGateActionKeep": "秘匿化を維持",
-  "RedactionGateActionQuit": "CodeWhale を終了",
+  "RedactionGateActionQuit": "Codewhale を終了",
   "RedactionGateConfirmTitle": "最終確認",
   "RedactionGateConfirmQuestion": "本当によろしいですか？無効化すると、ツール出力のキーがそのままモデルへ送信されます。再度有効化して再確認するまで継続します。",
   "RedactionGateActionBack": "戻る",

@@ -371,11 +371,15 @@ pub fn set_document(
         let identity = config
             .resolve_provider_pin_identity(value)
             .map_err(anyhow::Error::msg)?;
-        return persistence::set_document_value(
+        persistence::set_document_value(
             doc,
             &["provider"],
             identity.persisted_id().unwrap_or(&identity.key),
-        );
+        )?;
+        // Same root-alias authority as the Runtime/TUI provider writer: a CLI
+        // switch must not leave the incoming route holding the outgoing one's
+        // fallback, and must not delete a choice to get there.
+        return persistence::reconcile_root_model_aliases(doc, &config, &identity);
     }
     let identity = model_identity(&config, key)?;
     persistence::set_provider_model_document(
@@ -542,6 +546,81 @@ model = "Other-X"
         assert_eq!(
             document(&path)["providers"]["team.a"]["model"].as_str(),
             Some("Other-X")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cli_provider_edits_share_the_runtime_writer_root_alias_authority() -> Result<()> {
+        let _env = lock_test_env();
+        let home = tempfile::tempdir()?;
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let _path = EnvVarGuard::remove("CODEWHALE_CONFIG_PATH");
+        let _legacy_path = EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH");
+        let _cloud = EnvVarGuard::set("CODEWHALE_DISABLE_CLOUD_FACTS", "1");
+        let _overrides: Vec<_> = [
+            "CODEWHALE_MODEL",
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_DEFAULT_TEXT_MODEL",
+            "CODEWHALE_PROVIDER",
+            "DEEPSEEK_PROVIDER",
+            "CODEWHALE_BASE_URL",
+            "DEEPSEEK_BASE_URL",
+            "CODEWHALE_PROFILE",
+            "DEEPSEEK_PROFILE",
+            "ZAI_MODEL",
+            "ZAI_BASE_URL",
+        ]
+        .into_iter()
+        .map(EnvVarGuard::remove)
+        .collect();
+        let path = home.path().join("config.toml");
+
+        // The incoming route owns its own leaf, so the outgoing root fallback
+        // is inert saved state. A CLI switch must not delete it, and switching
+        // back must still find it.
+        std::fs::write(
+            &path,
+            "route_preferences_version = 1\nprovider = \"zai\"\ndefault_text_model = \"GLM-4.6\"\n[providers.deepseek]\nmodel = \"deepseek-v4-pro\"\n",
+        )?;
+        set(&path, "provider", "deepseek")?;
+        assert_eq!(
+            document(&path)["default_text_model"].as_str(),
+            Some("GLM-4.6")
+        );
+        let switched = Config::load(Some(path.clone()), None)
+            .expect("a CLI provider switch must remain loadable");
+        assert_eq!(switched.api_provider(), ApiProvider::Deepseek);
+        assert_eq!(switched.default_model(), "deepseek-v4-pro");
+        set(&path, "provider", "zai")?;
+        assert_eq!(
+            Config::load(Some(path.clone()), None)
+                .expect("switching back must remain loadable")
+                .default_model(),
+            "GLM-4.6"
+        );
+
+        // With no leaf on the incoming route the alias is what `Config::load`
+        // rejects. Move it to the route that owns it rather than drop it.
+        std::fs::write(
+            &path,
+            "route_preferences_version = 1\nprovider = \"volcengine\"\ndefault_text_model = \"ark-private-id\"\n",
+        )?;
+        set(&path, "provider", "deepseek")?;
+        let doc = document(&path);
+        assert!(doc.get("default_text_model").is_none());
+        assert_eq!(
+            doc["providers"]["volcengine"]["model"].as_str(),
+            Some("ark-private-id")
+        );
+        Config::load(Some(path.clone()), None)
+            .expect("a CLI switch must not commit an unloadable config");
+        set(&path, "provider", "volcengine")?;
+        assert_eq!(
+            Config::load(Some(path), None)
+                .expect("switching back must remain loadable")
+                .default_model(),
+            "ark-private-id"
         );
         Ok(())
     }

@@ -11,15 +11,10 @@ use super::*;
 
 /// Resolve the headless `exec` model-step ceiling.
 ///
-/// R1: omitting `--max-turns` no longer means `u32::MAX`. A non-interactive
-/// run has nobody watching it, so its default bound is the same finite
-/// ceiling the interactive engine uses. Clap already rejects `--max-turns
-/// 0`, so no "0 means unlimited" sentinel can reach here; an explicit value
-/// is still clamped to the documented finite range.
+/// Omission leaves model steps uncapped. Clap rejects `--max-turns 0`;
+/// explicit positive values retain the documented finite range.
 pub(crate) fn exec_max_steps(max_turns: Option<u32>) -> u32 {
-    crate::core::engine::turn_budget::resolve_max_model_steps(max_turns.or(Some(
-        crate::core::engine::turn_budget::DEFAULT_EXEC_MAX_TURNS,
-    )))
+    crate::core::engine::turn_budget::resolve_max_model_steps(max_turns)
 }
 
 #[allow(clippy::too_many_arguments)]

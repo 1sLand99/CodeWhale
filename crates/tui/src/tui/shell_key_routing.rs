@@ -1,8 +1,8 @@
 //! Shell keyboard bindings for details / context / help.
 //!
 //! Footer hints, help catalog chords, and live handlers must agree on one
-//! source. Printable characters always belong to the composer: bare `v`
-//! types `v` in every focus state — work surface, transcript selection,
+//! source. Outside exclusive consent gates, printable characters belong to
+//! the composer: bare `v` types `v` in every ordinary focus state — work surface, transcript selection,
 //! panel, or modal (TUI-DOG-002). Details/output fires only on
 //! Option+V / Alt+V, and macOS renders the label as `⌥V`, never `Alt`/`Cmd`.
 //! Help answers to `F1` and `Ctrl+/` (with `/help`); chrome advertises only
@@ -30,6 +30,8 @@ use crate::tui::views::ModalKind;
 /// the text itself; every shell binding asks this instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
+    /// The model-bound redaction consent gate exclusively owns its decision.
+    RedactionGate,
     /// The onboarding rail owns every key until it finishes.
     Onboarding,
     /// A modal view is on top of the stack and handles its own keys.
@@ -45,9 +47,12 @@ pub enum Focus {
 /// Which focus states a binding is live in — the `ShellBinding` focus rule
 /// that used to be re-invented at every call site as
 /// `&& app.view_stack.is_empty()`. The variants nest: each admits everything
-/// the one above it does, plus one more surface.
+/// the one above it does, plus one more surface. The redaction consent gate
+/// is exclusive and sits outside that shell hierarchy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusScope {
+    /// Only the model-bound redaction consent gate.
+    RedactionGate,
     /// A live session: the composer, or a rail/workflow panel that has taken
     /// the keys from it.
     SessionShell,
@@ -56,7 +61,8 @@ pub enum FocusScope {
     /// [`FocusScope::AnyShell`], plus the Config modal, which displays the
     /// very setting the binding changes.
     AnyShellOrConfig,
-    /// Every focus state, onboarding and modals included.
+    /// Every ordinary shell state, onboarding and modals included. Exclusive
+    /// consent gates keep their own keys.
     Everywhere,
 }
 
@@ -64,13 +70,14 @@ impl FocusScope {
     #[must_use]
     pub fn admits(self, focus: Focus) -> bool {
         match self {
+            Self::RedactionGate => focus == Focus::RedactionGate,
             Self::SessionShell => matches!(focus, Focus::Composer | Focus::Panel),
             Self::AnyShell => matches!(focus, Focus::Composer | Focus::Panel | Focus::Launch),
             Self::AnyShellOrConfig => matches!(
                 focus,
                 Focus::Composer | Focus::Panel | Focus::Launch | Focus::Modal(ModalKind::Config)
             ),
-            Self::Everywhere => true,
+            Self::Everywhere => focus != Focus::RedactionGate,
         }
     }
 }
@@ -78,6 +85,10 @@ impl FocusScope {
 /// Stable binding ids shared by handlers, footer hints, and help catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShellBindingId {
+    RedactionGateConfirm,
+    RedactionGateKeepOrBack,
+    RedactionGateQuit,
+    RedactionGateScroll,
     ToolDetails,
     ContextInspector,
     ProviderRoute,
@@ -112,6 +123,16 @@ impl ShellBinding {
     #[must_use]
     pub fn matches(&self, key: &KeyEvent) -> bool {
         match self.id {
+            ShellBindingId::RedactionGateConfirm => is_redaction_gate_choice(key, '1', 'y'),
+            ShellBindingId::RedactionGateKeepOrBack => is_redaction_gate_choice(key, '2', 'u'),
+            ShellBindingId::RedactionGateQuit => is_redaction_gate_choice(key, '3', 'n'),
+            ShellBindingId::RedactionGateScroll => {
+                key.modifiers.is_empty()
+                    && matches!(
+                        key.code,
+                        KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown
+                    )
+            }
             ShellBindingId::ToolDetails => is_tool_details_shortcut(key),
             ShellBindingId::ContextInspector => is_context_inspector_shortcut(key),
             ShellBindingId::ProviderRoute => is_provider_route_shortcut(key),
@@ -141,6 +162,30 @@ pub fn route(focus: Focus, key: &KeyEvent) -> Option<ShellBindingId> {
 
 /// Canonical shell bindings. Handlers and chrome read from here.
 pub const SHELL_BINDINGS: &[ShellBinding] = &[
+    ShellBinding {
+        id: ShellBindingId::RedactionGateConfirm,
+        catalog_chord: "1/Y",
+        footer_chord: "1/Y",
+        focus: FocusScope::RedactionGate,
+    },
+    ShellBinding {
+        id: ShellBindingId::RedactionGateKeepOrBack,
+        catalog_chord: "2/U",
+        footer_chord: "2/U",
+        focus: FocusScope::RedactionGate,
+    },
+    ShellBinding {
+        id: ShellBindingId::RedactionGateQuit,
+        catalog_chord: "3/N",
+        footer_chord: "3/N",
+        focus: FocusScope::RedactionGate,
+    },
+    ShellBinding {
+        id: ShellBindingId::RedactionGateScroll,
+        catalog_chord: "↑/↓",
+        footer_chord: "↑/↓",
+        focus: FocusScope::RedactionGate,
+    },
     ShellBinding {
         id: ShellBindingId::ToolDetails,
         catalog_chord: "Alt+V",
@@ -220,6 +265,13 @@ pub const SHELL_BINDINGS: &[ShellBinding] = &[
         focus: FocusScope::AnyShell,
     },
 ];
+
+fn is_redaction_gate_choice(key: &KeyEvent, digit: char, letter: char) -> bool {
+    // Modifiers must not turn an unrelated shortcut into consent. Shift is
+    // accepted for the uppercase letter advertised in the action rail.
+    (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+        && matches!(key.code, KeyCode::Char(ch) if ch == digit || ch.eq_ignore_ascii_case(&letter))
+}
 
 /// The chord the info line advertises for help.
 ///
@@ -659,6 +711,7 @@ mod tests {
             FocusScope::Everywhere,
         ];
         let states = [
+            Focus::RedactionGate,
             Focus::Composer,
             Focus::Panel,
             Focus::Launch,
@@ -705,6 +758,68 @@ mod tests {
             route(Focus::Launch, &shift_tab),
             Some(ShellBindingId::PermissionCycle)
         );
+    }
+
+    #[test]
+    fn redaction_choices_require_the_gate_and_explicit_unmodified_keys() {
+        for (id, keys) in [
+            (ShellBindingId::RedactionGateConfirm, ['1', 'y', 'Y']),
+            (ShellBindingId::RedactionGateKeepOrBack, ['2', 'u', 'U']),
+            (ShellBindingId::RedactionGateQuit, ['3', 'n', 'N']),
+        ] {
+            for key in keys {
+                for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+                    let event = KeyEvent::new(KeyCode::Char(key), modifiers);
+                    assert_eq!(route(Focus::RedactionGate, &event), Some(id));
+                    for focus in [
+                        Focus::Composer,
+                        Focus::Panel,
+                        Focus::Launch,
+                        Focus::Onboarding,
+                        Focus::Modal(ModalKind::Approval),
+                    ] {
+                        assert_eq!(route(focus, &event), None, "{focus:?}: {event:?}");
+                    }
+                }
+                for modifiers in [
+                    KeyModifiers::CONTROL,
+                    KeyModifiers::ALT,
+                    KeyModifiers::SUPER,
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                ] {
+                    assert_eq!(
+                        route(
+                            Focus::RedactionGate,
+                            &KeyEvent::new(KeyCode::Char(key), modifiers)
+                        ),
+                        None
+                    );
+                }
+            }
+        }
+        for code in [KeyCode::Enter, KeyCode::F(1), KeyCode::F(2), KeyCode::Tab] {
+            assert_eq!(
+                route(
+                    Focus::RedactionGate,
+                    &KeyEvent::new(code, KeyModifiers::NONE)
+                ),
+                None
+            );
+        }
+        for code in [
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+        ] {
+            assert_eq!(
+                route(
+                    Focus::RedactionGate,
+                    &KeyEvent::new(code, KeyModifiers::NONE)
+                ),
+                Some(ShellBindingId::RedactionGateScroll)
+            );
+        }
     }
 
     #[test]

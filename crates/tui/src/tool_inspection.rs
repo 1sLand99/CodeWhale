@@ -52,6 +52,7 @@ pub enum TurnStopReason {
     ProviderNoToolCall,
     ProviderToolCallMissing,
     StepBudgetExhausted,
+    NoProgress,
     Interrupted,
     Failed,
 }
@@ -63,7 +64,8 @@ pub struct TurnStopDiagnostics {
     pub status: Option<crate::core::events::TurnOutcomeStatus>,
     /// None means the precise runtime exit boundary was not observed.
     pub reason: Option<TurnStopReason>,
-    pub effective_max_steps: u32,
+    /// None means the caller did not install a model-step ceiling.
+    pub effective_max_steps: Option<u32>,
     pub step_budget_source: &'static str,
     /// Existing zero-based scheduler step; transport retries do not advance it.
     pub model_step_index: u32,
@@ -75,6 +77,9 @@ pub struct TurnStopDiagnostics {
     pub reasoning_only_reprompts: u32,
     pub soft_landing_sent: bool,
     pub final_report_requested: bool,
+    pub permission_strategy_switches: u32,
+    /// Denied provider-response batches since the latest useful progress.
+    pub permission_denial_rounds_without_progress: u32,
     pub last_provider_finish_reason: Option<BoundedString>,
     /// Structured calls decoded from the stream, before legacy text-call parsing.
     pub last_response_tool_calls: Option<usize>,
@@ -470,7 +475,7 @@ impl ToolInspectionSnapshot {
         ));
         out.push_str(&format!("Step: {}\n", self.step));
         if let Some(terminal) = &self.terminal {
-            out.push_str("Terminal diagnostics (observed facts; null means unknown):\n");
+            out.push_str("Terminal diagnostics (observed facts; effective_max_steps null means uncapped, other nulls mean unknown):\n");
             if let Ok(json) = serde_json::to_string_pretty(terminal) {
                 out.push_str(&json);
                 out.push('\n');

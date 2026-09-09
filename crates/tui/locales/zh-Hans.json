@@ -808,7 +808,7 @@
   "OnboardTrustUntrustedNotice": "在未信任工作区的情况下继续 — 工具与钩子保持受限。",
   "RedactionGateActionConfirm": "确认并关闭",
   "RedactionGateActionKeep": "保持脱敏开启",
-  "RedactionGateActionQuit": "退出 CodeWhale",
+  "RedactionGateActionQuit": "退出 Codewhale",
   "RedactionGateConfirmTitle": "最终确认",
   "RedactionGateConfirmQuestion": "您真的确认吗？关闭后，工具输出中的密钥将原样发送给模型，直到您重新开启并再次确认。",
   "RedactionGateActionBack": "返回",

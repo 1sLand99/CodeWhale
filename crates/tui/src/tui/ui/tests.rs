@@ -715,6 +715,14 @@ fn focus_test_app() -> App {
 /// One representative terminal encoding per shell binding.
 fn shell_binding_probe(id: ShellBindingId) -> KeyEvent {
     match id {
+        ShellBindingId::RedactionGateConfirm => {
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)
+        }
+        ShellBindingId::RedactionGateKeepOrBack => {
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE)
+        }
+        ShellBindingId::RedactionGateQuit => KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+        ShellBindingId::RedactionGateScroll => KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
         ShellBindingId::ToolDetails => KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT),
         ShellBindingId::ContextInspector => KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT),
         ShellBindingId::ProviderRoute => KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE),
@@ -766,6 +774,10 @@ fn no_shell_binding_changes_meaning_once_the_composer_has_text() {
             "{:?} changed meaning because the composer has text",
             binding.id
         );
+        if binding.focus == crate::tui::shell_key_routing::FocusScope::RedactionGate {
+            assert_eq!(on_typed, None, "consent keys must not act on a draft");
+            continue;
+        }
         assert_eq!(
             on_typed,
             Some(binding.id),
@@ -918,6 +930,25 @@ fn focus_owner_follows_the_surface_that_owns_the_keys() {
         shell_binding_for_key(&app, &KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)),
         Some(ShellBindingId::Help)
     );
+
+    app.redaction_gate = true;
+    assert_eq!(app.focus(), Focus::RedactionGate);
+    let confirm = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+    assert_eq!(
+        shell_binding_for_key(&app, &confirm),
+        Some(ShellBindingId::RedactionGateConfirm)
+    );
+    assert_eq!(
+        shell_binding_for_key(&app, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        None
+    );
+    assert_eq!(
+        shell_binding_for_key(&app, &KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)),
+        None
+    );
+    app.onboarding = crate::tui::app::OnboardingState::Welcome;
+    assert_eq!(app.focus(), Focus::Modal(ModalKind::Help));
+    assert_eq!(shell_binding_for_key(&app, &confirm), None);
 }
 
 #[test]
@@ -9365,14 +9396,15 @@ fn first_run_ollama_choice_survives_restart_from_canonical_config() {
     // shared fixture options hard-code a DeepSeek id no launch would supply
     // here, and `App::new` only re-derives the model when the legacy Settings
     // archive still owns the selection — which, since Config became the saved
-    // route authority, it no longer does.
-    let restarted = Box::new(App::new(
-        TuiOptions {
-            model: restart_config.default_model(),
-            ..create_test_options()
-        },
-        &restart_config,
-    ));
+    // route authority, it no longer does. Pin the resolved id before `App`
+    // sees it, so a regression in `default_model` cannot hide behind the
+    // app-level assertions below.
+    let options = TuiOptions {
+        model: restart_config.default_model(),
+        ..create_test_options()
+    };
+    assert_eq!(options.model, crate::config::DEFAULT_OLLAMA_MODEL);
+    let restarted = Box::new(App::new(options, &restart_config));
     assert_eq!(restarted.api_provider, ApiProvider::Ollama);
     assert_eq!(restarted.model, crate::config::DEFAULT_OLLAMA_MODEL);
     assert_ne!(

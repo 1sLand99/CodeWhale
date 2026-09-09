@@ -808,7 +808,7 @@
   "OnboardTrustUntrustedNotice": "Tiếp tục mà không tin cậy workspace — công cụ và hook vẫn bị hạn chế.",
   "RedactionGateActionConfirm": "xác nhận và tắt",
   "RedactionGateActionKeep": "giữ che khóa",
-  "RedactionGateActionQuit": "thoát CodeWhale",
+  "RedactionGateActionQuit": "thoát Codewhale",
   "RedactionGateConfirmTitle": "Xác nhận cuối cùng",
   "RedactionGateConfirmQuestion": "Bạn có chắc chắn không? Sau khi tắt, khóa trong đầu ra công cụ sẽ được gửi nguyên văn cho mô hình cho đến khi bạn bật lại tính năng che và xác nhận lần nữa.",
   "RedactionGateActionBack": "quay lại",

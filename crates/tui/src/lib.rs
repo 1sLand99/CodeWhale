@@ -16950,11 +16950,8 @@ api_key = "test-only-key"
         assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
-    /// R1: omitting `--max-turns` used to resolve to `u32::MAX`, i.e. a
-    /// headless run with no bound at all. It now resolves to the finite
-    /// default, and an explicit value still wins.
     #[test]
-    fn exec_defaults_to_a_finite_headless_turn_cap() {
+    fn exec_only_installs_an_explicit_headless_turn_cap() {
         let cli = parse_cli(&["codewhale", "exec", "--auto", "benchmark this"]);
         let Some(Commands::Exec(args)) = cli.command else {
             panic!("expected exec command");
@@ -16964,10 +16961,19 @@ api_key = "test-only-key"
         let defaulted = exec_max_steps(args.max_turns);
         assert_eq!(
             defaulted,
-            crate::core::engine::turn_budget::DEFAULT_EXEC_MAX_TURNS
+            crate::core::engine::turn_budget::DEFAULT_MAX_MODEL_STEPS
         );
-        assert!(defaulted < u32::MAX, "the headless default must be finite");
+        assert_eq!(
+            crate::core::turn::TurnContext::new(defaulted).step_limit(),
+            None
+        );
         assert_eq!(exec_max_steps(Some(7)), 7);
+        let mut capped = crate::core::turn::TurnContext::new(exec_max_steps(Some(7)));
+        for _ in 0..7 {
+            capped.next_step();
+        }
+        assert!(capped.at_max_steps());
+        assert_eq!(capped.stop_diagnostics.effective_max_steps, Some(7));
         assert_eq!(
             exec_max_steps(Some(u32::MAX)),
             crate::core::engine::turn_budget::MAX_MAX_MODEL_STEPS,
