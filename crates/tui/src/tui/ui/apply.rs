@@ -2368,7 +2368,11 @@ pub(crate) async fn apply_command_result(
             },
             AppAction::TaskShow { id } => {
                 let task = match app.current_session_id.as_deref() {
-                    Some(session_id) => task_manager.get_task_for_owner(&id, session_id).await,
+                    Some(session_id) => {
+                        task_manager
+                            .get_task_for_interactive_session(&id, session_id)
+                            .await
+                    }
                     None => Err(anyhow::anyhow!("Task not found: {id}")),
                 };
                 match task {
@@ -2382,7 +2386,11 @@ pub(crate) async fn apply_command_result(
             }
             AppAction::TaskCancel { id } => {
                 let cancellation = match app.current_session_id.as_deref() {
-                    Some(session_id) => task_manager.cancel_task_for_owner(&id, session_id).await,
+                    Some(session_id) => {
+                        task_manager
+                            .cancel_task_for_interactive_session(&id, session_id)
+                            .await
+                    }
                     None => Err(anyhow::anyhow!("Task not found: {id}")),
                 };
                 match cancellation {

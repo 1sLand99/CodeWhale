@@ -1821,6 +1821,34 @@ impl TaskManager {
             .await
     }
 
+    /// Retrieve a task the interactive operator can inspect by full id or prefix.
+    ///
+    /// Scheduled automations have no session owner because they can outlive the
+    /// session that configured them. They remain operator-visible only while
+    /// bound to this manager's verified Runtime execution scope. Session-owned
+    /// tasks keep their existing isolation, and unscoped legacy records remain
+    /// hidden.
+    pub(crate) async fn get_task_for_interactive_session(
+        &self,
+        id_or_prefix: &str,
+        owner_session_id: &str,
+    ) -> Result<TaskRecord> {
+        let mut state = self.state.lock().await;
+        let _transaction = self.lock_store().await?;
+        self.refresh_locked(&mut state)?;
+        let id = resolve_task_id_visible_to_operator(
+            &state.tasks,
+            id_or_prefix,
+            owner_session_id,
+            self.execution_scope(),
+        )?;
+        state
+            .tasks
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| anyhow!("Task not found: {id_or_prefix}"))
+    }
+
     /// Retrieve the exact owned task stamped onto a trusted runtime thread.
     ///
     /// The runtime thread supplies a full durable id rather than model input.
@@ -1859,7 +1887,7 @@ impl TaskManager {
 
     /// Cancel a queued or running task by id/prefix.
     pub async fn cancel_task(&self, id_or_prefix: &str) -> Result<TaskCancellation> {
-        self.cancel_task_visible_to(id_or_prefix, None).await
+        self.cancel_task_visible_to(id_or_prefix, None, None).await
     }
 
     /// Cancel a queued or running task owned by the given session.
@@ -1870,8 +1898,27 @@ impl TaskManager {
         id_or_prefix: &str,
         owner_session_id: &str,
     ) -> Result<TaskCancellation> {
-        self.cancel_task_visible_to(id_or_prefix, Some(owner_session_id))
+        self.cancel_task_visible_to(id_or_prefix, Some(owner_session_id), None)
             .await
+    }
+
+    /// Cancel a task visible to the interactive operator.
+    ///
+    /// This is the cancellation counterpart to
+    /// [`Self::get_task_for_interactive_session`]. It exists for human TUI
+    /// actions, including the automation view's cancel button; model and child
+    /// task APIs retain session-only visibility.
+    pub(crate) async fn cancel_task_for_interactive_session(
+        &self,
+        id_or_prefix: &str,
+        owner_session_id: &str,
+    ) -> Result<TaskCancellation> {
+        self.cancel_task_visible_to(
+            id_or_prefix,
+            Some(owner_session_id),
+            Some(self.execution_scope()),
+        )
+        .await
     }
 
     /// Cancel the exact owned task stamped onto a trusted runtime thread.
@@ -1887,11 +1934,20 @@ impl TaskManager {
         &self,
         id_or_prefix: &str,
         owner_session_id: Option<&str>,
+        operator_execution_scope: Option<&str>,
     ) -> Result<TaskCancellation> {
         let mut state = self.state.lock().await;
         let _transaction = self.lock_store().await?;
         self.refresh_locked(&mut state)?;
-        let id = resolve_task_id_visible_to(&state.tasks, id_or_prefix, owner_session_id)?;
+        let id = match (owner_session_id, operator_execution_scope) {
+            (Some(owner_session_id), Some(execution_scope)) => resolve_task_id_visible_to_operator(
+                &state.tasks,
+                id_or_prefix,
+                owner_session_id,
+                execution_scope,
+            )?,
+            _ => resolve_task_id_visible_to(&state.tasks, id_or_prefix, owner_session_id)?,
+        };
         let now = Utc::now();
 
         let mut cancel_running = false;
@@ -3185,6 +3241,38 @@ fn resolve_task_id_visible_to(
     }
 }
 
+fn resolve_task_id_visible_to_operator(
+    tasks: &HashMap<String, TaskRecord>,
+    id_or_prefix: &str,
+    owner_session_id: &str,
+    execution_scope: &str,
+) -> Result<String> {
+    let visible = |record: &TaskRecord| {
+        record.owner_session_id.as_deref() == Some(owner_session_id)
+            || record.owner_session_id.is_none()
+                && !execution_scope.is_empty()
+                && record.execution_scope.as_deref() == Some(execution_scope)
+    };
+    if tasks.get(id_or_prefix).is_some_and(visible) {
+        return Ok(id_or_prefix.to_string());
+    }
+    let matches = tasks
+        .iter()
+        .filter(|(id, record)| id.starts_with(id_or_prefix) && visible(record))
+        .map(|(id, _)| id)
+        .cloned()
+        .collect::<Vec<_>>();
+    match matches.len() {
+        0 => bail!("Task not found: {id_or_prefix}"),
+        1 => Ok(matches[0].clone()),
+        _ => bail!(
+            "Ambiguous task prefix '{}': matches {} tasks",
+            id_or_prefix,
+            matches.len()
+        ),
+    }
+}
+
 fn resolve_task_id(tasks: &HashMap<String, TaskRecord>, id_or_prefix: &str) -> Result<String> {
     resolve_task_id_visible_to(tasks, id_or_prefix, None)
 }
@@ -3909,6 +3997,129 @@ mod tests {
             "switching A to B and back must restore A's controls"
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn interactive_task_controls_include_only_owned_or_same_scope_records() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let manager = TaskManager::start_with_executor(
+            test_config(root.path().to_path_buf()),
+            Arc::new(MockExecutor),
+        )
+        .await?;
+        // Exercise persisted controls without a worker racing to execute the
+        // queued fixture records. The manager retains its verified scope.
+        manager.shutdown_and_wait().await?;
+        let mut scheduled = sample_task_record();
+        scheduled.id = "task_dead000000000001".to_string();
+        scheduled.owner_session_id = None;
+        scheduled.execution_scope = Some(manager.execution_scope().to_string());
+        scheduled.status = TaskStatus::Queued;
+
+        let mut owned = scheduled.clone();
+        owned.id = "task_beef000000000001".to_string();
+        owned.owner_session_id = Some("session-a".to_string());
+        owned.status = TaskStatus::Completed;
+
+        let mut foreign_scope = scheduled.clone();
+        foreign_scope.id = "task_dead000000000002".to_string();
+        foreign_scope.execution_scope = Some(test_execution_scope("other"));
+        let mut other_session = scheduled.clone();
+        other_session.id = "task_dead000000000003".to_string();
+        other_session.owner_session_id = Some("session-b".to_string());
+        let mut legacy = scheduled.clone();
+        legacy.id = "task_dead000000000004".to_string();
+        legacy.execution_scope = None;
+        let hidden = [foreign_scope, other_session, legacy];
+        {
+            let mut state = manager.state.lock().await;
+            for record in std::iter::once(&scheduled)
+                .chain(std::iter::once(&owned))
+                .chain(hidden.iter())
+            {
+                manager.persist_task_locked(record)?;
+                state.tasks.insert(record.id.clone(), record.clone());
+            }
+        }
+
+        for record in [&scheduled, &owned] {
+            assert_eq!(
+                manager
+                    .get_task_for_interactive_session(&record.id, "session-a")
+                    .await?
+                    .id,
+                record.id
+            );
+        }
+        // Hidden records sharing this prefix must not make it ambiguous.
+        assert_eq!(
+            manager
+                .get_task_for_interactive_session("task_dead", "session-a")
+                .await?
+                .id,
+            scheduled.id
+        );
+        let ambiguous = manager
+            .get_task_for_interactive_session("task_", "session-a")
+            .await
+            .unwrap_err();
+        assert!(ambiguous.to_string().contains("matches 2 tasks"));
+        for record in &hidden {
+            assert!(
+                manager
+                    .get_task_for_interactive_session(&record.id, "session-a")
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Task not found")
+            );
+            assert!(
+                manager
+                    .cancel_task_for_interactive_session(&record.id, "session-a")
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Task not found")
+            );
+            assert_eq!(
+                manager.get_task(&record.id).await?.status,
+                TaskStatus::Queued
+            );
+        }
+        // Model and child-session APIs do not inherit the human-only access.
+        assert!(
+            manager
+                .get_task_for_owner(&scheduled.id, "session-a")
+                .await
+                .is_err()
+        );
+        assert!(
+            manager
+                .cancel_task_for_owner(&scheduled.id, "session-a")
+                .await
+                .is_err()
+        );
+        let canceled = manager
+            .cancel_task_for_interactive_session("task_dead", "session-a")
+            .await?;
+        assert_eq!(canceled.task.id, scheduled.id);
+        assert_eq!(canceled.task.status, TaskStatus::Canceled);
+        assert_eq!(
+            manager.get_task(&scheduled.id).await?.status,
+            TaskStatus::Canceled
+        );
+        manager.shutdown_and_wait().await?;
+        Ok(())
+    }
+
+    #[test]
+    fn interactive_task_controls_reject_an_empty_manager_scope() {
+        let mut record = sample_task_record();
+        record.owner_session_id = None;
+        record.execution_scope = Some(String::new());
+        let id = record.id.clone();
+        let tasks = HashMap::from([(id.clone(), record)]);
+        assert!(resolve_task_id_visible_to_operator(&tasks, &id, "session-a", "").is_err());
     }
 
     #[tokio::test]
