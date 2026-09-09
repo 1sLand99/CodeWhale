@@ -1,6 +1,6 @@
 #!/bin/sh
-# Shared test-home boundary extracted from test-tui-hermetic.sh. Both that
-# runner and Buildkite workspace tests use it; Rust toolchain homes stay real.
+# Shared test-home boundary for local and CI workspace tests.
+# Rust toolchain homes stay real.
 set -eu
 
 if [ "$#" -eq 0 ]; then

@@ -440,7 +440,7 @@ API share that Engine.
 | `fleets/`, `workflows/` | Distributed Fleet definitions and workflow examples |
 | `brand/` | Source artwork and generated brand variants used by the README, website and terminal |
 | `docs/` | User/developer documentation, schemas, fixtures and referenced release material |
-| `scripts/`, `.github/`, `.buildkite/`, `.cnb.yml` | Development, validation, CI and release tooling |
+| `scripts/`, `.github/`, `.cnb.yml` | Development, validation, CI and release tooling |
 | `patches/` | Vendored dependency fixes, including their licensing files |
 
 Generated files that the product embeds or validates, such as model catalogs,
