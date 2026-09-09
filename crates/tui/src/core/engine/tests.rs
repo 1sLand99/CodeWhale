@@ -3584,6 +3584,37 @@ async fn operate_turns_a_work_prompt_into_the_goal_but_work_mode_does_not() {
 }
 
 #[tokio::test]
+async fn operate_leaves_followup_and_long_questions_as_ordinary_turns() {
+    let report = "what about like rust or docker builds or something";
+    let (objective, active, contracts) = operate_goal_probe(AppMode::Operate, report).await;
+    assert_eq!(
+        objective, None,
+        "conversational followup must remain ordinary turn in Operate"
+    );
+    assert!(!active);
+    assert_eq!(contracts, 1);
+
+    let long_q =
+        "why did the build fail on the last step when running under docker on macos with rust 1.80";
+    let (objective, active, contracts) = operate_goal_probe(AppMode::Operate, long_q).await;
+    assert_eq!(
+        objective, None,
+        "long question without punctuation must remain ordinary turn"
+    );
+    assert!(!active);
+    assert_eq!(contracts, 1);
+
+    let zh_followup = "那 rust 或者 docker 构建呢";
+    let (objective, active, contracts) = operate_goal_probe(AppMode::Operate, zh_followup).await;
+    assert_eq!(
+        objective, None,
+        "Chinese followup must remain ordinary turn in Operate"
+    );
+    assert!(!active);
+    assert_eq!(contracts, 1);
+}
+
+#[tokio::test]
 async fn operate_contract_is_appended_once_and_an_existing_goal_is_never_replaced() {
     let first_entered = std::sync::Arc::new(tokio::sync::Notify::new());
     let release_first = std::sync::Arc::new(tokio::sync::Notify::new());

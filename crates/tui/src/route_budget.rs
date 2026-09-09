@@ -126,15 +126,12 @@ pub(crate) fn effective_max_output_tokens(model: &str) -> u32 {
     (window / 2).min(API_MAX_OUTPUT_TOKENS)
 }
 
-/// Conservative request ceiling for a model the static catalogue does not
-/// describe at all.
-///
-/// An absent compatibility cap is not evidence of a large ceiling. Remote
-/// OpenAI-compatible routes serving an unrecognized wire alias frequently
-/// publish a much lower `max_tokens` maximum and reject anything above it, so
-/// an uncatalogued id keeps this floor rather than inheriting the full
-/// [`API_MAX_OUTPUT_TOKENS`] request cap.
-const UNCATALOGUED_COMPAT_MAX_OUTPUT_TOKENS: u32 = 8_192;
+/// Automatic allowance when an exact remote model has no output metadata.
+/// This is policy, not a discovered provider limit. Reasoning and tool arguments
+/// share this allowance; an 8K fallback truncated ordinary file writes after
+/// reasoning consumed most of the response. Known route limits still constrain
+/// requests, and an explicit operator setting may replace this fallback.
+const UNCATALOGUED_COMPAT_MAX_OUTPUT_TOKENS: u32 = API_MAX_OUTPUT_TOKENS;
 
 /// Assumed output ceiling for an Anthropic-family model the catalogue does
 /// not describe (#5440). The 64K Messages floor is real, but applying it to
@@ -277,18 +274,23 @@ pub(crate) fn effective_max_output_tokens_for_route(
     // such as the `kimi-for-coding` family, and operator-owned self-hosted
     // engines. For those there is nothing to clamp against and the requested
     // cap stands. A model the catalogue simply has no row for is not the same
-    // fact — absence is not permission, so it keeps a conservative ceiling
+    // fact — absence keeps a labeled automatic allowance
     // (see `output_ceiling_source`). A concrete route/offering maximum is the
     // missing evidence for that exact route and may replace only the generic
     // uncatalogued guess; known compatibility caps stay authoritative and are
     // still intersected with any route maximum.
     let cap = match (compatibility_source, route_cap) {
         // A concrete route/offering maximum is evidence about this exact
-        // route. It therefore outranks the generic 8K guess that exists only
+        // route. It therefore outranks the generic fallback that exists only
         // because the static catalogue has no row for the wire id. With no
         // route fact the conservative guess still applies, and the route fact
         // can never raise the caller's requested cap.
         (OutputCeilingSource::Uncatalogued(_), Some(route_cap)) => requested_cap.min(route_cap),
+        (OutputCeilingSource::Uncatalogued(_), None)
+            if explicit_max_output_tokens_override().is_some() =>
+        {
+            requested_cap
+        }
         _ => {
             let cap = compatibility_cap.map_or(requested_cap, |compat| requested_cap.min(compat));
             route_cap.map_or(cap, |route_cap| cap.min(route_cap))
@@ -382,8 +384,8 @@ mod tests {
             for (window, expected_output) in [
                 (16_384, 4_096),
                 (32_768, 8_192),
-                (65_536, 8_192),
-                (262_144, 8_192),
+                (65_536, 16_384),
+                (262_144, 65_536),
             ] {
                 let limits = Some(RouteLimits {
                     context_tokens: Some(window),
@@ -469,8 +471,8 @@ mod tests {
             );
             assert_eq!(
                 effective_max_output_tokens_for_route(provider, model, None),
-                UNCATALOGUED_COMPAT_MAX_OUTPUT_TOKENS,
-                "{provider:?}: no route fact must stay fail-closed"
+                64_000,
+                "{provider:?}: no route fact must preserve the labeled automatic allowance"
             );
             for route_cap in [24_576, 64_000] {
                 assert_eq!(
@@ -866,11 +868,11 @@ mod tests {
             ] {
                 assert_eq!(provider_capability(provider, model).max_output, None);
                 let source = output_ceiling_source(provider, model);
-                assert_eq!(source, OutputCeilingSource::Uncatalogued(8_192));
+                assert_eq!(source, OutputCeilingSource::Uncatalogued(65_536));
                 assert_eq!(source.as_str(), "uncatalogued");
                 assert_eq!(
                     effective_max_output_tokens_for_route(provider, model, None),
-                    8_192,
+                    64_000,
                     "{provider:?}: {model}"
                 );
             }
@@ -996,6 +998,44 @@ mod tests {
         .expect("override route budget");
         assert_eq!(budget.input_budget_ceiling, 226_656);
         assert!(budget.available_input_tokens > 0);
+    }
+
+    #[test]
+    fn explicit_uncatalogued_allowance_respects_route_and_context_limits() {
+        let _lock = crate::test_support::lock_test_env();
+        let _canonical =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_MAX_OUTPUT_TOKENS", "100000");
+        let _legacy = crate::test_support::EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
+        let model = "uncatalogued-preview-for-output-test";
+        let limits = RouteLimits {
+            context_tokens: Some(327_680),
+            ..RouteLimits::default()
+        };
+        assert_eq!(
+            effective_max_output_tokens_for_route(ApiProvider::Custom, model, Some(limits)),
+            100_000
+        );
+        assert_eq!(
+            effective_max_output_tokens_for_route(
+                ApiProvider::Custom,
+                model,
+                Some(RouteLimits {
+                    output_tokens: Some(32_768),
+                    ..limits
+                })
+            ),
+            32_768
+        );
+        let small = RouteLimits {
+            context_tokens: Some(32_768),
+            ..RouteLimits::default()
+        };
+        let cap = effective_max_output_tokens_for_route(ApiProvider::Custom, model, Some(small));
+        assert_eq!(cap, 30_720);
+        assert_eq!(
+            route_output_reservation(ApiProvider::Custom, model, Some(small)),
+            cap
+        );
     }
 
     #[test]

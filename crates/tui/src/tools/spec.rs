@@ -1052,7 +1052,9 @@ impl ToolContext {
     /// # Ok::<(), crate::tools::spec::ToolError>(())
     /// ```
     pub fn resolve_path(&self, raw: &str) -> Result<PathBuf, ToolError> {
-        let candidate = if std::path::Path::new(raw).is_absolute() {
+        let candidate = if let Some(home_path) = resolve_home_path(raw)? {
+            home_path
+        } else if std::path::Path::new(raw).is_absolute() {
             PathBuf::from(raw)
         } else {
             self.workspace.join(raw)
@@ -1354,6 +1356,63 @@ pub(crate) fn normalize_path(path: &Path) -> PathBuf {
         normalized.push(part);
     }
     normalized
+}
+
+/// Resolve an exact `~` or `~/` path prefix to the current user's home directory.
+///
+/// Only exact `~` and `~/` (or `~\` on Windows) prefixes are resolved. Prefixes like
+/// `~otheruser`, shell variables (`$VAR`), command substitution, and globs are not
+/// expanded. Literal paths like `./~/file` stay literal.
+///
+/// Returns:
+/// - `Ok(Some(path))` if `raw` has an exact home prefix and home was determined.
+/// - `Ok(None)` if `raw` does not have an exact home prefix.
+/// - `Err(ToolError)` if `raw` has an exact home prefix but user home could not be determined.
+pub(crate) fn resolve_home_path(raw: &str) -> Result<Option<PathBuf>, ToolError> {
+    resolve_home_path_with(raw, crate::config::effective_home_dir)
+}
+
+pub(crate) fn resolve_home_path_with(
+    raw: &str,
+    home_lookup: impl FnOnce() -> Option<PathBuf>,
+) -> Result<Option<PathBuf>, ToolError> {
+    let suffix = if raw == "~" {
+        ""
+    } else if let Some(rest) = raw.strip_prefix("~/") {
+        rest.trim_start_matches(|c| c == '/' || (cfg!(windows) && c == '\\'))
+    } else {
+        #[cfg(windows)]
+        if let Some(rest) = raw.strip_prefix(r"~\") {
+            rest.trim_start_matches(['/', '\\'])
+        } else {
+            return Ok(None);
+        }
+        #[cfg(not(windows))]
+        return Ok(None);
+    };
+
+    // A drive prefix is not a home-relative suffix. `PathBuf::join` would
+    // otherwise replace the home on Windows (for example `~/C:\file`).
+    #[cfg(windows)]
+    if Path::new(suffix)
+        .components()
+        .any(|part| matches!(part, std::path::Component::Prefix(_)))
+    {
+        return Err(ToolError::invalid_input(
+            "a home-relative path cannot contain a drive prefix",
+        ));
+    }
+    let home = home_lookup().ok_or_else(|| {
+        ToolError::execution_failed(format!(
+            "Failed to resolve path '{raw}': user home directory could not be determined"
+        ))
+    })?;
+
+    if suffix.is_empty() {
+        Ok(Some(home))
+    } else {
+        Ok(Some(home.join(suffix)))
+    }
 }
 
 /// The core trait that all tools must implement.

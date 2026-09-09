@@ -435,9 +435,26 @@ fn is_config_or_backup(candidate: &Path, config_path: &Path) -> bool {
 /// result, which would read as "the file is empty" and invite the model to
 /// probe siblings.
 pub(crate) fn enforce_read_denylist(path: &Path, tool: &str) -> Result<(), ToolError> {
-    match crate::sandbox::read_guard::active().check(path) {
+    // Expand the user's home before authorization, retaining the spelling they
+    // supplied in every denial. This shares the file tools' path resolution;
+    // expansion grants no additional access and never exposes a symlink target.
+    let home_path = path
+        .to_str()
+        .map(super::spec::resolve_home_path)
+        .transpose()?
+        .flatten();
+    if home_path
+        .as_deref()
+        .is_some_and(is_codewhale_credential_path)
+    {
+        return Err(ToolError::permission_denied(format!(
+            "{tool} cannot expose Codewhale configuration or credential-store files; use `codewhale config list` or `codewhale auth status` for safe inspection"
+        )));
+    }
+    match crate::sandbox::read_guard::active().check(home_path.as_deref().unwrap_or(path)) {
         Ok(()) => Ok(()),
-        Err(denial) => {
+        Err(mut denial) => {
+            denial.requested = path.to_path_buf();
             let message = denial.message(tool);
             tracing::warn!(
                 target: "codewhale::sandbox::read_guard",
@@ -815,7 +832,7 @@ impl ToolSpec for ReadFileTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Path to the file (relative to workspace or absolute). Alias: `file_path`"
+                    "description": "Path to the file (relative to workspace, absolute, or ~/ home-relative). Alias: `file_path`"
                 },
                 "start_line": {
                     "type": "integer",
@@ -2663,7 +2680,7 @@ impl ToolSpec for ListDirTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Relative path (default: .)"
+                    "description": "Path to inspect (relative to workspace, absolute, or ~/ home-relative; default: .)"
                 }
             },
             "required": []

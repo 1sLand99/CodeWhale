@@ -1667,8 +1667,8 @@ impl App {
         if self.startup_input_unproven {
             self.startup_input_unproven = false;
             self.hold_unproven_submit(
-                "Codewhale could not confirm it received everything you typed during startup. \
-                 Check the line above and press Enter again to send it as shown.",
+                "Check the line, then press Enter again to send it. \
+                 Startup may have missed some characters.",
             );
             return None;
         }

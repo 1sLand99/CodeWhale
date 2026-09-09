@@ -2644,3 +2644,239 @@ async fn read_file_refusal_names_the_callers_spelling_not_the_symlink_target() {
         "the refusal must not reveal the symlink target's location: {message}"
     );
 }
+
+#[tokio::test]
+async fn read_and_write_file_home_path_in_allowed_real_home_fixture() {
+    let real_home = crate::config::effective_home_dir().expect("test home must be available");
+    let home_fixture = tempfile::Builder::new()
+        .prefix("cw_home_tool_fixture_")
+        .tempdir_in(&real_home)
+        .expect("create fixture inside test home");
+
+    let test_file = home_fixture.path().join("home_note.txt");
+    let rel = test_file
+        .strip_prefix(&real_home)
+        .expect("fixture is below test home");
+    let tilde_path = format!("~/{}", rel.to_string_lossy());
+
+    let ctx = ToolContext::new(home_fixture.path().to_path_buf());
+
+    // 1. Write content to home-relative path
+    let write_result = WriteFileTool
+        .execute(
+            json!({
+                "path": &tilde_path,
+                "content": "initial home content\n"
+            }),
+            &ctx,
+        )
+        .await
+        .expect("write_file to home-relative path inside workspace should succeed");
+    assert!(write_result.success);
+
+    // 2. Read content back and verify content and hash
+    let read_result = ReadFileTool
+        .execute(json!({ "path": &tilde_path }), &ctx)
+        .await
+        .expect("read_file from home-relative path should succeed");
+    assert!(read_result.success);
+    assert!(read_result.content.contains("initial home content\n"));
+    let expected_hash = crate::tools::file::content_hash(b"initial home content\n");
+    assert!(read_result.content.contains(&expected_hash));
+
+    // 3. Edit content with read-before-write consistency
+    let edit_result = EditFileTool
+        .execute(
+            json!({
+                "path": &tilde_path,
+                "search": "initial home",
+                "replace": "updated home"
+            }),
+            &ctx,
+        )
+        .await
+        .expect("edit_file on home-relative path should succeed after read");
+    assert!(edit_result.success);
+
+    // 4. Verify updated read
+    let updated_read = ReadFileTool
+        .execute(json!({ "path": &tilde_path }), &ctx)
+        .await
+        .expect("read_file after edit should succeed");
+    assert!(updated_read.content.contains("updated home content\n"));
+
+    // 5. list_dir on home-relative directory
+    let dir_rel = home_fixture.path().strip_prefix(&real_home).unwrap();
+    let dir_tilde = format!("~/{}", dir_rel.to_string_lossy());
+    let list_result = ListDirTool
+        .execute(json!({ "path": &dir_tilde }), &ctx)
+        .await
+        .expect("list_dir on home-relative directory should succeed");
+    assert!(list_result.success);
+    assert!(list_result.content.contains("home_note.txt"));
+}
+
+#[tokio::test]
+async fn read_file_home_path_restricted_refusal() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let ctx = ToolContext::new(workspace.path().to_path_buf());
+
+    let error = ReadFileTool
+        .execute(
+            json!({ "path": "~/untrusted_outside_workspace_file_98765.txt" }),
+            &ctx,
+        )
+        .await
+        .expect_err("home path outside workspace without trust must be refused");
+    assert!(
+        matches!(
+            error,
+            ToolError::PathEscape { .. } | ToolError::ExecutionFailed { .. }
+        ),
+        "expected path escape or execution failed, got: {error:?}"
+    );
+
+    let write_error = WriteFileTool
+        .execute(
+            json!({
+                "path": "~/untrusted_outside_workspace_file_98765.txt",
+                "content": "illegal write"
+            }),
+            &ctx,
+        )
+        .await
+        .expect_err("write to untrusted home path must be refused");
+    assert!(
+        matches!(
+            write_error,
+            ToolError::PathEscape { .. } | ToolError::ExecutionFailed { .. }
+        ),
+        "expected path escape or execution failed, got: {write_error:?}"
+    );
+}
+
+#[tokio::test]
+async fn read_file_home_path_trusted_external_allowance() {
+    let real_home = crate::config::effective_home_dir().expect("test home must be available");
+    let trusted_fixture = tempfile::Builder::new()
+        .prefix("cw_home_trusted_fixture_")
+        .tempdir_in(&real_home)
+        .expect("create fixture inside test home");
+
+    let test_file = trusted_fixture.path().join("external.txt");
+    std::fs::write(&test_file, "external trusted data\n").expect("write external");
+    let rel = test_file
+        .strip_prefix(&real_home)
+        .expect("fixture is below test home");
+    let tilde_path = format!("~/{}", rel.to_string_lossy());
+
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let canonical_trusted = trusted_fixture
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| trusted_fixture.path().to_path_buf());
+    let ctx = ToolContext::new(workspace.path().to_path_buf())
+        .with_trusted_external_paths(vec![canonical_trusted]);
+
+    let result = ReadFileTool
+        .execute(json!({ "path": &tilde_path }), &ctx)
+        .await
+        .expect("read_file on trusted external home path should succeed");
+    assert!(result.success);
+    assert!(result.content.contains("external trusted data\n"));
+}
+
+#[tokio::test]
+async fn read_file_literal_tilde_stays_literal() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let literal_dir = workspace.path().join("~");
+    std::fs::create_dir_all(&literal_dir).expect("create literal ~ dir");
+    let literal_file = literal_dir.join("payload.txt");
+    std::fs::write(&literal_file, "literal dir content").expect("write payload");
+
+    let ctx = ToolContext::new(workspace.path().to_path_buf());
+    let result = ReadFileTool
+        .execute(json!({ "path": "./~/payload.txt" }), &ctx)
+        .await
+        .expect("read_file on literal ./~/ path should read from workspace literal ~ directory");
+    assert!(result.success);
+    assert!(result.content.contains("literal dir content"));
+}
+
+#[tokio::test]
+async fn read_file_no_shell_expansion() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let home_var_dir = workspace.path().join("$HOME");
+    std::fs::create_dir_all(&home_var_dir).expect("create literal $HOME dir");
+    let var_file = home_var_dir.join("shell.txt");
+    std::fs::write(&var_file, "literal $HOME file").expect("write var file");
+
+    let ctx = ToolContext::new(workspace.path().to_path_buf());
+    let result = ReadFileTool
+        .execute(json!({ "path": "$HOME/shell.txt" }), &ctx)
+        .await
+        .expect("read_file on $HOME/file should read from workspace literal $HOME directory without expanding env vars");
+    assert!(result.success);
+    assert!(result.content.contains("literal $HOME file"));
+}
+
+#[tokio::test]
+async fn read_file_denies_home_credential_path() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    // Even in trust mode, credential paths must be blocked
+    let ctx = ToolContext::new(workspace.path().to_path_buf()).with_trust_mode(true);
+
+    let error = ReadFileTool
+        .execute(json!({ "path": "~/.codewhale/config.toml" }), &ctx)
+        .await
+        .expect_err("reading ~/.codewhale/config.toml must be denied");
+    assert!(
+        matches!(error, ToolError::PermissionDenied { .. }),
+        "expected permission denied, got: {error:?}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("cannot expose Codewhale configuration or credential-store files"),
+        "error message must protect credentials: {message}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn read_file_refusal_names_home_spelling_not_denied_symlink_target() {
+    let real_home = crate::config::effective_home_dir().expect("test home must be available");
+    let home_fixture = tempfile::Builder::new()
+        .prefix("cw_home_symlink_fixture_")
+        .tempdir_in(&real_home)
+        .expect("create fixture inside test home");
+
+    let denied_file = home_fixture.path().join(".env");
+    std::fs::write(&denied_file, "SYNTHETIC_FIXTURE=not-a-secret").expect("create denied fixture");
+    let link = home_fixture.path().join("ssh_probe");
+    std::os::unix::fs::symlink(&denied_file, &link).expect("symlink to denied file");
+
+    let rel = link
+        .strip_prefix(&real_home)
+        .expect("fixture is below test home");
+    let tilde_path = format!("~/{}", rel.to_string_lossy());
+
+    let ctx = ToolContext::new(home_fixture.path().to_path_buf());
+    let error = ReadFileTool
+        .execute(json!({ "path": &tilde_path }), &ctx)
+        .await
+        .expect_err("symlink pointing to a denied file must be refused");
+    assert!(
+        matches!(error, ToolError::PermissionDenied { .. }),
+        "expected permission refusal, got: {error:?}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains(&tilde_path),
+        "refusal message must name caller's tilde path ({tilde_path}): {message}"
+    );
+    assert!(
+        !message.contains(&denied_file.display().to_string()),
+        "refusal message must NOT leak target path ({}): {message}",
+        denied_file.display()
+    );
+}
