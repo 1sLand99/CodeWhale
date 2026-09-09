@@ -25183,10 +25183,10 @@ fn six_worker_progress_storm_keeps_input_render_and_cancel_live() {
     );
 
     let (tx, rx) = std::sync::mpsc::channel();
-    tx.send(TerminalInputMessage::Event(Event::Key(KeyEvent::new(
-        KeyCode::Char('c'),
-        KeyModifiers::CONTROL,
-    ))))
+    tx.send(TerminalInputMessage::Event(ObservedTerminalEvent::new(
+        Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        Instant::now(),
+    )))
     .expect("send key event");
     let input = TerminalInputPump {
         rx,
@@ -25206,7 +25206,7 @@ fn six_worker_progress_storm_keeps_input_render_and_cancel_live() {
     .expect("queued key event");
     assert!(
         matches!(
-            event,
+            event.event,
             Event::Key(key)
                 if key.code == KeyCode::Char('c')
                     && key.modifiers.contains(KeyModifiers::CONTROL)
@@ -25222,19 +25222,85 @@ fn six_worker_progress_storm_keeps_input_render_and_cancel_live() {
 }
 
 #[test]
+fn queued_terminal_events_keep_receipt_gap_for_late_unbracketed_submit() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let prompt = "late queue draft";
+    // Put the whole stream in the channel before the event loop reads it.
+    // Processing time therefore has no useful spacing; only the input
+    // thread's receipt time can distinguish the deliberate Enter.
+    let first_at = Instant::now()
+        .checked_sub(Duration::from_secs(1))
+        .expect("one-second-old receipt time");
+    for (index, ch) in prompt.chars().enumerate() {
+        tx.send(TerminalInputMessage::Event(ObservedTerminalEvent::new(
+            Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
+            first_at + Duration::from_micros(index as u64),
+        )))
+        .expect("queue raw prompt event");
+    }
+    let last_char_at = first_at + Duration::from_micros(prompt.len() as u64 - 1);
+    let enter_at = last_char_at + Duration::from_millis(150);
+    tx.send(TerminalInputMessage::Event(ObservedTerminalEvent::new(
+        Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        enter_at,
+    )))
+    .expect("queue deliberate Enter");
+
+    let input = TerminalInputPump {
+        rx,
+        stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        paused: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        paused_ack: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        handle: None,
+        last_alive_at: std::cell::Cell::new(Instant::now()),
+    };
+    let mut pending = VecDeque::new();
+    let mut app = create_test_app();
+    app.use_paste_burst_detection = true;
+    app.bracketed_paste_seen = false;
+    let mut submitted = None;
+
+    for _ in 0..=prompt.len() {
+        // Match the production loop's wall-clock idle flush before it reads
+        // each queued event. Old receipt times must remain authoritative for
+        // the subsequent paste/Enter decision even when this eager flush runs.
+        flush_paste_burst_before_composer(&mut app, Instant::now());
+        let observed = next_terminal_event(&input, &mut pending, Duration::from_millis(1))
+            .expect("read queued terminal event")
+            .expect("queued event remains");
+        let Event::Key(key) = observed.event else {
+            panic!("queued stream contains only keys");
+        };
+        flush_paste_burst_before_composer(&mut app, observed.observed_at);
+        if handle_plain_key_before_composer(&mut app, &key, observed.observed_at) {
+            continue;
+        }
+        if key.code == KeyCode::Enter {
+            submitted = app.handle_composer_enter();
+        }
+    }
+
+    assert_eq!(
+        submitted.as_deref(),
+        Some(prompt),
+        "a deliberate Enter observed 150ms after raw input must submit even when the event loop drains the backlog without delay"
+    );
+}
+
+#[test]
 fn terminal_input_child_pause_drains_codewhale_events_before_editor_handoff() {
     let (tx, rx) = std::sync::mpsc::channel();
-    tx.send(TerminalInputMessage::Event(Event::Key(KeyEvent::new(
-        KeyCode::Char('x'),
-        KeyModifiers::NONE,
-    ))))
+    tx.send(TerminalInputMessage::Event(ObservedTerminalEvent::new(
+        Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+        Instant::now(),
+    )))
     .expect("send buffered key event");
     tx.send(TerminalInputMessage::Heartbeat)
         .expect("send buffered heartbeat");
-    tx.send(TerminalInputMessage::Event(Event::Key(KeyEvent::new(
-        KeyCode::Char('y'),
-        KeyModifiers::NONE,
-    ))))
+    tx.send(TerminalInputMessage::Event(ObservedTerminalEvent::new(
+        Event::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+        Instant::now(),
+    )))
     .expect("send second buffered key event");
 
     let input = TerminalInputPump {
@@ -25245,10 +25311,10 @@ fn terminal_input_child_pause_drains_codewhale_events_before_editor_handoff() {
         handle: None,
         last_alive_at: std::cell::Cell::new(Instant::now()),
     };
-    let mut pending_terminal_events = VecDeque::from([Event::Key(KeyEvent::new(
-        KeyCode::Char('z'),
-        KeyModifiers::NONE,
-    ))]);
+    let mut pending_terminal_events = VecDeque::from([ObservedTerminalEvent::new(
+        Event::Key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE)),
+        Instant::now(),
+    )]);
 
     input
         .pause_for_child_terminal()
@@ -25275,10 +25341,10 @@ fn terminal_input_child_pause_drains_codewhale_events_before_editor_handoff() {
 #[test]
 fn terminal_input_handoff_preserves_pending_cancellation_keys() {
     let (tx, rx) = std::sync::mpsc::channel();
-    tx.send(TerminalInputMessage::Event(Event::Key(KeyEvent::new(
-        KeyCode::Char('\u{3}'),
-        KeyModifiers::NONE,
-    ))))
+    tx.send(TerminalInputMessage::Event(ObservedTerminalEvent::new(
+        Event::Key(KeyEvent::new(KeyCode::Char('\u{3}'), KeyModifiers::NONE)),
+        Instant::now(),
+    )))
     .expect("send raw Ctrl+C");
     let input = TerminalInputPump {
         rx,
@@ -25288,9 +25354,16 @@ fn terminal_input_handoff_preserves_pending_cancellation_keys() {
         handle: None,
         last_alive_at: std::cell::Cell::new(Instant::now()),
     };
+    let observed_at = Instant::now();
     let mut pending_terminal_events = VecDeque::from([
-        Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
-        Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        ObservedTerminalEvent::new(
+            Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+            observed_at,
+        ),
+        ObservedTerminalEvent::new(
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            observed_at,
+        ),
     ]);
 
     input
@@ -25302,16 +25375,12 @@ fn terminal_input_handoff_preserves_pending_cancellation_keys() {
         "pending cancellation must refuse the child handoff"
     );
     assert_eq!(pending_terminal_events.len(), 3);
-    assert!(
-        pending_terminal_events
-            .iter()
-            .any(|event| { matches!(event, Event::Key(key) if key.code == KeyCode::Esc) })
-    );
-    assert!(
-        pending_terminal_events.iter().any(|event| {
-            matches!(event, Event::Key(key) if key.code == KeyCode::Char('\u{3}'))
-        })
-    );
+    assert!(pending_terminal_events.iter().any(|observed| {
+        matches!(&observed.event, Event::Key(key) if key.code == KeyCode::Esc)
+    }));
+    assert!(pending_terminal_events.iter().any(|observed| {
+        matches!(&observed.event, Event::Key(key) if key.code == KeyCode::Char('\u{3}'))
+    }));
 
     input.resume_after_child_terminal();
 }
@@ -25375,17 +25444,17 @@ fn input_pump_restart_detaches_wedged_thread_and_installs_fresh_parts() {
     );
 
     new_tx
-        .send(TerminalInputMessage::Event(Event::Key(KeyEvent::new(
-            KeyCode::Char('k'),
-            KeyModifiers::NONE,
-        ))))
+        .send(TerminalInputMessage::Event(ObservedTerminalEvent::new(
+            Event::Key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)),
+            Instant::now(),
+        )))
         .expect("send event on replacement channel");
     let event = pump
         .try_recv()
         .expect("replacement channel readable")
         .expect("replacement channel delivers the event");
     assert!(
-        matches!(event, Event::Key(key) if key.code == KeyCode::Char('k')),
+        matches!(event.event, Event::Key(key) if key.code == KeyCode::Char('k')),
         "restarted pump must deliver events from the replacement channel"
     );
 
@@ -26636,15 +26705,16 @@ fn a_scroll_burst_is_folded_into_one_frame() {
     // Nine more ticks behind the one already in hand, then a key press that
     // must end the burst and survive unread.
     for _ in 0..9 {
-        tx.send(TerminalInputMessage::Event(scroll(
-            crossterm::event::MouseEventKind::ScrollDown,
+        tx.send(TerminalInputMessage::Event(ObservedTerminalEvent::new(
+            scroll(crossterm::event::MouseEventKind::ScrollDown),
+            Instant::now(),
         )))
         .expect("send scroll");
     }
-    tx.send(TerminalInputMessage::Event(Event::Key(KeyEvent::new(
-        KeyCode::Char('x'),
-        KeyModifiers::NONE,
-    ))))
+    tx.send(TerminalInputMessage::Event(ObservedTerminalEvent::new(
+        Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+        Instant::now(),
+    )))
     .expect("send key");
     let input = TerminalInputPump {
         rx,
@@ -26676,7 +26746,10 @@ fn a_scroll_burst_is_folded_into_one_frame() {
 
     // The key press ended the burst and is still queued, unread.
     assert_eq!(pending.len(), 1, "the non-scroll event was pushed back");
-    assert!(matches!(pending.front(), Some(Event::Key(_))));
+    assert!(matches!(
+        pending.front().map(|observed| &observed.event),
+        Some(Event::Key(_))
+    ));
 }
 
 // ---------------------------------------------------------------------------

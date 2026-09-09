@@ -5612,8 +5612,10 @@ command = "echo project"
     #[cfg(unix)]
     #[test]
     fn helper_wait_and_uncontained_reap_paths_are_bounded() {
-        let mut helper = Command::new("sh")
-            .args(["-c", "sleep 30"])
+        // These helpers reap one immediate child. A shell can fork `sleep`
+        // and leave that descendant holding the test's output pipes.
+        let mut helper = Command::new("sleep")
+            .arg("30")
             .spawn()
             .expect("spawn helper");
         let started = Instant::now();
@@ -5623,8 +5625,8 @@ command = "echo project"
         assert!(started.elapsed() < super::HOOK_REAP_TIMEOUT + Duration::from_secs(1));
         assert!(matches!(helper.try_wait(), Ok(Some(_))));
 
-        let mut uncontained = Command::new("sh")
-            .args(["-c", "sleep 30"])
+        let mut uncontained = Command::new("sleep")
+            .arg("30")
             .spawn()
             .expect("spawn uncontained child");
         assert!(super::kill_and_reap_immediate_child(

@@ -23,9 +23,25 @@ pub(super) const MAX_ENGINE_EVENTS_PER_DRAIN: usize = 16;
 pub(super) const ENGINE_DRAIN_TIME_BUDGET: Duration = Duration::from_millis(8);
 
 pub(super) enum TerminalInputMessage {
-    Event(Event),
+    Event(ObservedTerminalEvent),
     Heartbeat,
     Error(io::Error),
+}
+
+/// A terminal event paired with the instant the dedicated input thread read it.
+///
+/// The event loop can lag behind this thread under load. Keeping receipt time
+/// prevents that backlog from collapsing a deliberate pause between a raw
+/// paste and Enter into a paste-speed sequence.
+pub(crate) struct ObservedTerminalEvent {
+    pub(crate) event: Event,
+    pub(crate) observed_at: Instant,
+}
+
+impl ObservedTerminalEvent {
+    pub(crate) fn new(event: Event, observed_at: Instant) -> Self {
+        Self { event, observed_at }
+    }
 }
 
 pub(crate) struct TerminalInputPump {
@@ -82,7 +98,8 @@ impl TerminalInputPump {
                         Ok(true) => match event::read() {
                             Ok(event) => {
                                 last_heartbeat = Instant::now();
-                                if tx.send(TerminalInputMessage::Event(event)).is_err() {
+                                let observed = ObservedTerminalEvent::new(event, last_heartbeat);
+                                if tx.send(TerminalInputMessage::Event(observed)).is_err() {
                                     break;
                                 }
                             }
@@ -118,7 +135,10 @@ impl TerminalInputPump {
         })
     }
 
-    pub(super) fn recv_timeout(&self, timeout: Duration) -> io::Result<Option<Event>> {
+    pub(super) fn recv_timeout(
+        &self,
+        timeout: Duration,
+    ) -> io::Result<Option<ObservedTerminalEvent>> {
         let deadline = Instant::now() + timeout;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -148,7 +168,7 @@ impl TerminalInputPump {
         }
     }
 
-    pub(super) fn try_recv(&self) -> io::Result<Option<Event>> {
+    pub(super) fn try_recv(&self) -> io::Result<Option<ObservedTerminalEvent>> {
         loop {
             match self.rx.try_recv() {
                 Ok(TerminalInputMessage::Event(event)) => {

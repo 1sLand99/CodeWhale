@@ -582,23 +582,23 @@ pub(crate) fn coalesce_scroll_burst(
     app: &mut App,
     first: crossterm::event::MouseEvent,
     input: &TerminalInputPump,
-    pending: &mut VecDeque<Event>,
+    pending: &mut VecDeque<ObservedTerminalEvent>,
 ) -> std::io::Result<crossterm::event::MouseEvent> {
     if !is_scroll_event(&first) {
         return Ok(first);
     }
     let mut latest = first;
     for _ in 0..MAX_COALESCED_SCROLLS {
-        let Some(next_evt) = try_next_terminal_event(input, pending)? else {
+        let Some(next_observed) = try_next_terminal_event(input, pending)? else {
             break;
         };
-        match next_evt {
-            Event::Mouse(next) if is_scroll_event(&next) => {
+        match &next_observed.event {
+            Event::Mouse(next) if is_scroll_event(next) => {
                 let _ = handle_mouse_event(app, latest);
-                latest = next;
+                latest = *next;
             }
-            other => {
-                pending.push_back(other);
+            _ => {
+                pending.push_back(next_observed);
                 break;
             }
         }
@@ -1526,9 +1526,14 @@ pub(crate) async fn run_event_loop(
     // queue the pump feeds — and do it *before* the pump is spawned, so those
     // keys are delivered ahead of anything still sitting in the tty rather
     // than behind it.
-    let mut pending_terminal_events: VecDeque<Event> = VecDeque::new();
+    let mut replayed_startup_events = VecDeque::new();
     let startup_input_receipt =
-        crate::tui::startup_input::replay_into(&mut pending_terminal_events);
+        crate::tui::startup_input::replay_into(&mut replayed_startup_events);
+    let startup_input_observed_at = Instant::now();
+    let mut pending_terminal_events: VecDeque<ObservedTerminalEvent> = replayed_startup_events
+        .into_iter()
+        .map(|event| ObservedTerminalEvent::new(event, startup_input_observed_at))
+        .collect();
     // When startup could not account for every byte it consumed, the shell
     // cannot prove it saw the whole line. The composer holds the next submit
     // instead of sending text it cannot vouch for.
@@ -4584,7 +4589,9 @@ pub(crate) async fn run_event_loop(
             }
         }
 
-        if let Some(evt) = maybe_terminal_event {
+        if let Some(observed_terminal_event) = maybe_terminal_event {
+            let event_observed_at = observed_terminal_event.observed_at;
+            let evt = observed_terminal_event.event;
             app.needs_redraw = true;
 
             // Handle bracketed paste events
@@ -4646,16 +4653,19 @@ pub(crate) async fn run_event_loop(
                 // buffer between intermediate sizes.
                 let mut final_w = width;
                 let mut final_h = height;
-                while let Some(next_evt) =
+                while let Some(next_observed) =
                     try_next_terminal_event(&terminal_input, &mut pending_terminal_events)?
                 {
-                    match next_evt {
+                    match next_observed.event {
                         Event::Resize(w, h) => {
                             final_w = w;
                             final_h = h;
                         }
                         other => {
-                            pending_terminal_events.push_back(other);
+                            pending_terminal_events.push_back(ObservedTerminalEvent::new(
+                                other,
+                                next_observed.observed_at,
+                            ));
                             break;
                         }
                     }
@@ -5689,7 +5699,7 @@ pub(crate) async fn run_event_loop(
                 continue;
             }
 
-            let now = Instant::now();
+            let now = event_observed_at;
             flush_paste_burst_before_composer(app, now);
 
             // On Windows, AltGr is delivered as `Ctrl+Alt`; treat

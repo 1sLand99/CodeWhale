@@ -8,29 +8,29 @@ use super::*;
 
 pub(crate) fn next_terminal_event(
     input: &TerminalInputPump,
-    pending: &mut VecDeque<Event>,
+    pending: &mut VecDeque<ObservedTerminalEvent>,
     timeout: Duration,
-) -> io::Result<Option<Event>> {
+) -> io::Result<Option<ObservedTerminalEvent>> {
     if let Some(event) = pending.pop_front() {
         return Ok(Some(event));
     }
     let event = input.recv_timeout(timeout)?;
-    if let Some(event) = event.as_ref() {
-        observe_terminal_attention(event);
+    if let Some(observed) = event.as_ref() {
+        observe_terminal_attention(&observed.event);
     }
     Ok(event)
 }
 
 pub(crate) fn try_next_terminal_event(
     input: &TerminalInputPump,
-    pending: &mut VecDeque<Event>,
-) -> io::Result<Option<Event>> {
+    pending: &mut VecDeque<ObservedTerminalEvent>,
+) -> io::Result<Option<ObservedTerminalEvent>> {
     if let Some(event) = pending.pop_front() {
         return Ok(Some(event));
     }
     let event = input.try_recv()?;
-    if let Some(event) = event.as_ref() {
-        observe_terminal_attention(event);
+    if let Some(observed) = event.as_ref() {
+        observe_terminal_attention(&observed.event);
     }
     Ok(event)
 }
@@ -43,7 +43,7 @@ pub(crate) fn try_next_terminal_event(
 /// the normal event loop can process it.
 pub(crate) fn prepare_terminal_input_handoff(
     input: &TerminalInputPump,
-    pending: &mut VecDeque<Event>,
+    pending: &mut VecDeque<ObservedTerminalEvent>,
 ) -> io::Result<bool> {
     let mut drained = VecDeque::new();
     while let Some(event) = input.try_recv()? {
@@ -52,7 +52,7 @@ pub(crate) fn prepare_terminal_input_handoff(
     let interrupted = pending
         .iter()
         .chain(drained.iter())
-        .any(terminal_event_interrupts_child_handoff);
+        .any(|observed| terminal_event_interrupts_child_handoff(&observed.event));
     if interrupted {
         pending.extend(drained);
         return Ok(false);
@@ -76,14 +76,14 @@ fn terminal_event_interrupts_child_handoff(event: &Event) -> bool {
 
 pub(crate) fn collect_pending_terminal_events(
     input: &TerminalInputPump,
-    pending: &mut VecDeque<Event>,
+    pending: &mut VecDeque<ObservedTerminalEvent>,
 ) -> io::Result<()> {
-    while let Some(event) = input.try_recv()? {
+    while let Some(observed) = input.try_recv()? {
         // Focus is notification authority, not merely a render event. Apply
         // it at pump receipt so a queued FocusGained cannot sit behind an
         // engine TurnComplete and produce a false background notification.
-        observe_terminal_attention(&event);
-        pending.push_back(event);
+        observe_terminal_attention(&observed.event);
+        pending.push_back(observed);
     }
     Ok(())
 }
