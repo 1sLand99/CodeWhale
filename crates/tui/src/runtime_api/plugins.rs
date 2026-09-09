@@ -279,74 +279,6 @@ fn mcp_server_review(name: &str, cfg: &crate::mcp::McpServerConfig) -> PluginMcp
     }
 }
 
-#[cfg(test)]
-mod review_tests {
-    use super::mcp_server_review;
-
-    #[test]
-    fn plugin_mcp_review_omits_url_credentials_without_changing_the_bundle() {
-        for (raw, expected) in [
-            (
-                "https://review-user:review-password@mcp.example.invalid:8443/review-path?arbitrary=review-query#review-fragment",
-                "https://mcp.example.invalid:8443",
-            ),
-            (
-                "http://[::1]:9000/mcp?token=review-query",
-                "http://[::1]:9000",
-            ),
-            (
-                "https://mcp.example.invalid/mcp",
-                "https://mcp.example.invalid",
-            ),
-            (
-                "not a URL review-secret",
-                "unparseable (configured value omitted)",
-            ),
-            (
-                "data:text/plain,review-secret",
-                "unparseable (configured value omitted)",
-            ),
-        ] {
-            let cfg: crate::mcp::McpServerConfig = serde_json::from_value(serde_json::json!({
-                "url": raw,
-                "env": { "REVIEW_ENV": "review-env-value" },
-                "headers": { "Authorization": "review-header-value" }
-            }))
-            .unwrap();
-            let review = mcp_server_review("demo", &cfg);
-            assert_eq!(review.url.as_deref(), Some(expected));
-            assert_eq!(review.kind, "remote");
-            assert_eq!(review.env_keys, ["REVIEW_ENV"]);
-            assert_eq!(review.header_keys, ["Authorization"]);
-            let payload = serde_json::to_string(&review).unwrap();
-            for secret in [
-                "review-user",
-                "review-password",
-                "review-path",
-                "review-query",
-                "review-fragment",
-                "review-secret",
-                "review-env-value",
-                "review-header-value",
-            ] {
-                assert!(!payload.contains(secret), "review exposed {secret}");
-            }
-            // Display redaction must not change the endpoint used at execution
-            // or the manifest from which the trust receipt is derived.
-            assert_eq!(cfg.url.as_deref(), Some(raw));
-        }
-        let stdio: crate::mcp::McpServerConfig = serde_json::from_value(serde_json::json!({
-            "command": "npx", "args": ["demo-server"]
-        }))
-        .unwrap();
-        let review = mcp_server_review("stdio", &stdio);
-        assert_eq!(review.kind, "stdio");
-        assert_eq!(review.url, None);
-        assert_eq!(review.command, stdio.command);
-        assert_eq!(review.args, stdio.args);
-    }
-}
-
 fn file_stem(path: &std::path::Path) -> String {
     path.file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
@@ -1014,5 +946,73 @@ pub(super) async fn install_marketplace_candidate_api(
             "candidate '{}' has parse errors and cannot be installed: {diagnostics}",
             req.candidate
         ))),
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::mcp_server_review;
+
+    #[test]
+    fn plugin_mcp_review_omits_url_credentials_without_changing_the_bundle() {
+        for (raw, expected) in [
+            (
+                "https://review-user:review-password@mcp.example.invalid:8443/review-path?arbitrary=review-query#review-fragment",
+                "https://mcp.example.invalid:8443",
+            ),
+            (
+                "http://[::1]:9000/mcp?token=review-query",
+                "http://[::1]:9000",
+            ),
+            (
+                "https://mcp.example.invalid/mcp",
+                "https://mcp.example.invalid",
+            ),
+            (
+                "not a URL review-secret",
+                "unparseable (configured value omitted)",
+            ),
+            (
+                "data:text/plain,review-secret",
+                "unparseable (configured value omitted)",
+            ),
+        ] {
+            let cfg: crate::mcp::McpServerConfig = serde_json::from_value(serde_json::json!({
+                "url": raw,
+                "env": { "REVIEW_ENV": "review-env-value" },
+                "headers": { "Authorization": "review-header-value" }
+            }))
+            .unwrap();
+            let review = mcp_server_review("demo", &cfg);
+            assert_eq!(review.url.as_deref(), Some(expected));
+            assert_eq!(review.kind, "remote");
+            assert_eq!(review.env_keys, ["REVIEW_ENV"]);
+            assert_eq!(review.header_keys, ["Authorization"]);
+            let payload = serde_json::to_string(&review).unwrap();
+            for secret in [
+                "review-user",
+                "review-password",
+                "review-path",
+                "review-query",
+                "review-fragment",
+                "review-secret",
+                "review-env-value",
+                "review-header-value",
+            ] {
+                assert!(!payload.contains(secret), "review exposed {secret}");
+            }
+            // Display redaction must not change the endpoint used at execution
+            // or the manifest from which the trust receipt is derived.
+            assert_eq!(cfg.url.as_deref(), Some(raw));
+        }
+        let stdio: crate::mcp::McpServerConfig = serde_json::from_value(serde_json::json!({
+            "command": "npx", "args": ["demo-server"]
+        }))
+        .unwrap();
+        let review = mcp_server_review("stdio", &stdio);
+        assert_eq!(review.kind, "stdio");
+        assert_eq!(review.url, None);
+        assert_eq!(review.command, stdio.command);
+        assert_eq!(review.args, stdio.args);
     }
 }

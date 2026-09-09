@@ -7,6 +7,10 @@
 //! only when they have content. Every fact below is asserted to appear in
 //! the composed frame exactly once.
 
+// These tests print captured frames as acceptance evidence. Production TUI
+// code still denies unstructured stderr; this exception is test-module only.
+#![allow(clippy::print_stderr)]
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 

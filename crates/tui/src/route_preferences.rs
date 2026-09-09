@@ -333,6 +333,105 @@ pub fn selected_route(path: &Path) -> Result<(String, String, codewhale_config::
     Ok((provider, config.default_model(), source))
 }
 
+/// Save one explicit route preference after atomically adopting legacy choices.
+pub fn set(path: &Path, key: &str, value: &str) -> Result<()> {
+    persistence::mutate_config_document(path, |doc| set_document(path, doc, key, value))
+}
+
+/// Prepare a validated snapshot for a caller's preview and atomic save.
+/// Migration changes only this document; this function never writes a file.
+pub fn prepare_document(path: &Path, raw: &str) -> Result<toml_edit::DocumentMut> {
+    let mut doc = raw
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|_| anyhow::anyhow!("Could not parse route configuration; contents omitted"))?;
+    parse_config(raw)?;
+    persistence::migrate_legacy_route_preferences(path, &mut doc)?;
+    Ok(doc)
+}
+
+/// Edit one route selection in an already-prepared candidate without saving.
+/// Callers must prepare migration first and atomically save the final snapshot.
+pub fn set_document(
+    path: &Path,
+    doc: &mut toml_edit::DocumentMut,
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    ensure!(is_route_key(key), "Not a route preference key: {key}");
+    let value = value.trim();
+    ensure!(
+        !value.is_empty() && !value.chars().any(char::is_control),
+        "Route preference must be nonempty and contain no control characters"
+    );
+    if let Some(key) = project_root_key(path, key) {
+        return persistence::set_document_value(doc, &[key], value);
+    }
+    let config = parse_config(&doc.to_string())?;
+    if key == "provider" {
+        let identity = config
+            .resolve_provider_pin_identity(value)
+            .map_err(anyhow::Error::msg)?;
+        return persistence::set_document_value(
+            doc,
+            &["provider"],
+            identity.persisted_id().unwrap_or(&identity.key),
+        );
+    }
+    let identity = model_identity(&config, key)?;
+    persistence::set_provider_model_document(
+        doc,
+        identity.provider,
+        identity.persisted_id().unwrap_or(&identity.key),
+        value,
+    )
+}
+
+/// Clear a canonical selection without allowing archived Settings to restore it.
+pub fn unset(path: &Path, key: &str) -> Result<()> {
+    ensure!(is_route_key(key), "Not a route preference key: {key}");
+    persistence::mutate_config_document(path, |doc| {
+        if key == "provider" || project_root_key(path, key).is_some() {
+            persistence::unset_document_value(doc, &[key])?;
+            return Ok(());
+        }
+        let config = parse_config(&doc.to_string())?;
+        let identity = model_identity(&config, key)?;
+        persistence::unset_document_value(doc, &model_slot(&identity)?)?;
+        // Clear relevant legacy fallbacks as well, or deleting the canonical
+        // leaf would restore an older choice on reload. Root fields belong to
+        // the active route, with DeepSeek's historical default as an exception.
+        if matches!(
+            identity.provider,
+            ApiProvider::Deepseek | ApiProvider::DeepseekCN
+        ) || config
+            .active_provider_identity(config.api_provider())
+            .is_ok_and(|active| active == identity)
+        {
+            let mut scoped = config.clone();
+            scoped.scope_to_provider_identity(&identity);
+            scoped.set_provider_model_override(identity.provider, None);
+            scoped.legacy_model = None;
+            for root_key in ["default_text_model", "model"] {
+                let Some(model) = doc.get(root_key).and_then(toml_edit::Item::as_str) else {
+                    continue;
+                };
+                scoped.default_text_model = Some(model.to_string());
+                let wire_model = crate::config::wire_model_for_provider_route(
+                    identity.provider,
+                    &scoped.deepseek_base_url(),
+                    model,
+                );
+                // Reuse Config's root-model guards: a foreign DeepSeek root
+                // ignored by the active vendor remains that provider's fallback.
+                if scoped.default_model() == wire_model {
+                    persistence::unset_document_value(doc, &[root_key])?;
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -630,103 +729,4 @@ model = "Other-X"
         assert_eq!(loaded.default_model(), selected_route(&path)?.1);
         Ok(())
     }
-}
-
-/// Save one explicit route preference after atomically adopting legacy choices.
-pub fn set(path: &Path, key: &str, value: &str) -> Result<()> {
-    persistence::mutate_config_document(path, |doc| set_document(path, doc, key, value))
-}
-
-/// Prepare a validated snapshot for a caller's preview and atomic save.
-/// Migration changes only this document; this function never writes a file.
-pub fn prepare_document(path: &Path, raw: &str) -> Result<toml_edit::DocumentMut> {
-    let mut doc = raw
-        .parse::<toml_edit::DocumentMut>()
-        .map_err(|_| anyhow::anyhow!("Could not parse route configuration; contents omitted"))?;
-    parse_config(raw)?;
-    persistence::migrate_legacy_route_preferences(path, &mut doc)?;
-    Ok(doc)
-}
-
-/// Edit one route selection in an already-prepared candidate without saving.
-/// Callers must prepare migration first and atomically save the final snapshot.
-pub fn set_document(
-    path: &Path,
-    doc: &mut toml_edit::DocumentMut,
-    key: &str,
-    value: &str,
-) -> Result<()> {
-    ensure!(is_route_key(key), "Not a route preference key: {key}");
-    let value = value.trim();
-    ensure!(
-        !value.is_empty() && !value.chars().any(char::is_control),
-        "Route preference must be nonempty and contain no control characters"
-    );
-    if let Some(key) = project_root_key(path, key) {
-        return persistence::set_document_value(doc, &[key], value);
-    }
-    let config = parse_config(&doc.to_string())?;
-    if key == "provider" {
-        let identity = config
-            .resolve_provider_pin_identity(value)
-            .map_err(anyhow::Error::msg)?;
-        return persistence::set_document_value(
-            doc,
-            &["provider"],
-            identity.persisted_id().unwrap_or(&identity.key),
-        );
-    }
-    let identity = model_identity(&config, key)?;
-    persistence::set_provider_model_document(
-        doc,
-        identity.provider,
-        identity.persisted_id().unwrap_or(&identity.key),
-        value,
-    )
-}
-
-/// Clear a canonical selection without allowing archived Settings to restore it.
-pub fn unset(path: &Path, key: &str) -> Result<()> {
-    ensure!(is_route_key(key), "Not a route preference key: {key}");
-    persistence::mutate_config_document(path, |doc| {
-        if key == "provider" || project_root_key(path, key).is_some() {
-            persistence::unset_document_value(doc, &[key])?;
-            return Ok(());
-        }
-        let config = parse_config(&doc.to_string())?;
-        let identity = model_identity(&config, key)?;
-        persistence::unset_document_value(doc, &model_slot(&identity)?)?;
-        // Clear relevant legacy fallbacks as well, or deleting the canonical
-        // leaf would restore an older choice on reload. Root fields belong to
-        // the active route, with DeepSeek's historical default as an exception.
-        if matches!(
-            identity.provider,
-            ApiProvider::Deepseek | ApiProvider::DeepseekCN
-        ) || config
-            .active_provider_identity(config.api_provider())
-            .is_ok_and(|active| active == identity)
-        {
-            let mut scoped = config.clone();
-            scoped.scope_to_provider_identity(&identity);
-            scoped.set_provider_model_override(identity.provider, None);
-            scoped.legacy_model = None;
-            for root_key in ["default_text_model", "model"] {
-                let Some(model) = doc.get(root_key).and_then(toml_edit::Item::as_str) else {
-                    continue;
-                };
-                scoped.default_text_model = Some(model.to_string());
-                let wire_model = crate::config::wire_model_for_provider_route(
-                    identity.provider,
-                    &scoped.deepseek_base_url(),
-                    model,
-                );
-                // Reuse Config's root-model guards: a foreign DeepSeek root
-                // ignored by the active vendor remains that provider's fallback.
-                if scoped.default_model() == wire_model {
-                    persistence::unset_document_value(doc, &[root_key])?;
-                }
-            }
-        }
-        Ok(())
-    })
 }
