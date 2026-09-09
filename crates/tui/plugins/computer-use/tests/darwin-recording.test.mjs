@@ -20,10 +20,12 @@ function fixture(t) {
   fs.mkdirSync(path.dirname(helper), { recursive: true });
   fs.writeFileSync(helper, `#!${process.execPath}\n` + `
 import fs from 'node:fs';
+import path from 'node:path';
 const {args} = JSON.parse(process.argv[2]);
-fs.writeFileSync(args.file, 'partial');
 const stop = () => { if(args.durationSec === 8) return; fs.writeFileSync(args.file, 'finalized'); process.exit(0); };
 process.on('SIGINT', stop); process.stdin.resume(); process.stdin.on('end', stop);
+fs.writeFileSync(path.join(path.dirname(args.file), '..', 'handler-installed'), '');
+fs.writeFileSync(args.file, 'partial');
 if(args.durationSec !== 7) console.log(JSON.stringify({ready:true}));
 setInterval(()=>{},1000);
 `);
@@ -68,8 +70,10 @@ test('recording startup cancellation owns and stops the pending child', {skip:pr
   const started = withSignal(controller.signal, () => owner.recordingStart({durationSec:7}));
   const rejected = assert.rejects(started, error => error.code === 'cancelled');
   const dir = path.join(root, 'recordings');
+  const handlersReady = path.join(root, 'handler-installed');
   const deadline = Date.now() + 2000;
-  while ((!fs.existsSync(dir) || !fs.readdirSync(dir).length) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+  while ((!fs.existsSync(handlersReady) || !fs.existsSync(dir) || !fs.readdirSync(dir).length) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.ok(fs.existsSync(handlersReady), 'fake helper installed cancellation handlers');
   controller.abort();
   await rejected;
   assert.equal((await owner.recordingList()).running.length, 0);
