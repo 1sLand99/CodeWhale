@@ -40,6 +40,10 @@ run_isolated sh -c '
   test "$HOME" != "$1/outer/home"
   test "$USERPROFILE" = "$HOME"
   test -d "$HOME/.codewhale"
+  test -d "$HOME/AppData/Roaming"
+  test -d "$HOME/AppData/Local"
+  test "$APPDATA" = "$HOME/AppData/Roaming"
+  test "$LOCALAPPDATA" = "$HOME/AppData/Local"
   test ! -e "$HOME/.codewhale/fleets/selected"
   test -z "${CODEWHALE_HOME+x}"
   test -z "${CODEWHALE_CONFIG_PATH+x}"
@@ -91,6 +95,10 @@ test "$HOME" != "$TEST_FIXTURE/outer/home" || {
   exit 1
 }
 test "$USERPROFILE" = "$HOME"
+test "$APPDATA" = "$HOME/AppData/Roaming"
+test "$LOCALAPPDATA" = "$HOME/AppData/Local"
+test -d "$APPDATA"
+test -d "$LOCALAPPDATA"
 test ! -e "$HOME/.codewhale/fleets/selected"
 test -z "${CODEWHALE_HOME+x}"
 test -z "${CODEWHALE_CONFIG_PATH+x}"
@@ -148,4 +156,60 @@ child_home=$(cat "$fixture/dev-home")
 test ! -d "${child_home%/*}"
 test "$(cat "$fixture/outer/home/.codewhale/fleets/selected")" = 'My fleet'
 printf '%s\n' 'ok 8 - dev-test preserves failure status and cleans only its temporary home'
-printf '%s\n' 'test result: 8 passed; 0 failed'
+
+# Exercise Windows cygpath path normalization, backslash toolchain resolution,
+# and AppData provisioning required by sccache and Windows known-folder lookups.
+mkdir -p "$fixture/win-bin" "$fixture/win-toolchain/bin"
+cat > "$fixture/win-bin/cygpath" <<'EOF'
+#!/bin/sh
+set -eu
+case "${1:-}" in
+  -m|-u) shift ;;
+  *) exit 2 ;;
+esac
+printf '%s\n' "$1" | tr '\\' '/'
+EOF
+cat > "$fixture/win-bin/rustup" <<'EOF'
+#!/bin/sh
+set -eu
+printf '%s\n' "$TEST_TOOLCHAIN\\bin\\rustc.exe"
+EOF
+chmod +x "$fixture/win-bin/cygpath" "$fixture/win-bin/rustup"
+
+run_win_fixture() {
+  env -i HOME="$fixture/outer/home" \
+    USERPROFILE="$fixture/outer/home" \
+    APPDATA="$fixture/outer/home/AppData/Roaming" \
+    LOCALAPPDATA="$fixture/outer/home/AppData/Local" \
+    CARGO_HOME="$fixture/cargo" RUSTUP_HOME="$fixture/rustup" \
+    TEST_FIXTURE="$fixture" TEST_TOOLCHAIN="$fixture/win-toolchain" \
+    TMPDIR="$fixture/tmp with spaces" \
+    PATH="$fixture/win-bin:/usr/bin:/bin" "$@"
+}
+
+run_win_fixture "$repo_root/scripts/with-hermetic-test-home.sh" sh -c '
+  set -eu
+  test "$HOME" != "$1/outer/home"
+  test "$USERPROFILE" = "$HOME"
+  test "$APPDATA" = "$HOME/AppData/Roaming"
+  test "$LOCALAPPDATA" = "$HOME/AppData/Local"
+  test -d "$HOME/AppData/Roaming"
+  test -d "$HOME/AppData/Local"
+  test -d "$HOME/.codewhale"
+  test "$APPDATA" != "$1/outer/home/AppData/Roaming"
+  test "$LOCALAPPDATA" != "$1/outer/home/AppData/Local"
+  # Verify toolchain_bin stripped the backslash executable properly
+  case "$PATH" in "$1/win-toolchain/bin:"*) ;; *) exit 1 ;; esac
+  # Verify sccache config-dir resolution target (RoamingAppData/Mozilla/sccache)
+  sccache_cfg_parent="$APPDATA/Mozilla/sccache"
+  mkdir -p "$sccache_cfg_parent"
+  printf "%s\n" "test-config = true" > "$sccache_cfg_parent/config"
+  test -f "$HOME/AppData/Roaming/Mozilla/sccache/config"
+  test ! -e "$1/outer/home/AppData/Roaming/Mozilla/sccache/config"
+  printf "%s\n" "$HOME" > "$1/win-child-home"
+' sh "$fixture"
+win_child_home=$(cat "$fixture/win-child-home")
+test ! -d "${win_child_home%/*}"
+printf '%s\n' 'ok 9 - cygpath path normalization, backslash toolchain resolution and hermetic AppData'
+
+printf '%s\n' 'test result: 9 passed; 0 failed'
