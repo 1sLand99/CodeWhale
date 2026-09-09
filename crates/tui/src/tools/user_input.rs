@@ -225,7 +225,11 @@ impl RequestUserInputTool {
     pub fn new(limits: UserInputLimits) -> Self {
         Self {
             description: format!(
-                "Ask the user 1-{} short questions and return their selections.",
+                "Ask the user 1-{} short questions with selectable options and return their \
+selections. Reach for this when a decision is genuinely the user's to make and guessing \
+would be costly or wrong: ambiguous scope, an irreversible or expensive choice, a missing \
+preference, or a fork the user should own. Do not use it for facts you can find in the \
+workspace — investigate those instead. The call blocks until the user answers.",
                 limits.max_questions
             ),
             limits,
@@ -438,10 +442,10 @@ mod tests {
         assert_eq!(limits.max_options, 4);
         // An empty `[tools]` table resolves to the same ceilings.
         assert_eq!(UserInputLimits::from_config_values(None, None), limits);
-        assert_eq!(
-            RequestUserInputTool::default().description(),
-            "Ask the user 1-6 short questions and return their selections."
-        );
+        let tool = RequestUserInputTool::default();
+        let description = tool.description();
+        assert!(description.contains("Ask the user 1-6 short questions"));
+        assert!(description.contains("blocks until the user answers"));
     }
 
     #[test]
@@ -512,10 +516,9 @@ mod tests {
     #[test]
     fn schema_and_description_reflect_configured_limits() {
         let tool = RequestUserInputTool::new(UserInputLimits::from_config_values(Some(8), Some(5)));
-        assert_eq!(
-            tool.description(),
-            "Ask the user 1-8 short questions and return their selections."
-        );
+        let description = tool.description();
+        assert!(description.contains("Ask the user 1-8 short questions"));
+        assert!(description.contains("blocks until the user answers"));
         let schema = tool.input_schema();
         let questions = &schema["properties"]["questions"];
         assert_eq!(questions["minItems"], json!(1));
