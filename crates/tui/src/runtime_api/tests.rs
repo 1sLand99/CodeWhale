@@ -1626,17 +1626,33 @@ async fn omitted_runtime_models_use_the_active_provider_default() -> Result<()> 
         assert_eq!(created["model"], expected, "{label} durable task model");
 
         let stream_client = crate::tls::reqwest_client();
-        let stream_task = tokio::spawn(async move {
+        let mut stream_task = tokio::spawn(async move {
             stream_client
                 .post(format!("http://{addr}/v1/stream"))
                 .json(&json!({ "prompt": format!("{label} omitted stream model") }))
                 .send()
                 .await
         });
-        let created = tokio::time::timeout(ci_scaled(Duration::from_secs(2)), hook_rx.recv())
+        let created = tokio::time::timeout(ci_scaled(Duration::from_secs(2)), async {
+            tokio::select! {
+                created = hook_rx.recv() => created
+                    .with_context(|| format!("{label} compatibility stream test hook closed")),
+                response = &mut stream_task => {
+                    let response = response
+                        .with_context(|| format!("{label} compatibility stream HTTP task failed"))?
+                        .with_context(|| format!("{label} compatibility stream HTTP request failed"))?;
+                    let status = response.status();
+                    let body = if status.is_success() {
+                        "unexpected successful response".to_string()
+                    } else {
+                        response.text().await.unwrap_or_default()
+                    };
+                    bail!("{label} compatibility stream returned HTTP {status} before ThreadCreated: {body}");
+                }
+            }
+        })
             .await
-            .with_context(|| format!("{label} compatibility stream did not create its thread"))?
-            .with_context(|| format!("{label} compatibility stream test hook closed"))?;
+            .with_context(|| format!("{label} compatibility stream made no HTTP/hook progress before thread creation"))??;
         let (thread_id, _resume) = match created {
             CompatStreamTestPoint::ThreadCreated { thread_id, resume } => (thread_id, resume),
             CompatStreamTestPoint::SubscribedBeforeReplay { .. }

@@ -22103,14 +22103,16 @@ async fn first_turn_waits_for_explicit_mcp_schema_without_waiting_for_unrelated_
     let tmp = tempdir().expect("tempdir");
     let server = tmp.path().join("server.mjs");
     let release = tmp.path().join("release-slow");
+    let release_fast = tmp.path().join("release-fast");
     fs::write(&server, r#"import fs from 'node:fs';
+import path from 'node:path';
 import readline from 'node:readline';
 readline.createInterface({ input: process.stdin }).on('line', async line => {
   const request = JSON.parse(line);
   if (request.id === undefined) return;
   if (request.method === 'initialize') {
-    if (process.argv[2] === 'slow') while (!fs.existsSync(process.argv[3])) await new Promise(r => setTimeout(r, 10));
-    else await new Promise(r => setTimeout(r, 150));
+    fs.writeFileSync(path.join(process.argv[3], 'started-' + process.argv[2]), 'ready');
+    while (!fs.existsSync(path.join(process.argv[3], 'release-' + process.argv[2]))) await new Promise(r => setTimeout(r, 10));
   }
   const result = request.method === 'initialize'
     ? { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: process.argv[2], version: '1' } }
@@ -22123,8 +22125,8 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
         serde_json::to_vec(&json!({
             "timeouts": { "connect_timeout": 10 },
             "servers": {
-                "fast": { "command": node, "args": [server, "fast", release] },
-                "slow": { "command": node, "args": [server, "slow", release] },
+                "fast": { "command": node, "args": [server, "fast", tmp.path()] },
+                "slow": { "command": node, "args": [server, "slow", tmp.path()] },
                 "failed": { "command": "codewhale-missing-mcp-fixture-38911" }
             }
         }))
@@ -22146,6 +22148,25 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
         engine.mcp_tools().await.is_empty(),
         "ordinary startup remains nonblocking"
     );
+    // Separate Windows/CI process startup from the schema-wait assertion.
+    // Both children have received initialize, but neither can answer until
+    // this test releases its own gate. No fixed delay stands in for readiness.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !tmp.path().join("started-fast").exists() || !tmp.path().join("started-slow").exists()
+        {
+            engine.drain_mcp_boot_updates().await;
+            for name in ["fast", "slow"] {
+                assert!(
+                    !engine.mcp_connection_errors.contains_key(name),
+                    "{name} fixture failed before initialize: {:?}",
+                    engine.mcp_connection_errors.get(name)
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("both MCP fixtures must reach initialize before checking first-turn ordering");
     let route = TurnRouteContext {
         provider: ApiProvider::Deepseek,
         model: DEFAULT_TEXT_MODEL.to_string(),
@@ -22166,9 +22187,8 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
         false,
         crate::tui::approval::ApprovalMode::Suggest,
     );
-    let build = tokio::time::timeout(
-        Duration::from_secs(5),
-        engine.build_turn_tool_registry_and_catalog(
+    let build = {
+        let build = engine.build_turn_tool_registry_and_catalog(
             &policy,
             &[],
             Some(vec![
@@ -22179,9 +22199,32 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
             McpAccess::Connect,
             route,
             "",
-        ),
-    )
-    .await;
+        );
+        tokio::pin!(build);
+        std::future::poll_fn(|cx| {
+            assert!(
+                std::future::Future::poll(build.as_mut(), cx).is_pending(),
+                "the first turn must wait for the explicitly selected fast schema"
+            );
+            std::task::Poll::Ready(())
+        })
+        .await;
+        fs::write(&release_fast, "release").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), build).await
+    };
+    let unrelated_pending = !release.exists()
+        && engine.mcp_boot_in_flight
+        && !engine.mcp_connection_errors.contains_key("slow");
+    let connected = engine
+        .mcp_pool
+        .as_ref()
+        .unwrap()
+        .lock()
+        .await
+        .connected_servers()
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
     engine.cancel_token.cancel();
     tokio::time::timeout(
         Duration::from_millis(100),
@@ -22191,7 +22234,16 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
     .expect("stop interrupts explicit schema wait");
     let _turn_control = engine.begin_turn_control();
     fs::write(&release, "release").unwrap();
-    let build = build.expect("explicit fast/failed selections must not wait for slow");
+    let build = build.unwrap_or_else(|error| {
+        panic!(
+            "explicit fast/failed selections must not wait for slow: {error:?}; connected={connected:?}; errors={:?}",
+            engine.mcp_connection_errors
+        )
+    });
+    assert!(
+        unrelated_pending,
+        "success must precede the unrelated server's release, completion, or timeout"
+    );
     let active = build.surface.active.unwrap_or_default();
     assert_eq!(
         active
