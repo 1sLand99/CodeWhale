@@ -5874,6 +5874,11 @@ command = "echo project"
             // The router itself touches nothing a hook needs to gate.
             ("agent", "other"),
             ("todo_write", "safe"),
+            // Goal controls retain their existing hook classification when
+            // promoted from deferred discovery to the eager catalog.
+            ("create_goal", "other"),
+            ("get_goal", "other"),
+            ("update_goal", "other"),
         ];
         for name in crate::core::engine::tool_catalog::DEFAULT_ACTIVE_NATIVE_TOOLS {
             let expected = EXPECTED.iter().find(|(n, _)| n == name).map(|(_, c)| *c);

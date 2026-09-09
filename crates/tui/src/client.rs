@@ -6914,12 +6914,6 @@ mod tests {
     async fn assert_kimi_code_captures_exact_general_child_catalog() {
         let tools = crate::tools::subagent::kimi_general_child_request_tools_fixture();
         let source_len = tools.len();
-        // Specialized tools remain discoverable beyond the fixed eager head.
-        assert_eq!(
-            source_len,
-            crate::core::engine::default_active_native_tool_names().len() + 1,
-            "expected the seven-tool General child catalog: {tools:?}"
-        );
         let source_names = tools
             .iter()
             .map(|tool| tool.name.clone())
@@ -6927,10 +6921,16 @@ mod tests {
         let expected_names = crate::core::engine::default_active_native_tool_names()
             .iter()
             .copied()
+            // Children can inspect the shared goal, but only its owning
+            // session can create it or change its completion state.
+            .filter(|name| !matches!(*name, "create_goal" | "update_goal"))
             .chain([crate::core::engine::tool_catalog::TOOL_SEARCH_NAME])
             .map(str::to_string)
             .collect();
         assert_eq!(source_names, expected_names);
+        assert!(source_names.contains("get_goal"));
+        assert!(!source_names.contains("create_goal"));
+        assert!(!source_names.contains("update_goal"));
 
         // Name the offending first-party tool in test-only diagnostics while
         // production errors remain fixed and non-secret.
