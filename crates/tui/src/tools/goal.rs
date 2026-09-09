@@ -162,12 +162,58 @@ fn normalize_explicit_goal_objective(raw: &str) -> Option<String> {
 ///
 /// Only a direct work instruction is considered for automatic persistence.
 /// Prompt length alone never authorizes a goal: questions and conversational
-/// followups remain ordinary turns. Ambiguous requests still run normally;
+/// followups and requests declining a goal remain ordinary turns. Ambiguous requests still run normally;
 /// the user can use `/goal` to explicitly request persistent work.
 #[must_use]
 pub fn operate_goal_from_prompt(input: &str) -> Option<ExplicitGoalDirective> {
     let input = input.trim();
     if input.starts_with(['"', '\'', '`', '>']) {
+        return None;
+    }
+    // Mode defaults cannot override a user's request to avoid persistence.
+    // Keep this conservative: declining an automatic goal still runs the task.
+    let lower = input.to_lowercase().replace('’', "'");
+    if [
+        "no goal",
+        "without a goal",
+        "without goal",
+        "不要创建目标",
+        "不要设置目标",
+    ]
+    .iter()
+    .any(|phrase| lower.contains(phrase))
+        || lower
+            .split(['.', '!', '?', ';', '。', '！', '？', '；'])
+            .any(|clause| {
+                ["do not ", "don't ", "never ", "without "]
+                    .iter()
+                    .filter_map(|negation| clause.find(negation))
+                    .any(|start| {
+                        // A negated list carries through commas: "do not edit
+                        // files, create a goal, or start another tool".
+                        let words: Vec<_> = clause[start..]
+                            .split(|c: char| !c.is_alphanumeric())
+                            .filter(|word| !word.is_empty())
+                            .collect();
+                        words.iter().any(|word| matches!(*word, "goal" | "goals"))
+                            && words.iter().any(|word| {
+                                matches!(
+                                    *word,
+                                    "create"
+                                        | "creating"
+                                        | "set"
+                                        | "setting"
+                                        | "start"
+                                        | "starting"
+                                        | "track"
+                                        | "tracking"
+                                        | "use"
+                                        | "using"
+                                )
+                            })
+                    })
+            })
+    {
         return None;
     }
     let words: Vec<&str> = input.split_whitespace().collect();
@@ -1501,6 +1547,28 @@ mod tests {
                 prompt
             );
         }
+    }
+
+    #[test]
+    fn operate_respects_goal_opt_out_including_negated_lists() {
+        for prompt in [
+            "Run one bounded cancellation check. Do not edit files, inspect other files, create a goal, spawn agents, or start any other tool.",
+            "Build the example, but don't create a goal.",
+            "Fix the button. Don’t create a persistent goal for this.",
+            "Run the check without a goal.",
+            "Verify the output; no goal tracking for this task.",
+            "Update the sample. Never set a goal automatically.",
+            "Fix the test. Do not use /goal.",
+            "Run the check without creating a goal.",
+            "Fix the example. Don't create any goals.",
+            "Run one check. Do not edit files,\ncreate a goal, or spawn agents.",
+            "Fix this issue, 不要创建目标。",
+        ] {
+            assert_eq!(operate_goal_from_prompt(prompt), None, "{prompt}");
+        }
+        // A separate prohibition must not negate a later work instruction.
+        let work = "Fix the failing checks. Do not publish. Build the release and verify it.";
+        assert_eq!(operate_goal_from_prompt(work).unwrap().objective, work);
     }
 
     #[tokio::test]

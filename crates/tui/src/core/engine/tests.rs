@@ -3620,6 +3620,18 @@ async fn operate_leaves_followup_and_long_questions_as_ordinary_turns() {
 }
 
 #[tokio::test]
+async fn operate_does_not_create_a_goal_when_the_work_request_declines_one() {
+    let prompt = "Run one bounded cancellation check. Do not edit files, inspect other files, create a goal, spawn agents, or start any other tool.";
+    let (objective, active, contracts) = operate_goal_probe(AppMode::Operate, prompt).await;
+    assert_eq!(objective, None);
+    assert!(!active);
+    assert_eq!(
+        contracts, 1,
+        "the ordinary Operate turn still reaches the model"
+    );
+}
+
+#[tokio::test]
 async fn operate_contract_is_appended_once_and_an_existing_goal_is_never_replaced() {
     let first_entered = std::sync::Arc::new(tokio::sync::Notify::new());
     let release_first = std::sync::Arc::new(tokio::sync::Notify::new());
