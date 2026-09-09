@@ -78,6 +78,34 @@ pub(crate) fn echo_queued_user_turn(app: &mut App, message: &mut QueuedMessage) 
     app.scroll_to_bottom();
 }
 
+/// Paint the transcript cell for a submitted user turn, reusing the cell that
+/// queue-time echo already painted when there is one. Exactly one
+/// `HistoryCell::User` must represent a message across queue -> steer ->
+/// dispatch; returns that cell's index.
+pub(crate) fn paint_user_turn_cell(
+    app: &mut App,
+    message: &QueuedMessage,
+    content: String,
+) -> usize {
+    if message.history_echoed
+        && let Some(idx) = app
+            .history
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(idx, cell)| match cell {
+                HistoryCell::User { content } if content == &message.display => Some(idx),
+                _ => None,
+            })
+    {
+        app.history[idx] = HistoryCell::User { content };
+        app.needs_redraw = true;
+        return idx;
+    }
+    app.add_message(HistoryCell::User { content });
+    app.history.len().saturating_sub(1)
+}
+
 pub(crate) fn enqueue_offline_message(app: &mut App, message: QueuedMessage) {
     app.queue_message(message);
     persist_offline_queue_state(app);
@@ -601,24 +629,9 @@ pub(crate) fn prepare_user_dispatch(
     app.needs_redraw = true;
 
     let message_index = app.api_messages.len();
-    let history_cell = if message.history_echoed {
-        // Already painted at Queue time — reuse that cell for reference
-        // recording instead of duplicating the bubble.
-        app.history
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(idx, cell)| match cell {
-                HistoryCell::User { content } if content == &message.display => Some(idx),
-                _ => None,
-            })
-            .unwrap_or_else(|| app.history.len().saturating_sub(1))
-    } else {
-        app.add_message(HistoryCell::User {
-            content: message.display.clone(),
-        });
-        app.history.len().saturating_sub(1)
-    };
+    // Already painted at Queue time — reuse that cell for reference
+    // recording instead of duplicating the bubble.
+    let history_cell = paint_user_turn_cell(app, &message, message.display.clone());
     app.scroll_to_bottom();
     // Anchor the tail-flash to the moment the user message appears, not to
     // the async dispatch completion (which can lag by a route plan). The
@@ -1101,11 +1114,10 @@ pub(crate) async fn steer_user_message(
     // the content that chronologically preceded it.
     app.flush_active_cell();
 
-    // Mirror steer input in local transcript/session state.
-    app.add_message(HistoryCell::User {
-        content: format!("+ {}", message.display),
-    });
-    let history_cell = app.history.len().saturating_sub(1);
+    // Mirror steer input in local transcript/session state. A message echoed
+    // at queue time already owns a transcript cell; rewrite that cell into the
+    // steer form instead of painting a second bubble.
+    let history_cell = paint_user_turn_cell(app, &message, format!("+ {}", message.display));
     app.record_context_references(history_cell, message_index, references);
     app.api_messages.push(Message {
         role: Role::User,

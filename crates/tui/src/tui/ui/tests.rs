@@ -15682,6 +15682,34 @@ fn prepare_skips_user_echo_when_history_echoed() {
 }
 
 #[test]
+fn steer_reuses_queued_echo_cell_instead_of_doubling() {
+    let mut app = create_test_app();
+    let mut message = QueuedMessage::new("queued text".to_string(), None);
+    echo_queued_user_turn(&mut app, &mut message);
+    assert!(
+        message.history_echoed,
+        "queue echo must mark the message as already painted"
+    );
+
+    let idx = paint_user_turn_cell(&mut app, &message, format!("+ {}", message.display));
+
+    let user_cells: Vec<String> = app
+        .history
+        .iter()
+        .filter_map(|cell| match cell {
+            HistoryCell::User { content } => Some(content.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        user_cells,
+        vec!["+ queued text".to_string()],
+        "steer must rewrite the queued cell, not paint a second bubble"
+    );
+    assert_eq!(idx, 0, "the rewritten cell keeps the queue-time index");
+}
+
+#[test]
 fn engine_drain_budget_respects_event_and_time_limits() {
     let start = Instant::now();
     assert!(!engine_drain_budget_exhausted(0, start, start));
