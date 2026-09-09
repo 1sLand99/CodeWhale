@@ -26,6 +26,10 @@ pub(crate) const AGENT_ARROWS: &str = "agent_arrows";
 /// The idle bottom-of-screen affordance that opens the work dock. Founder
 /// live-test: "what do we press at the bottom to get the workbar to show up?"
 pub(crate) const DOCK_OPEN: &str = "dock_open";
+/// The `/help` route hint on the metrics line. It retires like every other
+/// hint so the row stops advertising a route the user already knows
+/// (founder, 2026-09-08: an always-on key hint is noise).
+pub(crate) const HELP_ROUTE: &str = "help_route";
 
 /// Whether the hint for `key` has been used often enough to retire.
 pub(crate) fn retired(uses: &BTreeMap<String, u8>, key: &str) -> bool {

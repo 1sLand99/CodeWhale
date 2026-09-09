@@ -5060,6 +5060,7 @@ pub(crate) async fn run_event_loop(
             // completions and the agent-focus projection get the key first.
             match shell_binding_for_key(app, &key) {
                 Some(ShellBindingId::Help) => {
+                    app.note_footer_hint_used(crate::tui::footer_hints::HELP_ROUTE);
                     toggle_help_view(app);
                     continue;
                 }

@@ -293,7 +293,6 @@ pub const HELP_CHROME_CHORD: &str = "/help";
 /// A slash command names itself, so it prints bare (`/help`); a key chord
 /// still needs the word (`Ctrl+/ help`).
 #[must_use]
-#[cfg(test)]
 pub fn info_help_hint(locale: crate::localization::Locale) -> String {
     let chord = binding(ShellBindingId::Help).footer_chord;
     if chord.starts_with('/') {

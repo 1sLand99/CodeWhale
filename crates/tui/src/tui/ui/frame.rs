@@ -355,10 +355,18 @@ fn render_info_row(f: &mut Frame, app: &mut App, area: Rect) -> InfoLineInteract
             })
             .map(|hb| hb.id)
     });
-    // The permanent `/help` pin left the metrics line (founder, 2026-09-08):
-    // an always-on key hint is noise. Contextual hints and retiring status
-    // toasts live in the posture bar above, which already owns them.
-    let info = InfoLine::new(&app.ui_theme, "", &segments)
+    // The metrics line no longer pins `/help` forever (founder, 2026-09-08).
+    // The route still appears until its binding has been used, then retires
+    // with the other footer hints so the row stays quiet once help is learned.
+    let help_hint = if crate::tui::footer_hints::retired(
+        &app.footer_hint_uses,
+        crate::tui::footer_hints::HELP_ROUTE,
+    ) {
+        String::new()
+    } else {
+        crate::tui::shell_key_routing::info_help_hint(app.ui_locale)
+    };
+    let info = InfoLine::new(&app.ui_theme, &help_hint, &segments)
         .ascii_safe(crate::tui::color_compat::ascii_safe_enabled())
         .hovered(hovered)
         .compact(app.metrics_line == crate::config::ChromeRowPreset::Compact);

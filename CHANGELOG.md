@@ -115,9 +115,9 @@ with an accessibility-first pointer.
   every other tool result (`tool_result_max_bytes`, 12k floor, 2 MiB ceiling)
   instead of a hardcoded 12k/4k/4k copy that cut a 12,001-character report to
   8,000.
-- The permanent `/help` key hint left the metrics line. Contextual hints and
-  retiring status toasts in the posture bar above still name the relevant
-  chords when they matter.
+- The metrics line no longer carries a permanent `/help` hint. The route still
+  appears until its binding has been used and then retires with the other
+  footer hints, so the row stays quiet once help is learned.
 - `request_user_input`'s description names when asking is the right move
   (ambiguous scope, an irreversible or expensive choice, a missing preference)
   and when it is not, so the model stops guessing at discoverable facts.

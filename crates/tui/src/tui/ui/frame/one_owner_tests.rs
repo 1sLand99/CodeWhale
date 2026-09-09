@@ -157,8 +157,10 @@ fn composed_frame_paints_each_fact_in_exactly_one_row() {
             ("model", model),
             ("cost", super::session_cost_label(&app)),
             ("agent count", "2 agents".to_string()),
-            // The permanent `/help` pin is gone (founder, 2026-09-08): the
-            // metrics line no longer paints a key hint at all.
+            (
+                "help hint",
+                crate::tui::shell_key_routing::info_help_hint(app.ui_locale),
+            ),
             ("output rate", "40 avg tok/s".to_string()),
             ("ttft", "ttft 400ms".to_string()),
         ];
