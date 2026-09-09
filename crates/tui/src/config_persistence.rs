@@ -58,6 +58,16 @@ pub(crate) fn migrate_legacy_route_preferences(
                 "Could not read legacy route preferences; configuration was not changed"
             )
         })?;
+    // An unparsable settings.toml loads as defaults carrying `load_error`, which
+    // keeps the UI usable but is not evidence that no preferences were saved.
+    // This migration is one-way: stamping the version over defaults would retire
+    // the user's real legacy choices unread. Refuse instead, exactly as
+    // `Settings::save_to_path` refuses to overwrite an unreadable document.
+    // Contents stay omitted; the file may hold private text.
+    anyhow::ensure!(
+        settings.load_error.is_none(),
+        "Could not read legacy route preferences; configuration was not changed"
+    );
     config.apply_saved_selection(&settings);
     let active_identity = config.active_provider_identity(config.api_provider()).ok();
     let selector = active_identity
@@ -213,7 +223,56 @@ pub(crate) fn persist_provider_selection(
             doc,
             &["provider"],
             identity.persisted_id().unwrap_or(&identity.key),
-        )
+        )?;
+        // Root `model`/`default_text_model` address the *active* route, so a
+        // provider switch leaves them naming the route that is on its way out.
+        // The incoming route usually cannot serve that id, and `Config::load`
+        // then rejects the file this function just wrote — the caller commits a
+        // switch and gets an unloadable config. Move the outgoing choice onto
+        // its own canonical leaf while that leaf is free, since it is real saved
+        // state, and clear the root alias, which no longer addresses its route.
+        let outgoing = config.active_provider_identity(config.api_provider()).ok();
+        for root_key in ["default_text_model", "model"] {
+            let Some(value) = doc
+                .get(root_key)
+                .and_then(toml_edit::Item::as_str)
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            // Reparsed per key: relocating the first alias can fill the leaf the
+            // second one would otherwise be moved onto.
+            let switched: crate::config::Config = toml::from_str(&doc.to_string())
+                .map_err(|_| anyhow::anyhow!("Could not parse switched route; contents omitted"))?;
+            if switched.active_route_serves_root_model(&value) {
+                continue;
+            }
+            // An unnamed custom route stores its model in the root alias
+            // itself, so there is no leaf to move it to; that value is dropped
+            // with the route it belonged to.
+            if let Some(outgoing) = outgoing.as_ref().filter(|outgoing| {
+                **outgoing != identity
+                    && !(outgoing.provider == ApiProvider::Custom
+                        && outgoing.persisted_id().is_none())
+            }) {
+                let mut scoped = switched.clone();
+                scoped.scope_to_provider_identity(outgoing);
+                if scoped
+                    .provider_config_for(outgoing.provider)
+                    .and_then(|entry| entry.model.as_deref())
+                    .is_none()
+                {
+                    set_provider_model_document(
+                        doc,
+                        outgoing.provider,
+                        outgoing.persisted_id().unwrap_or(&outgoing.key),
+                        &value,
+                    )?;
+                }
+            }
+            unset_document_value(doc, &[root_key])?;
+        }
+        Ok(())
     })?;
     Ok(path)
 }
@@ -1187,11 +1246,18 @@ action = "mode.plan"
             .expect("persist should succeed");
 
         let body = fs::read_to_string(&path).unwrap();
+        // The fixture is a pre-migration home config, so this first write also
+        // commits the one-way route-preference migration receipt in the same
+        // atomic replacement. That stamp and the model value are the only two
+        // permitted edits: comments, ordering and quoted tables stay byte-exact.
         let expected = GOLDEN_CONFIG.replace(
             "model = \"deepseek-v4-pro\" # pinned for release QA",
-            "model = \"deepseek-v4-flash\" # pinned for release QA",
+            "model = \"deepseek-v4-flash\" # pinned for release QA\nroute_preferences_version = 1",
         );
-        assert_eq!(body, expected, "only the model value may change");
+        assert_eq!(
+            body, expected,
+            "only the model value and the migration stamp may change"
+        );
     }
 
     #[test]
@@ -1659,6 +1725,46 @@ slot = 1
             doc["route_preferences_migration"]["previous_models"]["zai"].as_str(),
             Some("GLM-5.2")
         );
+    }
+
+    #[test]
+    fn switching_provider_preserves_the_outgoing_root_model_without_overwriting_its_leaf() {
+        use crate::test_support::{EnvVarGuard, lock_test_env};
+        let _lock = lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let _model_guard = ModelEnvGuard::new();
+        let path = home.path().join("config.toml");
+        for root_key in ["default_text_model", "model"] {
+            for existing in [None, Some("GLM-4.5-Air")] {
+                let mut source = format!(
+                    "route_preferences_version = 1\nprovider = 'zai'\n{root_key} = 'GLM-4.6'\n"
+                );
+                if let Some(model) = existing {
+                    source.push_str(&format!("[providers.zai]\nmodel = '{model}'\n"));
+                }
+                fs::write(&path, source).unwrap();
+                persist_provider_selection(
+                    Some(&path),
+                    ApiProvider::Deepseek,
+                    "deepseek",
+                    Some("deepseek-v4-pro"),
+                )
+                .unwrap();
+                let body = fs::read_to_string(&path).unwrap();
+                let doc: toml::Value = toml::from_str(&body).unwrap();
+                assert!(doc.get(root_key).is_none());
+                assert_eq!(
+                    doc["providers"]["zai"]["model"].as_str(),
+                    Some(existing.unwrap_or("GLM-4.6")),
+                    "switching routes must preserve the outgoing selection"
+                );
+                let restored = crate::config::Config::load(Some(path.clone()), None)
+                    .expect("saved provider switch must remain loadable");
+                assert_eq!(restored.api_provider(), ApiProvider::Deepseek);
+                assert_eq!(restored.default_model(), "deepseek-v4-pro");
+            }
+        }
     }
 
     #[test]

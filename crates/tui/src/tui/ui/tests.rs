@@ -9360,7 +9360,19 @@ fn first_run_ollama_choice_survives_restart_from_canonical_config() {
     app.finish_onboarding_without_feature_intro();
     drop(app);
     let restart_config = Config::load(Some(config_path), None).expect("reload restart config");
-    let restarted = Box::new(App::new(create_test_options(), &restart_config));
+    // A launch derives its startup model from the config it just read
+    // (`run_interactive`: `TuiOptions.model = config.default_model()`). The
+    // shared fixture options hard-code a DeepSeek id no launch would supply
+    // here, and `App::new` only re-derives the model when the legacy Settings
+    // archive still owns the selection — which, since Config became the saved
+    // route authority, it no longer does.
+    let restarted = Box::new(App::new(
+        TuiOptions {
+            model: restart_config.default_model(),
+            ..create_test_options()
+        },
+        &restart_config,
+    ));
     assert_eq!(restarted.api_provider, ApiProvider::Ollama);
     assert_eq!(restarted.model, crate::config::DEFAULT_OLLAMA_MODEL);
     assert_ne!(

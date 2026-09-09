@@ -9708,12 +9708,15 @@ async fn switch_provider_rejects_legacy_deepseek_cn_alias() -> Result<()> {
 }
 
 #[tokio::test]
-async fn switch_provider_with_deepseek_and_explicit_model_updates_default_text_model() -> Result<()>
-{
-    // When switching TO a DeepSeek provider with an explicit model, the
-    // endpoint must persist `default_text_model` (the DeepSeek-specific
-    // root key) in addition to the provider change, mirroring
-    // `switch_provider` in ui.rs which pins `default_model` for DeepSeek.
+async fn switch_provider_with_deepseek_and_explicit_model_persists_canonical_leaf() -> Result<()> {
+    // Switching TO DeepSeek with an explicit model persists that model on the
+    // canonical `[providers.deepseek].model` leaf, not on a root alias.
+    //
+    // The fixture also carries a root `default_text_model` left over from the
+    // outgoing Volcengine route. Root aliases address the *active* route, so
+    // leaving it behind would make the file this endpoint just wrote fail
+    // `Config::load` under DeepSeek. It is already shadowed by Volcengine's own
+    // leaf, so the switch drops it rather than relocating it.
     let root = std::env::temp_dir().join(format!(
         "codewhale-switch-deepseek-model-{}",
         Uuid::new_v4()
@@ -9753,18 +9756,35 @@ model = "glm-2"
         "switch to deepseek with model should succeed, body: {body}"
     );
 
-    // The persisted config must have provider = "deepseek" and
-    // default_text_model updated to the explicit model.
+    // The persisted config must have provider = "deepseek", the explicit model
+    // on DeepSeek's canonical leaf, and no root alias still naming Volcengine's
+    // model. Volcengine keeps its own saved leaf untouched.
     let persisted = fs::read_to_string(&config_file)?;
-    assert!(
-        persisted.contains("provider = \"deepseek\""),
+    let document: toml::Value = toml::from_str(&persisted)?;
+    assert_eq!(
+        document["provider"].as_str(),
+        Some("deepseek"),
         "provider should be persisted as deepseek. Actual config:\n{persisted}"
     );
-    assert!(
-        persisted.contains("default_text_model = \"deepseek-v4-pro\""),
-        "DeepSeek explicit model must be persisted as default_text_model. \
+    assert_eq!(
+        document["providers"]["deepseek"]["model"].as_str(),
+        Some("deepseek-v4-pro"),
+        "the explicit model belongs on DeepSeek's canonical leaf. \
          Actual config:\n{persisted}"
     );
+    assert!(
+        document.get("default_text_model").is_none(),
+        "a root alias naming the outgoing route must not survive the switch. \
+         Actual config:\n{persisted}"
+    );
+    assert_eq!(
+        document["providers"]["volcengine"]["model"].as_str(),
+        Some("glm-2"),
+        "the outgoing route keeps its own saved model. Actual config:\n{persisted}"
+    );
+    // The receipt that matters: what was written still loads under the new
+    // route. Before the root alias was cleared this returned 500.
+    Config::load(Some(config_file), None)?;
 
     handle.abort();
     Ok(())

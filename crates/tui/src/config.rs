@@ -5067,10 +5067,7 @@ impl Config {
         // whose provider owns a non-DeepSeek family — including ones our own
         // setup wizard writes (`provider = "zai"`, `GLM-5.2`). (#4829)
         if let Some(model) = self.default_text_model.as_deref()
-            && !model.trim().eq_ignore_ascii_case("auto")
-            && !provider_passes_model_through(self.api_provider())
-            && !self.active_provider_preserves_custom_base_url_model()
-            && canonical_model_id_for_provider(self.api_provider(), model).is_none()
+            && !self.active_route_serves_root_model(model)
         {
             let provider = self.api_provider();
             let known = model_completion_names_for_provider(provider);
@@ -6673,6 +6670,20 @@ impl Config {
 
     fn active_provider_preserves_custom_base_url_model(&self) -> bool {
         self.provider_uses_custom_endpoint(self.api_provider())
+    }
+
+    /// Whether the active route can serve `model` as a root `model` /
+    /// `default_text_model` alias.
+    ///
+    /// [`Config::validate`] rejects a root alias that fails this, so a writer
+    /// that changes the active route must clear or relocate an alias the new
+    /// route cannot serve — otherwise it commits a file that no longer loads.
+    /// One predicate, so the writer and the validator cannot disagree.
+    pub(crate) fn active_route_serves_root_model(&self, model: &str) -> bool {
+        model.trim().eq_ignore_ascii_case("auto")
+            || provider_passes_model_through(self.api_provider())
+            || self.active_provider_preserves_custom_base_url_model()
+            || canonical_model_id_for_provider(self.api_provider(), model).is_some()
     }
 
     /// Whether `provider`'s effective endpoint is a custom host rather than its

@@ -7,6 +7,12 @@
 //! only when they have content. Every fact below is asserted to appear in
 //! the composed frame exactly once.
 
+// These tests print the composed frame as failure evidence. They run under
+// `cargo test`, never inside the alt-screen, so `tui/mod.rs`'s
+// `#![deny(clippy::print_stderr)]` — which exists to stop the scroll demon in
+// production paint paths — does not apply here.
+#![allow(clippy::print_stderr)]
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
