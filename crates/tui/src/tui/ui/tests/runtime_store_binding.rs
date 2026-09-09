@@ -17,6 +17,121 @@ fn fixture_config() -> Config {
 }
 
 #[tokio::test]
+async fn runtime_store_binding_persists_on_exit_without_a_model_turn() -> anyhow::Result<()> {
+    let _environment = crate::test_support::lock_test_env();
+    let root = tempfile::tempdir()?;
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path());
+    let _runtime = crate::test_support::EnvVarGuard::remove("CODEWHALE_RUNTIME_DIR");
+    let _legacy = crate::test_support::EnvVarGuard::remove("DEEPSEEK_RUNTIME_DIR");
+    let explicit_store = crate::test_support::EnvVarGuard::set(
+        "CODEWHALE_RUNTIME_DIR",
+        root.path().join("original-runtime"),
+    );
+    let mut config = fixture_config();
+    let sessions = SessionManager::default_location()?;
+    let original = crate::session_manager::create_saved_session_with_id_and_mode(
+        "legacy-conversation".into(),
+        &[text_message("user", "retain this earlier conversation")],
+        "deepseek-v4-pro",
+        root.path(),
+        0,
+        None,
+        None,
+    );
+    assert!(original.metadata.runtime_store.is_none());
+    sessions.save_session(&original)?;
+    sessions.save_checkpoint(&original)?;
+    let mut app = Box::new(create_test_app());
+    apply_loaded_session_with_goal(&mut app, &mut config, &original, None)
+        .map_err(anyhow::Error::msg)?;
+    let task_config = TaskManagerConfig::from_runtime(&config, root.path().into(), None, Some(1));
+    let tasks = TaskManager::start(
+        task_config.clone(),
+        config.clone(),
+        app.plugin_registry.clone(),
+        &original.metadata.id,
+        None,
+    )
+    .await?;
+    let binding = tasks
+        .session_store_binding()
+        .expect("attached Runtime store");
+    app.runtime_services.task_manager = Some(tasks.clone());
+    let (handle, actor) =
+        persistence_actor::spawn_persistence_actor(SessionManager::default_location()?);
+    // Match clean exit ordering: no Engine turn, checkpoint or snapshot has
+    // been queued by this host before its TaskManager stops.
+    tasks.shutdown_and_wait().await?;
+    assert!(
+        super::super::event_loop::persist_settled_session_on_shutdown(&mut app, &handle)
+            .map_err(anyhow::Error::msg)?
+    );
+    assert!(handle.try_send(PersistRequest::Shutdown));
+    actor.await?;
+    let saved = sessions.load_session(&original.metadata.id)?;
+    assert_eq!(saved.metadata.runtime_store.as_ref(), Some(&binding));
+    assert_eq!(saved.metadata.title, original.metadata.title);
+    assert_eq!(saved.messages, original.messages);
+    assert!(
+        sessions
+            .load_session_checkpoint(&original.metadata.id)?
+            .is_none()
+    );
+    drop(app);
+    drop(tasks);
+    drop(explicit_store);
+    // Ordinary resume now reopens the same authority without an env override.
+    let resumed = TaskManager::start(
+        task_config,
+        config,
+        Arc::new(crate::plugins::PluginRegistry::empty(root.path())),
+        &saved.metadata.id,
+        saved.metadata.runtime_store.as_ref(),
+    )
+    .await?;
+    assert_eq!(resumed.execution_scope(), binding.execution_scope);
+    resumed.shutdown_and_wait().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_store_binding_exit_preserves_inflight_recovery() -> anyhow::Result<()> {
+    let _environment = crate::test_support::lock_test_env();
+    let root = tempfile::tempdir()?;
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path());
+    let sessions = SessionManager::default_location()?;
+    for (loading, dispatch) in [(true, false), (false, true)] {
+        let original = crate::session_manager::create_saved_session_with_mode(
+            &[],
+            "deepseek-v4-pro",
+            root.path(),
+            0,
+            None,
+            None,
+        );
+        let path = sessions.save_session(&original)?;
+        let checkpoint = sessions.save_checkpoint(&original)?;
+        let saved_before = std::fs::read(&path)?;
+        let checkpoint_before = std::fs::read(&checkpoint)?;
+        let mut app = Box::new(create_test_app());
+        app.current_session_id = Some(original.metadata.id.clone());
+        app.is_loading = loading;
+        app.dispatch_in_flight = dispatch;
+        let (handle, actor) =
+            persistence_actor::spawn_persistence_actor(SessionManager::default_location()?);
+        assert!(
+            !super::super::event_loop::persist_settled_session_on_shutdown(&mut app, &handle)
+                .map_err(anyhow::Error::msg)?
+        );
+        assert!(handle.try_send(PersistRequest::Shutdown));
+        actor.await?;
+        assert_eq!(std::fs::read(path)?, saved_before);
+        assert_eq!(std::fs::read(checkpoint)?, checkpoint_before);
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn runtime_store_binding_survives_launch_snapshot_and_resume() -> anyhow::Result<()> {
     let _environment = crate::test_support::lock_test_env();
     let root = tempfile::tempdir()?;

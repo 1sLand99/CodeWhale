@@ -112,6 +112,24 @@ fn current_session_fleet_workers_status(
     .replace("{count}", &count.to_string())
 }
 
+/// Host state can change without a model turn, including learning the Runtime
+/// binding of a resumed legacy session. Commit that state before clearing its
+/// recovery checkpoint; an unfinished turn keeps its checkpoint untouched.
+pub(super) fn persist_settled_session_on_shutdown(
+    app: &mut App,
+    handle: &persistence_actor::PersistActorHandle,
+) -> Result<bool, String> {
+    if app.is_loading || app.dispatch_in_flight || app.current_session_id.is_none() {
+        return Ok(false);
+    }
+    let manager = SessionManager::default_location().map_err(|error| error.to_string())?;
+    let session = build_session_snapshot(app, &manager)?;
+    if !handle.try_send(PersistRequest::CompletedCommit { session }) {
+        return Err("persistence actor is unavailable during shutdown".into());
+    }
+    Ok(true)
+}
+
 #[derive(Debug)]
 struct TranslationAccountingContext {
     cost_scope: crate::cost_status::CostScopeToken,
@@ -1163,12 +1181,16 @@ pub async fn run_tui(
         // Capture the final edited draft before the shutdown durability barrier.
         persist_offline_queue_state(&app);
         let turn_in_flight = app.is_loading || app.dispatch_in_flight;
-        if !turn_in_flight && let Some(session_id) = app.current_session_id.clone() {
-            handle.try_send(PersistRequest::ClearCheckpoint { session_id });
-        } else if turn_in_flight {
+        if turn_in_flight {
             tracing::info!(
                 target: "persistence",
                 "shutdown preserves the in-flight checkpoint for recovery review"
+            );
+        } else if let Err(error) = persist_settled_session_on_shutdown(&mut app, &handle) {
+            tracing::warn!(
+                target: "persistence",
+                %error,
+                "session snapshot could not be queued during shutdown; checkpoint retained"
             );
         }
         let (report_tx, report_rx) = tokio::sync::oneshot::channel();
