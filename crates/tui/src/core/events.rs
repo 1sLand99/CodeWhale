@@ -450,7 +450,7 @@ pub enum Event {
         /// status, current step, elapsed and token usage per row, built from
         /// the retained worker records rather than from live agent state, so a
         /// finished agent keeps the numbers it finished with.
-        roster: Vec<crate::tui::agent_roster::AgentRosterRow>,
+        roster: Vec<crate::agent_roster::AgentRosterRow>,
     },
 
     /// Structured sub-agent mailbox envelope (issue #128). Carries the

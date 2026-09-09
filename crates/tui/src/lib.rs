@@ -22,6 +22,7 @@ include!(concat!(env!("OUT_DIR"), "/i18n_init.rs"));
 mod localization_backend;
 
 mod acp_server;
+pub mod agent_roster;
 mod approval_log;
 mod artifacts;
 mod audit;

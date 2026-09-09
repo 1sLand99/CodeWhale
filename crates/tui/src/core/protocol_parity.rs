@@ -28,6 +28,7 @@ use codewhale_protocol::op as wire_op;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::agent_roster::{AgentRosterRow, RosterState};
 use crate::compaction::CompactionConfig;
 use crate::config::ApiProvider;
 use crate::core::engine::preview::PreviewUnresolved;
@@ -43,7 +44,6 @@ use crate::route_billing::RouteProduct;
 use crate::tools::spec::ToolError;
 use crate::tools::subagent::AgentWorkerStatus;
 use crate::tools::user_input::UserInputRequest;
-use crate::tui::agent_roster::{AgentRosterRow, RosterState};
 use codewhale_config::AppMode;
 use codewhale_execpolicy::ApprovalMode;
 use codewhale_protocol::ResponseChannel;

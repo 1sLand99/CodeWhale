@@ -118,7 +118,7 @@ fn agent_list_event(manager: &SubAgentManager, active_session_id: &str) -> Event
             24,
         ),
         queued_follow_ups: manager.queued_follow_up_counts_for_session(active_session_id),
-        roster: crate::tui::agent_roster::build_agent_roster(
+        roster: crate::agent_roster::build_agent_roster(
             &manager.list_worker_records_for_session(active_session_id),
             now_ms,
         ),
