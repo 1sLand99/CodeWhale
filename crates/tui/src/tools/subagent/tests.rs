@@ -10915,7 +10915,8 @@ fn stamp_subagent_summary_truncates_when_over_budget() {
     // issue #2652: a summary exceeding the budget is head+tail truncated using
     // the existing [Output truncated ...] vocabulary, honestly noting there is
     // no retrieve handle, and is marked truncated.
-    let big = "a".repeat(SUBAGENT_SUMMARY_CHAR_BUDGET + 5_000);
+    let budget = subagent_summary_char_budget();
+    let big = "a".repeat(budget + 5_000);
     let (stamped, truncated) = stamp_subagent_summary(&big);
     assert!(truncated);
     assert!(
@@ -10930,10 +10931,11 @@ fn stamp_subagent_summary_truncates_when_over_budget() {
         !stamped.contains("[Sub-agent self-report"),
         "truncated summary must not also get the self-report note"
     );
-    // Head and tail slices are present; a run of budget-length 'a's is gone
-    // from the middle.
-    assert!(stamped.contains(&"a".repeat(SUBAGENT_SUMMARY_HEAD_CHARS)));
-    assert!(stamped.contains(&"a".repeat(SUBAGENT_SUMMARY_TAIL_CHARS)));
+    // The whole budget is spent on content: two-thirds head, one-third tail.
+    let head_chars = budget * 2 / 3;
+    let tail_chars = budget - head_chars;
+    assert!(stamped.contains(&"a".repeat(head_chars)));
+    assert!(stamped.contains(&"a".repeat(tail_chars)));
     assert!(
         stamped.chars().filter(|c| *c == 'a').count() < big.chars().count(),
         "truncation removed middle characters"

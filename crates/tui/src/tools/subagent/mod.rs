@@ -16740,15 +16740,17 @@ fn annotate_child_model_error(
 }
 
 /// Char budget above which a sub-agent summary is treated as a large dump and
-/// head+tail truncated. Mirrors `TOOL_RESULT_SENT_CHAR_BUDGET` in
-/// `crates/tui/src/client/chat.rs:1377` so sub-agent summaries use the same
-/// threshold as regular tool outputs. Duplicated locally to avoid coupling the
-/// sub-agent module to the wire-compaction internals.
+/// head+tail truncated. The floor mirrors `TOOL_RESULT_SENT_CHAR_BUDGET` in
+/// `crates/tui/src/client/chat.rs`, but the effective budget follows the same
+/// adaptive resolver as every other tool result so an explicit
+/// `tool_result_max_bytes` opt-in is honored instead of silently capped.
 const SUBAGENT_SUMMARY_CHAR_BUDGET: usize = 12_000;
-/// Head/tail slice sizes when truncating; mirror the wire constants
-/// (`TOOL_RESULT_HEAD_CHARS`/`TOOL_RESULT_TAIL_CHARS`, chat.rs:1378-1379).
-const SUBAGENT_SUMMARY_HEAD_CHARS: usize = 4_000;
-const SUBAGENT_SUMMARY_TAIL_CHARS: usize = 4_000;
+
+fn subagent_summary_char_budget() -> usize {
+    crate::tools::large_output_router::WorkshopConfig::active_tool_result_max_bytes()
+        .map(|bytes| bytes.clamp(SUBAGENT_SUMMARY_CHAR_BUDGET, 2 * 1024 * 1024))
+        .unwrap_or(SUBAGENT_SUMMARY_CHAR_BUDGET)
+}
 
 /// One-line provenance suffix reinforcing that a sub-agent summary is a
 /// self-report (issue #2652). Appended only when the summary was NOT
@@ -16778,18 +16780,21 @@ fn stamp_subagent_summary(raw: &str) -> (String, bool) {
 /// The ref-aware stamper; see `stamp_subagent_summary`.
 fn stamp_subagent_summary_with_ref(raw: &str, report_ref: Option<&str>) -> (String, bool) {
     let total = raw.chars().count();
-    if total <= SUBAGENT_SUMMARY_CHAR_BUDGET {
+    let budget = subagent_summary_char_budget();
+    if total <= budget {
         return (format!("{raw}{SUBAGENT_SELF_REPORT_NOTE}"), false);
     }
+    // Spend the whole budget on content: two-thirds head, one-third tail. The
+    // old fixed 4,000 + 4,000 cut a 12,001-char report down to 8,000.
+    let head_chars = budget * 2 / 3;
+    let tail_chars = budget - head_chars;
     let chars: Vec<char> = raw.chars().collect();
-    let head: String = chars.iter().take(SUBAGENT_SUMMARY_HEAD_CHARS).collect();
+    let head: String = chars.iter().take(head_chars).collect();
     let tail: String = chars
         .iter()
-        .skip(total.saturating_sub(SUBAGENT_SUMMARY_TAIL_CHARS))
+        .skip(total.saturating_sub(tail_chars))
         .collect();
-    let omitted = total
-        .saturating_sub(SUBAGENT_SUMMARY_HEAD_CHARS)
-        .saturating_sub(SUBAGENT_SUMMARY_TAIL_CHARS);
+    let omitted = total.saturating_sub(head_chars).saturating_sub(tail_chars);
     let retrieval = match report_ref {
         Some(reference) => format!(
             "the full report is retained as artifact {reference} — read the elided middle ({omitted} \
@@ -16803,7 +16808,7 @@ material claims."
         ),
     };
     let stamped = format!(
-        "{head}\n\n[Sub-agent summary truncated: {SUBAGENT_SUMMARY_HEAD_CHARS} + {SUBAGENT_SUMMARY_TAIL_CHARS} of {total} \
+        "{head}\n\n[Sub-agent summary truncated: {head_chars} + {tail_chars} of {total} \
 chars shown. This is the child's self-report; {retrieval}]\n\n{tail}",
     );
     (stamped, true)
@@ -16822,7 +16827,7 @@ pub(crate) fn spill_subagent_final_report(
     result: &SubAgentResult,
 ) -> Option<String> {
     let raw = summarize_subagent_result(result);
-    if raw.chars().count() <= SUBAGENT_SUMMARY_CHAR_BUDGET {
+    if raw.chars().count() <= subagent_summary_char_budget() {
         return None;
     }
     let artifact_id = format!("art_sa_{}_report", result.agent_id);
