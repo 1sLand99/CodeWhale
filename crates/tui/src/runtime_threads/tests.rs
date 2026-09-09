@@ -5112,6 +5112,7 @@ async fn wait_for_terminal_turn(
     turn_id: &str,
     timeout: Duration,
 ) -> Result<TurnRecord> {
+    let mut event_rx = manager.subscribe_events();
     let deadline = Instant::now() + timeout;
     loop {
         let turn = manager.store.load_turn(turn_id)?;
@@ -5147,7 +5148,16 @@ async fn wait_for_terminal_turn(
                 );
             }
         }
-        sleep(Duration::from_millis(20)).await;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            continue;
+        }
+        tokio::select! {
+            // Recheck durable state on a lifecycle event; the terminal record,
+            // completion receipt and released claim remain the success gate.
+            _ = event_rx.recv() => {}
+            _ = sleep(remaining.min(Duration::from_millis(20))) => {}
+        }
     }
 }
 
@@ -8112,7 +8122,7 @@ async fn worker_lifecycle_receipts_preserve_owner_outcome_and_durable_replay() -
             },
         )
         .await?;
-    let _ = wait_for_terminal_turn(&manager, &turn.id, Duration::from_secs(2)).await?;
+    let _ = wait_for_terminal_turn(&manager, &turn.id, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
     let events = manager.events_since(&thread.id, None)?;
     let workers: Vec<_> = events
         .iter()
