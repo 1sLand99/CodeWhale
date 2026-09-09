@@ -377,75 +377,6 @@ fn live_sessions() -> &'static std::sync::RwLock<std::collections::HashSet<Strin
     LIVE_SESSIONS.get_or_init(Default::default)
 }
 
-/// Session directories held open by a runtime store, refcounted.
-///
-/// `LIVE_SESSIONS` is a single-slot interactive claim — `set_live_session`
-/// clears it — so it cannot describe the *other* sessions a process is running
-/// at the same time: a scheduled automation, a background task, a subagent.
-/// Those mint a session directory under `sessions/<id>/runtime` before any
-/// `<id>.json` record exists, which is exactly the shape
-/// `reclaim_orphaned_session_dirs` deletes. It was deleting the store out from
-/// under running automations, which then failed with "Failed to open Runtime
-/// store state" or "Failed to open Runtime event lock" against a path that no
-/// longer existed.
-///
-/// Refcounted because several stores can be scoped to one session id, and
-/// released by guard drop so a crash still leaves the directory reclaimable.
-static CLAIMED_SESSION_DIRS: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashMap<String, usize>>,
-> = std::sync::OnceLock::new();
-
-fn claimed_session_dirs() -> &'static std::sync::Mutex<std::collections::HashMap<String, usize>> {
-    CLAIMED_SESSION_DIRS.get_or_init(Default::default)
-}
-
-/// Holds `sessions/<id>/` against orphan reclamation until dropped.
-#[derive(Debug)]
-pub struct SessionDirClaim {
-    session_id: String,
-}
-
-impl Drop for SessionDirClaim {
-    fn drop(&mut self) {
-        if let Ok(mut claims) = claimed_session_dirs().lock()
-            && let Some(count) = claims.get_mut(&self.session_id)
-        {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                claims.remove(&self.session_id);
-            }
-        }
-    }
-}
-
-/// Claim `sessions/<session_id>/` for as long as the returned guard lives.
-///
-/// Any writer that creates a session directory before its `<id>.json` record
-/// exists must hold one of these, or the orphan sweep may reclaim the
-/// directory while it is still in use.
-#[must_use]
-pub fn claim_session_dir(session_id: &str) -> Option<SessionDirClaim> {
-    let session_id = session_id.trim();
-    if session_id.is_empty() || !is_session_uuid(session_id) {
-        // Only UUID-shaped directories are reclaimable, so only those need a
-        // claim. Anything else is already left alone by the sweep.
-        return None;
-    }
-    let mut claims = claimed_session_dirs().lock().ok()?;
-    *claims.entry(session_id.to_string()).or_insert(0) += 1;
-    Some(SessionDirClaim {
-        session_id: session_id.to_string(),
-    })
-}
-
-/// Is this session directory claimed by a runtime store in this process?
-#[must_use]
-pub fn is_claimed_session_dir(session_id: &str) -> bool {
-    claimed_session_dirs()
-        .lock()
-        .is_ok_and(|claims| claims.contains_key(session_id))
-}
-
 /// Who is asking to mutate a saved session.
 ///
 /// This is an authority distinction, not a convenience one: the owner may
@@ -474,22 +405,6 @@ pub fn set_live_session(session_id: Option<&str>) {
             live.insert(id.to_string());
         }
     }
-}
-
-/// The canonical session-id shape: a hyphenated UUID, `8-4-4-4-12` hex.
-///
-/// Used to gate directory removal, so it is deliberately exact rather than
-/// permissive — see `reclaim_orphaned_session_dirs`.
-fn is_session_uuid(name: &str) -> bool {
-    let groups: Vec<&str> = name.split('-').collect();
-    if groups.len() != 5 {
-        return false;
-    }
-    const WIDTHS: [usize; 5] = [8, 4, 4, 4, 12];
-    groups
-        .iter()
-        .zip(WIDTHS)
-        .all(|(group, width)| group.len() == width && group.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 /// Is this session currently owned by **this process's** interactive surface?
@@ -2577,93 +2492,6 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Ceiling on orphan directories reclaimed per `cleanup` call.
-    ///
-    /// Reconciliation runs on the save path, so it must never turn one save
-    /// into a long stall. A real machine accumulated 780 orphans; at this rate
-    /// it converges over a couple of dozen saves instead of blocking one.
-    const MAX_ORPHAN_DIRS_PER_SWEEP: usize = 32;
-
-    /// Remove per-session artifact directories whose session no longer exists.
-    ///
-    /// `delete_session` removes `sessions/<id>/` along with `<id>.json`, so
-    /// nothing written by the current code leaks. What was missing is
-    /// *reconciliation*: directories stranded by earlier versions — or by a
-    /// `remove_dir_all` that failed while the `remove_file` before it
-    /// succeeded, an error `cleanup_old_sessions_keeping` deliberately
-    /// swallows — were never collected by anything. A real `~/.codewhale`
-    /// held **780** such directories, each holding shell-completion evidence
-    /// artifacts, which is also why traversing that tree had become slow.
-    ///
-    /// Deliberately conservative, because this removes directories under
-    /// `$HOME`. A directory is reclaimed only when **all** of these hold:
-    ///
-    /// - its name is a valid session id by `validated_session_id` (so
-    ///   `checkpoints/` and any other bookkeeping directory is excluded);
-    /// - `sessions/<id>.json` does not exist;
-    /// - `checkpoints/<id>.json` does not exist — a crashed session's evidence
-    ///   must outlive its missing document, since that is exactly what
-    ///   recovery reads;
-    /// - the session is not live in *this* process (`is_live_session`).
-    ///   That check is process-local; a second Codewhale sharing `$HOME`
-    ///   is not visible here, so reclaim also requires the session
-    ///   document and checkpoint to be gone.
-    ///
-    /// Best effort throughout: a failure to read the directory or remove an
-    /// entry is ignored rather than failing the save that triggered it.
-    fn reclaim_orphaned_session_dirs(&self) {
-        let Ok(entries) = fs::read_dir(&self.sessions_dir) else {
-            return;
-        };
-        let Ok(legacy_checkpoint_origin) = self.legacy_checkpoint_origin() else {
-            // An unidentified legacy checkpoint may own any orphan's evidence.
-            return;
-        };
-        let mut reclaimed = 0usize;
-        for entry in entries.flatten() {
-            if reclaimed >= Self::MAX_ORPHAN_DIRS_PER_SWEEP {
-                return;
-            }
-            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-                continue;
-            }
-            let name = entry.file_name();
-            let Some(id) = name.to_str() else {
-                continue;
-            };
-            // `validated_session_id` is far too permissive to gate a
-            // `remove_dir_all` — it accepts any `[A-Za-z0-9_-]+`, which
-            // includes `checkpoints` itself. Reclaiming that directory would
-            // delete every crash-recovery checkpoint, and then, on the same
-            // pass, every session directory those checkpoints were protecting.
-            // Require the exact shape the runtime actually mints instead. An
-            // id that is not a UUID simply keeps its directory: leaving a
-            // stranger alone is the safe direction to be wrong in.
-            if !is_session_uuid(id) {
-                continue;
-            }
-            let Ok(session_path) = self.validated_session_path(id) else {
-                continue;
-            };
-            if session_path.exists()
-                || is_live_session(id)
-                || is_claimed_session_dir(id)
-                || legacy_checkpoint_origin.as_deref() == Some(id)
-            {
-                continue;
-            }
-            if self
-                .validated_checkpoint_path(id)
-                .is_ok_and(|checkpoint| checkpoint.exists())
-            {
-                continue;
-            }
-            if fs::remove_dir_all(entry.path()).is_ok() {
-                reclaimed += 1;
-            }
-        }
-    }
-
     /// Clean up old sessions to stay within `MAX_SESSIONS` limit.
     pub fn cleanup_old_sessions(&self) -> std::io::Result<()> {
         self.cleanup_old_sessions_keeping(None)
@@ -2684,7 +2512,11 @@ impl SessionManager {
                 let _ = self.remove_session(&session.id, SessionRemoval::Retention);
             }
         }
-        self.reclaim_orphaned_session_dirs();
+        // A directory without a top-level session snapshot is not proof of an
+        // orphan: runtime threads and automations own independent durable stores,
+        // including in other processes and before their first snapshot. Retention
+        // only removes records it listed above; never infer authority to delete
+        // other directories from an absent transcript or process-local claim.
 
         Ok(())
     }
@@ -4707,12 +4539,10 @@ mod tests {
         manager.save_session(&session).expect("save empty");
     }
 
-    // === orphaned per-session artifact directories ===
+    // === session retention and independent runtime data ===
 
-    /// A real `~/.codewhale/sessions` held 780 directories whose session had
-    /// long been pruned, each still holding shell-completion evidence.
     #[test]
-    fn cleanup_reclaims_session_dirs_whose_session_is_gone() {
+    fn cleanup_preserves_artifacts_without_a_session_snapshot() {
         let tmp = tempdir().expect("tempdir");
         let manager = SessionManager::new(tmp.path().to_path_buf()).expect("manager");
         let workspace = tmp.path().join("ws");
@@ -4730,8 +4560,11 @@ mod tests {
         manager.cleanup_old_sessions().expect("cleanup");
 
         assert!(
-            !tmp.path().join(orphan).exists(),
-            "a directory whose session is gone is reclaimed"
+            tmp.path()
+                .join(orphan)
+                .join("artifacts/art_evidence.txt")
+                .exists(),
+            "an absent snapshot does not authorize deleting independent evidence"
         );
         assert!(
             tmp.path().join(live).join("artifacts").exists(),
@@ -4739,35 +4572,80 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_claimed_session_dir_is_not_reclaimed_while_its_runtime_store_is_open() {
-        // The automation regression: a scheduled run mints
-        // `sessions/<id>/runtime` before any `<id>.json` exists, so the sweep
-        // saw the shape it reclaims and deleted the store mid-run. The run
-        // then failed with "Failed to open Runtime store state" against a path
-        // that no longer existed. Without the claim this directory is gone.
+    #[tokio::test]
+    async fn cleanup_in_another_process_preserves_runtime_without_a_snapshot() {
+        const PROBE: &str = "CODEWHALE_RUNTIME_RETENTION_PROBE";
+        if let Some(directory) = std::env::var_os(PROBE) {
+            let manager = SessionManager::new(PathBuf::from(directory)).expect("child manager");
+            manager.cleanup_old_sessions().expect("child retention");
+            return;
+        }
         let tmp = tempdir().expect("tempdir");
-        let manager = SessionManager::new(tmp.path().to_path_buf()).expect("manager");
-        let running = "44444444-4444-4444-8444-444444444444";
-        let runtime = tmp.path().join(running).join("runtime");
-        fs::create_dir_all(&runtime).expect("runtime dir");
-        fs::write(runtime.join("state.json"), b"{}").expect("state");
-
-        let claim = claim_session_dir(running).expect("uuid dirs are claimable");
-        manager.cleanup_old_sessions().expect("cleanup");
+        let sessions = tmp.path().join("sessions");
+        let manager = SessionManager::new(sessions.clone()).expect("manager");
+        let runtime = sessions.join("44444444-4444-4444-8444-444444444444/runtime");
+        let store = crate::runtime_threads::RuntimeThreadStore::open(runtime.clone())
+            .expect("live automation store");
+        let first = store
+            .append_event(
+                "thread_probe",
+                None,
+                None,
+                "probe",
+                serde_json::json!({"step": 1}),
+            )
+            .await
+            .expect("first durable event");
+        let run_cleanup = || {
+            let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+                .args([
+                    "--exact",
+                    "session_manager::tests::cleanup_in_another_process_preserves_runtime_without_a_snapshot",
+                    "--nocapture",
+                ])
+                .env(PROBE, &sessions)
+                .output()
+                .expect("independent cleanup process");
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        };
         assert!(
-            runtime.join("state.json").exists(),
-            "a running automation's store must outlive the orphan sweep"
+            manager
+                .list_sessions()
+                .expect("no interactive snapshot")
+                .is_empty()
         );
-
-        // Dropping the claim returns it to the reclaimable set, so a crashed
-        // run still cannot strand its directory forever.
-        drop(claim);
-        manager.cleanup_old_sessions().expect("cleanup");
-        assert!(
-            !tmp.path().join(running).exists(),
-            "an unclaimed orphan is still reclaimed"
+        run_cleanup();
+        assert_eq!(
+            store.current_seq().await.expect("live cursor survives"),
+            first.seq
         );
+        drop(store);
+        // A closed store can still own resumable events. It is not garbage
+        // simply because no process or interactive transcript claims it.
+        run_cleanup();
+        let reopened = crate::runtime_threads::RuntimeThreadStore::open(runtime)
+            .expect("reopen preserved automation store");
+        assert_eq!(
+            reopened.current_seq().await.expect("recovered cursor"),
+            first.seq
+        );
+        let next = reopened
+            .append_event(
+                "thread_probe",
+                None,
+                None,
+                "probe",
+                serde_json::json!({"step": 2}),
+            )
+            .await
+            .expect("continue recovered event sequence");
+        assert_eq!(next.seq, first.seq + 1);
     }
 
     #[test]
@@ -4808,35 +4686,6 @@ mod tests {
             not_a_session.exists(),
             "a name that is not a valid session id is not ours to remove"
         );
-    }
-
-    #[test]
-    fn only_a_real_uuid_can_gate_a_directory_removal() {
-        // Real ids from a live ~/.codewhale.
-        for id in [
-            "db609d23-e25f-48b0-918e-6d1e390a7cb7",
-            "5bd5095c-2a10-46bb-9979-ed967d892d45",
-            "11111111-1111-4111-8111-111111111111",
-        ] {
-            assert!(super::is_session_uuid(id), "{id} is a session id");
-        }
-        // Everything `validated_session_id` would have waved through.
-        for name in [
-            "checkpoints",
-            "some-user-folder",
-            "mine",
-            "artifacts",
-            "db609d23-e25f-48b0-918e-6d1e390a7cb", // short final group
-            "db609d23-e25f-48b0-918e-6d1e390a7cb77", // long final group
-            "db609d23-e25f-48b0-918e",             // four groups
-            "zz609d23-e25f-48b0-918e-6d1e390a7cb7", // non-hex
-            "",
-        ] {
-            assert!(
-                !super::is_session_uuid(name),
-                "{name:?} must never gate a remove_dir_all"
-            );
-        }
     }
 
     #[test]
