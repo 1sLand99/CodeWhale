@@ -10590,7 +10590,17 @@ fn core_primitives_and_todo_write_default_to_eager() {
 
 #[test]
 fn default_active_contract_keeps_discovery_and_core_tools_eager() {
-    const EXPECTED_NATIVE: [&str; 6] = ["read", "write", "edit", "bash", "agent", "todo_write"];
+    const EXPECTED_NATIVE: [&str; 9] = [
+        "read",
+        "write",
+        "edit",
+        "bash",
+        "agent",
+        "todo_write",
+        "create_goal",
+        "get_goal",
+        "update_goal",
+    ];
     assert_eq!(
         default_active_native_tool_names(),
         EXPECTED_NATIVE.as_slice()
@@ -11111,6 +11121,9 @@ async fn runtime_contract_tool_metric_uses_canonical_mode_surfaces() {
     let expected_active = HashSet::from([
         "agent",
         "bash",
+        "create_goal",
+        "get_goal",
+        "update_goal",
         "edit",
         "read",
         "todo_write",
@@ -11139,7 +11152,7 @@ async fn runtime_contract_tool_metric_uses_canonical_mode_surfaces() {
         assert_eq!(
             metric_tool_names(&payload, mode, "active"),
             expected_active,
-            "{mode} must keep the same Pi-small request head"
+            "{mode} must keep the same request head including goal controls"
         );
     }
 
@@ -12420,8 +12433,8 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
         .with_priority(1)
         .mount(&server)
         .await;
-    // The first `update_goal` call only loads the deferred tool; the retry —
-    // the request carrying the deferral receipt — is the one that executes.
+    // Goal control must execute immediately: continuation cannot depend on
+    // discovering or retrying the very tool that lets the model stop it.
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
         .and(body_string_contains("was deferred and has now been loaded"))
@@ -12430,7 +12443,7 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
                 .insert_header("content-type", "text/event-stream")
                 .set_body_string(goal_sse),
         )
-        .expect(1)
+        .expect(0)
         .with_priority(2)
         .mount(&server)
         .await;
@@ -12560,6 +12573,18 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
     );
     assert!(saw_shell_result);
     assert!(saw_complete);
+    let requests = server.received_requests().await.expect("recorded requests");
+    let first: serde_json::Value = serde_json::from_slice(&requests[0].body).expect("request JSON");
+    for name in ["create_goal", "get_goal", "update_goal"] {
+        assert!(
+            first["tools"]
+                .as_array()
+                .expect("wire tools")
+                .iter()
+                .any(|tool| tool["function"]["name"] == name),
+            "first provider request must expose {name} without discovery"
+        );
+    }
     let written = std::fs::read_to_string(workspace.path().join("operate-mode-approved.txt"))
         .expect("workspace-scoped shell output");
     assert_eq!(written.trim_end(), "operate-approved");

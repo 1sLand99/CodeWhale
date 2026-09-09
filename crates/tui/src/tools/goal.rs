@@ -1203,7 +1203,7 @@ impl ToolSpec for UpdateGoalTool {
     }
 
     fn description(&self) -> &'static str {
-        "Update the runtime goal completion gate. Critical verification may seal one immutable completion contract. Advisory review is append-only context and never completes, blocks, or pauses the goal. Mark blocked when progress requires user input."
+        "Update the runtime goal completion gate by calling this tool; a prose status in your answer does not change the goal or stop continuation. Critical verification may seal one immutable completion contract. Advisory review is append-only context and never completes, blocks, or pauses the goal. Mark blocked when progress requires user input."
     }
 
     fn input_schema(&self) -> Value {

@@ -7407,7 +7407,7 @@ async fn execute_surface_tool(
 }
 
 #[test]
-fn small_surface_starts_with_only_pi_head_and_search() {
+fn small_surface_starts_with_core_tools_and_read_only_goal_control() {
     let registry = small_surface_registry(FleetRole::Builder);
     let catalog = registry.deferred_catalog_for_model(&FleetRole::Builder);
     let mut surface = SubAgentToolSurface::new(catalog, &[]);
@@ -7418,6 +7418,7 @@ fn small_surface_starts_with_only_pi_head_and_search() {
             "agent",
             "bash",
             "edit",
+            "get_goal",
             "read",
             "todo_write",
             "tool_search",
@@ -7638,7 +7639,14 @@ fn small_surface_caches_are_independent_bounded_and_revalidated() {
 #[tokio::test]
 async fn small_surface_successful_cached_use_touches_lru() {
     let registry = small_surface_registry(FleetRole::Builder);
-    let catalog = registry.deferred_catalog_for_model(&FleetRole::Builder);
+    let mut catalog = registry.deferred_catalog_for_model(&FleetRole::Builder);
+    // Exercise the LRU with a deliberately deferred read-only fixture tool;
+    // production goal controls are eager and must not consume cache slots.
+    catalog
+        .iter_mut()
+        .find(|tool| tool.name == "get_goal")
+        .expect("goal read fixture")
+        .defer_loading = Some(true);
     let mut others = catalog
         .iter()
         .filter(|tool| tool.defer_loading == Some(true) && tool.name != "get_goal")
@@ -7674,10 +7682,18 @@ fn small_surface_depth_cap_removes_only_agent() {
     );
     assert_eq!(
         model_tool_names(model_request_tools(&mut surface)),
-        ["bash", "edit", "read", "todo_write", "tool_search", "write"]
-            .into_iter()
-            .map(str::to_string)
-            .collect()
+        [
+            "bash",
+            "edit",
+            "get_goal",
+            "read",
+            "todo_write",
+            "tool_search",
+            "write"
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
     );
 }
 

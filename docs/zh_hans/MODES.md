@@ -17,7 +17,7 @@ Codewhale 有三个相关概念:
 按 `Tab` 补全 composer 菜单，或在 composer 为空时循环切换可见模式:**Plan → Work → Operate → Plan**。`Tab` 从不发送或排队 composer 文本；用 `Enter` 发送或排队。按 `Shift+Tab` 循环切换权限姿态(Ask → Auto-Review → Full Access)。按 `Ctrl+T` 循环切换推理强度。运行 `/mode` 打开模式选择器，或直接用 `/mode work`、`/mode plan`、`/mode operate` 切换。
 
 - **Plan**:设计优先的提示方式。稳定的原语名称保持熟悉，但运行时集中拒绝文件修改和 shell 执行。只读检查与策略允许的研究(包括延迟的 Web 搜索/抓取)仍然可用。
-- **Work**(内部为 `agent`):普通的多步执行。第一回合的小工具箱是 `read`、`write`、`edit`、`bash`、`agent` 和 `todo_write`;审批、沙箱、仓库法和托管策略仍然决定什么可以执行。
+- **Work**(内部为 `agent`):普通的多步执行。第一回合的工具箱包含 `read`、`write`、`edit`、`bash`、`agent` 和 `todo_write`，以及无需搜索即可使用的目标控制工具 `create_goal`、`get_goal` 和 `update_goal`。创建目标仍须用户明确要求；审批、沙箱、仓库法和托管策略决定什么可以执行。
 - **Operate**:多任务指挥姿态。它与 Work 拥有相同的原语身份和执行权限。父会话是 **operator**:派发后台 worker 是独立或并行工作的默认方式。小而紧密耦合的任务在父会话中处理；可分离的流用后台 `agent` worker,当顺序、阶段、门、共享预算或确定性汇入重要时使用 Workflow。**派发不等于完成** — 有写权限的子智能体必须返回真实的验证证据。
 
 `Act` 和 `/mode act` 仍然是 Work 的兼容别名。保存的设置仍然规范化为内部值 `agent`。

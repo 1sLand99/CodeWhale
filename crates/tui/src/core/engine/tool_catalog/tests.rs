@@ -72,11 +72,24 @@ fn published_synthetic_names_agree_with_the_synthetic_predicate() {
 fn first_turn_surface_is_stable_across_plan_work_and_full_access() {
     assert_eq!(
         DEFAULT_ACTIVE_NATIVE_TOOLS,
-        &["read", "write", "edit", "bash", "agent", "todo_write"]
+        &[
+            "read",
+            "write",
+            "edit",
+            "bash",
+            "agent",
+            "todo_write",
+            "create_goal",
+            "get_goal",
+            "update_goal"
+        ]
     );
     let expected = [
         "agent",
         "bash",
+        "create_goal",
+        "get_goal",
+        "update_goal",
         "edit",
         "read",
         "todo_write",
@@ -94,6 +107,9 @@ fn first_turn_surface_is_stable_across_plan_work_and_full_access() {
             "bash",
             "agent",
             "todo_write",
+            "create_goal",
+            "get_goal",
+            "update_goal",
             "Git",
             "Run",
             "tasks",
