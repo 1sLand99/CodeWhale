@@ -6097,6 +6097,7 @@ impl SubAgentManager {
                 .unwrap_or(false),
             claim_pre_namespaced: claim.is_some(),
             preserve_runtime_profile: preserved_profile,
+            resume_from_agent_id: Some(agent_id.clone()),
             ..Default::default()
         };
         let resumed = self.spawn_background_with_assignment_options(
@@ -8611,7 +8612,7 @@ impl ToolSpec for AgentTool {
                 "action": {
                     "type": "string",
                     "enum": ["start", "roster", "status", "peek", "message", "followup", "interrupt", "wait", "claim", "release", "cancel"],
-                    "description": "start launches a turn-owned worker and returns immediately. roster lists roles with their resolved routes and capability/cost evidence. status/peek inspect running or retained workers. message queues a note without waking a running child. followup delivers queued notes and wakes a running child for its next user-provenance model turn. interrupt stops the current turn while preserving the child checkpoint. wait only observes; see until. claim widens your own enforced write scope (see write_roots). release clears write claims whose owner is no longer running — the remediation a write-scope contention refusal names; pass agent_id to clear one, omit it to sweep. cancel permanently cancels a running child."
+                    "description": "start launches a turn-owned worker and returns immediately. roster lists roles with their resolved routes and capability/cost evidence. status/peek inspect running or retained workers. message queues a note without waking a running child. followup delivers notes to a running child or continues an interrupted child from its checkpoint; use the returned agent_id for subsequent waits/messages. Retrying followup on the original interrupted id reuses its successor in this runtime. interrupt stops the current turn while preserving the child checkpoint. wait only observes; see until. claim widens your own enforced write scope (see write_roots). release clears write claims whose owner is no longer running — the remediation a write-scope contention refusal names; pass agent_id to clear one, omit it to sweep. cancel permanently cancels a running child."
                 },
                 "until": {
                     "type": "string",
@@ -8624,7 +8625,7 @@ impl ToolSpec for AgentTool {
                 },
                 "message": {
                     "type": "string",
-                    "description": "Parent note for action=message or action=followup. message queues only; followup also wakes a running child."
+                    "description": "Parent note for action=message or action=followup. message queues only; followup wakes a running child or continues a parked child from its checkpoint."
                 },
                 "name": {
                     "type": "string",
@@ -8672,7 +8673,7 @@ impl ToolSpec for AgentTool {
                 },
                 "resume_from": {
                     "type": "string",
-                    "description": "Settled child agent_id or session name to continue. The source must not be running. Its full transcript is loaded and prepended as the new child's context (fork_context=true), continuing the transcript lineage under a new role or profile (e.g. explore → implementer → verifier). Mutually exclusive with fork_context=false. Cross-workspace or missing sources are rejected with a clear error."
+                    "description": "Settled child agent_id or session name to fork into a separate new worker. Repeating start with resume_from creates another independent worker; use action=followup to continue parked work without an accidental duplicate. The source must not be running. Its full transcript is loaded and prepended as the new child's context (fork_context=true), continuing the transcript lineage under a new role or profile (e.g. explore → implementer → verifier). Mutually exclusive with fork_context=false. Cross-workspace or missing sources are rejected with a clear error."
                 }
             },
             "dependentSchemas": {
@@ -11416,7 +11417,7 @@ fn subagent_cancellation_projection(
         turn_end_parking.is_some_and(|signal| signal.load(std::sync::atomic::Ordering::Acquire));
     if parking_requested {
         let reason = format!(
-            "Parent turn ended before this turn-owned child settled. Work was parked instead of discarded; resume with agent(action=\"start\", prompt=\"Continue the parked assignment.\", resume_from=\"{agent_id}\")."
+            "Parent turn ended before this turn-owned child settled. Work was parked instead of discarded; continue with agent(action=\"followup\", agent_id=\"{agent_id}\", message=\"Continue the parked assignment.\"). Use the returned agent_id for subsequent waits and messages."
         );
         let mut checkpoint = build_subagent_checkpoint(agent_id, &reason, messages, steps, true);
         // Parked, not asking: nothing will answer this child, and its write
@@ -11424,7 +11425,7 @@ fn subagent_cancellation_projection(
         checkpoint.parked_at_turn_end = true;
         let needs_input = SubAgentNeedsInput {
             question: format!(
-                "Resume this parked child with agent(action=\"start\", prompt=\"Continue the parked assignment.\", resume_from=\"{agent_id}\")."
+                "Continue this parked child with agent(action=\"followup\", agent_id=\"{agent_id}\", message=\"Continue the parked assignment.\"). This returns a successor agent_id; the original parked receipt remains intact."
             ),
         };
         return (

@@ -699,10 +699,63 @@ fn goal_row_label(app: &App) -> Option<String> {
 /// `▾ Subagents N` group door, oldest-first as the runtime reports them.
 fn agents_view_rows(app: &mut App) -> Vec<WorkRow> {
     let rows = project(app);
-    let agents: Vec<WorkRow> = rows
+    let mut agents: Vec<WorkRow> = rows
         .into_iter()
         .filter(|row| row.id.0.starts_with("worker:"))
         .collect();
+    // The compact cache expires settled cards after 45 seconds. The explicit
+    // register is session history: retain its receipt rows, preserving fresh
+    // cache/progress projections by worker ID when both sources know a worker.
+    let mut retained = Vec::new();
+    let mut seen = HashSet::new();
+    for receipt in app.current_agent_roster() {
+        let id = WorkRowId(format!("worker:{}", receipt.worker_id));
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        if let Some(index) = agents.iter().position(|row| row.id == id) {
+            retained.push(agents.remove(index));
+            continue;
+        }
+        let parked = receipt.state == crate::tui::agent_roster::RosterState::Parked;
+        let status = if parked {
+            current_activity_status_label(AgentCurrentActivityStatus::Parked, app.ui_locale)
+        } else {
+            std::borrow::Cow::Borrowed(worker_status_label(receipt.status))
+        };
+        let activity = receipt.activity.clone().unwrap_or_default();
+        retained.push(WorkRow {
+            id,
+            mark: receipt.state.glyph(),
+            label: receipt.display_name.clone(),
+            detail: if activity.is_empty() {
+                status.to_string()
+            } else {
+                format!("{status} · {activity}")
+            },
+            tone: bucket_tone(if parked {
+                WorkBucket::Ready
+            } else {
+                worker_status_bucket(receipt.status)
+            }),
+            selectable: true,
+            primary_action: Some(SidebarRowAction::OpenAgentTranscript {
+                agent_id: receipt.worker_id.clone(),
+            }),
+            agent: Some(AgentRowFacts {
+                role_label: receipt.display_name.clone(),
+                status: status.to_string(),
+                objective: activity,
+                elapsed_secs: receipt.millis.map(|millis| millis / 1_000),
+                model: (!receipt.model.is_empty() && receipt.model != "unknown")
+                    .then(|| receipt.model.clone()),
+                tokens: receipt.output_tokens,
+                todos_remaining: None,
+            }),
+        });
+    }
+    retained.extend(agents);
+    let agents = retained;
     let mut out = Vec::with_capacity(agents.len() + 1);
     if !agents.is_empty() {
         out.push(agents_section_heading(&format!(
@@ -2866,6 +2919,154 @@ mod tests {
             started_at: None,
             from_prior_session: false,
         }
+    }
+
+    fn retained_agent_receipt(
+        id: &str,
+        status: AgentWorkerStatus,
+        state: crate::tui::agent_roster::RosterState,
+    ) -> crate::tui::agent_roster::AgentRosterRow {
+        crate::tui::agent_roster::AgentRosterRow {
+            worker_id: id.to_string(),
+            display_name: format!("retained {id}"),
+            model: "test-model".to_string(),
+            state,
+            status,
+            activity: None,
+            millis: Some(3_000),
+            input_tokens: None,
+            output_tokens: None,
+            cost_microusd: None,
+            steps_taken: 3,
+            parent_run_id: None,
+            run_id: id.to_string(),
+        }
+    }
+
+    #[test]
+    fn agents_register_retains_expired_receipts_alongside_fresh_live_rows() {
+        use crate::tui::agent_roster::RosterState;
+        use crate::tui::subagent_routing::reconcile_subagent_activity_state_at;
+        use std::time::Duration;
+
+        let mut app = test_app();
+        app.current_session_id = Some("roster-owner".to_string());
+        app.agent_roster_session_id = app.current_session_id.clone();
+        let mut done = running_agent("done");
+        done.status = SubAgentStatus::Completed;
+        app.subagent_cache = vec![done, running_agent("live")];
+        let receipt =
+            retained_agent_receipt("done", AgentWorkerStatus::Completed, RosterState::Done);
+        app.agent_roster = vec![
+            receipt.clone(),
+            receipt,
+            // A newer live cache row must win over an older retained receipt.
+            retained_agent_receipt("live", AgentWorkerStatus::Completed, RosterState::Done),
+        ];
+        app.agent_progress
+            .insert("done".to_string(), "old progress".to_string());
+        let observed = Instant::now();
+        reconcile_subagent_activity_state_at(&mut app, observed);
+        reconcile_subagent_activity_state_at(&mut app, observed + Duration::from_secs(46));
+        assert!(
+            !app.subagent_cache
+                .iter()
+                .any(|agent| agent.agent_id == "done")
+        );
+        assert!(!app.agent_progress.contains_key("done"));
+
+        let rows = agents_view_rows(&mut app);
+        let workers: Vec<_> = rows.iter().filter(|row| row.agent.is_some()).collect();
+        assert_eq!(workers.len(), 2, "one row per retained/live worker ID");
+        let done = workers
+            .iter()
+            .find(|row| row.id.0 == "worker:done")
+            .unwrap();
+        assert_eq!(done.agent.as_ref().unwrap().status, "completed");
+        assert_eq!(done.agent.as_ref().unwrap().elapsed_secs, Some(3));
+        assert_eq!(done.agent.as_ref().unwrap().tokens, None);
+        let live = workers
+            .iter()
+            .find(|row| row.id.0 == "worker:live")
+            .unwrap();
+        assert_eq!(live.agent.as_ref().unwrap().status, "running");
+
+        app.subagent_cache[0].status = SubAgentStatus::Completed;
+        reconcile_subagent_activity_state_at(&mut app, observed + Duration::from_secs(47));
+        reconcile_subagent_activity_state_at(&mut app, observed + Duration::from_secs(93));
+        assert!(app.subagent_cache.is_empty());
+        assert!(app.agent_progress.is_empty());
+        let rows = agents_view_rows(&mut app);
+        assert_eq!(rows.iter().filter(|row| row.agent.is_some()).count(), 2);
+    }
+
+    #[test]
+    fn retained_agents_register_is_bound_to_the_exact_parent_session() {
+        use crate::tui::agent_roster::RosterState;
+
+        let mut app = test_app();
+        app.agent_roster_session_id = Some("original-session".to_string());
+        app.agent_roster = vec![retained_agent_receipt(
+            "private-worker",
+            AgentWorkerStatus::Completed,
+            RosterState::Done,
+        )];
+        app.agent_roster[0].cost_microusd = Some(1_000);
+        for owner in [None, Some(""), Some("other-session")] {
+            app.current_session_id = owner.map(str::to_string);
+            assert!(app.current_agent_roster().is_empty());
+            assert!(
+                !agents_view_rows(&mut app)
+                    .iter()
+                    .any(|row| row.agent.is_some())
+            );
+            assert!(
+                !super::super::views::price_rows(&mut app)
+                    .iter()
+                    .any(|row| row.id.0.starts_with("price:agent:"))
+            );
+        }
+        app.current_session_id = Some("original-session".to_string());
+        assert_eq!(app.current_agent_roster().len(), 1);
+        assert_eq!(
+            agents_view_rows(&mut app)
+                .iter()
+                .filter(|row| row.agent.is_some())
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn retained_agents_register_distinguishes_parked_from_waiting_for_input() {
+        use crate::tui::agent_roster::RosterState;
+
+        let mut app = test_app();
+        app.current_session_id = Some("roster-owner".to_string());
+        app.agent_roster_session_id = app.current_session_id.clone();
+        app.agent_roster = vec![
+            retained_agent_receipt(
+                "parked",
+                AgentWorkerStatus::WaitingForUser,
+                RosterState::Parked,
+            ),
+            retained_agent_receipt(
+                "asked",
+                AgentWorkerStatus::WaitingForUser,
+                RosterState::Waiting,
+            ),
+        ];
+        let rows = agents_view_rows(&mut app);
+        let parked = rows.iter().find(|row| row.id.0 == "worker:parked").unwrap();
+        let asked = rows.iter().find(|row| row.id.0 == "worker:asked").unwrap();
+        assert_eq!(parked.mark, RosterState::Parked.glyph());
+        assert_eq!(parked.tone, WorkTone::Muted);
+        assert_ne!(parked.agent.as_ref().unwrap().status, "waiting for input");
+        assert_eq!(asked.agent.as_ref().unwrap().status, "waiting for input");
+        assert_eq!(asked.tone, WorkTone::Attention);
+        assert!(
+            matches!(&parked.primary_action, Some(SidebarRowAction::OpenAgentTranscript { agent_id }) if agent_id == "parked")
+        );
     }
 
     /// #5287: the identity column leads with the name the lane was dispatched

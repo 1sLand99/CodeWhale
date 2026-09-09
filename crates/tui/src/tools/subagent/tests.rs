@@ -20629,6 +20629,98 @@ async fn resume_from_checkpoint_spawns_seeded_agent_with_checkpoint_context() {
 }
 
 #[tokio::test]
+async fn parked_followup_reuses_successor_and_preserves_route_authority_and_lineage() {
+    let tmp = tempdir().unwrap();
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
+    let saved_profile = WorkerRuntimeProfile::for_role(FleetRole::Scout);
+    let saved_route = ChildRouteReceipt {
+        requested_type: "explore".into(),
+        requested_profile: None,
+        resolved_profile_id: None,
+        profile_origin: None,
+        canonical_role: "explore".into(),
+        provider_id: "deepseek".into(),
+        model_id: "deepseek-v4-flash".into(),
+        route_source: "role.pin".into(),
+        requested_reasoning: "inherit".into(),
+        effective_reasoning: None,
+        runtime_version: "fixture".into(),
+        runtime_build_sha: "fixture".into(),
+    };
+    let agent_id = {
+        let mut guard = manager.write().await;
+        let id = guard.insert_test_running_agent("parked-inventory", tmp.path());
+        let agent = guard.agents.get_mut(&id).unwrap();
+        agent.agent_type = FleetRole::Scout;
+        agent.model = saved_route.model_id.clone();
+        agent.allowed_tools = Some(Vec::new());
+        let spec = &mut guard.worker_records.get_mut(&id).unwrap().spec;
+        spec.agent_type = FleetRole::Scout;
+        spec.model = saved_route.model_id.clone();
+        spec.runtime_profile = saved_profile.clone();
+        spec.child_route = Some(saved_route.clone());
+        park_child_at_turn_end(&mut guard, &id);
+        id
+    };
+    let prior = manager.read().await.get_result(&agent_id).unwrap();
+    let instruction = prior.needs_input.as_ref().unwrap().question.as_str();
+    assert!(instruction.contains("action=\"followup\""), "{instruction}");
+    assert!(instruction.contains(&format!("agent_id=\"{agent_id}\"")));
+
+    // Reuse the existing loopback client so a scheduled child cannot contact
+    // a provider. The public tool must preserve the child's read-only profile
+    // even though the caller permits writes and has a different workspace.
+    let (client, _calls, _bodies) = delayed_chat_client(Duration::from_secs(30), "done").await;
+    let mut runtime = stub_runtime();
+    runtime.client = client;
+    runtime.manager = Arc::clone(&manager);
+    assert_ne!(runtime.context.workspace, tmp.path());
+    let tool = AgentTool::new(Arc::clone(&manager), runtime);
+    let context = ToolContext::new(tmp.path());
+    let mut successors = Vec::new();
+    for message in [
+        "Continue the parked assignment.",
+        "Include the remaining checks.",
+    ] {
+        let result = tool
+            .execute(
+                json!({"action": "followup", "agent_id": agent_id, "message": message}),
+                &context,
+            )
+            .await
+            .expect("the emitted recovery action must execute");
+        let receipt: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(receipt["continued_from_checkpoint"], true);
+        successors.push(receipt["agent_id"].as_str().unwrap().to_string());
+    }
+    assert_eq!(successors[0], successors[1]);
+    assert_ne!(successors[0], agent_id);
+
+    let mut guard = manager.write().await;
+    assert_eq!(guard.agents.len(), 2, "one predecessor and one successor");
+    let spec = &guard.worker_records.get(&successors[0]).unwrap().spec;
+    assert_eq!(spec.child_route.as_ref(), Some(&saved_route));
+    assert_eq!(spec.runtime_profile.role, saved_profile.role);
+    assert_eq!(spec.runtime_profile.permissions, saved_profile.permissions);
+    assert_eq!(spec.runtime_profile.shell, saved_profile.shell);
+    assert_eq!(spec.runtime_profile.tools, saved_profile.tools);
+    let manifest = spec.launch_manifest.as_ref().unwrap();
+    assert_eq!(
+        manifest.resume_from_agent_id.as_deref(),
+        Some(agent_id.as_str())
+    );
+    assert_eq!(manifest.cwd.as_deref(), tmp.path().to_str());
+    let after = guard.get_result(&agent_id).unwrap();
+    assert_eq!(after.status, prior.status);
+    assert_eq!(after.checkpoint, prior.checkpoint);
+    assert!(
+        guard.child_was_woken(&successors[0])
+            || guard.queued_mail_depth(&successors[0]).unwrap_or(0) >= 1
+    );
+    let _ = guard.cancel_agent(&successors[0]);
+}
+
+#[tokio::test]
 async fn resume_from_checkpoint_is_idempotent_across_repeated_followups() {
     let tmp = tempdir().unwrap();
     let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);

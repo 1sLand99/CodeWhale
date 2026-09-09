@@ -200,7 +200,7 @@ pub(super) fn price_rows(app: &mut App) -> Vec<WorkRow> {
         primary_action: Some(SidebarRowAction::Command("/cost".to_string())),
         agent: None,
     });
-    let roster = app.agent_roster.clone();
+    let roster = app.current_agent_roster().to_vec();
     let priced: Vec<_> = roster
         .iter()
         .filter(|row| row.cost_microusd.is_some())

@@ -1910,9 +1910,12 @@ pub struct App {
     /// boundary (`agent_id` → count), from the latest `AgentList` refresh.
     pub agent_queued_follow_ups: HashMap<String, usize>,
     /// Receipts-only roster of every agent that ran this session (#5479).
-    /// Refreshed wholesale on each `AgentList` event; rendered by `/agents`
-    /// and, in a later slice, by the agents rail.
+    /// Refreshed wholesale on each `AgentList` event; shared by `/agents`,
+    /// the Agents register and the Price view.
     pub agent_roster: Vec<crate::tui::agent_roster::AgentRosterRow>,
+    /// Original conversation owner of the retained snapshot. A process boot
+    /// marker or a worker's parent run is not a conversation identity.
+    pub agent_roster_session_id: Option<String>,
     /// `/agents list` asked for a one-shot transcript listing. Cleared by the
     /// `AgentList` handler that prints it.
     pub agent_roster_print_requested: bool,
@@ -2556,6 +2559,22 @@ fn push_enabled_provider_model(
 }
 
 impl App {
+    /// A retained roster remains readable only in its owning conversation.
+    pub(crate) fn current_agent_roster(&self) -> &[crate::tui::agent_roster::AgentRosterRow] {
+        if self
+            .current_session_id
+            .as_deref()
+            .is_some_and(|session_id| {
+                !session_id.is_empty()
+                    && self.agent_roster_session_id.as_deref() == Some(session_id)
+            })
+        {
+            &self.agent_roster
+        } else {
+            &[]
+        }
+    }
+
     /// Who owns the keyboard right now.
     ///
     /// The single derivation of [`Focus`], mirroring the order in which the
