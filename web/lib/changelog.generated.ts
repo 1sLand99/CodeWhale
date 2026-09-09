@@ -50,7 +50,7 @@ export const CHANGELOG: ChangelogRelease[] = [
           "A tool call truncated at the provider's output limit can no longer be repaired into valid JSON and executed: repairs that had to synthesize structure (append or discard closers) are routed to the existing malformed-arguments path so the model is asked to re-issue — including when the stream is cut before the closing content-block event (#5986).",
           "codewhale metrics reads Codewhale's own receipts again: the deepseek-home fallback resolved $HOME/.deepseek unconditionally, so the rollup reported all zeros from a directory nothing has written since 2024. The Codewhale audit log is primary, with a checked legacy fallback."
         ],
-        "itemCount": 15
+        "itemCount": 31
       },
       {
         "heading": "Changed",

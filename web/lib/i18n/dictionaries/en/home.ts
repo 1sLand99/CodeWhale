@@ -17,7 +17,7 @@ export const home: HomeDict = {
 
   heroTitle: "Build and automate with the models you choose",
   heroIntro:
-    "{brand} gives you agents that can build software, work with your files, and turn repetitive tasks into reusable workflows. Tell them what you want to accomplish and choose the hosted or local models that suit the job, with the freedom to switch providers as you go.",
+    "{brand} is an open-source agent that reads files, edits code, runs commands, and checks its work. Use it in your terminal or local browser with a hosted or local model. You choose the tools and permissions; the session keeps the conversation and tool results.",
   getCodewhale: "Get Codewhale",
   exploreProduct: "Explore the product",
 
@@ -39,26 +39,26 @@ export const home: HomeDict = {
 
   gainHeading: "What you can do with Codewhale",
   gainLede:
-    "Start with a project, a question, or a task you want to automate, then work with one agent or give parts of a larger job to several.",
+    "Ask for a concrete result: fix a bug, understand a project, or turn a repeated task into a workflow. Start with one agent and split larger jobs when useful.",
   gain: [
     [
-      "Build something",
-      "Describe what you want to make and work with agents that can read your code, edit files, run commands, and check the result."
+      "Build and check a project",
+      "Ask the agent to inspect a project, make a change, then run its tests. Follow the file edits and command results as it works."
     ],
     [
-      "Automate everyday work",
-      "Create scripts and workflows for tasks you repeat, so you can run them again from the terminal whenever you need them."
+      "Reuse work that repeats",
+      "Turn a repeated task into a script or saved workflow. Use codewhale exec in scripts and CI, or give parts of a larger job to several agents."
     ],
     [
-      "Work with different models",
-      "Use hosted or local models for your agents, with different models and roles handling the parts of a job they are suited to."
+      "Stay in control",
+      "Set permissions before work starts, respond to approval requests, and interrupt a running task. Review the conversation and tool results before continuing."
     ]
   ],
 
   chapterModels: "Your models",
   modelsHeading: "A choice of models for every task",
   modelsBody:
-    "Connect directly to a hosted provider, use a gateway to access several, or run a model locally, then choose which model each session uses as you work.",
+    "Choose the provider and model for each session: connect with an API key, use a supported provider sign-in, or run a local model. Your Codewhale account and your model connection serve different purposes.",
   modelsFacts: [
     ["Hosted", "Your own API key, saved with codewhale auth set --provider <id>"],
     ["Gateway", "One endpoint for many models, provider still chosen by you"],
@@ -75,22 +75,22 @@ export const home: HomeDict = {
   chapterAccount: "Get Codewhale",
   availabilityHeading: "Where you can use Codewhale",
   availabilityLede:
-    "You can use Codewhale in your terminal today while we build the web app, desktop app, and cloud computers.",
+    "The terminal and local browser client are available now. Desktop and hosted web apps are being developed around the same session model; their availability is listed separately below.",
   availability: [
     [
-      "Terminal",
+      "Terminal and local browser",
       "Released",
-      "GitHub release binaries for Linux, macOS, and Windows; npm and Cargo are alternatives. Android on Termux is a preview.",
+      "Install on Linux, macOS, or Windows. Run codewhale in your terminal, or codewhale web for the local browser client. npm and Cargo are alternatives; Android on Termux is a preview.",
     ],
     [
-      "Web app",
+      "Hosted web app",
       "Development preview",
-      "Account access and browser pairing in the development preview.",
+      "Sign in with a Codewhale account and pair a computer in the development preview. Hosted task execution is still being qualified.",
     ],
     [
       "Desktop",
       "Development build",
-      "The macOS app is in development; a public download is coming later.",
+      "The macOS app brings folders, conversations, and model connections into a desktop window. A public download is coming later.",
     ],
     [
       "Cloud computers",
@@ -99,16 +99,16 @@ export const home: HomeDict = {
     ],
   ],
   availabilityNote:
-    "You can use the terminal without a Codewhale account, and any hosted model usage is billed by your provider.",
+    "The terminal and local browser do not require a Codewhale account. An account is used for hosted web and desktop access; it does not replace your model connection. Hosted model usage with your own key is billed by that provider.",
   accountLink: "Create an account",
 
-  surfacesHeading: "Ways to work with Codewhale",
+  surfacesHeading: "Tools, connected apps, and saved work",
   surfaces: [
-    ["TUI", "Run codewhale to work interactively in your terminal"],
-    ["codewhale exec", "Run a task from a script or CI job"],
-    ["Local web client", "Run codewhale web to open a browser client for the same local Runtime"],
-    ["Plugins and MCP", "Add tools to the Runtime; review and enable plugins before use"],
-    ["Fleet", "Several agents on one job"],
+    ["Files and commands", "Read a project, edit files, run tests, and inspect command output within the permissions you set."],
+    ["Plugins and MCP", "Connect additional tools and services. Review and enable plugins before the agent can use them."],
+    ["Computer Use · source preview", "The current source includes a plugin for seeing and interacting with other applications. Enable it explicitly and grant the required system permissions."],
+    ["Saved sessions", "Keep the conversation and tool results together. The local browser connects to the same Codewhale session on your computer; resume saved work instead of starting over."],
+    ["Fleet", "Assign parts of a task to agents with different models and roles, and follow their progress."],
   ],
   runtimeLink: "Explore integrations",
 

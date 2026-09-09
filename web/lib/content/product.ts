@@ -39,17 +39,17 @@ export const PRODUCT_COPY = {
     zh: "用你选择的模型，创造与自动化。",
   },
   lede: {
-    en: "Build projects, research the web, and automate work with agents that use your files and tools. Start with one model, switch providers when you need to, or assign different models to parts of a larger task.",
-    zh: "让智能体利用你的文件和工具，构建项目、检索网页、自动化工作。从一个模型开始，按需切换提供商，也可以让不同模型分担大型任务。",
+    en: "Codewhale is an open-source agent that can read a project, edit files, run commands, and use connected tools. Direct the work from your terminal or local browser, choose the model, and keep the conversation and tool results in a saved session.",
+    zh: "Codewhale 是一个开源智能体，能够读取项目、编辑文件、运行命令并使用连接的工具。在终端或本地浏览器中指挥任务，选择模型，并将对话和工具结果保存在会话中。",
   },
 
-  gainHeading: { en: "What you gain", zh: "你能得到什么" },
+  gainHeading: { en: "Models, teamwork, and control", zh: "模型、协作与控制" },
   gain: [
     {
       title: { en: "Choose your models", zh: "选择你的模型" },
       body: {
-        en: "Connect a supported provider, gateway, or local model server. Change models as the task calls for it.",
-        zh: "连接支持的提供商、网关或本地模型服务，根据任务需要切换模型。",
+        en: "Connect a provider with your own API key or a supported sign-in flow, use a gateway, or run a local model server. Choose the model for each session.",
+        zh: "使用自己的 API 密钥或受支持的登录方式连接提供商，也可以使用网关或本地模型服务。为每个会话选择模型。",
       },
     },
     {
@@ -62,16 +62,16 @@ export const PRODUCT_COPY = {
     {
       title: { en: "Set the permissions", zh: "设定权限" },
       body: {
-        en: "Choose the session mode and approval settings. Review changes, steer the work, and continue from a saved session.",
-        zh: "选择会话模式与审批设置，检查修改、调整方向，并从保存的会话继续工作。",
+        en: "Choose the session mode and approval settings. Inspect tool calls and results, review file changes, interrupt work, and continue from a saved session.",
+        zh: "选择会话模式与审批设置，查看工具调用和结果、检查文件变更、随时中断，并从保存的会话继续工作。",
       },
     },
   ] satisfies ProductRow[],
 
   availabilityHeading: { en: "Where to use Codewhale", zh: "在哪里使用 Codewhale" },
   availabilityLede: {
-    en: "Start with the published terminal release. The web and desktop workbenches and cloud computers are in development; they have separate availability from the terminal.",
-    zh: "从已发布的终端版开始使用。网页工作台、桌面工作台和云端计算机正在开发中，它们的开放状态与终端版分别说明。",
+    en: "The terminal and local browser client are available now. Desktop and hosted web apps are being developed around the same session model; their availability is separate. The terminal and local browser work without a Codewhale account. Hosted web and desktop access use an account, while the model connection remains your choice.",
+    zh: "终端与本地浏览器客户端现已可用，无需 Codewhale 账户。桌面和托管网页应用正基于同一会话模型开发，开放状态分别说明；访问这些应用需要账户，模型连接仍由你选择。",
   },
   availability: [
     {
@@ -85,11 +85,21 @@ export const PRODUCT_COPY = {
       linkLabel: { en: "Install guide", zh: "安装指南" },
     },
     {
-      surface: { en: "Web app", zh: "网页应用" },
+      surface: { en: "Local browser", zh: "本地浏览器" },
+      status: { en: "Included with the terminal", zh: "随终端提供" },
+      detail: {
+        en: "Run codewhale web to open Codewhale in your browser. Read conversations and tool results, send a task, and respond to approvals on your machine.",
+        zh: "运行 codewhale web，在浏览器中使用本机上的 Codewhale，查看对话与工具结果、发送任务并处理本机上的审批。",
+      },
+      href: "/docs/web",
+      linkLabel: { en: "Local browser guide", zh: "本地浏览器指南" },
+    },
+    {
+      surface: { en: "Hosted web app", zh: "托管网页应用" },
       status: { en: "Development preview", zh: "开发预览" },
       detail: {
-        en: "Account access and browser pairing in the development preview.",
-        zh: "开发预览版提供账户访问与浏览器配对。",
+        en: "Sign in with a Codewhale account and pair a computer in the development preview. Hosted task execution is still being qualified.",
+        zh: "开发预览版支持使用 Codewhale 账户登录并配对计算机。托管任务执行仍在验证中。",
       },
       href: "/signin",
       linkLabel: { en: "Sign in", zh: "登录" },
@@ -98,8 +108,8 @@ export const PRODUCT_COPY = {
       surface: { en: "Desktop", zh: "桌面端" },
       status: { en: "Development build", zh: "开发版本" },
       detail: {
-        en: "The macOS app is in development; a public download is coming later.",
-        zh: "macOS 应用正在开发中，将来会提供公开下载。",
+        en: "The macOS app brings folders, conversations, and model connections into a desktop window. A public download is coming later.",
+        zh: "macOS 应用将文件夹、对话和模型连接整合在桌面窗口中，将来会提供公开下载。",
       },
       href: null,
       linkLabel: null,
@@ -134,8 +144,8 @@ export const PRODUCT_COPY = {
 
   surfacesHeading: { en: "Use the tools that fit your work", zh: "选择适合工作的工具" },
   surfacesLede: {
-    en: "The Runtime runs the agent and its tools. Terminal and browser clients let you direct that work. The current source includes the Computer Use plugin for interacting with other applications; review and enable it before use.",
-    zh: "Runtime 负责运行智能体及其工具，终端和浏览器客户端让你指挥任务。当前源码包含 Computer Use 插件，用于操作其他应用；使用前需审核并启用。",
+    en: "Tools let the agent act on a task: edit files, run a command, or use a connected service. Codewhale runs the agent and its tools locally, keeping the conversation and tool results together. Plugins use the permissions you grant.",
+    zh: "工具让智能体能够执行任务：编辑文件、运行命令或使用连接的服务。Codewhale 在本地运行智能体及其工具，将对话与工具结果保存在一起。插件在你授予的权限内工作。",
   },
   surfacesLink: { en: "Explore integrations", zh: "查看集成" },
 

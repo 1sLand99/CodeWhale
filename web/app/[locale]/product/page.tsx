@@ -63,6 +63,26 @@ export default async function ProductPage({ params }: { params: Promise<{ locale
         </div>
       </section>
 
+      <section className="folio-section product-page-surfaces">
+        <div className="product-container folio-chapter-grid">
+          <div>
+            <h2>{t(PRODUCT_COPY.surfacesHeading)}</h2>
+            <p className="folio-section-lede">{t(PRODUCT_COPY.surfacesLede)}</p>
+            <Link href={`/${locale}/runtime`} className="folio-link">
+              {t(PRODUCT_COPY.surfacesLink)}
+            </Link>
+          </div>
+          <dl className="folio-fact-list">
+            {home.surfaces.map(([name, description]) => (
+              <div key={name}>
+                <dt>{name}</dt>
+                <dd>{description}</dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+      </section>
+
       <section className="folio-section">
         <div className="product-container folio-chapter-grid">
           <div>
@@ -110,26 +130,6 @@ export default async function ProductPage({ params }: { params: Promise<{ locale
                     </>
                   )}
                 </dd>
-              </div>
-            ))}
-          </dl>
-        </div>
-      </section>
-
-      <section className="folio-section product-page-surfaces">
-        <div className="product-container folio-chapter-grid">
-          <div>
-            <h2>{t(PRODUCT_COPY.surfacesHeading)}</h2>
-            <p className="folio-section-lede">{t(PRODUCT_COPY.surfacesLede)}</p>
-            <Link href={`/${locale}/runtime`} className="folio-link">
-              {t(PRODUCT_COPY.surfacesLink)}
-            </Link>
-          </div>
-          <dl className="folio-fact-list">
-            {home.surfaces.map(([name, description]) => (
-              <div key={name}>
-                <dt>{name}</dt>
-                <dd>{description}</dd>
               </div>
             ))}
           </dl>

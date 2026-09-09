@@ -14,7 +14,7 @@ export const home: HomeDict = {
     "借助开源智能体和你选择的云端或本地 AI 模型，开发软件、处理文件，并自动完成日常任务。",
   heroTitle: "用你选择的模型，完成开发和自动化任务",
   heroIntro:
-    "{brand} 为你提供能够开发软件、处理文件，并将重复任务转化为可复用工作流程的智能体。告诉它们你想完成什么，再选择适合这项工作的云端或本地模型，你还可以在工作过程中自由切换提供商。",
+    "{brand} 是一个开源智能体，能够读取文件、编辑代码、运行命令并检查结果。在终端或本地浏览器中使用它，连接你选择的云端或本地模型。工具和权限由你决定；对话与工具执行结果保存在会话中。",
   getCodewhale: "获取 Codewhale",
   exploreProduct: "了解产品",
   shotPreview: "终端预览",
@@ -31,25 +31,25 @@ export const home: HomeDict = {
   chapterTerminal: "你的终端",
   chapterTerminalTitle: "从你想做的项目开始",
   gainHeading: "你可以用 Codewhale 做什么",
-  gainLede: "从一个项目、一个问题，或一项希望自动处理的任务开始，你可以与一个智能体一起完成，也可以将较大的工作拆分给多个智能体。",
+  gainLede: "从具体目标开始：修复错误、理解项目，或把重复任务变成工作流程。先用一个智能体，需要时再拆分大型任务。",
   gain: [
     [
-      "构建项目",
-      "描述你想做什么，然后与能够阅读代码、编辑文件、运行命令并检查结果的智能体一起完成。"
+      "开发项目并验证结果",
+      "让智能体查看项目、完成修改，再运行测试。你可以在工作过程中查看文件变更和命令结果。"
     ],
     [
-      "自动处理日常工作",
-      "为重复执行的任务创建脚本和工作流程，以便在需要时随时从终端再次运行。"
+      "复用重复的工作",
+      "把重复任务变成脚本或保存的工作流程。在脚本和 CI 中使用 codewhale exec，也可以让多个智能体分担大型任务。"
     ],
     [
-      "使用不同的模型",
-      "为智能体选择云端或本地模型，让不同模型和角色承担各自适合的工作。"
+      "掌握执行过程",
+      "开始前设定权限，处理审批请求，随时中断正在运行的任务。查看对话与工具结果，再决定如何继续。"
     ]
   ],
   chapterModels: "你的模型",
   modelsHeading: "为每项任务选择合适的模型",
   modelsBody:
-    "你可以直接连接云端模型提供商，通过网关访问多家提供商，或在本地运行模型，并在工作过程中选择每个会话使用的模型。",
+    "为每个会话选择提供商和模型：使用 API 密钥、受支持的提供商登录方式，或本地模型。Codewhale 账户与模型连接各有用途。",
   modelsFacts: [
     ["托管", "你自己的 API 密钥，用 codewhale auth set --provider <id> 保存"],
     ["网关", "一个端点接多个模型，提供商仍由你选"],
@@ -62,22 +62,22 @@ export const home: HomeDict = {
   startVocabularyLink: "查名词",
   chapterAccount: "获取 Codewhale",
   availabilityHeading: "你可以在哪里使用 Codewhale",
-  availabilityLede: "你现在就可以在终端中使用 Codewhale，同时我们正在开发网页应用、桌面应用和云端计算机。",
+  availabilityLede: "终端与本地浏览器客户端现已可用。桌面和托管网页应用正基于同一会话模型开发；各端的开放状态分别列在下方。",
   availability: [
     [
-      "终端",
+      "终端与本地浏览器",
       "已发布",
-      "GitHub 提供适用于 Linux、macOS 和 Windows 的发布版二进制文件；也可通过 npm 或 Cargo 安装。在 Android 上通过 Termux 运行的版本为预览版。"
+      "支持 Linux、macOS 和 Windows。运行 codewhale 使用终端，或运行 codewhale web 打开本地浏览器客户端。也可通过 npm 或 Cargo 安装；Android 上的 Termux 版本为预览版。"
     ],
     [
-      "网页应用",
+      "托管网页应用",
       "开发预览",
-      "开发预览版提供账户访问与浏览器配对。"
+      "开发预览版支持使用 Codewhale 账户登录并配对计算机。托管任务执行仍在验证中。"
     ],
     [
       "桌面端",
       "开发版本",
-      "macOS 应用仍在开发中，稍后将提供公开下载。"
+      "macOS 应用将文件夹、对话和模型连接整合在桌面窗口中，稍后将提供公开下载。"
     ],
     [
       "云端计算机",
@@ -85,15 +85,15 @@ export const home: HomeDict = {
       "用于运行任务的托管计算机。"
     ]
   ],
-  availabilityNote: "使用终端不需要 Codewhale 账户，云端模型的使用费用由你的提供商收取。",
+  availabilityNote: "终端和本地浏览器不需要 Codewhale 账户。账户用于托管网页和桌面端访问，不能代替模型连接。使用自己的密钥调用云端模型时，费用由该提供商收取。",
   accountLink: "创建账户",
-  surfacesHeading: "使用 Codewhale 的方式",
+  surfacesHeading: "工具、应用连接与保存的工作",
   surfaces: [
-    ["TUI", "运行 codewhale，在终端中交互式工作"],
-    ["codewhale exec", "从脚本或 CI 任务中执行工作"],
-    ["本地 Web 客户端", "运行 codewhale web，在浏览器中使用同一个本地 Runtime"],
-    ["插件与 MCP", "向 Runtime 添加工具；使用插件前需审核并启用"],
-    ["fleet", "多个智能体协作一件事"],
+    ["文件与命令", "在你设定的权限内读取项目、编辑文件、运行测试并查看命令输出。"],
+    ["插件与 MCP", "连接更多工具和服务。智能体使用插件前，需由你审核并启用。"],
+    ["Computer Use · 源码预览", "当前源码包含用于查看和操作其他应用的插件，需主动启用并授予必要的系统权限。"],
+    ["保存的会话", "将对话和工具结果保存在一起。本地浏览器连接到你电脑上的同一个 Codewhale 会话；继续保存的工作，无需从头开始。"],
+    ["Fleet", "把任务分配给不同模型和角色的智能体，并跟踪它们的进度。"],
   ],
   runtimeLink: "了解集成",
   installBandHeading: "在 macOS 或 Linux 上安装 Codewhale",

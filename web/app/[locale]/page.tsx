@@ -150,6 +150,24 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
         </div>
       </section>
 
+      {/* Tools and saved work, before setup details. */}
+      <section className="folio-section">
+        <div className="product-container">
+          <h2>{d.surfacesHeading}</h2>
+          <dl className="folio-fact-list mt-8">
+            {d.surfaces.map(([name, description]) => (
+              <div key={name}>
+                <dt>{name}</dt>
+                <dd>{description}</dd>
+              </div>
+            ))}
+          </dl>
+          <Link href={`/${locale}/runtime`} className="folio-link">
+            {d.runtimeLink}
+          </Link>
+        </div>
+      </section>
+
       {/* 02 — YOUR MODELS */}
       <section className="folio-section">
         <div className="product-container folio-chapter-grid">
@@ -218,22 +236,6 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
             <a href={APP_SIGNUP_URL} className="folio-link" data-usage="signup">
               {d.accountLink}
             </a>
-          </div>
-        </section>
-
-        {/* Surfaces */}
-        <section className="product-surfaces">
-          <div className="product-container">
-            <h2>{d.surfacesHeading}</h2>
-            <div className="product-surface-list">
-              {d.surfaces.map(([name, description]) => (
-                <div key={name}>
-                  <strong>{name}</strong>
-                  <span>{description}</span>
-                </div>
-              ))}
-            </div>
-            <Link href={`/${locale}/runtime`}>{d.runtimeLink}</Link>
           </div>
         </section>
 
