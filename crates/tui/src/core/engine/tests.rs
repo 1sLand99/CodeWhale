@@ -17212,6 +17212,36 @@ fn subagent_results_are_summarized_before_parent_context_insertion() {
 }
 
 #[test]
+fn wait_payloads_survive_parent_context_compaction() {
+    let raw = json!({
+        "action": "wait",
+        "until": "all",
+        "all_settled": true,
+        "settled": [{"agent_id": "agent_1234abcd", "status": "Completed"}],
+        "still_running": [],
+        "waited_ms": 1234,
+        "timed_out": false,
+        "note": "joined the fan-out"
+    })
+    .to_string();
+    let output = ToolResult::success(raw.clone());
+
+    let context = compact_tool_result_for_context("deepseek-v4-pro", "agent", &output);
+
+    assert!(
+        !context.contains("status=unknown"),
+        "a wait envelope must not be projected as an unknown snapshot: {context}"
+    );
+    assert!(context.contains("agent_1234abcd"));
+    assert!(context.contains("still_running"));
+    assert!(context.contains("waited_ms"));
+    assert_eq!(
+        context, raw,
+        "small coordination payloads pass through verbatim"
+    );
+}
+
+#[test]
 fn run_verifiers_results_are_structured_before_context_insertion() {
     let noisy_failure = "node lint failure detail\n".repeat(300);
     let noisy_success = "successful check output\n".repeat(300);

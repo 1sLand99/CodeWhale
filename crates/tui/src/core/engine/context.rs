@@ -200,6 +200,16 @@ fn summarize_subagent_snapshot(snapshot: &serde_json::Value, index: usize) -> St
     lines.join("\n")
 }
 
+/// A payload is a sub-agent snapshot when it carries the identity/status shape
+/// this summarizer knows how to render (`agent_id`/`agent_type`, optionally
+/// wrapped in a `snapshot` field).
+fn looks_like_subagent_snapshot(value: &serde_json::Value) -> bool {
+    let value = value.get("snapshot").unwrap_or(value);
+    value
+        .as_object()
+        .is_some_and(|obj| obj.contains_key("agent_id") || obj.contains_key("agent_type"))
+}
+
 fn compact_subagent_tool_result_for_context(tool_name: &str, raw: &str) -> Option<String> {
     if tool_name != "agent" {
         return None;
@@ -211,6 +221,20 @@ fn compact_subagent_tool_result_for_context(tool_name: &str, raw: &str) -> Optio
         serde_json::Value::Object(_) => vec![&parsed],
         _ => return None,
     };
+
+    // Coordination envelopes (`wait`, `status`, `claim`, ...) carry typed
+    // fields the parent needs verbatim: `settled`, `still_running`,
+    // `timed_out`, `waited_ms`, `note`. Projecting them through the snapshot
+    // renderer replaced every one with `unknown (agent) status=unknown` and
+    // dropped the real payload. Summarize only snapshot-shaped results; let
+    // anything else fall through to the generic bounded path.
+    if snapshots.is_empty()
+        || !snapshots
+            .iter()
+            .all(|value| looks_like_subagent_snapshot(value))
+    {
+        return None;
+    }
 
     let mut out = String::from("[sub-agent result summarized for parent context]\n");
     out.push_str(
