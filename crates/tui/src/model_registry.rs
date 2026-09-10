@@ -129,6 +129,9 @@ const SEED_MODEL_IDS: &[(&str, ModelProvider)] = &[
     // / Atlascloud / Novita / Fireworks / Siliconflow / SGLang / vLLM /
     // Huggingface / Together / Volcengine / WanjieArk / Ollama defaults) ---
     ("deepseek-v4-pro", ModelProvider::DeepSeek),
+    // The official V4.1 id and the config default: it must be seeded here so
+    // this list keeps mirroring the DEFAULT_* constants it documents.
+    ("deepseek-flash", ModelProvider::DeepSeek),
     ("deepseek-v4-flash", ModelProvider::DeepSeek),
     ("deepseek-v4-flash-vision-exp", ModelProvider::DeepSeek),
     ("deepseek-ai/deepseek-v4-pro", ModelProvider::DeepSeek),

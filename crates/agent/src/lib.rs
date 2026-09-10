@@ -1541,6 +1541,22 @@ impl ModelRegistry {
                     fallback_chain,
                 });
             }
+            // A provider's own declared default is available from that
+            // provider by definition — the descriptor owns that fact (#6443:
+            // `deepseek-flash` is the Deepseek default and resolved nowhere).
+            // Registry rows canonicalize aliases and carry capability
+            // metadata; they must not gate the name the provider declares.
+            let declared_default = provider.provider().default_model();
+            if !declared_default.trim().is_empty()
+                && name.trim().eq_ignore_ascii_case(declared_default.trim())
+            {
+                return Ok(ModelResolution {
+                    requested: Some(name.to_string()),
+                    resolved: Self::descriptor_default_model(provider, declared_default),
+                    used_fallback: false,
+                    fallback_chain,
+                });
+            }
             if !self.models.iter().any(|model| model.provider == provider) {
                 return Err(ModelResolutionError::ProviderHasNoModels {
                     provider,
@@ -1554,12 +1570,6 @@ impl ModelRegistry {
         }
 
         fallback_chain.push(format!("provider_default:{}", provider.as_str()));
-        if !self.models.iter().any(|model| model.provider == provider) {
-            return Err(ModelResolutionError::ProviderHasNoModels {
-                provider,
-                requested: None,
-            });
-        }
         let default_model = provider.provider().default_model();
         if let Some(model) = self
             .models
@@ -1574,11 +1584,44 @@ impl ModelRegistry {
                 fallback_chain,
             });
         }
+        // Same rule as the explicit branch: the descriptor's declared default
+        // resolves for its own provider even without a registry row (#6443).
+        // Ollama is the exception: its descriptor default is the placeholder
+        // `unknown`, and the real default comes from the live local catalog
+        // (Y-2), so a placeholder must never resolve as a model.
+        if !default_model.trim().is_empty() && provider != ProviderKind::Ollama {
+            return Ok(ModelResolution {
+                requested: None,
+                resolved: Self::descriptor_default_model(provider, default_model),
+                used_fallback: true,
+                fallback_chain,
+            });
+        }
+        if !self.models.iter().any(|model| model.provider == provider) {
+            return Err(ModelResolutionError::ProviderHasNoModels {
+                provider,
+                requested: None,
+            });
+        }
 
         Err(ModelResolutionError::ProviderDefaultUnavailable {
             provider,
             default_model: default_model.to_string(),
         })
+    }
+
+    /// The [`ModelInfo`] a provider's declared default resolves to when the
+    /// registry carries no explicit row for it. The descriptor owns the
+    /// identity; capability metadata stays conservative rather than
+    /// fabricating a capability the registry never recorded.
+    fn descriptor_default_model(provider: ProviderKind, id: &str) -> ModelInfo {
+        ModelInfo {
+            id: id.trim().to_string(),
+            provider,
+            aliases: Vec::new(),
+            supports_tools: true,
+            supports_reasoning: false,
+        }
     }
 }
 
@@ -1825,7 +1868,10 @@ mod tests {
         let resolved = registry.resolve_ok(None, Some(ProviderKind::Deepseek));
 
         assert_eq!(resolved.resolved.provider, ProviderKind::Deepseek);
-        assert_eq!(resolved.resolved.id, "deepseek-v4-pro");
+        // The descriptor's declared default, not the first cloud row: the
+        // registry's Deepseek rows start at v4-pro, and borrowing that here is
+        // exactly the mismatch #6443 fixed.
+        assert_eq!(resolved.resolved.id, "deepseek-flash");
         assert!(resolved.used_fallback);
         assert_eq!(resolved.fallback_chain, ["provider_default:deepseek"]);
     }
@@ -1845,7 +1891,10 @@ mod tests {
     }
 
     #[test]
-    fn missing_provider_default_row_fails_instead_of_borrowing_another_model() {
+    fn provider_default_without_a_registry_row_resolves_to_its_own_id() {
+        // SHA-6443: the descriptor owns its declared default. A registry that
+        // carries unrelated rows must still resolve the provider's own
+        // default — and must never borrow another provider's model.
         let registry = ModelRegistry::new(vec![ModelInfo {
             id: "not-the-openai-default".to_string(),
             provider: ProviderKind::Openai,
@@ -1854,16 +1903,12 @@ mod tests {
             supports_reasoning: true,
         }]);
 
-        let error = registry
+        let resolved = registry
             .resolve(None, Some(ProviderKind::Openai))
-            .expect_err("a missing provider default must fail closed");
-        assert_eq!(
-            error,
-            ModelResolutionError::ProviderDefaultUnavailable {
-                provider: ProviderKind::Openai,
-                default_model: "gpt-5.6".to_string(),
-            }
-        );
+            .expect("the provider's declared default resolves for that provider");
+        assert_eq!(resolved.resolved.id, "gpt-5.6");
+        assert_eq!(resolved.resolved.provider, ProviderKind::Openai);
+        assert!(resolved.used_fallback);
     }
 
     #[test]
@@ -2800,5 +2845,28 @@ mod tests {
             ModelFamily::Inferencer
         );
         assert_eq!(model_family(""), ModelFamily::Inferencer);
+    }
+
+    /// SHA-6443: a provider's declared default must be a model its own
+    /// registry can resolve. A default the registry rejects fails a test
+    /// here, not a founder's `model resolve`.
+    #[test]
+    fn every_provider_default_resolves_for_its_own_provider() {
+        let registry = ModelRegistry::default();
+        let mut failures = Vec::new();
+        for kind in ProviderKind::all() {
+            let default = kind.provider().default_model();
+            if default.trim().is_empty() {
+                continue;
+            }
+            if let Err(error) = registry.resolve(Some(default), Some(*kind)) {
+                failures.push(format!("{} ({kind:?}): {error}", default));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "provider defaults must resolve for their own provider:\n{}",
+            failures.join("\n")
+        );
     }
 }

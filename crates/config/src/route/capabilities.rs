@@ -93,7 +93,10 @@ pub(crate) fn documented_server_side_web_search(
         ),
         "deepseek" => matches!(
             wire_model_id.as_str(),
-            "deepseek-v4-flash" | "deepseek-v4-pro" | "deepseek-v4-flash-vision-exp"
+            "deepseek-flash"
+                | "deepseek-v4-flash"
+                | "deepseek-v4-pro"
+                | "deepseek-v4-flash-vision-exp"
         ),
         "moonshot" => matches!(wire_model_id.as_str(), "kimi-k3" | "kimi-k2.6"),
         _ => false,
