@@ -1519,12 +1519,8 @@ fn deepseek_flash_v41_classifies_reasoning_through_the_catalog() {
         None,
     ));
 
-    let style = reasoning_stream_style_for_route(
-        ApiProvider::Deepseek,
-        base_url,
-        "deepseek-flash",
-        None,
-    );
+    let style =
+        reasoning_stream_style_for_route(ApiProvider::Deepseek, base_url, "deepseek-flash", None);
     assert_eq!(style, ReasoningStreamStyle::SeparateField);
     let events = decode_chunks_with_style(
         &[r#"{"choices":[{"delta":{"reasoning_content":"private flash plan"}}]}"#],
