@@ -497,6 +497,24 @@ pub(crate) fn compact_tool_result_for_route(
         return raw.to_string();
     }
 
+    // The `read` primitive already bounds itself to an explicit per-call byte
+    // budget and, when that budget truncates the file, ends with a footer
+    // naming the exact offset to continue from. Compacting it a second time
+    // would drop content the caller deliberately budgeted for *and* delete the
+    // continuation contract, leaving the model with a head/tail snippet and no
+    // way to page. A result that stayed inside its declared budget therefore
+    // passes through; one that somehow exceeded it still falls through to the
+    // ordinary limits below.
+    if output
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("read_budget_bytes"))
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|budget| raw.len() as u64 <= budget)
+    {
+        return raw.to_string();
+    }
+
     if let Some(summary) = compact_subagent_tool_result_for_context(tool_name, raw) {
         return summary;
     }

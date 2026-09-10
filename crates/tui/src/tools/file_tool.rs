@@ -60,7 +60,7 @@ impl ToolSpec for ReadTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read a text file. Output is limited to 2000 complete lines or 50KB, whichever comes first. Use offset and limit to continue through large files."
+        "Read a text file. The whole file comes back in one call when it fits this call's output budget — 100000 bytes by default, raisable to 500000 with max_bytes. There is no line cap. Use offset and limit for an exact line range; when output is budget-limited the footer names the exact offset to continue from."
     }
 
     fn input_schema(&self) -> Value {
@@ -78,6 +78,10 @@ impl ToolSpec for ReadTool {
                 "limit": {
                     "type": "number",
                     "description": "Maximum number of lines to read."
+                },
+                "max_bytes": {
+                    "type": "number",
+                    "description": "Output budget in bytes for this one call. Defaults to 100000; values above the 500000 maximum are clamped down rather than rejected, and a value below the active default leaves the default in place."
                 }
             },
             "required": ["path"],

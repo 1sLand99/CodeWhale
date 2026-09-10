@@ -776,8 +776,13 @@ byte ceilings (#5367) raise the model-visible floor after that routing
 and never lower it:
 
 - `read_result_max_bytes` — cap for a single `read` / `read_file`
-  result. Absent keeps the compile-time defaults (50KiB / 2000 lines
-  for `read`, 16KiB / 500 lines for `read_file`).
+  result. Absent keeps the compile-time defaults (100000 bytes for
+  `read`, which has no line cap; 16KiB / 500 lines for `read_file`).
+  For `read` this is the middle of a three-layer budget: the model's
+  own per-call `max_bytes` (hard maximum 500000) raises the budget for
+  one call, this setting raises the floor for the whole process, and
+  either way 2MiB is the absolute ceiling. Highest wins; neither layer
+  can lower a budget the other granted.
 - `tool_result_max_bytes` — cap for a generic tool result after
   spillover. Absent keeps the 12K-character compact floor (48K on
   windows ≥500K tokens). Hard cap is 2MiB.
