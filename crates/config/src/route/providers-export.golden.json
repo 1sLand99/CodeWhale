@@ -175,6 +175,11 @@
       ],
       "models": [
         {
+          "id": "deepseek-flash",
+          "canonical": "deepseek-flash",
+          "default": true
+        },
+        {
           "id": "deepseek-v4-flash",
           "canonical": "deepseek-v4-flash"
         },
@@ -184,8 +189,7 @@
         },
         {
           "id": "deepseek-v4-pro",
-          "canonical": "deepseek-v4-pro",
-          "default": true
+          "canonical": "deepseek-v4-pro"
         }
       ],
       "transport": "model-aware"
