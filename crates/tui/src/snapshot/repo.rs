@@ -294,7 +294,9 @@ impl SnapshotRepo {
             // existing repo's `MAX_SNAPSHOT_SIZE_MB` budget. Users on
             // workspaces that grew past the cap mid-session get the
             // existing aggressive-pruning path in `snapshot()`.
-            if let Err(gate) = estimate_workspace_size_bounded(&work_tree, cap_bytes) {
+            if let Err(gate) =
+                estimate_workspace_size_bounded(&work_tree, cap_bytes, SIZE_WALK_MAX_ENTRIES)
+            {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     gate.describe(cap_bytes, &work_tree),
@@ -1033,19 +1035,28 @@ fn io_other(msg: impl Into<String>) -> io::Error {
 
 /// Walk `workspace` and accumulate file sizes, returning `Ok(total)`
 /// when the workspace fits under `cap_bytes` and `Err(gate)` naming the
-/// bound that tripped. Honors `.gitignore` (via the `ignore` crate's
-/// `WalkBuilder` defaults) and the snapshot-specific skip list above,
-/// so the measured size reflects what would actually land in a
-/// snapshot commit rather than the raw `du -sh` total.
+/// bound that tripped. Honors `.gitignore` — whether or not the
+/// workspace is itself a git repo, matching the `git add -A` that the
+/// snapshot commit actually runs against this work tree — and the
+/// snapshot-specific skip list above, so the measured size reflects
+/// what would land in a snapshot commit rather than the raw `du -sh`
+/// total.
 ///
-/// The walk is bounded by both `cap_bytes` and
-/// [`SIZE_WALK_MAX_ENTRIES`], and the two bounds are reported
-/// separately because they have different recoveries. A `cap_bytes` of
-/// `0` disables the byte cap entirely (so config can opt out) but not
-/// the entry bound.
+/// The walk is bounded by both `cap_bytes` and `max_entries`, and the
+/// two bounds are reported separately because they have different
+/// recoveries. A `cap_bytes` of `0` disables the byte cap entirely (so
+/// config can opt out) but not the entry bound.
+///
+/// Production passes [`SIZE_WALK_MAX_ENTRIES`] for `max_entries`; it is
+/// a parameter only so the entry bound is reachable in a test without
+/// creating 200,000 inodes. It must not be threaded up through
+/// [`SnapshotRepo::open_or_init_with_cap`]: [`WorkspaceGate::describe`]
+/// interpolates the constant into the user-facing message, so a weaker
+/// injected bound would report a number that did not trip.
 pub fn estimate_workspace_size_bounded(
     workspace: &Path,
     cap_bytes: u64,
+    max_entries: usize,
 ) -> Result<u64, WorkspaceGate> {
     use ignore::WalkBuilder;
     let mut total: u64 = 0;
@@ -1053,6 +1064,12 @@ pub fn estimate_workspace_size_bounded(
     let skip: HashSet<&'static str> = SIZE_WALK_SKIP_DIRS.iter().copied().collect();
     let walker = WalkBuilder::new(workspace)
         .hidden(false)
+        // `ignore` defaults to `require_git(true)`, which silently disables
+        // every gitignore rule when the workspace is not inside a git repo.
+        // The snapshot's own `git add -A` honors `.gitignore` regardless, so
+        // without this the estimator over-counts a non-git workspace and can
+        // refuse it while offering a `.gitignore` remedy that cannot work.
+        .require_git(false)
         .follow_links(false)
         .filter_entry(move |entry| {
             // Skip the well-known build-output directories at any depth.
@@ -1066,7 +1083,7 @@ pub fn estimate_workspace_size_bounded(
         .build();
     for entry in walker.flatten() {
         entries += 1;
-        if entries > SIZE_WALK_MAX_ENTRIES {
+        if entries > max_entries {
             return Err(WorkspaceGate::TooManyEntries);
         }
         if let Ok(meta) = entry.metadata()
@@ -1810,7 +1827,7 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::write(workspace.join("a.txt"), vec![b'a'; 100]).unwrap();
         std::fs::write(workspace.join("b.txt"), vec![b'b'; 50]).unwrap();
-        let total = estimate_workspace_size_bounded(&workspace, 10_000)
+        let total = estimate_workspace_size_bounded(&workspace, 10_000, SIZE_WALK_MAX_ENTRIES)
             .expect("under-cap walk must return a total");
         assert!(
             total >= 150,
@@ -1827,7 +1844,7 @@ mod tests {
         std::fs::write(workspace.join("a.bin"), vec![b'a'; 1024]).unwrap();
         std::fs::write(workspace.join("b.bin"), vec![b'b'; 1024]).unwrap();
         assert_eq!(
-            estimate_workspace_size_bounded(&workspace, 1024),
+            estimate_workspace_size_bounded(&workspace, 1024, SIZE_WALK_MAX_ENTRIES),
             Err(WorkspaceGate::TooLarge),
             "over-cap walk must name the size gate for early bailout"
         );
@@ -1869,7 +1886,7 @@ mod tests {
         std::fs::write(workspace.join("node_modules/big.bin"), vec![0u8; 1_000_000]).unwrap();
         std::fs::write(workspace.join("target/big.bin"), vec![0u8; 1_000_000]).unwrap();
         std::fs::write(workspace.join("src/lib.rs"), b"// real source").unwrap();
-        let total = estimate_workspace_size_bounded(&workspace, 500_000)
+        let total = estimate_workspace_size_bounded(&workspace, 500_000, SIZE_WALK_MAX_ENTRIES)
             .expect("walk must succeed since real source is tiny");
         assert!(
             total < 1_000,
@@ -1884,11 +1901,78 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         // 10 KB file — would trip a 1 KB cap, but cap=0 means no cap.
         std::fs::write(workspace.join("big.bin"), vec![0u8; 10 * 1024]).unwrap();
-        let total = estimate_workspace_size_bounded(&workspace, 0)
+        let total = estimate_workspace_size_bounded(&workspace, 0, SIZE_WALK_MAX_ENTRIES)
             .expect("cap=0 must always return a total");
         assert!(
             total >= 10 * 1024,
             "total ({total}) must include the 10 KB file when cap is disabled"
+        );
+    }
+
+    /// The entry ceiling is the bound that no test could reach before
+    /// `max_entries` became a parameter: 200,000 inodes per run is not a
+    /// price a unit test should pay. A byte-cheap workspace must still be
+    /// refused, and refused as the *entry* gate — reporting `TooLarge` here
+    /// would offer `max_workspace_gb` as a remedy that cannot lift it.
+    #[test]
+    fn entry_ceiling_refuses_a_byte_cheap_workspace_with_too_many_entries() {
+        let tmp = tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        for i in 0..10 {
+            std::fs::write(workspace.join(format!("f{i}.txt")), b"x").unwrap();
+        }
+        assert_eq!(
+            estimate_workspace_size_bounded(&workspace, 10_000_000, 3),
+            Err(WorkspaceGate::TooManyEntries),
+            "ten tiny files under a 10 MB cap must trip the entry bound, not the byte cap"
+        );
+    }
+
+    /// The invariant documented on `WorkspaceGate::TooManyEntries` and on the
+    /// estimator: `max_workspace_gb = 0` opts out of the byte cap only. A
+    /// future "if `cap_bytes == 0`, skip the walk" shortcut would satisfy
+    /// every other test here and silently delete the ceiling that exists to
+    /// stop a multi-minute `git add -A`.
+    #[test]
+    fn cap_zero_does_not_lift_the_entry_ceiling() {
+        let tmp = tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        for i in 0..10 {
+            std::fs::write(workspace.join(format!("f{i}.txt")), b"x").unwrap();
+        }
+        assert_eq!(
+            estimate_workspace_size_bounded(&workspace, 0, 3),
+            Err(WorkspaceGate::TooManyEntries),
+            "cap_bytes = 0 disables the byte cap, never the entry ceiling"
+        );
+    }
+
+    /// `ignore` disables gitignore matching entirely when no ancestor holds a
+    /// `.git` (`require_git` defaults to true), but the snapshot's own
+    /// `git add -A --work-tree <workspace>` reads `.gitignore` either way. A
+    /// non-git workspace was therefore measured on content that would never
+    /// be staged — and then told to fix it by editing `.gitignore`.
+    ///
+    /// Deliberately creates no `.git`: the point is the non-repo case.
+    #[test]
+    fn gitignored_content_is_excluded_outside_a_git_repo() {
+        let tmp = tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::write(workspace.join(".gitignore"), "big.bin\n").unwrap();
+        std::fs::write(workspace.join("big.bin"), vec![0u8; 1_000_000]).unwrap();
+        std::fs::write(workspace.join("src/lib.rs"), b"// real source").unwrap();
+        assert!(
+            !workspace.join(".git").exists(),
+            "this test is only meaningful outside a git repo"
+        );
+        let total = estimate_workspace_size_bounded(&workspace, 500_000, SIZE_WALK_MAX_ENTRIES)
+            .expect("the only large file is gitignored, so the walk must fit under the cap");
+        assert!(
+            total < 1_000,
+            "total ({total}) must exclude the gitignored 1 MB file"
         );
     }
 

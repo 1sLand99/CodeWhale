@@ -940,6 +940,15 @@ mod snapshot_notice_tests {
                 "{scope:?} must not advertise a config key that cannot lift it: {line}"
             );
             assert!(line.contains("/undo"), "the consequence is named: {line}");
+            if scope == SnapshotsDisabledScope::TooManyFiles {
+                // The `{limit}` this notice carries is the entry ceiling.
+                // Nothing else asserts it reaches the user, so a dropped
+                // placeholder would render "more than  files" silently.
+                assert!(
+                    line.contains(&crate::snapshot::SIZE_WALK_MAX_ENTRIES.to_string()),
+                    "the entry ceiling must be stated, not left as a blank limit: {line}"
+                );
+            }
         }
     }
 
