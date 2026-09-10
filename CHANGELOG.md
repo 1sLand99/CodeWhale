@@ -7,16 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.13] - Unreleased candidate
+## [0.9.13] - 2026-09-10
 
 Codewhale v0.9.13 source candidate addresses integrity issues in 0.9.12:
 multiline paste is one paste again, truncated tool arguments can no longer execute, strict
 ACP clients connect again, concurrent instances stop destroying each
 other's queued text, and the Computer Use bundle includes plugin 0.2.1
-with an accessibility-first pointer.
+with an accessibility-first pointer. DeepSeek V4.1 Flash
+(`deepseek-flash`) is the default DeepSeek model, reasoning-capable routes
+keep reasoning out of the answer regardless of how the model id is shaped,
+and `/mcp reload` no longer freezes the interface while servers reconnect.
 
 ### Fixed
 
+- `/mcp reload` no longer freezes the interface. The reload was awaiting the
+  whole reconnect batch on the TUI event loop; it now joins the same
+  supervised background pass the session boot uses, the status chip counts
+  the batch down live, and the finished receipt arrives as an event. With
+  23 configured servers (11 live, 10 awaiting auth, 2 failing) the first
+  echoed keystroke after a reload lands in ~5 s instead of ~42 s (#5974).
+- The posture bar no longer states the same duration twice on a first turn
+  (#6041).
+- Reasoning-capable models whose id carries no version substring
+  (`deepseek-flash`) keep `reasoning_content` in the thinking block instead
+  of the answer text; the replay gate consults the model catalog rather than
+  matching a `deepseek-v4` version string (#6044).
+- `codewhale model resolve` accepts a provider's declared default even when
+  its registry row is missing — `deepseek-flash` failed resolution against
+  the provider that declares it as default — and a test now resolves every
+  provider's `DEFAULT_*_MODEL` for its own provider (#6043).
+- Markdown `_italic_` requires both delimiters to be flanking per CommonMark,
+  so math subscripts no longer italicize the prose between them
+  (`[t_, b_p]. Actually — hold on, do we even tile all the way from t_?`
+  rendered 60 characters italic) (#6042).
 - Cancelling a foreground shell wait stops its owned process group even when
   the tool future is dropped. Explicitly backgrounded jobs retain their
   ownership. Interrupted tool receipts distinguish work that started from
@@ -269,6 +292,10 @@ with an accessibility-first pointer.
 
 ### Added
 
+- `deepseek-flash` (DeepSeek V4.1 Flash: text-only, 1M-token context,
+  reasoning and tool calls) joins the catalog as DeepSeek's declared default,
+  and the offline catalog seed matches it; the DeepSeek Pro listing no longer
+  overstates the published price (#6025).
 - Native plugin authoring guides now cover English and Chinese. The explicit
   offline converter supports selected portable Skills and static Streamable
   HTTP MCP declarations from OpenCode and DSH. Unsupported executable hooks,
