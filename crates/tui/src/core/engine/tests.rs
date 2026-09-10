@@ -22134,7 +22134,10 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
         },
         &api_config,
     );
-    engine.start_mcp_session_boot().await;
+    engine
+        .start_mcp_session_boot(McpConnectRefresh::IfChanged)
+        .await
+        .expect("session boot starts");
     assert!(
         engine.mcp_tools().await.is_empty(),
         "ordinary startup remains nonblocking"

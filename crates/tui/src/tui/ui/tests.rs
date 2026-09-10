@@ -2561,17 +2561,24 @@ async fn mcp_enable_persists_and_applies_the_live_tool_pool_in_one_action() {
     assert!(!app.mcp_reload_required);
     assert_eq!(app.mcp_snapshot.as_ref(), Some(&snapshot));
     assert_eq!(app.mcp_snapshot_generation, 7);
-    assert!(app.mcp_snapshot_generation_invalidated);
+    // The reconnect pass owns generation 7 from here: the interim snapshot
+    // must not invalidate its own progress events.
+    assert!(!app.mcp_snapshot_generation_invalidated);
+    assert!(
+        app.mcp_reload_in_flight,
+        "an accepted reload waits for the pass's finished receipt"
+    );
     assert!(app.history.iter().any(|cell| matches!(
         cell,
         HistoryCell::System { content }
             if content.contains("Enabled MCP server 'fixture'")
     )));
-    assert!(app.history.iter().any(|cell| matches!(
+    // The counts receipt belongs to the finished event, not to the action
+    // that started the pass.
+    assert!(!app.history.iter().any(|cell| matches!(
         cell,
         HistoryCell::System { content }
             if content.contains("MCP tool pool reloaded in process")
-                && content.contains("next model turn")
     )));
 }
 

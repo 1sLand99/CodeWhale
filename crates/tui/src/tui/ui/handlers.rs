@@ -794,9 +794,31 @@ pub(crate) async fn handle_mcp_ui_action(
     } else if rebuild_live_pool {
         match engine_handle.reload_mcp(path.clone()).await {
             Ok(update) => {
+                // The reload no longer waits for the connect batch. The
+                // engine's supervised pass owns the live surface from here:
+                // apply the interim snapshot without invalidating its own
+                // generation, leave connecting/initializing to the pass's
+                // progress events, and let its finished event post the
+                // counts. A config mutation keeps its own receipt instead of
+                // the reload-started line.
                 app.mcp_reload_required = false;
-                add_mcp_message(app, mcp_reload_summary(&update.snapshot));
-                Ok((update.snapshot, Some(update.generation)))
+                app.mcp_reload_in_flight = true;
+                if is_reload {
+                    add_mcp_message(
+                        app,
+                        format!(
+                            "MCP reload started in the background: {} configured server(s) reconnecting. The status bar tracks progress; the next model turn uses the catalog as it settles.",
+                            update.snapshot.servers.len()
+                        ),
+                    );
+                }
+                app.mcp_configured_count = update.snapshot.servers.len();
+                app.mcp_snapshot_generation = update.generation;
+                app.mcp_snapshot_generation_invalidated = false;
+                app.hotbar_actions.replace_mcp_tools(Some(&update.snapshot));
+                app.mcp_snapshot = Some(update.snapshot);
+                open_mcp_extensions(app);
+                return;
             }
             Err(error) => {
                 app.mcp_reload_required = true;

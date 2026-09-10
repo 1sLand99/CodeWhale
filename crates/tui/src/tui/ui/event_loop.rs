@@ -6803,6 +6803,15 @@ pub(crate) fn apply_mcp_session_boot_event(
     app.mcp_snapshot_generation_invalidated = false;
     app.mcp_configured_count = snapshot.servers.len();
     app.hotbar_actions.replace_mcp_tools(Some(&snapshot));
+    if finished && app.mcp_reload_in_flight {
+        // One completion receipt for the explicit reload that started this
+        // pass; session boot never sets the flag.
+        app.mcp_reload_in_flight = false;
+        crate::tui::mcp_routing::add_mcp_message(
+            app,
+            crate::tui::ui::provider_routes::mcp_reload_summary(&snapshot),
+        );
+    }
     app.mcp_snapshot = Some(snapshot);
     app.mcp_connecting = connecting;
     app.mcp_initializing = !finished;

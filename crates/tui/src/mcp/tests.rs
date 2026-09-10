@@ -3408,7 +3408,8 @@ async fn explicit_reload_reconnects_unchanged_config_and_preserves_dynamic_serve
         .unwrap();
     let generation_before = pool.catalog_generation.load(AtomicOrdering::SeqCst);
 
-    let errors = pool.reload_and_connect_all().await.unwrap();
+    pool.force_reload_config_sources().unwrap();
+    let errors = pool.connect_all().await;
 
     assert!(
         errors.is_empty(),
@@ -3459,13 +3460,8 @@ async fn config_source_switch_preserves_dynamic_servers_in_the_shared_pool() {
     pool.connections.insert("local".to_string(), conn);
     let generation_before = pool.catalog_generation.load(AtomicOrdering::SeqCst);
 
-    pool.switch_workspace_config_source_and_connect_all(
-        &invalid_path,
-        &workspace,
-        Arc::clone(&plugins),
-    )
-    .await
-    .expect_err("malformed replacement must fail closed");
+    pool.switch_workspace_config_source(&invalid_path, &workspace, Arc::clone(&plugins))
+        .expect_err("malformed replacement must fail closed");
     assert_eq!(pool.config_sources.first(), Some(&initial_path));
     assert!(pool.connections.contains_key("local"));
     assert_eq!(drops.load(AtomicOrdering::SeqCst), 0);
@@ -3474,10 +3470,9 @@ async fn config_source_switch_preserves_dynamic_servers_in_the_shared_pool() {
         generation_before
     );
 
-    let errors = pool
-        .switch_workspace_config_source_and_connect_all(&replacement_path, &workspace, plugins)
-        .await
+    pool.switch_workspace_config_source(&replacement_path, &workspace, plugins)
         .unwrap();
+    let errors = pool.connect_all().await;
 
     assert!(errors.is_empty());
     assert!(pool.server_names().contains(&"runtime".to_string()));
@@ -7760,7 +7755,8 @@ async fn mcp_ceiling_survives_source_reload_and_blocks_new_runtime_names() {
         .unwrap()
         .with_disallowed_tools(vec!["mcp_private*".to_string()]);
     fs::write(&source, r#"{"mcpServers":{"private":{"command":"must-not-execute-private","required":true},"private_a":{"command":"must-not-execute-private"}}}"#).unwrap();
-    assert!(pool.reload_and_connect_all().await.unwrap().is_empty());
+    pool.force_reload_config_sources().unwrap();
+    assert!(pool.connect_all().await.is_empty());
     assert!(pool.enabled_server_names().is_empty());
     assert!(pool.get_or_connect("private_a").await.is_err());
     assert!(

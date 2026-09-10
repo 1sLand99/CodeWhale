@@ -2128,6 +2128,10 @@ pub struct App {
     pub mcp_configured_count: usize,
     /// Set after in-TUI MCP config edits because the engine caches its MCP pool.
     pub mcp_reload_required: bool,
+    /// True between an accepted `/mcp` reload (or mutation that rebuilds the
+    /// live pool) and the background pass's finished receipt, so completion
+    /// can post exactly one summary.
+    pub mcp_reload_in_flight: bool,
     /// Tool execution log
     pub tool_log: Vec<String>,
     /// Active skill to apply to next user message

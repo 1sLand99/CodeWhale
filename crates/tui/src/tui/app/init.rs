@@ -1016,6 +1016,7 @@ impl App {
             // or malformed config simply hides the chip.
             mcp_configured_count,
             mcp_reload_required: false,
+            mcp_reload_in_flight: false,
             tool_log: Vec::new(),
             active_skill: None,
             active_skill_provenance: None,

@@ -1182,6 +1182,17 @@ async fn forward_subagent_mailbox_message(
     tx.send(event).await.is_ok()
 }
 
+/// Which config-source refresh precedes a connect pass.
+enum McpConnectRefresh {
+    /// Session boot: re-read only when the sources moved (mtime/content).
+    IfChanged,
+    /// Explicit reload: force a re-read and drop every live connection
+    /// first, so even a byte-identical config re-dials under the current
+    /// credentials. A malformed source fails the pass before anything is
+    /// dropped.
+    Force,
+}
+
 impl Engine {
     /// Surface the snapshots-disabled notice a blocking snapshot task parked
     /// (#5930). Called at turn boundaries; each session gets its own notice.
@@ -2589,7 +2600,15 @@ impl Engine {
         // engine must wait for its host to claim and explicitly dispatch the
         // next turn so events cannot be attached to the wrong durable record.
         let host_managed_turns = self.host_managed_turns();
-        self.start_mcp_session_boot().await;
+        if let Err(error) = self
+            .start_mcp_session_boot(McpConnectRefresh::IfChanged)
+            .await
+        {
+            tracing::debug!(
+                "MCP session boot failed: {}",
+                crate::mcp::format_mcp_error_for_display(&error)
+            );
+        }
 
         loop {
             let Some(input) = self.next_run_input(host_managed_turns).await else {
@@ -6565,38 +6584,43 @@ impl Engine {
         Ok(pool)
     }
 
+    /// Force the engine-owned pool to re-read its config sources and start
+    /// the reconnect pass, returning the interim snapshot immediately.
+    ///
+    /// This is the explicit `/mcp reload` path. It deliberately does **not**
+    /// wait for the connect batch: a config with many servers can take
+    /// minutes to settle, and a caller that waited from the TUI starved
+    /// input and redraw for the whole batch. The batch is the same
+    /// supervised pass session boot already uses, so progress and the
+    /// finished receipt arrive as `Event::McpSessionBoot` updates under the
+    /// returned generation. A malformed source returns Err **before** any
+    /// live connection is dropped.
     async fn reload_mcp_pool(&mut self, config_path: PathBuf) -> anyhow::Result<McpManagerUpdate> {
         if self.mcp_boot_in_flight {
             self.wait_for_mcp_boot().await;
         }
-        let pool = self
-            .ensure_mcp_pool()
-            .await
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        let mut pool = pool.lock().await;
-        let connection_errors = if config_path == self.session.mcp_config_path {
-            pool.reload_and_connect_all().await?
-        } else {
-            pool.switch_workspace_config_source_and_connect_all(
-                &config_path,
-                &self.session.workspace,
-                Arc::clone(&self.plugin_registry),
-            )
-            .await?
-        };
-        let errors = connection_errors
-            .into_iter()
-            .map(|(name, error)| (name, crate::mcp::format_mcp_error_for_display(&error)))
-            .collect::<HashMap<_, _>>();
-        self.session.mcp_config_path = config_path;
-        self.mcp_connection_errors = errors;
-        let snapshot = pool.manager_snapshot(
-            &self.session.mcp_config_path,
-            false,
-            &self.mcp_connection_errors,
-        );
-        drop(pool);
-        let generation = self.next_mcp_event_generation();
+        if config_path != self.session.mcp_config_path {
+            // Transactional swap without handshakes under the lock; the
+            // forced re-read below then re-dials the freshly installed
+            // sources.
+            let pool = self
+                .ensure_mcp_pool()
+                .await
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            {
+                let mut pool = pool.lock().await;
+                pool.switch_workspace_config_source(
+                    &config_path,
+                    &self.session.workspace,
+                    Arc::clone(&self.plugin_registry),
+                )?;
+            }
+            self.session.mcp_config_path = config_path;
+        }
+        let generation = self
+            .start_mcp_session_boot(McpConnectRefresh::Force)
+            .await?;
+        let snapshot = self.mcp_session_snapshot().await?;
         Ok(McpManagerUpdate {
             snapshot,
             generation,
@@ -6879,25 +6903,44 @@ impl Engine {
     /// Start the concurrent connect pass without occupying the engine mailbox.
     /// Optional servers stay in the background unless the task explicitly
     /// selects their tools; `mcp_tools` snapshots whatever is already ready.
-    async fn start_mcp_session_boot(&mut self) {
-        if !self.config.features.enabled(Feature::Mcp) {
-            return;
+    ///
+    /// Returns the event generation the pass owns, or `Ok(0)` when nothing
+    /// was started (the feature gate skipped a session boot). Progress and
+    /// the finished receipt flow as `Event::McpSessionBoot` updates under
+    /// that generation.
+    async fn start_mcp_session_boot(&mut self, refresh: McpConnectRefresh) -> anyhow::Result<u64> {
+        if matches!(refresh, McpConnectRefresh::IfChanged)
+            && !self.config.features.enabled(Feature::Mcp)
+        {
+            // Nothing to start. The only caller that reads the generation is
+            // the explicit reload, which never takes this branch.
+            return Ok(0);
         }
         let pool = match self.ensure_mcp_pool().await {
             Ok(pool) => pool,
             Err(error) => {
+                if matches!(refresh, McpConnectRefresh::Force) {
+                    return Err(anyhow::anyhow!(error.to_string()));
+                }
                 tracing::debug!("MCP session boot skipped: {error}");
-                return;
+                return Ok(0);
             }
         };
 
         let (pending, auth_errors, timeouts, network_policy, catalog_generation) = {
             let mut pool = pool.lock().await;
-            if let Err(error) = pool.reload_if_config_changed().await {
-                tracing::debug!(
-                    "MCP session boot config reload failed: {}",
-                    crate::mcp::format_mcp_error_for_display(&error)
-                );
+            match refresh {
+                McpConnectRefresh::IfChanged => {
+                    if let Err(error) = pool.reload_if_config_changed().await {
+                        tracing::debug!(
+                            "MCP session boot config reload failed: {}",
+                            crate::mcp::format_mcp_error_for_display(&error)
+                        );
+                    }
+                }
+                // A malformed source returns Err before anything is dropped,
+                // so a failed explicit reload leaves the live pool intact.
+                McpConnectRefresh::Force => pool.force_reload_config_sources()?,
             }
             let (pending, auth_errors) = pool.collect_pending_connects();
             (
@@ -6921,7 +6964,7 @@ impl Engine {
             self.mcp_boot_in_flight = false;
             self.mcp_boot_generation = None;
             self.emit_mcp_session_boot(generation, true).await;
-            return;
+            return Ok(generation);
         }
 
         self.mcp_boot_in_flight = true;
@@ -7004,6 +7047,8 @@ impl Engine {
                 let _ = done_tx.send(true);
             },
         );
+
+        Ok(generation)
     }
 
     /// Connect the configured servers through the one engine-owned pool and

@@ -2889,25 +2889,31 @@ impl McpPool {
         self.reload_from_config_sources(false)
     }
 
-    /// Force a source re-read, invalidate all advertised routes, reconnect
-    /// enabled servers, and return per-server connection errors. Dynamic
+    /// Force a source re-read and drop every live connection so the next
+    /// connect pass reattaches under the current configuration and
+    /// credentials — without waiting for any handshake. An explicit reload is
+    /// intent, so cooldowns lift and even a byte-identical config re-dials.
+    ///
+    /// An unreadable or malformed source returns `Err` **before** anything is
+    /// dropped: a failed reload leaves the live tool pool intact. Dynamic
     /// in-memory servers remain registered because this mutates the existing
     /// pool rather than replacing it.
-    pub async fn reload_and_connect_all(&mut self) -> Result<Vec<(String, anyhow::Error)>> {
-        self.reload_from_config_sources(true)?;
-        Ok(self.connect_all().await)
+    pub(crate) fn force_reload_config_sources(&mut self) -> Result<()> {
+        self.reload_from_config_sources(true).map(|_| ())
     }
 
-    /// Switch the global config source transactionally, preserving this
-    /// shared pool (and its dynamic runtime servers) for parent and sub-agent
-    /// holders. A malformed replacement leaves the current config,
-    /// connections, and source paths unchanged.
-    pub(crate) async fn switch_workspace_config_source_and_connect_all(
+    /// Install a replacement global config source transactionally, preserving
+    /// this shared pool (and its dynamic runtime servers) for parent and
+    /// sub-agent holders. A malformed replacement leaves the current config,
+    /// connections, and source paths unchanged. On success every live
+    /// connection is dropped; the caller reattaches through its own connect
+    /// pass so no pool lock is held across a handshake.
+    pub(crate) fn switch_workspace_config_source(
         &mut self,
         path: &Path,
         workspace: &Path,
         plugins: Arc<crate::plugins::PluginRegistry>,
-    ) -> Result<Vec<(String, anyhow::Error)>> {
+    ) -> Result<()> {
         validate_mcp_config_path(path)?;
         if plugins.workspace() != workspace {
             anyhow::bail!("plugin registry workspace does not match MCP pool workspace");
@@ -2933,7 +2939,7 @@ impl McpPool {
         self.workspace = Some(workspace);
         self.plugin_registry = Some(plugins);
         self.catalog_generation.fetch_add(1, Ordering::SeqCst);
-        Ok(self.connect_all().await)
+        Ok(())
     }
 
     /// Get or create a connection to a server
