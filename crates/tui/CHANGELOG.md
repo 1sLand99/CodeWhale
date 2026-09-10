@@ -15,8 +15,9 @@ ACP clients connect again, concurrent instances stop destroying each
 other's queued text, and the Computer Use bundle includes plugin 0.2.1
 with an accessibility-first pointer. DeepSeek V4.1 Flash
 (`deepseek-flash`) is the default DeepSeek model, reasoning-capable routes
-keep reasoning out of the answer regardless of how the model id is shaped,
-and `/mcp reload` no longer freezes the interface while servers reconnect.
+keep reasoning out of the answer even when a model id carries no version
+number, and `/mcp reload` no longer freezes the interface while servers
+reconnect.
 
 ### Fixed
 
@@ -30,8 +31,9 @@ and `/mcp reload` no longer freezes the interface while servers reconnect.
   (#6041).
 - Reasoning-capable models whose id carries no version substring
   (`deepseek-flash`) keep `reasoning_content` in the thinking block instead
-  of the answer text; the replay gate consults the model catalog rather than
-  matching a `deepseek-v4` version string (#6044).
+  of the answer text. The gate only ever matched the literal `deepseek-v4`
+  version string, so it now consults the model catalog as well; the older
+  literal arms remain for the V4 aliases they were written for (#6044).
 - `codewhale model resolve` accepts a provider's declared default even when
   its registry row is missing — `deepseek-flash` failed resolution against
   the provider that declares it as default — and a test now resolves every

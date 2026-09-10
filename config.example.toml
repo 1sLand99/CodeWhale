@@ -79,7 +79,7 @@ base_url = "https://api.deepseek.com/beta"
 #   auto                         — auto-select between flash and pro based on task complexity.
 #                                  Complex tasks (debugging, refactoring, architecture) → pro;
 #                                  simple tasks (lookups, formatting, Q&A) → flash.
-default_text_model = "deepseek-v4-pro"
+default_text_model = "deepseek-flash"
 
 # ─────────────────────────────────────────────────────────────────────────────────
 # Thinking Mode (DeepSeek V4 reasoning effort)
