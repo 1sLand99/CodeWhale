@@ -211,19 +211,42 @@ fn composed_frame_paints_each_fact_in_exactly_one_row() {
         // session half needs 120 columns here, the turn half 160. Each
         // paints in exactly one row wherever it paints. The metrics line
         // carries no repository, branch or provider.
-        let clock_facts: &[(u16, &str)] =
-            &[(120, "worked 1m 15s"), (160, "sub-agents underway 1m 15s")];
-        for (needs, needle) in clock_facts {
-            if width < *needs {
-                continue;
-            }
-            assert!(rows[posture].contains(needle), "{}", rows[posture]);
+        // First turn: the turn half names the phase and stays; the session
+        // reading is the identical duration, so it is suppressed rather than
+        // stated twice (#6041) — the turn half is the one that needs 160
+        // columns, so a narrower row keeps the affordances and no stopwatch.
+        let turn_needle = "sub-agents underway 1m 15s";
+        if width >= 160 {
+            assert!(rows[posture].contains(turn_needle), "{}", rows[posture]);
             assert_eq!(
-                count_rows_containing(&rows, needle),
+                count_rows_containing(&rows, turn_needle),
                 1,
-                "{width}x{height}: {needle:?} paints in exactly one row:\n{}",
+                "{width}x{height}: {turn_needle:?} paints in exactly one row:\n{}",
                 rows.join("\n")
             );
+        }
+        assert!(
+            !rows[posture].contains("worked 1m 15s"),
+            "{width}x{height}: the duplicate session reading must not be stated: {}",
+            rows[posture]
+        );
+        // After a finished turn the totals differ and the worked chip
+        // returns: 1m of finished turns plus the live 1m 15s reads 2m 15s.
+        let mut worked = working_app();
+        worked.cumulative_turn_duration = Duration::from_secs(60);
+        let rows = draw(&mut worked, width, height);
+        if width >= 120 {
+            let worked_needle = "worked 2m 15s";
+            assert!(rows[posture].contains(worked_needle), "{}", rows[posture]);
+            assert_eq!(
+                count_rows_containing(&rows, worked_needle),
+                1,
+                "{width}x{height}: {worked_needle:?} paints in exactly one row:\n{}",
+                rows.join("\n")
+            );
+        }
+        if width >= 160 {
+            assert!(rows[posture].contains(turn_needle), "{}", rows[posture]);
         }
         assert!(!rows[metrics].contains('⑂'), "{}", rows[metrics]);
         // No dead key hints anywhere in the frame.

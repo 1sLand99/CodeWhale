@@ -748,7 +748,19 @@ pub(crate) fn resolve_runtime_route_for_identity(
     )?;
     let provider = identity.provider;
     let mut route_config = prepared_route_config(config, &identity, model_selector);
-    let saved_provider_model = configured_model_for_route(&route_config, provider);
+    // The operator's effective default for the active provider is the
+    // route's default too; mirror `provider_default_model` precedence so a
+    // configured choice is not displaced by the provider catalog's default
+    // (deepseek-flash). `auto` stays the resolver's sentinel.
+    let configured_default = (provider == config.api_provider()
+        && config.default_text_model.is_some())
+    .then(|| config.default_model())
+    .filter(|model| {
+        let model = model.trim();
+        !model.is_empty() && !model.eq_ignore_ascii_case("auto")
+    });
+    let saved_provider_model = configured_model_for_route(&route_config, provider)
+        .or(configured_default.as_deref());
     // #5034: with no explicit selector and no saved model, a Codex route
     // would fall back to the resolver's static seed offering. Prefer the
     // live Codex roster head so a provider switch lands on the current
