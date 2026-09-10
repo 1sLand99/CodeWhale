@@ -7131,43 +7131,53 @@ mod google_thought_signature_tests {
     // ── Google thought signatures (#v0.9.8 Google backend) ──────────────
     use crate::config::{DEFAULT_GOOGLE_BASE_URL, DEFAULT_OPENAI_BASE_URL};
 
-    fn google_request_with_signed_tool(signature: Option<&str>) -> MessageRequest {
+    /// One signed tool turn. `paired` false is the restart shape: the process
+    /// died between the tool call and its result, so the terminal
+    /// `tool_result` never reached durable history.
+    fn signed_history(signature: Option<&str>, paired: bool) -> Vec<Message> {
+        let mut messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "Read the config.".to_string(),
+                    cache_control: None,
+                }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "Reading now.".to_string(),
+                        cache_control: None,
+                    },
+                    ContentBlock::ToolUse {
+                        id: "call-g-1".to_string(),
+                        name: "read".to_string(),
+                        input: json!({"path": "config.toml"}),
+                        caller: None,
+                        thought_signature: signature.map(str::to_string),
+                    },
+                ],
+            },
+        ];
+        if paired {
+            messages.push(Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call-g-1".to_string(),
+                    content: "key = \"value\"".to_string(),
+                    is_error: None,
+                    content_blocks: None,
+                }],
+            });
+        }
+        messages
+    }
+
+    fn request_from(messages: Vec<Message>) -> MessageRequest {
         MessageRequest {
             model: "gemini-3.1-pro-preview".to_string(),
-            messages: vec![
-                Message {
-                    role: Role::User,
-                    content: vec![ContentBlock::Text {
-                        text: "Read the config.".to_string(),
-                        cache_control: None,
-                    }],
-                },
-                Message {
-                    role: Role::Assistant,
-                    content: vec![
-                        ContentBlock::Text {
-                            text: "Reading now.".to_string(),
-                            cache_control: None,
-                        },
-                        ContentBlock::ToolUse {
-                            id: "call-g-1".to_string(),
-                            name: "read".to_string(),
-                            input: json!({"path": "config.toml"}),
-                            caller: None,
-                            thought_signature: signature.map(str::to_string),
-                        },
-                    ],
-                },
-                Message {
-                    role: Role::User,
-                    content: vec![ContentBlock::ToolResult {
-                        tool_use_id: "call-g-1".to_string(),
-                        content: "key = \"value\"".to_string(),
-                        is_error: None,
-                        content_blocks: None,
-                    }],
-                },
-            ],
+            messages,
             max_tokens: 64,
             system: None,
             tools: None,
@@ -7179,6 +7189,10 @@ mod google_thought_signature_tests {
             temperature: None,
             top_p: None,
         }
+    }
+
+    fn google_request_with_signed_tool(signature: Option<&str>) -> MessageRequest {
+        request_from(signed_history(signature, true))
     }
 
     #[test]
@@ -7510,5 +7524,138 @@ mod google_thought_signature_tests {
             _ => None,
         });
         assert_eq!(signature.as_deref(), Some("SIG-delta"));
+    }
+
+    /// Run the production restart/resume chain over a message history:
+    /// persist to disk, reload, repair crashed tool pairs, then project for
+    /// restore exactly as `apply.rs` does before assigning `api_messages`.
+    /// Returns the recovery receipt, the restored messages, and the raw
+    /// session JSON as it actually sits on disk.
+    fn resumed(
+        messages: &[Message],
+    ) -> (
+        crate::session_manager::SessionRecovery,
+        Vec<Message>,
+        String,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = crate::session_manager::SessionManager::new(dir.path().join("sessions"))
+            .expect("session manager");
+        let session = crate::session_manager::create_saved_session(
+            messages,
+            "gemini-3.1-pro-preview",
+            dir.path(),
+            0,
+            None,
+        );
+        let id = session.metadata.id.clone();
+        let path = manager.save_session(&session).expect("save session");
+        let on_disk = std::fs::read_to_string(&path).expect("read persisted session");
+        let recovery = manager
+            .recover_session_for_resume(&id)
+            .expect("recover session for resume");
+        let restored =
+            crate::runtime_handoff::project_messages_for_restore(&recovery.session.messages);
+        (recovery, restored, on_disk)
+    }
+
+    fn replayed_signature(body: &serde_json::Value) -> Option<String> {
+        body["messages"]
+            .as_array()
+            .expect("wire messages")
+            .iter()
+            // The crash repair appends a trailing assistant text receipt, so
+            // find the tool-call message by shape, never by index.
+            .find(|message| message.get("tool_calls").is_some())
+            .expect("assistant tool-call message")
+            .pointer("/tool_calls/0/extra_content/google/thought_signature")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    }
+
+    /// C22 done-evidence item 3: restarting and resuming must continue the
+    /// signed history. This walks the whole persistence chain — durable JSON,
+    /// reload, restore projection, wire body — because the signature can be
+    /// lost at any of them, and a serde round-trip alone would prove none of
+    /// it. Local unit evidence only: it does not exercise a real Gemini call.
+    #[test]
+    fn resumed_google_session_replays_signed_tool_calls() {
+        let original = signed_history(Some("SIG-abc123"), true);
+        let (recovery, restored, on_disk) = resumed(&original);
+
+        assert!(
+            !recovery.changed,
+            "a fully paired history needs no repair on resume"
+        );
+        assert_eq!(
+            recovery.session.messages, original,
+            "reload must return the signed history unchanged"
+        );
+        assert_eq!(
+            restored, original,
+            "the restore projection must not touch signed tool history"
+        );
+        assert!(
+            on_disk.contains("\"thought_signature\"") && on_disk.contains("SIG-abc123"),
+            "the signature must reach durable storage, not just live memory"
+        );
+
+        for (provider, base_url) in [
+            (ApiProvider::Google, DEFAULT_GOOGLE_BASE_URL),
+            (
+                ApiProvider::Custom,
+                "https://generativelanguage.googleapis.com/v1beta/openai",
+            ),
+        ] {
+            let body =
+                build_chat_wire_body(&request_from(restored.clone()), provider, base_url, true)
+                    .expect("a resumed signed history must build, not fail closed");
+            assert_eq!(
+                replayed_signature(&body.body).as_deref(),
+                Some("SIG-abc123"),
+                "resumed history must still replay the signature ({base_url})"
+            );
+        }
+    }
+
+    /// The real restart shape: the process died between the tool call and its
+    /// result, so resume runs `repair_tool_call_pairs`, which rebuilds every
+    /// message. That rebuild must not strip `ToolUse` fields — if it did, the
+    /// repaired history would fail closed on Gemini 3 forever after.
+    #[test]
+    fn crash_repaired_resume_keeps_the_signature_on_the_repaired_tool_call() {
+        let (recovery, restored, on_disk) = resumed(&signed_history(Some("SIG-abc123"), false));
+
+        assert!(recovery.changed, "a dangling tool call must be repaired");
+        assert_eq!(recovery.repaired_call_count, 1);
+        assert_eq!(recovery.duplicate_result_count, 0);
+        assert_eq!(recovery.orphan_result_count, 0);
+        assert!(
+            on_disk.contains("\"thought_signature\"") && on_disk.contains("SIG-abc123"),
+            "the signature must reach durable storage, not just live memory"
+        );
+        assert!(
+            restored
+                .iter()
+                .any(|message| message.content.iter().any(|block| matches!(
+                    block,
+                    ContentBlock::ToolResult { tool_use_id, content, .. }
+                        if tool_use_id == "call-g-1" && content.contains("crashed_and_repaired")
+                ))),
+            "the repair must pair the dangling call with a terminal result"
+        );
+
+        let body = build_chat_wire_body(
+            &request_from(restored),
+            ApiProvider::Google,
+            DEFAULT_GOOGLE_BASE_URL,
+            true,
+        )
+        .expect("a crash-repaired signed history must build, not fail closed");
+        assert_eq!(
+            replayed_signature(&body.body).as_deref(),
+            Some("SIG-abc123"),
+            "crash repair must not strip the thought signature"
+        );
     }
 }
