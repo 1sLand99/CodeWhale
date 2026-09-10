@@ -14167,6 +14167,72 @@ mod doctor_endpoint_tests {
         assert!(report["alias_deprecation"].is_null());
     }
 
+    /// DeepSeek keeps accepting `deepseek-v4-pro` after 2026-09-14 and serves
+    /// V4.1 Flash behind it, so the id is never rewritten on the wire and the
+    /// old "was it rewritten?" guard reported nothing. #6025.
+    #[test]
+    fn provider_capability_report_warns_that_deepseek_retires_v4_pro() {
+        let mut config = Config {
+            // Name the official endpoint rather than inheriting whatever this
+            // machine has configured: the claim is DeepSeek's to make, so the
+            // test has to say which host it is asking about.
+            base_url: Some(crate::config::DEFAULT_DEEPSEEK_BASE_URL.to_string()),
+            default_text_model: Some("deepseek-v4-pro".to_string()),
+            ..Default::default()
+        };
+        crate::config::normalize_model_config_for_test(&mut config);
+
+        let report = provider_capability_report(&config);
+
+        assert_eq!(report["resolved_model"], "deepseek-v4-pro");
+        assert_eq!(report["alias_deprecation"]["alias"], "deepseek-v4-pro");
+        assert_eq!(report["alias_deprecation"]["replacement"], "deepseek-flash");
+        assert_eq!(
+            report["alias_deprecation"]["retirement_utc"],
+            "2026-09-14T04:00:00Z"
+        );
+    }
+
+    /// The surface `codewhale doctor` prints from, which resolves no base URL
+    /// of its own. Keep it covered separately: the report path above can only
+    /// speak for a route whose endpoint is already decided.
+    #[test]
+    fn doctor_capability_names_the_v4_pro_retirement_for_the_deepseek_provider() {
+        let capability = crate::config::provider_capability(
+            crate::config::ApiProvider::Deepseek,
+            "deepseek-v4-pro",
+        );
+        let alias = capability
+            .alias_deprecation
+            .expect("deepseek-v4-pro carries the vendor retirement");
+
+        assert_eq!(alias.alias, "deepseek-v4-pro");
+        assert_eq!(alias.replacement, "deepseek-flash");
+        assert_eq!(alias.retirement_date, "2026-09-14");
+        assert!(
+            alias.notice.contains("billed at Flash") || alias.notice.contains("Flash's price"),
+            "the notice must say the bill changes too: {}",
+            alias.notice
+        );
+    }
+
+    /// A custom endpoint owns the same model strings; DeepSeek's retirement is
+    /// not a claim CodeWhale may make about someone else's host.
+    #[test]
+    fn provider_capability_report_leaves_custom_v4_pro_namespace_untouched() {
+        let mut config = Config {
+            base_url: Some("https://models.example/v1".to_string()),
+            default_text_model: Some("deepseek-v4-pro".to_string()),
+            ..Default::default()
+        };
+        crate::config::normalize_model_config_for_test(&mut config);
+
+        let report = provider_capability_report(&config);
+
+        assert_eq!(report["resolved_model"], "deepseek-v4-pro");
+        assert!(report["alias_deprecation"].is_null());
+    }
+
     #[test]
     fn doctor_route_report_exposes_tokenhub_openai_compatible_route_without_secret() {
         let mut providers = crate::config::ProvidersConfig::default();

@@ -13,8 +13,8 @@ use codewhale_config::pricing::{
 
 use crate::config::{
     ApiProvider, DEEPSEEK_ALIAS_REPLACEMENT, DEEPSEEK_ALIAS_RETIREMENT_UTC,
-    DEFAULT_STEPFUN_BASE_URL, DEFAULT_STEPFUN_MODEL, DEFAULT_STEPFUN_PLAN_BASE_URL,
-    canonical_model_id_for_provider,
+    DEEPSEEK_V4_PRO_SUNSET_UTC, DEFAULT_STEPFUN_BASE_URL, DEFAULT_STEPFUN_MODEL,
+    DEFAULT_STEPFUN_PLAN_BASE_URL, canonical_model_id_for_provider,
 };
 use codewhale_models::{Usage, has_date_snapshot_suffix};
 
@@ -1015,14 +1015,6 @@ fn deepseek_is_peak(now: DateTime<Utc>) -> bool {
     !deepseek_weekend_off_peak(now) && deepseek_peak_hour(now.hour())
 }
 
-/// 12:00 Beijing on 2026-09-14, when DeepSeek stops serving V4 Pro.
-///
-/// The vendor's 2026-09-10 notice: "we plan to postpone the discontinuation of
-/// the V4 Pro service to 12:00 Beijing Time on September 14, 2026. At that
-/// time, all requests to the Pro model will be routed to V4.1 Flash and billed
-/// at Flash's price."
-const DEEPSEEK_V4_PRO_SUNSET: &str = "2026-09-14T04:00:00Z";
-
 fn deepseek_v4_pro_pricing(now: DateTime<Utc>) -> ModelPricing {
     // After the sunset a `deepseek-v4-pro` request is served by V4.1 Flash and
     // billed at Flash's rates. Reporting Pro's rates past that instant would
@@ -1030,7 +1022,7 @@ fn deepseek_v4_pro_pricing(now: DateTime<Utc>) -> ModelPricing {
     // fabricated receipt, which is the one thing cost reporting must never do.
     // This is what the `now` parameter was always for.
     if now
-        >= DEEPSEEK_V4_PRO_SUNSET
+        >= DEEPSEEK_V4_PRO_SUNSET_UTC
             .parse::<DateTime<Utc>>()
             .expect("valid sunset timestamp")
     {

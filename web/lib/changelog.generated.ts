@@ -83,6 +83,7 @@ export const CHANGELOG: ChangelogRelease[] = [
         "heading": "Added",
         "items": [
           "deepseek-flash (DeepSeek V4.1 Flash: text-only, 1M-token context, reasoning and tool calls) joins the catalog as DeepSeek's declared default, and the offline catalog seed matches it; the DeepSeek Pro listing no longer overstates the published price (#6025).",
+          "codewhale doctor and the provider capability report now name DeepSeek's V4 Pro retirement while there is still time to act on it: a route on deepseek-v4-pro reports that DeepSeek routes it to deepseek-flash from 2026-09-14 and bills at Flash's price. The id keeps working, so nothing is rewritten for you — the point is that the substitution is the vendor's choice unless you make it yours first. A custom endpoint serving the same model string is untouched: DeepSeek's…",
           "Native plugin authoring guides now cover English and Chinese. The explicit offline converter supports selected portable Skills and static Streamable HTTP MCP declarations from OpenCode and DSH. Unsupported executable hooks, automatic OAuth and policy-bearing configurations are refused; generated bundles still require native installation, review and trust. Legacy SSE fallback is not reproduced (#5827, requested by @giancarlocp).",
           "Signed cloud model facts can refresh provider capabilities and prices while preserving verified cached data when a refresh fails. A dispatched request keeps its selected price snapshot so later catalog updates cannot change its recorded cost (#5752).",
           "Saved sessions preserve exact provider routes. Auxiliary model calls settle their usage once against the route and price snapshot that executed them, including recovery, rather than resolving a new price at completion (#5726, #5848).",
@@ -92,10 +93,9 @@ export const CHANGELOG: ChangelogRelease[] = [
           "The /theme picker now discovers valid user-authored custom:<name> overlays, previews their colors, highlights the active overlay, and preserves it when the picker is opened and committed without navigation (#5901).",
           "Compaction has two standing knobs next to [context] in config.toml: [compaction] summary_instructions (appended to the summarizer prompt on every manual and automatic pass; /compact <focus> still composes after it) and [compaction] retained_user_message_tokens (default 20 000, clamped 2 000..=200 000) for the verbatim user-message budget. Both are absent by default and absent means the pre-existing behavior. The /compact receipt names the effective budget and whether…",
           "[tools] user_input_max_questions (default 6, 1..=10) and [tools] user_input_max_options (default 4, 2..=10) replace the hard-coded request_user_input limits; the validator, the tool schema and its description read one value, spawned children inherit the parent's ceilings, and a rejected payload names the ceiling it hit and the key to raise (#5949).",
-          "The slash menu shows a command's usage line and its subcommands as soon as a space is typed after the verb, filtered by what follows, so Tab completes /workspace wor to /workspace worktrees; /help states the focused command's usage in its detail slot (#5952).",
-          "The three /fleet views (roster, live workers, saved teams) are one back-navigable stack: Esc in workers or saved teams returns to the roster with its cursor intact and still closes the window at the root or on direct entry; the Esc footer hint says back or close accordingly (#5954)."
+          "The slash menu shows a command's usage line and its subcommands as soon as a space is typed after the verb, filtered by what follows, so Tab completes /workspace wor to /workspace worktrees; /help states the focused command's usage in its detail slot (#5952)."
         ],
-        "itemCount": 16
+        "itemCount": 17
       },
       {
         "heading": "Contributors",

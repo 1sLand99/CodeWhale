@@ -331,6 +331,16 @@ reconnect.
   reasoning and tool calls) joins the catalog as DeepSeek's declared default,
   and the offline catalog seed matches it; the DeepSeek Pro listing no longer
   overstates the published price (#6025).
+- `codewhale doctor` and the provider capability report now name DeepSeek's
+  V4 Pro retirement while there is still time to act on it: a route on
+  `deepseek-v4-pro` reports that DeepSeek routes it to `deepseek-flash` from
+  2026-09-14 and bills at Flash's price. The id keeps working, so nothing is
+  rewritten for you — the point is that the substitution is the vendor's
+  choice unless you make it yours first. A custom endpoint serving the same
+  model string is untouched: DeepSeek's retirement is not a claim CodeWhale
+  makes about someone else's host. Cost reporting already switched to Flash's
+  rates at that instant, and both now read the same date from one constant
+  (#6025).
 - Native plugin authoring guides now cover English and Chinese. The explicit
   offline converter supports selected portable Skills and static Streamable
   HTTP MCP declarations from OpenCode and DSH. Unsupported executable hooks,
