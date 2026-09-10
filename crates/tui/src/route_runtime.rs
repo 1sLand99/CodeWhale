@@ -759,8 +759,8 @@ pub(crate) fn resolve_runtime_route_for_identity(
         let model = model.trim();
         !model.is_empty() && !model.eq_ignore_ascii_case("auto")
     });
-    let saved_provider_model = configured_model_for_route(&route_config, provider)
-        .or(configured_default.as_deref());
+    let saved_provider_model =
+        configured_model_for_route(&route_config, provider).or(configured_default.as_deref());
     // #5034: with no explicit selector and no saved model, a Codex route
     // would fall back to the resolver's static seed offering. Prefer the
     // live Codex roster head so a provider switch lands on the current
