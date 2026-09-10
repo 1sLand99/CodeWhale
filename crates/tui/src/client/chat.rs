@@ -3241,6 +3241,13 @@ fn requires_reasoning_content(model: &str) -> bool {
         || lower.starts_with("deepseek-chat")
         || lower.starts_with("deepseek-reasoner")
         || has_deepseek_r_series_marker(&lower)
+        // #6044: the V4.1 official id dropped the version number entirely
+        // (`deepseek-flash`), so the literal arms above cannot see it and
+        // the decode/replay classifiers depended on a later catalog fallback
+        // to catch it. The catalog owns the capability — consult it here so
+        // every caller (stream style, wire replay, prompt inspection) agrees
+        // without another hardcoded id.
+        || (lower.starts_with("deepseek-") && model_supports_reasoning(model))
 }
 
 fn should_replay_reasoning_content(model: &str, effort: Option<&str>) -> bool {

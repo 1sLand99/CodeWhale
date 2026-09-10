@@ -1496,3 +1496,48 @@ fn mistral_stream_blocks_are_decoded_only_by_the_mistral_style() {
         }
     )));
 }
+
+#[test]
+fn deepseek_flash_v41_classifies_reasoning_through_the_catalog() {
+    // #6044: V4.1's official id dropped the version number, so the literal
+    // `deepseek-v4` arms cannot see it. The catalog owns the capability and
+    // every classifier — stream style, wire replay, prompt inspection — must
+    // read it there instead of relying on another classifier's fallback.
+    let base_url = "https://api.deepseek.com";
+    assert!(
+        requires_reasoning_content("deepseek-flash"),
+        "the name gate must recognize the official V4.1 id through the catalog"
+    );
+    assert!(
+        should_replay_reasoning_content("deepseek-flash", None),
+        "prompt inspection must agree with the wire request"
+    );
+    assert!(should_replay_reasoning_content_for_provider_on_route(
+        ApiProvider::Deepseek,
+        base_url,
+        "deepseek-flash",
+        None,
+    ));
+
+    let style = reasoning_stream_style_for_route(
+        ApiProvider::Deepseek,
+        base_url,
+        "deepseek-flash",
+        None,
+    );
+    assert_eq!(style, ReasoningStreamStyle::SeparateField);
+    let events = decode_chunks_with_style(
+        &[r#"{"choices":[{"delta":{"reasoning_content":"private flash plan"}}]}"#],
+        style,
+    );
+    assert_eq!(thinking_delta_text(&events), "private flash plan");
+    assert_eq!(
+        text_delta_text(&events),
+        "",
+        "reasoning must never leak into visible prose"
+    );
+
+    // A non-reasoning DeepSeek name stays literal: the prefix alone is not
+    // evidence, the catalog entry is.
+    assert!(!requires_reasoning_content("deepseek-coder"));
+}
