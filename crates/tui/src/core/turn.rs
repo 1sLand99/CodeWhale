@@ -610,8 +610,8 @@ pub struct SnapshotsDisabledNotice {
 }
 
 impl SnapshotsDisabledNotice {
-    fn message_id(&self) -> crate::localization::MessageId {
-        use crate::localization::MessageId;
+    fn message_id(&self) -> codewhale_localization::MessageId {
+        use codewhale_localization::MessageId;
         match self.scope {
             SnapshotsDisabledScope::WorkspaceTooLarge => MessageId::SnapshotsDisabledTooLarge,
             SnapshotsDisabledScope::TooManyFiles => MessageId::SnapshotsDisabledTooManyFiles,
@@ -621,8 +621,8 @@ impl SnapshotsDisabledNotice {
 
     /// The single user-facing line: what is off, for which workspace, why, and
     /// the recovery that actually applies to this gate.
-    pub fn localize(&self, locale: crate::localization::Locale) -> String {
-        crate::localization::tr(locale, self.message_id())
+    pub fn localize(&self, locale: codewhale_localization::Locale) -> String {
+        codewhale_localization::tr(locale, self.message_id())
             .replace("{workspace}", &self.workspace)
             .replace("{limit}", &self.limit)
             .replace("{config_key}", SNAPSHOTS_CAP_CONFIG_KEY)
@@ -763,7 +763,7 @@ fn maybe_notify_snapshots_disabled_once(
     // this path has always printed. The TUI and `/status` localize properly.
     eprintln!(
         "warning: {}",
-        notice.localize(crate::localization::Locale::En)
+        notice.localize(codewhale_localization::Locale::En)
     );
     true
 }
@@ -827,7 +827,7 @@ mod snapshot_notice_tests {
             let notices = take_snapshots_disabled_notices(&workspace, Some(session));
             assert_eq!(notices.len(), 1, "each session receives its own notice");
             assert_eq!(notices[0].scope, SnapshotsDisabledScope::WorkspaceTooLarge);
-            let line = notices[0].localize(crate::localization::Locale::En);
+            let line = notices[0].localize(codewhale_localization::Locale::En);
             assert_eq!(line.lines().count(), 1, "one line, not a stacked notice");
             assert_eq!(
                 line.matches(&workspace.display().to_string()).count(),
@@ -933,7 +933,7 @@ mod snapshot_notice_tests {
             let notice = snapshots_disabled_status(workspace.path(), Some(&session))
                 .expect("gated error must be retained for /status");
             assert_eq!(notice.scope, scope);
-            let line = notice.localize(crate::localization::Locale::En);
+            let line = notice.localize(codewhale_localization::Locale::En);
             assert_eq!(line.lines().count(), 1, "one line, not a stacked notice");
             assert!(
                 !line.contains(SNAPSHOTS_CAP_CONFIG_KEY),
@@ -970,7 +970,7 @@ mod snapshot_notice_tests {
         ));
         let notice =
             snapshots_disabled_status(workspace.path(), Some("session")).expect("retained");
-        let line = notice.localize(crate::localization::Locale::En);
+        let line = notice.localize(codewhale_localization::Locale::En);
         assert!(line.contains("2.0 GB"), "{line}");
         assert!(line.contains(SNAPSHOTS_CAP_CONFIG_KEY), "{line}");
     }

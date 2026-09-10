@@ -961,6 +961,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "codewhale-localization"
+version = "0.9.13"
+dependencies = [
+ "codewhale-build-support",
+ "ratatui",
+ "rust-i18n",
+ "rust-i18n-support",
+ "serde_json",
+ "unicode-segmentation",
+ "unicode-width",
+]
+
+[[package]]
 name = "codewhale-mcp"
 version = "0.9.13"
 dependencies = [
@@ -1090,6 +1103,7 @@ dependencies = [
  "codewhale-execpolicy",
  "codewhale-hooks",
  "codewhale-lane",
+ "codewhale-localization",
  "codewhale-paths",
  "codewhale-protocol",
  "codewhale-release",
@@ -1129,8 +1143,6 @@ dependencies = [
  "rio-vt",
  "rmcp",
  "rusqlite",
- "rust-i18n",
- "rust-i18n-support",
  "rustls",
  "rusty_alloc-api",
  "schemars",

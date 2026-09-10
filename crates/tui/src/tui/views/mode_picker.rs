@@ -12,7 +12,6 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::localization::Locale;
 use crate::palette;
 use crate::tui::app::AppModeUi;
 use crate::tui::menu_style;
@@ -21,6 +20,7 @@ use crate::tui::views::{
     render_modal_footer, render_modal_surface,
 };
 use codewhale_config::AppMode;
+use codewhale_localization::Locale;
 
 // Operate is visible because the engine now enforces a coordinator/worker
 // boundary while allowing ordinary conversation and asynchronous dispatch.

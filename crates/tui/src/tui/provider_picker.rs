@@ -37,7 +37,6 @@ use ratatui::{
 
 use crate::config::{ApiProvider, Config, base_url_uses_local_host, provider_is_configured};
 use crate::core::ops::ProviderRuntimeStatus;
-use crate::localization::{Locale, MessageId, tr};
 use crate::model_profile::{
     SupportState, resolved_capability_profile, resolved_capability_profile_for_route,
 };
@@ -61,6 +60,7 @@ use codewhale_config::{
     AGNES_TEMPLATE_ID, ProviderSetupApply, ProviderSetupTemplate, SENSENOVA_TEMPLATE_ID,
     provider_setup_template, provider_setup_templates,
 };
+use codewhale_localization::{Locale, MessageId, tr};
 use serde_json::Value;
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -6845,7 +6845,7 @@ mod tests {
     fn template_list_uses_locale_for_kinds_labels_and_guidance() {
         let config = Config::default();
         let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config)
-            .with_locale(crate::localization::Locale::ZhHans);
+            .with_locale(codewhale_localization::Locale::ZhHans);
         assert!(matches!(
             picker.handle_key(key(KeyCode::Char('p'))),
             ViewAction::None
@@ -8790,7 +8790,7 @@ mod tests {
             None,
         )
         .expect("OpenAI Codex has a picker row")
-        .with_locale(crate::localization::Locale::ZhHans);
+        .with_locale(codewhale_localization::Locale::ZhHans);
 
         picker.handle_key(key(KeyCode::Char('2')));
         picker.handle_key(key(KeyCode::Enter));
@@ -8852,7 +8852,7 @@ mod tests {
             None,
         )
         .expect("xAI has a picker row")
-        .with_locale(crate::localization::Locale::ZhHans);
+        .with_locale(codewhale_localization::Locale::ZhHans);
 
         let rendered = render_text(&picker, 100, 24);
         let compact = rendered

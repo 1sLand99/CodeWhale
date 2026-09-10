@@ -17,10 +17,10 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
-use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
 use crate::tui::menu_style;
 use crate::tui::widgets::Renderable;
+use codewhale_localization::{Locale, MessageId, tr};
 
 /// Per-item line cap before we collapse the rest into a `…` overflow row.
 const PREVIEW_LINE_LIMIT: usize = 3;
@@ -116,11 +116,11 @@ impl PendingInputPreview {
                     .replace("{count}", &count.to_string())
             };
             let next = self.queued_messages[0].replace('\n', " ");
-            let summary = crate::localization::truncate_to_width(
+            let summary = codewhale_localization::truncate_to_width(
                 &format!("{prefix}{next}"),
                 usize::from(width),
             );
-            let controls = crate::localization::truncate_to_width(
+            let controls = codewhale_localization::truncate_to_width(
                 &tr(self.locale, MessageId::PendingSendNowDropControls)
                     .replace("{key}", self.edit_binding.label),
                 usize::from(width),

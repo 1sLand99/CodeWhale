@@ -8,7 +8,6 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use crate::localization::Locale;
 use crate::models::{ContentBlock, Message};
 use crate::palette;
 use crate::tools::plan::PlanSnapshot;
@@ -17,6 +16,7 @@ use crate::tui::app::TranscriptSpacing;
 use crate::tui::diff_render;
 use crate::tui::motion::MotionMode;
 use crate::tui::ui_text::CopyLineSeparator;
+use codewhale_localization::Locale;
 
 mod agent_activity;
 mod archived_context;
@@ -1236,7 +1236,10 @@ impl ExploringCell {
             Cow::Borrowed("")
         } else if all_done {
             if status == ToolStatus::Success {
-                crate::localization::tr(locale, crate::localization::MessageId::ToolReceiptDone)
+                codewhale_localization::tr(
+                    locale,
+                    codewhale_localization::MessageId::ToolReceiptDone,
+                )
             } else {
                 Cow::Borrowed(tool_status_label(status))
             }
@@ -2886,26 +2889,29 @@ pub(crate) fn tool_receipt_label(
         ToolFamily::Read | ToolFamily::Find => {
             let lines = output.map(count_output_lines).unwrap_or(0);
             if lines == 0 {
-                crate::localization::tr(locale, crate::localization::MessageId::ToolReceiptDone)
-            } else if lines == 1 {
-                crate::localization::tr(
+                codewhale_localization::tr(
                     locale,
-                    crate::localization::MessageId::ToolReceiptLinesSingular,
+                    codewhale_localization::MessageId::ToolReceiptDone,
+                )
+            } else if lines == 1 {
+                codewhale_localization::tr(
+                    locale,
+                    codewhale_localization::MessageId::ToolReceiptLinesSingular,
                 )
             } else {
                 Cow::Owned(
-                    crate::localization::tr(
+                    codewhale_localization::tr(
                         locale,
-                        crate::localization::MessageId::ToolReceiptLinesPlural,
+                        codewhale_localization::MessageId::ToolReceiptLinesPlural,
                     )
                     .replace("{count}", &lines.to_string()),
                 )
             }
         }
         ToolFamily::Run => {
-            crate::localization::tr(locale, crate::localization::MessageId::ToolReceiptDone)
+            codewhale_localization::tr(locale, codewhale_localization::MessageId::ToolReceiptDone)
         }
-        _ => crate::localization::tr(locale, crate::localization::MessageId::ToolReceiptDone),
+        _ => codewhale_localization::tr(locale, codewhale_localization::MessageId::ToolReceiptDone),
     }
 }
 

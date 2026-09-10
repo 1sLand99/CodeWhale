@@ -1281,8 +1281,8 @@ impl UnpricedReason {
     }
 
     #[must_use]
-    pub const fn message_id(self) -> crate::localization::MessageId {
-        use crate::localization::MessageId;
+    pub const fn message_id(self) -> codewhale_localization::MessageId {
+        use codewhale_localization::MessageId;
         match self {
             Self::NotMoneyMetered => MessageId::CostReasonNotMoney,
             Self::UnknownBillingBasis => MessageId::CostReasonBillingUnknown,

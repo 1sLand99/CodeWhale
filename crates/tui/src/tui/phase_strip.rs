@@ -24,12 +24,12 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::localization::{MessageId, tr};
 use crate::palette::ChromeInk;
 use crate::tui::{
     app::App,
     underwater::{LiveActivity, ShellPhase, ShellTier, phase_marker_with_activity},
 };
+use codewhale_localization::{MessageId, tr};
 
 /// Fixed one-row reservation for the identity band below the composer.
 #[must_use]
@@ -441,7 +441,7 @@ mod tests {
             },
             &Config::default(),
         );
-        app.ui_locale = crate::localization::Locale::En;
+        app.ui_locale = codewhale_localization::Locale::En;
 
         // The info line's own budget rule (ui/frame.rs): width minus the brand
         // lockup, meter, and clock floor, never below 24.
@@ -508,7 +508,7 @@ mod tests {
     fn long_custom_route_names_shed_whole_fields_across_width_tiers() {
         let model = "deepseek-v4-flash-vision-preview-2026-08-01";
         let mut app = test_app();
-        app.ui_locale = crate::localization::Locale::En;
+        app.ui_locale = codewhale_localization::Locale::En;
         app.set_provider_identity(
             crate::config::ApiProvider::Custom,
             "acme-research-gateway-eu-central",

@@ -623,10 +623,10 @@ pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot)
         // the objective is the prompt the user just typed, so the receipt
         // says what Operate will do with it instead of echoing it.
         let content = if app.mode == AppMode::Operate {
-            app.tr(crate::localization::MessageId::GoalReceiptSetOperate)
+            app.tr(codewhale_localization::MessageId::GoalReceiptSetOperate)
                 .into_owned()
         } else {
-            app.tr(crate::localization::MessageId::GoalReceiptSet)
+            app.tr(codewhale_localization::MessageId::GoalReceiptSet)
                 .replace("{objective}", objective)
         };
         app.add_message(crate::tui::history::HistoryCell::System { content });
@@ -640,7 +640,7 @@ pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot)
         && let Some(progress) = snapshot.progress.as_ref()
     {
         let mut content = app
-            .tr(crate::localization::MessageId::GoalProgressReceipt)
+            .tr(codewhale_localization::MessageId::GoalProgressReceipt)
             .replace("{percent}", &progress.percent.to_string())
             .replace(
                 "{bar}",
@@ -649,14 +649,14 @@ pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot)
         if let Some(now) = progress.now.as_deref() {
             content.push('\n');
             content.push_str(
-                &app.tr(crate::localization::MessageId::GoalProgressNow)
+                &app.tr(codewhale_localization::MessageId::GoalProgressNow)
                     .replace("{note}", now),
             );
         }
         if let Some(next) = progress.next.as_deref() {
             content.push('\n');
             content.push_str(
-                &app.tr(crate::localization::MessageId::GoalProgressNext)
+                &app.tr(codewhale_localization::MessageId::GoalProgressNext)
                     .replace("{note}", next),
             );
         }
@@ -880,7 +880,7 @@ pub(crate) async fn apply_model_picker_choice(
     save_as_startup_default: bool,
 ) {
     if app.reject_setting_change_while_busy(
-        crate::localization::MessageId::SettingSubjectModelAndThinking,
+        codewhale_localization::MessageId::SettingSubjectModelAndThinking,
     ) {
         note_startup_default_not_saved(app, save_as_startup_default);
         return;
@@ -1059,7 +1059,8 @@ pub(crate) async fn apply_picker_effort_choice(
     effort: ReasoningEffort,
     previous_effort: ReasoningEffort,
 ) {
-    if app.reject_setting_change_while_busy(crate::localization::MessageId::SettingSubjectThinking)
+    if app
+        .reject_setting_change_while_busy(codewhale_localization::MessageId::SettingSubjectThinking)
     {
         return;
     }
@@ -1115,7 +1116,7 @@ pub(crate) async fn apply_picker_effort_choice(
         );
         if persisted {
             summary.push_str(" · ");
-            summary.push_str(&app.tr(crate::localization::MessageId::SavedAsStartupDefault));
+            summary.push_str(&app.tr(codewhale_localization::MessageId::SavedAsStartupDefault));
         }
         summary
     };
@@ -2347,9 +2348,9 @@ pub(crate) async fn apply_command_result(
                 app.add_message(HistoryCell::System {
                     content: match tasks {
                         Ok(tasks) => format_task_list(&tasks),
-                        Err(_) => crate::localization::tr(
+                        Err(_) => codewhale_localization::tr(
                             app.ui_locale,
-                            crate::localization::MessageId::TaskInventoryUnavailable,
+                            codewhale_localization::MessageId::TaskInventoryUnavailable,
                         )
                         .to_string(),
                     },

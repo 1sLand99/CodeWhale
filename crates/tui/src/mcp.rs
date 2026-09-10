@@ -4698,13 +4698,13 @@ impl McpRecoveryKind {
     }
 
     #[must_use]
-    pub fn label_key(self) -> crate::localization::MessageId {
+    pub fn label_key(self) -> codewhale_localization::MessageId {
         match self {
-            Self::Enable => crate::localization::MessageId::ExtensionsActionEnable,
-            Self::Connect => crate::localization::MessageId::ExtensionsActionConnect,
-            Self::Reconnect => crate::localization::MessageId::ExtensionsActionReconnect,
-            Self::Reauth => crate::localization::MessageId::ExtensionsActionReauth,
-            Self::Diagnose => crate::localization::MessageId::ExtensionsActionDiagnose,
+            Self::Enable => codewhale_localization::MessageId::ExtensionsActionEnable,
+            Self::Connect => codewhale_localization::MessageId::ExtensionsActionConnect,
+            Self::Reconnect => codewhale_localization::MessageId::ExtensionsActionReconnect,
+            Self::Reauth => codewhale_localization::MessageId::ExtensionsActionReauth,
+            Self::Diagnose => codewhale_localization::MessageId::ExtensionsActionDiagnose,
         }
     }
 }

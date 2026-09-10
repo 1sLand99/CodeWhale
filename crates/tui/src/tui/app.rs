@@ -24,7 +24,6 @@ use crate::config::{
 use crate::core::authority::{ModeSessionPrefs, base_policy_for_mode};
 use crate::core::events::TurnRoute;
 use crate::hooks::{HookContext, HookEvent, HookExecutor, HookResult};
-use crate::localization::{Locale, MessageId, resolve_locale, tr};
 use crate::models::{Message, SystemPrompt, Tool, Usage};
 use crate::palette::{self, UiTheme};
 use crate::pricing::{CostCurrency, CostEstimate};
@@ -48,6 +47,7 @@ use crate::tui::shell_key_routing::Focus;
 use crate::tui::streaming::StreamingState;
 use crate::tui::transcript::TranscriptViewCache;
 use crate::tui::views::ViewStack;
+use codewhale_localization::{Locale, MessageId, resolve_locale, tr};
 
 mod composer;
 mod init;
@@ -2305,7 +2305,7 @@ pub struct App {
             Option<(
                 u64,
                 String,
-                crate::localization::Locale,
+                codewhale_localization::Locale,
                 Result<Box<codewhale_config::UserConstitution>, String>,
             )>,
         >,
@@ -3024,7 +3024,7 @@ impl App {
             settings.set("locale", tag)?;
             Ok(settings.locale.clone())
         })?;
-        self.ui_locale = crate::localization::resolve_locale(&locale);
+        self.ui_locale = codewhale_localization::resolve_locale(&locale);
         self.needs_redraw = true;
         Ok(())
     }

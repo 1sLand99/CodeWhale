@@ -144,7 +144,7 @@ Codewhale 以两个紧凑层级呈现其随附 skills，这样 agentic 工作流
 
 支持 `description_<tag>` frontmatter（先是精确 tag，然后是主子标签，最后是规范描述——繁体中文被排除在简体的 `zh` 回退之外）。**没有内置 skill 附带本地化路由描述**，也不会伪造一个。因此随附契约是一个显式的、经过测试的回退：
 
-- 对于包中每个 skill × `Locale::shipped()` 中每个 locale——全部 15 个：`en`、`ja`、`zh-Hans`、`zh-Hant`、`pt-BR`、`es-419`、`vi`、`ko`、`ca`、`de`、`fr`、`id`、`hi`、`ru`、`uk`（`crates/tui/src/localization.rs:70-88`）——`description_for_locale` 返回规范英文描述。
+- 对于包中每个 skill × `Locale::shipped()` 中每个 locale——全部 15 个：`en`、`ja`、`zh-Hans`、`zh-Hant`、`pt-BR`、`es-419`、`vi`、`ko`、`ca`、`de`、`fr`、`id`、`hi`、`ru`、`uk`（`crates/localization/src/lib.rs:70-88`）——`description_for_locale` 返回规范英文描述。
 - 渲染的目录块在所有随附 locale 中逐字节相同。
 - 精确 tag 匹配、主子标签回退（`pt-BR` → `description_pt`）和英文回退都针对一个合成的编写夹具覆盖，因此即使包本身仅英文，解析路径也保持被测试。
 

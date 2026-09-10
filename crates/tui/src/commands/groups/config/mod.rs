@@ -11,8 +11,8 @@ mod status;
 
 use crate::commands::CommandResult;
 use crate::commands::traits::{Command, CommandGroup, CommandInfo, FunctionCommand};
-use crate::localization::MessageId;
 use crate::tui::app::App;
+use codewhale_localization::MessageId;
 
 pub struct ConfigCommands;
 

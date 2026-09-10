@@ -1628,7 +1628,7 @@ impl AcpServer {
     }
 
     fn session_configuration(&self, session_id: &str) -> Value {
-        use crate::localization::{MessageId, resolve_locale, tr};
+        use codewhale_localization::{MessageId, resolve_locale, tr};
         let settings = crate::settings::Settings::load().unwrap_or_default();
         let locale = resolve_locale(&settings.locale);
         let session = &self.sessions[session_id];
@@ -2021,7 +2021,7 @@ fn build_acp_system_prompt(
     route_limits: Option<codewhale_config::route::RouteLimits>,
 ) -> SystemPrompt {
     let settings = crate::settings::Settings::load().unwrap_or_default();
-    let locale_tag = crate::localization::resolve_locale(&settings.locale)
+    let locale_tag = codewhale_localization::resolve_locale(&settings.locale)
         .tag()
         .to_string();
     let instructions = config

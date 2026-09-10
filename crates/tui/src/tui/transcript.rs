@@ -17,7 +17,6 @@ use ratatui::{
     text::{Line, Span},
 };
 
-use crate::localization::{MessageId, tr};
 use crate::tui::app::TranscriptSpacing;
 use crate::tui::history::{
     HistoryCell, ReasoningAction, ReasoningActionTarget, TranscriptActionOwner,
@@ -25,6 +24,7 @@ use crate::tui::history::{
 };
 use crate::tui::scrolling::TranscriptLineMeta;
 use crate::tui::ui_text::CopyLineSeparator;
+use codewhale_localization::{MessageId, tr};
 
 /// Revision-bound render output. Arcs keep cache enumeration O(cells) instead
 /// of deep-cloning every rendered line on ambient frames (issue #78); the

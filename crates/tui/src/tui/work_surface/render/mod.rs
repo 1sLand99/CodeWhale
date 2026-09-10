@@ -23,10 +23,10 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::localization::MessageId;
 use crate::palette::{ChromeInk, chrome_style};
 use crate::tui::app::{App, SidebarHoverRow, SidebarHoverSection};
 use crate::tui::ui_text::truncate_line_to_width;
+use codewhale_localization::MessageId;
 
 use super::model::{
     DockTabHitbox, DockTabTarget, RailPanel, WorkHitbox, WorkRow, WorkSurfacePlacement, WorkTone,

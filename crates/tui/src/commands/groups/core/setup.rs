@@ -3,8 +3,8 @@
 use crate::commands::traits::{CommandInfo, RegisterCommand};
 #[cfg(test)]
 use crate::config::ApiProvider;
-use crate::localization::MessageId;
 use crate::tui::app::{App, AppAction};
+use codewhale_localization::MessageId;
 
 use super::CommandResult;
 use codewhale_config::SetupStep;

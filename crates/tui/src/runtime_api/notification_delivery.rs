@@ -2,10 +2,10 @@
 //! policy owners. This endpoint prepares an attempt; it never submits a banner.
 
 use super::*;
-use crate::localization::{Locale, MessageId, tr};
 use crate::runtime_threads::{RuntimeEventRecord, RuntimeTurnStatus};
 use crate::tui::notification_payload::NotificationPayload;
 use crate::tui::{notification_audio, notifications, sound_policy};
+use codewhale_localization::{Locale, MessageId, tr};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

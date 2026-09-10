@@ -113,7 +113,7 @@ fn translation_placeholder_spinner_frame(app: &App, elapsed: f32) -> &'static st
 }
 
 pub(super) fn translation_placeholder_frame(app: &App) -> String {
-    let base = crate::localization::thinking_translation_placeholder(app.ui_locale);
+    let base = codewhale_localization::thinking_translation_placeholder(app.ui_locale);
     let elapsed = app
         .thinking_started_at
         .or(app.turn_started_at)
@@ -126,7 +126,7 @@ pub(super) fn translation_placeholder_frame(app: &App) -> String {
 /// If the given entry is empty or still showing the translation
 /// placeholder prefix, replace it with the latest animated frame.
 pub(super) fn set_placeholder(app: &mut App, entry_idx: usize) {
-    let base = crate::localization::thinking_translation_placeholder(app.ui_locale);
+    let base = codewhale_localization::thinking_translation_placeholder(app.ui_locale);
     let next = translation_placeholder_frame(app);
     let mutated = if let Some(active) = app.active_cell.as_mut()
         && let Some(HistoryCell::Thinking { content, .. }) = active.entry_mut(entry_idx)
@@ -157,7 +157,7 @@ pub(super) fn animate_pending_translation(app: &mut App, translation_pending: bo
     if !translation_pending && !thinking_streaming {
         return false;
     }
-    let base = crate::localization::thinking_translation_placeholder(app.ui_locale);
+    let base = codewhale_localization::thinking_translation_placeholder(app.ui_locale);
     let next = translation_placeholder_frame(app);
 
     if let Some(active) = app.active_cell.as_mut() {

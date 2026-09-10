@@ -6,10 +6,10 @@ use std::path::Path;
 
 use super::CommandResult;
 use crate::compaction::estimate_input_tokens_conservative;
-use crate::localization::{Locale, MessageId, tr};
 use crate::tui::app::{App, AppModeUi};
 use crate::utils::{display_path, estimate_message_chars};
 use codewhale_execpolicy::ApprovalMode;
+use codewhale_localization::{Locale, MessageId, tr};
 
 /// Show a compact runtime status report for the current TUI session.
 pub fn status(app: &mut App) -> CommandResult {

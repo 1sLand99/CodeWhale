@@ -364,7 +364,7 @@ pub(crate) async fn run_exec_agent(
         disallowed_tools: disallowed_tools.clone(),
         max_tool_calls,
         hook_executor: None,
-        locale_tag: crate::localization::resolve_locale(&settings.locale)
+        locale_tag: codewhale_localization::resolve_locale(&settings.locale)
             .tag()
             .to_string(),
         workshop: {

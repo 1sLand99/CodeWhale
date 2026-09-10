@@ -2228,7 +2228,7 @@ mod tests {
         // seam: it only enters the prompt when `translation_enabled` is
         // true. When it does, every shipped locale must be named
         // canonically (English name + endonym) — never silently "English".
-        for locale in crate::localization::Locale::shipped() {
+        for locale in codewhale_localization::Locale::shipped() {
             assert_eq!(
                 translation_target_language_for_tag(locale.tag()),
                 locale.translation_target_name(),

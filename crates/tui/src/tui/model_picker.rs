@@ -28,7 +28,6 @@ use crate::codex_model_cache::{
     self, CodexModelCacheFreshness, CodexModelMetadata, CodexModelRoster,
 };
 use crate::config::{ApiProvider, Config, DEEPSEEK_ALIAS_REPLACEMENT};
-use crate::localization::{Locale, MessageId, tr};
 use crate::model_profile::{
     CapabilityOverride, SupportState, resolved_capability_profile_for_route_with_overrides,
     resolved_capability_profile_with_overrides,
@@ -47,6 +46,7 @@ use crate::tui::views::{
     ActionHint, ListDetailLayout, ModalKind, ModalView, ViewAction, ViewEvent, render_modal_footer,
     render_underwater_surface,
 };
+use codewhale_localization::{Locale, MessageId, tr};
 
 /// Thinking-effort rows shown for DeepSeek-style providers, in the order
 /// DeepSeek behaviorally distinguishes them.

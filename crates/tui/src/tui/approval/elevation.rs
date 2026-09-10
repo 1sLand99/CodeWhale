@@ -10,10 +10,10 @@ use std::path::{Path, PathBuf};
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
-use crate::localization::Locale;
 use crate::sandbox::SandboxPolicy;
 use crate::tui::views::{ModalKind, ModalView, ViewAction, ViewEvent};
 use crate::tui::widgets::{ElevationWidget, Renderable};
+use codewhale_localization::Locale;
 
 /// Options for elevating sandbox permissions after a denial.
 #[derive(Debug, Clone, PartialEq, Eq)]

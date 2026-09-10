@@ -44,9 +44,9 @@ use serde_json::{Value, json};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::commands::traits::{CommandInfo, RegisterCommand};
-use crate::localization::{Locale, MessageId, tr};
 use crate::models::{ContentBlock, Message};
 use crate::tui::app::App;
+use codewhale_localization::{Locale, MessageId, tr};
 
 use super::CommandResult;
 use super::export::{is_internal_role, is_sensitive_key, redact_json, sanitize_text};

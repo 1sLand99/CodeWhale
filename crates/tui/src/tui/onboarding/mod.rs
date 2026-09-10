@@ -25,10 +25,10 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-use crate::localization::MessageId;
 use crate::palette;
 use crate::tui::app::{App, OnboardingState};
 use crate::tui::views::{ActionHint, render_modal_footer, render_underwater_surface};
+use codewhale_localization::MessageId;
 
 const ONBOARDED_MARKER_FILE: &str = ".onboarded";
 
@@ -406,7 +406,7 @@ pub fn mark_trusted(workspace: &Path) -> anyhow::Result<PathBuf> {
 /// confident; anything else defaults to English silently, so first run asks
 /// once. Returning users never see the language screen.
 pub fn locale_confidently_inferred(setting: &str) -> bool {
-    let normalized = crate::localization::normalize_configured_locale(setting);
+    let normalized = codewhale_localization::normalize_configured_locale(setting);
     if normalized.is_some_and(|tag| tag != "auto") {
         return true;
     }
@@ -414,7 +414,7 @@ pub fn locale_confidently_inferred(setting: &str) -> bool {
         std::env::var(key)
             .ok()
             .filter(|value| locale_var_names_a_language(value))
-            .and_then(|value| crate::localization::normalize_configured_locale(&value))
+            .and_then(|value| codewhale_localization::normalize_configured_locale(&value))
             .is_some_and(|tag| tag != "auto")
     })
 }
@@ -430,7 +430,7 @@ fn locale_var_names_a_language(value: &str) -> bool {
 
 /// The example task the ready screen seeds into the composer, chosen from
 /// what is cheaply visible in the workspace.
-pub fn first_task_seed(workspace: &Path, locale: crate::localization::Locale) -> String {
+pub fn first_task_seed(workspace: &Path, locale: codewhale_localization::Locale) -> String {
     let id = if CODE_PROJECT_MARKERS
         .iter()
         .any(|marker| workspace.join(marker).is_file())
@@ -439,7 +439,7 @@ pub fn first_task_seed(workspace: &Path, locale: crate::localization::Locale) ->
     } else {
         MessageId::OnboardSeedFolder
     };
-    crate::localization::tr(locale, id).into_owned()
+    codewhale_localization::tr(locale, id).into_owned()
 }
 
 /// Welcome → the first decision this run actually needs.
@@ -503,7 +503,7 @@ pub fn choose_offline_explore(app: &mut App) {
     // `advance_*` clears the status bar, so the label is applied after it.
     advance_onboarding_after_provider(app);
     app.status_message = Some(
-        app.tr(crate::localization::MessageId::OnboardOfflineNotice)
+        app.tr(codewhale_localization::MessageId::OnboardOfflineNotice)
             .into_owned(),
     );
     app.needs_redraw = true;
@@ -534,8 +534,8 @@ pub fn finish_ready_and_open_composer(app: &mut App) {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::localization::{Locale, MessageId, tr};
     use crate::tui::app::{App, TuiOptions};
+    use codewhale_localization::{Locale, MessageId, tr};
     use std::path::PathBuf;
 
     /// A first-run app with the onboarding decision reset to "nothing asked

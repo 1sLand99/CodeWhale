@@ -1,11 +1,11 @@
 use super::*;
-use crate::localization::Locale;
 use crate::palette;
 use crate::tools::plan::PlanSnapshot;
 use crate::tui::history::{
     ExecCell, ExecSource, HistoryCell, PlanUpdateCell, ReasoningAction, ReasoningActionTarget,
     ToolCell, ToolStatus, TranscriptActionOwner,
 };
+use codewhale_localization::Locale;
 
 impl TranscriptViewCache {
     pub(crate) fn reasoning_action_target(&self) -> Option<ReasoningActionTarget> {

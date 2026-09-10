@@ -14,7 +14,7 @@ use crate::palette::{ChromeInk, UI_THEME, UiTheme};
 /// The hint the live shell advertises, from the one binding module that owns
 /// it — a fixture string here would let chrome and routing drift apart.
 fn help_hint() -> String {
-    crate::tui::shell_key_routing::info_help_hint(crate::localization::Locale::En)
+    crate::tui::shell_key_routing::info_help_hint(codewhale_localization::Locale::En)
 }
 
 const BLOCKER_SIZES: [(u16, u16); 4] = [(80, 24), (100, 30), (120, 32), (160, 40)];

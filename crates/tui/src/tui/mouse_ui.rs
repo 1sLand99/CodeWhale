@@ -101,7 +101,6 @@ use ratatui::layout::Rect;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::localization::MessageId;
 use crate::models::{ContentBlock, Message};
 use crate::tui::app::{App, SidebarRowAction};
 use crate::tui::command_palette::{
@@ -116,6 +115,7 @@ use crate::tui::ui_text::{
     history_cell_to_text, line_to_plain, slice_text, text_display_width, truncate_line_to_width,
 };
 use crate::tui::views::{ContextMenuAction, HelpView, ModalKind, ViewEvent};
+use codewhale_localization::MessageId;
 
 // These functions will need to be imported from ui.rs or we can just import crate::tui::ui::*.
 use crate::tui::ui::{

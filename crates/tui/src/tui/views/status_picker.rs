@@ -22,13 +22,13 @@ use ratatui::{
 };
 
 use crate::config::{ApiProvider, StatusItem};
-use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
 use crate::tui::menu_style;
 use crate::tui::views::{
     ActionHint, ModalKind, ModalView, ViewAction, ViewEvent, centered_modal_area,
     render_modal_footer, render_modal_surface,
 };
+use codewhale_localization::{Locale, MessageId, tr};
 use unicode_width::UnicodeWidthStr;
 
 /// Picker state. We hold both the user's working selection AND the original
@@ -297,7 +297,7 @@ fn status_row_text(pointer: &str, mark: &str, item: &StatusItem, width: usize) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::localization::Locale;
+    use codewhale_localization::Locale;
 
     #[test]
     fn opens_with_active_items_pre_selected() {

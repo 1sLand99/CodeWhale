@@ -431,10 +431,13 @@ fn safe_parent_from_meta(app: &App, meta: Option<&AgentProgressMeta>) -> String 
 
 fn activity_status_label(
     status: AgentCurrentActivityStatus,
-    locale: crate::localization::Locale,
+    locale: codewhale_localization::Locale,
 ) -> std::borrow::Cow<'static, str> {
     if status == AgentCurrentActivityStatus::Parked {
-        return crate::localization::tr(locale, crate::localization::MessageId::AgentStatusParked);
+        return codewhale_localization::tr(
+            locale,
+            codewhale_localization::MessageId::AgentStatusParked,
+        );
     }
     std::borrow::Cow::Borrowed(match status {
         AgentCurrentActivityStatus::Queued => "queued",

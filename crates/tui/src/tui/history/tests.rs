@@ -1198,7 +1198,7 @@ fn the_still_marker_rewrite_never_consumes_braille_tool_output() {
 /// Replaces two tests, each of which hard-coded one direction.
 #[test]
 fn a_card_verb_agrees_with_its_own_label_in_every_locale() {
-    use crate::localization::Locale;
+    use codewhale_localization::Locale;
 
     for (label, expected_en, expected_zh, forbidden_en) in [
         (
@@ -1252,8 +1252,8 @@ fn a_card_verb_agrees_with_its_own_label_in_every_locale() {
 /// contain `stdout:` would be inventing a number the shell never reported.
 #[test]
 fn receipts_count_only_what_they_actually_counted() {
-    use crate::localization::Locale;
     use crate::tui::widgets::tool_card::ToolFamily;
+    use codewhale_localization::Locale;
 
     for (locale, done, unit) in [(Locale::En, "done", "line"), (Locale::ZhHans, "完成", "行")] {
         let label = |family, status, output| {
@@ -1316,7 +1316,7 @@ fn receipts_count_only_what_they_actually_counted() {
 /// localized completion and never a fabricated line count or stream name.
 #[test]
 fn shell_headers_stay_truthful_through_the_output_formatters() {
-    use crate::localization::Locale;
+    use codewhale_localization::Locale;
 
     let cases = [
         (
@@ -2460,7 +2460,7 @@ fn a_settled_verify_glyph_does_not_read_as_a_settled_read() {
             80,
             /*low_motion*/ true,
             RenderMode::Live,
-            crate::localization::Locale::En,
+            codewhale_localization::Locale::En,
         )[0]
         .spans[1]
             .style

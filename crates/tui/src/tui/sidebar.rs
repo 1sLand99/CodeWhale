@@ -247,12 +247,15 @@ fn sidebar_worker_status_text(status: AgentWorkerStatus) -> &'static str {
 
 fn sidebar_current_activity_status_text(
     status: AgentCurrentActivityStatus,
-    locale: crate::localization::Locale,
+    locale: codewhale_localization::Locale,
 ) -> std::borrow::Cow<'static, str> {
     // A parked husk gets its own word, translated (#5906) — "waiting" here
     // would be the same lie the work surface used to tell.
     if status == AgentCurrentActivityStatus::Parked {
-        return crate::localization::tr(locale, crate::localization::MessageId::AgentStatusParked);
+        return codewhale_localization::tr(
+            locale,
+            codewhale_localization::MessageId::AgentStatusParked,
+        );
     }
     std::borrow::Cow::Borrowed(match status {
         AgentCurrentActivityStatus::Queued => "queued",
@@ -280,11 +283,11 @@ fn sidebar_agent_status_is_terminal(status: &str) -> bool {
 mod tests {
     use super::sidebar_agent_rows;
     use crate::config::Config;
-    use crate::localization::Locale;
     use crate::tui::app::{
         AgentCurrentActivity, AgentCurrentActivityStatus, AgentProgressMeta, App,
         SidebarHoverSection, SidebarHoverState, TuiOptions,
     };
+    use codewhale_localization::Locale;
     use std::path::PathBuf;
 
     fn create_test_app() -> App {
@@ -844,9 +847,9 @@ mod tests {
         let rows = sidebar_agent_rows(&app);
         assert_eq!(
             rows[0].status,
-            crate::localization::tr(
+            codewhale_localization::tr(
                 Locale::De,
-                crate::localization::MessageId::AgentStatusParked
+                codewhale_localization::MessageId::AgentStatusParked
             )
         );
     }

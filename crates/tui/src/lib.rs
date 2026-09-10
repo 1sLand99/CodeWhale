@@ -17,10 +17,6 @@ use wait_timeout::ChildExt;
 
 use crate::dependencies::ExternalTool;
 
-use rust_i18n::i18n;
-include!(concat!(env!("OUT_DIR"), "/i18n_init.rs"));
-mod localization_backend;
-
 mod acp_server;
 pub mod agent_roster;
 mod approval_log;
@@ -68,7 +64,6 @@ mod integrations;
 mod lane_control;
 mod llm_client;
 mod llm_response_cache;
-mod localization;
 mod logging;
 mod lsp;
 mod mcp;
@@ -2030,7 +2025,7 @@ pub fn accept_telemetry_notice(config_path: Option<PathBuf>, version: u32) -> Re
 /// Enabling affects the next launch; disabling immediately erases queued usage.
 pub fn set_telemetry_preference(config_path: Option<PathBuf>, enabled: bool) -> Result<String> {
     let applied = crate::telemetry_notice::apply_persistent_preference(config_path, enabled);
-    let message = applied.message(crate::localization::Locale::En);
+    let message = applied.message(codewhale_localization::Locale::En);
     if applied.is_error() {
         anyhow::bail!("{message}");
     }
@@ -12243,7 +12238,7 @@ async fn build_direct_workflow_tool(
         manager.clone(),
     )
     .with_locale_tag(
-        crate::localization::resolve_locale(
+        codewhale_localization::resolve_locale(
             &crate::settings::Settings::load_persisted()
                 .unwrap_or_default()
                 .locale,

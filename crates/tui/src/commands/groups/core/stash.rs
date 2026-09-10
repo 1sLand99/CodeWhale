@@ -7,8 +7,8 @@
 
 use crate::commands::traits::{CommandInfo, RegisterCommand};
 use crate::composer_stash;
-use crate::localization::MessageId;
 use crate::tui::app::App;
+use codewhale_localization::MessageId;
 
 use super::CommandResult;
 

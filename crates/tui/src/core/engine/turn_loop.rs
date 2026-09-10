@@ -1589,9 +1589,9 @@ impl Engine {
                             "model {} rejected image content; resending with images replaced by text",
                             self.session.model
                         ));
-                        let status = crate::localization::tr(
-                            crate::localization::resolve_locale(&self.config.locale_tag),
-                            crate::localization::MessageId::ImageInputRejectedResent,
+                        let status = codewhale_localization::tr(
+                            codewhale_localization::resolve_locale(&self.config.locale_tag),
+                            codewhale_localization::MessageId::ImageInputRejectedResent,
                         )
                         .replace("{model}", &self.session.model);
                         let _ = self.tx_event.send(Event::status(status)).await;
@@ -1996,9 +1996,9 @@ impl Engine {
                 return (
                     TurnOutcomeStatus::Failed,
                     Some(
-                        crate::localization::tr(
-                            crate::localization::resolve_locale(&self.config.locale_tag),
-                            crate::localization::MessageId::ProviderToolCallMissing,
+                        codewhale_localization::tr(
+                            codewhale_localization::resolve_locale(&self.config.locale_tag),
+                            codewhale_localization::MessageId::ProviderToolCallMissing,
                         )
                         .replace("{reason}", reason),
                     ),

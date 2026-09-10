@@ -6,9 +6,9 @@
 
 use std::fmt::Write as _;
 
-use crate::localization::{Locale, MessageId, tr};
 use crate::tools::subagent::CoordinationDetailProjection;
 use crate::tools::subagent::coord::{DecisionStatus, ReconciliationReceipt};
+use codewhale_localization::{Locale, MessageId, tr};
 
 #[must_use]
 pub(crate) fn summary(locale: Locale, projection: &CoordinationDetailProjection) -> String {

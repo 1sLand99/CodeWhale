@@ -1,8 +1,8 @@
 //! `/copy` command — copy the last completed assistant response.
 
 use crate::commands::traits::{CommandInfo, RegisterCommand};
-use crate::localization::MessageId;
 use crate::tui::app::App;
+use codewhale_localization::MessageId;
 
 use super::CommandResult;
 

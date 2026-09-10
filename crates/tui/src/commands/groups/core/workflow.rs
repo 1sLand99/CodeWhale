@@ -10,13 +10,13 @@
 //! `/workflow` alone.
 
 use crate::commands::traits::{CommandInfo, RegisterCommand};
-use crate::localization::MessageId;
 use crate::models::ContentBlock;
 use crate::tui::app::WORKFLOW_DRAFT_INSTRUCTION_PREFIX;
 use crate::tui::app::{App, AppAction};
 use codewhale_config::AppMode;
 #[cfg(test)]
 use codewhale_execpolicy::ApprovalMode;
+use codewhale_localization::MessageId;
 
 use super::CommandResult;
 
@@ -520,7 +520,7 @@ mod tests {
     #[test]
     fn auto_sets_auto_review_and_explains_the_trio() {
         let mut app = test_app();
-        app.ui_locale = crate::localization::Locale::En;
+        app.ui_locale = codewhale_localization::Locale::En;
         app.set_agent_approval_posture(ApprovalMode::Suggest);
 
         let result = auto(&mut app, None);

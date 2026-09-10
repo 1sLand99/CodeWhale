@@ -7,12 +7,12 @@ use crate::config::{
     ApiProvider, DEFAULT_KIMI_CODE_BASE_URL, KIMI_CODE_MEMBERSHIP_PLAN_CONSOLE_URL,
     normalize_custom_model_id, normalize_model_name_for_provider,
 };
-use crate::localization::{Locale, MessageId, tr};
 #[cfg(test)]
 use crate::reasoning_preference::ReasoningEffort;
 use crate::tui::app::{App, AppAction};
 use crate::tui::views::{HelpView, ModalKind, SubAgentsView, subagent_view_agents};
 use codewhale_config::AppMode;
+use codewhale_localization::{Locale, MessageId, tr};
 
 use super::CommandResult;
 
@@ -851,7 +851,7 @@ mod tests {
             ..crate::test_support::test_tui_options(PathBuf::from("/tmp/test-workspace"))
         };
         let mut app = App::new(options, &Config::default());
-        app.ui_locale = crate::localization::Locale::En;
+        app.ui_locale = codewhale_localization::Locale::En;
         app.api_provider = crate::config::ApiProvider::Deepseek;
         app.model = "deepseek-v4-pro".to_string();
         app.auto_model = false;
@@ -1788,7 +1788,7 @@ mod tests {
 
     #[test]
     fn home_dashboard_localizes_in_zh_hans() {
-        use crate::localization::Locale;
+        use codewhale_localization::Locale;
         let mut app = create_test_app();
         app.ui_locale = Locale::ZhHans;
         let result = home_dashboard(&mut app);

@@ -16,13 +16,13 @@ use crate::config_persistence::{
     persist_subagents_bool_key, persist_subagents_integer_key, persist_table_string_key,
     persist_tui_integer_key, persist_unset_root_key,
 };
-use crate::localization::{MessageId, resolve_locale, tr};
 use crate::reasoning_preference::ReasoningEffort;
 use crate::settings::Settings;
 use crate::tui::app::{App, AppAction, OnboardingState, ScreenMode, SettingSelection, VimMode};
 use anyhow::Result;
 use codewhale_config::AppMode;
 use codewhale_execpolicy::ApprovalMode;
+use codewhale_localization::{MessageId, resolve_locale, tr};
 use std::path::{Path, PathBuf};
 
 /// Open the interactive config editor.
@@ -226,23 +226,23 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
     if let Some(notifications_key) = key.strip_prefix("notifications.") {
         return show_notifications_setting(app, notifications_key);
     }
-    fn locale_display(l: crate::localization::Locale) -> &'static str {
+    fn locale_display(l: codewhale_localization::Locale) -> &'static str {
         match l {
-            crate::localization::Locale::En => "en",
-            crate::localization::Locale::ZhHans => "zh-Hans",
-            crate::localization::Locale::ZhHant => "zh-Hant",
-            crate::localization::Locale::Ja => "ja",
-            crate::localization::Locale::PtBr => "pt-BR",
-            crate::localization::Locale::Es419 => "es-419",
-            crate::localization::Locale::Vi => "vi",
-            crate::localization::Locale::Ko => "ko",
-            crate::localization::Locale::Ca => "ca",
-            crate::localization::Locale::De => "de",
-            crate::localization::Locale::Fr => "fr",
-            crate::localization::Locale::Id => "id",
-            crate::localization::Locale::Hi => "hi",
-            crate::localization::Locale::Ru => "ru",
-            crate::localization::Locale::Uk => "uk",
+            codewhale_localization::Locale::En => "en",
+            codewhale_localization::Locale::ZhHans => "zh-Hans",
+            codewhale_localization::Locale::ZhHant => "zh-Hant",
+            codewhale_localization::Locale::Ja => "ja",
+            codewhale_localization::Locale::PtBr => "pt-BR",
+            codewhale_localization::Locale::Es419 => "es-419",
+            codewhale_localization::Locale::Vi => "vi",
+            codewhale_localization::Locale::Ko => "ko",
+            codewhale_localization::Locale::Ca => "ca",
+            codewhale_localization::Locale::De => "de",
+            codewhale_localization::Locale::Fr => "fr",
+            codewhale_localization::Locale::Id => "id",
+            codewhale_localization::Locale::Hi => "hi",
+            codewhale_localization::Locale::Ru => "ru",
+            codewhale_localization::Locale::Uk => "uk",
         }
     }
     fn density_display(d: crate::tui::app::ComposerDensity) -> &'static str {
@@ -1062,7 +1062,7 @@ fn file_only_status(configured: Option<bool>) -> String {
     }
 }
 
-fn search_provider_display(config: &Config, locale: crate::localization::Locale) -> String {
+fn search_provider_display(config: &Config, locale: codewhale_localization::Locale) -> String {
     let resolved = config.search_provider_resolution();
     let source = match resolved.source {
         SearchProviderSource::Default => tr(locale, MessageId::ConfigDefaultValue)
@@ -5259,7 +5259,7 @@ context_window = 262144
         fs::create_dir(&path).unwrap();
         let mut app = create_test_app();
         app.config_path = Some(path);
-        app.ui_locale = crate::localization::Locale::ZhHans;
+        app.ui_locale = codewhale_localization::Locale::ZhHans;
         let before = (app.posture_bar, app.metrics_line);
         for key in ["posture_bar", "metrics_line"] {
             let result = config_command(&mut app, Some(&format!("{key} hidden --save")));

@@ -293,7 +293,7 @@ pub const HELP_CHROME_CHORD: &str = "/help";
 /// A slash command names itself, so it prints bare (`/help`); a key chord
 /// still needs the word (`Ctrl+/ help`).
 #[must_use]
-pub fn info_help_hint(locale: crate::localization::Locale) -> String {
+pub fn info_help_hint(locale: codewhale_localization::Locale) -> String {
     let chord = binding(ShellBindingId::Help).footer_chord;
     if chord.starts_with('/') {
         return chord.to_string();
@@ -301,7 +301,7 @@ pub fn info_help_hint(locale: crate::localization::Locale) -> String {
     format!(
         "{} {}",
         chord,
-        crate::localization::tr(locale, crate::localization::MessageId::InfoLineHelp)
+        codewhale_localization::tr(locale, codewhale_localization::MessageId::InfoLineHelp)
     )
 }
 
@@ -584,7 +584,7 @@ mod tests {
         // Ctrl+/ is still accepted, but chrome advertises the route that
         // works in every terminal.
         assert_eq!(binding(ShellBindingId::Help).footer_chord, "/help");
-        let hint = info_help_hint(crate::localization::Locale::En);
+        let hint = info_help_hint(codewhale_localization::Locale::En);
         assert_eq!(hint, "/help", "a slash command names itself");
         assert!(
             is_help_shortcut(&KeyEvent::new(KeyCode::Char('/'), KeyModifiers::CONTROL)),
@@ -695,7 +695,7 @@ mod tests {
         // The metrics line's help hint is built from this table, so it must
         // not be able to name a chord the same table refuses at any focus
         // the chrome is rendered in (the hint paints on every screen).
-        let hint = info_help_hint(crate::localization::Locale::En);
+        let hint = info_help_hint(codewhale_localization::Locale::En);
         let help = binding(ShellBindingId::Help);
         assert!(hint.starts_with(help.footer_chord), "{hint}");
         assert_eq!(help.focus, FocusScope::Everywhere);

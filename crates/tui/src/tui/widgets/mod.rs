@@ -16,7 +16,6 @@ use std::time::Duration;
 use crate::commands;
 #[cfg(test)]
 use crate::config::ApiProvider;
-use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
 #[cfg(test)]
 use crate::provider_lake::all_catalog_models_for_provider;
@@ -31,6 +30,7 @@ use crate::tui::ui_text::{grapheme_display_width, text_display_width};
 use crate::tui::underwater::ShellPhase;
 use codewhale_config::AppMode;
 use codewhale_execpolicy::ApprovalMode;
+use codewhale_localization::{Locale, MessageId, tr};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -1484,7 +1484,8 @@ impl Renderable for ComposerWidget<'_> {
                     Span::styled(
                         format!(
                             " {}  ",
-                            self.app.tr(crate::localization::MessageId::HistoryHintMove)
+                            self.app
+                                .tr(codewhale_localization::MessageId::HistoryHintMove)
                         ),
                         Style::default().fg(palette::TEXT_MUTED),
                     ),
@@ -1492,20 +1493,20 @@ impl Renderable for ComposerWidget<'_> {
                         format!(
                             "{}  ",
                             self.app
-                                .tr(crate::localization::MessageId::HistoryHintAccept)
+                                .tr(codewhale_localization::MessageId::HistoryHintAccept)
                         ),
                         Style::default().fg(palette::TEXT_MUTED),
                     ),
                     Span::styled(
                         self.app
-                            .tr(crate::localization::MessageId::HistoryHintRestore),
+                            .tr(codewhale_localization::MessageId::HistoryHintRestore),
                         Style::default().fg(palette::TEXT_MUTED),
                     ),
                 ]))
             } else if !self.slash_menu_entries.is_empty() {
                 Some(Line::from(Span::styled(
                     self.app
-                        .tr(crate::localization::MessageId::ComposerSlashMenuHint),
+                        .tr(codewhale_localization::MessageId::ComposerSlashMenuHint),
                     Style::default().fg(self.app.ui_theme.text_hint),
                 )))
             } else if !input_text.trim().is_empty() {
@@ -1547,7 +1548,7 @@ impl Renderable for ComposerWidget<'_> {
                     format!(
                         " {} ",
                         self.app
-                            .tr(crate::localization::MessageId::HistorySearchTitle)
+                            .tr(codewhale_localization::MessageId::HistorySearchTitle)
                     ),
                     Style::default().fg(palette::TEXT_MUTED),
                 )));
@@ -1695,7 +1696,7 @@ impl Renderable for ComposerWidget<'_> {
             if history_search_matches.is_empty() {
                 lines.push(Line::from(Span::styled(
                     self.app
-                        .tr(crate::localization::MessageId::HistoryNoMatches),
+                        .tr(codewhale_localization::MessageId::HistoryNoMatches),
                     Style::default().fg(palette::TEXT_MUTED),
                 )));
             } else {
@@ -3144,8 +3145,8 @@ impl<'a> ElevationWidget<'a> {
 
 impl Renderable for ElevationWidget<'_> {
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        use crate::localization::MessageId;
-        use crate::localization::tr;
+        use codewhale_localization::MessageId;
+        use codewhale_localization::tr;
 
         let popup_width = 70.min(area.width.saturating_sub(4));
         let popup_height = 22.min(area.height.saturating_sub(4));
@@ -3689,7 +3690,7 @@ pub(crate) fn slash_completion_hints(
     input: &str,
     limit: usize,
     cached_skills: &[(String, String)],
-    locale: crate::localization::Locale,
+    locale: codewhale_localization::Locale,
     workspace: Option<&std::path::Path>,
     api_provider: ApiProvider,
 ) -> Vec<SlashMenuEntry> {
@@ -3773,7 +3774,7 @@ pub(crate) fn slash_completion_hints_with_model_candidates(
     input: &str,
     limit: usize,
     cached_skills: &[(String, String)],
-    locale: crate::localization::Locale,
+    locale: codewhale_localization::Locale,
     workspace: Option<&std::path::Path>,
     model_candidates: &[String],
 ) -> Vec<SlashMenuEntry> {
@@ -4160,7 +4161,7 @@ fn push_command_entry(
     name: &str,
     command_key: &str,
     prefix_lower: &str,
-    locale: crate::localization::Locale,
+    locale: codewhale_localization::Locale,
     user_commands: &[&commands::user_registry::UserCommandMetadata],
 ) {
     let user_command = user_commands
@@ -4598,7 +4599,6 @@ mod tests {
         wrap_input_lines_for_mouse, wrap_text,
     };
     use crate::config::{ApiProvider, Config};
-    use crate::localization::Locale;
     use crate::palette;
     use crate::tui::active_cell::ActiveCell;
     use crate::tui::app::{
@@ -4610,6 +4610,7 @@ mod tests {
     };
     use crate::tui::scrolling::{TranscriptLineMeta, TranscriptScroll};
     use codewhale_config::AppMode;
+    use codewhale_localization::Locale;
     use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::{
         buffer::Buffer,
@@ -6851,7 +6852,7 @@ mod tests {
         assert!(!normal_rendered.contains("Draft"));
         assert!(
             !normal_rendered
-                .contains(&*normal_app.tr(crate::localization::MessageId::HistorySearchTitle))
+                .contains(&*normal_app.tr(codewhale_localization::MessageId::HistorySearchTitle))
         );
 
         let mut draft_app = create_test_app();
@@ -6874,7 +6875,7 @@ mod tests {
         search_widget.render(area, &mut search_buf);
         assert!(
             buffer_text(&search_buf, area)
-                .contains(&*search_app.tr(crate::localization::MessageId::HistorySearchTitle))
+                .contains(&*search_app.tr(codewhale_localization::MessageId::HistorySearchTitle))
         );
     }
 

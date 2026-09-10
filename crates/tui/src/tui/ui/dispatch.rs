@@ -1322,7 +1322,7 @@ pub(crate) async fn dispatch_composer_message(
         let text = message.display.clone();
         crate::tui::agent_focus::echo_user_follow_up(app, &text);
         let receipt = app
-            .tr(crate::localization::MessageId::AgentFocusFollowUpQueued)
+            .tr(codewhale_localization::MessageId::AgentFocusFollowUpQueued)
             .replace("{agent}", &label);
         app.push_history_cell(crate::tui::history::HistoryCell::System { content: receipt });
         if engine_handle
@@ -1334,7 +1334,7 @@ pub(crate) async fn dispatch_composer_message(
             .is_err()
         {
             let failed = app
-                .tr(crate::localization::MessageId::AgentFocusFollowUpFailed)
+                .tr(codewhale_localization::MessageId::AgentFocusFollowUpFailed)
                 .replace("{agent}", &label)
                 .replace("{reason}", "engine unavailable");
             app.status_message = Some(failed.clone());

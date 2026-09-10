@@ -15,11 +15,11 @@
 
 use unicode_width::UnicodeWidthStr;
 
-use crate::localization::{Locale, MessageId, tr};
 use crate::mcp::{McpManagerSnapshot, McpServerSnapshot};
 use crate::plugins::PluginRegistry;
 use crate::plugins::types::{PluginDiagnosticLevel, PluginTrustStatus};
 use crate::tui::app::App;
+use codewhale_localization::{Locale, MessageId, tr};
 
 pub(crate) const ITEM_SEPARATOR: &str = " · ";
 const MAX_NAMED_CHIPS: usize = 4;

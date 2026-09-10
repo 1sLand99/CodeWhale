@@ -3,8 +3,8 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use crate::localization::{Locale, MessageId, tr};
 use crate::tui::app::App;
+use codewhale_localization::{Locale, MessageId, tr};
 
 use super::CommandResult;
 

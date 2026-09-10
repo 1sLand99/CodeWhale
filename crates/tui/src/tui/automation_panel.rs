@@ -26,8 +26,8 @@ use chrono::{DateTime, Utc};
 use crate::automation_manager::{
     AutomationRecord, AutomationRunRecord, AutomationRunStatus, AutomationStatus,
 };
-use crate::localization::{Locale, MessageId, tr};
 use crate::palette::ChromeInk;
+use codewhale_localization::{Locale, MessageId, tr};
 
 /// Band glyph for the automation slot. Composed in code (locales/AGENTS.md);
 /// the ASCII-safe projection comes from `glyphs::ascii_fallback`.

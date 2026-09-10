@@ -2,6 +2,10 @@
 //!
 //! This intentionally covers UI chrome only. It does not change model prompts,
 //! model output language, provider behavior, or media payload semantics.
+use rust_i18n::i18n;
+include!(concat!(env!("OUT_DIR"), "/i18n_init.rs"));
+mod localization_backend;
+
 use std::borrow::Cow;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};

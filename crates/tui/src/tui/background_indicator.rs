@@ -29,8 +29,8 @@
 
 use std::collections::HashSet;
 
-use crate::localization::truncate_to_width;
 use crate::tui::app::{App, TaskPanelEntry, TaskPanelEntryKind};
+use codewhale_localization::truncate_to_width;
 
 /// Per-item label cap so one long command or objective cannot eat the whole
 /// row before the whole-line truncation kicks in.

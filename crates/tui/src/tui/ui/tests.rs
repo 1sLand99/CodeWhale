@@ -238,7 +238,7 @@ fn composer_rows_stay_pinned_across_turn_state_transitions() {
         });
         app.onboarding = crate::tui::app::OnboardingState::None;
         app.launch.visible = false;
-        app.ui_locale = crate::localization::Locale::En;
+        app.ui_locale = codewhale_localization::Locale::En;
         app
     }
 
@@ -2131,7 +2131,7 @@ fn assert_saved_startup_route(provider: &str, provider_key: &str, model: &str) -
 #[test]
 fn resume_hint_reconstructs_exact_command_for_canonical_uuid() {
     let id = "019dd9d6-4f44-7c83-9863-59674a12b827";
-    let hint = resume_hint_text(crate::localization::Locale::En, Some(id), true);
+    let hint = resume_hint_text(codewhale_localization::Locale::En, Some(id), true);
     assert_eq!(
         hint.as_deref(),
         Some("To resume this session, run codewhale resume 019dd9d6-4f44-7c83-9863-59674a12b827")
@@ -2152,7 +2152,7 @@ fn resume_hint_falls_back_to_picker_for_noncanonical_ids() {
         "x\n\x1b[2J",
     ] {
         assert_eq!(
-            resume_hint_text(crate::localization::Locale::En, Some(id), true).as_deref(),
+            resume_hint_text(codewhale_localization::Locale::En, Some(id), true).as_deref(),
             Some("To choose a saved session, run codewhale resume"),
             "id {id:?} must select the picker hint, never interpolation"
         );
@@ -2162,16 +2162,16 @@ fn resume_hint_falls_back_to_picker_for_noncanonical_ids() {
 #[test]
 fn resume_hint_omits_missing_id_and_non_tty_output() {
     assert_eq!(
-        resume_hint_text(crate::localization::Locale::En, None, true),
+        resume_hint_text(codewhale_localization::Locale::En, None, true),
         None
     );
     assert_eq!(
-        resume_hint_text(crate::localization::Locale::En, Some("   "), true),
+        resume_hint_text(codewhale_localization::Locale::En, Some("   "), true),
         None
     );
     assert_eq!(
         resume_hint_text(
-            crate::localization::Locale::En,
+            codewhale_localization::Locale::En,
             Some("019dd9d6-4f44-7c83-9863-59674a12b827"),
             false,
         ),
@@ -6225,7 +6225,7 @@ async fn session_denied_cache_notice_preserves_parallel_tool_indices() {
 async fn session_denied_cache_notice_renders_host_scope_in_zh_hans() {
     let _home = SettingsHomeGuard::new();
     let mut app = create_test_app();
-    app.ui_locale = crate::localization::Locale::ZhHans;
+    app.ui_locale = codewhale_localization::Locale::ZhHans;
     let mut engine = mock_engine_handle();
 
     auto_deny_session_approval(
@@ -13223,7 +13223,7 @@ fn hotbar_dispatches_route_switch_slot() {
     let route_metadata = app
         .hotbar_actions
         .iter()
-        .map(|action| action.metadata(crate::localization::Locale::En))
+        .map(|action| action.metadata(codewhale_localization::Locale::En))
         .find(|metadata| metadata.category == HotbarActionCategory::Route)
         .expect("test app should register at least the active provider route");
     let route_id = route_metadata.id.clone();
@@ -13558,7 +13558,7 @@ fn subagent_completion_status_reads_summary_fallbacks() {
 fn agent_complete_toast_is_truthful_and_localized_for_cancelled_workers() {
     let cancelled = crate::tools::subagent::SubAgentStatus::Cancelled;
     let mut app = create_test_app();
-    app.ui_locale = crate::localization::Locale::Ja;
+    app.ui_locale = codewhale_localization::Locale::Ja;
     apply_agent_complete_status_and_observer(&mut app, "agent_x", "worker result", &cancelled);
     let toast = app.status_toasts.back().unwrap();
     assert_eq!(toast.level, StatusToastLevel::Warning);
@@ -22748,7 +22748,7 @@ fn recoverable_provider_error_advances_fallback_chain() {
     use crate::error_taxonomy::{ErrorCategory, ErrorEnvelope, ErrorSeverity};
 
     let mut app = create_test_app();
-    app.ui_locale = crate::localization::Locale::Fr;
+    app.ui_locale = codewhale_localization::Locale::Fr;
     app.api_provider = ApiProvider::Deepseek;
     app.provider_chain = Some(codewhale_config::ProviderChain::new(
         codewhale_config::ProviderKind::Deepseek,
@@ -23283,7 +23283,7 @@ fn non_recoverable_engine_error_enters_offline_mode() {
 fn env_only_auth_failure_reopens_provider_onboarding() {
     use crate::error_taxonomy::ErrorEnvelope;
     let mut app = create_test_app();
-    app.ui_locale = crate::localization::Locale::Ja;
+    app.ui_locale = codewhale_localization::Locale::Ja;
     app.api_provider = crate::config::ApiProvider::Anthropic;
     app.config_path = Some(std::path::PathBuf::from("/tmp/codewhale-phase2.toml"));
     app.api_key_env_only = true;
@@ -24255,7 +24255,7 @@ fn completed_turn_notification_truncates_long_text() {
 #[test]
 fn completed_turn_notification_leads_with_user_locale() {
     let mut app = create_test_app();
-    app.ui_locale = crate::localization::Locale::Ja;
+    app.ui_locale = codewhale_localization::Locale::Ja;
     let payload = crate::tui::notifications::completed_turn_payload(
         &app,
         "完了しました。",
@@ -24270,7 +24270,7 @@ fn completed_turn_notification_leads_with_user_locale() {
 #[test]
 fn subagent_completion_notification_uses_summary_line_not_sentinel() {
     let payload = crate::tui::notifications::subagent_terminal_payload(
-        crate::localization::Locale::En,
+        codewhale_localization::Locale::En,
         "agent_live",
         "Finished the docs audit.\n<codewhale:subagent.done>{}</codewhale:subagent.done>",
         &crate::tools::subagent::SubAgentStatus::Completed,
@@ -24287,7 +24287,7 @@ fn subagent_completion_notification_uses_summary_line_not_sentinel() {
 #[test]
 fn subagent_completion_notification_can_include_elapsed_summary() {
     let payload = crate::tui::notifications::subagent_terminal_payload(
-        crate::localization::Locale::En,
+        codewhale_localization::Locale::En,
         "agent_live",
         "",
         &crate::tools::subagent::SubAgentStatus::Completed,
@@ -24303,7 +24303,7 @@ fn subagent_completion_notification_can_include_elapsed_summary() {
 #[test]
 fn subagent_cancelled_notification_never_claims_completion() {
     let payload = crate::tui::notifications::subagent_terminal_payload(
-        crate::localization::Locale::En,
+        codewhale_localization::Locale::En,
         "agent_stopped",
         "Cancelled\n<codewhale:subagent.done>{\"status\":\"cancelled\"}</codewhale:subagent.done>",
         &crate::tools::subagent::SubAgentStatus::Cancelled,
@@ -25584,7 +25584,7 @@ mod work_surface {
 
     fn idle_rail_app(panel: RailPanel) -> App {
         let mut app = create_test_app();
-        app.ui_locale = crate::localization::Locale::En;
+        app.ui_locale = codewhale_localization::Locale::En;
         // Pin the chrome the budget charges for: `App::new` reads the developer's
         // real settings.toml, and a host with `composer_border = false` would
         // shift every threshold below by a row.
@@ -27281,7 +27281,7 @@ fn notification_live_delta_updates_current_config_projection_and_queries_atomica
 
 #[test]
 fn notification_invalid_live_delta_uses_selected_locale_and_keeps_policy() {
-    use crate::localization::Locale;
+    use codewhale_localization::Locale;
 
     let _guard = crate::test_support::lock_test_env();
     let mut app = create_test_app();
@@ -27313,7 +27313,7 @@ fn notification_invalid_live_delta_uses_selected_locale_and_keeps_policy() {
 async fn notification_approval_settlement_retires_the_prompt_and_preserves_warning_receipts() {
     let _guard = crate::test_support::lock_test_env();
     let mut app = create_test_app();
-    app.ui_locale = crate::localization::Locale::Ja;
+    app.ui_locale = codewhale_localization::Locale::Ja;
     let payload = notifications::approval_needed_payload(app.ui_locale, "saved-failed-tool");
     app.push_status_toast_record(
         StatusToast::new(payload.headline(), StatusToastLevel::Warning, Some(12_000))
@@ -27362,7 +27362,7 @@ async fn notification_approval_settlement_retires_the_prompt_and_preserves_warni
 fn notification_input_failure_keeps_the_request_and_success_retires_only_its_action() {
     let _guard = crate::test_support::lock_test_env();
     let mut app = create_test_app();
-    app.ui_locale = crate::localization::Locale::Fr;
+    app.ui_locale = codewhale_localization::Locale::Fr;
     let payload = notifications::input_needed_payload(app.ui_locale);
     app.pending_user_input_prompt = Some((
         "input-a".into(),

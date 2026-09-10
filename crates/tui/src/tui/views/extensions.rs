@@ -23,9 +23,9 @@ use super::{
     CommandPaletteAction, ModalKind, ModalView, ViewAction, ViewEvent, render_modal_footer,
     render_underwater_surface, truncate_view_text,
 };
-use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
 use crate::tui::app::App;
+use codewhale_localization::{Locale, MessageId, tr};
 
 fn localize(locale: Locale, id: MessageId, replacements: &[(&str, &str)]) -> String {
     let mut value = tr(locale, id).into_owned();

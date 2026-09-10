@@ -7,7 +7,6 @@
 //! tool-details pager (including #500 spillover folding), copy-cell actions, and
 //! footer detail labels live here too.
 
-use crate::localization::{MessageId, tr};
 use crate::snapshot::SnapshotRepo;
 use crate::tui::app::App;
 use crate::tui::footer_ui::one_line_summary;
@@ -16,6 +15,7 @@ use crate::tui::pager::{PagerPage, PagerView};
 use crate::tui::ui_text::{
     history_cell_to_clipboard_text, history_cell_to_text, line_to_plain, truncate_line_to_width,
 };
+use codewhale_localization::{MessageId, tr};
 
 fn selected_transcript_cell_index(app: &App) -> Option<usize> {
     app.viewport

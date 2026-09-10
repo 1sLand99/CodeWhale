@@ -65,7 +65,6 @@ use crate::core::events::Event as EngineEvent;
 use crate::core::ops::{Op, ProviderRuntimeStatus, USER_SHELL_TOOL_ID_PREFIX, UserInputProvenance};
 use crate::hooks::{HookEvent, HookExecutor, TurnEndPayloadInput, TurnEndTotals};
 use crate::llm_client::LlmClient;
-use crate::localization::{MessageId, tr};
 use crate::models::{ContentBlock, Message, MessageRequest, SystemPrompt, Usage};
 use crate::palette;
 use crate::prompts;
@@ -106,6 +105,7 @@ use crate::tui::persistence_actor::{self, PersistRequest};
 use crate::tui::scrolling::TranscriptScroll;
 use crate::turn_route_plan::{PlannedTurnRoute, TurnRoutePlanRequest, plan_turn_route};
 use crate::work_graph::task_owner_snapshot;
+use codewhale_localization::{MessageId, tr};
 // SelectionAutoscroll unused
 use crate::tui::motion::{FrameRequester, MotionMode};
 use crate::tui::session_picker::SessionPickerView;
@@ -369,11 +369,11 @@ fn tui_launch_preflight_rejects_background_process_group() {
 }
 
 fn resume_hint_text(
-    locale: crate::localization::Locale,
+    locale: codewhale_localization::Locale,
     session_id: Option<&str>,
     terminal_output: bool,
 ) -> Option<String> {
-    use crate::localization::{MessageId, tr};
+    use codewhale_localization::{MessageId, tr};
     if !terminal_output {
         return None;
     }
@@ -599,7 +599,7 @@ pub(crate) struct CacheWarmupOutcome {
 fn deliver_constitution_draft_result(
     app: &mut App,
     model_label: String,
-    locale: crate::localization::Locale,
+    locale: codewhale_localization::Locale,
     outcome: Result<Box<codewhale_config::UserConstitution>, String>,
 ) {
     match outcome {
@@ -647,7 +647,7 @@ fn deliver_fleet_draft_result(
     picked_route: Option<(String, String)>,
     reasoning_effort: Option<String>,
     outcome: Result<Box<crate::fleet::profile::FleetProfileDraft>, String>,
-    locale: crate::localization::Locale,
+    locale: codewhale_localization::Locale,
 ) {
     match outcome {
         Ok(draft) => {
@@ -669,7 +669,7 @@ fn deliver_fleet_draft_result(
                 app.view_stack.push_boxed(boxed);
                 if installed {
                     app.status_message = Some(match locale {
-                        crate::localization::Locale::ZhHans => {
+                        codewhale_localization::Locale::ZhHans => {
                             format!("{model_label} 已起草配置。请查看下方 TOML，然后按 g 保存。")
                         }
                         _ => format!(
@@ -681,7 +681,7 @@ fn deliver_fleet_draft_result(
         }
         Err(reason) => {
             app.status_message = Some(match locale {
-                crate::localization::Locale::ZhHans => {
+                codewhale_localization::Locale::ZhHans => {
                     format!("{model_label} 未能起草配置（{reason}）。按 Enter 仍会插入编写提示。")
                 }
                 _ => format!(

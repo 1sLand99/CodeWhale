@@ -339,7 +339,7 @@ pub(crate) fn test_app_with_options(options: crate::tui::app::TuiOptions) -> cra
 
     // Deterministic presentation regardless of host locale.
     app.cost_currency = crate::pricing::CostCurrency::Usd;
-    app.ui_locale = crate::localization::Locale::En;
+    app.ui_locale = codewhale_localization::Locale::En;
     // Transcript tests must not depend on a concurrently swapped settings
     // home. Tests for hidden reasoning opt out explicitly.
     app.show_thinking = true;

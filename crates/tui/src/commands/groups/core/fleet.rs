@@ -26,8 +26,8 @@ use codewhale_lane::{ControlDomain, ControlOperation, ControlSurface};
 use crate::commands::traits::{CommandInfo, RegisterCommand};
 use crate::config::Config;
 use crate::fleet::control::execute_fleet_control;
-use crate::localization::{Locale, MessageId, tr};
 use crate::tui::app::{App, AppAction};
+use codewhale_localization::{Locale, MessageId, tr};
 
 use super::CommandResult;
 

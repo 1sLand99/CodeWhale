@@ -23,7 +23,7 @@
 //! module is the vocabulary, not the layout engine. Keeping it small means
 //! a future visual refresh only has to touch the constants here.
 
-use crate::localization::Locale;
+use codewhale_localization::Locale;
 
 /// Tool family — the verb the agent is performing. Used to pick a glyph
 /// and label for the card header.
@@ -130,18 +130,18 @@ fn tool_display_label_for_name(name: &str) -> String {
     }
 }
 
-fn family_message_id(family: ToolFamily) -> crate::localization::MessageId {
+fn family_message_id(family: ToolFamily) -> codewhale_localization::MessageId {
     match family {
-        ToolFamily::Read => crate::localization::MessageId::ToolFamilyRead,
-        ToolFamily::Patch => crate::localization::MessageId::ToolFamilyPatch,
-        ToolFamily::Run => crate::localization::MessageId::ToolFamilyRun,
-        ToolFamily::Find => crate::localization::MessageId::ToolFamilyFind,
-        ToolFamily::Delegate => crate::localization::MessageId::ToolFamilyDelegate,
-        ToolFamily::Fanout => crate::localization::MessageId::ToolFamilyFanout,
-        ToolFamily::Rlm => crate::localization::MessageId::ToolFamilyRlm,
-        ToolFamily::Verify => crate::localization::MessageId::ToolFamilyVerify,
-        ToolFamily::Think => crate::localization::MessageId::ToolFamilyThink,
-        ToolFamily::Generic => crate::localization::MessageId::ToolFamilyGeneric,
+        ToolFamily::Read => codewhale_localization::MessageId::ToolFamilyRead,
+        ToolFamily::Patch => codewhale_localization::MessageId::ToolFamilyPatch,
+        ToolFamily::Run => codewhale_localization::MessageId::ToolFamilyRun,
+        ToolFamily::Find => codewhale_localization::MessageId::ToolFamilyFind,
+        ToolFamily::Delegate => codewhale_localization::MessageId::ToolFamilyDelegate,
+        ToolFamily::Fanout => codewhale_localization::MessageId::ToolFamilyFanout,
+        ToolFamily::Rlm => codewhale_localization::MessageId::ToolFamilyRlm,
+        ToolFamily::Verify => codewhale_localization::MessageId::ToolFamilyVerify,
+        ToolFamily::Think => codewhale_localization::MessageId::ToolFamilyThink,
+        ToolFamily::Generic => codewhale_localization::MessageId::ToolFamilyGeneric,
     }
 }
 
@@ -152,9 +152,9 @@ pub fn tool_activity_label_for_name(name: &str, locale: Locale) -> String {
     let family = tool_family_for_name(name);
     let mid = family_message_id(family);
     if matches!(family, ToolFamily::Generic) {
-        format!("{} {name}", crate::localization::tr(locale, mid))
+        format!("{} {name}", codewhale_localization::tr(locale, mid))
     } else {
-        crate::localization::tr(locale, mid).to_string()
+        codewhale_localization::tr(locale, mid).to_string()
     }
 }
 
@@ -348,7 +348,7 @@ mod tests {
         tool_display_label_for_name, tool_family_for_call, tool_family_for_name,
         tool_family_for_title, tool_header_summary_for_name,
     };
-    use crate::localization::{Locale, MessageId, tr};
+    use codewhale_localization::{Locale, MessageId, tr};
     use serde_json::json;
 
     #[test]

@@ -1592,7 +1592,7 @@ pub(crate) async fn run_models(
     selected: Option<&str>,
     json: bool,
 ) -> anyhow::Result<()> {
-    use crate::localization::{MessageId, resolve_locale, tr};
+    use codewhale_localization::{MessageId, resolve_locale, tr};
     let locale = resolve_locale(
         &crate::settings::Settings::load_persisted()
             .unwrap_or_default()

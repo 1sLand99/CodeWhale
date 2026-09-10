@@ -41,7 +41,6 @@ use ratatui::{
 use crate::config::Config;
 use crate::fleet::profile::FleetProfileScope;
 use crate::fleet::role::public_role_label;
-use crate::localization::{MessageId, tr};
 use crate::palette;
 use crate::tui::app::App;
 use crate::tui::menu_style;
@@ -49,6 +48,7 @@ use crate::tui::views::{
     ActionHint, ModalKind, ModalView, ViewAction, ViewEvent, centered_modal_area,
     render_modal_footer_with_gutter, render_modal_surface, truncate_view_text,
 };
+use codewhale_localization::{MessageId, tr};
 
 const PROFILE_DIR: &str = ".codewhale/agents";
 
@@ -224,7 +224,7 @@ const THINKING_CHOICES: &[Choice] = &[
 #[derive(Debug, Clone)]
 pub struct FleetSetupSnapshot {
     workspace: PathBuf,
-    locale: crate::localization::Locale,
+    locale: codewhale_localization::Locale,
     /// Whether the active provider has a key or local runtime — gates the
     /// model-draft offer, mirroring the constitution card's `provider_ready`.
     provider_ready: bool,
@@ -2503,7 +2503,7 @@ fn destination_status(
     personal_dir: &Result<PathBuf, String>,
     file_name: &str,
     project_profiles_enabled: bool,
-    locale: crate::localization::Locale,
+    locale: codewhale_localization::Locale,
 ) -> DestinationStatus {
     let dir: Result<PathBuf, String> = match scope {
         FleetProfileScope::Project => {
@@ -2579,7 +2579,7 @@ mod tests {
     fn snapshot() -> FleetSetupSnapshot {
         FleetSetupSnapshot {
             workspace: PathBuf::from("/tmp/codewhale-test-workspace"),
-            locale: crate::localization::Locale::En,
+            locale: codewhale_localization::Locale::En,
             provider_ready: true,
             provider: "DeepSeek".to_string(),
             model: "deepseek-v4-pro".to_string(),
@@ -3259,7 +3259,7 @@ mod tests {
         // concrete provider route.
         assert_eq!(provider, None);
         assert_eq!(reasoning_effort, None);
-        assert_eq!(locale, crate::localization::Locale::En);
+        assert_eq!(locale, codewhale_localization::Locale::En);
     }
 
     #[test]
@@ -3687,7 +3687,7 @@ mod tests {
             &personal,
             "reviewer.toml",
             true,
-            crate::localization::Locale::En,
+            codewhale_localization::Locale::En,
         );
         assert_eq!(
             fresh.target,
@@ -3706,7 +3706,7 @@ mod tests {
             &personal,
             "reviewer.toml",
             true,
-            crate::localization::Locale::En,
+            codewhale_localization::Locale::En,
         );
         assert!(
             existing.target_exists,
@@ -3719,7 +3719,7 @@ mod tests {
             &personal,
             "reviewer.toml",
             false,
-            crate::localization::Locale::En,
+            codewhale_localization::Locale::En,
         );
         assert!(
             disabled
@@ -3735,7 +3735,7 @@ mod tests {
             &personal,
             "reviewer.toml",
             true,
-            crate::localization::Locale::En,
+            codewhale_localization::Locale::En,
         );
         assert!(missing.unavailable_reason.is_some(), "{missing:?}");
     }

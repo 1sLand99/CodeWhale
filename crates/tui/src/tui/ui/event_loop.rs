@@ -102,12 +102,12 @@ pub(super) fn apply_engine_session_projection(
 }
 
 fn current_session_fleet_workers_status(
-    locale: crate::localization::Locale,
+    locale: codewhale_localization::Locale,
     count: usize,
 ) -> String {
-    crate::localization::tr(
+    codewhale_localization::tr(
         locale,
-        crate::localization::MessageId::SubagentsCurrentSessionFleetWorkersStatus,
+        codewhale_localization::MessageId::SubagentsCurrentSessionFleetWorkersStatus,
     )
     .replace("{count}", &count.to_string())
 }
@@ -1700,9 +1700,9 @@ pub(crate) async fn run_event_loop(
                     let text = match translated {
                         Ok(text) => {
                             app.status_message = Some(
-                                crate::localization::tr(
+                                codewhale_localization::tr(
                                     app.ui_locale,
-                                    crate::localization::MessageId::TranslationComplete,
+                                    codewhale_localization::MessageId::TranslationComplete,
                                 )
                                 .to_string(),
                             );
@@ -1712,12 +1712,12 @@ pub(crate) async fn run_event_loop(
                             tracing::warn!("assistant translation failed: {err}");
                             app.status_message = Some(format!(
                                 "{}: {err}",
-                                crate::localization::tr(
+                                codewhale_localization::tr(
                                     app.ui_locale,
-                                    crate::localization::MessageId::TranslationFailed,
+                                    codewhale_localization::MessageId::TranslationFailed,
                                 )
                             ));
-                            crate::localization::hidden_translation_failed(app.ui_locale)
+                            codewhale_localization::hidden_translation_failed(app.ui_locale)
                                 .to_string()
                         }
                     };
@@ -1767,8 +1767,10 @@ pub(crate) async fn run_event_loop(
                     let text = match translated {
                         Ok(text) => {
                             app.status_message = Some(
-                                crate::localization::thinking_translation_complete(app.ui_locale)
-                                    .to_string(),
+                                codewhale_localization::thinking_translation_complete(
+                                    app.ui_locale,
+                                )
+                                .to_string(),
                             );
                             text
                         }
@@ -1776,9 +1778,9 @@ pub(crate) async fn run_event_loop(
                             tracing::warn!("thinking translation failed: {err}");
                             app.status_message = Some(format!(
                                 "{}: {err}",
-                                crate::localization::thinking_translation_failed(app.ui_locale)
+                                codewhale_localization::thinking_translation_failed(app.ui_locale)
                             ));
-                            crate::localization::hidden_translation_failed(app.ui_locale)
+                            codewhale_localization::hidden_translation_failed(app.ui_locale)
                                 .to_string()
                         }
                     };
@@ -2032,9 +2034,9 @@ pub(crate) async fn run_event_loop(
                             && let Some(translation_client) = active_translation_client.as_ref()
                         {
                             app.status_message = Some(
-                                crate::localization::tr(
+                                codewhale_localization::tr(
                                     app.ui_locale,
-                                    crate::localization::MessageId::TranslationInProgress,
+                                    codewhale_localization::MessageId::TranslationInProgress,
                                 )
                                 .to_string(),
                             );
@@ -2134,7 +2136,7 @@ pub(crate) async fn run_event_loop(
                                 && let Some(translation_client) = active_translation_client.as_ref()
                             {
                                 app.status_message = Some(
-                                    crate::localization::thinking_translation_in_progress(
+                                    codewhale_localization::thinking_translation_in_progress(
                                         app.ui_locale,
                                     )
                                     .to_string(),
@@ -2159,7 +2161,7 @@ pub(crate) async fn run_event_loop(
                                 let (origin_session_fingerprint, origin_turn_fingerprint) =
                                     translation_origin(app);
                                 let placeholder =
-                                    crate::localization::thinking_translation_placeholder(
+                                    codewhale_localization::thinking_translation_placeholder(
                                         app.ui_locale,
                                     )
                                     .to_string();
@@ -2185,7 +2187,7 @@ pub(crate) async fn run_event_loop(
                                 });
                             } else {
                                 let placeholder =
-                                    crate::localization::thinking_translation_placeholder(
+                                    codewhale_localization::thinking_translation_placeholder(
                                         app.ui_locale,
                                     );
                                 streaming_thinking::replace_pending_translation(
@@ -7036,7 +7038,7 @@ mod session_boot_event_tests {
         assert_eq!(app.mcp_configured_count, 2);
         let surface = crate::tui::session_boot::SessionBootSurface::from_app(&app);
         let chip = surface
-            .activity_notice(crate::localization::Locale::En, 80)
+            .activity_notice(codewhale_localization::Locale::En, 80)
             .map(|notice| notice.text)
             .expect("chip");
         assert!(chip.contains("alpha"), "{chip}");
@@ -7281,7 +7283,7 @@ mod session_boot_event_tests {
 #[cfg(test)]
 mod fleet_workers_status_tests {
     use super::current_session_fleet_workers_status;
-    use crate::localization::Locale;
+    use codewhale_localization::Locale;
 
     #[test]
     fn current_session_fleet_worker_status_keeps_the_english_session_boundary() {

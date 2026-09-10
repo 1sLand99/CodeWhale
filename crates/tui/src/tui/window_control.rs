@@ -605,8 +605,8 @@ pub(crate) fn toggle_pin(app: &mut crate::tui::app::App) {
 }
 
 fn show_result(app: &mut crate::tui::app::App, result: anyhow::Result<bool>) {
-    use crate::localization::MessageId;
     use crate::tui::app::StatusToastLevel;
+    use codewhale_localization::MessageId;
     let (message, level) = match result {
         Ok(true) => (MessageId::WindowPinActive, StatusToastLevel::Info),
         Ok(false) => (MessageId::WindowPinReleased, StatusToastLevel::Info),

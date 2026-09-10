@@ -373,7 +373,7 @@ path today):
 | --- | --- | --- | --- |
 | `codewhale-glyphs` | `crates/tui/src/tui/glyphs.rs` | Constant tables + pure fns; no crate-internal deps. | `crate::tui::glyphs` |
 | `codewhale-palette` | `crates/tui/src/palette/{tokens,themes,adapt,contrast,detect,osc11,user_theme}.rs` + `assets/user-theme.schema.json` | Pure color math and theme tables; depends on ratatui `Color` and `codewhale_config::codewhale_home` only. Also unblocks the web/CWC token drift noted in the tokens survey. | `crate::palette` |
-| `codewhale-i18n` | `crates/tui/src/localization.rs` + `crates/tui/locales/*.json` | The `rust_i18n::i18n!` macro compiles all 15 packs into whichever crate hosts it; moving it out means locale-only edits no longer rebuild the TUI. `MessageId` is a plain enum. | `crate::localization` |
+| `codewhale-i18n` | `crates/localization/src/lib.rs` + `crates/localization/locales/*.json` | The `rust_i18n::i18n!` macro compiles all 15 packs into whichever crate hosts it; moving it out means locale-only edits no longer rebuild the TUI. `MessageId` is a plain enum. | `crate::localization` |
 | `codewhale-mcp-transport` | `crates/tui/src/mcp/{sse,stdio,external_import}.rs` | Already talks to `codewhale-mcp`; the reviewed-launch binding is the only tui coupling. | `crate::mcp` |
 
 Rules for the split: pure moves plus `pub use` re-exports at the old

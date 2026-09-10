@@ -1913,8 +1913,10 @@ mod tests {
         assert!(!crate::tui::coordination_detail::needs_attention(
             &projection
         ));
-        let pager =
-            crate::tui::coordination_detail::format(crate::localization::Locale::En, &projection);
+        let pager = crate::tui::coordination_detail::format(
+            codewhale_localization::Locale::En,
+            &projection,
+        );
         assert!(
             pager.contains("disposition resolved_by_successful_claim"),
             "{pager}"

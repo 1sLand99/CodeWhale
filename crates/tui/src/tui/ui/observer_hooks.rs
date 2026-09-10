@@ -684,7 +684,7 @@ mv "$receipt" "$receipt.done"
                     None,
                     &app.workspace,
                 ),
-                crate::localization::Locale::En,
+                codewhale_localization::Locale::En,
                 crate::config::ApprovalDefaultSelection::default(),
             ),
         );

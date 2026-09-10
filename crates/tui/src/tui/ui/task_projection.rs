@@ -25,9 +25,9 @@ pub(super) async fn refresh_active_task_panel(
                 let changed = namespace_changed || !app.task_panel_unavailable;
                 if !app.task_panel_unavailable {
                     app.push_status_toast(
-                        crate::localization::tr(
+                        codewhale_localization::tr(
                             app.ui_locale,
-                            crate::localization::MessageId::TaskInventoryUnavailable,
+                            codewhale_localization::MessageId::TaskInventoryUnavailable,
                         )
                         .to_string(),
                         crate::tui::app::StatusToastLevel::Warning,
@@ -100,9 +100,9 @@ pub(super) async fn refresh_active_task_panel(
                 if unverified {
                     entry.stale = true;
                     entry.role = Some(
-                        crate::localization::tr(
+                        codewhale_localization::tr(
                             app.ui_locale,
-                            crate::localization::MessageId::TaskOwnershipUnverified,
+                            codewhale_localization::MessageId::TaskOwnershipUnverified,
                         )
                         .to_string(),
                     );

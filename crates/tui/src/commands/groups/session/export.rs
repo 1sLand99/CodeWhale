@@ -15,10 +15,10 @@ use regex::Regex;
 use serde_json::Value;
 
 use crate::commands::traits::{CommandInfo, RegisterCommand};
-use crate::localization::MessageId;
 use crate::models::{ContentBlock, Message, Role};
 use crate::tui::app::App;
 use crate::tui::history::HistoryCell;
+use codewhale_localization::MessageId;
 
 use super::CommandResult;
 

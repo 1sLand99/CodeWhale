@@ -11,12 +11,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Widget};
 use unicode_width::UnicodeWidthStr;
 
-use crate::localization::{MessageId, tr};
 use crate::plugins::recommend::{
     PluginNextStep, RecommendOptions, load_marketplace_candidates, match_plugin_for_draft,
     recommend_plugins_for_task,
 };
 use crate::tui::app::{App, StatusToast, StatusToastKind, StatusToastLevel};
+use codewhale_localization::{MessageId, tr};
 
 const CATALOG_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const CTA_DEBOUNCE: Duration = Duration::from_millis(200);
@@ -286,8 +286,8 @@ pub fn draw_plugin_cta(app: &mut App, area: Rect, buf: &mut Buffer) {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::localization::Locale;
     use crate::tui::app::TuiOptions;
+    use codewhale_localization::Locale;
     use std::fs;
     use tempfile::TempDir;
 

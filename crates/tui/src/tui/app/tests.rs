@@ -2146,8 +2146,9 @@ fn subscription_route_hides_stale_session_dollars_in_footer() {
         !matches!(chip, crate::route_billing::UsageChip::Money(_)),
         "{chip:?}"
     );
-    let rendered = crate::route_billing::format_usage_chip(&chip, crate::localization::Locale::En)
-        .unwrap_or_default();
+    let rendered =
+        crate::route_billing::format_usage_chip(&chip, codewhale_localization::Locale::En)
+            .unwrap_or_default();
     assert!(!rendered.contains('$'), "{rendered}");
     assert!(rendered.contains("Codex OAuth quota"), "{rendered}");
 }
@@ -6267,7 +6268,7 @@ fn status_classifier_does_not_paint_negated_success_green() {
 
 #[test]
 fn onboarding_provider_copy_is_provider_neutral_in_en() {
-    use crate::localization::{Locale, MessageId, tr};
+    use codewhale_localization::{Locale, MessageId, tr};
 
     let title = tr(Locale::En, MessageId::OnboardProviderTitle);
     let blurb = tr(Locale::En, MessageId::OnboardProviderBlurb);

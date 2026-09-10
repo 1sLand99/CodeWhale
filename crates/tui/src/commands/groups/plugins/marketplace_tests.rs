@@ -4,8 +4,8 @@
 
 use super::*;
 use crate::config::Config;
-use crate::localization::Locale;
 use crate::tui::app::{App, TuiOptions};
+use codewhale_localization::Locale;
 use std::fs;
 use std::path::Path;
 use tempfile::TempDir;

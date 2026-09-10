@@ -13,9 +13,6 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::config::{ApiProvider, ApprovalPolicyControl, Config};
 use crate::features::{FEATURES, Stage};
-use crate::localization::{
-    Locale, MessageId, configured_locale_is_partial_pack, normalize_configured_locale, tr, tr_key,
-};
 use crate::palette;
 use crate::settings::Settings;
 use crate::tools::UserInputResponse;
@@ -29,6 +26,9 @@ use crate::tui::history::{HistoryCell, SubAgentCell, summarize_tool_output};
 use crate::tui::menu_style;
 use crate::tui::tideline::{SettingApplySemantics, SettingAuthority, SettingFact, UiSnapshot};
 use crate::tui::widgets::agent_card::AgentLifecycle;
+use codewhale_localization::{
+    Locale, MessageId, configured_locale_is_partial_pack, normalize_configured_locale, tr, tr_key,
+};
 
 pub mod automations;
 pub mod extensions;
@@ -926,7 +926,7 @@ pub enum ViewEvent {
     SetupConstitutionModelDraftRequested {
         draft: crate::tui::setup::GuidedConstitutionDraft,
         freeform_note: Option<String>,
-        locale: crate::localization::Locale,
+        locale: codewhale_localization::Locale,
     },
     /// Emitted by the fleet setup Review step (`m`) to ask the configured
     /// model to draft the agent profile the wizard describes. The host
@@ -948,7 +948,7 @@ pub enum ViewEvent {
         /// as `provider`: the ratified profile must preserve the operator's
         /// explicit choice, not whatever the model echoed.
         reasoning_effort: Option<String>,
-        locale: crate::localization::Locale,
+        locale: codewhale_localization::Locale,
     },
     /// Emitted by the `/fleet` roster view (`s` / Enter) to edit a member.
     /// The host routes a selected v2 Fleet to its exact editor and uses the
@@ -3478,7 +3478,7 @@ fn config_hint_for_key(locale: Locale, key: &str) -> Cow<'static, str> {
         "locale" => {
             static LOCALE_HINT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
             return Cow::Borrowed(
-                LOCALE_HINT.get_or_init(|| crate::localization::configured_locale_values(" | ")),
+                LOCALE_HINT.get_or_init(|| codewhale_localization::configured_locale_values(" | ")),
             );
         }
         _ => {}
@@ -6274,7 +6274,6 @@ mod tests {
         truncate_view_text,
     };
     use crate::config::Config;
-    use crate::localization::{Locale, MessageId, tr, tr_key};
     use crate::palette;
     use crate::settings::Settings;
     use crate::tools::subagent::{FleetRole, SubAgentAssignment, SubAgentResult, SubAgentStatus};
@@ -6282,6 +6281,7 @@ mod tests {
     use crate::tui::history::{HistoryCell, SubAgentCell};
     use crate::tui::views::{CommandPaletteAction, SubAgentsView};
     use crate::tui::widgets::agent_card::{AgentLifecycle, FanoutCard};
+    use codewhale_localization::{Locale, MessageId, tr, tr_key};
     use crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
@@ -10991,7 +10991,7 @@ context_window = 262144
     #[test]
     fn default_modal_does_not_consume_paste() {
         let mut stack = ViewStack::new();
-        stack.push(HelpView::new_for_locale(crate::localization::Locale::En));
+        stack.push(HelpView::new_for_locale(codewhale_localization::Locale::En));
         assert!(!stack.handle_paste("hello"));
         assert_eq!(stack.top_kind(), Some(ModalKind::Help));
     }

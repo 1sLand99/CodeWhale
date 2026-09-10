@@ -12,10 +12,10 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{expand_path, normalize_model_name};
-use crate::localization::normalize_configured_locale;
 use crate::palette::{normalize_hex_rgb_color, normalize_theme_setting};
 use crate::reasoning_preference::ReasoningEffort;
 use codewhale_config::resolve::Layer;
+use codewhale_localization::normalize_configured_locale;
 
 const SETTINGS_FILE_NAME: &str = "settings.toml";
 
@@ -99,8 +99,8 @@ impl TuiPrefsMigration {
     /// One localized line per outcome, in the order a reader needs them:
     /// what moved, what did not, and what was parked.
     #[must_use]
-    pub fn lines(&self, locale: crate::localization::Locale) -> Vec<String> {
-        use crate::localization::{MessageId, tr};
+    pub fn lines(&self, locale: codewhale_localization::Locale) -> Vec<String> {
+        use codewhale_localization::{MessageId, tr};
 
         let backup = self
             .backup
@@ -1580,7 +1580,7 @@ impl Settings {
                 let Some(locale) = normalize_configured_locale(value) else {
                     anyhow::bail!(
                         "Failed to update setting: invalid locale '{value}'. Expected: {}.",
-                        crate::localization::configured_locale_values(", ")
+                        codewhale_localization::configured_locale_values(", ")
                     );
                 };
                 self.locale = locale.to_string();
@@ -1746,8 +1746,8 @@ impl Settings {
     }
 
     /// Get all settings as a displayable string
-    pub fn display(&self, locale: crate::localization::Locale) -> String {
-        use crate::localization::{MessageId, tr};
+    pub fn display(&self, locale: codewhale_localization::Locale) -> String {
+        use codewhale_localization::{MessageId, tr};
         let mut lines = Vec::new();
         lines.push(tr(locale, MessageId::SettingsTitle).to_string());
         lines.push("─────────────────────────────".to_string());
@@ -4169,14 +4169,14 @@ mod tests {
     #[test]
     fn display_localizes_header_and_config_file_label() {
         let settings = Settings::default();
-        let en = settings.display(crate::localization::Locale::En);
+        let en = settings.display(codewhale_localization::Locale::En);
         assert!(en.contains("Settings:"), "english header missing:\n{en}");
         assert!(
             en.contains("Config file:"),
             "english config label missing:\n{en}"
         );
 
-        let zh = settings.display(crate::localization::Locale::ZhHans);
+        let zh = settings.display(codewhale_localization::Locale::ZhHans);
         assert!(zh.contains("设置"), "chinese header missing:\n{zh}");
         assert!(
             zh.contains("配置文件"),
@@ -4196,7 +4196,7 @@ mod tests {
             ..Settings::default()
         };
 
-        let display = settings.display(crate::localization::Locale::En);
+        let display = settings.display(codewhale_localization::Locale::En);
 
         assert!(display.contains("model defaults:     config.toml (use /config)"));
         for archived in [
@@ -5276,7 +5276,7 @@ mod tests {
             primary.exists(),
             "settings load should migrate to primary path"
         );
-        let display = loaded.display(crate::localization::Locale::En);
+        let display = loaded.display(codewhale_localization::Locale::En);
         assert!(
             display.contains(&format!("Config file: {}", primary.display())),
             "settings display should surface the canonical codewhale path:\n{display}"
@@ -5435,7 +5435,7 @@ mod tests {
             primary.exists(),
             "legacy fallback should be copied into primary"
         );
-        let display = loaded.display(crate::localization::Locale::En);
+        let display = loaded.display(codewhale_localization::Locale::En);
         assert!(
             display.contains(&format!("Config file: {}", primary.display())),
             "settings display should surface the canonical codewhale path:\n{display}"
@@ -5585,7 +5585,7 @@ mod tests {
             vec![("theme".to_string(), "light".to_string(), "dark".to_string())]
         );
         assert!(
-            !receipt.lines(crate::localization::Locale::En).is_empty(),
+            !receipt.lines(codewhale_localization::Locale::En).is_empty(),
             "a disagreement must be sayable"
         );
     }
@@ -5612,7 +5612,7 @@ mod tests {
         assert!(preserved.contains("font_size = 14"), "{preserved}");
         assert!(preserved.contains("ctrl+enter"), "{preserved}");
         let line = receipt
-            .lines(crate::localization::Locale::En)
+            .lines(codewhale_localization::Locale::En)
             .join(" ")
             .to_lowercase();
         assert!(line.contains("font_size"), "{line}");
@@ -5802,13 +5802,13 @@ mod tests {
             EnvVarRestore::set("DEEPSEEK_CONFIG_PATH", tmp.path().join("config.toml"));
 
         let loaded = Settings::load().expect("load settings");
-        let text = loaded.display(crate::localization::Locale::En);
+        let text = loaded.display(codewhale_localization::Locale::En);
         assert!(text.contains("from settings.toml: theme"), "{text}");
         assert!(!text.contains("session override"), "{text}");
 
         let mut session = Settings::default();
         session.set("locale", "en").expect("set locale");
-        let text = session.display(crate::localization::Locale::En);
+        let text = session.display(codewhale_localization::Locale::En);
         assert!(text.contains("session override: locale"), "{text}");
     }
 

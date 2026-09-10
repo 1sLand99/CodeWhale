@@ -20,12 +20,12 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-use crate::localization::MessageId;
 use crate::palette;
 use crate::tui::app::{App, RedactionGateNotice, StatusToastKind};
 use crate::tui::onboarding::wrap_words;
 use crate::tui::shell_key_routing::{ShellBindingId, binding};
 use crate::tui::views::{ActionHint, render_modal_footer, render_underwater_surface};
+use codewhale_localization::MessageId;
 
 /// Whether the startup gate must ask before the current config's
 /// `[redaction] model_bound` request can take effect.
@@ -214,7 +214,7 @@ mod tests {
             ..crate::test_support::test_tui_options(PathBuf::from("workspace-fixture"))
         };
         let mut app = App::new(options, &Config::default());
-        app.ui_locale = crate::localization::Locale::En;
+        app.ui_locale = codewhale_localization::Locale::En;
         app.redaction_gate = true;
         app
     }
@@ -259,8 +259,8 @@ mod tests {
         // question (see the trust screen's narrow-terminal discipline).
         for width in [40usize, 60, 80, 120] {
             for locale in [
-                crate::localization::Locale::En,
-                crate::localization::Locale::ZhHans,
+                codewhale_localization::Locale::En,
+                codewhale_localization::Locale::ZhHans,
             ] {
                 let mut app = app_fixture();
                 app.ui_locale = locale;
@@ -298,7 +298,7 @@ mod tests {
                 .collect::<String>()
         };
         for &(width, height) in &[(40, 12), (60, 16), (80, 24)] {
-            for &locale in crate::localization::Locale::shipped() {
+            for &locale in codewhale_localization::Locale::shipped() {
                 for confirming in [false, true] {
                     let mut app = app_fixture();
                     app.ui_locale = locale;

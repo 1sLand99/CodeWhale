@@ -33,12 +33,12 @@ use std::borrow::Cow;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 
-use crate::localization::{Locale, MessageId, tr};
 use crate::palette::{self, UiTheme};
 use crate::tools::subagent::{AgentWorkerStatus, FleetRole, SubAgentResult, SubAgentStatus};
 use crate::tui::glyphs;
 use crate::tui::motion::mode::MotionMode;
 use crate::tui::underwater::ShellPhase;
+use codewhale_localization::{Locale, MessageId, tr};
 
 /// Cells occupied by a badge (species mark + body).
 pub const BADGE_WIDTH: usize = 2;

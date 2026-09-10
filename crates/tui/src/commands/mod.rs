@@ -479,11 +479,11 @@ fn suggest_command_names(
 mod tests {
     use super::*;
     use crate::config::{ApiProvider, Config};
-    use crate::localization::{Locale, MessageId};
     use crate::tools::plan::{PlanItemArg, StepStatus, UpdatePlanArgs};
     use crate::tools::todo::TodoStatus;
     use crate::tui::app::{App, AppAction, TuiOptions};
     use crate::tui::work_surface::{RailPanel, WorkSurfacePlacement};
+    use codewhale_localization::{Locale, MessageId};
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
@@ -2022,7 +2022,7 @@ mod tests {
         assert_eq!(info.name, "feat015ctx");
         assert_eq!(
             info.description_id,
-            crate::localization::MessageId::CmdWorkspaceDescription,
+            codewhale_localization::MessageId::CmdWorkspaceDescription,
             "portable description_key must bridge to the TUI localization id"
         );
     }
@@ -2461,7 +2461,7 @@ mod tests {
         let info = registry().get_info("note").expect("note info");
         assert_eq!(
             info.description_id,
-            crate::localization::MessageId::CmdNoteDescription
+            codewhale_localization::MessageId::CmdNoteDescription
         );
     }
 
@@ -2486,7 +2486,7 @@ mod tests {
         let info = registry().get_info("memory").expect("memory info");
         assert_eq!(
             info.description_id,
-            crate::localization::MessageId::CmdMemoryDescription
+            codewhale_localization::MessageId::CmdMemoryDescription
         );
     }
 
@@ -2679,7 +2679,7 @@ mod tests {
         let info = registry().get_info("plugin").expect("plugin info");
         assert_eq!(
             info.description_id,
-            crate::localization::MessageId::CmdPluginDescription
+            codewhale_localization::MessageId::CmdPluginDescription
         );
     }
 

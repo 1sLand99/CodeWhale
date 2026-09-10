@@ -115,7 +115,7 @@ mod tests {
             ..crate::test_support::test_tui_options(PathBuf::from("."))
         };
         let mut app = App::new(options, &Config::default());
-        app.ui_locale = crate::localization::Locale::En;
+        app.ui_locale = codewhale_localization::Locale::En;
         // Dogfood guard: App::new reads the developer's real settings.toml,
         // and the 0.9.4 migration maps a legacy sidebar_focus onto the rail
         // panel. These tests exercise the Tasks panel's row machinery, so

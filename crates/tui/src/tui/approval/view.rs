@@ -12,10 +12,10 @@ use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKin
 use ratatui::layout::Rect;
 
 use crate::config::ApprovalDefaultSelection;
-use crate::localization::{Locale, MessageId, tr};
 use crate::tools::canonical_action::canonical_action_alias;
 use crate::tui::views::{ModalKind, ModalView, ViewAction, ViewEvent};
 use crate::tui::widgets::{ApprovalWidget, Renderable};
+use codewhale_localization::{Locale, MessageId, tr};
 
 #[cfg(test)]
 use super::RiskLevel;

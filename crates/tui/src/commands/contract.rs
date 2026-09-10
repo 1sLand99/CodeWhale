@@ -67,12 +67,12 @@ use codewhale_execpolicy::ApprovalMode;
 use crate::commands::groups::plugins::plugin_network_policy;
 
 use crate::dependencies::ExternalTool as _;
-use crate::localization::{MessageId, tr};
 use crate::network_policy::NetworkPolicy;
 use crate::pricing::CostCurrency;
 use crate::reasoning_preference::ReasoningEffort;
 use crate::tui::app::App;
 use crate::tui::history::HistoryCell;
+use codewhale_localization::{MessageId, tr};
 
 // ---------------------------------------------------------------------------
 // Pending frontier projection (D4)
@@ -3197,8 +3197,8 @@ fn scan_managed_plugins_portable(
         Some(home) => home.to_path_buf(),
         None => crate::config::effective_home_dir().ok_or_else(|| {
             tr(
-                crate::localization::Locale::En,
-                crate::localization::MessageId::PluginKimiHomeMissing,
+                codewhale_localization::Locale::En,
+                codewhale_localization::MessageId::PluginKimiHomeMissing,
             )
             .into_owned()
             .to_string()
@@ -3218,8 +3218,8 @@ fn scan_managed_plugins_portable(
             let root_text = escape_review_text(&configured_root.display().to_string());
             let error_text = escape_review_text(&error.to_string());
             return Err(tr(
-                crate::localization::Locale::En,
-                crate::localization::MessageId::PluginKimiRootInspectFailed,
+                codewhale_localization::Locale::En,
+                codewhale_localization::MessageId::PluginKimiRootInspectFailed,
             )
             .replace("{root}", &root_text)
             .replace("{error}", &error_text));
@@ -3228,8 +3228,8 @@ fn scan_managed_plugins_portable(
     if crate::plugins::metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
         let root_text = escape_review_text(&configured_root.display().to_string());
         return Err(tr(
-            crate::localization::Locale::En,
-            crate::localization::MessageId::PluginKimiRootMustBeDirectory,
+            codewhale_localization::Locale::En,
+            codewhale_localization::MessageId::PluginKimiRootMustBeDirectory,
         )
         .replace("{root}", &root_text));
     }
@@ -3237,8 +3237,8 @@ fn scan_managed_plugins_portable(
         let root_text = escape_review_text(&configured_root.display().to_string());
         let error_text = escape_review_text(&error.to_string());
         tr(
-            crate::localization::Locale::En,
-            crate::localization::MessageId::PluginKimiRootCanonicalizeFailed,
+            codewhale_localization::Locale::En,
+            codewhale_localization::MessageId::PluginKimiRootCanonicalizeFailed,
         )
         .replace("{root}", &root_text)
         .replace("{error}", &error_text)
@@ -3248,8 +3248,8 @@ fn scan_managed_plugins_portable(
             let root_text = escape_review_text(&canonical_root.display().to_string());
             let error_text = escape_review_text(&error.to_string());
             tr(
-                crate::localization::Locale::En,
-                crate::localization::MessageId::PluginKimiRootListFailed,
+                codewhale_localization::Locale::En,
+                codewhale_localization::MessageId::PluginKimiRootListFailed,
             )
             .replace("{root}", &root_text)
             .replace("{error}", &error_text)
@@ -3258,15 +3258,15 @@ fn scan_managed_plugins_portable(
         .map_err(|error| {
             let error_text = escape_review_text(&error.to_string());
             tr(
-                crate::localization::Locale::En,
-                crate::localization::MessageId::PluginKimiEntryReadFailed,
+                codewhale_localization::Locale::En,
+                codewhale_localization::MessageId::PluginKimiEntryReadFailed,
             )
             .replace("{error}", &error_text)
         })?;
     if entries.len() > MAX_MANAGED_CHILDREN {
         return Err(tr(
-            crate::localization::Locale::En,
-            crate::localization::MessageId::PluginKimiEntryLimit,
+            codewhale_localization::Locale::En,
+            codewhale_localization::MessageId::PluginKimiEntryLimit,
         )
         .replace("{count}", &entries.len().to_string())
         .replace("{max}", &MAX_MANAGED_CHILDREN.to_string()));
@@ -3284,8 +3284,8 @@ fn scan_managed_plugins_portable(
                 let error_text = escape_review_text(&error.to_string());
                 rejected.push(
                     tr(
-                        crate::localization::Locale::En,
-                        crate::localization::MessageId::PluginKimiEntryInspectFailed,
+                        codewhale_localization::Locale::En,
+                        codewhale_localization::MessageId::PluginKimiEntryInspectFailed,
                     )
                     .replace("{path}", &path_text)
                     .replace("{error}", &error_text),
@@ -3297,8 +3297,8 @@ fn scan_managed_plugins_portable(
             let path_text = escape_review_path(&path);
             rejected.push(
                 tr(
-                    crate::localization::Locale::En,
-                    crate::localization::MessageId::PluginKimiEntryLinksRefused,
+                    codewhale_localization::Locale::En,
+                    codewhale_localization::MessageId::PluginKimiEntryLinksRefused,
                 )
                 .replace("{path}", &path_text),
             );
@@ -3314,8 +3314,8 @@ fn scan_managed_plugins_portable(
                 let canonical_text = escape_review_text(&canonical_path.display().to_string());
                 rejected.push(
                     tr(
-                        crate::localization::Locale::En,
-                        crate::localization::MessageId::PluginKimiEntryOutsideRoot,
+                        codewhale_localization::Locale::En,
+                        codewhale_localization::MessageId::PluginKimiEntryOutsideRoot,
                     )
                     .replace("{path}", &path_text)
                     .replace("{canonical_path}", &canonical_text),
@@ -3327,8 +3327,8 @@ fn scan_managed_plugins_portable(
                 let error_text = escape_review_text(&error.to_string());
                 rejected.push(
                     tr(
-                        crate::localization::Locale::En,
-                        crate::localization::MessageId::PluginKimiEntryCanonicalizeFailed,
+                        codewhale_localization::Locale::En,
+                        codewhale_localization::MessageId::PluginKimiEntryCanonicalizeFailed,
                     )
                     .replace("{path}", &path_text)
                     .replace("{error}", &error_text),
@@ -4043,8 +4043,8 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::localization::Locale;
     use crate::models::Role;
+    use codewhale_localization::Locale;
     use tempfile::TempDir;
 
     fn test_app() -> App {

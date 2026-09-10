@@ -467,15 +467,15 @@ fn direction_items(direction: &str) -> Vec<String> {
 
 #[must_use]
 pub fn render_plan_board(op: &Operation) -> String {
-    render_plan_board_locale(op, crate::localization::Locale::En)
+    render_plan_board_locale(op, codewhale_localization::Locale::En)
 }
 
 /// Plan board with locale-aware chrome. Contract tokens (status / pace enum
 /// values, slice ids, owner ids) stay verbatim; the surrounding prose comes
 /// from the TUI locale packs.
 #[must_use]
-pub fn render_plan_board_locale(op: &Operation, locale: crate::localization::Locale) -> String {
-    use crate::localization::{MessageId, tr};
+pub fn render_plan_board_locale(op: &Operation, locale: codewhale_localization::Locale) -> String {
+    use codewhale_localization::{MessageId, tr};
     let tr_line = |id: MessageId| tr(locale, id).into_owned();
 
     let mut out = String::new();
@@ -535,8 +535,8 @@ pub fn render_plan_board_locale(op: &Operation, locale: crate::localization::Loc
     out
 }
 
-fn render_timeline(slices: &[OperatePlanSlice], locale: crate::localization::Locale) -> String {
-    use crate::localization::{MessageId, tr};
+fn render_timeline(slices: &[OperatePlanSlice], locale: codewhale_localization::Locale) -> String {
+    use codewhale_localization::{MessageId, tr};
     let max_end = slices
         .iter()
         .map(|slice| slice.start_offset_sec.saturating_add(slice.duration_sec))
@@ -2080,10 +2080,10 @@ api_key_env = "CW_OPERATE_MISSING_TEST_KEY"
     fn plan_board_localizes_chrome_but_not_contract_tokens() {
         let mut op = with_credentials(Operation::new("Scout\nWrite", None));
         op.plan_from_direction();
-        let english = render_plan_board_locale(&op, crate::localization::Locale::En);
+        let english = render_plan_board_locale(&op, codewhale_localization::Locale::En);
         assert!(english.contains("gantt  time →"), "{english}");
         assert!(english.contains("burn  No cap"), "{english}");
-        let japanese = render_plan_board_locale(&op, crate::localization::Locale::Ja);
+        let japanese = render_plan_board_locale(&op, codewhale_localization::Locale::Ja);
         assert!(japanese.contains("ガント"), "{japanese}");
         // Contract tokens stay verbatim in every locale.
         assert!(japanese.contains("slice-1"), "{japanese}");

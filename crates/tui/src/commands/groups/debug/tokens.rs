@@ -1,9 +1,9 @@
 //! Token/cost introspection and context commands.
 
 use crate::compaction::estimate_input_tokens_conservative;
-use crate::localization::{Locale, MessageId, tr};
 use crate::models::SystemPrompt;
 use crate::tui::app::{App, AppAction};
+use codewhale_localization::{Locale, MessageId, tr};
 
 use super::CommandResult;
 
@@ -483,7 +483,7 @@ mod cost_breakdown_tests {
             ..crate::test_support::test_tui_options(PathBuf::from("/tmp/test-workspace"))
         };
         let mut app = App::new(options, &Config::default());
-        app.ui_locale = crate::localization::Locale::En;
+        app.ui_locale = codewhale_localization::Locale::En;
         app.cost_currency = CostCurrency::Usd;
         app.api_provider = crate::config::ApiProvider::Deepseek;
         app

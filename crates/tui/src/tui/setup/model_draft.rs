@@ -22,8 +22,8 @@
 use codewhale_config::{UntrustedDraftParse, UserConstitution, user_constitution::MAX_NOTES_LEN};
 
 use crate::llm_client::LlmClient;
-use crate::localization::Locale;
 use crate::models::{ContentBlock, Message, MessageRequest, SystemPrompt};
+use codewhale_localization::Locale;
 
 use super::{GuidedConstitutionDraft, autonomy_label};
 use crate::models::Role;

@@ -9,11 +9,11 @@ use crate::automation_manager::{
     AutomationRecord, AutomationRunRecord, AutomationRunStatus, AutomationStatus,
     SharedAutomationManager, run_now_shared,
 };
-use crate::localization::{Locale, MessageId, tr};
 use crate::task_manager::SharedTaskManager;
 use crate::tui::app::{App, AutomationAction};
 use crate::tui::automation_panel::{SettledOutcome, SettledRun};
 use crate::tui::history::{AutomationCell, AutomationCellKind, HistoryCell};
+use codewhale_localization::{Locale, MessageId, tr};
 
 pub(super) async fn handle_action(
     app: &mut App,

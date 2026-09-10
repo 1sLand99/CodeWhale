@@ -26,11 +26,11 @@ use ratatui::{
     widgets::{Paragraph, Widget},
 };
 
-use crate::localization::MessageId;
 use crate::models::Message;
 use crate::tools::subagent::SubAgentStatus;
 use crate::tui::app::App;
 use crate::tui::history::{HistoryCell, history_cells_from_message};
+use codewhale_localization::MessageId;
 
 /// How often the focused transcript re-reads the child's durable artifact.
 /// The rail's live activity line already ticks per event; the full chat only

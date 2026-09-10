@@ -587,7 +587,7 @@ mod tests {
 
         let mut picker = crate::tui::session_picker::SessionPickerView::new_with_sessions(
             &workspace,
-            crate::localization::Locale::En,
+            codewhale_localization::Locale::En,
             all.clone(),
         );
 

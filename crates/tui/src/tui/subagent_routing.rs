@@ -110,9 +110,9 @@ pub(crate) fn subagent_is_parked(agent: &SubAgentResult) -> bool {
 /// The one-line recovery a parked row shows instead of a pending question:
 /// nobody will answer it, so it names the two ways out that actually exist.
 pub(crate) fn parked_recovery_detail(app: &App) -> String {
-    crate::localization::tr(
+    codewhale_localization::tr(
         app.ui_locale,
-        crate::localization::MessageId::AgentStatusParkedRecovery,
+        codewhale_localization::MessageId::AgentStatusParkedRecovery,
     )
     .into_owned()
 }

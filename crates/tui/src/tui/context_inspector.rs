@@ -18,7 +18,6 @@ use crate::compaction::{
     CompactionPath, estimate_input_tokens_for_pressure, inspect_compaction_keep,
     last_round_kept_count, last_round_start, pinned_anchors_text,
 };
-use crate::localization::{Locale, MessageId, tr};
 use crate::models::{SystemPrompt, Tool};
 use crate::palette;
 use crate::session_manager::SessionContextReference;
@@ -29,6 +28,7 @@ use crate::tui::views::{
     render_underwater_surface,
 };
 use codewhale_core::ContextReferenceSource;
+use codewhale_localization::{Locale, MessageId, tr};
 
 /// Marker used by per-turn working-set metadata. Replicated here so the
 /// context inspector can distinguish stable prompt blocks from volatile
@@ -1022,7 +1022,7 @@ mod tests {
     use codewhale_core::{ContextReference, ContextReferenceKind, ContextReferenceSource};
     use std::path::PathBuf;
 
-    use crate::localization::Locale;
+    use codewhale_localization::Locale;
 
     fn test_app() -> App {
         let mut app = App::new(

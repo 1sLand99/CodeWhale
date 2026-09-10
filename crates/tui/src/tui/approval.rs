@@ -29,9 +29,9 @@
 
 #[cfg(test)]
 use crate::config::ApprovalDefaultSelection;
-use crate::localization::{Locale, MessageId, tr};
 use crate::tools::canonical_action::canonical_action_alias;
 use codewhale_config::ToolAskRule;
+use codewhale_localization::{Locale, MessageId, tr};
 use serde_json::Value;
 use std::path::Path;
 #[cfg(test)]

@@ -31,13 +31,13 @@ pub(super) fn cache_warmup_result(usage: &Usage) -> String {
 /// Render the response body for `/models` / `models list` — the current
 /// model is starred and other available models follow underneath.
 pub(super) fn available_models_message(
-    locale: crate::localization::Locale,
+    locale: codewhale_localization::Locale,
     current_provider: &str,
     current_model: &str,
     models: &[String],
     fleet: &Result<Vec<crate::fleet::members::FleetModel>, crate::fleet::store::FleetStoreError>,
 ) -> String {
-    use crate::localization::{MessageId, tr};
+    use codewhale_localization::{MessageId, tr};
     let mut lines = Vec::new();
     // The fleet leads (design §10 F1): what the person added, with the roles
     // each model fills, before the provider's full list. A selected fleet
@@ -92,7 +92,7 @@ mod tests {
             "deepseek-v4-flash".to_string(),
         ];
         let msg = available_models_message(
-            crate::localization::Locale::En,
+            codewhale_localization::Locale::En,
             "deepseek",
             "deepseek-v4-pro",
             &models,
@@ -115,7 +115,7 @@ mod tests {
             "selected fleet `Ops`".to_string(),
         ));
         let msg = available_models_message(
-            crate::localization::Locale::En,
+            codewhale_localization::Locale::En,
             "deepseek",
             "deepseek-v4-pro",
             &[],
@@ -147,7 +147,7 @@ mod tests {
             },
         ];
         let msg = available_models_message(
-            crate::localization::Locale::En,
+            codewhale_localization::Locale::En,
             "novita",
             "deepseek/deepseek-v4-flash",
             &[],

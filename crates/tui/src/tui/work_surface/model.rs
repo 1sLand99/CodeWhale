@@ -254,6 +254,19 @@ pub(super) struct AgentRowFacts {
     /// been published; `Some(0)` means the list exists and is fully settled
     /// (the strip still hides a zero chip — see `agent_receipt`).
     pub todos_remaining: Option<u32>,
+    /// Whether this row on its own keeps the work dock open
+    /// ([`live_agent_row_count`]). Running, queued and answerable work does;
+    /// a finished agent does not.
+    ///
+    /// Typed at every construction site, never sniffed back out of `status` —
+    /// a renderer must not infer lifecycle from an English word
+    /// (`crates/tui/AGENTS.md`). The derivation deliberately differs by
+    /// source because the sources carry different facts: a card in the
+    /// 45-second live cache is *news*, so a fresh failure re-opens the dock
+    /// long enough to be seen, while the same worker's retained receipt stays
+    /// readable for an hour (`COMPLETED_AGENT_RETENTION`) and must not pin the
+    /// dock open for the rest of the session.
+    pub holds_dock_open: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -697,6 +710,26 @@ fn goal_row_label(app: &App) -> Option<String> {
 
 /// The agents view: the roster. Every worker row, live or settled, under the
 /// `▾ Subagents N` group door, oldest-first as the runtime reports them.
+///
+/// ## Order and nesting
+///
+/// This list is **roster-ordered** — creation order with parked husks sunk
+/// last (`build_agent_roster`) — not tree-ordered. The `↳ ` indent and the
+/// `(+N)` child count that `order_agent_seeds` stamps are therefore a fact
+/// about the *live* projection carried through this merge, never a claim that
+/// the row directly above an indented row is its parent.
+///
+/// Rows built from a retained receipt stay flat, and that is deliberate.
+/// `AgentRosterRow` does carry `parent_run_id`, but deriving depth from it
+/// here would put a second depth authority on one list and, because the list
+/// is not tree-ordered, would draw exactly the dangling indent
+/// `order_agent_seeds` refuses to draw. Nesting instead degrades to flat, and
+/// it degrades symmetrically: once either half of a pair has outlived its
+/// live card, the surviving half loses its `↳ ` or its `(+N)` with it,
+/// because `order_agent_seeds` only ever sees cache seeds. A pair is nested
+/// or it is flat; one half is never marked without the other. Pinned by
+/// `a_retained_child_renders_flat_under_a_retained_parent` and
+/// `a_live_child_flattens_once_its_parent_has_expired_to_a_receipt`.
 fn agents_view_rows(app: &mut App) -> Vec<WorkRow> {
     let rows = project(app);
     let mut agents: Vec<WorkRow> = rows
@@ -751,6 +784,10 @@ fn agents_view_rows(app: &mut App) -> Vec<WorkRow> {
                     .then(|| receipt.model.clone()),
                 tokens: receipt.output_tokens,
                 todos_remaining: None,
+                // History, not news: a settled receipt has nothing running,
+                // and a parked husk asked nobody anything (#5906). Only a
+                // worker still running or still answerable holds the dock.
+                holds_dock_open: !parked && !receipt.state.is_terminal(),
             }),
         });
     }
@@ -832,10 +869,22 @@ fn view_has_work(app: &mut App, panel: RailPanel) -> bool {
 }
 
 /// Live worker rows: the ones that make the agents view open on its own.
+///
+/// Counted over [`agents_view_rows`] — the same merged projection the register
+/// renders — not over the 45-second `subagent_cache` alone. A child that is
+/// blocked on a person survives in the retained roster after its live card
+/// expires, and across a session restore, where `subagent_cache` keeps only
+/// this instance's workers; the dock has to open for it either way.
 pub(super) fn live_agent_row_count(app: &mut App) -> usize {
-    project(app)
+    agents_view_rows(app)
         .iter()
-        .filter(|row| row.id.0.starts_with("worker:") && !agent_row_is_strip_settled(row))
+        .filter(|row| {
+            row.id.0.starts_with("worker:")
+                && row
+                    .agent
+                    .as_ref()
+                    .is_some_and(|facts| facts.holds_dock_open)
+        })
         .count()
 }
 
@@ -909,14 +958,6 @@ fn automation_row(app: &App) -> Option<WorkRow> {
         primary_action: Some(SidebarRowAction::Command("/automation".to_string())),
         agent: None,
     })
-}
-
-/// Completed/cancelled workers leave the Top strip; failed/interrupted stay
-/// because they still need attention. Paths to receipts remain via Agents.
-fn agent_row_is_strip_settled(row: &WorkRow) -> bool {
-    row.agent
-        .as_ref()
-        .is_some_and(|facts| matches!(facts.status.as_str(), "completed" | "cancelled"))
 }
 
 /// Row ids of the plan-step (to-do) nodes in the cached graph.
@@ -1391,7 +1432,7 @@ fn coordination_row(app: &App) -> Option<RankedWorkRow> {
         WorkBucket::Recent
     };
     let title = app
-        .tr(crate::localization::MessageId::CoordinationWorkTitle)
+        .tr(codewhale_localization::MessageId::CoordinationWorkTitle)
         .into_owned();
     Some(RankedWorkRow {
         bucket,
@@ -1687,6 +1728,7 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
                             model: meta.and_then(|meta| meta.resolved_model.clone()),
                             tokens: meta.and_then(|meta| meta.received_tokens),
                             todos_remaining: meta.and_then(|meta| meta.todos_remaining),
+                            holds_dock_open: bucket.is_actionable(),
                         }),
                     },
                 },
@@ -1772,6 +1814,7 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
                                 model: meta.and_then(|meta| meta.resolved_model.clone()),
                                 tokens: meta.and_then(|meta| meta.received_tokens),
                                 todos_remaining: meta.and_then(|meta| meta.todos_remaining),
+                                holds_dock_open: bucket.is_actionable(),
                             }),
                         },
                     },
@@ -1898,13 +1941,16 @@ fn current_activity_status_bucket(status: AgentCurrentActivityStatus) -> WorkBuc
 
 fn current_activity_status_label(
     status: AgentCurrentActivityStatus,
-    locale: crate::localization::Locale,
+    locale: codewhale_localization::Locale,
 ) -> std::borrow::Cow<'static, str> {
     // `parked` is the one word here that has to be translated: it is new
     // vocabulary a reader has never seen on this row, and the whole point is
     // that it does not read as "waiting for input" (#5906).
     if status == AgentCurrentActivityStatus::Parked {
-        return crate::localization::tr(locale, crate::localization::MessageId::AgentStatusParked);
+        return codewhale_localization::tr(
+            locale,
+            codewhale_localization::MessageId::AgentStatusParked,
+        );
     }
     std::borrow::Cow::Borrowed(match status {
         AgentCurrentActivityStatus::Queued => "queued",
@@ -2331,6 +2377,9 @@ fn shell_work_rows(app: &App) -> Vec<WorkRow> {
                     model: None,
                     tokens: None,
                     todos_remaining: None,
+                    // Only live shells reach this list; the agents counter
+                    // never sees a `shell:` row either way.
+                    holds_dock_open: true,
                 }),
             }
         })
@@ -2941,6 +2990,169 @@ mod tests {
             parent_run_id: None,
             run_id: id.to_string(),
         }
+    }
+
+    /// The register merges the retained roster with the live cache; the
+    /// counter that opens the dock has to read the same merged view, or a
+    /// child blocked on a person goes unseen the moment its 45-second card
+    /// expires (or a session restore filters it out of `subagent_cache`).
+    #[test]
+    fn a_roster_only_waiting_worker_opens_the_dock() {
+        use crate::agent_roster::RosterState;
+
+        let mut app = test_app();
+        app.current_session_id = Some("roster-owner".to_string());
+        app.agent_roster_session_id = app.current_session_id.clone();
+        assert!(app.subagent_cache.is_empty());
+        app.agent_roster = vec![retained_agent_receipt(
+            "blocked",
+            AgentWorkerStatus::WaitingForUser,
+            RosterState::Waiting,
+        )];
+
+        assert_eq!(live_agent_row_count(&mut app), 1);
+        assert!(view_has_work(&mut app, RailPanel::Agents));
+    }
+
+    /// The other half of reading the roster: it is retained for an hour, so a
+    /// settled receipt must not pin the dock open for the rest of the session.
+    /// A parked husk counts as settled too — nothing will answer it (#5906).
+    #[test]
+    fn retained_settled_receipts_do_not_hold_the_dock_open() {
+        use crate::agent_roster::RosterState;
+
+        let mut app = test_app();
+        app.current_session_id = Some("roster-owner".to_string());
+        app.agent_roster_session_id = app.current_session_id.clone();
+        app.agent_roster = vec![
+            retained_agent_receipt("done", AgentWorkerStatus::Completed, RosterState::Done),
+            retained_agent_receipt("failed", AgentWorkerStatus::Failed, RosterState::Failed),
+            retained_agent_receipt(
+                "cancelled",
+                AgentWorkerStatus::Cancelled,
+                RosterState::Cancelled,
+            ),
+            retained_agent_receipt(
+                "parked",
+                AgentWorkerStatus::WaitingForUser,
+                RosterState::Parked,
+            ),
+        ];
+
+        // Every receipt is still readable in the register...
+        assert_eq!(
+            agents_view_rows(&mut app)
+                .iter()
+                .filter(|row| row.agent.is_some())
+                .count(),
+            4
+        );
+        // ...and none of them re-opens the dock.
+        assert_eq!(live_agent_row_count(&mut app), 0);
+        assert!(!view_has_work(&mut app, RailPanel::Agents));
+    }
+
+    /// #36 nesting is a fact about the *live* projection: `order_agent_seeds`
+    /// indents a child only when its parent is on the same surface, and
+    /// `(+N)` counts only children the list actually shows.
+    #[test]
+    fn nesting_survives_while_both_rows_are_live() {
+        let mut app = test_app();
+        app.current_session_id = Some("roster-owner".to_string());
+        app.agent_roster_session_id = app.current_session_id.clone();
+        let mut child = running_agent("child");
+        child.parent_run_id = Some("parent".to_string());
+        app.subagent_cache = vec![running_agent("parent"), child];
+
+        let rows = agents_view_rows(&mut app);
+        let label = |id: &str| {
+            rows.iter()
+                .find(|row| row.id.0 == format!("worker:{id}"))
+                .unwrap_or_else(|| panic!("{id} row: {rows:?}"))
+                .label
+                .clone()
+        };
+        assert!(label("child").starts_with("↳ "), "{:?}", label("child"));
+        assert!(label("parent").contains("(+1)"), "{:?}", label("parent"));
+    }
+
+    /// Deliberate, and asserted so it is not "fixed" into a lie: a receipt
+    /// that has outlived its live card renders FLAT, with no `↳ ` and no
+    /// `(+N)`, even when the roster still knows its `parent_run_id`.
+    ///
+    /// The register is ordered by the roster (creation order, parked last),
+    /// not by the tree, so an indent here would be an adjacency claim the
+    /// list cannot keep — exactly the dangling indent `order_agent_seeds`
+    /// refuses to draw. Deriving depth here instead would also put a second
+    /// depth authority on the same list. Nesting degrades to flat, and it
+    /// degrades symmetrically: see the sibling test below.
+    #[test]
+    fn a_retained_child_renders_flat_under_a_retained_parent() {
+        use crate::agent_roster::RosterState;
+
+        let mut app = test_app();
+        app.current_session_id = Some("roster-owner".to_string());
+        app.agent_roster_session_id = app.current_session_id.clone();
+        let mut child =
+            retained_agent_receipt("child", AgentWorkerStatus::Completed, RosterState::Done);
+        child.parent_run_id = Some("parent".to_string());
+        app.agent_roster = vec![
+            retained_agent_receipt("parent", AgentWorkerStatus::Completed, RosterState::Done),
+            child,
+        ];
+
+        let rows = agents_view_rows(&mut app);
+        for id in ["parent", "child"] {
+            let label = rows
+                .iter()
+                .find(|row| row.id.0 == format!("worker:{id}"))
+                .unwrap_or_else(|| panic!("{id} row: {rows:?}"))
+                .label
+                .clone();
+            assert!(!label.contains('↳'), "{id}: {label:?}");
+            assert!(!label.contains("(+"), "{id}: {label:?}");
+        }
+    }
+
+    /// The other direction, which is what makes the flattening honest rather
+    /// than half-applied: when the PARENT has expired to a receipt and only
+    /// the child is still live, the live child flattens too — its parent is
+    /// not among the cache seeds, so `order_agent_seeds` leaves it at the top
+    /// level. Nesting is present for a pair or absent for a pair; it is never
+    /// stamped on one half of one.
+    #[test]
+    fn a_live_child_flattens_once_its_parent_has_expired_to_a_receipt() {
+        use crate::agent_roster::RosterState;
+
+        let mut app = test_app();
+        app.current_session_id = Some("roster-owner".to_string());
+        app.agent_roster_session_id = app.current_session_id.clone();
+        let mut child = running_agent("child");
+        child.parent_run_id = Some("parent".to_string());
+        app.subagent_cache = vec![child];
+        let mut retained_child =
+            retained_agent_receipt("child", AgentWorkerStatus::Running, RosterState::Running);
+        retained_child.parent_run_id = Some("parent".to_string());
+        app.agent_roster = vec![
+            retained_agent_receipt("parent", AgentWorkerStatus::Completed, RosterState::Done),
+            retained_child,
+        ];
+
+        let rows = agents_view_rows(&mut app);
+        let child_label = rows
+            .iter()
+            .find(|row| row.id.0 == "worker:child")
+            .unwrap_or_else(|| panic!("child row: {rows:?}"))
+            .label
+            .clone();
+        assert!(!child_label.contains('↳'), "{child_label:?}");
+        let parent_label = rows
+            .iter()
+            .find(|row| row.id.0 == "worker:parent")
+            .unwrap_or_else(|| panic!("parent row: {rows:?}"))
+            .label
+            .clone();
+        assert!(!parent_label.contains("(+"), "{parent_label:?}");
     }
 
     #[test]

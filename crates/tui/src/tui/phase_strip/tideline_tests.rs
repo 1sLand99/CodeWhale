@@ -489,7 +489,7 @@ use super::{ShellPhase, working_clock};
 #[test]
 fn live_turn_clock_states_the_turn_and_the_session() {
     let mut app = session_app();
-    app.ui_locale = crate::localization::Locale::En;
+    app.ui_locale = codewhale_localization::Locale::En;
     app.is_loading = true;
     app.turn_started_at = Some(Instant::now() - Duration::from_secs(75));
     app.cumulative_turn_duration = Duration::from_secs(2_400);
@@ -510,7 +510,7 @@ fn live_turn_clock_states_the_turn_and_the_session() {
 #[test]
 fn session_reading_carries_finished_turns_plus_the_live_one() {
     let mut app = session_app();
-    app.ui_locale = crate::localization::Locale::En;
+    app.ui_locale = codewhale_localization::Locale::En;
     app.cumulative_turn_duration = Duration::from_secs(3_600);
 
     // Turn in flight: the finished total plus this turn.
@@ -538,7 +538,7 @@ fn session_reading_carries_finished_turns_plus_the_live_one() {
 #[test]
 fn clock_distinguishes_working_from_waiting_on_something() {
     let mut app = session_app();
-    app.ui_locale = crate::localization::Locale::En;
+    app.ui_locale = codewhale_localization::Locale::En;
     app.is_loading = true;
     app.turn_started_at = Some(Instant::now() - Duration::from_secs(75));
     app.cumulative_turn_duration = Duration::from_secs(2_400);
@@ -580,7 +580,7 @@ fn clock_distinguishes_working_from_waiting_on_something() {
 #[test]
 fn a_session_that_has_not_worked_states_no_clock() {
     let mut app = session_app();
-    app.ui_locale = crate::localization::Locale::En;
+    app.ui_locale = codewhale_localization::Locale::En;
     let facts = tideline_footer_from_app(&mut app, 160);
     assert!(facts.turn_clock.is_none());
     assert!(facts.session_clock.is_none());

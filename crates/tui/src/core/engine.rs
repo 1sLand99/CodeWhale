@@ -1192,8 +1192,9 @@ impl Engine {
         ) {
             // One rendered line, localized once here: the TUI toasts it as-is
             // and `/status` re-renders it from the retained observation.
-            let reason =
-                notice.localize(crate::localization::resolve_locale(&self.config.locale_tag));
+            let reason = notice.localize(codewhale_localization::resolve_locale(
+                &self.config.locale_tag,
+            ));
             let _ = self
                 .tx_event
                 .send(Event::SnapshotsDisabled {

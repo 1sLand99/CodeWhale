@@ -16,7 +16,7 @@ fn create_test_app() -> App {
         ..crate::test_support::test_tui_options(PathBuf::from("/tmp/test-workspace"))
     };
     let mut app = App::new(options, &Config::default());
-    app.ui_locale = crate::localization::Locale::En;
+    app.ui_locale = codewhale_localization::Locale::En;
     app.cost_currency = crate::pricing::CostCurrency::Usd;
     app.api_provider = crate::config::ApiProvider::Deepseek;
     app

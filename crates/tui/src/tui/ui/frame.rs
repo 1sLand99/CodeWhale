@@ -60,8 +60,8 @@ fn output_tokens(app: &App) -> Option<u64> {
 /// row ignored that list entirely and the picker's toggles did nothing.
 pub(crate) fn info_segments(app: &App, width: u16) -> Vec<InfoSegment> {
     use crate::config::StatusItem;
-    use crate::localization::MessageId;
     use crate::palette::ChromeInk;
+    use codewhale_localization::MessageId;
     let mut segments = Vec::new();
     let tier = crate::tui::underwater::ShellTier::for_chrome_width(width);
     let shows = |item: StatusItem| app.status_items.contains(&item);
@@ -417,7 +417,7 @@ fn render_info_row(f: &mut Frame, app: &mut App, area: Rect) -> InfoLineInteract
 /// resolved, so it stays one list rather than a `register_rect` scattered
 /// through every widget that happens to remember.
 fn register_clickable_chrome_for_hover(app: &App) {
-    use crate::localization::MessageId;
+    use codewhale_localization::MessageId;
     let targets: [(Option<Rect>, MessageId); 4] = [
         (
             app.viewport.jump_to_latest_button_area,
@@ -441,7 +441,7 @@ fn register_clickable_chrome_for_hover(app: &App) {
         crate::tui::hover_layer::register_rect(
             crate::tui::hover_hit::HoverTargetKind::Link,
             area,
-            crate::localization::tr(app.ui_locale, label).into_owned(),
+            codewhale_localization::tr(app.ui_locale, label).into_owned(),
             false,
         );
     }
@@ -456,8 +456,11 @@ fn register_clickable_chrome_for_hover(app: &App) {
         crate::tui::hover_layer::register_rect(
             crate::tui::hover_hit::HoverTargetKind::Link,
             submit,
-            crate::localization::tr(app.ui_locale, crate::localization::MessageId::KbSendDraft)
-                .into_owned(),
+            codewhale_localization::tr(
+                app.ui_locale,
+                codewhale_localization::MessageId::KbSendDraft,
+            )
+            .into_owned(),
             false,
         );
     }
@@ -512,41 +515,44 @@ fn register_info_interaction_targets(app: &mut App, hitboxes: InfoLineInteractio
         let label = match target.mouse_action {
             Some(crate::tui::tideline::InteractionAction::InspectContext) => format!(
                 "{} · {}",
-                crate::localization::tr(
+                codewhale_localization::tr(
                     app.ui_locale,
-                    crate::localization::MessageId::CtxMenuContextInspector,
+                    codewhale_localization::MessageId::CtxMenuContextInspector,
                 ),
-                crate::localization::tr(
+                codewhale_localization::tr(
                     app.ui_locale,
-                    crate::localization::MessageId::CtxMenuContextInspectorDesc,
+                    codewhale_localization::MessageId::CtxMenuContextInspectorDesc,
                 ),
             ),
             Some(crate::tui::tideline::InteractionAction::OpenProviderPicker) => format!(
                 "{} · {}",
-                crate::localization::tr(
+                codewhale_localization::tr(
                     app.ui_locale,
-                    crate::localization::MessageId::RoutePanelHeader,
+                    codewhale_localization::MessageId::RoutePanelHeader,
                 ),
-                crate::localization::tr(
+                codewhale_localization::tr(
                     app.ui_locale,
-                    crate::localization::MessageId::CmdProviderDescription,
+                    codewhale_localization::MessageId::CmdProviderDescription,
                 ),
             ),
             // `/model` is a command name, not prose, so it stays verbatim in
             // every locale; only the description is translated.
             Some(crate::tui::tideline::InteractionAction::OpenModelPicker) => format!(
                 "/model · {}",
-                crate::localization::tr(
+                codewhale_localization::tr(
                     app.ui_locale,
-                    crate::localization::MessageId::CmdModelDescription,
+                    codewhale_localization::MessageId::CmdModelDescription,
                 ),
             ),
             Some(crate::tui::tideline::InteractionAction::ShowDockPanel(panel)) => {
                 panel.title().to_string()
             }
             Some(crate::tui::tideline::InteractionAction::DismissDock) => {
-                crate::localization::tr(app.ui_locale, crate::localization::MessageId::KbCloseMenu)
-                    .into_owned()
+                codewhale_localization::tr(
+                    app.ui_locale,
+                    codewhale_localization::MessageId::KbCloseMenu,
+                )
+                .into_owned()
             }
             None => continue,
         };
@@ -2560,7 +2566,7 @@ mod tests {
         use crate::tui::session_metrics::{full_text, snapshot_from_app};
 
         let mut app = app_with_context_percent(60);
-        app.ui_locale = crate::localization::Locale::En;
+        app.ui_locale = codewhale_localization::Locale::En;
         app.status_items = vec![StatusItem::SessionMetrics, StatusItem::Tokens];
         app.is_loading = true;
         app.turn_started_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(120));

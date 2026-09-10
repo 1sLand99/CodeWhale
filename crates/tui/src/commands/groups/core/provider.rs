@@ -6,8 +6,8 @@
 
 use crate::commands::traits::{CommandInfo, RegisterCommand};
 use crate::config::{ApiProvider, canonical_model_id_for_provider, provider_passes_model_through};
-use crate::localization::MessageId;
 use crate::tui::app::{App, AppAction};
+use codewhale_localization::MessageId;
 
 use super::CommandResult;
 
@@ -259,7 +259,7 @@ mod tests {
             ..crate::test_support::test_tui_options(PathBuf::from("."))
         };
         let mut app = App::new(options, &Config::default());
-        app.ui_locale = crate::localization::Locale::En;
+        app.ui_locale = codewhale_localization::Locale::En;
         app.api_provider = crate::config::ApiProvider::Deepseek;
         app
     }

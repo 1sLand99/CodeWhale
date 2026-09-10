@@ -12,7 +12,7 @@ use anyhow::{Result, anyhow};
 use codewhale_config::{SetupState, TELEMETRY_NOTICE_VERSION};
 use codewhale_telemetry::SessionSource;
 
-use crate::localization::{Locale, MessageId, tr};
+use codewhale_localization::{Locale, MessageId, tr};
 
 /// Marker for a nonblocking disclosure of default-on usage and Settings opt-out.
 #[derive(Debug, Clone)]

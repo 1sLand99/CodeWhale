@@ -14,7 +14,7 @@ use super::store::{
     FleetFile, FleetMember, FleetScope, FleetStoreError, load_fleet_at, load_fleet_in_scope,
     resolve_selected_fleet, save_fleet, set_selected, slugify,
 };
-use crate::localization::{Locale, MessageId, tr};
+use codewhale_localization::{Locale, MessageId, tr};
 
 /// Default name for the personal fleet created by the first `/fleet add` or
 /// ⇧F on a row in `/model` when no fleet is selected yet.

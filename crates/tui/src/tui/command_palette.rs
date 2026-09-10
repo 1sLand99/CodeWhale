@@ -17,7 +17,6 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::commands;
-use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
 use crate::skills;
 use crate::tools::spec::ApprovalRequirement;
@@ -28,6 +27,7 @@ use crate::tui::views::{
     ActionHint, CommandPaletteAction, ModalKind, ModalView, ViewAction, ViewEvent,
     centered_modal_area, render_modal_footer, render_modal_surface,
 };
+use codewhale_localization::{Locale, MessageId, tr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PaletteSection {

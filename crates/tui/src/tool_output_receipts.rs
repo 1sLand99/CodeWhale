@@ -5,8 +5,8 @@ use crate::artifacts::{ArtifactKind, ArtifactRecord};
 use serde_json::Value;
 
 use crate::fast_hash::FastHashMap;
-use crate::localization::{Locale, MessageId, tr};
 use crate::models::{ContentBlock, Message};
+use codewhale_localization::{Locale, MessageId, tr};
 
 /// Match the provider-wire budget so persisted/resumed history does not keep a
 /// larger raw body than the model would receive on a fresh request.

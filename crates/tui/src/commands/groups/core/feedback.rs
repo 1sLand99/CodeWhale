@@ -1,8 +1,8 @@
 use super::CommandResult;
 use crate::commands::traits::{CommandInfo, RegisterCommand};
-use crate::localization::MessageId;
 use crate::tools::github::report;
 use crate::tui::app::{App, AppAction};
+use codewhale_localization::MessageId;
 
 const SECURITY_POLICY_URL: &str = "https://github.com/Hmbown/CodeWhale/security/policy";
 const FEATURE_URL: &str =
@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn feedback_commands_use_the_active_locale() {
         let (mut app, _tmp) = test_app();
-        app.ui_locale = crate::localization::Locale::Ja;
+        app.ui_locale = codewhale_localization::Locale::Ja;
         let result = feedback(&mut app, Some("--help"));
         assert!(result.message.unwrap().contains("投稿"));
     }

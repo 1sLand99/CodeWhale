@@ -31,8 +31,8 @@ use regex::Regex;
 use crate::commands::CommandResult;
 use crate::commands::traits::{CommandInfo, RegisterCommand};
 use crate::config::Config;
-use crate::localization::{MessageId, tr};
 use crate::tui::app::{App, AppAction};
+use codewhale_localization::{MessageId, tr};
 
 /// Transcription model requested from the provider's chat-completions API.
 const ASR_MODEL: &str = "mimo-v2.5-asr";

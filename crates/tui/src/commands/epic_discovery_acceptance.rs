@@ -11,10 +11,10 @@ use tempfile::TempDir;
 use crate::commands::{self, CommandResult};
 use crate::config::ApiProvider;
 use crate::config::Config;
-use crate::localization::Locale;
 use crate::tui::app::{App, TuiOptions};
 use crate::tui::command_palette::{self, CommandPaletteEntry};
 use crate::tui::widgets::{self, SlashMenuEntry};
+use codewhale_localization::Locale;
 
 // --- FEAT-012 discovery filtering constants ---
 

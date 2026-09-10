@@ -7,12 +7,12 @@ use codewhale_config::AppMode;
 
 use crate::commands::{self, CommandInfo, CommandResult};
 use crate::config::{ApiProvider, Config};
-use crate::localization::{Locale, MessageId, tr};
 use crate::provider_lake::all_catalog_models_for_provider;
 use crate::tui::app::{App, AppAction};
 use crate::tui::command_palette::{
     CommandPaletteView, build_entries as build_command_palette_entries,
 };
+use codewhale_localization::{Locale, MessageId, tr};
 
 pub const HOTBAR_COMPACT_LABEL_MAX_WIDTH: usize = 7;
 
@@ -1457,7 +1457,7 @@ mod tests {
             ..crate::test_support::test_tui_options(workspace)
         };
         let mut app = App::new(options, config);
-        app.ui_locale = crate::localization::Locale::En;
+        app.ui_locale = codewhale_localization::Locale::En;
         app
     }
 

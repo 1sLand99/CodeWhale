@@ -2,8 +2,8 @@ use super::*;
 // `fs` was a cfg(test) import on the parent, and `Path` is now only used by
 // the legacy/render seams. Both belong here.
 use crate::config::Config;
-use crate::localization::Locale;
 use crate::tui::app::{App, TuiOptions};
+use codewhale_localization::Locale;
 use std::fs;
 use std::path::Path;
 use tempfile::TempDir;

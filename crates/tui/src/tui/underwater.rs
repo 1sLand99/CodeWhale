@@ -20,7 +20,6 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::config::HeaderItem;
-use crate::localization::{Locale, MessageId, tr};
 use crate::palette::{ChromeInk, chrome_style};
 use crate::tui::ui_text::{semantic_truncate, text_display_width};
 use crate::tui::{
@@ -31,6 +30,7 @@ use crate::tui::{
 };
 use codewhale_config::AppMode;
 use codewhale_execpolicy::ApprovalMode;
+use codewhale_localization::{Locale, MessageId, tr};
 
 /// Responsive density tier. It changes how much truth is shown, never the
 /// underlying state grammar.

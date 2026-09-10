@@ -13,8 +13,8 @@
 //! - unknown stays unknown — never `$0.00` and never an estimate-as-spend.
 
 use crate::config::{ApiProvider, Config, ProviderConfig};
-use crate::localization::{Locale, MessageId, tr};
 use crate::pricing::{CostCurrency, UnpricedReason, format_cost_amount};
+use codewhale_localization::{Locale, MessageId, tr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BillingPresentation {
@@ -1159,23 +1159,23 @@ mod tests {
         );
         assert!(!matches!(chip, UsageChip::Money(_)));
         assert_eq!(
-            format_usage_chip(&chip, crate::localization::Locale::En).as_deref(),
+            format_usage_chip(&chip, codewhale_localization::Locale::En).as_deref(),
             Some("usage: Kimi Code quota")
         );
         // The label names the membership product, never the credential import
         // mechanism, and never a dollar figure.
         assert!(
-            !format_usage_chip(&chip, crate::localization::Locale::En)
+            !format_usage_chip(&chip, codewhale_localization::Locale::En)
                 .unwrap_or_default()
                 .contains("OAuth")
         );
         assert!(
-            !format_usage_chip(&chip, crate::localization::Locale::En)
+            !format_usage_chip(&chip, codewhale_localization::Locale::En)
                 .unwrap_or_default()
                 .contains("imported token")
         );
         assert!(
-            !format_usage_chip(&chip, crate::localization::Locale::En)
+            !format_usage_chip(&chip, codewhale_localization::Locale::En)
                 .unwrap_or_default()
                 .contains('$')
         );
@@ -1315,7 +1315,7 @@ mod tests {
             );
             assert!(!matches!(chip, UsageChip::Money(_)));
             assert!(
-                !format_usage_chip(&chip, crate::localization::Locale::En)
+                !format_usage_chip(&chip, codewhale_localization::Locale::En)
                     .unwrap_or_default()
                     .contains('$')
             );
@@ -1344,7 +1344,7 @@ mod tests {
         );
         assert!(matches!(chip, UsageChip::Money(_)));
         assert!(
-            format_usage_chip(&chip, crate::localization::Locale::En)
+            format_usage_chip(&chip, codewhale_localization::Locale::En)
                 .unwrap_or_default()
                 .contains('$')
         );
@@ -1384,7 +1384,7 @@ mod tests {
             }
         );
         assert!(
-            !format_usage_chip(&chip, crate::localization::Locale::En)
+            !format_usage_chip(&chip, codewhale_localization::Locale::En)
                 .unwrap_or_default()
                 .contains('$')
         );
@@ -1537,11 +1537,11 @@ mod tests {
             None,
         );
         assert_eq!(
-            format_usage_chip(&chip, crate::localization::Locale::En).as_deref(),
+            format_usage_chip(&chip, codewhale_localization::Locale::En).as_deref(),
             Some("usage: Codex OAuth quota")
         );
         assert!(
-            !format_usage_chip(&chip, crate::localization::Locale::En)
+            !format_usage_chip(&chip, codewhale_localization::Locale::En)
                 .unwrap_or_default()
                 .contains('$')
         );
@@ -1595,7 +1595,7 @@ mod tests {
             None,
         );
         assert!(
-            !format_usage_chip(&chip, crate::localization::Locale::En)
+            !format_usage_chip(&chip, codewhale_localization::Locale::En)
                 .unwrap_or_default()
                 .contains('$')
         );
@@ -1644,7 +1644,7 @@ mod tests {
             None,
         );
         assert!(
-            !format_usage_chip(&chip, crate::localization::Locale::En)
+            !format_usage_chip(&chip, codewhale_localization::Locale::En)
                 .unwrap_or_default()
                 .contains('$')
         );
@@ -1683,7 +1683,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            format_usage_chip(&payg_chip, crate::localization::Locale::En).as_deref(),
+            format_usage_chip(&payg_chip, codewhale_localization::Locale::En).as_deref(),
             Some("$0.42")
         );
 
@@ -1708,7 +1708,7 @@ mod tests {
             None,
         );
         assert!(
-            !format_usage_chip(&plan_chip, crate::localization::Locale::En)
+            !format_usage_chip(&plan_chip, codewhale_localization::Locale::En)
                 .unwrap_or_default()
                 .contains('$')
         );
@@ -1880,7 +1880,7 @@ mod tests {
             Some(37.0),
         );
         assert_eq!(
-            format_usage_chip(&chip, crate::localization::Locale::En).as_deref(),
+            format_usage_chip(&chip, codewhale_localization::Locale::En).as_deref(),
             Some("usage: Grok OAuth quota · 37%")
         );
     }
@@ -1902,7 +1902,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            format_usage_chip(&spent, crate::localization::Locale::En).as_deref(),
+            format_usage_chip(&spent, codewhale_localization::Locale::En).as_deref(),
             Some("$0.42")
         );
 
@@ -1915,9 +1915,9 @@ mod tests {
             None,
         );
         assert_eq!(zero, UsageChip::Hidden);
-        assert!(format_usage_chip(&zero, crate::localization::Locale::En).is_none());
+        assert!(format_usage_chip(&zero, codewhale_localization::Locale::En).is_none());
         assert!(
-            !format_usage_chip(&zero, crate::localization::Locale::En)
+            !format_usage_chip(&zero, codewhale_localization::Locale::En)
                 .unwrap_or_default()
                 .contains('$')
         );
@@ -1938,11 +1938,11 @@ mod tests {
             None,
         );
         assert_eq!(
-            format_usage_chip(&chip, crate::localization::Locale::En).as_deref(),
+            format_usage_chip(&chip, codewhale_localization::Locale::En).as_deref(),
             Some("cost: local")
         );
         assert!(
-            !format_usage_chip(&chip, crate::localization::Locale::En)
+            !format_usage_chip(&chip, codewhale_localization::Locale::En)
                 .unwrap_or_default()
                 .contains('$')
         );
@@ -1996,11 +1996,11 @@ mod tests {
         );
         assert_eq!(chip, UsageChip::Unknown(vec![UnpricedReason::NoPricingRow]));
         assert_eq!(
-            format_usage_chip(&chip, crate::localization::Locale::En).as_deref(),
+            format_usage_chip(&chip, codewhale_localization::Locale::En).as_deref(),
             Some("cost: unknown (rate unavailable)")
         );
         assert!(
-            !format_usage_chip(&chip, crate::localization::Locale::En)
+            !format_usage_chip(&chip, codewhale_localization::Locale::En)
                 .unwrap_or_default()
                 .contains('$')
         );
@@ -2018,7 +2018,7 @@ mod tests {
             UsageChip::Unknown(vec![UnpricedReason::UnknownBillingBasis])
         );
         assert!(
-            !format_usage_chip(&unknown_billing, crate::localization::Locale::En)
+            !format_usage_chip(&unknown_billing, codewhale_localization::Locale::En)
                 .unwrap_or_default()
                 .contains('$')
         );
@@ -2367,7 +2367,7 @@ mod tests {
         );
         assert!(matches!(chip, UsageChip::Money(_)));
         assert!(
-            format_usage_chip(&chip, crate::localization::Locale::En)
+            format_usage_chip(&chip, codewhale_localization::Locale::En)
                 .unwrap_or_default()
                 .contains('$')
         );
@@ -2403,7 +2403,7 @@ mod tests {
         );
         assert!(!matches!(chip, UsageChip::Money(_)));
         assert!(
-            !format_usage_chip(&chip, crate::localization::Locale::En)
+            !format_usage_chip(&chip, codewhale_localization::Locale::En)
                 .unwrap_or_default()
                 .contains('$')
         );
@@ -2565,7 +2565,7 @@ mod tests {
                 UsageChip::Unknown(vec![UnpricedReason::UnknownBillingBasis])
             );
             assert!(
-                !format_usage_chip(&chip, crate::localization::Locale::En)
+                !format_usage_chip(&chip, codewhale_localization::Locale::En)
                     .unwrap_or_default()
                     .contains('$')
             );

@@ -41,7 +41,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use crate::localization::{Locale, MessageId, tr};
+use codewhale_localization::{Locale, MessageId, tr};
 
 /// Runtime accumulators behind the strip. Lives on [`crate::tui::app::App`],
 /// resets with the token breakdown when a session is loaded, so the numbers

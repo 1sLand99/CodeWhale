@@ -11,9 +11,9 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::localization::{Locale, MessageId, tr};
 use crate::palette::ChromeInk;
 use crate::tui::glyphs;
+use codewhale_localization::{Locale, MessageId, tr};
 
 /// What happened to the automation or its run. Drives the card's ink; the
 /// visible verb phrase comes from the producer (localized at construction).
@@ -146,11 +146,11 @@ impl AutomationCell {
             text.push(' ');
             text.push_str(&self.verb);
         }
-        let text = crate::localization::truncate_to_width(&text, budget);
+        let text = codewhale_localization::truncate_to_width(&text, budget);
         let used = unicode_width::UnicodeWidthStr::width(text.as_str());
         let detail = self.detail.as_deref().and_then(|detail| {
             let remaining = budget.saturating_sub(used + 2);
-            (remaining > 0).then(|| crate::localization::truncate_to_width(detail, remaining))
+            (remaining > 0).then(|| codewhale_localization::truncate_to_width(detail, remaining))
         });
         let mut spans = vec![
             Span::styled(

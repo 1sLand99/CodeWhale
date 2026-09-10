@@ -15,7 +15,6 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::localization::{Locale, MessageId, tr};
 use crate::models::Role;
 use crate::palette;
 use crate::session_manager::{
@@ -29,6 +28,7 @@ use crate::tui::views::{
     render_underwater_surface,
 };
 use crate::tui::views::{ModalKind, ModalView, ViewAction, ViewEvent};
+use codewhale_localization::{Locale, MessageId, tr};
 
 fn section_block(title: &str) -> Block<'static> {
     Block::default()

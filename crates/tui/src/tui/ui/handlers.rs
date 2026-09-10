@@ -277,7 +277,7 @@ pub(crate) async fn handle_setup_constitution_model_draft(
     config: &Config,
     draft: crate::tui::setup::GuidedConstitutionDraft,
     freeform_note: Option<String>,
-    locale: crate::localization::Locale,
+    locale: codewhale_localization::Locale,
 ) {
     // Spawn the draft off the event loop (same pattern as the fleet drafter,
     // #3757 review): awaiting it inline parked the whole TUI for up to the
@@ -301,7 +301,7 @@ pub(crate) async fn handle_setup_constitution_model_draft(
     let spawn_label = model_label.clone();
     let request_gen = app.next_draft_gen();
     app.status_message = Some(match locale {
-        crate::localization::Locale::ZhHans => {
+        codewhale_localization::Locale::ZhHans => {
             format!(
                 "{model_label} 正在生成协作准则草案……（最多 {}s）",
                 DRAFT_TIMEOUT.as_secs()
@@ -345,7 +345,7 @@ pub(crate) async fn handle_fleet_profile_model_draft(
     model: String,
     provider: Option<String>,
     reasoning_effort: Option<String>,
-    locale: crate::localization::Locale,
+    locale: codewhale_localization::Locale,
 ) {
     // The route the operator actually picked at `m`-press time (#4093). A
     // model draft always comes back `provider: None` (the untrusted gate
@@ -380,7 +380,7 @@ pub(crate) async fn handle_fleet_profile_model_draft(
     let request_gen = app.next_draft_gen();
     let workspace = app.workspace.clone();
     app.status_message = Some(match locale {
-        crate::localization::Locale::ZhHans => {
+        codewhale_localization::Locale::ZhHans => {
             format!(
                 "{model_label} 正在起草配置……（最多 {}s）",
                 DRAFT_TIMEOUT.as_secs()
@@ -513,7 +513,7 @@ fn start_mcp_login(app: &mut App, config: &Config, name: String, scopes: Vec<Str
             )?;
             let server = cfg.servers.get(&name).ok_or_else(|| {
                 anyhow::anyhow!(
-                    crate::localization::tr(locale, MessageId::McpLoginServerNotFound)
+                    codewhale_localization::tr(locale, MessageId::McpLoginServerNotFound)
                         .replace("{server}", &name)
                 )
             })?;
@@ -534,7 +534,7 @@ fn start_mcp_login(app: &mut App, config: &Config, name: String, scopes: Vec<Str
             let login = tokio::time::timeout(Duration::from_secs(15), handshake)
                 .await
                 .with_context(|| {
-                    crate::localization::tr(locale, MessageId::McpLoginHandshakeTimeout)
+                    codewhale_localization::tr(locale, MessageId::McpLoginHandshakeTimeout)
                         .into_owned()
                 })??;
             if let Ok(mut cell) = progress.lock() {
@@ -1756,7 +1756,7 @@ pub(crate) async fn handle_view_events(
                         let roster_refresh_failed = engine_handle
                             .try_send(Op::SetFleetRoster { roster })
                             .is_err();
-                        let zh = app.ui_locale == crate::localization::Locale::ZhHans;
+                        let zh = app.ui_locale == codewhale_localization::Locale::ZhHans;
                         app.add_message(HistoryCell::System {
                             content: if zh {
                                 format!("已保存团队配置：{}", target.display())
@@ -1786,7 +1786,7 @@ pub(crate) async fn handle_view_events(
                     }
                     Err(err) => {
                         app.status_message =
-                            Some(if app.ui_locale == crate::localization::Locale::ZhHans {
+                            Some(if app.ui_locale == codewhale_localization::Locale::ZhHans {
                                 format!("无法保存团队配置：{err:#}")
                             } else {
                                 format!("Team profile could not be saved: {err:#}")

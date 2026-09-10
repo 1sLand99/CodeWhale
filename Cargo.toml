@@ -11,6 +11,7 @@ members = [
     "crates/execpolicy",
     "crates/hooks",
     "crates/lane",
+    "crates/localization",
     "crates/mcp",
     "crates/paths",
     "crates/protocol",

@@ -4,8 +4,8 @@ use codewhale_config::{PermissionsFileState, PermissionsSnapshot, ToolAskRule};
 use codewhale_execpolicy::{ApprovalMode, PermissionAction};
 
 use crate::commands::CommandResult;
-use crate::localization::{MessageId, tr};
 use crate::tui::app::{App, AppAction};
+use codewhale_localization::{MessageId, tr};
 
 pub(super) fn permissions_command(app: &App, arg: Option<&str>) -> CommandResult {
     let raw = arg.map(str::trim).unwrap_or("");
@@ -253,8 +253,8 @@ fn operation_error(app: &App, error: &anyhow::Error) -> CommandResult {
 mod tests {
     use std::fs;
 
-    use crate::localization::Locale;
     use crate::tui::app::TuiOptions;
+    use codewhale_localization::Locale;
 
     use super::*;
 
