@@ -19,7 +19,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use codewhale_agent::ModelRegistry;
 use codewhale_config::{ConfigToml, ProviderKind};
 use codewhale_execpolicy::{
     AskForApproval, ExecApprovalRequirement, ExecPolicyContext, ExecPolicyDecision,
@@ -908,12 +907,10 @@ impl ThreadManager {
     }
 }
 
-/// Top-level runtime combining config, model registry, threads, tools, MCP, and hooks.
+/// Top-level runtime combining config, threads, tools, MCP, and hooks.
 pub struct Runtime {
     /// Resolved application configuration.
     pub config: ConfigToml,
-    /// Registry of available model providers.
-    pub model_registry: ModelRegistry,
     /// Manages conversation thread lifecycle.
     pub thread_manager: ThreadManager,
     /// Registry of callable tools.
@@ -932,7 +929,6 @@ impl Runtime {
     /// Constructs a new `Runtime`, loading existing jobs from the state store.
     pub fn new(
         config: ConfigToml,
-        model_registry: ModelRegistry,
         state: StateStore,
         tool_registry: Arc<ToolRegistry>,
         mcp_manager: Arc<McpManager>,
@@ -945,7 +941,6 @@ impl Runtime {
         }
         Self {
             config,
-            model_registry,
             thread_manager: ThreadManager::new(state),
             tool_registry,
             mcp_manager,
@@ -989,7 +984,6 @@ impl Runtime {
     ///   referenced `mcp.json` still requires a headless-runtime restart;
     ///   the TUI owns a separate explicit `/mcp reload` operation.
     /// * `tool_registry` — built once at startup.
-    /// * `model_registry` — static catalog.
     pub fn reload_config_and_policy(&mut self, config: ConfigToml, exec_policy: ExecPolicyEngine) {
         self.config = config;
         self.exec_policy = exec_policy;
@@ -3175,7 +3169,6 @@ mod tests {
     #[tokio::test]
     async fn invoke_tool_returns_timeout_status_for_slow_tools() {
         use async_trait::async_trait;
-        use codewhale_agent::ModelRegistry;
         use codewhale_config::ConfigToml;
         use codewhale_execpolicy::{AskForApproval, ExecPolicyEngine};
         use codewhale_hooks::HookDispatcher;
@@ -3218,7 +3211,6 @@ mod tests {
 
         let runtime = Runtime::new(
             ConfigToml::default(),
-            ModelRegistry::default(),
             temp_core_state("invoke-tool-timeout"),
             Arc::new(registry),
             Arc::new(McpManager::default()),
@@ -3255,7 +3247,6 @@ mod tests {
         // honest answer here is a refusal that names where turns actually run.
         let mut runtime = Runtime::new(
             ConfigToml::default(),
-            ModelRegistry::default(),
             temp_core_state("message-refused"),
             Arc::new(ToolRegistry::default()),
             Arc::new(McpManager::default()),

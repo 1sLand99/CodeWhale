@@ -901,7 +901,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
- "codewhale-agent",
  "codewhale-config",
  "codewhale-execpolicy",
  "codewhale-hooks",

@@ -4,7 +4,6 @@ use std::{
 };
 
 use async_trait::async_trait;
-use codewhale_agent::ModelRegistry;
 use codewhale_config::ConfigToml;
 use codewhale_core::Runtime;
 use codewhale_execpolicy::{AskForApproval, ExecPolicyEngine};
@@ -78,7 +77,6 @@ async fn invoke_fixture(
     ));
     let runtime = Runtime::new(
         ConfigToml::default(),
-        ModelRegistry::default(),
         StateStore::open(Some(state_path)).expect("open temporary state"),
         Arc::new(registry),
         Arc::new(McpManager::default()),

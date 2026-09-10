@@ -837,7 +837,6 @@ fn build_state_with_transport(
 
     let runtime = Runtime::new(
         config.clone(),
-        registry.clone(),
         state_store,
         Arc::new(ToolRegistry::default()),
         Arc::new(McpManager::default()),

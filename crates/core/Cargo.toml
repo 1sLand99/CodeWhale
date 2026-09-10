@@ -15,7 +15,6 @@ anyhow.workspace = true
 chrono.workspace = true
 serde.workspace = true
 thiserror.workspace = true
-codewhale-agent = { path = "../agent", version = "0.9.13" }
 codewhale-config = { path = "../config", version = "0.9.13" }
 codewhale-execpolicy = { path = "../execpolicy", version = "0.9.13" }
 codewhale-hooks = { path = "../hooks", version = "0.9.13" }
