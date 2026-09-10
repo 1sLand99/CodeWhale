@@ -1754,9 +1754,19 @@ fn parse_inline_spans(line: &str, base_style: Style, link_style: Style) -> Vec<I
         {
             let inner = &rest[1..1 + end];
             let after = &rest[1 + end + 1..];
+            // CommonMark forbids an intraword `_` from opening emphasis and
+            // requires the opener to be left-flanking (not followed by
+            // whitespace). Guarding only the closer let `b_p … t_?` italicize
+            // the prose between two math subscripts (#6042).
+            let preceded_by_word = line[..line.len() - rest.len()]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_alphanumeric);
+            let openable =
+                !preceded_by_word && inner.chars().next().is_some_and(|c| !c.is_whitespace());
             // Closing delimiter must not be immediately followed by a
             // letter, digit, or underscore.
-            if !after.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+            if openable && !after.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
                 out.push(InlineToken::new(inner.to_string(), italic_style, None));
                 rest = after;
                 continue;
@@ -2574,6 +2584,46 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn underscore_emphasis_does_not_open_mid_word_across_math_subscripts() {
+        // #6042: the closing-side guard alone let `b_p` open emphasis and
+        // `t_?` close it, italicizing 60 characters of prose. CommonMark
+        // forbids an intraword `_` from opening emphasis.
+        let source = "[t_, b_p]. Actually — hold on, do we even tile all the way from t_?";
+        let lines = render_parsed(&parse(source), 200, Style::default());
+        let italic: Vec<&str> = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .filter(|span| span.style.add_modifier.contains(Modifier::ITALIC))
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(
+            italic.is_empty(),
+            "math subscripts must not open emphasis; italic spans: {italic:?}"
+        );
+
+        // A properly flanked `_italic_` run still renders italic…
+        let flanked = render_parsed(&parse("an _emphasised_ word"), 80, Style::default());
+        assert!(
+            flanked
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .any(|span| span.style.add_modifier.contains(Modifier::ITALIC)
+                    && span.content.as_ref() == "emphasised"),
+            "a flanked _italic_ run must still render italic"
+        );
+        // …and after punctuation it still opens.
+        let after_punct = render_parsed(&parse("word (_also_)"), 80, Style::default());
+        assert!(
+            after_punct
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .any(|span| span.style.add_modifier.contains(Modifier::ITALIC)
+                    && span.content.as_ref() == "also"),
+            "a _ run after punctuation must still open"
+        );
     }
 
     #[test]
