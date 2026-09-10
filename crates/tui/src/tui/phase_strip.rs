@@ -611,7 +611,7 @@ pub struct TidelineFooter<'a> {
     /// this session has actually worked — the reading the founder went
     /// looking for and could not find (#5914). Outlives the turn half, and
     /// sheds before the hint and the counts. `None` until the session has
-    /// worked a minute.
+    /// worked a minute, and while it would repeat the turn reading (#6041).
     pub session_clock: Option<(&'a str, codewhale_palette::ChromeInk)>,
     /// The one hint that applies right now (`Esc to interrupt`).
     pub hint: Option<(&'a str, codewhale_palette::ChromeInk)>,
@@ -1091,7 +1091,10 @@ pub(crate) type ClockReading = Option<(String, ChromeInk)>;
 ///   live turn, so it ticks continuously and never jumps at `TurnComplete`.
 ///   It is model work, not wall clock since launch — an idle TUI does not
 ///   claim to have been working. Quiet ink while no turn is running, because
-///   the clock is stopped.
+///   the clock is stopped. Suppressed while it would repeat the turn
+///   reading — on a session's first turn the two are the same duration
+///   (#6041); it returns as soon as a finished turn makes the totals
+///   different.
 pub(crate) fn working_clock(
     app: &App,
     phase: ShellPhase,
@@ -1115,19 +1118,26 @@ pub(crate) fn working_clock(
     let worked = app
         .cumulative_turn_duration
         .saturating_add(turn.unwrap_or_default());
-    let session_clock = (worked.as_secs() >= CLOCK_SESSION_FLOOR_SECS).then(|| {
-        (
-            tr(app.ui_locale, MessageId::FooterWorkedChip).replace(
-                "{duration}",
-                &crate::elapsed::format_elapsed_secs(worked.as_secs()),
-            ),
-            if turn.is_some() {
-                ink
-            } else {
-                ChromeInk::MetadataValue
-            },
-        )
-    });
+    // #6041: on a session's first turn there is no finished-turn total, so
+    // the session reading would print the same duration the turn reading
+    // already carries. The turn half names what is happening; the worked
+    // chip earns its place only once a finished turn makes it a different
+    // number.
+    let repeats_turn = turn.is_some_and(|turn| turn.as_secs() == worked.as_secs());
+    let session_clock =
+        (worked.as_secs() >= CLOCK_SESSION_FLOOR_SECS && !repeats_turn).then(|| {
+            (
+                tr(app.ui_locale, MessageId::FooterWorkedChip).replace(
+                    "{duration}",
+                    &crate::elapsed::format_elapsed_secs(worked.as_secs()),
+                ),
+                if turn.is_some() {
+                    ink
+                } else {
+                    ChromeInk::MetadataValue
+                },
+            )
+        });
     (turn_clock, session_clock)
 }
 

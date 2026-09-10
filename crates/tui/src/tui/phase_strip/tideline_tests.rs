@@ -533,6 +533,38 @@ fn session_reading_carries_finished_turns_plus_the_live_one() {
     assert_eq!(ink, ChromeInk::MetadataValue, "a stopped clock reads quiet");
 }
 
+/// #6041: a session's first long turn must not print one duration twice.
+/// The turn half names the phase; the session half returns only once a
+/// finished turn makes the totals different.
+#[test]
+fn first_turn_does_not_repeat_the_turn_duration_as_a_session_total() {
+    let mut app = session_app();
+    app.ui_locale = codewhale_localization::Locale::En;
+    app.is_loading = true;
+    app.turn_started_at = Some(Instant::now() - Duration::from_secs(22 * 60 + 39));
+
+    let facts = tideline_footer_from_app(&mut app, 160);
+    assert_eq!(
+        facts.turn_clock.expect("the turn clock states the phase").0,
+        "working 22m 39s"
+    );
+    assert!(
+        facts.session_clock.is_none(),
+        "a session total that repeats the turn reading is furniture (#6041)"
+    );
+
+    // One finished turn later the two readings differ, and both are honest.
+    app.cumulative_turn_duration = Duration::from_secs(14 * 60);
+    let facts = tideline_footer_from_app(&mut app, 160);
+    assert_eq!(
+        facts
+            .session_clock
+            .expect("a finished total earns the chip")
+            .0,
+        "worked 36m 39s"
+    );
+}
+
 /// Actively working, waiting on a sub-agent, and waiting on you are three
 /// different readings — a bare duration cannot tell them apart.
 #[test]
