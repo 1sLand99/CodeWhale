@@ -6785,7 +6785,7 @@ impl Engine {
     /// `uvx` download their package on first run — so without an outer bound a
     /// single cold fetch left `/mcp` waiting on `mcp_boot_done` forever, which
     /// reads to the user as a frozen application.
-    const MCP_BOOT_UI_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+    const MCP_BOOT_UI_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
     async fn wait_for_mcp_boot(&mut self) {
         if let Some(rx) = self.mcp_boot_done.as_mut() {
@@ -6825,7 +6825,21 @@ impl Engine {
         if requested.is_empty() {
             return;
         }
+        // A turn must start even when a selected server never answers. An
+        // unreachable or un-authenticated MCP server is an ordinary state, not
+        // an exceptional one, so waiting without a deadline here turned one bad
+        // row in the config into an unresponsive session. Past the deadline the
+        // turn proceeds with the tools that are ready; the boot keeps running,
+        // and the missing server's tools become available on a later turn.
+        let deadline = tokio::time::Instant::now() + Self::MCP_BOOT_UI_WAIT;
         while self.mcp_boot_in_flight {
+            if tokio::time::Instant::now() >= deadline {
+                tracing::info!(
+                    waited_secs = Self::MCP_BOOT_UI_WAIT.as_secs(),
+                    "starting the turn before every selected MCP server is ready"
+                );
+                break;
+            }
             self.drain_mcp_boot_updates().await;
             let Some(pool) = self.mcp_pool.as_ref() else {
                 break;
@@ -6847,8 +6861,13 @@ impl Engine {
             let Some(rx) = self.mcp_boot_rx.as_mut() else {
                 break;
             };
+            // The deadline has to cover this await too: a server that accepts
+            // the connection and then goes quiet sends no progress update at
+            // all, so checking only at the top of the loop would still park the
+            // turn here indefinitely.
             let update = tokio::select! {
                 _ = self.cancel_token.cancelled() => None,
+                () = tokio::time::sleep_until(deadline) => None,
                 update = rx.recv() => update,
             };
             let Some(update) = update else { break };
@@ -6994,11 +7013,16 @@ impl Engine {
         if self.mcp_pool.is_none() {
             let _ = self.ensure_mcp_pool().await;
         }
+        // Wait for the boot, but never without a deadline. Servers that fail
+        // fast — a missing binary, a refused connection — are diagnosed in
+        // milliseconds, and that diagnosis is the whole value of `/mcp`, so
+        // returning before it lands would report an empty picture. Servers that
+        // *stall* are the problem: `npx -y` and `uvx` fetch their package on
+        // first run, and one cold fetch used to hold the view open forever.
+        // Past the deadline the view renders what is known and the background
+        // boot keeps running, so slower servers land on a later snapshot.
         if self.mcp_boot_in_flight {
             self.wait_for_mcp_boot().await;
-        } else if self.mcp_pool.is_some() && self.mcp_connection_errors.is_empty() {
-            // Tests and explicit `/mcp` callers may run before spawn-time boot
-            // has been scheduled; connect now without blocking later turns.
         }
         self.drain_mcp_boot_updates().await;
         let snapshot = self.mcp_session_snapshot().await?;
