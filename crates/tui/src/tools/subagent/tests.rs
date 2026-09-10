@@ -13297,7 +13297,9 @@ async fn turn_end_parking_preserves_a_step_zero_resumable_checkpoint() {
         panic!("turn-end parking must interrupt resumably: {result:?}");
     };
     assert!(
-        reason.contains(&format!("resume_from=\"{agent_id}\"")),
+        reason.contains(&format!(
+            "agent(action=\"followup\", agent_id=\"{agent_id}\""
+        )),
         "{reason}"
     );
     assert_eq!(result.steps_taken, 0);
@@ -13317,9 +13319,9 @@ async fn turn_end_parking_preserves_a_step_zero_resumable_checkpoint() {
         .as_ref()
         .expect("parked work must carry an actionable recovery instruction");
     assert!(
-        recovery
-            .question
-            .contains(&format!("resume_from=\"{agent_id}\"")),
+        recovery.question.contains(&format!(
+            "agent(action=\"followup\", agent_id=\"{agent_id}\""
+        )),
         "{}",
         recovery.question
     );
@@ -13329,7 +13331,9 @@ async fn turn_end_parking_preserves_a_step_zero_resumable_checkpoint() {
             agent_id: ref delivered_agent_id,
             reason: ref delivered_reason,
         } if delivered_agent_id == agent_id
-            && delivered_reason.contains(&format!("resume_from=\"{agent_id}\""))
+            && delivered_reason.contains(&format!(
+                "agent(action=\"followup\", agent_id=\"{agent_id}\""
+            ))
     ));
 
     let (explicit_status, _, _, explicit_needs_input, explicit_worker_status, _) =
@@ -16260,7 +16264,9 @@ async fn queued_turn_owned_child_parks_without_a_false_start_transition() {
             message,
             MailboxMessage::Interrupted { agent_id, reason }
                 if agent_id == "agent_queued_turn_end_park"
-                    && reason.contains("resume_from=\"agent_queued_turn_end_park\"")
+                    && reason.contains(
+                        "agent(action=\"followup\", agent_id=\"agent_queued_turn_end_park\""
+                    )
         )),
         "parking must publish an actionable interrupted receipt: {messages:?}"
     );

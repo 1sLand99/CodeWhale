@@ -2923,8 +2923,7 @@ async fn read_file_denies_ambient_home_config_even_when_codewhale_home_is_reloca
     let _home = crate::test_support::EnvVarGuard::set("HOME", home.path());
     let _userprofile = crate::test_support::EnvVarGuard::set("USERPROFILE", home.path());
     // The override points somewhere else entirely — the ambient store must stay guarded.
-    let _codewhale_home =
-        crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", relocated.path());
+    let _codewhale_home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", relocated.path());
     let _config_path = crate::test_support::EnvVarGuard::remove("CODEWHALE_CONFIG_PATH");
     let _legacy_config_path = crate::test_support::EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH");
 

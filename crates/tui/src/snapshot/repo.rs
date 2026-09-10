@@ -104,20 +104,30 @@ pub const GATE_TOO_LARGE_MARKER: &str = "workspace too large for snapshots";
 pub const GATE_TOO_MANY_ENTRIES_MARKER: &str = "workspace has too many files for snapshots";
 pub const GATE_UNSAFE_LOCATION_MARKER: &str = "workspace snapshots are disabled";
 
+/// Display a workspace path in gate diagnostics without Windows verbatim
+/// (`\\?\`) prefixes. `Path::canonicalize` embeds that prefix; users and
+/// tests name the workspace without it, so leave it out of the message.
+fn display_workspace_for_gate(workspace: &Path) -> String {
+    let raw = workspace.display().to_string();
+    raw.strip_prefix(r"\\?\")
+        .or_else(|| raw.strip_prefix("//?/"))
+        .unwrap_or(&raw)
+        .to_string()
+}
+
 impl WorkspaceGate {
     /// One-line English diagnostic for logs, `/undo`, and the gate matcher.
     /// The user-facing consequence and recovery are localized by the notice
     /// surfaces; this string must not restate them.
     fn describe(self, cap_bytes: u64, workspace: &Path) -> String {
+        let workspace = display_workspace_for_gate(workspace);
         match self {
             Self::TooLarge => format!(
-                "{GATE_TOO_LARGE_MARKER}: over {} bytes of snapshot-eligible content in {}",
+                "{GATE_TOO_LARGE_MARKER}: over {} bytes of snapshot-eligible content in {workspace}",
                 cap_bytes,
-                workspace.display()
             ),
             Self::TooManyEntries => format!(
-                "{GATE_TOO_MANY_ENTRIES_MARKER}: over {SIZE_WALK_MAX_ENTRIES} snapshot-eligible entries in {}",
-                workspace.display()
+                "{GATE_TOO_MANY_ENTRIES_MARKER}: over {SIZE_WALK_MAX_ENTRIES} snapshot-eligible entries in {workspace}"
             ),
         }
     }
@@ -277,7 +287,7 @@ impl SnapshotRepo {
                 io::ErrorKind::InvalidInput,
                 format!(
                     "{GATE_UNSAFE_LOCATION_MARKER} for {reason}: {}",
-                    work_tree.display()
+                    display_workspace_for_gate(&work_tree)
                 ),
             ));
         }
@@ -1994,8 +2004,13 @@ mod tests {
             msg.contains(GATE_TOO_LARGE_MARKER),
             "error must call out the size cap; got: {msg}"
         );
+        let named_owned = workspace.display().to_string();
+        let named = named_owned
+            .strip_prefix(r"\\?\")
+            .or_else(|| named_owned.strip_prefix("//?/"))
+            .unwrap_or(named_owned.as_str());
         assert!(
-            msg.contains(&workspace.display().to_string()),
+            msg.contains(named),
             "error must name the workspace it refused; got: {msg}"
         );
         // The remedy belongs to the localized notice. Repeating it here is
