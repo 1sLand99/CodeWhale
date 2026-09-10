@@ -20727,6 +20727,191 @@ async fn parked_followup_reuses_successor_and_preserves_route_authority_and_line
 }
 
 #[tokio::test]
+async fn parked_followup_executes_on_the_saved_cross_provider_route() {
+    // #6046: a parked child pinned to a provider other than the session's
+    // active one must resume on that provider. The resume runtime derives
+    // from the caller (DeepSeek here), so without rebinding the saved pin the
+    // successor validates its saved model against the caller's provider and
+    // fails instantly with `ForeignModelForDirectProvider` — never reaching a
+    // model step. The fixture pins zai/glm-5 (different from the stub
+    // runtime's default deepseek) and points both provider tables at a local
+    // loopback endpoint, so the test can only pass if the resumed child's
+    // own model request goes out through the saved provider's client.
+    let tmp = tempdir().unwrap();
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let bodies: Arc<std::sync::Mutex<Vec<Value>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let app = Router::new().route(
+        "/{*path}",
+        post({
+            let calls = Arc::clone(&calls);
+            let bodies = Arc::clone(&bodies);
+            move |Json(body): Json<Value>| {
+                let calls = Arc::clone(&calls);
+                let bodies = Arc::clone(&bodies);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    bodies
+                        .lock()
+                        .expect("request body recorder mutex poisoned")
+                        .push(body);
+                    Json(json!({
+                        "id": "chatcmpl-cross-provider-resume",
+                        "model": "glm-5",
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "done"},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1,
+                            "total_tokens": 2
+                        }
+                    }))
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback chat endpoint");
+    let addr = listener.local_addr().expect("loopback chat endpoint addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    // Session stays on direct deepseek (its default endpoint — the exact
+    // #6046 shape: a direct provider rejects foreign models). The pinned zai
+    // table carries the loopback endpoint so a zai-scoped client is fully
+    // hermetic. No code path can reach a real provider: the broken path fails
+    // at model resolution before any request, and the fixed path only ever
+    // builds the zai client.
+    let providers = crate::config::ProvidersConfig {
+        deepseek: crate::config::ProviderConfig {
+            api_key: Some("session-key".to_string()),
+            ..Default::default()
+        },
+        zai: crate::config::ProviderConfig {
+            api_key: Some("pinned-key".to_string()),
+            base_url: Some(format!("http://{addr}/v1")),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let config = crate::config::Config {
+        provider: Some("deepseek".to_string()),
+        providers: Some(providers),
+        ..Default::default()
+    };
+    let mut runtime = stub_runtime().with_api_config(config.clone());
+    runtime.client = DeepSeekClient::new(&config).expect("session client builds");
+    runtime.manager = Arc::clone(&manager);
+    assert_eq!(
+        runtime.client.api_provider(),
+        ApiProvider::Deepseek,
+        "precondition: the session is on a different provider than the pin"
+    );
+
+    let saved_route = ChildRouteReceipt {
+        requested_type: "explore".into(),
+        requested_profile: None,
+        resolved_profile_id: None,
+        profile_origin: None,
+        canonical_role: "explore".into(),
+        provider_id: "zai".into(),
+        model_id: "glm-5".into(),
+        route_source: "role.pin".into(),
+        requested_reasoning: "inherit".into(),
+        effective_reasoning: None,
+        runtime_version: "fixture".into(),
+        runtime_build_sha: "fixture".into(),
+    };
+    let agent_id = {
+        let mut guard = manager.write().await;
+        let id = guard.insert_test_running_agent("parked-cross-provider", tmp.path());
+        let agent = guard.agents.get_mut(&id).unwrap();
+        agent.agent_type = FleetRole::Scout;
+        agent.model = saved_route.model_id.clone();
+        agent.allowed_tools = Some(Vec::new());
+        let spec = &mut guard.worker_records.get_mut(&id).unwrap().spec;
+        spec.agent_type = FleetRole::Scout;
+        spec.model = saved_route.model_id.clone();
+        spec.runtime_profile = WorkerRuntimeProfile::for_role(FleetRole::Scout);
+        spec.child_route = Some(saved_route.clone());
+        park_child_at_turn_end(&mut guard, &id);
+        id
+    };
+
+    let tool = AgentTool::new(Arc::clone(&manager), runtime);
+    let context = ToolContext::new(tmp.path());
+    let result = tool
+        .execute(
+            json!({"action": "followup", "agent_id": agent_id, "message": "Continue."}),
+            &context,
+        )
+        .await
+        .expect("the emitted recovery action must execute");
+    let receipt: Value = serde_json::from_str(&result.content).unwrap();
+    assert_eq!(receipt["continued_from_checkpoint"], true);
+    let successor = receipt["agent_id"].as_str().unwrap().to_string();
+
+    // Assert the route the resumed child actually executes with: it must run
+    // a real model step on the saved provider and settle Completed. On the
+    // broken path (caller's provider kept) the successor fails fast with the
+    // foreign-model error and never issues a request.
+    let settled = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let snapshot = manager.read().await.get_result(&successor).unwrap();
+            if !matches!(snapshot.status, SubAgentStatus::Running) {
+                return snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("resumed child must settle within 10s");
+    assert_eq!(
+        settled.status,
+        SubAgentStatus::Completed,
+        "resumed child must execute on its saved zai route, got {:?} ({:?})",
+        settled.status,
+        settled.result.as_deref()
+    );
+
+    let (call_count, executed_snapshot) = {
+        let executed = bodies.lock().expect("request body recorder mutex poisoned");
+        (
+            calls.load(Ordering::SeqCst),
+            executed
+                .iter()
+                .filter_map(|body| body.get("model").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect::<Vec<_>>(),
+        )
+    };
+    let executed_on_saved_provider = executed_snapshot
+        .iter()
+        .any(|model| model.to_ascii_lowercase().contains("glm"));
+    assert!(
+        executed_on_saved_provider && call_count >= 1,
+        "the resumed child must issue its model request through the saved provider's client; saw {call_count} call(s) with models {executed_snapshot:?}"
+    );
+
+    // The receipt half keeps working too.
+    let mut guard = manager.write().await;
+    let spec = &guard.worker_records.get(&successor).unwrap().spec;
+    assert_eq!(
+        spec.child_route
+            .as_ref()
+            .map(|route| route.provider_id.as_str()),
+        Some("zai")
+    );
+    let _ = guard.cancel_agent(&successor);
+}
+
+#[tokio::test]
 async fn resume_from_checkpoint_is_idempotent_across_repeated_followups() {
     let tmp = tempdir().unwrap();
     let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);

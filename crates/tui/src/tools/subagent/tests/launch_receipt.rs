@@ -15,6 +15,13 @@ fn consultant_runtime(
         },
         openai_codex: crate::config::ProviderConfig {
             api_key: Some("codex-test-key".to_string()),
+            // A custom endpoint lets a pinned codex client construct from the
+            // table key alone (see the codex_credentials fallback in
+            // DeepSeekClient::new) instead of requiring machine-local OAuth
+            // consent. The endpoint is never contacted: these fixtures cancel
+            // their children before a model step, and 127.0.0.1:9 refuses
+            // instantly if one ever races.
+            base_url: Some("http://127.0.0.1:9/v1".to_string()),
             ..Default::default()
         },
         ..Default::default()
@@ -338,8 +345,11 @@ async fn issue_5305_receipt_survives_ledger_interruption_completion_and_resume()
     let completion = subagent_completion_from_result(&interrupted);
     assert!(completion.payload.contains("gpt-5.6-sol"));
 
-    let mut runtime = stub_runtime();
-    runtime.manager = manager.clone();
+    // #6046: resume rebinds the receipt's provider pin, so the runtime must
+    // carry a config the pinned openai-codex client can be built from
+    // hermetically (api-key table, no machine-local OAuth consent), exactly
+    // like the fresh-spawn fixtures in this file.
+    let runtime = consultant_runtime(workspace.path(), manager.clone());
     let resumed = {
         let mut guard = manager.write().await;
         guard

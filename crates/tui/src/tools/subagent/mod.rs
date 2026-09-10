@@ -6084,6 +6084,22 @@ impl SubAgentManager {
         // (worktree/cwd children must not resume in the parent directory).
         let mut runtime = runtime;
         runtime.context.workspace = workspace;
+        // Rebind the child's saved provider pin (#6046). The resumed runtime
+        // is derived from the caller, whose active provider can differ from
+        // the provider the child was spawned under; without this rebind the
+        // saved model is validated against the caller's provider and rejected
+        // as a foreign model for a direct provider. `bind_spawn_provider` is
+        // a no-op when the pin already matches, so same-provider children are
+        // unaffected. Borrow the receipt: it is moved into the spawn options
+        // below.
+        if let Some(saved_route) = child_route.as_ref() {
+            bind_spawn_provider(&mut runtime, &saved_route.provider_id).map_err(|error| {
+                anyhow!(
+                    "Cannot resume agent {agent_id} on its saved provider '{}': {error}",
+                    saved_route.provider_id
+                )
+            })?;
+        }
         let options = SubAgentSpawnOptions {
             name: None, // the old session name stays owned by the terminal record
             model: Some(model),
