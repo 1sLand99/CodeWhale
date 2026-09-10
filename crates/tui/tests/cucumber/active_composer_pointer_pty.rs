@@ -352,7 +352,7 @@ fn assert_live_shell_contract(frame: &Frame, cols: u16, size: &str) {
     // default model, which must remain visible even at 40 columns.
     let metrics = frame.row(frame.rows().saturating_sub(1));
     assert!(
-        metrics.contains("deepseek-v4-pro"),
+        metrics.contains("deepseek-flash"),
         "{size}: live shell misses the model in the metrics line\n{}",
         frame.debug_dump()
     );

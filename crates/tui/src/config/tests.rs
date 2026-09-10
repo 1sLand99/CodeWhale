@@ -3898,7 +3898,7 @@ fn ensure_config_file_exists_creates_first_run_template() -> Result<()> {
     let content = fs::read_to_string(&created)?;
 
     assert_eq!(created, temp_root.join(".deepseek").join("config.toml"));
-    assert!(content.contains("default_text_model = \"deepseek-v4-pro\""));
+    assert!(content.contains(&format!("default_text_model = \"{DEFAULT_TEXT_MODEL}\"")));
     assert!(content.contains("reasoning_effort = \"auto\""));
     assert!(!content.contains("api_key ="));
     assert!(ensure_config_file_exists(None)?.is_none());
@@ -7179,7 +7179,9 @@ fn deepseek_default_model_canonicalizes_provider_prefixed_ids() {
         default_text_model: Some(DEFAULT_OPENROUTER_MODEL.to_string()),
         ..Default::default()
     };
-    assert_eq!(config.default_model(), DEFAULT_TEXT_MODEL);
+    // The prefixed id canonicalizes to the deepseek-native PRO spelling; it is
+    // not the default constant (that is deepseek-flash), it is that model.
+    assert_eq!(config.default_model(), "deepseek-v4-pro");
 
     let config = Config {
         provider: Some("deepseek".to_string()),
@@ -7192,7 +7194,7 @@ fn deepseek_default_model_canonicalizes_provider_prefixed_ids() {
         }),
         ..Default::default()
     };
-    assert_eq!(config.default_model(), DEFAULT_TEXT_MODEL);
+    assert_eq!(config.default_model(), "deepseek-v4-pro");
 }
 
 #[test]
@@ -7256,18 +7258,18 @@ fn validate_route_rejects_mismatched_provider_model_tuple() {
 fn wire_model_for_provider_matches_active_provider_shape() {
     assert_eq!(
         wire_model_for_provider(ApiProvider::Deepseek, DEFAULT_OPENROUTER_MODEL),
-        DEFAULT_TEXT_MODEL
+        "deepseek-v4-pro"
     );
     assert_eq!(
-        wire_model_for_provider(ApiProvider::Openrouter, DEFAULT_TEXT_MODEL),
+        wire_model_for_provider(ApiProvider::Openrouter, "deepseek-v4-pro"),
         DEFAULT_OPENROUTER_MODEL
     );
     assert_eq!(
-        wire_model_for_provider(ApiProvider::NvidiaNim, DEFAULT_TEXT_MODEL),
+        wire_model_for_provider(ApiProvider::NvidiaNim, "deepseek-v4-pro"),
         DEFAULT_NVIDIA_NIM_MODEL
     );
     assert_eq!(
-        wire_model_for_provider(ApiProvider::Together, DEFAULT_TEXT_MODEL),
+        wire_model_for_provider(ApiProvider::Together, "deepseek-v4-pro"),
         DEFAULT_TOGETHER_MODEL
     );
     assert_eq!(
