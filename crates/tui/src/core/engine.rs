@@ -6775,12 +6775,36 @@ impl Engine {
         }
     }
 
+    /// How long a caller will block on the session boot before proceeding with
+    /// whatever has connected so far.
+    ///
+    /// This bounds the *wait*, never the boot: the supervised boot task keeps
+    /// running, so a slow server still lands through the normal progress
+    /// updates and appears once it is ready. The per-server connect timeout
+    /// does not cover everything that can stall a stdio server — `npx -y` and
+    /// `uvx` download their package on first run — so without an outer bound a
+    /// single cold fetch left `/mcp` waiting on `mcp_boot_done` forever, which
+    /// reads to the user as a frozen application.
+    const MCP_BOOT_UI_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
     async fn wait_for_mcp_boot(&mut self) {
         if let Some(rx) = self.mcp_boot_done.as_mut() {
-            while !*rx.borrow() {
-                if rx.changed().await.is_err() {
-                    break;
+            let settled = tokio::time::timeout(Self::MCP_BOOT_UI_WAIT, async {
+                while !*rx.borrow() {
+                    if rx.changed().await.is_err() {
+                        break;
+                    }
                 }
+            })
+            .await;
+            if settled.is_err() {
+                // Not an error: the boot continues in the background and its
+                // progress updates still arrive. Say so rather than silently
+                // returning a short server list as if it were complete.
+                tracing::info!(
+                    wait_secs = Self::MCP_BOOT_UI_WAIT.as_secs(),
+                    "MCP session boot still connecting; continuing with the servers ready so far"
+                );
             }
         }
         self.drain_mcp_boot_updates().await;
