@@ -452,28 +452,33 @@ pub fn max_output_tokens_for_model(model: &str) -> Option<u32> {
     }
 }
 
+/// Catalog-first reasoning capability. `None` means no catalog row and no
+/// remaining cited fallback — unknown, not "not a reasoning model".
+///
+/// Prefer this over [`model_supports_reasoning`] when the caller can surface
+/// unknown the way unknown cost already is. The bool wrapper still defaults
+/// unknown to `false` for existing stream/UI gates.
 #[must_use]
-pub fn model_supports_reasoning(model: &str) -> bool {
+pub fn model_reasoning_capability(model: &str) -> Option<bool> {
     if let Some(supports_reasoning) = crate::model_catalog::resolved_supports_reasoning(model) {
-        return supports_reasoning;
+        return Some(supports_reasoning);
     }
     let lower = model.to_lowercase();
     if canonical_official_deepseek_model_id(&lower).is_some() {
-        return true;
+        return Some(true);
     }
-    // #3016 plus the 2026 Kimi Code K2.7 update: Moonshot-native Kimi IDs,
-    // including the stable `kimi-for-coding` coding route, emit
-    // reasoning_content that must stay out of answer prose.
+    // Remaining prefix/list arms have no catalog row yet. They stay until
+    // each family is fully sourced (#6032 part 2). Do not invent rows.
     if lower.starts_with("kimi-") {
-        return true;
+        return Some(true);
     }
     if lower.starts_with("mistral-medium")
         || lower.starts_with("mistral-small")
         || lower.starts_with("magistral")
     {
-        return true;
+        return Some(true);
     }
-    matches!(
+    let listed = matches!(
         lower.as_str(),
         "arcee-ai/trinity-large-thinking"
             | "thinkingmachines/inkling"
@@ -484,8 +489,6 @@ pub fn model_supports_reasoning(model: &str) -> bool {
             | "moonshotai/kimi-k2.7-code-highspeed"
             | "moonshotai/kimi-k2.6"
             | "moonshotai/kimi-k2.6:free"
-            | "kimi-k2.6"
-            | "kimi-for-coding"
             | "minimax-m3"
             | "minimax-m2.7-highspeed"
             | "minimax-m2.5"
@@ -502,23 +505,6 @@ pub fn model_supports_reasoning(model: &str) -> bool {
             | "qwen/qwen3.6-27b"
             | "qwen/qwen3.6-plus"
             | "qwen/qwen3.7-plus"
-            // Bare qwen3.x ids are Alibaba Cloud Model Studio's own model ids
-            // (Token Plan / Coding Plan catalogs). Per Model Studio's
-            // deep-thinking docs these are hybrid-thinking models that stream
-            // `reasoning_content` (OpenAI dialect) or thinking blocks
-            // (Anthropic dialect); qwen3.7/3.6/3.5 families default thinking
-            // ON server-side. Bare `qwen3.8-flash` is the OpenRouter short
-            // id (reasoning: true on models.dev 2026-08-26), not a Model
-            // Studio family default.
-            | "qwen3.8-max"
-            | "qwen3.8-max-preview"
-            | "qwen3.8-flash"
-            | "qwen3.7-max"
-            | "qwen3.7-plus"
-            | "qwen3.6-plus"
-            | "qwen3.6-flash"
-            | "qwen3.5-plus"
-            | "qwen3.5-flash"
             | "tencent/hy3-preview"
             | "xiaomi/mimo-v2.5-pro"
             | "xiaomi/mimo-v2.5"
@@ -533,7 +519,13 @@ pub fn model_supports_reasoning(model: &str) -> bool {
             | "grok-4.20-0309-reasoning"
     ) || is_openai_gpt_55_api_model(&lower)
         || is_openai_gpt_56_api_model(&lower)
-        || is_openai_codex_model(&lower)
+        || is_openai_codex_model(&lower);
+    listed.then_some(true)
+}
+
+#[must_use]
+pub fn model_supports_reasoning(model: &str) -> bool {
+    model_reasoning_capability(model).unwrap_or(false)
 }
 
 /// Contributor tier of Muse Spark 1.2 is a distinct selectable id with
@@ -787,6 +779,20 @@ mod tests {
     /// "reasoning not expected", which leaks their `reasoning_content` into
     /// ordinary prose (#6044).
     #[test]
+    fn unknown_reasoning_capability_is_observable() {
+        assert_eq!(
+            model_reasoning_capability("not-a-real-model-xyz"),
+            None,
+            "unknown must not collapse to false at this layer"
+        );
+        assert!(
+            !model_supports_reasoning("not-a-real-model-xyz"),
+            "legacy bool wrapper still defaults unknown to false"
+        );
+        assert_eq!(model_reasoning_capability("kimi-for-coding"), Some(true));
+    }
+
+    #[test]
     fn catalog_alone_covers_the_models_removed_from_the_heuristic_pile() {
         let removed = [
             "claude-opus-4-8",
@@ -816,6 +822,22 @@ mod tests {
             "muse-spark-1.1",
             "muse-spark-1.2",
             "muse-spark-1.2-contributor",
+            // Part 2: cited qwen3.x / Kimi coding-route arms moved into the
+            // bundled catalog (Alibaba Cloud Model Studio deep-thinking docs;
+            // #3016 plus the 2026 K2.7 update).
+            "kimi-for-coding",
+            "kimi-for-coding-highspeed",
+            "kimi-k2.5",
+            "kimi-k2.6",
+            "qwen3.5-flash",
+            "qwen3.5-plus",
+            "qwen3.6-flash",
+            "qwen3.6-plus",
+            "qwen3.7-max",
+            "qwen3.7-plus",
+            "qwen3.8-flash",
+            "qwen3.8-max",
+            "qwen3.8-max-preview",
         ];
         for model in removed {
             assert_eq!(
