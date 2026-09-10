@@ -2123,3 +2123,49 @@ fn test_patch_undo_never_crosses_session_boundary() {
     );
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "b-before");
 }
+
+/// `/undo` used to report only `Removed N message(s)` when the snapshot repo
+/// could not be opened, implying a file rollback that never happened. The
+/// conversation-only fallback must say so, and say why.
+#[test]
+fn test_undo_reports_that_files_were_not_reverted_when_the_repo_is_unavailable() {
+    use crate::test_support::{EnvVarGuard, lock_test_env};
+    use tempfile::tempdir;
+
+    let _lock = lock_test_env();
+    let tmp = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp.path());
+    let _profile = EnvVarGuard::set("USERPROFILE", tmp.path());
+
+    // The home directory itself is refused by the snapshot safety gate, so
+    // `patch_undo` cannot open a repo at all.
+    let mut app = create_test_app();
+    app.workspace = tmp.path().to_path_buf();
+    app.current_session_id = Some("test-session".to_string());
+    app.yolo = true;
+    app.history.push(HistoryCell::User {
+        content: "change something".to_string(),
+    });
+    app.api_messages.push(Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "change something".to_string(),
+            cache_control: None,
+        }],
+    });
+
+    let result = super::dispatch(&mut app, "undo", None).expect("undo is dispatched here");
+    let message = result.message.as_deref().unwrap_or_default();
+    assert!(
+        message.contains("Removed 1 message(s)"),
+        "conversation undo still runs: {message}"
+    );
+    assert!(
+        message.contains(super::undo::FILES_NOT_REVERTED_NOTE),
+        "the user must be told files were not reverted: {message}"
+    );
+    assert!(
+        message.contains(super::undo::SNAPSHOT_REPO_UNAVAILABLE_PREFIX),
+        "the reason must travel with the fallback: {message}"
+    );
+}

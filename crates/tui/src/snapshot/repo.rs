@@ -83,7 +83,45 @@ pub const DEFAULT_MAX_WORKSPACE_BYTES_FOR_SNAPSHOT: u64 = 2 * 1024 * 1024 * 1024
 /// will inspect before declaring the workspace "too large". Protects
 /// against a workspace with millions of tiny files (no individual
 /// file is large, but `git add -A` would still take forever).
-const SIZE_WALK_MAX_ENTRIES: usize = 200_000;
+pub const SIZE_WALK_MAX_ENTRIES: usize = 200_000;
+
+/// Which snapshot gate refused a workspace. The recovery differs per gate —
+/// raising `[snapshots] max_workspace_gb` lifts only [`WorkspaceGate::TooLarge`]
+/// — so callers must not offer one gate's remedy for another's failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceGate {
+    /// Snapshot-eligible content exceeds the configured byte cap.
+    TooLarge,
+    /// The bounded walk hit [`SIZE_WALK_MAX_ENTRIES`]. This bound is
+    /// independent of the byte cap: `max_workspace_gb = 0` does not lift it.
+    TooManyEntries,
+}
+
+/// Leading text of the `io::Error` each gate produces. `core::turn` matches on
+/// these to pick the right consequence/recovery notice, so they are one
+/// declaration shared by producer and matcher rather than two literals.
+pub const GATE_TOO_LARGE_MARKER: &str = "workspace too large for snapshots";
+pub const GATE_TOO_MANY_ENTRIES_MARKER: &str = "workspace has too many files for snapshots";
+pub const GATE_UNSAFE_LOCATION_MARKER: &str = "workspace snapshots are disabled";
+
+impl WorkspaceGate {
+    /// One-line English diagnostic for logs, `/undo`, and the gate matcher.
+    /// The user-facing consequence and recovery are localized by the notice
+    /// surfaces; this string must not restate them.
+    fn describe(self, cap_bytes: u64, workspace: &Path) -> String {
+        match self {
+            Self::TooLarge => format!(
+                "{GATE_TOO_LARGE_MARKER}: over {} bytes of snapshot-eligible content in {}",
+                cap_bytes,
+                workspace.display()
+            ),
+            Self::TooManyEntries => format!(
+                "{GATE_TOO_MANY_ENTRIES_MARKER}: over {SIZE_WALK_MAX_ENTRIES} snapshot-eligible entries in {}",
+                workspace.display()
+            ),
+        }
+    }
+}
 
 /// Top-level directory and extension patterns that the snapshot path
 /// already excludes via `BUILTIN_EXCLUDES`. The estimator skips these
@@ -238,7 +276,7 @@ impl SnapshotRepo {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "workspace snapshots are disabled for {reason}: {}",
+                    "{GATE_UNSAFE_LOCATION_MARKER} for {reason}: {}",
                     work_tree.display()
                 ),
             ));
@@ -256,15 +294,10 @@ impl SnapshotRepo {
             // existing repo's `MAX_SNAPSHOT_SIZE_MB` budget. Users on
             // workspaces that grew past the cap mid-session get the
             // existing aggressive-pruning path in `snapshot()`.
-            if estimate_workspace_size_bounded(&work_tree, cap_bytes).is_none() {
+            if let Err(gate) = estimate_workspace_size_bounded(&work_tree, cap_bytes) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!(
-                        "workspace too large for snapshots (over {} GB of non-excluded content or > {} entries): {}\n  raise `[snapshots] max_workspace_gb` in config.toml (or set it to 0 to disable the cap) if you want snapshots on this workspace.",
-                        cap_bytes / (1024 * 1024 * 1024),
-                        SIZE_WALK_MAX_ENTRIES,
-                        work_tree.display()
-                    ),
+                    gate.describe(cap_bytes, &work_tree),
                 ));
             }
             let parent = git_dir.parent().ok_or_else(|| {
@@ -998,18 +1031,22 @@ fn io_other(msg: impl Into<String>) -> io::Error {
     io::Error::other(msg.into())
 }
 
-/// Walk `workspace` and accumulate file sizes, returning `Some(total)`
-/// when the workspace fits under `cap_bytes` and `None` when the walk
-/// exceeds the cap. Honors `.gitignore` (via the `ignore` crate's
+/// Walk `workspace` and accumulate file sizes, returning `Ok(total)`
+/// when the workspace fits under `cap_bytes` and `Err(gate)` naming the
+/// bound that tripped. Honors `.gitignore` (via the `ignore` crate's
 /// `WalkBuilder` defaults) and the snapshot-specific skip list above,
 /// so the measured size reflects what would actually land in a
 /// snapshot commit rather than the raw `du -sh` total.
 ///
 /// The walk is bounded by both `cap_bytes` and
-/// [`SIZE_WALK_MAX_ENTRIES`] — either trip returns `None`. A
-/// `cap_bytes` of `0` disables the cap entirely (returns `Some(total)`
-/// no matter how large), so config can opt out.
-pub fn estimate_workspace_size_bounded(workspace: &Path, cap_bytes: u64) -> Option<u64> {
+/// [`SIZE_WALK_MAX_ENTRIES`], and the two bounds are reported
+/// separately because they have different recoveries. A `cap_bytes` of
+/// `0` disables the byte cap entirely (so config can opt out) but not
+/// the entry bound.
+pub fn estimate_workspace_size_bounded(
+    workspace: &Path,
+    cap_bytes: u64,
+) -> Result<u64, WorkspaceGate> {
     use ignore::WalkBuilder;
     let mut total: u64 = 0;
     let mut entries: usize = 0;
@@ -1030,18 +1067,18 @@ pub fn estimate_workspace_size_bounded(workspace: &Path, cap_bytes: u64) -> Opti
     for entry in walker.flatten() {
         entries += 1;
         if entries > SIZE_WALK_MAX_ENTRIES {
-            return None;
+            return Err(WorkspaceGate::TooManyEntries);
         }
         if let Ok(meta) = entry.metadata()
             && meta.is_file()
         {
             total = total.saturating_add(meta.len());
             if cap_bytes > 0 && total > cap_bytes {
-                return None;
+                return Err(WorkspaceGate::TooLarge);
             }
         }
     }
-    Some(total)
+    Ok(total)
 }
 
 fn unsafe_workspace_snapshot_reason(workspace: &Path, home: Option<&Path>) -> Option<&'static str> {
@@ -1774,7 +1811,7 @@ mod tests {
         std::fs::write(workspace.join("a.txt"), vec![b'a'; 100]).unwrap();
         std::fs::write(workspace.join("b.txt"), vec![b'b'; 50]).unwrap();
         let total = estimate_workspace_size_bounded(&workspace, 10_000)
-            .expect("under-cap walk must return Some");
+            .expect("under-cap walk must return a total");
         assert!(
             total >= 150,
             "total ({total}) must include both files (≥150 bytes)"
@@ -1782,17 +1819,42 @@ mod tests {
     }
 
     #[test]
-    fn estimate_workspace_size_bounded_returns_none_when_over_cap() {
+    fn estimate_workspace_size_bounded_reports_the_size_gate_when_over_cap() {
         let tmp = tempdir().unwrap();
         let workspace = tmp.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         // Two 1 KB files, cap at 1 KB — second file should trip the cap.
         std::fs::write(workspace.join("a.bin"), vec![b'a'; 1024]).unwrap();
         std::fs::write(workspace.join("b.bin"), vec![b'b'; 1024]).unwrap();
-        assert!(
-            estimate_workspace_size_bounded(&workspace, 1024).is_none(),
-            "over-cap walk must return None for early bailout"
+        assert_eq!(
+            estimate_workspace_size_bounded(&workspace, 1024),
+            Err(WorkspaceGate::TooLarge),
+            "over-cap walk must name the size gate for early bailout"
         );
+    }
+
+    #[test]
+    fn oversize_gate_message_states_the_byte_cap_without_a_remedy() {
+        // The remedy is localized by the notice surfaces; repeating it here is
+        // what produced the doubled warning.
+        let message =
+            WorkspaceGate::TooLarge.describe(2 * 1024 * 1024 * 1024, Path::new("/tmp/ws"));
+        assert!(message.starts_with(GATE_TOO_LARGE_MARKER));
+        assert!(message.contains("/tmp/ws"));
+        assert!(!message.contains("max_workspace_gb"));
+        assert_eq!(message.lines().count(), 1, "the gate message is one line");
+    }
+
+    #[test]
+    fn entry_gate_message_is_distinct_and_never_blames_the_size_cap() {
+        let message = WorkspaceGate::TooManyEntries.describe(0, Path::new("/tmp/ws"));
+        assert!(message.starts_with(GATE_TOO_MANY_ENTRIES_MARKER));
+        assert!(
+            !message.contains(GATE_TOO_LARGE_MARKER),
+            "the entry gate must not be reported as a size trip"
+        );
+        assert!(message.contains(&SIZE_WALK_MAX_ENTRIES.to_string()));
+        assert!(!message.contains("max_workspace_gb"));
     }
 
     #[test]
@@ -1822,8 +1884,8 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         // 10 KB file — would trip a 1 KB cap, but cap=0 means no cap.
         std::fs::write(workspace.join("big.bin"), vec![0u8; 10 * 1024]).unwrap();
-        let total =
-            estimate_workspace_size_bounded(&workspace, 0).expect("cap=0 must always return Some");
+        let total = estimate_workspace_size_bounded(&workspace, 0)
+            .expect("cap=0 must always return a total");
         assert!(
             total >= 10 * 1024,
             "total ({total}) must include the 10 KB file when cap is disabled"
@@ -1845,12 +1907,18 @@ mod tests {
         };
         let msg = err.to_string();
         assert!(
-            msg.contains("workspace too large for snapshots"),
+            msg.contains(GATE_TOO_LARGE_MARKER),
             "error must call out the size cap; got: {msg}"
         );
         assert!(
-            msg.contains("max_workspace_gb"),
-            "error must reference the config knob users can raise; got: {msg}"
+            msg.contains(&workspace.display().to_string()),
+            "error must name the workspace it refused; got: {msg}"
+        );
+        // The remedy belongs to the localized notice. Repeating it here is
+        // what produced the doubled, three-line warning users saw.
+        assert!(
+            !msg.contains("max_workspace_gb"),
+            "gate error must not carry its own remedy copy; got: {msg}"
         );
     }
 

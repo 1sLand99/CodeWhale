@@ -113,11 +113,16 @@ fn snapshot_notice_precedes_first_provider_call_and_is_owned_by_session() {
                     expected_notices,
                     "notice must precede provider dispatch for this session"
                 );
-                assert!(
-                    observed[0]
-                        .iter()
-                        .all(|reason| reason.contains("workspace too large"))
-                );
+                assert!(observed[0].iter().all(|reason| {
+                    // One rendered line: consequence, cause, and the remedy
+                    // that lifts this gate, each stated once.
+                    reason.lines().count() == 1
+                        && reason.contains("Snapshots and /undo are off")
+                        && reason
+                            .matches(crate::core::turn::SNAPSHOTS_CAP_CONFIG_KEY)
+                            .count()
+                            == 1
+                }));
             }
             assert_eq!(client.call_count(), 1);
             assert!(

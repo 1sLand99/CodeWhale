@@ -300,8 +300,10 @@ pub enum EventMsg {
         omitted_tool_count: u64,
     },
 
-    /// Workspace snapshots (undo) are off for this workspace; `reason` names
-    /// the gate and the config key that lifts it.
+    /// Workspace snapshots (undo) are off for this workspace. `reason` is one
+    /// rendered, localized line: the consequence, the gate that refused, and
+    /// the recovery that actually lifts *that* gate (the size cap's config key
+    /// appears only for the size gate).
     SnapshotsDisabled {
         thread_id: ThreadId,
         session_id: SessionId,

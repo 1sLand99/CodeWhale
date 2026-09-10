@@ -53,6 +53,7 @@ pub use prune::{DEFAULT_MAX_AGE, prune_older_than};
 pub const DEFAULT_MAX_SNAPSHOTS: usize = 50;
 #[allow(unused_imports)]
 pub use repo::{
-    DEFAULT_MAX_WORKSPACE_BYTES_FOR_SNAPSHOT, Snapshot, SnapshotId, SnapshotRepo,
-    estimate_workspace_size_bounded,
+    DEFAULT_MAX_WORKSPACE_BYTES_FOR_SNAPSHOT, GATE_TOO_LARGE_MARKER, GATE_TOO_MANY_ENTRIES_MARKER,
+    GATE_UNSAFE_LOCATION_MARKER, SIZE_WALK_MAX_ENTRIES, Snapshot, SnapshotId, SnapshotRepo,
+    WorkspaceGate, estimate_workspace_size_bounded,
 };

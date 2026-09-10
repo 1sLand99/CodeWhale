@@ -183,6 +183,8 @@ pub enum Event {
     /// Workspace snapshots (undo) could not be enabled for this workspace.
     /// Emitted once per session/workspace so another session cannot consume
     /// its notice. The disabled state also remains visible in `/status` (#5930).
+    /// `reason` is the single localized line rendered from the gate, so every
+    /// surface states the workspace, the limit, and the recovery exactly once.
     SnapshotsDisabled { workspace: String, reason: String },
     // === Streaming Events ===
     /// A new message block has started

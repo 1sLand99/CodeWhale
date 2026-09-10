@@ -193,13 +193,35 @@ pub(in crate::commands) fn dispatch(
             // that would silently crop the conversation instead of telling
             // the user to switch modes.
             let result = undo::patch_undo(app);
-            if result.message.as_deref().is_none_or(|m| {
+            // `CommandResult::error` decorates its text with an `Error: `
+            // prefix, so the repo-unavailable arm below never matched and the
+            // fallback it names was dead: `/undo` dumped the raw gate error
+            // and left the conversation untouched. Match the undecorated text.
+            let declined = result
+                .message
+                .as_deref()
+                .map(|m| m.strip_prefix("Error: ").unwrap_or(m));
+            if declined.is_none_or(|m| {
                 m.starts_with("No snapshots found")
                     || m.starts_with("No older tool or pre-turn")
                     || m.starts_with("No undoable snapshot")
-                    || m.starts_with("Snapshot repo")
+                    || m.starts_with(undo::SNAPSHOT_REPO_UNAVAILABLE_PREFIX)
             }) {
-                undo::undo_conversation(app)
+                // "Nothing to revert" is already honest; an unavailable repo
+                // is not — the conversation-only result must say the files
+                // were left alone, and why.
+                let unavailable = declined
+                    .filter(|m| m.starts_with(undo::SNAPSHOT_REPO_UNAVAILABLE_PREFIX))
+                    .map(str::to_owned);
+                let mut fallback = undo::undo_conversation(app);
+                if let Some(reason) = unavailable {
+                    let note = format!("{}\n{reason}", undo::FILES_NOT_REVERTED_NOTE);
+                    fallback.message = Some(match fallback.message.take() {
+                        Some(message) => format!("{message}\n{note}"),
+                        None => note,
+                    });
+                }
+                fallback
             } else {
                 result
             }

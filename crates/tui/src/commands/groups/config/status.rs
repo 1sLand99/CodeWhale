@@ -119,16 +119,7 @@ fn format_status(app: &App) -> String {
         &app.workspace,
         app.current_session_id.as_deref(),
     ) {
-        let message = localized(
-            locale,
-            MessageId::SnapshotsDisabledNotice,
-            &[
-                ("{workspace}", &notice.workspace),
-                ("{reason}", &notice.reason),
-                ("{config_key}", crate::core::turn::SNAPSHOTS_CAP_CONFIG_KEY),
-            ],
-        );
-        let _ = writeln!(out, "  {message}");
+        let _ = writeln!(out, "  {}", notice.localize(locale));
     }
     let _ = writeln!(out);
 
@@ -561,9 +552,13 @@ mod tests {
         for _ in 0..2 {
             let report = status(&mut app).message.unwrap();
             assert!(report.contains("Snapshots and /undo are off"), "{report}");
-            assert!(report.contains("workspace too large"), "{report}");
-            assert!(
-                report.contains(crate::core::turn::SNAPSHOTS_CAP_CONFIG_KEY),
+            assert!(report.contains("snapshot-eligible content"), "{report}");
+            // Stated once, not doubled by a raw reason plus a template.
+            assert_eq!(
+                report
+                    .matches(crate::core::turn::SNAPSHOTS_CAP_CONFIG_KEY)
+                    .count(),
+                1,
                 "{report}"
             );
         }

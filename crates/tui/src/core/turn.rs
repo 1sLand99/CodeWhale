@@ -568,7 +568,7 @@ fn snapshot_with_label(
         Err(e) => {
             // The first gated failure belongs to this session, even when other
             // sessions use the same workspace in this process (#5930).
-            if maybe_notify_snapshots_disabled_once(workspace, session_id, &e) {
+            if maybe_notify_snapshots_disabled_once(workspace, session_id, cap_bytes, &e) {
                 tracing::warn!(target: "snapshot", session_id, "snapshot repo init failed: {e}");
             } else {
                 tracing::debug!(target: "snapshot", "snapshot repo init still failing: {e}");
@@ -578,18 +578,76 @@ fn snapshot_with_label(
     }
 }
 
+/// Which gate turned snapshots off. Each variant selects its own consequence
+/// and recovery copy: only [`Self::WorkspaceTooLarge`] is lifted by
+/// [`SNAPSHOTS_CAP_CONFIG_KEY`], so the other two must never advertise it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotsDisabledScope {
+    /// Snapshot-eligible content exceeds `[snapshots] max_workspace_gb`.
+    WorkspaceTooLarge,
+    /// The bounded walk hit the entry ceiling. Raising (or zeroing) the GB cap
+    /// does not lift this bound.
+    TooManyFiles,
+    /// Home, filesystem root, or a top-level home folder: refused for safety,
+    /// and no config value changes that.
+    UnsafeLocation,
+}
+
 /// Snapshot availability observed for a session and its workspace. Delivering
 /// the notice does not erase the status: `/status` can still explain why undo
 /// is unavailable after the transient toast has expired (#5930).
+///
+/// The notice carries the gate, not prose: every surface renders exactly one
+/// localized line from it, so the workspace, the limit, and the recovery are
+/// each stated once (#6042).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotsDisabledNotice {
     pub workspace: String,
-    pub reason: String,
+    pub scope: SnapshotsDisabledScope,
+    /// Preformatted limit for the scope that names one (`2.0 GB`, `200000`).
+    /// Empty for scopes whose message names no limit.
+    pub limit: String,
 }
 
-/// The config key that lifts the size gate; named in every surface of the
-/// notice so the remedy travels with the failure.
+impl SnapshotsDisabledNotice {
+    fn message_id(&self) -> crate::localization::MessageId {
+        use crate::localization::MessageId;
+        match self.scope {
+            SnapshotsDisabledScope::WorkspaceTooLarge => MessageId::SnapshotsDisabledTooLarge,
+            SnapshotsDisabledScope::TooManyFiles => MessageId::SnapshotsDisabledTooManyFiles,
+            SnapshotsDisabledScope::UnsafeLocation => MessageId::SnapshotsDisabledUnsafeLocation,
+        }
+    }
+
+    /// The single user-facing line: what is off, for which workspace, why, and
+    /// the recovery that actually applies to this gate.
+    pub fn localize(&self, locale: crate::localization::Locale) -> String {
+        crate::localization::tr(locale, self.message_id())
+            .replace("{workspace}", &self.workspace)
+            .replace("{limit}", &self.limit)
+            .replace("{config_key}", SNAPSHOTS_CAP_CONFIG_KEY)
+    }
+}
+
+/// The config key that lifts the size gate. Named only by the size-gate
+/// notice: it is not a remedy for the entry ceiling or the safety refusal.
 pub const SNAPSHOTS_CAP_CONFIG_KEY: &str = "[snapshots] max_workspace_gb";
+
+/// Human-readable byte cap for the size-gate notice. Keeps small test caps
+/// from rendering as a misleading `0 GB`.
+fn format_cap_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    let value = bytes as f64;
+    if value >= KIB.powi(3) {
+        format!("{:.1} GB", value / KIB.powi(3))
+    } else if value >= KIB.powi(2) {
+        format!("{:.1} MB", value / KIB.powi(2))
+    } else if value >= KIB {
+        format!("{:.1} KB", value / KIB)
+    } else {
+        format!("{bytes} bytes")
+    }
+}
 
 type SnapshotNoticeKey = (std::path::PathBuf, Option<String>);
 
@@ -661,34 +719,51 @@ fn clear_snapshots_disabled_status(workspace: &Path, session_id: Option<&str>) {
 fn maybe_notify_snapshots_disabled_once(
     workspace: &Path,
     session_id: Option<&str>,
+    cap_bytes: u64,
     error: &std::io::Error,
 ) -> bool {
     let message = error.to_string();
-    if !(message.contains("workspace too large for snapshots")
-        || message.contains("workspace snapshots are disabled"))
-    {
+    // The gate markers are declared by the snapshot policy that produces them,
+    // so this stays one classifier rather than a second copy of the rules.
+    let scope = if message.contains(crate::snapshot::GATE_TOO_LARGE_MARKER) {
+        SnapshotsDisabledScope::WorkspaceTooLarge
+    } else if message.contains(crate::snapshot::GATE_TOO_MANY_ENTRIES_MARKER) {
+        SnapshotsDisabledScope::TooManyFiles
+    } else if message.contains(crate::snapshot::GATE_UNSAFE_LOCATION_MARKER) {
+        SnapshotsDisabledScope::UnsafeLocation
+    } else {
+        // A real snapshot/data-loss error, not a gate: leave it to the caller's
+        // WARN so it is never softened into a "snapshots are off" notice.
         return true;
-    }
+    };
+    let notice = SnapshotsDisabledNotice {
+        workspace: workspace.to_string_lossy().into_owned(),
+        scope,
+        limit: match scope {
+            SnapshotsDisabledScope::WorkspaceTooLarge => format_cap_bytes(cap_bytes),
+            SnapshotsDisabledScope::TooManyFiles => {
+                crate::snapshot::SIZE_WALK_MAX_ENTRIES.to_string()
+            }
+            SnapshotsDisabledScope::UnsafeLocation => String::new(),
+        },
+    };
     let mut states = snapshot_notices()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let state = states
         .entry(snapshot_notice_key(workspace, session_id))
         .or_default();
-    state.disabled = Some(SnapshotsDisabledNotice {
-        workspace: workspace.to_string_lossy().into_owned(),
-        reason: message.clone(),
-    });
+    state.disabled = Some(notice.clone());
     if std::mem::replace(&mut state.warned, true) {
         return false;
     }
     state.pending = true;
     drop(states);
+    // Headless stderr has no session locale to resolve; English is the pack
+    // this path has always printed. The TUI and `/status` localize properly.
     eprintln!(
-        "warning: workspace snapshots/undo are OFF for {}
-  {message}
-  raise `{SNAPSHOTS_CAP_CONFIG_KEY}` in config.toml (or set it to 0 to disable the cap) to opt in.",
-        workspace.display()
+        "warning: {}",
+        notice.localize(crate::localization::Locale::En)
     );
     true
 }
@@ -751,11 +826,20 @@ mod snapshot_notice_tests {
         for session in ["session-b", "session-a"] {
             let notices = take_snapshots_disabled_notices(&workspace, Some(session));
             assert_eq!(notices.len(), 1, "each session receives its own notice");
-            assert!(
-                notices[0]
-                    .reason
-                    .contains("workspace too large for snapshots")
+            assert_eq!(notices[0].scope, SnapshotsDisabledScope::WorkspaceTooLarge);
+            let line = notices[0].localize(crate::localization::Locale::En);
+            assert_eq!(line.lines().count(), 1, "one line, not a stacked notice");
+            assert_eq!(
+                line.matches(&workspace.display().to_string()).count(),
+                1,
+                "the workspace is named exactly once: {line}"
             );
+            assert_eq!(
+                line.matches(SNAPSHOTS_CAP_CONFIG_KEY).count(),
+                1,
+                "the remedy is stated exactly once: {line}"
+            );
+            assert!(line.contains("1.0 KB"), "the tripped cap is named: {line}");
             assert!(take_snapshots_disabled_notices(&workspace, Some(session)).is_empty());
             assert_eq!(
                 snapshots_disabled_status(&workspace, Some(session)),
@@ -765,6 +849,22 @@ mod snapshot_notice_tests {
         }
         assert!(snapshots_disabled_status(&workspace, Some("session-c")).is_none());
         assert!(snapshots_disabled_status(&root.path().join("other"), Some("session-a")).is_none());
+    }
+
+    /// The quiet case: a workspace under the cap snapshots and says nothing.
+    #[test]
+    fn small_workspace_snapshots_with_no_notice_at_all() {
+        let _env = crate::test_support::lock_test_env();
+        let root = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path());
+        let _user_home = crate::test_support::EnvVarGuard::set("HOME", root.path());
+        let _user_profile = crate::test_support::EnvVarGuard::set("USERPROFILE", root.path());
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join("small.txt"), b"tiny").unwrap();
+        assert!(pre_turn_snapshot(&workspace, 1, 1024 * 1024, None, Some("session")).is_some());
+        assert!(snapshots_disabled_status(&workspace, Some("session")).is_none());
+        assert!(take_snapshots_disabled_notices(&workspace, Some("session")).is_empty());
     }
 
     #[test]
@@ -791,10 +891,79 @@ mod snapshot_notice_tests {
         assert!(maybe_notify_snapshots_disabled_once(
             workspace.path(),
             Some("session"),
+            1024,
             &error
         ));
         assert!(take_snapshots_disabled_notices(workspace.path(), Some("session")).is_empty());
         assert!(snapshots_disabled_status(workspace.path(), Some("session")).is_none());
+    }
+
+    /// Every gate must state a recovery that actually lifts *that* gate. The
+    /// entry ceiling and the home/root refusal are not raised by the GB cap,
+    /// so naming it there is the unhelpful follow-up this packet removes.
+    #[test]
+    fn each_gate_gets_its_own_accurate_recovery() {
+        let workspace = tempfile::tempdir().unwrap();
+        for (gate_message, scope, cap_bytes) in [
+            (
+                format!(
+                    "{}: over 2 bytes in x",
+                    crate::snapshot::GATE_TOO_MANY_ENTRIES_MARKER
+                ),
+                SnapshotsDisabledScope::TooManyFiles,
+                0,
+            ),
+            (
+                format!(
+                    "{} for home directory: x",
+                    crate::snapshot::GATE_UNSAFE_LOCATION_MARKER
+                ),
+                SnapshotsDisabledScope::UnsafeLocation,
+                2 * 1024 * 1024 * 1024,
+            ),
+        ] {
+            let session = format!("{scope:?}");
+            let error = std::io::Error::new(std::io::ErrorKind::InvalidInput, gate_message);
+            assert!(maybe_notify_snapshots_disabled_once(
+                workspace.path(),
+                Some(&session),
+                cap_bytes,
+                &error
+            ));
+            let notice = snapshots_disabled_status(workspace.path(), Some(&session))
+                .expect("gated error must be retained for /status");
+            assert_eq!(notice.scope, scope);
+            let line = notice.localize(crate::localization::Locale::En);
+            assert_eq!(line.lines().count(), 1, "one line, not a stacked notice");
+            assert!(
+                !line.contains(SNAPSHOTS_CAP_CONFIG_KEY),
+                "{scope:?} must not advertise a config key that cannot lift it: {line}"
+            );
+            assert!(line.contains("/undo"), "the consequence is named: {line}");
+        }
+    }
+
+    #[test]
+    fn oversize_notice_names_the_cap_and_only_then_the_config_key() {
+        let workspace = tempfile::tempdir().unwrap();
+        let error = std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "{}: over x bytes in y",
+                crate::snapshot::GATE_TOO_LARGE_MARKER
+            ),
+        );
+        assert!(maybe_notify_snapshots_disabled_once(
+            workspace.path(),
+            Some("session"),
+            2 * 1024 * 1024 * 1024,
+            &error
+        ));
+        let notice =
+            snapshots_disabled_status(workspace.path(), Some("session")).expect("retained");
+        let line = notice.localize(crate::localization::Locale::En);
+        assert!(line.contains("2.0 GB"), "{line}");
+        assert!(line.contains(SNAPSHOTS_CAP_CONFIG_KEY), "{line}");
     }
 }
 

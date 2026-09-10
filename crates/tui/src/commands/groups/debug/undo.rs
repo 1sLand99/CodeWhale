@@ -7,6 +7,18 @@ use crate::tui::history::HistoryCell;
 
 use super::CommandResult;
 
+/// Opening of the [`patch_undo`] message that means the snapshot repo could
+/// not be opened at all — as opposed to "there is nothing to revert". The
+/// dispatcher must carry this into the conversation-only fallback: dropping it
+/// left `/undo` reporting `Removed N message(s)` while the workspace files it
+/// implied were reverted were never touched.
+pub(in crate::commands) const SNAPSHOT_REPO_UNAVAILABLE_PREFIX: &str = "Snapshot repo unavailable";
+
+/// Told to the user whenever conversation-only undo runs because the snapshot
+/// repo was unavailable.
+pub(in crate::commands) const FILES_NOT_REVERTED_NOTE: &str =
+    "Workspace files were NOT reverted — only the conversation was rolled back.";
+
 /// Remove last message pair (user + assistant).
 ///
 /// This is the old `/undo` behaviour — it removes the most recent
@@ -147,7 +159,7 @@ pub fn patch_undo(app: &mut App) -> CommandResult {
         Ok(r) => r,
         Err(e) => {
             return CommandResult::error(format!(
-                "Snapshot repo unavailable for {}: {e}",
+                "{SNAPSHOT_REPO_UNAVAILABLE_PREFIX} for {}: {e}",
                 workspace.display(),
             ));
         }
