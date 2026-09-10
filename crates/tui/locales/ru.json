@@ -2151,6 +2151,7 @@
   "McpDiagnosisNext": "Следующий шаг: {command}.",
   "McpStateDisabled": "отключён",
   "McpStateAuthorizationRequired": "требуется авторизация",
+  "McpStateConnecting": "подключение",
   "McpStateFailed": "ошибка подключения",
   "McpStateDisconnected": "не подключён",
   "ResumeExactSessionHint": "Чтобы продолжить этот сеанс, выполните {command}",

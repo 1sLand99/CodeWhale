@@ -2151,6 +2151,7 @@
   "McpDiagnosisNext": "次の操作: {command}。",
   "McpStateDisabled": "無効",
   "McpStateAuthorizationRequired": "認証が必要",
+  "McpStateConnecting": "接続中",
   "McpStateFailed": "接続失敗",
   "McpStateDisconnected": "未接続",
   "ResumeExactSessionHint": "このセッションを再開するには {command} を実行してください",

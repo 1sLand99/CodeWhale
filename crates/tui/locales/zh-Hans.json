@@ -2151,6 +2151,7 @@
   "McpDiagnosisNext": "下一步：{command}。",
   "McpStateDisabled": "已禁用",
   "McpStateAuthorizationRequired": "需要授权",
+  "McpStateConnecting": "连接中",
   "McpStateFailed": "连接失败",
   "McpStateDisconnected": "未连接",
   "ResumeExactSessionHint": "要继续此会话，请运行 {command}",

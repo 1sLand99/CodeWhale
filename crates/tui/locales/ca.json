@@ -2151,6 +2151,7 @@
   "McpDiagnosisNext": "Pas següent: {command}.",
   "McpStateDisabled": "desactivat",
   "McpStateAuthorizationRequired": "cal autorització",
+  "McpStateConnecting": "connectant",
   "McpStateFailed": "connexió fallida",
   "McpStateDisconnected": "sense connexió",
   "ResumeExactSessionHint": "Per reprendre aquesta sessió, executa {command}",

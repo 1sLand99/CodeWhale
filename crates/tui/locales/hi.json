@@ -2151,6 +2151,7 @@
   "McpDiagnosisNext": "अगला कदम: {command}।",
   "McpStateDisabled": "अक्षम",
   "McpStateAuthorizationRequired": "प्राधिकरण आवश्यक",
+  "McpStateConnecting": "कनेक्ट हो रहा है",
   "McpStateFailed": "कनेक्शन विफल",
   "McpStateDisconnected": "कनेक्ट नहीं है",
   "ResumeExactSessionHint": "यह सत्र फिर शुरू करने के लिए {command} चलाएँ",

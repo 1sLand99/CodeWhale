@@ -5,6 +5,13 @@
 //! (`MCP · 4 connecting` or `Plugins · Problems: 2 · /plugins`); detailed
 //! diagnosis and actions belong in `/mcp` or `/plugins`, never as multi-row
 //! boot output between the transcript and composer.
+//!
+//! One exception, and it is a place rather than a second source: the launch
+//! screen has the vertical room the footer does not, so
+//! [`crate::tui::underwater::launch_empty_state`] projects the *same*
+//! [`SessionBootSurface`] into a block under the recent-work list that names
+//! the servers that failed or need a login. Nothing here computes MCP state
+//! twice; that renderer reads [`SessionBootSurface::servers`].
 
 use unicode_width::UnicodeWidthStr;
 
@@ -14,7 +21,7 @@ use crate::plugins::PluginRegistry;
 use crate::plugins::types::{PluginDiagnosticLevel, PluginTrustStatus};
 use crate::tui::app::App;
 
-const ITEM_SEPARATOR: &str = " · ";
+pub(crate) const ITEM_SEPARATOR: &str = " · ";
 const MAX_NAMED_CHIPS: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,6 +203,16 @@ impl SessionBootSurface {
             plugins,
             unnamed_connecting,
         }
+    }
+
+    /// Enabled servers known to be connecting before any name has arrived.
+    ///
+    /// The first launch frame can have `mcp_initializing` set with an empty
+    /// name list; without this a 23-server workspace would paint nothing at
+    /// all until the first boot event lands.
+    #[must_use]
+    pub fn connecting_without_names(&self) -> usize {
+        self.unnamed_connecting
     }
 
     #[must_use]

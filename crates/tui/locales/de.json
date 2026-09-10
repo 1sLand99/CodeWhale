@@ -2151,6 +2151,7 @@
   "McpDiagnosisNext": "Nächster Schritt: {command}.",
   "McpStateDisabled": "deaktiviert",
   "McpStateAuthorizationRequired": "Autorisierung erforderlich",
+  "McpStateConnecting": "verbindet",
   "McpStateFailed": "Verbindung fehlgeschlagen",
   "McpStateDisconnected": "nicht verbunden",
   "ResumeExactSessionHint": "Um diese Sitzung fortzusetzen, führe {command} aus",

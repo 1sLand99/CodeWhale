@@ -2151,6 +2151,7 @@
   "McpDiagnosisNext": "Langkah berikutnya: {command}.",
   "McpStateDisabled": "dinonaktifkan",
   "McpStateAuthorizationRequired": "perlu otorisasi",
+  "McpStateConnecting": "menghubungkan",
   "McpStateFailed": "koneksi gagal",
   "McpStateDisconnected": "belum terhubung",
   "ResumeExactSessionHint": "Untuk melanjutkan sesi ini, jalankan {command}",

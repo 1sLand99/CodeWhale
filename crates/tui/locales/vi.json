@@ -2151,6 +2151,7 @@
   "McpDiagnosisNext": "Bước tiếp theo: {command}.",
   "McpStateDisabled": "đã tắt",
   "McpStateAuthorizationRequired": "cần cấp quyền",
+  "McpStateConnecting": "đang kết nối",
   "McpStateFailed": "kết nối thất bại",
   "McpStateDisconnected": "chưa kết nối",
   "ResumeExactSessionHint": "Để tiếp tục phiên này, chạy {command}",

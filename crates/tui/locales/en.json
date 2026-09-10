@@ -2151,6 +2151,7 @@
   "McpDiagnosisNext": "Next: {command}.",
   "McpStateDisabled": "disabled",
   "McpStateAuthorizationRequired": "authorization required",
+  "McpStateConnecting": "connecting",
   "McpStateFailed": "connection failed",
   "McpStateDisconnected": "not connected",
   "ResumeExactSessionHint": "To resume this session, run {command}",

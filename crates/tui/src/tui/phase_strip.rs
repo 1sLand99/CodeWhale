@@ -1305,6 +1305,16 @@ pub(crate) fn tideline_footer_from_app(app: &mut App, width: u16) -> TidelineFoo
     let right = selected_notice(app.active_status_toast(phase), &phase_label)
         .map(|(text, ink, _urgent)| (text, ink))
         .or_else(|| {
+            // The launch screen carries the full MCP block — every state, with
+            // the failing and unauthorized servers named. Repeating a squeezed
+            // one-server chip down here would give the same fact two homes and
+            // show strictly less of it. Suppress the chip, not the surface:
+            // `SessionBootSurface::from_app` stays untouched so every other
+            // consumer of boot state, including the launch block itself, is
+            // unaffected.
+            if app.launch.visible {
+                return None;
+            }
             let boot = crate::tui::session_boot::SessionBootSurface::from_app(app);
             boot.activity_notice(app.ui_locale, notice_budget)
                 .map(|chip| (chip.text, boot_activity_ink(chip.level)))

@@ -2151,6 +2151,7 @@
   "McpDiagnosisNext": "다음 단계: {command}.",
   "McpStateDisabled": "비활성화됨",
   "McpStateAuthorizationRequired": "인증 필요",
+  "McpStateConnecting": "연결 중",
   "McpStateFailed": "연결 실패",
   "McpStateDisconnected": "연결되지 않음",
   "ResumeExactSessionHint": "이 세션을 재개하려면 {command} 실행",
