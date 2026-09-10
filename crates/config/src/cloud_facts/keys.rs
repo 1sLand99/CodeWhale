@@ -48,9 +48,27 @@ pub struct TrustedKey {
     pub status: KeyStatus,
 }
 
-/// Production trust is deliberately empty until a public anchor is approved.
-/// Tests inject their own fixture keys; a shipped binary cannot trust those keys.
-pub const TRUSTED_KEYS: &[TrustedKey] = &[];
+/// Pinned production trust anchors.
+///
+/// A shipped binary can only trust a key it was compiled with — there is no
+/// in-band command that installs or widens trust, and `CODEWHALE_CLOUD_FACTS_PATH`
+/// verifies against this same table, so a local envelope is no escape hatch.
+/// Adding a key here is therefore a release-gated decision, and the matching
+/// entry in `web/lib/cloud-facts/keys.ts` must stay byte-identical:
+/// `check:facts` fails when the two tables diverge.
+///
+/// Tests inject their own fixture keys; no fixture signature establishes
+/// production trust.
+pub const TRUSTED_KEYS: &[TrustedKey] = &[TrustedKey {
+    // Approved 2026-09-10. Private half held by the founder outside any
+    // repository; only this public anchor is committed.
+    key_id: "cwf-2026-09",
+    public_key: [
+        229, 221, 108, 200, 133, 179, 185, 249, 210, 78, 85, 107, 124, 85, 91, 236, 39, 143, 28,
+        190, 129, 220, 233, 125, 216, 136, 82, 215, 148, 26, 6, 133,
+    ],
+    status: KeyStatus::Active,
+}];
 
 /// Look up a pinned key by id.
 #[must_use]

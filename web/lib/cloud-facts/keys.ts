@@ -5,9 +5,8 @@
  * the two diverge. Keys are pinned here (and in the binary); the Supabase
  * `facts_key` table is informational and never a trust root.
  *
- * No production signing anchor has been approved for this release. An empty
- * table disables delivery before any transport read. Tests supply their own
- * public fixture keys; those keys never belong in this table.
+ * The pinned anchor below is the trust root for delivery. Tests supply their
+ * own public fixture keys; those keys never belong in this table.
  */
 export type KeyStatus = "active" | "retired";
 
@@ -23,7 +22,15 @@ export const ENVELOPE_VERSION = 1;
 export const SUPPORTED_SCHEMA_VERSION = 1;
 export const MAX_PAYLOAD_BYTES = 512 * 1024;
 
-export const TRUSTED_KEYS: readonly TrustedKey[] = [];
+export const TRUSTED_KEYS: readonly TrustedKey[] = [
+  {
+    // Approved 2026-09-10. Mirrors crates/config/src/cloud_facts/keys.rs.
+    // Private half held by the founder outside any repository.
+    keyId: "cwf-2026-09",
+    publicKey: "5d1syIWzufnSTlVrfFVb7CePHL6B3Ol92IhS15QaBoU=",
+    status: "active",
+  },
+];
 
 export function trustedKey(keyId: string): TrustedKey | undefined {
   return TRUSTED_KEYS.find((key) => key.keyId === keyId);
