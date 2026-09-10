@@ -581,14 +581,20 @@ fn is_exact_mistral_chat_route(provider: ApiProvider, base_url: &str) -> bool {
     ) && path == "v1"
 }
 
-/// Google's OpenAI-compatibility route. Thought signatures are captured
+/// Google's OpenAI-compatibility route, identified by the **resolved base
+/// URL** rather than by provider identity. Thought signatures are captured
 /// from tool-call `extra_content.google.thought_signature` and replayed on
 /// the assistant tool-call messages of later turns; thinking models fail
 /// closed when a replayed call has no signature.
-fn is_exact_google_chat_route(provider: ApiProvider, base_url: &str) -> bool {
-    if provider != ApiProvider::Google {
-        return false;
-    }
+///
+/// The endpoint carries the signature contract, not the config row that
+/// happens to name it: a manually configured `kind="openai-compatible"`
+/// provider ([`ApiProvider::Custom`]) pointed at this exact host and path is
+/// byte-for-byte the same endpoint as the built-in `google` row, so it must
+/// preserve and replay signatures the same way. The converse still holds —
+/// a `google` row pointed at some other gateway is not this route and never
+/// carries Google-only fields off-endpoint.
+fn is_google_openai_compat_chat_route(base_url: &str) -> bool {
     let trimmed = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
     let Some((host, path)) = trimmed
         .strip_prefix("https://")
@@ -619,12 +625,12 @@ fn google_model_requires_thought_signatures(model: &str) -> bool {
 /// cannot disable thinking).
 fn apply_google_thinking_level(
     body: &mut serde_json::Value,
-    provider: ApiProvider,
+    _provider: ApiProvider,
     base_url: &str,
     _model: &str,
     effort: Option<&str>,
 ) {
-    if !is_exact_google_chat_route(provider, base_url) || effort.is_none() {
+    if !is_google_openai_compat_chat_route(base_url) || effort.is_none() {
         return;
     }
     let level = match effort
@@ -639,21 +645,27 @@ fn apply_google_thinking_level(
     body["google"]["thinking_config"]["thinking_level"] = json!(level);
 }
 
-/// Fail closed before transport when the exact Google route would replay
-/// tool calls without the thought signatures Google's thinking models
-/// require. The error names the model and tells the operator how to
-/// recover instead of letting Google reject or corrupt the tool loop.
+/// Fail closed before transport when Google's OpenAI-compat route would
+/// replay tool calls without the thought signatures Google's thinking models
+/// require. The error names the model and the tool call and tells the
+/// operator how to recover instead of letting Google reject or corrupt the
+/// tool loop.
+///
+/// Models whose thinking is off by default (Gemini 2.5 Flash-Lite) degrade
+/// instead of failing — but never silently: the unsigned replay is reported
+/// through the same warning path the reasoning-replay sanitizer uses, so a
+/// later tool-turn failure has a receipt. Only tool-call identifiers and the
+/// model id are logged; signature bytes never are.
 fn validate_google_thought_signature_replay(
-    provider: ApiProvider,
     base_url: &str,
     model: &str,
     messages: &[Value],
 ) -> Result<()> {
-    if !is_exact_google_chat_route(provider, base_url)
-        || !google_model_requires_thought_signatures(model)
-    {
+    if !is_google_openai_compat_chat_route(base_url) {
         return Ok(());
     }
+    let requires_signatures = google_model_requires_thought_signatures(model);
+    let mut unsigned_call_ids: Vec<&str> = Vec::new();
     for message in messages {
         let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) else {
             continue;
@@ -665,23 +677,47 @@ fn validate_google_thought_signature_replay(
                 .is_none();
             if missing {
                 let id = call.get("id").and_then(Value::as_str).unwrap_or("?");
-                anyhow::bail!(
-                    "Gemini model `{model}` requires a thought signature to replay tool call \
-                     `{id}`, but none was captured (the turn predates signature capture, or \
-                     the provider omitted it). Start a new session before using tools on \
-                     this route."
-                );
+                if requires_signatures {
+                    anyhow::bail!(
+                        "Gemini model `{model}` requires a thought signature to replay tool call \
+                         `{id}`, but none was captured (the turn predates signature capture, or \
+                         the provider omitted it). Start a new session before using tools on \
+                         this route."
+                    );
+                }
+                unsigned_call_ids.push(id);
             }
         }
+    }
+    if !unsigned_call_ids.is_empty() {
+        // Bounded: identifiers only, and only the first few of them.
+        let sample = unsigned_call_ids
+            .iter()
+            .take(3)
+            .copied()
+            .collect::<Vec<_>>()
+            .join(", ");
+        tracing::warn!(
+            model = %model,
+            unsigned_tool_calls = unsigned_call_ids.len(),
+            sample_tool_call_ids = %sample,
+            "replaying tool calls without Google thought signatures on the Gemini \
+             OpenAI-compatible route; later signed tool turns may be rejected"
+        );
     }
     Ok(())
 }
 
 /// Captured Google signatures ride on tool calls as
-/// `extra_content.google.thought_signature`. Only the exact Google route
-/// may carry them on the wire; every other provider gets them stripped so
-/// a route switch never leaks Google-only fields to a foreign gateway.
-fn strip_google_tool_call_extra_content(messages: &mut [Value]) {
+/// `extra_content.google.thought_signature`. Only Google's OpenAI-compat
+/// endpoint may carry them on the wire; every other route gets them stripped
+/// so a route switch never leaks Google-only fields to a foreign gateway.
+///
+/// Returns how many tool calls lost a signature, so the caller can report a
+/// route switch that silently drops signed history instead of dropping it
+/// without a receipt. Never returns or logs the signature bytes.
+fn strip_google_tool_call_extra_content(messages: &mut [Value]) -> usize {
+    let mut stripped = 0usize;
     for message in messages {
         let Some(tool_calls) = message.get_mut("tool_calls").and_then(Value::as_array_mut) else {
             continue;
@@ -690,13 +726,16 @@ fn strip_google_tool_call_extra_content(messages: &mut [Value]) {
             if let Some(extra) = call.get_mut("extra_content")
                 && let Some(obj) = extra.as_object_mut()
             {
-                obj.remove("google");
+                if obj.remove("google").is_some() {
+                    stripped += 1;
+                }
                 if obj.is_empty() {
                     call.as_object_mut().map(|c| c.remove("extra_content"));
                 }
             }
         }
     }
+    stripped
 }
 
 fn mistral_model_has_adjustable_reasoning(model: &str) -> bool {
@@ -1042,7 +1081,7 @@ pub(crate) fn build_chat_wire_body(
         let wire = wire_model_for_provider_route(provider, base_url, &request.model);
         crate::models::effective_muse_wire_id(&wire).to_string()
     };
-    validate_google_thought_signature_replay(provider, base_url, &model, &messages)?;
+    validate_google_thought_signature_replay(base_url, &model, &messages)?;
     let mut body = if stream {
         json!({
             "model": model.clone(),
@@ -1713,8 +1752,20 @@ impl<'a> PromptBuilder<'a> {
         if is_exact_mistral_chat_route(provider, base_url) {
             reshape_mistral_messages_for_reasoning_replay(&mut messages);
         }
-        if !is_exact_google_chat_route(provider, base_url) {
-            strip_google_tool_call_extra_content(&mut messages);
+        if !is_google_openai_compat_chat_route(base_url) {
+            // A signature captured on Google's endpoint is meaningless — and
+            // potentially a leak — anywhere else, so it is stripped. Say so:
+            // the model will behave differently on the replayed tool history,
+            // and a silent strip is exactly what made this defect invisible.
+            let stripped = strip_google_tool_call_extra_content(&mut messages);
+            if stripped > 0 {
+                tracing::warn!(
+                    provider = ?provider,
+                    stripped_tool_calls = stripped,
+                    "dropping captured Google thought signatures: this route is not Google's \
+                     OpenAI-compatible endpoint, so the replayed tool history is unsigned"
+                );
+            }
         }
         messages
     }
@@ -7223,6 +7274,128 @@ mod google_thought_signature_tests {
                 .iter()
                 .all(|m| m.pointer("/tool_calls/0/extra_content").is_none()),
             "signatures must not be sent to a non-Google endpoint"
+        );
+    }
+
+    /// The manually configured OpenAI-compatible row (#1519,
+    /// `ApiProvider::Custom`) pointed at Google's OpenAI-compat endpoint is
+    /// byte-for-byte the same endpoint as the built-in `google` row. C22: it
+    /// used to fail the `provider == Google` half of the route gate, so its
+    /// signatures were stripped on replay with no warning and later signed
+    /// tool turns failed. The gate now binds to the endpoint.
+    #[test]
+    fn manually_configured_openai_compatible_google_endpoint_replays_signatures() {
+        let request = google_request_with_signed_tool(Some("SIG-abc123"));
+        for base_url in [
+            DEFAULT_GOOGLE_BASE_URL,
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            "https://GenerativeLanguage.googleapis.com/v1beta/openai/",
+        ] {
+            let messages = build_chat_messages_for_request_and_provider_and_route(
+                &request,
+                ApiProvider::Custom,
+                base_url,
+            );
+            let assistant = messages
+                .iter()
+                .find(|m| m.get("role") == Some(&json!("assistant")))
+                .expect("assistant replay message");
+            assert_eq!(
+                assistant
+                    .pointer("/tool_calls/0/extra_content/google/thought_signature")
+                    .and_then(serde_json::Value::as_str),
+                Some("SIG-abc123"),
+                "custom row at Google's endpoint must replay the signature ({base_url})"
+            );
+        }
+    }
+
+    /// Signature preservation is a property of the endpoint, never of the
+    /// reasoning setting: an operator who turns reasoning off (or whose
+    /// effort is simply absent) still has to replay signed tool history.
+    #[test]
+    fn signatures_survive_replay_regardless_of_the_reasoning_setting() {
+        for effort in [None, Some("off"), Some("low"), Some("high")] {
+            for (provider, base_url) in [
+                (ApiProvider::Google, DEFAULT_GOOGLE_BASE_URL),
+                (
+                    ApiProvider::Custom,
+                    "https://generativelanguage.googleapis.com/v1beta/openai",
+                ),
+            ] {
+                let mut request = google_request_with_signed_tool(Some("SIG-abc123"));
+                request.reasoning_effort = effort.map(str::to_string);
+                let body = build_chat_wire_body(&request, provider, base_url, true)
+                    .expect("signed replay builds on a signature-bearing route");
+                let assistant = body.body["messages"]
+                    .as_array()
+                    .expect("messages")
+                    .iter()
+                    .find(|m| m.get("role") == Some(&json!("assistant")))
+                    .expect("assistant replay message");
+                assert_eq!(
+                    assistant
+                        .pointer("/tool_calls/0/extra_content/google/thought_signature")
+                        .and_then(serde_json::Value::as_str),
+                    Some("SIG-abc123"),
+                    "reasoning={effort:?} must not govern signature replay ({base_url})"
+                );
+            }
+        }
+    }
+
+    /// Fail closed on the manually configured row too — the missing-signature
+    /// error is the useful feedback that replaces a silent strip.
+    #[test]
+    fn custom_row_at_google_endpoint_fails_closed_without_a_signature() {
+        let request = google_request_with_signed_tool(None);
+        let error = build_chat_wire_body(
+            &request,
+            ApiProvider::Custom,
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            false,
+        )
+        .err()
+        .expect("missing signature must fail closed before transport");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("thought signature") && rendered.contains("call-g-1"),
+            "error must name the missing signature and the tool call: {rendered}"
+        );
+    }
+
+    /// A custom row pointed somewhere else is still a foreign gateway: the
+    /// signature is stripped, and the strip reports how much it removed so
+    /// the drop is never silent.
+    #[test]
+    fn custom_row_off_google_endpoint_strips_and_reports_signatures() {
+        let request = google_request_with_signed_tool(Some("SIG-abc123"));
+        let mut messages = build_chat_messages_for_request_and_provider_and_route(
+            &request,
+            ApiProvider::Google,
+            DEFAULT_GOOGLE_BASE_URL,
+        );
+        assert_eq!(
+            strip_google_tool_call_extra_content(&mut messages),
+            1,
+            "the strip must report the signatures it dropped"
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|m| m.pointer("/tool_calls/0/extra_content").is_none()),
+            "stripped history must carry no Google-only fields"
+        );
+        let via_route = build_chat_messages_for_request_and_provider_and_route(
+            &request,
+            ApiProvider::Custom,
+            "https://gateway.example.com/v1",
+        );
+        assert!(
+            via_route
+                .iter()
+                .all(|m| m.pointer("/tool_calls/0/extra_content").is_none()),
+            "signatures must not reach a non-Google endpoint"
         );
     }
 
