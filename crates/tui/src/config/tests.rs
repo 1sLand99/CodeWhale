@@ -7494,6 +7494,7 @@ fn model_completion_scenario() {
             model_completion_names_for_provider(ApiProvider::Deepseek),
             vec![
                 "deepseek-v4-pro",
+                "deepseek-flash",
                 "deepseek-v4-flash",
                 "deepseek-v4-flash-vision-exp"
             ]
