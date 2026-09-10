@@ -414,6 +414,14 @@ reconnect.
 
 ### Notes
 
+- **DeepSeek retires the V4 Pro route on 2026-09-14.** DeepSeek's notice,
+  surfaced in #6025 by @ronohara, states that at 12:00 Beijing time that day
+  every request to the Pro model is routed to V4.1 Flash and billed at
+  Flash's price. That is why `deepseek-flash` is the shipped default here.
+  An explicitly configured `default_text_model` is still honored, so a config
+  that names `deepseek-v4-pro` on purpose keeps naming it and will be routed
+  by DeepSeek rather than by Codewhale — change it if you would rather pick
+  the replacement than have the vendor pick it for you.
 - Upgrading from 0.9.12 with Computer Use trusted and enabled: the
   bundle's content hash changes with the 0.2.1 refresh, so the plugin
   deactivates and asks for a fresh review — that is the designed
@@ -629,7 +637,9 @@ Reports and reproductions that shaped this release:
   budget collapsing to 1,024 tokens on 32K local models (#5820).
 - **[@ronohara](https://github.com/ronohara)** — reported the engine stopping
   after recoverable network errors, with the reproduction that pinned the
-  discarded approval (#5769).
+  discarded approval (#5769), and surfaced DeepSeek's notice that the V4 Pro
+  route is retired on 2026-09-14 — the report that set this release's default
+  model (#6025).
 - **[@Lujc0523](https://github.com/Lujc0523)** — asked for ACP session
   configuration of mode and model (#5863).
 - **[@senka9h](https://github.com/senka9h)** — reported that `serve --acp`

@@ -117,10 +117,11 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Notes",
         "items": [
+          "DeepSeek retires the V4 Pro route on 2026-09-14. DeepSeek's notice, surfaced in #6025 by @ronohara, states that at 12:00 Beijing time that day every request to the Pro model is routed to V4.1 Flash and billed at Flash's price. That is why deepseek-flash is the shipped default here. An explicitly configured default_text_model is still honored, so a config that names deepseek-v4-pro on purpose keeps naming it and will be routed by DeepSeek rather than by Codewhale — change it…",
           "Upgrading from 0.9.12 with Computer Use trusted and enabled: the bundle's content hash changes with the 0.2.1 refresh, so the plugin deactivates and asks for a fresh review — that is the designed fail-closed path for a desktop-driving plugin. Re-trust it from the Plugins page.",
           "The multiline-paste fix restores v9.11 behavior on terminals that accept EnableBracketedPaste but deliver pastes as keystrokes (reported on Windows 11 / PowerShell). Verified at the input-contract level and in CI; a manual paste check on a real Windows terminal is still welcome — please comment on #5981 with your terminal if anything still misbehaves."
         ],
-        "itemCount": 2
+        "itemCount": 3
       }
     ]
   },
