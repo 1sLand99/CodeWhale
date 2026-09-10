@@ -32,7 +32,7 @@ export const CHANGELOG: ChangelogRelease[] = [
     "version": "0.9.13",
     "date": "2026-09-10",
     "unreleased": false,
-    "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.9.12...HEAD",
+    "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.9.12...v0.9.13",
     "sections": [
       {
         "heading": "Fixed",
@@ -41,16 +41,16 @@ export const CHANGELOG: ChangelogRelease[] = [
           "The posture bar no longer states the same duration twice on a first turn (#6041).",
           "Reasoning-capable models whose id carries no version substring (deepseek-flash) keep reasoning_content in the thinking block instead of the answer text; the replay gate consults the model catalog rather than matching a deepseek-v4 version string (#6044).",
           "codewhale model resolve accepts a provider's declared default even when its registry row is missing — deepseek-flash failed resolution against the provider that declares it as default — and a test now resolves every provider's DEFAULT_*_MODEL for its own provider (#6043).",
+          "A configured default_text_model is honored when a new thread's route is resolved. That path consulted only the provider's catalog default, so a config naming one model silently created threads on another, and the unset default disagreed with the shipped one; the active provider's configured default now wins, matching provider_default_model, and both unset defaults name deepseek-flash (#6043).",
           "Markdown _italic_ requires both delimiters to be flanking per CommonMark, so math subscripts no longer italicize the prose between them ([t_, b_p]. Actually — hold on, do we even tile all the way from t_? rendered 60 characters italic) (#6042).",
           "An MCP server configured for OAuth that answers 401 before its first login now points at /mcp login <name> in the failure hint instead of a bearer token that does not exist (#6030).",
           "Cancelling a foreground shell wait stops its owned process group even when the tool future is dropped. Explicitly backgrounded jobs retain their ownership. Interrupted tool receipts distinguish work that started from calls skipped before execution, and returned tool failures remain errors in the next model request.",
           "Saved Fleet model identifiers retain exact spelling through selection, role pins, and roster changes, so changing one saved model does not modify another identifier that differs only in letter case.",
           "Chat wrapping reserves its scrollbar gutter consistently, keeping long identifiers readable when the viewport changes.",
           "The Engine keeps large send-message futures off the event loop's stack, preventing stack exhaustion when a restored session starts a provider turn.",
-          "New, imported, and live session titles skip runtime handoffs and use the first real user prompt. Explicitly renamed titles retain priority (#6012, thanks @SparkofSpike).",
-          "UI dispatch acceptance now precedes Engine execution, so a delayed acceptance callback cannot overwrite a turn that has already started or completed. Cancelling before acceptance preserves the prompt and leaves the next dispatch usable."
+          "New, imported, and live session titles skip runtime handoffs and use the first real user prompt. Explicitly renamed titles retain priority (#6012, thanks @SparkofSpike)."
         ],
-        "itemCount": 37
+        "itemCount": 38
       },
       {
         "heading": "Changed",
