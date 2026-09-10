@@ -10,15 +10,15 @@ use uuid::Uuid;
 
 use crate::client::DeepSeekClient;
 use crate::core::events::Event;
-use crate::models::{
+use crate::repl::PythonRuntime;
+use codewhale_models::{
     ContentBlock, Message, MessageRequest, SystemPrompt, Usage, is_incomplete_stop_reason,
     stop_reason_detail,
 };
-use crate::repl::PythonRuntime;
 
 use super::bridge::{RlmBridge, RlmLlmClient, RlmUsageAccumulator};
 use super::prompt::rlm_system_prompt;
-use crate::models::Role;
+use codewhale_models::Role;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -998,7 +998,7 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
     use crate::llm_client::mock::MockLlmClient;
-    use crate::models::MessageResponse;
+    use codewhale_models::MessageResponse;
 
     #[tokio::test]
     async fn max_tokens_complete_repl_is_not_executed_or_accepted() {

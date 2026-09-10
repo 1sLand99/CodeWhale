@@ -41,7 +41,7 @@ use std::hash::{Hash, Hasher};
 
 use serde::{Deserialize, Serialize};
 
-use crate::models::{SystemPrompt, Tool};
+use codewhale_models::{SystemPrompt, Tool};
 
 /// A snapshot of the immutable prefix's fingerprint.
 ///

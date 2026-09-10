@@ -6,7 +6,7 @@
 //! need to scroll past their bodies, and so the labels can be unit
 //! tested in isolation.
 
-use crate::models::Usage;
+use codewhale_models::Usage;
 
 /// Build the multi-line "Cache warmup complete: …" status message
 /// shown after a prefix-cache warmup turn finishes. Handles all four

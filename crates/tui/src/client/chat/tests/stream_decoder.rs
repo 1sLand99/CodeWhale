@@ -5,7 +5,7 @@
 //! directly to verify each "class of stream failure" the engine relies on.
 use super::*;
 use crate::client::wire::{InvalidSseUtf8, SseLineDecoder};
-use crate::models::{ContentBlockStart, Delta, StreamEvent};
+use codewhale_models::{ContentBlockStart, Delta, StreamEvent};
 
 /// Decode a raw SSE-data JSON chunk into our internal events, mirroring
 /// the per-event call shape used by `handle_chat_completion_stream`.

@@ -7,8 +7,8 @@ use super::{
     touch_cached_tool_after_execution,
 };
 use crate::core::session::ToolActivationCache;
-use crate::models::Tool;
 use codewhale_config::AppMode;
+use codewhale_models::Tool;
 use serde_json::json;
 use std::collections::{BTreeSet, HashSet};
 

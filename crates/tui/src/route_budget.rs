@@ -2,7 +2,7 @@ use codewhale_config::route::RouteLimits;
 
 use crate::config::{ApiProvider, provider_capability};
 use crate::context_budget::ContextBudget;
-use crate::models::{DEFAULT_COMPACTION_TOKEN_THRESHOLD, context_window_for_model};
+use codewhale_models::{DEFAULT_COMPACTION_TOKEN_THRESHOLD, context_window_for_model};
 
 /// Safe ordinary API request cap across provider routes.
 const API_MAX_OUTPUT_TOKENS: u32 = 65_536;
@@ -118,7 +118,7 @@ pub(crate) fn effective_max_output_tokens(model: &str) -> u32 {
     //   output ceiling in a machine-readable form; that number remains a
     //   catalogue-sourced value to re-verify against official docs when they
     //   publish one (#5373).
-    if let Some(documented) = crate::models::max_output_tokens_for_model(model) {
+    if let Some(documented) = codewhale_models::max_output_tokens_for_model(model) {
         return documented.min(API_MAX_OUTPUT_TOKENS);
     }
 
@@ -224,7 +224,7 @@ pub(crate) fn output_ceiling_source(provider: ApiProvider, model: &str) -> Outpu
     if matches!(
         provider,
         ApiProvider::Anthropic | ApiProvider::MinimaxAnthropic | ApiProvider::Openmodel
-    ) && crate::models::max_output_tokens_for_model(model).is_none()
+    ) && codewhale_models::max_output_tokens_for_model(model).is_none()
     {
         return OutputCeilingSource::Unverified(ANTHROPIC_UNKNOWN_MAX_OUTPUT_TOKENS);
     }
@@ -256,7 +256,7 @@ pub(crate) fn effective_max_output_tokens_for_route(
     // for a configured 32K Ollama route, leaving just 1K for input (#5820).
     // Explicit requests and documented ceilings retain their existing rules.
     let requested_cap = if explicit_max_output_tokens_override().is_none()
-        && crate::models::max_output_tokens_for_model(model).is_none()
+        && codewhale_models::max_output_tokens_for_model(model).is_none()
         && route_cap.is_none()
         && matches!(
             compatibility_source,
@@ -374,7 +374,7 @@ mod tests {
         let _canonical = crate::test_support::EnvVarGuard::remove("CODEWHALE_MAX_OUTPUT_TOKENS");
         let _legacy = crate::test_support::EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
         let model = "qwen2.5:7b";
-        assert!(crate::models::max_output_tokens_for_model(model).is_none());
+        assert!(codewhale_models::max_output_tokens_for_model(model).is_none());
         for provider in [
             ApiProvider::Ollama,
             ApiProvider::Sglang,
@@ -846,14 +846,14 @@ mod tests {
         let _env_lock = crate::test_support::lock_test_env();
         let _codewhale = crate::test_support::EnvVarGuard::remove("CODEWHALE_MAX_OUTPUT_TOKENS");
         let _deepseek = crate::test_support::EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
-        let _catalog_lock = crate::model_catalog::test_catalog_lock();
-        let catalog = crate::model_catalog::MergedCatalog::from_sources(
+        let _catalog_lock = codewhale_models::model_catalog::test_catalog_lock();
+        let catalog = codewhale_models::model_catalog::MergedCatalog::from_sources(
             std::collections::BTreeMap::new(),
             None,
-            crate::model_catalog::bundled_catalog(),
+            codewhale_models::model_catalog::bundled_catalog(),
             chrono::Utc::now(),
         );
-        let _catalog = crate::model_catalog::replace_active_catalog_for_test(catalog);
+        let _catalog = codewhale_models::model_catalog::replace_active_catalog_for_test(catalog);
 
         for provider in [
             ApiProvider::Deepseek,
@@ -887,7 +887,7 @@ mod tests {
         .map(|(id, max_output)| {
             (
                 id.to_string(),
-                crate::model_catalog::CatalogEntry {
+                codewhale_models::model_catalog::CatalogEntry {
                     id: id.to_string(),
                     context_window: Some(128_000),
                     max_output: Some(max_output),
@@ -897,19 +897,19 @@ mod tests {
                     modalities: Vec::new(),
                     supported_parameters: Vec::new(),
                     provider_model_id: None,
-                    provenance: crate::model_catalog::MetadataProvenance::UserOverride,
+                    provenance: codewhale_models::model_catalog::MetadataProvenance::UserOverride,
                 },
             )
         })
         .into_iter()
         .collect();
-        let catalog = crate::model_catalog::MergedCatalog::from_sources(
+        let catalog = codewhale_models::model_catalog::MergedCatalog::from_sources(
             overrides,
             None,
-            crate::model_catalog::bundled_catalog(),
+            codewhale_models::model_catalog::bundled_catalog(),
             chrono::Utc::now(),
         );
-        let _override = crate::model_catalog::replace_active_catalog_for_test(catalog);
+        let _override = codewhale_models::model_catalog::replace_active_catalog_for_test(catalog);
         for (model, expected) in [
             ("deepseek-v4.1-flash-expires-on-0910", 24_576),
             ("deepseek-v4-flash", 32_768),

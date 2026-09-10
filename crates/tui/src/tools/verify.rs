@@ -47,15 +47,15 @@ use crate::client::DeepSeekClient;
 use crate::dependencies::ExternalTool;
 use crate::features::Feature;
 use crate::llm_client::LlmClient;
-use crate::models::{ContentBlock, Message, MessageRequest, SystemPrompt, Usage};
 use crate::reasoning_preference::ReasoningEffort;
 use crate::utils::truncate_with_ellipsis;
+use codewhale_models::{ContentBlock, Message, MessageRequest, SystemPrompt, Usage};
 
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
     optional_str, required_str,
 };
-use crate::models::Role;
+use codewhale_models::Role;
 
 /// Total evidence budget handed to the critic. Kept well under a turn so the
 /// critic has room to reason. Large diffs/files are truncated with a marker.
@@ -513,8 +513,8 @@ async fn run_critique<C: LlmClient>(
         .await
         .map_err(|e| ToolError::execution_failed(format!("verify critic request failed: {e}")))?;
     let incomplete_stop_reason =
-        crate::models::is_incomplete_stop_reason(response.stop_reason.as_deref()).then(|| {
-            crate::models::stop_reason_detail(response.stop_reason.as_deref()).to_string()
+        codewhale_models::is_incomplete_stop_reason(response.stop_reason.as_deref()).then(|| {
+            codewhale_models::stop_reason_detail(response.stop_reason.as_deref()).to_string()
         });
     let text = extract_text(&response.content);
     Ok(CritiqueRun {
@@ -840,8 +840,8 @@ mod tests {
         ToolContext::new(Path::new("."))
     }
 
-    fn text_response(model: &str, body: &str) -> crate::models::MessageResponse {
-        crate::models::MessageResponse {
+    fn text_response(model: &str, body: &str) -> codewhale_models::MessageResponse {
+        codewhale_models::MessageResponse {
             id: "msg_test".to_string(),
             r#type: "message".to_string(),
             role: "assistant".to_string(),

@@ -30,10 +30,10 @@ use super::{
     render_spillover_annotation, render_thinking, render_thinking_with_analysis,
     running_status_label_with_elapsed,
 };
-use crate::models::{ContentBlock, Message, Role};
 use crate::tools::plan::{PlanSnapshot, StepStatus};
 use crate::tui::motion::MotionMode;
 use crate::tui::ui_text::{line_to_plain, slice_text, text_display_width};
+use codewhale_models::{ContentBlock, Message, Role};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 

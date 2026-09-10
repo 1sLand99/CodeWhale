@@ -6,10 +6,10 @@
 //! restart. This module owns both the exact live envelope and the narrow,
 //! idempotent restore projection so creation and recognition cannot drift.
 
-use crate::models::Role;
-use crate::models::{ContentBlock, Message};
 use crate::safe_label::SafeLabel;
 use crate::tools::subagent::{AgentWorkerStatus, SubAgentResult, SubAgentStatus};
+use codewhale_models::Role;
+use codewhale_models::{ContentBlock, Message};
 use serde::{Deserialize, Serialize};
 
 const COMPLETION_EVENT_PREFIX: &str = concat!(
@@ -1448,7 +1448,7 @@ mod tests {
         let image_only = Message {
             role: Role::User,
             content: vec![ContentBlock::ImageUrl {
-                image_url: crate::models::ImageUrlContent {
+                image_url: codewhale_models::ImageUrlContent {
                     url: "data:image/png;base64,AAAA".to_string(),
                 },
             }],

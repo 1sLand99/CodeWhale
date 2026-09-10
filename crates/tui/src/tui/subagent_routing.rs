@@ -1381,7 +1381,7 @@ mod tests {
                     crate::config::ApiProvider::Openrouter,
                     "vendor/model-real",
                 )),
-                usage: crate::models::Usage::default(),
+                usage: codewhale_models::Usage::default(),
             },
         );
 
@@ -1403,7 +1403,7 @@ mod tests {
                 agent_id: "agent_spend".to_string(),
                 source_id: "response-1".to_string(),
                 route: Box::new(route.clone()),
-                usage: crate::models::Usage {
+                usage: codewhale_models::Usage {
                     input_tokens: 1_000,
                     output_tokens: 40,
                     ..Default::default()
@@ -1417,7 +1417,7 @@ mod tests {
                 agent_id: "agent_spend".to_string(),
                 source_id: "response-2".to_string(),
                 route: Box::new(route),
-                usage: crate::models::Usage {
+                usage: codewhale_models::Usage {
                     input_tokens: 2_000,
                     output_tokens: 60,
                     ..Default::default()

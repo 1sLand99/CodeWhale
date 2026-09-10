@@ -6,7 +6,7 @@ use std::sync::{Mutex, OnceLock};
 use lru::LruCache;
 use sha2::{Digest, Sha256};
 
-use crate::models::{MessageRequest, MessageResponse, Usage};
+use codewhale_models::{MessageRequest, MessageResponse, Usage};
 
 const DEFAULT_CAPACITY: usize = 256;
 

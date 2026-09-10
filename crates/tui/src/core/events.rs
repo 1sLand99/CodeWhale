@@ -10,11 +10,11 @@ use serde_json::Value;
 
 use crate::config::ApiProvider;
 use crate::error_taxonomy::ErrorEnvelope;
-use crate::models::{Message, SystemPrompt, Tool, Usage};
 use crate::tools::goal::GoalSnapshot;
 use crate::tools::spec::{ToolError, ToolResult};
 use crate::tools::subagent::{AgentWorkerStatus, CoordinationDetailProjection, SubAgentResult};
 use crate::tools::user_input::UserInputRequest;
+use codewhale_models::{Message, SystemPrompt, Tool, Usage};
 
 /// Final status for a turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]

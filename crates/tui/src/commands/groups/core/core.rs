@@ -753,11 +753,11 @@ mod tests {
     use super::*;
     use crate::client::PromptInspection;
     use crate::config::Config;
-    use crate::models::Message;
-    use crate::models::Role;
     use crate::tui::app::{App, TuiOptions, TurnCacheRecord};
     use crate::tui::history::HistoryCell;
     use codewhale_config::AppMode;
+    use codewhale_models::Message;
+    use codewhale_models::Role;
     use std::ffi::OsString;
     use std::path::PathBuf;
     use std::time::Instant;

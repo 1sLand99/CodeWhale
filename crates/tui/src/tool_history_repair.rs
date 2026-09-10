@@ -7,8 +7,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::models::Role;
-use crate::models::{ContentBlock, Message};
+use codewhale_models::Role;
+use codewhale_models::{ContentBlock, Message};
 
 const CRASH_REPAIR_CONTENT: &str =
     "Tool call interrupted by process exit; terminal status: crashed_and_repaired.";
@@ -76,7 +76,8 @@ fn repair_tool_call_pairs_inner(
     let mut result_ordinal = 0usize;
 
     for (message_index, message) in messages.iter().enumerate() {
-        if message.role == "assistant" || message.role == crate::models::INTERRUPTED_ASSISTANT_ROLE
+        if message.role == "assistant"
+            || message.role == codewhale_models::INTERRUPTED_ASSISTANT_ROLE
         {
             record_missing_results(
                 pending_call_message,

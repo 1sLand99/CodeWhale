@@ -1,5 +1,5 @@
 use super::*;
-use crate::models::Role;
+use codewhale_models::Role;
 
 /// A 1x1 PNG, as bytes rather than a fixture file so the encoding tests
 /// have no filesystem dependency.
@@ -52,7 +52,7 @@ fn lowercase_read_image_preparation_is_typed_and_bounded() {
 
 #[test]
 fn blind_route_removes_nested_tool_result_image() {
-    let mut messages = vec![crate::models::Message {
+    let mut messages = vec![codewhale_models::Message {
         role: Role::User,
         content: vec![ContentBlock::ToolResult {
             tool_use_id: "call-image".to_string(),
@@ -200,8 +200,8 @@ fn classifies_remote_urls() {
     assert!(!is_remote_image_url("file:///tmp/a.png"));
 }
 
-fn message_with_image(url: &str) -> crate::models::Message {
-    crate::models::Message {
+fn message_with_image(url: &str) -> codewhale_models::Message {
+    codewhale_models::Message {
         role: Role::User,
         content: vec![
             ContentBlock::ImageUrl {
@@ -321,7 +321,7 @@ fn ingest_does_not_consult_model_capability() {
 fn a_blind_route_gets_text_in_place_of_every_image() {
     let mut messages = vec![
         message_with_image("data:image/png;base64,QUJD"),
-        crate::models::Message {
+        codewhale_models::Message {
             role: Role::Assistant,
             content: vec![ContentBlock::Text {
                 text: "sure".to_string(),

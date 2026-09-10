@@ -518,17 +518,17 @@ fn localized(locale: Locale, id: MessageId, replacements: &[(&str, &str)]) -> St
 
 #[cfg(test)]
 mod tests {
-    use crate::models::Role;
+    use codewhale_models::Role;
     use std::path::PathBuf;
 
     use tempfile::TempDir;
 
     use super::*;
     use crate::config::{ApiProvider, Config};
-    use crate::models::{ContentBlock, Message};
     use crate::tui::app::TuiOptions;
     use crate::tui::history::HistoryCell;
     use codewhale_config::AppMode;
+    use codewhale_models::{ContentBlock, Message};
 
     #[test]
     fn status_keeps_current_session_snapshot_remedy_after_notice_delivery() {

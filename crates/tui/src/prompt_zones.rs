@@ -21,8 +21,8 @@
 //! `AppendLog` / `TurnScratch` / `ThreeZoneRequest` are type scaffolding
 //! for future phases — not yet wired into the request path.
 
-use crate::models::Role;
-use crate::models::{Message, SystemPrompt, Tool};
+use codewhale_models::Role;
+use codewhale_models::{Message, SystemPrompt, Tool};
 // ── helpers ────────────────────────────────────────────────────────────
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -348,16 +348,16 @@ impl<'a> ThreeZoneRequest<'a> {
             Some(SystemPrompt::Text(text)) => {
                 messages.push(Message {
                     role: Role::System,
-                    content: vec![crate::models::ContentBlock::Text {
+                    content: vec![codewhale_models::ContentBlock::Text {
                         text: text.clone(),
                         cache_control: None,
                     }],
                 });
             }
             Some(SystemPrompt::Blocks(blocks)) => {
-                let content: Vec<crate::models::ContentBlock> = blocks
+                let content: Vec<codewhale_models::ContentBlock> = blocks
                     .iter()
-                    .map(|block| crate::models::ContentBlock::Text {
+                    .map(|block| codewhale_models::ContentBlock::Text {
                         text: block.text.clone(),
                         cache_control: block.cache_control.clone(),
                     })
@@ -398,7 +398,7 @@ impl<'a> ThreeZoneRequest<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::ContentBlock;
+    use codewhale_models::ContentBlock;
 
     fn make_tool(name: &str) -> Tool {
         Tool {
@@ -652,7 +652,7 @@ mod tests {
 
     #[test]
     fn blocks_system_prompt_preserves_cache_control() {
-        use crate::models::{CacheControl, SystemBlock};
+        use codewhale_models::{CacheControl, SystemBlock};
         let cc = Some(CacheControl {
             cache_type: "ephemeral".to_string(),
         });

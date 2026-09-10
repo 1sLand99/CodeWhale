@@ -288,13 +288,13 @@ mod tests {
     use crate::core::engine::tool_catalog::ToolSurfacePolicy;
     use crate::core::turn::TurnContext;
     use crate::llm_client::mock::{MockLlmClient, canned};
-    use crate::models::{ContentBlock, Message, Role, StreamEvent, Usage};
     use crate::sandbox::SandboxPolicy;
     use crate::tools::spec::{
         ApprovalRequirement, ToolCapability, ToolContext, ToolResult, ToolSpec,
     };
     use codewhale_config::AppMode;
     use codewhale_execpolicy::ApprovalMode;
+    use codewhale_models::{ContentBlock, Message, Role, StreamEvent, Usage};
     use serde_json::{Value, json};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};

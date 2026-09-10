@@ -1,11 +1,11 @@
 use super::*;
 use crate::core::events::{Event as EngineEvent, TurnOutcomeStatus};
 use crate::core::ops::Op;
-use crate::models::Role;
-use crate::models::Usage;
 use crate::runtime_threads::RuntimeEventRecord;
 use crate::test_support::{EnvVarGuard, lock_test_env};
 use anyhow::{Context, bail};
+use codewhale_models::Role;
+use codewhale_models::Usage;
 use futures_util::StreamExt;
 use std::fs;
 use std::path::Path;
@@ -271,7 +271,7 @@ impl crate::task_manager::TaskExecutor for MockExecutor {
     }
 }
 
-fn saved_session_with_blocks(blocks: Vec<crate::models::ContentBlock>) -> SavedSession {
+fn saved_session_with_blocks(blocks: Vec<codewhale_models::ContentBlock>) -> SavedSession {
     SavedSession {
         schema_version: 1,
         metadata: SessionMetadata {
@@ -296,7 +296,7 @@ fn saved_session_with_blocks(blocks: Vec<crate::models::ContentBlock>) -> SavedS
         },
         journal: None,
         leaf_id: None,
-        messages: vec![crate::models::Message {
+        messages: vec![codewhale_models::Message {
             role: Role::Assistant,
             content: blocks,
         }],
@@ -366,11 +366,11 @@ fn session_detail_scenario() {
     // from session_detail_tool_use_preserves_caller_metadata
     {
         let detail = session_to_detail(saved_session_with_blocks(vec![
-            crate::models::ContentBlock::ToolUse {
+            codewhale_models::ContentBlock::ToolUse {
                 id: "tool-1".to_string(),
                 name: "task_shell_start".to_string(),
                 input: json!({ "cmd": "cargo test" }),
-                caller: Some(crate::models::ToolCaller {
+                caller: Some(codewhale_models::ToolCaller {
                     caller_type: "subagent".to_string(),
                     tool_id: Some("parent-tool".to_string()),
                 }),
@@ -386,7 +386,7 @@ fn session_detail_scenario() {
     // from session_detail_tool_result_keeps_fallback_content_with_blocks
     {
         let detail = session_to_detail(saved_session_with_blocks(vec![
-            crate::models::ContentBlock::ToolResult {
+            codewhale_models::ContentBlock::ToolResult {
                 tool_use_id: "tool-1".to_string(),
                 content: "fallback text".to_string(),
                 is_error: Some(false),
@@ -5367,16 +5367,16 @@ async fn spawn_server_with_saved_sessions(
         let mut saved = crate::session_manager::create_saved_session_with_id_and_mode(
             (*id).to_string(),
             &[
-                crate::models::Message {
+                codewhale_models::Message {
                     role: Role::User,
-                    content: vec![crate::models::ContentBlock::Text {
+                    content: vec![codewhale_models::ContentBlock::Text {
                         text: format!("prompt for {title} with token=hunter2"),
                         cache_control: None,
                     }],
                 },
-                crate::models::Message {
+                codewhale_models::Message {
                     role: Role::Assistant,
-                    content: vec![crate::models::ContentBlock::Text {
+                    content: vec![codewhale_models::ContentBlock::Text {
                         text: "acknowledged".to_string(),
                         cache_control: None,
                     }],
@@ -13734,7 +13734,7 @@ fn runtime_image_named_catalog_cursor_binds_identity_endpoint_and_catalog() -> R
 
 #[tokio::test]
 async fn runtime_image_saved_session_import_validates_before_creating_a_thread() -> Result<()> {
-    use crate::models::{ContentBlock, ImageUrlContent};
+    use codewhale_models::{ContentBlock, ImageUrlContent};
     let _env = crate::test_support::lock_test_env();
     let dir = tempfile::tempdir()?;
     let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());

@@ -41,8 +41,10 @@ use crate::llm_client::{
 mod catalog_tests;
 
 use crate::logging;
-use crate::models::Role;
-use crate::models::{ContentBlock, Message, MessageRequest, MessageResponse, SystemPrompt, Usage};
+use codewhale_models::Role;
+use codewhale_models::{
+    ContentBlock, Message, MessageRequest, MessageResponse, SystemPrompt, Usage,
+};
 
 /// Every provider request that can feed the interactive TUI's attached CWC run
 /// takes a shared permit at this lowest common dispatch seam. Runtime Chat holds
@@ -2701,7 +2703,7 @@ impl DeepSeekClient {
         omitted_tool_count: usize,
     ) -> crate::llm_client::StreamEventBox {
         Box::pin(async_stream::stream! {
-            yield Ok(crate::models::StreamEvent::ToolProjectionWarning {
+            yield Ok(codewhale_models::StreamEvent::ToolProjectionWarning {
                 provider,
                 omitted_tool_names,
                 omitted_tool_count,
@@ -2763,10 +2765,10 @@ impl DeepSeekClient {
             };
             let usage = (response.usage != Usage::default()).then_some(response.usage.clone());
             let translated =
-                if crate::models::is_incomplete_stop_reason(response.stop_reason.as_deref()) {
+                if codewhale_models::is_incomplete_stop_reason(response.stop_reason.as_deref()) {
                     Err(anyhow::anyhow!(
                         "translate: provider response incomplete ({})",
-                        crate::models::stop_reason_detail(response.stop_reason.as_deref())
+                        codewhale_models::stop_reason_detail(response.stop_reason.as_deref())
                     ))
                 } else {
                     translation_text_from_response(&response)
@@ -2837,10 +2839,10 @@ impl DeepSeekClient {
         let usage = parse_usage(value.get("usage"));
         let stop_reason = value["choices"][0]["finish_reason"].as_str();
         let usage = (usage_reported && usage != Usage::default()).then_some(usage);
-        let translated = if crate::models::is_incomplete_stop_reason(stop_reason) {
+        let translated = if codewhale_models::is_incomplete_stop_reason(stop_reason) {
             Err(anyhow::anyhow!(
                 "translate: provider response incomplete ({})",
-                crate::models::stop_reason_detail(stop_reason)
+                codewhale_models::stop_reason_detail(stop_reason)
             ))
         } else {
             value["choices"][0]["message"]["content"]
@@ -5032,7 +5034,7 @@ pub(crate) fn responses_tool_output_for_test(
 }
 
 #[cfg(test)]
-pub(crate) fn chat_messages_for_test(messages: &[crate::models::Message]) -> Vec<Value> {
+pub(crate) fn chat_messages_for_test(messages: &[codewhale_models::Message]) -> Vec<Value> {
     chat::build_chat_messages(None, messages, "gpt-4o")
 }
 
@@ -5074,13 +5076,13 @@ mod tests {
         DEFAULT_CONCENTRATE_BASE_URL, DEFAULT_CONCENTRATE_MODEL, DEFAULT_EDENAI_MODEL,
         DEFAULT_TELECOMJS_MODEL, OPENROUTER_QWEN_3_6_FLASH_MODEL, ProviderConfig, ProvidersConfig,
     };
-    use crate::models::{
-        ContentBlock, ContentBlockStart, Delta, Message, MessageRequest, MessageResponse,
-        StreamEvent, Tool,
-    };
     use crate::tools::apply_patch::ApplyPatchTool;
     use crate::tools::spec::ToolSpec;
     use crate::tools::{ToolContext, ToolRegistryBuilder};
+    use codewhale_models::{
+        ContentBlock, ContentBlockStart, Delta, Message, MessageRequest, MessageResponse,
+        StreamEvent, Tool,
+    };
     use codewhale_protocol::runtime::DynamicToolSpec;
     use serde_json::json;
     use wiremock::matchers::{header, method, path};
@@ -7286,7 +7288,7 @@ mod tests {
             .expect("projection warning precedes provider SSE")
             .expect("projection warning is not a stream error");
         let (provider, omitted_tool_names, omitted_tool_count) = match first {
-            crate::models::StreamEvent::ToolProjectionWarning {
+            codewhale_models::StreamEvent::ToolProjectionWarning {
                 provider,
                 omitted_tool_names,
                 omitted_tool_count,
@@ -7301,7 +7303,7 @@ mod tests {
         while let Some(event) = stream.next().await {
             if matches!(
                 event.expect("captured SSE response remains valid"),
-                crate::models::StreamEvent::ToolProjectionWarning { .. }
+                codewhale_models::StreamEvent::ToolProjectionWarning { .. }
             ) {
                 additional_warnings += 1;
             }

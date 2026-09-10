@@ -4,8 +4,8 @@
 //! Moved verbatim out of `ui.rs`.
 
 use super::*;
-use crate::models::Role;
 use crate::tui::infoline::{InfoLine, InfoSegment, InfoSegmentId, infoline_hitboxes};
+use codewhale_models::Role;
 
 /// Context window percentage for the metrics line's reading — the same
 /// snapshot the posture bar's ≥80% microcopy reads, so the two can never
@@ -2311,11 +2311,11 @@ mod tests {
     /// here fakes the reading itself — it goes through
     /// `context_usage_snapshot` like the live shell does.
     fn app_with_context_percent(pct: u8) -> App {
-        use crate::models::{ContentBlock, Message};
+        use codewhale_models::{ContentBlock, Message};
         let mut app =
             crate::test_support::test_app_with_options(crate::test_support::test_tui_options("."));
         app.api_messages = vec![Message {
-            role: crate::models::Role::User,
+            role: codewhale_models::Role::User,
             content: vec![ContentBlock::Text {
                 text: "context ".repeat(400),
                 cache_control: None,

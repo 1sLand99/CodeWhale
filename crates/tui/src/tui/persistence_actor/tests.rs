@@ -3,8 +3,8 @@
 use super::*;
 use std::time::{Duration, Instant};
 
-use crate::models::Role;
-use crate::models::{ContentBlock, Message};
+use codewhale_models::Role;
+use codewhale_models::{ContentBlock, Message};
 
 const BACKLOG_RECEIPT_PATH_ENV: &str = "CODEWHALE_TEST_PERSISTENCE_BACKLOG_RECEIPT_PATH";
 const BACKLOG_SOURCE_SHA_ENV: &str = "CODEWHALE_TEST_PERSISTENCE_BACKLOG_SOURCE_SHA";

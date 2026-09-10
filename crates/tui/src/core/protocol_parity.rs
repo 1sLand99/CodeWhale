@@ -39,13 +39,13 @@ use crate::core::ops::Op;
 use crate::cost_status::RouteBillingMode;
 use crate::mcp::{McpManagerSnapshot, McpServerCapabilityMetadata};
 use crate::model_profile::SupportState;
-use crate::models::Usage;
 use crate::route_billing::RouteProduct;
 use crate::tools::spec::ToolError;
 use crate::tools::subagent::AgentWorkerStatus;
 use crate::tools::user_input::UserInputRequest;
 use codewhale_config::AppMode;
 use codewhale_execpolicy::ApprovalMode;
+use codewhale_models::Usage;
 use codewhale_protocol::ResponseChannel;
 
 /// Routing ids the engine does not carry on each event; the emitter supplies

@@ -13,14 +13,14 @@ use crate::client::DeepSeekClient;
 #[cfg(test)]
 use crate::dependencies::ExternalTool;
 use crate::llm_client::LlmClient;
-use crate::models::{ContentBlock, Message, MessageRequest, SystemPrompt, Usage};
 use crate::utils::truncate_with_ellipsis;
+use codewhale_models::{ContentBlock, Message, MessageRequest, SystemPrompt, Usage};
 
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
     optional_bool, optional_str, optional_u64, required_str,
 };
-use crate::models::Role;
+use codewhale_models::Role;
 
 const DEFAULT_MAX_CHARS: usize = 200_000;
 const MAX_MAX_CHARS: usize = 1_000_000;
@@ -1256,7 +1256,7 @@ impl ToolSpec for ReviewTool {
                 }
             };
             add_review_usage(&mut usage, &response.usage);
-            if crate::models::is_incomplete_stop_reason(response.stop_reason.as_deref()) {
+            if codewhale_models::is_incomplete_stop_reason(response.stop_reason.as_deref()) {
                 return Ok(review_error_with_usage(
                     &route,
                     &usage,
@@ -1264,7 +1264,7 @@ impl ToolSpec for ReviewTool {
                         "Review pass {}/{} response incomplete: provider stop reason `{}`; the partial review was not accepted.",
                         index + 1,
                         plan.as_ref().map_or(1, |plan| plan.passes.len()),
-                        crate::models::stop_reason_detail(response.stop_reason.as_deref())
+                        codewhale_models::stop_reason_detail(response.stop_reason.as_deref())
                     ),
                 ));
             }
@@ -2102,7 +2102,7 @@ mod tests {
             reasoning_tokens: Some(4),
             ..Default::default()
         };
-        first.server_tool_use = Some(crate::models::ServerToolUsage {
+        first.server_tool_use = Some(codewhale_models::ServerToolUsage {
             code_execution_requests: Some(1),
             tool_search_requests: None,
         });
@@ -2111,7 +2111,7 @@ mod tests {
             output_tokens: 5,
             prompt_cache_hit_tokens: Some(7),
             reasoning_tokens: Some(6),
-            server_tool_use: Some(crate::models::ServerToolUsage {
+            server_tool_use: Some(codewhale_models::ServerToolUsage {
                 code_execution_requests: Some(2),
                 tool_search_requests: Some(3),
             }),

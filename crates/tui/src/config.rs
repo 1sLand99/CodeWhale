@@ -688,10 +688,10 @@ pub fn provider_capability_with_wire(
             return ProviderCapability {
                 provider,
                 resolved_model: resolved_model.to_string(),
-                context_window: crate::models::context_window_for_model(resolved_model)
-                    .unwrap_or(crate::models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS),
-                max_output: crate::models::max_output_tokens_for_model(resolved_model),
-                thinking_supported: crate::models::model_supports_reasoning(resolved_model),
+                context_window: codewhale_models::context_window_for_model(resolved_model)
+                    .unwrap_or(codewhale_models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS),
+                max_output: codewhale_models::max_output_tokens_for_model(resolved_model),
+                thinking_supported: codewhale_models::model_supports_reasoning(resolved_model),
                 cache_telemetry_supported: false,
                 request_payload_mode: RequestPayloadMode::AnthropicMessages,
                 alias_deprecation: None,
@@ -701,10 +701,10 @@ pub fn provider_capability_with_wire(
             return ProviderCapability {
                 provider,
                 resolved_model: resolved_model.to_string(),
-                context_window: crate::models::context_window_for_model(resolved_model)
-                    .unwrap_or(crate::models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS),
-                max_output: crate::models::max_output_tokens_for_model(resolved_model),
-                thinking_supported: crate::models::model_supports_reasoning(resolved_model),
+                context_window: codewhale_models::context_window_for_model(resolved_model)
+                    .unwrap_or(codewhale_models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS),
+                max_output: codewhale_models::max_output_tokens_for_model(resolved_model),
+                thinking_supported: codewhale_models::model_supports_reasoning(resolved_model),
                 cache_telemetry_supported: false,
                 request_payload_mode: RequestPayloadMode::Responses,
                 alias_deprecation: None,
@@ -721,7 +721,7 @@ pub fn provider_capability_with_wire(
             resolved_model: resolved_model.to_string(),
             // 200K is the conservative Anthropic floor; 4.6+ models resolve
             // their 1M windows from models.rs rows (#3014).
-            context_window: crate::models::context_window_for_model(resolved_model)
+            context_window: codewhale_models::context_window_for_model(resolved_model)
                 .unwrap_or(200_000),
             // 64K is the documented Anthropic Messages floor. For a model
             // the catalogue describes this carries its documented ceiling;
@@ -729,9 +729,9 @@ pub fn provider_capability_with_wire(
             // `route_budget::output_ceiling_source` labels it unverified so
             // no receipt renders it as "documented" (#5440).
             max_output: Some(
-                crate::models::max_output_tokens_for_model(resolved_model).unwrap_or(64_000),
+                codewhale_models::max_output_tokens_for_model(resolved_model).unwrap_or(64_000),
             ),
-            thinking_supported: crate::models::model_supports_reasoning(resolved_model),
+            thinking_supported: codewhale_models::model_supports_reasoning(resolved_model),
             cache_telemetry_supported: matches!(provider, ApiProvider::Anthropic),
             request_payload_mode: RequestPayloadMode::AnthropicMessages,
             alias_deprecation: None,
@@ -766,12 +766,12 @@ pub fn provider_capability_with_wire(
         return ProviderCapability {
             provider,
             resolved_model: resolved_model.to_string(),
-            context_window: crate::models::context_window_for_model(resolved_model)
-                .unwrap_or(crate::models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS),
+            context_window: codewhale_models::context_window_for_model(resolved_model)
+                .unwrap_or(codewhale_models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS),
             // No documented output maximum for these routes: stay unknown so
             // no compatibility clamp is applied downstream.
-            max_output: crate::models::max_output_tokens_for_model(resolved_model),
-            thinking_supported: crate::models::model_supports_reasoning(resolved_model),
+            max_output: codewhale_models::max_output_tokens_for_model(resolved_model),
+            thinking_supported: codewhale_models::model_supports_reasoning(resolved_model),
             cache_telemetry_supported: false,
             request_payload_mode: RequestPayloadMode::ChatCompletions,
             alias_deprecation: None,
@@ -782,12 +782,12 @@ pub fn provider_capability_with_wire(
         return ProviderCapability {
             provider,
             resolved_model: resolved_model.to_string(),
-            context_window: crate::models::context_window_for_model(resolved_model)
-                .unwrap_or(crate::models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS),
+            context_window: codewhale_models::context_window_for_model(resolved_model)
+                .unwrap_or(codewhale_models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS),
             // No documented output maximum for these routes: stay unknown so
             // no compatibility clamp is applied downstream.
-            max_output: crate::models::max_output_tokens_for_model(resolved_model),
-            thinking_supported: crate::models::model_supports_reasoning(resolved_model),
+            max_output: codewhale_models::max_output_tokens_for_model(resolved_model),
+            thinking_supported: codewhale_models::model_supports_reasoning(resolved_model),
             cache_telemetry_supported: false,
             request_payload_mode: RequestPayloadMode::ChatCompletions,
             alias_deprecation: None,
@@ -815,8 +815,8 @@ pub fn provider_capability_with_wire(
     let offering =
         crate::provider_lake::bundled_catalog_offering_for_model(provider, resolved_model);
     let context_window = if is_v4_pro || is_v4_flash {
-        crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
-    } else if let Some(window) = crate::models::context_window_for_model(resolved_model) {
+        codewhale_models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
+    } else if let Some(window) = codewhale_models::context_window_for_model(resolved_model) {
         window
     } else if let Some(window) = offering
         .as_ref()
@@ -828,7 +828,7 @@ pub fn provider_capability_with_wire(
     } else if matches!(provider, ApiProvider::Ollama) {
         8192
     } else {
-        crate::models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS
+        codewhale_models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS
     };
 
     // Output limits require an exact catalog row or an explicitly recognized
@@ -839,7 +839,7 @@ pub fn provider_capability_with_wire(
     // are owned by the membership catalog. It must not become a placeholder
     // number: a fabricated 4K here silently clamped offline membership routes
     // to 4K output via `route_budget`.
-    let max_output = crate::models::max_output_tokens_for_model(resolved_model)
+    let max_output = codewhale_models::max_output_tokens_for_model(resolved_model)
         .or_else(|| {
             // Provider-owned wire IDs need not exist in the legacy model-only
             // catalog (for example Fireworks' accounts/... slug). Reuse the
@@ -857,7 +857,7 @@ pub fn provider_capability_with_wire(
                         .as_ref()
                         .map(|_| DEEPSEEK_ALIAS_REPLACEMENT)
                 })
-                .and_then(crate::models::max_output_tokens_for_model)
+                .and_then(codewhale_models::max_output_tokens_for_model)
         });
 
     // Exact catalog reasoning facts and recognized compatibility aliases only.
@@ -867,7 +867,7 @@ pub fn provider_capability_with_wire(
         || offering
             .as_ref()
             .is_some_and(|row| row.reasoning == Some(true))
-        || crate::models::model_supports_reasoning(resolved_model);
+        || codewhale_models::model_supports_reasoning(resolved_model);
 
     // Cache telemetry: returned only by DeepSeek-native and NVIDIA NIM endpoints.
     let cache_telemetry_supported = matches!(
@@ -1067,7 +1067,7 @@ pub fn validate_route(provider: ApiProvider, model: &str) -> Result<(), String> 
     Ok(())
 }
 
-use crate::models::canonical_official_deepseek_model_id;
+use codewhale_models::canonical_official_deepseek_model_id;
 
 /// Resolve model names accepted by DeepSeek's first-party endpoints.
 ///

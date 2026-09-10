@@ -51,15 +51,15 @@ use crate::core::engine::{
     exec_shell_ask_rule_decision_for_policy, file_tool_ask_rule_decision_for_policy,
 };
 use crate::llm_client::{LlmClient, StreamEventBox};
-use crate::models::Role;
-use crate::models::{
-    ContentBlock, ContentBlockStart, Delta, Message, MessageRequest, StreamEvent, SystemPrompt,
-};
 use crate::tools::spec::{ApprovalRequirement, PreparedToolCall, RichToolResult, ToolError};
 use crate::tools::{ToolContext, ToolRegistry, ToolRegistryBuilder};
 use crate::worker_profile::ShellPolicy;
 use codewhale_config::AppMode;
 use codewhale_execpolicy::ApprovalMode;
+use codewhale_models::Role;
+use codewhale_models::{
+    ContentBlock, ContentBlockStart, Delta, Message, MessageRequest, StreamEvent, SystemPrompt,
+};
 
 const ACP_PROTOCOL_VERSION: u64 = 1;
 

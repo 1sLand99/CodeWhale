@@ -13,15 +13,15 @@
 use std::time::Duration;
 
 use crate::core::model_client::ModelClient;
-use crate::models::Role;
-use crate::models::{
-    ContentBlock, Message, MessageRequest, MessageResponse, SystemPrompt, Usage,
-    is_incomplete_stop_reason,
-};
 use crate::tools::spec::ToolError;
 use crate::tui::auto_review::{
     AutoReviewAction, DEFAULT_GUARDIAN_POLICY, ReviewerRiskLevel, ReviewerVerdict,
     parse_reviewer_verdict,
+};
+use codewhale_models::Role;
+use codewhale_models::{
+    ContentBlock, Message, MessageRequest, MessageResponse, SystemPrompt, Usage,
+    is_incomplete_stop_reason,
 };
 use tokio_util::sync::CancellationToken;
 

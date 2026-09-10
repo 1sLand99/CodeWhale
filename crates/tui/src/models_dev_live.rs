@@ -165,7 +165,10 @@ pub fn cache_path() -> Option<PathBuf> {
 #[must_use]
 pub fn status() -> ModelsDevStatus {
     let current = STATUS.read().map(|guard| guard.clone()).unwrap_or_default();
-    honor_bundled_staleness(current, crate::model_catalog::bundled_catalog_is_stale())
+    honor_bundled_staleness(
+        current,
+        codewhale_models::model_catalog::bundled_catalog_is_stale(),
+    )
 }
 
 /// A Bundled-only report whose snapshot is itself past TTL reports `Stale`:

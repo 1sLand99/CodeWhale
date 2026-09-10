@@ -6,7 +6,7 @@
 
 use anyhow::Result;
 
-use crate::models::{ContentBlock, Message, SystemPrompt};
+use codewhale_models::{ContentBlock, Message, SystemPrompt};
 
 use super::{
     compaction_checkpoint_message, is_compaction_checkpoint_message, retained_user_messages,
@@ -455,7 +455,7 @@ pub(super) fn build_replacement_history(
 mod tests {
     use super::*;
     use crate::compaction::{COMPACTION_SUMMARY_MARKER, compaction_checkpoint_message};
-    use crate::models::{ContentBlock, Role};
+    use codewhale_models::{ContentBlock, Role};
     use serde_json::json;
 
     fn msg(role: &str, text: &str) -> Message {

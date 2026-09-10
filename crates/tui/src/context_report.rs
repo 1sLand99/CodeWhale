@@ -13,11 +13,11 @@ use serde::Serialize;
 use crate::compaction::{estimate_input_tokens_conservative, estimate_text_tokens_conservative};
 use crate::config::Config;
 use crate::context_budget::PressureLevel;
-use crate::models::{CacheControl, ContentBlock, Message, SystemPrompt, Tool};
 use crate::prompts::{CORE_EXECUTION_PROFILE_PROMPT, Personality};
 use crate::route_budget::route_context_window_tokens;
 use crate::tui::app::App;
 use codewhale_config::AppMode;
+use codewhale_models::{CacheControl, ContentBlock, Message, SystemPrompt, Tool};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PromptSourceMap {
@@ -955,10 +955,10 @@ pub fn prompt_context_json(context: &PromptContext) -> String {
 mod tests {
     use super::*;
     use crate::config::{ApiProvider, Config};
-    use crate::models::Role;
-    use crate::models::Tool;
     use crate::route_runtime::{ContextWindowResolution, ContextWindowSource};
     use codewhale_config::route::RouteLimits;
+    use codewhale_models::Role;
+    use codewhale_models::Tool;
     use std::fs;
     use tempfile::tempdir;
 
@@ -1377,7 +1377,7 @@ mod tests {
         // deepseek-v4-pro defaults to a 1M window; a resolved route advertising a
         // smaller window must win in the report's context_window_tokens.
         let route_window = 128_000u64;
-        let model_default = crate::models::context_window_for_model("deepseek-v4-pro")
+        let model_default = codewhale_models::context_window_for_model("deepseek-v4-pro")
             .expect("model has a default window");
         assert_ne!(
             u64::from(model_default),

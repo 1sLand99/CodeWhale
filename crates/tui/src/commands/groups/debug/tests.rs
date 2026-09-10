@@ -3,10 +3,10 @@ use super::tokens::{context, cost, system_prompt, tokens};
 use super::undo::{patch_undo, prune_undone_tool_context, retry, undo_conversation};
 use crate::client::CacheWarmupKey;
 use crate::config::Config;
-use crate::models::Role;
-use crate::models::{ContentBlock, Message, SystemBlock, SystemPrompt, Tool};
 use crate::tui::app::{App, AppAction, TuiOptions, TurnCacheRecord};
 use crate::tui::history::{GenericToolCell, HistoryCell, ToolCell, ToolStatus};
+use codewhale_models::Role;
+use codewhale_models::{ContentBlock, Message, SystemBlock, SystemPrompt, Tool};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -139,7 +139,7 @@ fn cost_report_states_its_coverage_and_names_what_it_excludes() {
     use crate::pricing::audit_turn_cost_for_provider_at;
 
     let mut app = create_test_app();
-    let write_heavy = crate::models::Usage {
+    let write_heavy = codewhale_models::Usage {
         input_tokens: 1_000_000,
         output_tokens: 100_000,
         prompt_cache_hit_tokens: Some(200_000),
@@ -207,7 +207,7 @@ fn cost_report_states_its_coverage_and_names_what_it_excludes() {
 #[test]
 fn cost_coverage_is_currency_specific_for_mixed_deepseek_openai() {
     let mut app = create_test_app();
-    let usage = crate::models::Usage {
+    let usage = codewhale_models::Usage {
         input_tokens: 10_000,
         output_tokens: 1_000,
         ..Default::default()
@@ -333,7 +333,7 @@ fn reset_cost_coverage_clears_every_counter() {
     use crate::pricing::audit_turn_cost_for_provider_at;
 
     let mut app = create_test_app();
-    let usage = crate::models::Usage {
+    let usage = codewhale_models::Usage {
         input_tokens: 1_000_000,
         output_tokens: 100_000,
         prompt_cache_write_tokens: Some(100_000),
@@ -390,7 +390,7 @@ fn tokens_report_says_estimate_and_exposes_coverage_and_cache_write() {
     app.record_turn_cost_audit(&crate::pricing::audit_turn_cost_for_provider_at(
         crate::config::ApiProvider::Moonshot,
         "kimi-k2.7-code",
-        &crate::models::Usage {
+        &codewhale_models::Usage {
             input_tokens: 1_000_000,
             output_tokens: 100_000,
             prompt_cache_write_tokens: Some(100_000),
@@ -691,14 +691,14 @@ fn cache_inspect_reports_divergence_from_previous_request() {
     ));
     app.api_messages.push(Message {
         role: Role::Assistant,
-        content: vec![crate::models::ContentBlock::Text {
+        content: vec![codewhale_models::ContentBlock::Text {
             text: "Prior answer".to_string(),
             cache_control: None,
         }],
     });
     app.api_messages.push(Message {
         role: Role::User,
-        content: vec![crate::models::ContentBlock::Text {
+        content: vec![codewhale_models::ContentBlock::Text {
             text: "First task".to_string(),
             cache_control: None,
         }],
@@ -710,7 +710,7 @@ fn cache_inspect_reports_divergence_from_previous_request() {
     assert!(first.contains("Static base prefix stability: no previous request"));
 
     if let Some(last) = app.api_messages.last_mut()
-        && let Some(crate::models::ContentBlock::Text { text, .. }) = last.content.first_mut()
+        && let Some(codewhale_models::ContentBlock::Text { text, .. }) = last.content.first_mut()
     {
         *text = "Second task".to_string();
     }
@@ -919,7 +919,7 @@ fn cache_history_shows_cache_write_tokens_and_explains_unpriced_turns() {
     use crate::pricing::audit_turn_cost_for_provider_at;
 
     let mut app = create_test_app();
-    let write_heavy = crate::models::Usage {
+    let write_heavy = codewhale_models::Usage {
         input_tokens: 1_000_000,
         output_tokens: 100_000,
         prompt_cache_hit_tokens: Some(200_000),

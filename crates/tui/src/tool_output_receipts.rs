@@ -5,8 +5,8 @@ use crate::artifacts::{ArtifactKind, ArtifactRecord};
 use serde_json::Value;
 
 use crate::fast_hash::FastHashMap;
-use crate::models::{ContentBlock, Message};
 use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_models::{ContentBlock, Message};
 
 /// Match the provider-wire budget so persisted/resumed history does not keep a
 /// larger raw body than the model would receive on a fresh request.
@@ -310,7 +310,7 @@ fn format_count(value: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::models::Role;
+    use codewhale_models::Role;
     use std::path::{Path, PathBuf};
 
     use super::*;

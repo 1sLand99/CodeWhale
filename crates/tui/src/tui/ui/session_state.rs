@@ -1072,7 +1072,7 @@ pub(crate) fn derive_session_title(messages: &[Message]) -> Option<String> {
 #[cfg(test)]
 mod derived_title_tests {
     use super::*;
-    use crate::models::Role;
+    use codewhale_models::Role;
 
     fn user(text: &str) -> Message {
         Message {

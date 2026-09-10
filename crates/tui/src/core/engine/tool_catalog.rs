@@ -14,10 +14,10 @@ use serde_json::{Value, json};
 #[cfg(test)]
 use crate::mcp::McpPool;
 use crate::model_profile::ToolSurfaceBudget;
-use crate::models::Tool;
 use crate::tools::spec::{ToolError, ToolResult, optional_str, optional_u64, required_str};
 use codewhale_config::AppMode;
 use codewhale_execpolicy::ApprovalMode;
+use codewhale_models::Tool;
 
 use crate::core::session::ToolActivationCache;
 use crate::dependencies::ExternalTool;

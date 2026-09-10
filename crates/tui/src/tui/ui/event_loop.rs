@@ -14,8 +14,8 @@ use super::task_projection::{
     refresh_shell_exec_live_output,
 };
 use super::*;
-use crate::models::Role;
 use crate::tui::shell_key_routing::ShellBindingId;
+use codewhale_models::Role;
 
 use crate::tui::control_socket::SessionControl;
 
@@ -140,7 +140,7 @@ struct TranslationAccountingContext {
 
 struct SettledTranslation {
     translated: anyhow::Result<String>,
-    usage: Option<crate::models::Usage>,
+    usage: Option<codewhale_models::Usage>,
 }
 
 impl TranslationAccountingContext {
@@ -224,7 +224,7 @@ impl TranslationAccountingContext {
     }
 }
 
-fn accrue_translation_usage(app: &mut App, usage: &crate::models::Usage) {
+fn accrue_translation_usage(app: &mut App, usage: &codewhale_models::Usage) {
     let turn_tokens = usage.input_tokens.saturating_add(usage.output_tokens);
     app.session.total_tokens = app.session.total_tokens.saturating_add(turn_tokens);
     app.session.total_conversation_tokens = app
@@ -2804,7 +2804,7 @@ pub(crate) async fn run_event_loop(
                             });
                         if let Some(launch) = suggestion_launch {
                             let suggestion_cell = app.prompt_suggestion_cell.clone();
-                            let messages: Vec<crate::models::Message> = app.api_messages.clone();
+                            let messages: Vec<codewhale_models::Message> = app.api_messages.clone();
                             let gen_token = app
                                 .prompt_suggestion_gen
                                 .load(std::sync::atomic::Ordering::Relaxed);
@@ -7133,15 +7133,15 @@ mod session_boot_event_tests {
         let mut app = test_app();
         app.current_session_id = Some("session-translation".to_string());
         app.runtime_turn_id = Some("turn-translation".to_string());
-        let usage_a = crate::models::Usage {
+        let usage_a = codewhale_models::Usage {
             input_tokens: 5,
             output_tokens: 2,
-            ..crate::models::Usage::default()
+            ..codewhale_models::Usage::default()
         };
-        let usage_b = crate::models::Usage {
+        let usage_b = codewhale_models::Usage {
             input_tokens: 3,
             output_tokens: 1,
-            ..crate::models::Usage::default()
+            ..codewhale_models::Usage::default()
         };
 
         let assistant = TranslationAccountingContext::capture(&app, "assistant", 1).settle(Ok(
@@ -7250,10 +7250,10 @@ mod session_boot_event_tests {
             turn.as_deref()
         ));
 
-        let usage = crate::models::Usage {
+        let usage = codewhale_models::Usage {
             input_tokens: 4,
             output_tokens: 2,
-            ..crate::models::Usage::default()
+            ..codewhale_models::Usage::default()
         };
         if translation_session_is_current(&app, session.as_deref()) {
             accrue_translation_usage(&mut app, &usage);

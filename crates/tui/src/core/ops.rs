@@ -5,11 +5,11 @@
 
 use crate::compaction::CompactionConfig;
 use crate::config::ApiProvider;
-use crate::models::{Message, SystemPrompt};
 use crate::route_runtime::ResolvedRuntimeRoute;
 use crate::tools::goal::GoalStatus;
 use codewhale_config::AppMode;
 use codewhale_execpolicy::ApprovalMode;
+use codewhale_models::{Message, SystemPrompt};
 use codewhale_protocol::runtime::DynamicToolSpec;
 use std::path::PathBuf;
 

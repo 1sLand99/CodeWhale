@@ -7,8 +7,8 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::models::{ContentBlock, Message};
 use anyhow::{Context, Result};
+use codewhale_models::{ContentBlock, Message};
 use ignore::WalkBuilder;
 use std::io;
 

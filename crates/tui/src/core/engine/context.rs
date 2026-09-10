@@ -6,12 +6,12 @@
 
 use crate::config::ApiProvider;
 use crate::context_budget::ContextBudget;
-use crate::models::SystemPrompt;
 #[cfg(test)]
 pub(super) use crate::route_budget::effective_max_output_tokens;
 pub(super) use crate::route_budget::effective_max_output_tokens_for_route;
 use crate::tools::spec::ToolResult;
 use codewhale_config::route::RouteLimits;
+use codewhale_models::SystemPrompt;
 use serde_json::Value;
 /// Keep this many most recent messages when emergency trimming is required.
 pub(super) const MIN_RECENT_MESSAGES_TO_KEEP: usize = 4;

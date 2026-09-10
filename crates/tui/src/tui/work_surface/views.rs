@@ -165,9 +165,9 @@ fn message_split(app: &App) -> (u64, u64, usize) {
             && message.content.iter().all(|block| {
                 matches!(
                     block,
-                    crate::models::ContentBlock::ToolResult { .. }
-                        | crate::models::ContentBlock::ToolSearchToolResult { .. }
-                        | crate::models::ContentBlock::CodeExecutionToolResult { .. }
+                    codewhale_models::ContentBlock::ToolResult { .. }
+                        | codewhale_models::ContentBlock::ToolSearchToolResult { .. }
+                        | codewhale_models::ContentBlock::CodeExecutionToolResult { .. }
                 )
             });
         if all_tool_results {

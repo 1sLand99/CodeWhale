@@ -12,7 +12,7 @@ use crate::config::{
     ProviderIdentity, is_exact_direct_moonshot_k3_route, is_exact_kimi_code_bare_k3_route,
     validate_kimi_code_api_model_id,
 };
-use crate::models::DIRECT_KIMI_K3_MAX_OUTPUT_TOKENS;
+use codewhale_models::DIRECT_KIMI_K3_MAX_OUTPUT_TOKENS;
 
 /// Why a route is using its effective context-window value.  Keep this
 /// receipt separate from the numeric route limits so every consumer can state
@@ -162,7 +162,7 @@ pub(crate) fn resolve_context_window(
 /// (a hint that overstates the window delays compaction past the provider's
 /// real limit).
 fn classify_capability_fallback_window(model: &str, tokens: u32) -> ContextWindowSource {
-    if crate::models::name_suffix_context_window_hint(model) == Some(tokens) {
+    if codewhale_models::name_suffix_context_window_hint(model) == Some(tokens) {
         ContextWindowSource::NameSuffixHint
     } else {
         ContextWindowSource::Fallback

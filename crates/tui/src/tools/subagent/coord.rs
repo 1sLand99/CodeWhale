@@ -1366,8 +1366,8 @@ impl ToolSpec for AgentsCoordinateTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::Role;
     use crate::tools::spec::ToolContext;
+    use codewhale_models::Role;
     use std::collections::BTreeSet;
     use tempfile::tempdir;
 
@@ -2015,9 +2015,9 @@ mod tests {
             guard.insert_test_interrupted_continuable_agent(
                 "paused_child",
                 tmp.path(),
-                vec![crate::models::Message {
+                vec![codewhale_models::Message {
                     role: Role::User,
-                    content: vec![crate::models::ContentBlock::Text {
+                    content: vec![codewhale_models::ContentBlock::Text {
                         text: "prior work".to_string(),
                         cache_control: None,
                     }],
@@ -2337,9 +2337,9 @@ mod tests {
             guard.insert_test_interrupted_continuable_agent(
                 "paused_child",
                 tmp.path(),
-                vec![crate::models::Message {
+                vec![codewhale_models::Message {
                     role: Role::User,
-                    content: vec![crate::models::ContentBlock::Text {
+                    content: vec![codewhale_models::ContentBlock::Text {
                         text: "prior work".to_string(),
                         cache_control: None,
                     }],

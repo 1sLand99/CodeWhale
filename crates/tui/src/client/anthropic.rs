@@ -17,7 +17,7 @@
 //!   non-cached `input_tokens`, and the normalized `input_tokens` is the sum
 //!   of all three (total prompt, the DeepSeek convention);
 //! - signed-thinking handling: `signature_delta` is captured into
-//!   [`crate::models::Delta::SignatureDelta`] and assistant thinking blocks
+//!   [`codewhale_models::Delta::SignatureDelta`] and assistant thinking blocks
 //!   replay verbatim (signature included); unsigned thinking blocks are
 //!   dropped from replay because the API rejects them.
 //!
@@ -30,8 +30,8 @@ use serde_json::{Value, json};
 use crate::config::{ApiProvider, wire_model_for_provider_route};
 use crate::llm_client::StreamEventBox;
 use crate::logging;
-use crate::models::{ContentBlock, MessageRequest, MessageResponse, StreamEvent, Usage};
 use crate::tools::schema_sanitize;
+use codewhale_models::{ContentBlock, MessageRequest, MessageResponse, StreamEvent, Usage};
 
 use super::prepared::WireDialect;
 use super::role_placement::{RolePlacement, role_placement};
@@ -54,8 +54,8 @@ impl DeepSeekClient {
 
         if let Some(system) = request.system.as_ref() {
             body["system"] = match system {
-                crate::models::SystemPrompt::Text(text) => json!(text),
-                crate::models::SystemPrompt::Blocks(blocks) => json!(
+                codewhale_models::SystemPrompt::Text(text) => json!(text),
+                codewhale_models::SystemPrompt::Blocks(blocks) => json!(
                     blocks
                         .iter()
                         .map(|block| {
@@ -128,7 +128,7 @@ impl DeepSeekClient {
         // gateways (#4978, e.g. Sensenova) only accept the documented
         // enabled/disabled/auto thinking types, so non-native routes get the
         // portable `{"type":"enabled","budget_tokens":N}` shape instead.
-        let thinking_capable = crate::models::model_supports_reasoning(&model);
+        let thinking_capable = codewhale_models::model_supports_reasoning(&model);
         let is_minimax_provider = self.api_provider == ApiProvider::MinimaxAnthropic;
         let is_minimax = crate::config::is_exact_minimax_anthropic_m3_route(
             self.api_provider,
@@ -558,7 +558,7 @@ fn anthropic_tool_choice(tool_choice: &Value) -> Value {
 /// `system` message ended up on the wire for the provider to 400 on. It now
 /// comes from the shared placement table, and pairs the table rejects are
 /// refused at the outbound seam before this function ever runs.
-pub(super) fn message_to_anthropic(message: &crate::models::Message) -> Option<Value> {
+pub(super) fn message_to_anthropic(message: &codewhale_models::Message) -> Option<Value> {
     let placement = role_placement(&message.role, WireDialect::AnthropicMessages);
     let wire_role = match placement {
         RolePlacement::User | RolePlacement::Developer => "user",
@@ -588,7 +588,7 @@ pub(super) fn message_to_anthropic(message: &crate::models::Message) -> Option<V
             .to_string();
         text["text"] = json!(format!(
             "{}{}",
-            crate::models::INTERRUPTED_ASSISTANT_CONTEXT_PREFIX,
+            codewhale_models::INTERRUPTED_ASSISTANT_CONTEXT_PREFIX,
             existing
         ));
     }
@@ -896,8 +896,8 @@ fn anthropic_error_fields(error: &Value) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::Role;
-    use crate::models::{CacheControl, Message, SystemBlock, SystemPrompt, Tool};
+    use codewhale_models::Role;
+    use codewhale_models::{CacheControl, Message, SystemBlock, SystemPrompt, Tool};
 
     fn request_with(
         model: &str,
@@ -1607,7 +1607,7 @@ mod tests {
 
     #[test]
     fn sse_fixture_decodes_text_thinking_signature_and_tool_use() {
-        use crate::models::{ContentBlockStart, Delta};
+        use codewhale_models::{ContentBlockStart, Delta};
 
         let events = [
             r#"{"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":3,"cache_creation_input_tokens":2045,"cache_read_input_tokens":18000,"output_tokens":1}}}"#,
@@ -1754,7 +1754,7 @@ mod tests {
         // whole reason the projection exists; if it regresses, every locally
         // attached screenshot 400s on the native route.
         let block = content_block_to_anthropic(&ContentBlock::ImageUrl {
-            image_url: crate::models::ImageUrlContent {
+            image_url: codewhale_models::ImageUrlContent {
                 url: "data:image/png;base64,QUJD".to_string(),
             },
         })
@@ -1795,7 +1795,7 @@ mod tests {
     #[test]
     fn remote_image_url_stays_a_url_source() {
         let block = content_block_to_anthropic(&ContentBlock::ImageUrl {
-            image_url: crate::models::ImageUrlContent {
+            image_url: codewhale_models::ImageUrlContent {
                 url: "https://example.com/shot.png".to_string(),
             },
         })
@@ -1814,7 +1814,7 @@ mod tests {
             "data:image/png,QUJD",
         ] {
             let block = content_block_to_anthropic(&ContentBlock::ImageUrl {
-                image_url: crate::models::ImageUrlContent {
+                image_url: codewhale_models::ImageUrlContent {
                     url: url.to_string(),
                 },
             })

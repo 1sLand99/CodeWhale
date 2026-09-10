@@ -75,7 +75,7 @@ impl CatalogCache {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct MergedCatalog {
+pub struct MergedCatalog {
     user_overrides: BTreeMap<String, CatalogEntry>,
     provider_cache: Option<CatalogCache>,
     bundled: CatalogCache,
@@ -83,7 +83,7 @@ pub(crate) struct MergedCatalog {
 }
 
 impl MergedCatalog {
-    pub(crate) fn from_sources(
+    pub fn from_sources(
         user_overrides: BTreeMap<String, CatalogEntry>,
         provider_cache: Option<CatalogCache>,
         bundled: CatalogCache,
@@ -197,21 +197,21 @@ pub fn load_cached() -> Option<CatalogCache> {
     serde_json::from_str(&raw).ok()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static TEST_CATALOG_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
 
-#[cfg(test)]
-pub(crate) fn test_catalog_lock() -> std::sync::MutexGuard<'static, ()> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_catalog_lock() -> std::sync::MutexGuard<'static, ()> {
     TEST_CATALOG_LOCK.lock().expect("model catalog test lock")
 }
 
-#[cfg(test)]
-pub(crate) struct ActiveCatalogGuard {
+#[cfg(any(test, feature = "test-support"))]
+pub struct ActiveCatalogGuard {
     previous: MergedCatalog,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for ActiveCatalogGuard {
     fn drop(&mut self) {
         let mut active = active_catalog().write().expect("active catalog write lock");
@@ -219,8 +219,8 @@ impl Drop for ActiveCatalogGuard {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn replace_active_catalog_for_test(catalog: MergedCatalog) -> ActiveCatalogGuard {
+#[cfg(any(test, feature = "test-support"))]
+pub fn replace_active_catalog_for_test(catalog: MergedCatalog) -> ActiveCatalogGuard {
     let mut active = active_catalog().write().expect("active catalog write lock");
     let previous = active.clone();
     *active = catalog;

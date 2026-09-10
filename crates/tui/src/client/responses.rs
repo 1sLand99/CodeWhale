@@ -13,11 +13,11 @@ use serde_json::{Value, json};
 use crate::config::ApiProvider;
 use crate::llm_client::StreamEventBox;
 use crate::logging;
-use crate::models::{
+use crate::tools::schema_sanitize;
+use codewhale_models::{
     ContentBlock, ContentBlockStart, Delta, MessageDelta, MessageRequest, MessageResponse,
     OpaqueReasoningState, StreamEvent, Tool, Usage,
 };
-use crate::tools::schema_sanitize;
 
 use super::prepared::WireDialect;
 use super::role_placement::{RolePlacement, role_placement};
@@ -776,7 +776,7 @@ pub(super) fn convert_messages_to_responses_input(
                             let text = if placement == RolePlacement::InterruptedAssistant {
                                 format!(
                                     "{}{}",
-                                    crate::models::INTERRUPTED_ASSISTANT_CONTEXT_PREFIX,
+                                    codewhale_models::INTERRUPTED_ASSISTANT_CONTEXT_PREFIX,
                                     text
                                 )
                             } else {

@@ -298,19 +298,53 @@ manifest,profile,progress,retry,terminal,work}.rs` have zero consumers and
 zero build cost (`core/mod.rs` documents them as staged scaffolding,
 TUI-DOG-017) — left as they are.
 
-### B3 order (not started)
+### B3 order
 
 1. `ApiProvider` + the exact-route helpers (`is_exact_*_route`) out of
    `crates/tui/src/config.rs` into codewhale-config, unblocking
-   `ReasoningEffort`.
-2. `localization` + `locales/*.json` → `codewhale-i18n` (the 312 k-line
-   `rust_i18n` closure leaves the tui unit; locale-only edits stop
-   rebuilding the TUI).
-3. `palette` + `glyphs` → `codewhale-palette` (also fixes web/CWC token
-   drift).
-4. `client/` (provider wire adapters) → `codewhale-client`, then
-   `fleet/`, `tools/`, `core/engine` — each behind the crate boundary its
-   tests already respect, measured with the A0 table.
+   `ReasoningEffort`. **Not started, and now the critical path** — see
+   item 4.
+2. **Landed.** `localization` + `locales/*.json` →
+   `codewhale-localization` (the 312 k-line `rust_i18n` closure left the
+   tui unit; locale-only edits no longer rebuild the TUI).
+3. **Landed.** `palette` → `codewhale-palette`; `command_safety` →
+   `codewhale-execpolicy` (it already owned `ApprovalMode`, so that move
+   removes a dependency edge rather than adding one).
+4. `client/` (provider wire adapters) → `codewhale-client`: **blocked on
+   item 1, not merely ordered after it.** With doc comments and
+   `#[cfg(test)]` blocks excluded, `client` still has 20 production
+   `crate::` edges. Three of them are hard:
+   - `crate::config` — `Config`, `ProvidersConfig`, `ProviderConfig`,
+     `TuiConfig`, `ApiProvider`, `RetryPolicy`, `validate_route`,
+     `wire_model_for_provider_route` and ~130 provider base-URL / model-id
+     constants. `crates/tui/src/config` is 29.7 k lines and itself reaches
+     `config_persistence`, `oauth`, `credentials`, `tui`, `fleet`,
+     `goal_loop`, `sandbox`, `lsp` … in production, so it cannot follow
+     `client` out.
+   - `crate::tools` ⇄ `client` is a genuine cycle: `client` uses
+     `tools::schema_sanitize`, `tools::large_output_router` and
+     `tools::truncate`, while `tools/{spec,review,registry,rlm,verify,
+     speech,fim,web_search,web/backend,subagent/advisor}.rs` use
+     `client::{DeepSeekClient, ProviderNativeSearchClient,
+     ProviderNativeSearchRequest, SpeechSynthesisRequest,
+     RemoteControlInferencePermit}`.
+   - `crate::core` ⇄ `client` is the same shape: `client` uses
+     `core::events::bounded_tool_projection_warning_names`, while
+     `core/{engine,engine/preview,engine/dispatch,engine/turn_loop,
+     engine/reviewer,protocol_parity}.rs` use `client::{DeepSeekClient,
+     PreparedOutboundRequest, canonical_json, parse_usage,
+     is_reasoning_replay_placeholder, redact_url_for_display}`.
+   Item 1 is therefore the whole precondition: move `ApiProvider`, the
+   exact-route helpers and the provider constants into codewhale-config
+   first, then re-measure the `tools` and `core` cycles.
+5. **Landed as the tractable part of item 4.** `models` +
+   `model_catalog` → `codewhale-models` (1,835 lines, 140 consumer files).
+   These sit directly under `client` on its dependency spine, had exactly
+   one production edge between them and none to the rest of the TUI, and
+   `models` was already half a re-export facade over
+   `codewhale_core::{request, role}`.
+6. Then `fleet/`, `tools/`, `core/engine` — each behind the crate boundary
+   its tests already respect, measured with the A0 table.
 
 ## What changed (this lane)
 

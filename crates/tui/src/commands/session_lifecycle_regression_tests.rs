@@ -10,13 +10,13 @@ use tempfile::TempDir;
 
 use crate::commands::CommandResult;
 use crate::config::Config;
-use crate::models::Role;
 use crate::reasoning_preference::ReasoningEffort;
 use crate::session_manager::create_saved_session_with_id_and_mode;
 use crate::test_support::EnvVarGuard;
 use crate::tui::app::{App, AppAction, TuiOptions, TurnCacheRecord};
 use crate::tui::history::HistoryCell;
 use codewhale_config::AppMode;
+use codewhale_models::Role;
 
 fn dispatch_lifecycle(app: &mut App, name: &str, arg: Option<&str>) -> CommandResult {
     let command = match arg {
@@ -170,9 +170,9 @@ fn fork_saves_parent_and_switches_to_child_session() {
         .expect("fixed parent timestamp");
     app.current_session_metadata = Some(cached_parent.clone());
     app.session_title = Some(cached_parent.title.clone());
-    app.api_messages.push(crate::models::Message {
+    app.api_messages.push(codewhale_models::Message {
         role: Role::User,
-        content: vec![crate::models::ContentBlock::Text {
+        content: vec![codewhale_models::ContentBlock::Text {
             text: "try another path".to_string(),
             cache_control: None,
         }],
@@ -258,9 +258,9 @@ fn fork_rejects_active_runtime_without_switching_sessions() {
     let tmpdir = TempDir::new().unwrap();
     let mut app = create_test_app_with_tmpdir(&tmpdir);
     app.current_session_id = Some("parent-session".to_string());
-    app.api_messages.push(crate::models::Message {
+    app.api_messages.push(codewhale_models::Message {
         role: Role::User,
-        content: vec![crate::models::ContentBlock::Text {
+        content: vec![codewhale_models::ContentBlock::Text {
             text: "still running".to_string(),
             cache_control: None,
         }],
@@ -281,9 +281,9 @@ fn new_session_from_resumed_state_creates_distinct_empty_session() {
     let mut app = create_test_app_with_tmpdir(&tmpdir);
     app.current_session_id = Some("old-session".to_string());
     app.session_title = Some("Old Session".to_string());
-    app.api_messages.push(crate::models::Message {
+    app.api_messages.push(codewhale_models::Message {
         role: Role::User,
-        content: vec![crate::models::ContentBlock::Text {
+        content: vec![codewhale_models::ContentBlock::Text {
             text: "continue this thread".to_string(),
             cache_control: None,
         }],
@@ -291,7 +291,9 @@ fn new_session_from_resumed_state_creates_distinct_empty_session() {
     app.add_message(HistoryCell::System {
         content: "old transcript".to_string(),
     });
-    app.system_prompt = Some(crate::models::SystemPrompt::Text("old prompt".to_string()));
+    app.system_prompt = Some(codewhale_models::SystemPrompt::Text(
+        "old prompt".to_string(),
+    ));
     app.session.total_tokens = 123;
     app.session.session_cost = 1.25;
 
@@ -384,7 +386,7 @@ fn new_session_force_cannot_detach_an_in_flight_turn() {
     let tmpdir = TempDir::new().unwrap();
     let mut app = create_test_app_with_tmpdir(&tmpdir);
     app.current_session_id = Some("old-session".to_string());
-    app.api_messages.push(crate::models::Message {
+    app.api_messages.push(codewhale_models::Message {
         role: Role::User,
         content: vec![],
     });
@@ -410,7 +412,7 @@ fn load_rejects_an_active_runtime_before_reading_or_mutating() {
     let tmpdir = TempDir::new().unwrap();
     let mut app = create_test_app_with_tmpdir(&tmpdir);
     app.current_session_id = Some("old-session".to_string());
-    app.api_messages.push(crate::models::Message {
+    app.api_messages.push(codewhale_models::Message {
         role: Role::User,
         content: vec![],
     });
@@ -529,9 +531,9 @@ fn test_load_valid_session_defers_state_restore_to_event_loop() {
     let tmpdir = TempDir::new().unwrap();
     let mut app1 = create_test_app_with_tmpdir(&tmpdir);
     // Set up some state to save
-    app1.api_messages.push(crate::models::Message {
+    app1.api_messages.push(codewhale_models::Message {
         role: Role::User,
-        content: vec![crate::models::ContentBlock::Text {
+        content: vec![codewhale_models::ContentBlock::Text {
             text: "Hello".to_string(),
             cache_control: None,
         }],
@@ -543,7 +545,7 @@ fn test_load_valid_session_defers_state_restore_to_event_loop() {
 
     // Create new app and load
     let mut app2 = create_test_app_with_tmpdir(&tmpdir);
-    app2.system_prompt = Some(crate::models::SystemPrompt::Text(
+    app2.system_prompt = Some(codewhale_models::SystemPrompt::Text(
         "stale prompt from prior session".to_string(),
     ));
     app2.session_context_references
@@ -614,7 +616,7 @@ fn explicit_save_persists_work_state_and_load_defers_application() {
 fn new_session_is_all_or_nothing_when_work_state_is_busy() {
     let tmpdir = TempDir::new().unwrap();
     let mut app = create_test_app_with_tmpdir(&tmpdir);
-    app.api_messages.push(crate::models::Message {
+    app.api_messages.push(codewhale_models::Message {
         role: Role::User,
         content: vec![],
     });
@@ -706,9 +708,9 @@ fn load_defers_artifact_registry_restore_to_event_loop() {
 fn load_defers_telemetry_reset_to_event_loop() {
     let tmpdir = TempDir::new().unwrap();
     let mut saved_app = create_test_app_with_tmpdir(&tmpdir);
-    saved_app.api_messages.push(crate::models::Message {
+    saved_app.api_messages.push(codewhale_models::Message {
         role: Role::User,
-        content: vec![crate::models::ContentBlock::Text {
+        content: vec![codewhale_models::ContentBlock::Text {
             text: "checkpoint".to_string(),
             cache_control: None,
         }],

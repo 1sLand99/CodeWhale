@@ -1362,7 +1362,7 @@ mod tests {
             agent_id: "agent_stream".to_string(),
             source_id: source_id.to_string(),
             route: Box::new(route.clone()),
-            usage: crate::models::Usage {
+            usage: codewhale_models::Usage {
                 input_tokens,
                 output_tokens,
                 ..Default::default()

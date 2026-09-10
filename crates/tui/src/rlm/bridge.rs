@@ -21,13 +21,13 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::llm_client::LlmClient;
-use crate::models::Role;
-use crate::models::{
+use crate::repl::runtime::{BatchResp, RpcDispatcher, RpcRequest, RpcResponse, SingleResp};
+use crate::utils::spawn_supervised;
+use codewhale_models::Role;
+use codewhale_models::{
     ContentBlock, Message, MessageRequest, MessageResponse, SystemPrompt, Usage,
     is_incomplete_stop_reason, stop_reason_detail,
 };
-use crate::repl::runtime::{BatchResp, RpcDispatcher, RpcRequest, RpcResponse, SingleResp};
-use crate::utils::spawn_supervised;
 
 /// One pre-dispatch reservation in the shared routed-usage ledger.
 #[derive(Debug, Clone, Copy)]

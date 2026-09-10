@@ -344,7 +344,7 @@ mod tests {
                 source_id: "auto-router:plan-usage".to_string(),
                 usage: crate::cost_status::EffectiveRouteUsage {
                     route: route.clone(),
-                    usage: crate::models::Usage {
+                    usage: codewhale_models::Usage {
                         input_tokens: 4,
                         output_tokens: 2,
                         ..Default::default()

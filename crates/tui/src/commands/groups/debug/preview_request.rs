@@ -187,7 +187,7 @@ fn parse_args(raw: &str) -> Result<PreviewArgs, String> {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::models::Role;
+    use codewhale_models::Role;
 
     fn args(raw: &str) -> Result<PreviewArgs, String> {
         parse_args(raw)
@@ -366,9 +366,9 @@ mod tests {
             "/tmp/test-workspace-preview-request-pure",
         ));
         let mut app = App::new(options, &Config::default());
-        app.api_messages.push(crate::models::Message {
+        app.api_messages.push(codewhale_models::Message {
             role: Role::User,
-            content: vec![crate::models::ContentBlock::Text {
+            content: vec![codewhale_models::ContentBlock::Text {
                 text: "hello".to_string(),
                 cache_control: None,
             }],

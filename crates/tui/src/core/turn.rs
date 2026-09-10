@@ -14,8 +14,8 @@
 //! snapshots.
 
 use crate::core::events::TurnRoute;
-use crate::models::Usage;
 use crate::snapshot::SnapshotRepo;
+use codewhale_models::Usage;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -295,7 +295,7 @@ fn add_optional_usage(total: Option<u32>, delta: Option<u32>) -> Option<u32> {
 #[cfg(test)]
 mod usage_tests {
     use super::*;
-    use crate::models::ServerToolUsage;
+    use codewhale_models::ServerToolUsage;
 
     #[test]
     fn add_usage_preserves_replay_and_saturates_server_tool_counters() {
@@ -323,7 +323,7 @@ mod usage_tests {
         assert_eq!(server.tool_search_requests, Some(5));
     }
 
-    fn below_threshold(messages: &[crate::models::Message], turn: &TurnContext) -> bool {
+    fn below_threshold(messages: &[codewhale_models::Message], turn: &TurnContext) -> bool {
         let config = crate::compaction::CompactionConfig {
             enabled: true,
             token_threshold: 100_000,

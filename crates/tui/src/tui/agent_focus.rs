@@ -26,11 +26,11 @@ use ratatui::{
     widgets::{Paragraph, Widget},
 };
 
-use crate::models::Message;
 use crate::tools::subagent::SubAgentStatus;
 use crate::tui::app::App;
 use crate::tui::history::{HistoryCell, history_cells_from_message};
 use codewhale_localization::MessageId;
+use codewhale_models::Message;
 
 /// How often the focused transcript re-reads the child's durable artifact.
 /// The rail's live activity line already ticks per event; the full chat only
@@ -153,7 +153,7 @@ pub(crate) fn agent_display_label(app: &App, agent_id: &str) -> String {
 /// message that carries the tool's result (or, while the call is still
 /// running, after the tool-use block itself), so a decision reads in place.
 fn cells_for_messages(messages: &[Message], receipts: &[(String, String)]) -> Vec<HistoryCell> {
-    use crate::models::ContentBlock;
+    use codewhale_models::ContentBlock;
     let mut resulted: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for message in messages {
         for block in &message.content {
@@ -288,7 +288,7 @@ fn message_plain_text(message: &Message) -> String {
         .content
         .iter()
         .filter_map(|block| match block {
-            crate::models::ContentBlock::Text { text, .. } => Some(text.as_str()),
+            codewhale_models::ContentBlock::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()

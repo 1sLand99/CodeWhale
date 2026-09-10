@@ -101,7 +101,6 @@ use ratatui::layout::Rect;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::models::{ContentBlock, Message};
 use crate::tui::app::{App, SidebarRowAction};
 use crate::tui::command_palette::{
     CommandPaletteView, build_entries as build_command_palette_entries,
@@ -116,6 +115,7 @@ use crate::tui::ui_text::{
 };
 use crate::tui::views::{ContextMenuAction, HelpView, ModalKind, ViewEvent};
 use codewhale_localization::MessageId;
+use codewhale_models::{ContentBlock, Message};
 
 // These functions will need to be imported from ui.rs or we can just import crate::tui::ui::*.
 use crate::tui::ui::{
@@ -1861,8 +1861,6 @@ mod tests {
         handle_mouse_event, sidebar_click_action,
     };
     use crate::config::Config;
-    use crate::models::Role;
-    use crate::models::{ContentBlock, Message};
     use crate::tui::app::{
         App, SidebarHoverRow, SidebarHoverSection, SidebarRowAction, TuiOptions,
     };
@@ -1871,6 +1869,8 @@ mod tests {
         InteractionTarget, InteractionTargetId,
     };
     use crate::tui::views::{ContextMenuAction, ModalKind, ViewEvent};
+    use codewhale_models::Role;
+    use codewhale_models::{ContentBlock, Message};
     use crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };

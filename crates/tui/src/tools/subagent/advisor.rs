@@ -29,9 +29,9 @@ use crate::client::DeepSeekClient;
 use crate::config::Config;
 use crate::core::events::Event;
 use crate::llm_client::LlmClient;
-use crate::models::Role;
-use crate::models::{ContentBlock, Message, MessageRequest, SystemPrompt};
 use crate::utils::truncate_with_ellipsis;
+use codewhale_models::Role;
+use codewhale_models::{ContentBlock, Message, MessageRequest, SystemPrompt};
 
 /// Maximum tokens the advisor may generate. Kept short so the note stays
 /// concise and does not compete with the parent turn's billing budget.
@@ -135,7 +135,7 @@ impl AdvisorUsageContext {
         &self,
         source_id: &str,
         route: &crate::cost_status::EffectiveRouteEnvelope,
-        usage: &crate::models::Usage,
+        usage: &codewhale_models::Usage,
     ) {
         crate::cost_status::report_effective_route_for_runtime(
             self.cost_scope,
@@ -392,7 +392,7 @@ pub async fn run_advisor_for_turn(
     // A decoded provider response is billable even when its partial/empty
     // content is rejected below or the emission guard suppresses a duplicate.
     let usage_source_id = format!("advisor:{turn_id}:provider-response:0");
-    if response.usage == crate::models::Usage::default() {
+    if response.usage == codewhale_models::Usage::default() {
         usage_context.report_unreceipted(&usage_source_id, &route);
         tracing::warn!(
             target: "advisor",
@@ -402,11 +402,11 @@ pub async fn run_advisor_for_turn(
         usage_context.report(&usage_source_id, &route, &response.usage);
     }
 
-    if crate::models::is_incomplete_stop_reason(response.stop_reason.as_deref()) {
+    if codewhale_models::is_incomplete_stop_reason(response.stop_reason.as_deref()) {
         tracing::warn!(
             target: "advisor",
             "advisor response incomplete for turn {turn_id} (stop reason `{}`); dropping partial note",
-            crate::models::stop_reason_detail(response.stop_reason.as_deref())
+            codewhale_models::stop_reason_detail(response.stop_reason.as_deref())
         );
         return;
     }

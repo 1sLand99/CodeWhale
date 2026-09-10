@@ -39,6 +39,7 @@ codewhale-core = { path = "../core", version = "0.9.13" }
 codewhale-execpolicy = { path = "../execpolicy", version = "0.9.13" }
 codewhale-hooks = { path = "../hooks", version = "0.9.13" }
 codewhale-lane = { path = "../lane", version = "0.9.13" }
+codewhale-models = { path = "../models", version = "0.9.13" }
 codewhale-palette = { path = "../palette", version = "0.9.13" }
 codewhale-paths = { path = "../paths", version = "0.9.13" }
 codewhale-protocol = { path = "../protocol", version = "0.9.13" }
@@ -120,6 +121,9 @@ rusty_alloc-api = { workspace = true, optional = true }
 codewhale-build-support = { path = "../build-support", version = "0.9.13" }
 
 [dev-dependencies]
+codewhale-models = { path = "../models", version = "0.9.13", features = [
+    "test-support",
+] }
 cucumber = "0.23.0"
 jsonschema.workspace = true
 wiremock = "0.6"

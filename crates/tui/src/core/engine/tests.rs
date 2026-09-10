@@ -9,12 +9,12 @@ use super::turn_loop::{
     requested_sandbox_escalation, sandbox_escalation_denial, workspace_write_carve_out_applies,
 };
 use crate::config::ApiProvider;
-use crate::models::{SystemBlock, Usage};
 use crate::prompts::{
     InstructionSource, PromptSessionContext, system_prompt_flat_text,
     system_prompt_for_mode_with_context_skills_and_session,
 };
 use crate::test_support::{EnvVarGuard, lock_test_env};
+use codewhale_models::{SystemBlock, Usage};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -497,8 +497,8 @@ impl crate::core::model_client::ModelClient for BlockingEmergencyCompactionModel
 
     async fn create_message(
         &self,
-        _request: crate::models::MessageRequest,
-    ) -> anyhow::Result<crate::models::MessageResponse> {
+        _request: codewhale_models::MessageRequest,
+    ) -> anyhow::Result<codewhale_models::MessageResponse> {
         let _drop_signal = DropSignal(std::sync::Arc::clone(&self.request_dropped));
         self.entered.notify_one();
         std::future::pending().await
@@ -506,7 +506,7 @@ impl crate::core::model_client::ModelClient for BlockingEmergencyCompactionModel
 
     async fn create_message_stream(
         &self,
-        _request: crate::models::MessageRequest,
+        _request: codewhale_models::MessageRequest,
     ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
         anyhow::bail!("emergency compaction uses the non-streaming model boundary")
     }
@@ -1046,7 +1046,7 @@ async fn exact_turn_snapshot_restores_custom_endpoint_and_turn_receipt_after_bui
 
 struct GatedGoalModelClient {
     calls: std::sync::atomic::AtomicUsize,
-    requests: std::sync::Mutex<Vec<crate::models::MessageRequest>>,
+    requests: std::sync::Mutex<Vec<codewhale_models::MessageRequest>>,
     second_request_entered: std::sync::Arc<tokio::sync::Notify>,
     release_second_request: std::sync::Arc<tokio::sync::Notify>,
     first_usage: Option<Usage>,
@@ -1082,14 +1082,14 @@ impl crate::core::model_client::ModelClient for IndexedGatedGoalModelClient {
 
     async fn create_message(
         &self,
-        _request: crate::models::MessageRequest,
-    ) -> anyhow::Result<crate::models::MessageResponse> {
+        _request: codewhale_models::MessageRequest,
+    ) -> anyhow::Result<codewhale_models::MessageResponse> {
         anyhow::bail!("indexed gate regression uses the streaming model boundary")
     }
 
     async fn create_message_stream(
         &self,
-        _request: crate::models::MessageRequest,
+        _request: codewhale_models::MessageRequest,
     ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
         let call = self
             .calls
@@ -1126,14 +1126,14 @@ impl crate::core::model_client::ModelClient for FirstRequestGatedGoalModelClient
 
     async fn create_message(
         &self,
-        _request: crate::models::MessageRequest,
-    ) -> anyhow::Result<crate::models::MessageResponse> {
+        _request: codewhale_models::MessageRequest,
+    ) -> anyhow::Result<codewhale_models::MessageResponse> {
         anyhow::bail!("mailbox regression uses the streaming model boundary")
     }
 
     async fn create_message_stream(
         &self,
-        _request: crate::models::MessageRequest,
+        _request: codewhale_models::MessageRequest,
     ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
         let call = self
             .calls
@@ -1173,14 +1173,14 @@ impl crate::core::model_client::ModelClient for FailingGoalModelClient {
 
     async fn create_message(
         &self,
-        _request: crate::models::MessageRequest,
-    ) -> anyhow::Result<crate::models::MessageResponse> {
+        _request: codewhale_models::MessageRequest,
+    ) -> anyhow::Result<codewhale_models::MessageResponse> {
         anyhow::bail!("failure regression uses the streaming model boundary")
     }
 
     async fn create_message_stream(
         &self,
-        _request: crate::models::MessageRequest,
+        _request: codewhale_models::MessageRequest,
     ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         anyhow::bail!(self.message.clone())
@@ -1192,7 +1192,7 @@ impl crate::core::model_client::ModelClient for FailingGoalModelClient {
 }
 
 impl GatedGoalModelClient {
-    fn captured_requests(&self) -> Vec<crate::models::MessageRequest> {
+    fn captured_requests(&self) -> Vec<codewhale_models::MessageRequest> {
         self.requests
             .lock()
             .expect("goal model request lock")
@@ -1212,14 +1212,14 @@ impl crate::core::model_client::ModelClient for GatedGoalModelClient {
 
     async fn create_message(
         &self,
-        _request: crate::models::MessageRequest,
-    ) -> anyhow::Result<crate::models::MessageResponse> {
+        _request: codewhale_models::MessageRequest,
+    ) -> anyhow::Result<codewhale_models::MessageResponse> {
         anyhow::bail!("goal regression uses the streaming model boundary")
     }
 
     async fn create_message_stream(
         &self,
-        request: crate::models::MessageRequest,
+        request: codewhale_models::MessageRequest,
     ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
         let call = self
             .calls
@@ -1239,9 +1239,9 @@ impl crate::core::model_client::ModelClient for GatedGoalModelClient {
         let mut events = crate::llm_client::mock::canned::simple_text_turn("still working");
         if call == 1
             && let Some(usage) = self.first_usage.clone()
-            && let Some(crate::models::StreamEvent::MessageDelta { usage: slot, .. }) = events
+            && let Some(codewhale_models::StreamEvent::MessageDelta { usage: slot, .. }) = events
                 .iter_mut()
-                .find(|event| matches!(event, crate::models::StreamEvent::MessageDelta { .. }))
+                .find(|event| matches!(event, codewhale_models::StreamEvent::MessageDelta { .. }))
         {
             *slot = Some(usage);
         }
@@ -4654,8 +4654,8 @@ async fn idle_subagent_delivery_releases_claim_when_route_fails_before_recording
 
 #[test]
 fn subagent_mailbox_keeps_lifecycle_events_reliable() {
-    use crate::models::Usage;
     use crate::tools::subagent::MailboxMessage;
+    use codewhale_models::Usage;
 
     assert!(subagent_mailbox_message_is_best_effort(
         &MailboxMessage::progress("agent_a", "step 1")
@@ -4765,8 +4765,8 @@ fn subagent_mailbox_samples_best_effort_events_per_agent() {
 
 #[test]
 fn subagent_mailbox_never_samples_lifecycle_or_usage_events() {
-    use crate::models::Usage;
     use crate::tools::subagent::{FleetRole, MailboxMessage};
+    use codewhale_models::Usage;
 
     let mut last_sent_at = HashMap::new();
     let start = Instant::now();
@@ -5506,7 +5506,7 @@ async fn steer_during_final_coordination_response_gets_its_own_provider_reply() 
 
 /// Compose one assistant turn that proposes `calls` as a single parallel
 /// tool-call batch: `(call_id, tool_name, args_json)` per block, in order.
-fn tool_batch_turn(calls: &[(&str, &str, &str)]) -> Vec<crate::models::StreamEvent> {
+fn tool_batch_turn(calls: &[(&str, &str, &str)]) -> Vec<codewhale_models::StreamEvent> {
     use crate::llm_client::mock::canned;
 
     let mut events = vec![canned::message_start("mock_tool_batch")];
@@ -6265,14 +6265,14 @@ impl crate::core::model_client::ModelClient for FailingGuardianModelClient {
 
     async fn create_message(
         &self,
-        _request: crate::models::MessageRequest,
-    ) -> anyhow::Result<crate::models::MessageResponse> {
+        _request: codewhale_models::MessageRequest,
+    ) -> anyhow::Result<codewhale_models::MessageResponse> {
         anyhow::bail!("fixture guardian transport failure")
     }
 
     async fn create_message_stream(
         &self,
-        request: crate::models::MessageRequest,
+        request: codewhale_models::MessageRequest,
     ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
         crate::core::model_client::ModelClient::create_message_stream(&self.inner, request).await
     }
@@ -6294,8 +6294,8 @@ impl crate::core::model_client::ModelClient for BlockingGuardianModelClient {
 
     async fn create_message(
         &self,
-        _request: crate::models::MessageRequest,
-    ) -> anyhow::Result<crate::models::MessageResponse> {
+        _request: codewhale_models::MessageRequest,
+    ) -> anyhow::Result<codewhale_models::MessageResponse> {
         let _drop_signal = DropSignal(std::sync::Arc::clone(&self.guardian_dropped));
         self.guardian_entered.notify_one();
         std::future::pending().await
@@ -6303,7 +6303,7 @@ impl crate::core::model_client::ModelClient for BlockingGuardianModelClient {
 
     async fn create_message_stream(
         &self,
-        _request: crate::models::MessageRequest,
+        _request: codewhale_models::MessageRequest,
     ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
         use crate::llm_client::mock::canned;
 
@@ -6340,14 +6340,14 @@ impl crate::core::model_client::ModelClient for BlockingModelClient {
 
     async fn create_message(
         &self,
-        _request: crate::models::MessageRequest,
-    ) -> anyhow::Result<crate::models::MessageResponse> {
+        _request: codewhale_models::MessageRequest,
+    ) -> anyhow::Result<codewhale_models::MessageResponse> {
         std::future::pending().await
     }
 
     async fn create_message_stream(
         &self,
-        _request: crate::models::MessageRequest,
+        _request: codewhale_models::MessageRequest,
     ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
         let _drop_signal = DropSignal(std::sync::Arc::clone(&self.request_dropped));
         self.entered.notify_one();
@@ -6362,7 +6362,7 @@ impl crate::core::model_client::ModelClient for BlockingModelClient {
 fn test_tool_surface(
     engine: &Engine,
     registry: crate::tools::ToolRegistry,
-    tools: Option<Vec<crate::models::Tool>>,
+    tools: Option<Vec<codewhale_models::Tool>>,
     mode: AppMode,
 ) -> ToolSurfacePolicy {
     ToolSurfacePolicy::new(
@@ -6429,7 +6429,7 @@ async fn tool_request_snapshot_matches_the_exact_mock_request_payload() {
 #[tokio::test]
 async fn normal_repl_kernel_persists_across_user_turns() {
     use crate::llm_client::mock::{MockLlmClient, canned};
-    use crate::models::{ContentBlock, Message, MessageResponse, Usage};
+    use codewhale_models::{ContentBlock, Message, MessageResponse, Usage};
 
     let workspace = tempdir().expect("tempdir");
     let mock = std::sync::Arc::new(MockLlmClient::new(vec![
@@ -6555,7 +6555,7 @@ async fn normal_repl_kernel_persists_across_user_turns() {
 
 async fn snapshot_for_catalog(
     workspace: &Path,
-    catalog: Option<Vec<crate::models::Tool>>,
+    catalog: Option<Vec<codewhale_models::Tool>>,
 ) -> crate::tool_inspection::ToolInspectionSnapshot {
     use crate::llm_client::mock::{MockLlmClient, canned};
 
@@ -6585,7 +6585,7 @@ async fn snapshot_for_catalog(
 async fn request_selector_distinguishes_absent_tools_from_present_empty_tools() {
     let workspace = tempdir().expect("tempdir");
     let absent = snapshot_for_catalog(workspace.path(), None).await;
-    let deferred_only = crate::models::Tool {
+    let deferred_only = codewhale_models::Tool {
         tool_type: Some("function".to_string()),
         name: "deferred_fixture".to_string(),
         description: "Deferred fixture".to_string(),
@@ -6874,7 +6874,7 @@ async fn request_snapshot_reports_registry_provenance_for_the_transmitted_catalo
     // the turn an empty catalog and nothing would be transmitted. Hand the
     // engine an explicit catalog instead: the registry is still the source of
     // the *facts*, including the fact that this tool is not model-visible.
-    let tools = Some(vec![crate::models::Tool {
+    let tools = Some(vec![codewhale_models::Tool {
         tool_type: None,
         name: "read_file".to_string(),
         description: "Read a file".to_string(),
@@ -8425,8 +8425,8 @@ async fn engine_cancellation_drops_active_injected_model_request() {
     task.await.expect("engine task");
 }
 
-fn guardian_fixture_response(text: &str) -> crate::models::MessageResponse {
-    crate::models::MessageResponse {
+fn guardian_fixture_response(text: &str) -> codewhale_models::MessageResponse {
+    codewhale_models::MessageResponse {
         id: "guardian-fixture".to_string(),
         r#type: "message".to_string(),
         role: "assistant".to_string(),
@@ -8447,7 +8447,7 @@ fn guardian_fixture_response(text: &str) -> crate::models::MessageResponse {
 }
 
 fn guardian_tool_results<'a>(
-    request: &'a crate::models::MessageRequest,
+    request: &'a codewhale_models::MessageRequest,
     call_id: &str,
 ) -> Vec<(&'a str, Option<bool>)> {
     request
@@ -8699,7 +8699,7 @@ async fn auto_review_guardian_parse_and_transport_failures_deny_closed() {
             r#"{"action":"write","path":".env","content":"must-not-run\n"}"#,
         );
         let follow_up_id = call_id.clone();
-        let follow_up = move |request: &crate::models::MessageRequest| {
+        let follow_up = move |request: &codewhale_models::MessageRequest| {
             let results = guardian_tool_results(request, &follow_up_id);
             assert_eq!(results.len(), 1, "reviewer failure must pair one result");
             let result = results[0];
@@ -11251,7 +11251,7 @@ fn print_mode_runtime_contract_metrics() {
         );
         let prompt_bytes = system_prompt_flat_text(&prompt).len();
         let prompt_blocks = match &prompt {
-            crate::models::SystemPrompt::Blocks(blocks) => blocks.len(),
+            codewhale_models::SystemPrompt::Blocks(blocks) => blocks.len(),
             _ => 1,
         };
         mode_metrics.insert(
@@ -11280,7 +11280,7 @@ fn representative_prompt(
     instructions: Option<&[InstructionSource]>,
     user_memory_block: Option<&str>,
     goal_objective: Option<&str>,
-) -> crate::models::SystemPrompt {
+) -> codewhale_models::SystemPrompt {
     system_prompt_for_mode_with_context_skills_and_session(
         workspace,
         None,
@@ -11296,10 +11296,10 @@ fn representative_prompt(
     )
 }
 
-fn prompt_block_count(prompt: &crate::models::SystemPrompt) -> usize {
+fn prompt_block_count(prompt: &codewhale_models::SystemPrompt) -> usize {
     match prompt {
-        crate::models::SystemPrompt::Blocks(blocks) => blocks.len(),
-        crate::models::SystemPrompt::Text(_) => 1,
+        codewhale_models::SystemPrompt::Blocks(blocks) => blocks.len(),
+        codewhale_models::SystemPrompt::Text(_) => 1,
     }
 }
 
@@ -11343,7 +11343,7 @@ fn normalize_representative_prompt(text: &str, workspace: &Path, home: &Path) ->
 
 fn representative_stage(
     name: &'static str,
-    prompt: crate::models::SystemPrompt,
+    prompt: codewhale_models::SystemPrompt,
     workspace: &Path,
     home: &Path,
 ) -> RepresentativePromptStage {
@@ -16600,7 +16600,7 @@ async fn edit_last_turn_without_user_prompt_errors_and_sends_nothing() {
         Message {
             role: Role::User,
             content: vec![ContentBlock::ImageUrl {
-                image_url: crate::models::ImageUrlContent {
+                image_url: codewhale_models::ImageUrlContent {
                     url: "data:image/png;base64,AAAA".to_string(),
                 },
             }],
@@ -20228,14 +20228,14 @@ impl crate::core::model_client::ModelClient for FlakyNetworkDropModelClient {
 
     async fn create_message(
         &self,
-        _request: crate::models::MessageRequest,
-    ) -> anyhow::Result<crate::models::MessageResponse> {
+        _request: codewhale_models::MessageRequest,
+    ) -> anyhow::Result<codewhale_models::MessageResponse> {
         anyhow::bail!("flaky-network regression uses the streaming model boundary")
     }
 
     async fn create_message_stream(
         &self,
-        _request: crate::models::MessageRequest,
+        _request: codewhale_models::MessageRequest,
     ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
         use crate::llm_client::mock::canned;
         let call = self
@@ -20256,7 +20256,7 @@ impl crate::core::model_client::ModelClient for FlakyNetworkDropModelClient {
                 if let StreamEvent::MessageStart { message } = &mut message_start {
                     message.usage = start_usage;
                 }
-                let events: Vec<anyhow::Result<crate::models::StreamEvent>> = vec![
+                let events: Vec<anyhow::Result<codewhale_models::StreamEvent>> = vec![
                     Ok(message_start),
                     Ok(canned::text_block_start(0)),
                     Ok(canned::text_delta(0, "billed truncated fragment")),
@@ -20279,7 +20279,7 @@ impl crate::core::model_client::ModelClient for FlakyNetworkDropModelClient {
             // Partial content first — this flips `any_content_received` so
             // the #103 transparent retry cannot fire — then the transport
             // dies the way the 0.9.4 Terminal-Bench crashes did.
-            let events: Vec<anyhow::Result<crate::models::StreamEvent>> = vec![
+            let events: Vec<anyhow::Result<codewhale_models::StreamEvent>> = vec![
                 Ok(canned::message_start("flaky_msg")),
                 Ok(canned::text_block_start(0)),
                 Ok(canned::text_delta(
@@ -20720,14 +20720,14 @@ impl crate::core::model_client::ModelClient for CancelAfterTerminalUsageModelCli
 
     async fn create_message(
         &self,
-        _request: crate::models::MessageRequest,
-    ) -> anyhow::Result<crate::models::MessageResponse> {
+        _request: codewhale_models::MessageRequest,
+    ) -> anyhow::Result<codewhale_models::MessageResponse> {
         anyhow::bail!("unused")
     }
 
     async fn create_message_stream(
         &self,
-        _request: crate::models::MessageRequest,
+        _request: codewhale_models::MessageRequest,
     ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
         use crate::llm_client::mock::canned;
 
@@ -21028,14 +21028,14 @@ impl crate::core::model_client::ModelClient for ThinkingOnlyDropModelClient {
 
     async fn create_message(
         &self,
-        _request: crate::models::MessageRequest,
-    ) -> anyhow::Result<crate::models::MessageResponse> {
+        _request: codewhale_models::MessageRequest,
+    ) -> anyhow::Result<codewhale_models::MessageResponse> {
         anyhow::bail!("thinking-only drop regression uses the streaming model boundary")
     }
 
     async fn create_message_stream(
         &self,
-        _request: crate::models::MessageRequest,
+        _request: codewhale_models::MessageRequest,
     ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
         use crate::llm_client::mock::canned;
         let call = self
@@ -21047,11 +21047,11 @@ impl crate::core::model_client::ModelClient for ThinkingOnlyDropModelClient {
             // visible streams before the transport dies. This still flips
             // `any_content_received`, which is what routes the drop to the
             // interactive resume path instead of the transparent retry.
-            let events: Vec<anyhow::Result<crate::models::StreamEvent>> = vec![
+            let events: Vec<anyhow::Result<codewhale_models::StreamEvent>> = vec![
                 Ok(canned::message_start("thinking_only_msg")),
                 Ok(StreamEvent::ContentBlockStart {
                     index: 0,
-                    content_block: crate::models::ContentBlockStart::Thinking {
+                    content_block: codewhale_models::ContentBlockStart::Thinking {
                         thinking: String::new(),
                     },
                 }),
@@ -21245,7 +21245,7 @@ struct ReasoningOnlyCleanFinishModelClient {
     stop_reason: &'static str,
     /// Every outbound request's messages, in order, so a test can tell a
     /// request-scoped nudge from one written into the session.
-    requests: std::sync::Mutex<Vec<Vec<crate::models::Message>>>,
+    requests: std::sync::Mutex<Vec<Vec<codewhale_models::Message>>>,
 }
 
 #[async_trait::async_trait]
@@ -21260,14 +21260,14 @@ impl crate::core::model_client::ModelClient for ReasoningOnlyCleanFinishModelCli
 
     async fn create_message(
         &self,
-        _request: crate::models::MessageRequest,
-    ) -> anyhow::Result<crate::models::MessageResponse> {
+        _request: codewhale_models::MessageRequest,
+    ) -> anyhow::Result<codewhale_models::MessageResponse> {
         anyhow::bail!("reasoning-only recovery uses the streaming model boundary")
     }
 
     async fn create_message_stream(
         &self,
-        _request: crate::models::MessageRequest,
+        _request: codewhale_models::MessageRequest,
     ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
         use crate::llm_client::mock::canned;
         if let Ok(mut requests) = self.requests.lock() {
@@ -21280,11 +21280,11 @@ impl crate::core::model_client::ModelClient for ReasoningOnlyCleanFinishModelCli
         if call <= self.reasoning_only {
             // A protocol-complete response that opened and closed only a
             // thinking block: no text, no tool call, and a clean stop reason.
-            let events: Vec<anyhow::Result<crate::models::StreamEvent>> = vec![
+            let events: Vec<anyhow::Result<codewhale_models::StreamEvent>> = vec![
                 Ok(canned::message_start("reasoning_only_msg")),
                 Ok(StreamEvent::ContentBlockStart {
                     index: 0,
-                    content_block: crate::models::ContentBlockStart::Thinking {
+                    content_block: codewhale_models::ContentBlockStart::Thinking {
                         thinking: String::new(),
                     },
                 }),
@@ -21540,7 +21540,7 @@ async fn the_reasoning_only_nudge_rides_one_request_and_never_joins_the_session(
     );
 
     let nudge = crate::config::DEFAULT_REASONING_ONLY_REPROMPT_MESSAGE;
-    let carries_nudge = |messages: &Vec<crate::models::Message>| {
+    let carries_nudge = |messages: &Vec<codewhale_models::Message>| {
         serde_json::to_string(messages)
             .expect("messages serialize")
             .contains(nudge)
@@ -21765,7 +21765,7 @@ async fn post_edit_hook_injects_diagnostics_message_before_next_request() {
     assert_eq!(last.role, "user");
     // turn_meta is now at the tail of the content array (PR #2517).
     let meta = match last.content.last() {
-        Some(crate::models::ContentBlock::Text { text, .. }) => text.clone(),
+        Some(codewhale_models::ContentBlock::Text { text, .. }) => text.clone(),
         other => panic!("expected text block at tail, got {other:?}"),
     };
     assert!(meta.starts_with("<turn_meta>\n"));
@@ -21773,7 +21773,7 @@ async fn post_edit_hook_injects_diagnostics_message_before_next_request() {
         .content
         .iter()
         .find_map(|block| match block {
-            crate::models::ContentBlock::Text { text, .. }
+            codewhale_models::ContentBlock::Text { text, .. }
                 if text.contains("<diagnostics file=\"") =>
             {
                 Some(text)
@@ -22980,7 +22980,7 @@ async fn background_completion_after_a_turn_is_delivered_once_on_the_next_turn()
 
     // ...and it is model-visible, marked as untrusted tool data.
     let message = crate::runtime_handoff::shell_completion_runtime_message(&first);
-    let crate::models::ContentBlock::Text { text, .. } = &message.content[0] else {
+    let codewhale_models::ContentBlock::Text { text, .. } = &message.content[0] else {
         panic!("expected runtime event text");
     };
     assert!(text.contains("background_shell_completion"), "{text}");

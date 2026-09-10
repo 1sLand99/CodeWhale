@@ -10,9 +10,9 @@
 //! Keeping every layer's text in one module makes prompt tuning a
 //! single-file operation.
 
-use crate::models::{SystemBlock, SystemPrompt};
 use crate::project_context::load_project_context_with_parents;
 use codewhale_config::AppMode;
+use codewhale_models::{SystemBlock, SystemPrompt};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 

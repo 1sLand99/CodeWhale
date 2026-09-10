@@ -10,7 +10,6 @@ use crate::approval_log::{ApprovalReceipt, ApprovalReceiptStore, ApprovalReplay}
 use crate::artifacts::ArtifactRecord;
 use crate::config::ApiProvider;
 use crate::model_routing::AutoRouteReceipt;
-use crate::models::{ContentBlock, Message, SystemPrompt};
 use crate::project_context::find_git_root;
 use crate::session_tree::{SessionEntry, SessionImportContainer, SessionJournal};
 use crate::tools::goal::{GoalPauseReason, GoalSnapshot};
@@ -22,6 +21,7 @@ use chrono::{DateTime, Utc};
 use codewhale_core::ContextReference;
 #[cfg(test)]
 use codewhale_core::{ContextReferenceKind, ContextReferenceSource};
+use codewhale_models::{ContentBlock, Message, SystemPrompt};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
@@ -60,7 +60,7 @@ struct LateUsageRecord {
     turn_fingerprint: String,
     route: crate::cost_status::EffectiveRouteEnvelope,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    usage: Option<crate::models::Usage>,
+    usage: Option<codewhale_models::Usage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1451,7 +1451,7 @@ impl SessionManager {
         turn_id: &str,
         source_id: &str,
         route: &crate::cost_status::EffectiveRouteEnvelope,
-        usage: Option<&crate::models::Usage>,
+        usage: Option<&codewhale_models::Usage>,
     ) -> io::Result<bool> {
         let (path, lock_path) = self.ensure_late_usage_paths(session_id)?;
         let lock_file = open_private_lock_file(&lock_path)?;
@@ -3359,10 +3359,10 @@ fn format_age(dt: &DateTime<Utc>) -> String {
 mod tests {
     use super::*;
     use crate::approval_log::ApprovalOutcome;
-    use crate::models::ContentBlock;
-    use crate::models::Role;
     use crate::tools::plan::StepStatus;
     use crate::tui::history::{HistoryCell, ToolCell, history_cells_from_message};
+    use codewhale_models::ContentBlock;
+    use codewhale_models::Role;
     use std::fs;
     use tempfile::tempdir;
 
@@ -3402,7 +3402,7 @@ mod tests {
                     Some(crate::config::DEFAULT_DEEPSEEK_BASE_URL),
                     Utc::now(),
                 ),
-                usage: crate::models::Usage {
+                usage: codewhale_models::Usage {
                     input_tokens: 1,
                     ..Default::default()
                 },
@@ -4028,10 +4028,10 @@ mod tests {
             Some(crate::config::DEFAULT_DEEPSEEK_BASE_URL),
             Utc::now(),
         );
-        let usage = crate::models::Usage {
+        let usage = codewhale_models::Usage {
             input_tokens: 17,
             output_tokens: 5,
-            ..crate::models::Usage::default()
+            ..codewhale_models::Usage::default()
         };
         let usage_record = crate::cost_status::RuntimeUsageRecord {
             source_id: "translation:old-turn:assistant:1".to_string(),
@@ -4165,9 +4165,9 @@ mod tests {
                         source_id: format!("late-bounded:{index}"),
                         usage: crate::cost_status::EffectiveRouteUsage {
                             route: route.clone(),
-                            usage: crate::models::Usage {
+                            usage: codewhale_models::Usage {
                                 input_tokens: 1,
-                                ..crate::models::Usage::default()
+                                ..codewhale_models::Usage::default()
                             },
                         },
                     },
@@ -4218,9 +4218,9 @@ mod tests {
             source_id: "linked-sidecar-response".to_string(),
             usage: crate::cost_status::EffectiveRouteUsage {
                 route,
-                usage: crate::models::Usage {
+                usage: codewhale_models::Usage {
                     input_tokens: 1,
-                    ..crate::models::Usage::default()
+                    ..codewhale_models::Usage::default()
                 },
             },
         };
@@ -5135,7 +5135,7 @@ mod tests {
         );
         assert!(loaded.messages.iter().any(|message| {
             (message.role == "assistant"
-                || message.role == crate::models::INTERRUPTED_ASSISTANT_ROLE)
+                || message.role == codewhale_models::INTERRUPTED_ASSISTANT_ROLE)
                 && message.content.iter().any(|block| {
                     matches!(
                         block,
@@ -5983,7 +5983,7 @@ mod tests {
             let mut first = Message {
                 role: Role::User,
                 content: vec![ContentBlock::ImageUrl {
-                    image_url: crate::models::ImageUrlContent {
+                    image_url: codewhale_models::ImageUrlContent {
                         url: "data:image/png;base64,AAAA".to_string(),
                     },
                 }],

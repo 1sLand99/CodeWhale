@@ -19,9 +19,10 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 
+use codewhale_models::{ContentBlock, Message};
+
 use crate::{
     core::events::{Event as EngineEvent, TurnOutcomeStatus},
-    models::{ContentBlock, Message},
     runtime_chat_relay::{
         RuntimeChatControlScope, RuntimeChatProjection, RuntimeChatPrompt, RuntimeChatRelayHost,
     },
@@ -5004,7 +5005,7 @@ fn epoch_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::Role;
+    use codewhale_models::Role;
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -7697,8 +7698,8 @@ mod tests {
 
     fn turn_complete_event() -> EngineEvent {
         EngineEvent::TurnComplete {
-            usage: crate::models::Usage::default(),
-            parent_route_usage: crate::models::Usage::default(),
+            usage: codewhale_models::Usage::default(),
+            parent_route_usage: codewhale_models::Usage::default(),
             routed_usage_dropped_records: 0,
             status: TurnOutcomeStatus::Completed,
             error: None,
@@ -8179,10 +8180,10 @@ mod tests {
         assert!(controller.has_active_run());
         assert!(controller.start(fixture_start()).is_err());
 
-        let usage = crate::models::Usage {
+        let usage = codewhale_models::Usage {
             input_tokens: 17,
             output_tokens: 5,
-            ..crate::models::Usage::default()
+            ..codewhale_models::Usage::default()
         };
         controller.observe_engine_event(&EngineEvent::TurnComplete {
             usage: usage.clone(),

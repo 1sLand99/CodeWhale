@@ -126,11 +126,11 @@ pub const KIMI_CODE_K3_256K_MODEL: &str = "k3-256k";
 pub const KIMI_CODE_HIGHSPEED_MODEL: &str = "kimi-for-coding-highspeed";
 // The K3 contract constants (`KIMI_CODE_K3_CONTEXT_WINDOW_TOKENS`,
 // `KIMI_K3_CONTEXT_WINDOW_TOKENS`, and the distinct default/direct output
-// limits) live in `crate::models` — the model-facts table, which also compiles
+// limits) live in `codewhale_models` — the model-facts table, which also compiles
 // standalone in integration tests — so the facts have exactly one home.
 // Re-export only the route-owned floor, which existing `crate::config` call
 // sites import.
-pub use crate::models::KIMI_CODE_K3_CONTEXT_WINDOW_TOKENS;
+pub use codewhale_models::KIMI_CODE_K3_CONTEXT_WINDOW_TOKENS;
 pub const DEFAULT_SGLANG_MODEL: &str = "deepseek-ai/DeepSeek-V4-Pro";
 pub const DEFAULT_SGLANG_FLASH_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
 pub const DEFAULT_SGLANG_BASE_URL: &str = "http://localhost:30000/v1";

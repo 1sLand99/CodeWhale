@@ -5,8 +5,8 @@
 //! directly once per user turn when `app.auto_model` is set. The remaining
 //! helpers here build the compact recent-context summary the router sees.
 
-use crate::models::{ContentBlock, Message};
 use crate::tui::app::App;
+use codewhale_models::{ContentBlock, Message};
 
 /// Whether the next turn should consult the auto-route flash model.
 pub(super) fn should_resolve_auto_model_selection(app: &App) -> bool {
@@ -85,8 +85,8 @@ fn truncate_for_auto_router(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::ContentBlock;
-    use crate::models::Role;
+    use codewhale_models::ContentBlock;
+    use codewhale_models::Role;
 
     fn make_msg(role: &str, text: &str) -> Message {
         Message {

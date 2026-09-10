@@ -8,8 +8,8 @@ use std::time::Duration;
 use crate::config::DEFAULT_TEXT_MODEL;
 use crate::core::model_client::ModelClient;
 use crate::logging;
-use crate::models::Role;
-use crate::models::{
+use codewhale_models::Role;
+use codewhale_models::{
     CacheControl, ContentBlock, Message, MessageRequest, SystemBlock, SystemPrompt, Usage,
 };
 
@@ -1536,10 +1536,10 @@ async fn create_summary(
         // Usage above is already billed; a provider-declared incomplete
         // summary must still fail rather than replace the session history
         // with a fragment.
-        if crate::models::is_incomplete_stop_reason(response.stop_reason.as_deref()) {
+        if codewhale_models::is_incomplete_stop_reason(response.stop_reason.as_deref()) {
             anyhow::bail!(
                 "Compaction summary response incomplete: provider stop reason `{}`; the partial summary was not accepted.",
-                crate::models::stop_reason_detail(response.stop_reason.as_deref())
+                codewhale_models::stop_reason_detail(response.stop_reason.as_deref())
             );
         }
 
@@ -1633,7 +1633,7 @@ mod quota_tests;
 
 #[cfg(test)]
 mod tests {
-    use crate::models::{ImageUrlContent, Message};
+    use codewhale_models::{ImageUrlContent, Message};
 
     #[test]
     fn inline_image_estimates_nonzero_tokens() {
@@ -1970,7 +1970,7 @@ mod tests {
         async fn create_message(
             &self,
             request: MessageRequest,
-        ) -> anyhow::Result<crate::models::MessageResponse> {
+        ) -> anyhow::Result<codewhale_models::MessageResponse> {
             self.requests
                 .lock()
                 .expect("capture scripted summary request")
@@ -1988,7 +1988,7 @@ mod tests {
             }
             let content = outcome
                 .ok_or_else(|| anyhow::anyhow!("scripted summary responses exhausted"))??;
-            Ok(crate::models::MessageResponse {
+            Ok(codewhale_models::MessageResponse {
                 id: "summary-scripted".to_string(),
                 r#type: "message".to_string(),
                 role: "assistant".to_string(),
@@ -2032,9 +2032,9 @@ mod tests {
         async fn create_message(
             &self,
             request: MessageRequest,
-        ) -> anyhow::Result<crate::models::MessageResponse> {
+        ) -> anyhow::Result<codewhale_models::MessageResponse> {
             *self.request.lock().expect("capture summary request") = Some(request);
-            Ok(crate::models::MessageResponse {
+            Ok(codewhale_models::MessageResponse {
                 id: "summary-fixture".to_string(),
                 r#type: "message".to_string(),
                 role: "assistant".to_string(),
@@ -2046,7 +2046,7 @@ mod tests {
                 stop_reason: None,
                 stop_sequence: None,
                 container: None,
-                usage: crate::models::Usage::default(),
+                usage: codewhale_models::Usage::default(),
             })
         }
 
@@ -2572,8 +2572,8 @@ mod tests {
         async fn create_message(
             &self,
             _request: MessageRequest,
-        ) -> anyhow::Result<crate::models::MessageResponse> {
-            Ok(crate::models::MessageResponse {
+        ) -> anyhow::Result<codewhale_models::MessageResponse> {
+            Ok(codewhale_models::MessageResponse {
                 id: "summary-truncated".to_string(),
                 r#type: "message".to_string(),
                 role: "assistant".to_string(),
@@ -2585,7 +2585,7 @@ mod tests {
                 stop_reason: Some("max_tokens".to_string()),
                 stop_sequence: None,
                 container: None,
-                usage: crate::models::Usage::default(),
+                usage: codewhale_models::Usage::default(),
             })
         }
 

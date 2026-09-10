@@ -38,9 +38,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use chrono::{DateTime, Utc};
 
 use crate::config::ApiProvider;
-use crate::models::Usage;
 use crate::pricing::{CostEstimate, TurnCostAudit};
 use crate::route_billing::BillingPresentation;
+use codewhale_models::Usage;
 
 /// Everything a drained background accrual needs to be explained.
 ///

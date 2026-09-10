@@ -4,9 +4,9 @@ use std::time::Instant;
 
 use super::CommandResult;
 use crate::client::{CacheWarmupKey, PromptInspection, inspect_prompt_for_request};
-use crate::models::MessageRequest;
 use crate::tui::app::{App, AppAction, TurnCacheRecord};
 use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_models::MessageRequest;
 
 /// Show per-turn DeepSeek prefix-cache telemetry for the last N turns (#263).
 ///
@@ -675,7 +675,7 @@ fn format_cache_history(app: &App, count: usize, locale: Locale) -> String {
         let replay_cell = rec
             .reasoning_replay_tokens
             .map_or_else(|| "—".to_string(), |t| t.to_string());
-        let classes = crate::pricing::token_usage_for_pricing(&crate::models::Usage {
+        let classes = crate::pricing::token_usage_for_pricing(&codewhale_models::Usage {
             input_tokens: rec.input_tokens,
             output_tokens: rec.output_tokens,
             prompt_cache_hit_tokens: rec.cache_hit_tokens,

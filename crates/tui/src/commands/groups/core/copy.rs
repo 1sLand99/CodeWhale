@@ -72,10 +72,10 @@ fn execute_copy(app: &mut App) -> CommandResult {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::models::{ContentBlock, Message, Role};
     use crate::tui::app::TuiOptions;
     use crate::tui::clipboard::ClipboardHandler;
     use crate::tui::history::{HistoryCell, history_cells_from_message};
+    use codewhale_models::{ContentBlock, Message, Role};
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
 

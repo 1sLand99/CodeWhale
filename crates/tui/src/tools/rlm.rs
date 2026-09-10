@@ -877,11 +877,11 @@ fn _assert_var_handle_shape(_: Option<VarHandle>) {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::Role;
-    use crate::models::{ContentBlock, Message, SystemPrompt};
     use crate::rlm::session::SessionObjectSnapshot;
     use crate::tools::handle::HandleReadTool;
     use crate::tools::spec::ToolContext;
+    use codewhale_models::Role;
+    use codewhale_models::{ContentBlock, Message, SystemPrompt};
     use std::path::PathBuf;
 
     fn ctx() -> ToolContext {
@@ -972,7 +972,7 @@ mod tests {
             Some(crate::config::ApiProvider::Deepseek.default_base_url()),
             chrono::Utc::now(),
         );
-        let usage = crate::models::Usage {
+        let usage = codewhale_models::Usage {
             input_tokens: 23,
             output_tokens: 5,
             reasoning_replay_tokens: Some(7),

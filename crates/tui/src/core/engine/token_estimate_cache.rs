@@ -1,6 +1,6 @@
 //! Process-local memoization for [`crate::compaction::estimate_input_tokens_conservative`].
 //!
-//! The token estimator walks the full [`crate::models::Message`] history and the
+//! The token estimator walks the full [`codewhale_models::Message`] history and the
 //! active system prompt, which is by far the most expensive per-turn CPU cost
 //! in the engine hot path. The same input data is queried from at least five
 //! sites per turn: capacity pre/post tool checkpoints, error escalation,
@@ -21,7 +21,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use crate::compaction::estimate_input_tokens_conservative;
-use crate::models::{Message, SystemPrompt};
+use codewhale_models::{Message, SystemPrompt};
 
 /// Default capacity for the rolling audit ring. Sized so a 64-entry window
 /// covers a full capacity controller observation cycle without unbounded
@@ -166,8 +166,8 @@ fn fingerprint_system_prompt(system: Option<&SystemPrompt>) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::Role;
-    use crate::models::{ContentBlock, SystemBlock};
+    use codewhale_models::Role;
+    use codewhale_models::{ContentBlock, SystemBlock};
 
     fn user_text(s: &str) -> Message {
         Message {

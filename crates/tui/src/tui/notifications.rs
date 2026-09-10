@@ -1115,10 +1115,10 @@ fn macos_notification_parts(payload: &NotificationPayload) -> (String, String) {
 // *what message* to put in the body. The low-level dispatcher is
 // `notify_done`; everything in this block sits in front of it.
 
-use crate::models::{ContentBlock, Message};
 use crate::tools::subagent::SubAgentStatus;
 use crate::tui::app::App;
 use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_models::{ContentBlock, Message};
 
 /// Resolve the effective notification method/threshold/include-summary tuple
 /// for a completed turn, taking the high-level
@@ -1309,7 +1309,8 @@ pub fn latest_assistant_text(messages: &[Message]) -> Option<String> {
         .iter()
         .rev()
         .find(|message| {
-            message.role == "assistant" || message.role == crate::models::INTERRUPTED_ASSISTANT_ROLE
+            message.role == "assistant"
+                || message.role == codewhale_models::INTERRUPTED_ASSISTANT_ROLE
         })
         .and_then(|message| {
             let text = message

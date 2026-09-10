@@ -4,7 +4,7 @@
 //! content block kind tracking, streamed tool-use buffers, transparent retry
 //! policy, and scrubbers for text that looks like a forged tool-call wrapper.
 
-use crate::models::ToolCaller;
+use codewhale_models::ToolCaller;
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

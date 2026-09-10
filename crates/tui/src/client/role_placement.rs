@@ -27,7 +27,7 @@
 //!   bytes, never how much the model should trust them.
 
 use super::prepared::WireDialect;
-use crate::models::{Message, Role};
+use codewhale_models::{Message, Role};
 
 /// Which channel of a wire body a message renders into.
 ///
@@ -147,7 +147,7 @@ pub(crate) fn reject_unsupported_roles(
 #[cfg(test)]
 mod tests {
     use super::{RolePlacement, WireDialect, reject_unsupported_roles, role_placement};
-    use crate::models::{ContentBlock, Message, Role};
+    use codewhale_models::{ContentBlock, Message, Role};
 
     const DIALECTS: [WireDialect; 3] = [
         WireDialect::ChatCompletions,
@@ -286,7 +286,7 @@ mod adapter_agreement_tests {
 
     use super::super::{anthropic, chat, responses};
     use crate::config::ApiProvider;
-    use crate::models::{
+    use codewhale_models::{
         ContentBlock, INTERRUPTED_ASSISTANT_CONTEXT_PREFIX, Message, MessageRequest, Role,
     };
 

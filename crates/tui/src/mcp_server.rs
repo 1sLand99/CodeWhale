@@ -14,11 +14,11 @@ use uuid::Uuid;
 use crate::client::DeepSeekClient;
 use crate::config::Config;
 use crate::llm_client::LlmClient;
-use crate::models::Role;
-use crate::models::{ContentBlock, Message, MessageRequest};
 use crate::session_manager::SessionManager;
 use crate::tools::spec::{ToolError, ToolResult};
 use crate::tools::{ToolContext, ToolRegistryBuilder};
+use codewhale_models::Role;
+use codewhale_models::{ContentBlock, Message, MessageRequest};
 
 #[derive(Debug, Default, Deserialize)]
 struct McpServerConfigFile {
@@ -427,10 +427,10 @@ impl McpServer {
         // A provider-declared incomplete reply must not enter the stored
         // thread or be returned as a successful answer. The billed usage is
         // still reported in the error payload.
-        if crate::models::is_incomplete_stop_reason(response.stop_reason.as_deref()) {
+        if codewhale_models::is_incomplete_stop_reason(response.stop_reason.as_deref()) {
             let error = format!(
                 "Model response incomplete: provider stop reason `{}`; the partial reply was not accepted.",
-                crate::models::stop_reason_detail(response.stop_reason.as_deref())
+                codewhale_models::stop_reason_detail(response.stop_reason.as_deref())
             );
             return Ok(json!({
                 "content": [{ "type": "text", "text": &error }],

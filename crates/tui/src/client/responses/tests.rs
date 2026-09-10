@@ -6,9 +6,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use futures_util::StreamExt;
 
 use crate::config::{Config, ProviderConfig, ProvidersConfig, RetryConfig};
-use crate::models::Message;
-use crate::models::Role;
-use crate::models::SystemPrompt;
+use codewhale_models::Message;
+use codewhale_models::Role;
+use codewhale_models::SystemPrompt;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
@@ -1339,7 +1339,7 @@ fn user_image_becomes_an_input_image_item() {
 
     let mut request = minimal_responses_request();
     request.messages[0].content.push(ContentBlock::ImageUrl {
-        image_url: crate::models::ImageUrlContent {
+        image_url: codewhale_models::ImageUrlContent {
             url: DATA_URL.to_string(),
         },
     });

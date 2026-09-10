@@ -15,14 +15,14 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::models::Role;
-use crate::models::{ContentBlock, Message};
 use crate::session_manager::{
     SavedSession, SessionListFilter, SessionManager, SessionMutator,
     create_saved_session_with_id_and_mode,
 };
 use crate::session_projection::{SessionQuery, SessionSortMode, project_sessions};
 use crate::session_resume::{AutoResumeDecision, ResumeRequest, decide_auto_resume};
+use codewhale_models::Role;
+use codewhale_models::{ContentBlock, Message};
 
 /// Which issue's acceptance list a row comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

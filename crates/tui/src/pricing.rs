@@ -16,7 +16,7 @@ use crate::config::{
     DEFAULT_STEPFUN_BASE_URL, DEFAULT_STEPFUN_MODEL, DEFAULT_STEPFUN_PLAN_BASE_URL,
     canonical_model_id_for_provider,
 };
-use crate::models::{Usage, has_date_snapshot_suffix};
+use codewhale_models::{Usage, has_date_snapshot_suffix};
 
 /// Cost display currency.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -747,7 +747,7 @@ fn known_pricing_for_model(model_lower: &str) -> Option<ModelPricing> {
         return explicit;
     }
     if let Some((input_usd_per_million, output_usd_per_million)) =
-        crate::model_catalog::resolved_usd_pricing(model_lower)
+        codewhale_models::model_catalog::resolved_usd_pricing(model_lower)
     {
         return Some(usd_only_pricing(
             input_usd_per_million,
@@ -4253,15 +4253,15 @@ mod tests {
 
     #[test]
     fn deepseek_pricing_requires_exact_ids_or_explicit_route_aliases() {
-        let _lock = crate::model_catalog::test_catalog_lock();
+        let _lock = codewhale_models::model_catalog::test_catalog_lock();
         let at = utc_hm(2, 0);
-        let catalog = crate::model_catalog::MergedCatalog::from_sources(
+        let catalog = codewhale_models::model_catalog::MergedCatalog::from_sources(
             BTreeMap::new(),
             None,
-            crate::model_catalog::bundled_catalog(),
+            codewhale_models::model_catalog::bundled_catalog(),
             at,
         );
-        let _guard = crate::model_catalog::replace_active_catalog_for_test(catalog);
+        let _guard = codewhale_models::model_catalog::replace_active_catalog_for_test(catalog);
         let usage = Usage {
             input_tokens: 1_000,
             output_tokens: 100,
@@ -4478,7 +4478,7 @@ mod tests {
 
     #[test]
     fn catalog_pricing_overrides_known_row_when_present() {
-        let _lock = crate::model_catalog::test_catalog_lock();
+        let _lock = codewhale_models::model_catalog::test_catalog_lock();
         let mut overrides = BTreeMap::new();
         let models = [
             "catalog-priced-model",
@@ -4487,7 +4487,7 @@ mod tests {
         for model in models {
             overrides.insert(
                 model.to_string(),
-                crate::model_catalog::CatalogEntry {
+                codewhale_models::model_catalog::CatalogEntry {
                     id: model.to_string(),
                     context_window: None,
                     max_output: None,
@@ -4497,17 +4497,17 @@ mod tests {
                     modalities: Vec::new(),
                     supported_parameters: Vec::new(),
                     provider_model_id: None,
-                    provenance: crate::model_catalog::MetadataProvenance::UserOverride,
+                    provenance: codewhale_models::model_catalog::MetadataProvenance::UserOverride,
                 },
             );
         }
-        let catalog = crate::model_catalog::MergedCatalog::from_sources(
+        let catalog = codewhale_models::model_catalog::MergedCatalog::from_sources(
             overrides,
             None,
-            crate::model_catalog::bundled_catalog(),
+            codewhale_models::model_catalog::bundled_catalog(),
             Utc::now(),
         );
-        let _guard = crate::model_catalog::replace_active_catalog_for_test(catalog);
+        let _guard = codewhale_models::model_catalog::replace_active_catalog_for_test(catalog);
 
         for model in models {
             let pricing = pricing_for_model_at(model, Utc::now()).expect(model);

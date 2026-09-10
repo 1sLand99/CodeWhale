@@ -11,7 +11,6 @@ use super::dispatch::{
 use super::*;
 use crate::core::authority::{ToolPermission, resolve_tool_permission};
 use crate::core::ops::UserInputProvenance;
-use crate::models::Role;
 use crate::prompt_zones::PinnedPrefix;
 use crate::runtime_handoff::{
     shell_completion_runtime_message, subagent_completion_runtime_message,
@@ -22,6 +21,7 @@ use crate::tools::canonical_action::canonical_action_alias;
 use crate::tools::spec::ToolTerminalStatus;
 use crate::tools::tool_call_budget::ToolCallBudget;
 use codewhale_core::request::{PrimaryTurnRequest, prepare_primary_turn_request};
+use codewhale_models::Role;
 
 const MAX_APPROVAL_INTENT_SUMMARY_CHARS: usize = 2_000;
 
@@ -36,7 +36,7 @@ struct StreamOutcome {
     current_text_visible: String,
     current_thinking: String,
     current_thinking_signature: Option<String>,
-    current_thinking_state: Option<crate::models::OpaqueReasoningState>,
+    current_thinking_state: Option<codewhale_models::OpaqueReasoningState>,
     tool_uses: Vec<ToolUseState>,
     usage: Usage,
     usage_reported: bool,
@@ -1287,7 +1287,7 @@ impl Engine {
             if let Some(pm) = self.session.prefix_stability.as_mut() {
                 let system_text =
                     crate::prefix_cache::system_prompt_text(self.session.system_prompt.as_ref());
-                let tools_ref: Option<&[crate::models::Tool]> = active_tools.as_deref();
+                let tools_ref: Option<&[codewhale_models::Tool]> = active_tools.as_deref();
                 let outcome = pm.check(&system_text, tools_ref, declared_change.as_deref());
                 // C5: request N's prefix may only diverge from N-1 across a
                 // DECLARED change. An undeclared drift means the pinned header
@@ -1382,7 +1382,8 @@ impl Engine {
             // PrefixStabilityManager already reports the change above.
             let system_text =
                 crate::prefix_cache::system_prompt_text(self.session.system_prompt.as_ref());
-            let current_tools: &[crate::models::Tool] = active_tools.as_deref().unwrap_or_default();
+            let current_tools: &[codewhale_models::Tool] =
+                active_tools.as_deref().unwrap_or_default();
 
             match &self.session.frozen_prefix {
                 Some(frozen) => {
@@ -2645,7 +2646,7 @@ impl Engine {
                             stream_request.max_tokens
                         )
                     } else if has_provider_reasoning {
-                        let reason = crate::models::stop_reason_detail(stop_reason.as_deref());
+                        let reason = codewhale_models::stop_reason_detail(stop_reason.as_deref());
                         format!(
                             "Model returned reasoning but no answer or tool call; the provider response was incomplete (stop reason: {}).",
                             reason
@@ -2943,7 +2944,7 @@ impl Engine {
         turn: &mut TurnContext,
         tool_policy: &ToolSurfacePolicy,
         tool_uses: &mut [ToolUseState],
-        tool_catalog: &[crate::models::Tool],
+        tool_catalog: &[codewhale_models::Tool],
         tool_registry: Option<&crate::tools::ToolRegistry>,
         active_tool_names: &mut std::collections::HashSet<String>,
         tool_call_budget: &mut ToolCallBudget,
@@ -3581,7 +3582,7 @@ impl Engine {
         plans: Vec<ToolExecutionPlan>,
         origin_turn_id: &str,
         current_text_visible: &str,
-        tool_catalog: &[crate::models::Tool],
+        tool_catalog: &[codewhale_models::Tool],
         active_tool_names: &mut std::collections::HashSet<String>,
         tool_registry: Option<&crate::tools::ToolRegistry>,
         tool_exec_lock: Arc<RwLock<()>>,
@@ -4478,7 +4479,7 @@ impl Engine {
         &mut self,
         outcomes: Vec<Option<ToolExecOutcome>>,
         turn: &mut TurnContext,
-        tool_catalog: &mut Vec<crate::models::Tool>,
+        tool_catalog: &mut Vec<codewhale_models::Tool>,
         active_tool_names: &mut std::collections::HashSet<String>,
         hook_contexts: &std::collections::HashMap<String, String>,
         mut fleet_denial_guard: Option<&mut FleetDenialGuard>,
@@ -4729,7 +4730,7 @@ impl Engine {
         &mut self,
         client: &dyn crate::core::model_client::ModelClient,
         stream: crate::llm_client::StreamEventBox,
-        stream_request: &crate::models::MessageRequest,
+        stream_request: &codewhale_models::MessageRequest,
         mut request_dispatched_at: Instant,
         drop_resumes_spent: u32,
         diagnostics: &mut crate::tool_inspection::TurnStopDiagnostics,
@@ -4746,7 +4747,7 @@ impl Engine {
         // #3014: Anthropic signed-thinking signature for the current
         // thinking block; must be replayed verbatim in tool loops.
         let mut current_thinking_signature: Option<String> = None;
-        let mut current_thinking_state: Option<crate::models::OpaqueReasoningState> = None;
+        let mut current_thinking_state: Option<codewhale_models::OpaqueReasoningState> = None;
         let mut tool_uses: Vec<ToolUseState> = Vec::new();
         let mut usage = Usage {
             input_tokens: 0,
@@ -6735,7 +6736,7 @@ mod tests {
             },
         ]);
         let text = match &message.content[0] {
-            crate::models::ContentBlock::Text { text, .. } => text,
+            codewhale_models::ContentBlock::Text { text, .. } => text,
             other => panic!("expected runtime event text, got {other:?}"),
         };
         assert!(text.contains("background_shell_completion"));

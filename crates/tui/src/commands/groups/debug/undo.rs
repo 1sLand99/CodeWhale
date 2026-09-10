@@ -1,9 +1,9 @@
 //! Undo, retry, edit, and diff commands.
 
 use crate::dependencies::{ExternalTool, Git};
-use crate::models::ContentBlock;
 use crate::tui::app::{App, AppAction};
 use crate::tui::history::HistoryCell;
+use codewhale_models::ContentBlock;
 
 use super::CommandResult;
 

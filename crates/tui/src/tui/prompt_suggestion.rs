@@ -477,7 +477,7 @@ pub async fn generate_suggestion(
 }
 
 /// Extract the first text line from a single message.
-fn message_summary(m: &crate::models::Message) -> Option<String> {
+fn message_summary(m: &codewhale_models::Message) -> Option<String> {
     let role = match m.role.as_str() {
         "user" => "User",
         "assistant" => "Assistant",
@@ -487,7 +487,7 @@ fn message_summary(m: &crate::models::Message) -> Option<String> {
         .content
         .iter()
         .filter_map(|block| match block {
-            crate::models::ContentBlock::Text { text, .. } => Some(text.as_str()),
+            codewhale_models::ContentBlock::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -510,7 +510,7 @@ fn message_summary(m: &crate::models::Message) -> Option<String> {
 
 /// Build a one-line-per-message summary of recent conversation context.
 /// Takes the last N messages, skipping tool-only messages.
-pub fn summarize_recent_messages(messages: &[crate::models::Message], limit: usize) -> String {
+pub fn summarize_recent_messages(messages: &[codewhale_models::Message], limit: usize) -> String {
     let start = messages.len().saturating_sub(limit);
     messages[start..]
         .iter()

@@ -811,14 +811,14 @@ pub fn usage_chip(
                     provider,
                     model,
                     surface,
-                    &crate::models::Usage::default(),
+                    &codewhale_models::Usage::default(),
                     chrono::Utc::now(),
                 )
             } else {
                 crate::pricing::audit_turn_cost_for_provider_at(
                     provider,
                     model,
-                    &crate::models::Usage::default(),
+                    &codewhale_models::Usage::default(),
                     chrono::Utc::now(),
                 )
             };
@@ -1102,8 +1102,8 @@ fn xiaomi_is_explicit_pay_as_you_go(config: Option<&ProviderConfig>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::Usage;
     use crate::pricing::CostCurrency;
+    use codewhale_models::Usage;
 
     fn config_with(provider: ApiProvider, provider_config: ProviderConfig) -> Config {
         let mut config = Config::default();
@@ -1754,7 +1754,7 @@ mod tests {
     fn child_route_billing_fails_closed_for_every_ambiguous_provider() {
         use crate::pricing::UnpricedReason;
 
-        let usage = crate::models::Usage {
+        let usage = codewhale_models::Usage {
             input_tokens: 10_000,
             output_tokens: 1_000,
             ..Default::default()

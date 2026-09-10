@@ -1010,7 +1010,7 @@ fn human_bytes(bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::Role;
+    use codewhale_models::Role;
     use image::ImageFormat;
     use tempfile::tempdir;
 
@@ -1470,9 +1470,9 @@ mod tests {
 
         // 3. Check Chat Completions provider request body wiring
         let messages = vec![
-            crate::models::Message {
+            codewhale_models::Message {
                 role: Role::Assistant,
-                content: vec![crate::models::ContentBlock::ToolUse {
+                content: vec![codewhale_models::ContentBlock::ToolUse {
                     id: "call_read_media".to_string(),
                     name: "read_media".to_string(),
                     input: json!({ "path": "wire.png" }),
@@ -1480,9 +1480,9 @@ mod tests {
                     thought_signature: None,
                 }],
             },
-            crate::models::Message {
+            codewhale_models::Message {
                 role: Role::User,
-                content: vec![crate::models::ContentBlock::ToolResult {
+                content: vec![codewhale_models::ContentBlock::ToolResult {
                     tool_use_id: "call_read_media".to_string(),
                     content: rich.content.clone(),
                     is_error: None,

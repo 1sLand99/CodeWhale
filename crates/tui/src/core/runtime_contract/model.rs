@@ -5,7 +5,7 @@ use async_trait::async_trait;
 
 use crate::llm_client::LlmClient;
 use crate::llm_client::StreamEventBox;
-use crate::models::{MessageRequest, MessageResponse};
+use codewhale_models::{MessageRequest, MessageResponse};
 
 /// Object-safe model boundary for Engine dependency injection.
 ///

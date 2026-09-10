@@ -1,5 +1,5 @@
-use crate::models::{ContentBlock, Message, Role};
 use chrono::{DateTime, Utc};
+use codewhale_models::{ContentBlock, Message, Role};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 pub const CURRENT_JOURNAL_SCHEMA_VERSION: u32 = 1;
@@ -476,7 +476,7 @@ pub fn render_tree(journal: &SessionJournal) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{ContentBlock, Message, Role};
+    use codewhale_models::{ContentBlock, Message, Role};
     fn msg(role: &str, text: &str) -> Message {
         Message {
             role: Role::from(role),

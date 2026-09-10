@@ -16,11 +16,11 @@
 
 use serde_json::json;
 
-use crate::models::{Tool, ToolCaller};
 use crate::tools::spec::{
     ResourceClaim, ToolError, ToolExecutionOutcome, ToolResult, ToolResultContentBlock,
     schedule_non_conflicting,
 };
+use codewhale_models::{Tool, ToolCaller};
 
 use super::ToolUseState;
 

@@ -23,8 +23,8 @@
 //! ```
 
 use crate::config::RetryPolicy;
-use crate::models::{MessageRequest, MessageResponse, StreamEvent};
 use anyhow::Result;
+use codewhale_models::{MessageRequest, MessageResponse, StreamEvent};
 use serde_json::Value;
 use std::future::Future;
 use std::pin::Pin;

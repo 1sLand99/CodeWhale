@@ -2,12 +2,12 @@
 //!
 //! Tracks conversation history, token usage, and session metadata.
 
-use crate::models::{Message, SystemPrompt, Usage};
 use crate::prefix_cache::PrefixStabilityManager;
 use crate::project_context::{ProjectContext, load_project_context_with_parents};
 use crate::prompt_zones::{AppendLog, FrozenPrefix};
 use crate::working_set::WorkingSet;
 use codewhale_execpolicy::ApprovalMode;
+use codewhale_models::{Message, SystemPrompt, Usage};
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 
@@ -48,19 +48,19 @@ impl ToolActivationCache {
     }
 
     fn catalog_tool<'a>(
-        catalog: &'a [crate::models::Tool],
+        catalog: &'a [codewhale_models::Tool],
         name: &str,
-    ) -> Option<&'a crate::models::Tool> {
+    ) -> Option<&'a codewhale_models::Tool> {
         catalog
             .iter()
             .find(|tool| tool.name == name && tool.defer_loading.unwrap_or(false))
     }
 
-    fn serialized_bytes(tool: &crate::models::Tool) -> usize {
+    fn serialized_bytes(tool: &codewhale_models::Tool) -> usize {
         serde_json::to_vec(tool).map_or(usize::MAX, |bytes| bytes.len())
     }
 
-    fn total_serialized_bytes(&self, catalog: &[crate::models::Tool]) -> usize {
+    fn total_serialized_bytes(&self, catalog: &[codewhale_models::Tool]) -> usize {
         self.names
             .iter()
             .filter_map(|name| Self::catalog_tool(catalog, name))
@@ -70,7 +70,7 @@ impl ToolActivationCache {
 
     /// Drop entries that are no longer deferred members of this turn's
     /// filtered catalog and enforce both cache bounds.
-    pub(crate) fn revalidate(&mut self, catalog: &[crate::models::Tool]) -> Vec<String> {
+    pub(crate) fn revalidate(&mut self, catalog: &[codewhale_models::Tool]) -> Vec<String> {
         let mut evicted = Vec::new();
         self.names.retain(|name| {
             let keep = Self::catalog_tool(catalog, name).is_some_and(|tool| {
@@ -98,7 +98,7 @@ impl ToolActivationCache {
     /// until both bounds hold.
     pub(crate) fn activate(
         &mut self,
-        catalog: &[crate::models::Tool],
+        catalog: &[codewhale_models::Tool],
         requested: &[String],
     ) -> ToolActivationDelta {
         let mut delta = ToolActivationDelta {
@@ -378,8 +378,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn deferred_tool(name: &str, description_bytes: usize) -> crate::models::Tool {
-        crate::models::Tool {
+    fn deferred_tool(name: &str, description_bytes: usize) -> codewhale_models::Tool {
+        codewhale_models::Tool {
             tool_type: None,
             name: name.to_string(),
             description: "x".repeat(description_bytes),

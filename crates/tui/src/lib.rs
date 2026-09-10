@@ -68,13 +68,11 @@ mod lsp;
 mod mcp;
 mod mcp_server;
 mod media_originals;
-mod model_catalog;
 mod model_context;
 mod model_inventory;
 mod model_profile;
 mod model_registry;
 mod model_routing;
-mod models;
 mod models_dev_live;
 mod native_memory;
 mod network_policy;
@@ -168,11 +166,11 @@ use crate::mcp::{
     McpCommandAvailability, McpConfig, McpPool, McpServerConfig, McpServerOAuthConfig,
     is_relative_stdio_path_arg,
 };
-use crate::models::Role;
-use crate::models::{ContentBlock, Message, MessageRequest, SystemPrompt};
 use crate::session_manager::{SessionManager, create_saved_session, truncate_id};
 use crate::tui::app::ScreenMode;
 use crate::tui::history::{summarize_tool_args, summarize_tool_output};
+use codewhale_models::Role;
+use codewhale_models::{ContentBlock, Message, MessageRequest, SystemPrompt};
 
 #[cfg(windows)]
 fn configure_windows_console_utf8() {
@@ -7779,7 +7777,7 @@ mod speech_cli_tests {
 /// Test API connectivity by making a minimal request
 async fn test_api_connectivity(config: &Config) -> Result<()> {
     use crate::client::DeepSeekClient;
-    use crate::models::{ContentBlock, Message, MessageRequest};
+    use codewhale_models::{ContentBlock, Message, MessageRequest};
 
     let client = DeepSeekClient::new(config)?;
     let model = client.model().to_string();
@@ -8386,24 +8384,25 @@ Provide findings ordered by severity with file references, then open questions, 
     let client = DeepSeekClient::new(&execution_config)?;
     let request_route = client.effective_route_envelope(&model, chrono::Utc::now());
     let planned_passes = prompts.len();
-    let mut usage = crate::models::Usage::default();
+    let mut usage = codewhale_models::Usage::default();
     let mut publication = if args.post {
         ReviewPublication::NotAttempted
     } else {
         ReviewPublication::NotRequested
     };
-    let report_failure = |usage: &crate::models::Usage, completed_passes, publication, message| {
-        report_review_failure(
-            &args,
-            &route_provider,
-            &model,
-            usage,
-            completed_passes,
-            planned_passes,
-            publication,
-            message,
-        )
-    };
+    let report_failure =
+        |usage: &codewhale_models::Usage, completed_passes, publication, message| {
+            report_review_failure(
+                &args,
+                &route_provider,
+                &model,
+                usage,
+                completed_passes,
+                planned_passes,
+                publication,
+                message,
+            )
+        };
     let mut accumulator = pr_plan
         .as_ref()
         .map(crate::tools::review::PrReviewAccumulator::new);
@@ -8450,7 +8449,7 @@ Provide findings ordered by severity with file references, then open questions, 
         };
         crate::tools::review::add_review_usage(&mut usage, &response.usage);
         review_stop_reason = response.stop_reason.clone();
-        if crate::models::is_incomplete_stop_reason(review_stop_reason.as_deref()) {
+        if codewhale_models::is_incomplete_stop_reason(review_stop_reason.as_deref()) {
             return report_failure(
                 &usage,
                 index,
@@ -8459,7 +8458,7 @@ Provide findings ordered by severity with file references, then open questions, 
                     "Review pass {}/{} incomplete: provider stop reason `{}`; the partial review was not accepted or posted.",
                     index + 1,
                     planned_passes,
-                    crate::models::stop_reason_detail(review_stop_reason.as_deref())
+                    codewhale_models::stop_reason_detail(review_stop_reason.as_deref())
                 ),
             );
         }
@@ -8622,7 +8621,7 @@ impl ReviewPublication {
 fn review_failure_payload(
     provider: &str,
     model: &str,
-    usage: &crate::models::Usage,
+    usage: &codewhale_models::Usage,
     completed_passes: usize,
     planned_passes: usize,
     publication: ReviewPublication,
@@ -8646,7 +8645,7 @@ fn report_review_failure(
     args: &ReviewArgs,
     provider: &str,
     model: &str,
-    usage: &crate::models::Usage,
+    usage: &codewhale_models::Usage,
     completed_passes: usize,
     planned_passes: usize,
     publication: ReviewPublication,
@@ -11372,7 +11371,7 @@ async fn run_one_shot(
     force_configured_route: bool,
 ) -> Result<()> {
     use crate::client::DeepSeekClient;
-    use crate::models::{
+    use codewhale_models::{
         ContentBlock, Message, MessageRequest, is_incomplete_stop_reason, stop_reason_detail,
     };
 
@@ -11432,7 +11431,7 @@ async fn run_one_shot_json(
     force_configured_route: bool,
 ) -> Result<()> {
     use crate::client::DeepSeekClient;
-    use crate::models::{
+    use codewhale_models::{
         ContentBlock, Message, MessageRequest, SystemPrompt, is_incomplete_stop_reason,
         stop_reason_detail,
     };
@@ -11502,13 +11501,13 @@ fn one_shot_exec_json_receipt(
     model: String,
     output: String,
     stop_reason: Option<String>,
-    usage: crate::models::Usage,
+    usage: codewhale_models::Usage,
 ) -> serde_json::Value {
-    let incomplete = crate::models::is_incomplete_stop_reason(stop_reason.as_deref());
+    let incomplete = codewhale_models::is_incomplete_stop_reason(stop_reason.as_deref());
     let error = incomplete.then(|| {
         format!(
             "Model response incomplete: provider stop reason `{}`.",
-            crate::models::stop_reason_detail(stop_reason.as_deref())
+            codewhale_models::stop_reason_detail(stop_reason.as_deref())
         )
     });
     serde_json::json!({
@@ -15707,7 +15706,7 @@ api_key = "test-only-key"
 
     #[test]
     fn review_failure_payload_preserves_usage_without_complete_claim() {
-        let usage = crate::models::Usage {
+        let usage = codewhale_models::Usage {
             input_tokens: 24,
             output_tokens: 4,
             reasoning_tokens: Some(3),
@@ -15735,15 +15734,15 @@ api_key = "test-only-key"
 
     #[test]
     fn review_failure_after_publication_preserves_all_usage_and_post_state() {
-        let mut usage = crate::models::Usage::default();
+        let mut usage = codewhale_models::Usage::default();
         for response_usage in [
-            crate::models::Usage {
+            codewhale_models::Usage {
                 input_tokens: 21,
                 output_tokens: 5,
                 reasoning_tokens: Some(2),
                 ..Default::default()
             },
-            crate::models::Usage {
+            codewhale_models::Usage {
                 input_tokens: 34,
                 output_tokens: 8,
                 reasoning_tokens: Some(3),
@@ -16570,7 +16569,7 @@ api_key = "test-only-key"
             "model-a".to_string(),
             "done".to_string(),
             Some("end_turn".to_string()),
-            crate::models::Usage {
+            codewhale_models::Usage {
                 input_tokens: 12,
                 output_tokens: 3,
                 ..Default::default()
@@ -16584,7 +16583,7 @@ api_key = "test-only-key"
             "model-a".to_string(),
             "partial".to_string(),
             Some("max_output_tokens".to_string()),
-            crate::models::Usage {
+            codewhale_models::Usage {
                 input_tokens: 20,
                 output_tokens: 9,
                 ..Default::default()

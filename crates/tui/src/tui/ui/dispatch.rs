@@ -4,7 +4,7 @@
 //! Moved verbatim out of `ui.rs`.
 
 use super::*;
-use crate::models::Role;
+use codewhale_models::Role;
 
 pub(crate) fn dispatch_hotbar_slot(
     app: &mut App,
@@ -161,7 +161,8 @@ pub(crate) fn replace_matching_assistant_text(
     translated_text: String,
 ) -> bool {
     for message in app.api_messages.iter_mut().rev() {
-        if message.role != "assistant" && message.role != crate::models::INTERRUPTED_ASSISTANT_ROLE
+        if message.role != "assistant"
+            && message.role != codewhale_models::INTERRUPTED_ASSISTANT_ROLE
         {
             continue;
         }

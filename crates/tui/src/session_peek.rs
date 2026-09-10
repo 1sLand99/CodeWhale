@@ -22,8 +22,8 @@
 
 use serde::Serialize;
 
-use crate::models::ContentBlock;
 use crate::session_manager::SavedSession;
+use codewhale_models::ContentBlock;
 
 /// Most entries a peek carries. The dashboard shows a tail, so this is "the
 /// last N exchanges", which is what a peek is for.
@@ -299,9 +299,9 @@ fn mask_assignment(token: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::Message;
-    use crate::models::Role;
     use crate::session_manager::create_saved_session_with_id_and_mode;
+    use codewhale_models::Message;
+    use codewhale_models::Role;
 
     fn text_block(text: &str) -> ContentBlock {
         ContentBlock::Text {
@@ -571,7 +571,7 @@ mod tests {
                 text_block(envelope),
                 text_block("<image path=\"/tmp/shot.png\">"),
                 ContentBlock::ImageUrl {
-                    image_url: crate::models::ImageUrlContent {
+                    image_url: codewhale_models::ImageUrlContent {
                         url: "data:image/png;base64,iVBORw0KGgo=".to_string(),
                     },
                 },

@@ -987,6 +987,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "codewhale-models"
+version = "0.9.13"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "codewhale-config",
+ "codewhale-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "codewhale-palette"
 version = "0.9.13"
 dependencies = [
@@ -1117,6 +1129,7 @@ dependencies = [
  "codewhale-hooks",
  "codewhale-lane",
  "codewhale-localization",
+ "codewhale-models",
  "codewhale-palette",
  "codewhale-paths",
  "codewhale-protocol",

@@ -15,8 +15,8 @@ use codewhale_protocol::runtime::DynamicToolSpec;
 use serde_json::Value;
 
 use crate::client::DeepSeekClient;
-use crate::models::Tool;
 use crate::tools::goal::SharedGoalState;
+use codewhale_models::Tool;
 
 use super::schema_canonicalize;
 use super::schema_sanitize;
@@ -299,7 +299,7 @@ impl ToolRegistry {
     pub fn to_api_tools_with_cache(&self, enable_cache: bool) -> Vec<Tool> {
         let mut tools = self.to_api_tools();
         if enable_cache && let Some(last) = tools.last_mut() {
-            last.cache_control = Some(crate::models::CacheControl {
+            last.cache_control = Some(codewhale_models::CacheControl {
                 cache_type: "ephemeral".to_string(),
             });
         }

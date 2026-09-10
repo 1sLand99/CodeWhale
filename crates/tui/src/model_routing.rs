@@ -15,9 +15,9 @@ use crate::cost_status::{
 };
 use crate::llm_client::LlmClient;
 use crate::model_inventory::ModelInventory;
-use crate::models::Role;
-use crate::models::{ContentBlock, Message, MessageRequest, MessageResponse, SystemPrompt};
 use crate::reasoning_preference::ReasoningEffort;
+use codewhale_models::Role;
+use codewhale_models::{ContentBlock, Message, MessageRequest, MessageResponse, SystemPrompt};
 
 /// Big/cheap model pair the auto-router may choose between for the active
 /// provider (#3018).
@@ -1038,7 +1038,7 @@ fn auto_route_pair(
     AutoRoutePair { strong, fast }
 }
 
-fn auto_route_usage_has_reported_data(usage: &crate::models::Usage) -> bool {
+fn auto_route_usage_has_reported_data(usage: &codewhale_models::Usage) -> bool {
     usage.input_tokens > 0
         || usage.output_tokens > 0
         || usage.prompt_cache_hit_tokens.is_some()
@@ -1098,7 +1098,7 @@ fn auto_route_attempt_from_response(
         .into_iter()
         .collect();
     let recommendation =
-        (!crate::models::is_incomplete_stop_reason(response.stop_reason.as_deref()))
+        (!codewhale_models::is_incomplete_stop_reason(response.stop_reason.as_deref()))
             .then(|| {
                 parse_inventory_auto_route_recommendation(
                     &message_response_text(response),
@@ -1474,7 +1474,7 @@ mod tests {
         id: &str,
         text: &str,
         stop_reason: &str,
-        usage: crate::models::Usage,
+        usage: codewhale_models::Usage,
     ) -> MessageResponse {
         MessageResponse {
             id: id.to_string(),
@@ -1553,7 +1553,7 @@ mod tests {
                 "same-provider-response-id",
                 &format!(r#"{{"provider":"openrouter","model":"{model}","thinking":"off"}}"#),
                 "stop",
-                crate::models::Usage {
+                codewhale_models::Usage {
                     input_tokens: 10,
                     output_tokens: 2,
                     prompt_cache_hit_tokens: Some(3),
@@ -1580,7 +1580,7 @@ mod tests {
                 "same-provider-response-id",
                 "not valid route json",
                 "stop",
-                crate::models::Usage {
+                codewhale_models::Usage {
                     input_tokens: 11,
                     output_tokens: 3,
                     ..Default::default()
@@ -1594,7 +1594,7 @@ mod tests {
                 "same-provider-response-id",
                 &format!(r#"{{"provider":"openrouter","model":"{model}"}}"#),
                 "length",
-                crate::models::Usage {
+                codewhale_models::Usage {
                     input_tokens: 12,
                     output_tokens: 4,
                     ..Default::default()
@@ -1610,7 +1610,7 @@ mod tests {
                 "missing-usage-response-id",
                 "not valid route json",
                 "stop",
-                crate::models::Usage::default(),
+                codewhale_models::Usage::default(),
             ),
             &inventory,
         );

@@ -53,8 +53,8 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::models::Role;
 use crate::tui::selection::{SelectionAutoscroll, TranscriptSelectionPoint};
+use codewhale_models::Role;
 use tempfile::TempDir;
 
 mod runtime_store_binding;
@@ -75,7 +75,7 @@ fn failed_engine_channel_settles_classifier_batch_once() {
             source_id: "auto-router:dispatch-usage".to_string(),
             usage: crate::cost_status::EffectiveRouteUsage {
                 route: route.clone(),
-                usage: crate::models::Usage {
+                usage: codewhale_models::Usage {
                     input_tokens: 6,
                     output_tokens: 2,
                     ..Default::default()
@@ -553,7 +553,7 @@ fn served_endpoint_fingerprint() -> Option<String> {
 
 #[test]
 fn completed_turn_cost_receipt_uses_the_captured_effective_route() {
-    let usage = crate::models::Usage {
+    let usage = codewhale_models::Usage {
         input_tokens: 1_000,
         output_tokens: 100,
         ..Default::default()
@@ -5836,10 +5836,10 @@ fn restored_reasoning_and_answer_clear_prior_fold_ownership() {
     app.folded_thinking.insert(0);
     let _ = render_underwater_test_app(&mut app, 80, 24);
     let old_epoch = app.transcript_identity_epoch;
-    let session = saved_session_with_messages(vec![crate::models::Message {
+    let session = saved_session_with_messages(vec![codewhale_models::Message {
         role: Role::Assistant,
         content: vec![
-            crate::models::ContentBlock::Thinking {
+            codewhale_models::ContentBlock::Thinking {
                 thinking: (1..=20)
                     .map(|line| format!("restored line {line:02}"))
                     .collect::<Vec<_>>()
@@ -5847,7 +5847,7 @@ fn restored_reasoning_and_answer_clear_prior_fold_ownership() {
                 signature: None,
                 state: None,
             },
-            crate::models::ContentBlock::Text {
+            codewhale_models::ContentBlock::Text {
                 text: "restored final answer".to_string(),
                 cache_control: None,
             },
@@ -13766,7 +13766,7 @@ fn subagent_token_usage_updates_live_cost_counter_without_card_change() {
                 ApiProvider::Deepseek,
                 "deepseek-v4-flash",
             )),
-            usage: crate::models::Usage {
+            usage: codewhale_models::Usage {
                 input_tokens: 10_000,
                 output_tokens: 1_000,
                 ..Default::default()
@@ -13793,7 +13793,7 @@ fn subagent_token_usage_prices_the_child_route_not_the_parent_route() {
             agent_id: "agent-codex".to_string(),
             source_id: "response-codex".to_string(),
             route: Box::new(test_mailbox_route(ApiProvider::OpenaiCodex, "gpt-5.5")),
-            usage: crate::models::Usage {
+            usage: codewhale_models::Usage {
                 input_tokens: 10_000,
                 output_tokens: 1_000,
                 ..Default::default()
@@ -13817,7 +13817,7 @@ fn subagent_token_usage_is_deduped_by_response_source() {
             ApiProvider::Deepseek,
             "deepseek-v4-flash",
         )),
-        usage: crate::models::Usage {
+        usage: codewhale_models::Usage {
             input_tokens: 10_000,
             output_tokens: 1_000,
             ..Default::default()
@@ -13866,7 +13866,7 @@ fn active_deleted_origin_mailbox_usage_does_not_accrue_or_restore_the_session() 
         &manager,
     );
     let route = test_mailbox_route(ApiProvider::Deepseek, "deepseek-v4-flash");
-    let usage = crate::models::Usage {
+    let usage = codewhale_models::Usage {
         input_tokens: 10_000,
         output_tokens: 1_000,
         ..Default::default()
@@ -13939,7 +13939,7 @@ fn subagent_token_usage_source_is_stable_across_engine_turns() {
             ApiProvider::Deepseek,
             "deepseek-v4-flash",
         )),
-        usage: crate::models::Usage {
+        usage: codewhale_models::Usage {
             input_tokens: 10_000,
             output_tokens: 1_000,
             ..Default::default()
@@ -18710,7 +18710,7 @@ fn legacy_child_usage_metadata_fails_closed_without_parent_route_fallback() {
 /// tokens were billed at nothing *and* the turn still looked fully priced (#4318).
 #[test]
 fn child_usage_metadata_carries_cache_write_and_reasoning_end_to_end() {
-    let child_usage = crate::models::Usage {
+    let child_usage = codewhale_models::Usage {
         input_tokens: 1_000_000,
         output_tokens: 100_000,
         prompt_cache_hit_tokens: Some(200_000),
@@ -18718,7 +18718,7 @@ fn child_usage_metadata_carries_cache_write_and_reasoning_end_to_end() {
         prompt_cache_write_tokens: Some(100_000),
         reasoning_tokens: Some(40_000),
         reasoning_replay_tokens: Some(12_345),
-        server_tool_use: Some(crate::models::ServerToolUsage {
+        server_tool_use: Some(codewhale_models::ServerToolUsage {
             code_execution_requests: Some(2),
             tool_search_requests: Some(1),
         }),
@@ -18822,7 +18822,7 @@ fn child_usage_metadata_carries_cache_write_and_reasoning_end_to_end() {
     crate::cost_status::attach_child_usage_metadata(
         &mut metadata,
         &test_mailbox_route(ApiProvider::Deepseek, "deepseek-v4-flash"),
-        &crate::models::Usage {
+        &codewhale_models::Usage {
             input_tokens: 1_000,
             output_tokens: 100,
             reasoning_tokens: Some(9_000),
@@ -18835,7 +18835,7 @@ fn child_usage_metadata_carries_cache_write_and_reasoning_end_to_end() {
     let sane = crate::pricing::calculate_turn_cost_estimate_for_provider(
         crate::config::ApiProvider::Deepseek,
         "deepseek-v4-flash",
-        &crate::models::Usage {
+        &codewhale_models::Usage {
             input_tokens: 1_000,
             output_tokens: 100,
             ..Default::default()
@@ -18857,7 +18857,7 @@ fn zero_usage_model_child_still_records_priced_receipt() {
     crate::cost_status::attach_child_usage_metadata(
         &mut metadata,
         &route,
-        &crate::models::Usage::default(),
+        &codewhale_models::Usage::default(),
     );
     let result = Ok(crate::tools::spec::ToolResult::error("kernel closed").with_metadata(metadata));
 
@@ -18959,9 +18959,9 @@ fn stale_cached_placeholder_title_does_not_override_generated_title() {
     let mut app = create_test_app();
     let manager = SessionManager::new(tempfile::tempdir().expect("tempdir").path().to_path_buf())
         .expect("session manager");
-    app.api_messages.push(crate::models::Message {
+    app.api_messages.push(codewhale_models::Message {
         role: Role::User,
-        content: vec![crate::models::ContentBlock::Text {
+        content: vec![codewhale_models::ContentBlock::Text {
             text: "Please fix the login bug".to_string(),
             cache_control: None,
         }],
@@ -19012,9 +19012,9 @@ fn persisted_placeholder_title_yields_to_computed_title_when_conversation_has_co
     );
     assert_eq!(stale.metadata.title, "New Session");
     manager.save_session(&stale).expect("save stale session");
-    app.api_messages.push(crate::models::Message {
+    app.api_messages.push(codewhale_models::Message {
         role: Role::User,
-        content: vec![crate::models::ContentBlock::Text {
+        content: vec![codewhale_models::ContentBlock::Text {
             text: "fix me".to_string(),
             cache_control: None,
         }],
@@ -23656,7 +23656,7 @@ fn duplicate_mailbox_token_usage_does_not_regress_displayed_cost() {
             ApiProvider::Deepseek,
             "deepseek-v4-flash",
         )),
-        usage: crate::models::Usage {
+        usage: codewhale_models::Usage {
             input_tokens: 10_000,
             output_tokens: 1_000,
             ..Default::default()
@@ -24177,23 +24177,23 @@ fn completed_turn_notification_uses_streaming_text() {
 #[test]
 fn completed_turn_notification_falls_back_to_latest_assistant_message() {
     let mut app = create_test_app();
-    app.api_messages.push(crate::models::Message {
+    app.api_messages.push(codewhale_models::Message {
         role: Role::Assistant,
-        content: vec![crate::models::ContentBlock::Text {
+        content: vec![codewhale_models::ContentBlock::Text {
             text: "Earlier turn".to_string(),
             cache_control: None,
         }],
     });
-    app.api_messages.push(crate::models::Message {
+    app.api_messages.push(codewhale_models::Message {
         role: Role::User,
-        content: vec![crate::models::ContentBlock::Text {
+        content: vec![codewhale_models::ContentBlock::Text {
             text: "next".to_string(),
             cache_control: None,
         }],
     });
-    app.api_messages.push(crate::models::Message {
+    app.api_messages.push(codewhale_models::Message {
         role: Role::Assistant,
-        content: vec![crate::models::ContentBlock::Text {
+        content: vec![codewhale_models::ContentBlock::Text {
             text: "Latest reply".to_string(),
             cache_control: None,
         }],
@@ -25506,7 +25506,7 @@ fn raw_mode_probe_handshake_never_leaks_under_concurrent_race() {
 
 #[test]
 fn backtrack_cut_index_skips_tool_result_user_messages() {
-    use crate::models::{ContentBlock, Message};
+    use codewhale_models::{ContentBlock, Message};
     // A turn with tools: user prompt, assistant tool_use, tool_result (role=user),
     // assistant text; then a second user prompt.
     let msgs = vec![
@@ -26552,9 +26552,9 @@ fn fresh_session_turn_lifecycle_leaves_no_orphan_checkpoint() {
         crate::core::engine::Engine::new(build_engine_config(&app, &config), &config);
 
     // Turn start (dispatch.rs): crash checkpoint under the App id.
-    app.api_messages.push(crate::models::Message {
+    app.api_messages.push(codewhale_models::Message {
         role: Role::User,
-        content: vec![crate::models::ContentBlock::Text {
+        content: vec![codewhale_models::ContentBlock::Text {
             text: "please answer".to_string(),
             cache_control: None,
         }],
@@ -26570,9 +26570,9 @@ fn fresh_session_turn_lifecycle_leaves_no_orphan_checkpoint() {
 
     // Turn completion (`PersistRequest::CompletedCommit`): save the session,
     // then clear the checkpoint of the id the snapshot carries.
-    app.api_messages.push(crate::models::Message {
+    app.api_messages.push(codewhale_models::Message {
         role: Role::Assistant,
-        content: vec![crate::models::ContentBlock::Text {
+        content: vec![codewhale_models::ContentBlock::Text {
             text: "answer".to_string(),
             cache_control: None,
         }],

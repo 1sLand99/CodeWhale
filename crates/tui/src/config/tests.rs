@@ -11426,7 +11426,7 @@ fn provider_capability_scenario() {
         let cap = provider_capability(ApiProvider::Deepseek, "deepseek-v4-pro");
         assert_eq!(
             cap.context_window,
-            crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
+            codewhale_models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
         );
         assert_eq!(cap.max_output, Some(384_000));
         assert!(cap.thinking_supported);
@@ -11444,7 +11444,7 @@ fn provider_capability_scenario() {
         );
         assert_eq!(
             cap.context_window,
-            crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
+            codewhale_models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
         );
         assert_eq!(cap.max_output, Some(384_000));
         assert!(cap.thinking_supported);
@@ -11461,12 +11461,12 @@ fn provider_capability_scenario() {
         assert_eq!(cap.resolved_model, DEFAULT_OPENMODEL_MODEL);
         assert_eq!(
             cap.context_window,
-            crate::models::context_window_for_model(DEFAULT_OPENMODEL_MODEL).unwrap_or(200_000)
+            codewhale_models::context_window_for_model(DEFAULT_OPENMODEL_MODEL).unwrap_or(200_000)
         );
         assert_eq!(
             cap.max_output,
             Some(
-                crate::models::max_output_tokens_for_model(DEFAULT_OPENMODEL_MODEL)
+                codewhale_models::max_output_tokens_for_model(DEFAULT_OPENMODEL_MODEL)
                     .unwrap_or(64_000)
             )
         );
@@ -11482,7 +11482,7 @@ fn provider_capability_scenario() {
         let cap = provider_capability(ApiProvider::Deepseek, "deepseek-v4-flash");
         assert_eq!(
             cap.context_window,
-            crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
+            codewhale_models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
         );
         assert_eq!(cap.max_output, Some(384_000));
         assert!(cap.thinking_supported);
@@ -11493,7 +11493,7 @@ fn provider_capability_scenario() {
         let cap = provider_capability(ApiProvider::Deepseek, "deepseek-chat");
         assert_eq!(
             cap.context_window,
-            crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
+            codewhale_models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
         );
         assert_eq!(cap.max_output, Some(384_000));
         assert!(cap.thinking_supported);
@@ -11513,7 +11513,7 @@ fn provider_capability_scenario() {
         let cap = provider_capability(ApiProvider::Deepseek, "deepseek-reasoner");
         assert_eq!(
             cap.context_window,
-            crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
+            codewhale_models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
         );
         assert_eq!(cap.max_output, Some(384_000));
         assert!(cap.thinking_supported);
@@ -11536,7 +11536,7 @@ fn provider_capability_scenario() {
         let cap = provider_capability(ApiProvider::NvidiaNim, DEFAULT_NVIDIA_NIM_MODEL);
         assert_eq!(
             cap.context_window,
-            crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
+            codewhale_models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
         );
         assert_eq!(cap.max_output, Some(384_000));
         assert!(cap.thinking_supported);
@@ -11556,7 +11556,7 @@ fn provider_capability_scenario_2() {
         let cap = provider_capability(ApiProvider::NvidiaNim, DEFAULT_NVIDIA_NIM_FLASH_MODEL);
         assert_eq!(
             cap.context_window,
-            crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
+            codewhale_models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
         );
         assert_eq!(cap.max_output, Some(384_000));
         assert!(cap.thinking_supported);
@@ -11581,11 +11581,11 @@ fn provider_capability_scenario_2() {
         let cap = provider_capability(ApiProvider::Together, TOGETHER_INKLING_MODEL);
         assert!(cap.thinking_supported);
         assert_eq!(
-            crate::models::context_window_for_model(TOGETHER_INKLING_MODEL),
+            codewhale_models::context_window_for_model(TOGETHER_INKLING_MODEL),
             None
         );
         assert_eq!(
-            crate::models::max_output_tokens_for_model(TOGETHER_INKLING_MODEL),
+            codewhale_models::max_output_tokens_for_model(TOGETHER_INKLING_MODEL),
             None
         );
     }
@@ -11612,7 +11612,7 @@ fn provider_capability_scenario_2() {
         let cap = provider_capability(ApiProvider::Novita, DEFAULT_NOVITA_MODEL);
         assert_eq!(
             cap.context_window,
-            crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
+            codewhale_models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
         );
         assert_eq!(cap.max_output, Some(384_000));
         assert!(cap.thinking_supported);
@@ -11623,7 +11623,7 @@ fn provider_capability_scenario_2() {
         let cap = provider_capability(ApiProvider::Fireworks, DEFAULT_FIREWORKS_MODEL);
         assert_eq!(
             cap.context_window,
-            crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
+            codewhale_models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
         );
         assert_eq!(cap.max_output, Some(384_000));
         assert!(cap.thinking_supported);
@@ -11654,7 +11654,7 @@ fn provider_capability_scenario_2() {
         let cap = provider_capability(ApiProvider::Siliconflow, DEFAULT_SILICONFLOW_MODEL);
         assert_eq!(
             cap.context_window,
-            crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
+            codewhale_models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
         );
         assert_eq!(cap.max_output, Some(384_000));
         assert!(cap.thinking_supported);
@@ -11669,7 +11669,7 @@ fn provider_capability_scenario_2() {
         let cap = provider_capability(ApiProvider::Sglang, DEFAULT_SGLANG_MODEL);
         assert_eq!(
             cap.context_window,
-            crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
+            codewhale_models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
         );
         assert_eq!(cap.max_output, Some(384_000));
         assert!(cap.thinking_supported);
@@ -11682,7 +11682,7 @@ fn provider_capability_openrouter_v4_pro_has_thinking_no_cache() {
     let cap = provider_capability(ApiProvider::Openrouter, DEFAULT_OPENROUTER_MODEL);
     assert_eq!(
         cap.context_window,
-        crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
+        codewhale_models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
     );
     assert_eq!(cap.max_output, Some(384_000));
     assert!(cap.thinking_supported);
@@ -11801,7 +11801,7 @@ fn provider_capability_arcee_direct_models_use_api_docs_shape() {
     // now says so instead of fabricating a 4K request fallback.
     assert_eq!(mini.max_output, None);
     assert_eq!(
-        crate::models::max_output_tokens_for_model(ARCEE_TRINITY_MINI_MODEL),
+        codewhale_models::max_output_tokens_for_model(ARCEE_TRINITY_MINI_MODEL),
         None
     );
     assert!(mini.thinking_supported);
@@ -11820,7 +11820,7 @@ fn provider_capability_scenario_3() {
         let cap = provider_capability(ApiProvider::Openai, "glm-5");
         assert_eq!(
             cap.context_window,
-            crate::models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS
+            codewhale_models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS
         );
         assert_eq!(cap.max_output, None);
         assert!(!cap.thinking_supported);
@@ -11838,7 +11838,7 @@ fn provider_capability_scenario_3() {
         let cap = provider_capability(ApiProvider::Atlascloud, "deepseek-ai/deepseek-v4-flash");
         assert_eq!(
             cap.context_window,
-            crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
+            codewhale_models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
         );
         assert_eq!(cap.max_output, Some(384_000));
         assert!(cap.thinking_supported);
@@ -11877,7 +11877,7 @@ fn provider_capability_scenario_3() {
         let cap = provider_capability(ApiProvider::WanjieArk, DEFAULT_WANJIE_ARK_MODEL);
         assert_eq!(
             cap.context_window,
-            crate::models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS
+            codewhale_models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS
         );
         assert_eq!(cap.max_output, None);
         assert!(cap.thinking_supported);
@@ -11909,7 +11909,7 @@ fn provider_capability_scenario_3() {
         let cap = provider_capability(ApiProvider::Ollama, "deepseek-v3.1:671b");
         assert_eq!(cap.context_window, 8192);
         assert_eq!(
-            crate::models::context_window_for_model("deepseek-v3.1:671b"),
+            codewhale_models::context_window_for_model("deepseek-v3.1:671b"),
             None
         );
         assert_eq!(cap.max_output, None);
@@ -12039,7 +12039,7 @@ fn provider_capability_scenario_4() {
         let cap = provider_capability(ApiProvider::Deepseek, "deepseek-coder");
         assert_eq!(
             cap.context_window,
-            crate::models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS
+            codewhale_models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS
         );
         assert_eq!(cap.max_output, None);
         assert!(!cap.thinking_supported);

@@ -21,8 +21,8 @@ use std::time::Duration;
 use crate::dependencies::ExternalTool;
 use serde_json::{Value, json};
 
-use crate::models::Tool;
 use crate::tools::spec::{ToolError, ToolResult, required_str};
+use codewhale_models::Tool;
 
 /// Tool name surfaced to the model. Held alongside `code_execution`
 /// in the deferred-tool dispatcher.

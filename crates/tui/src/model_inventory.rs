@@ -135,7 +135,7 @@ impl ModelInventory {
                 // that nobody verified it — the auto-router must not read a
                 // guessed window as a route capability.
                 let mut context_window_unverified =
-                    crate::model_catalog::resolved_context_window(&model).is_none();
+                    codewhale_models::model_catalog::resolved_context_window(&model).is_none();
                 if let Ok(route) =
                     crate::route_runtime::resolve_runtime_route(config, provider, Some(&model))
                 {

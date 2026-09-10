@@ -14,9 +14,9 @@ use crate::config::ApiProvider;
 use crate::core::events::Event;
 use crate::fast_hash::{FastHashMap, FastHashSet};
 use crate::llm_client::LlmClient;
-use crate::models::Role;
-use crate::models::{ContentBlock, Message, MessageRequest, Tool};
 use crate::regex_cache::compile_user_regex;
+use codewhale_models::Role;
+use codewhale_models::{ContentBlock, Message, MessageRequest, Tool};
 
 // ── Prompt‑building constants ──────────────────────────────────────────────
 
@@ -705,10 +705,10 @@ pub async fn run_purge(
 
     // A truncated response can still carry a complete-looking `purge_context`
     // call; executing it would mutate the session from incomplete output.
-    if crate::models::is_incomplete_stop_reason(response.stop_reason.as_deref()) {
+    if codewhale_models::is_incomplete_stop_reason(response.stop_reason.as_deref()) {
         return Err(format!(
             "Purge model response incomplete: provider stop reason `{}`; no purge was applied.",
-            crate::models::stop_reason_detail(response.stop_reason.as_deref())
+            codewhale_models::stop_reason_detail(response.stop_reason.as_deref())
         ));
     }
 
@@ -1093,7 +1093,7 @@ mod tests {
     }
 
     use crate::llm_client::mock::MockLlmClient;
-    use crate::models::{MessageResponse, Usage};
+    use codewhale_models::{MessageResponse, Usage};
 
     fn msg_response_with_tool_call(operations: serde_json::Value) -> MessageResponse {
         MessageResponse {

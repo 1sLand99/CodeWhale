@@ -28,7 +28,7 @@ use std::io::{self, Write};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::models::Tool;
+use codewhale_models::Tool;
 
 const MAX_RENDERED_TOOLS: usize = 32;
 const MAX_NAME_CHARS: usize = 256;

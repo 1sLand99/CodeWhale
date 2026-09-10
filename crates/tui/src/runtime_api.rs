@@ -65,8 +65,6 @@ use crate::fleet::profile::canonical_public_role_name;
 use crate::fleet::task_spec::FleetTaskSpecDocument;
 use crate::fleet::worker_runtime::fleet_write_roots;
 use crate::mcp::McpPool;
-#[cfg(test)]
-pub(super) use crate::models::{ContentBlock, Message};
 use crate::runtime_threads::{
     CompactThreadRequest, CreateThreadRequest, ExternalApprovalDecision,
     MAX_RUNTIME_EVENT_REPLAY_TAIL, RuntimeThreadManager, RuntimeThreadManagerConfig,
@@ -86,6 +84,8 @@ use crate::tools::subagent::{
     AgentWorkerRecord, SharedSubAgentManager, load_persisted_agent_worker_records,
     new_shared_subagent_manager_with_timeout,
 };
+#[cfg(test)]
+pub(super) use codewhale_models::{ContentBlock, Message};
 use codewhale_protocol::fleet::{
     FleetArtifactKind, FleetEventReplay, FleetRun, FleetRunId, FleetRuntimeEvent,
     FleetRuntimeTarget, FleetSecurityPolicy, FleetTaskSpec, FleetWorkerEventPayload,

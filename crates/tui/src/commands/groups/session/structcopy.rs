@@ -44,9 +44,9 @@ use serde_json::{Value, json};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::commands::traits::{CommandInfo, RegisterCommand};
-use crate::models::{ContentBlock, Message};
 use crate::tui::app::App;
 use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_models::{ContentBlock, Message};
 
 use super::CommandResult;
 use super::export::{is_internal_role, is_sensitive_key, redact_json, sanitize_text};
@@ -1238,11 +1238,11 @@ fn caps_value(caps: &Caps) -> Value {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::models::Role;
-    use crate::models::{ImageUrlContent, ToolCaller};
     use crate::tools::plan::{PlanItemArg, StepStatus, UpdatePlanArgs};
     use crate::tui::app::TuiOptions;
     use crate::tui::clipboard::ClipboardHandler;
+    use codewhale_models::Role;
+    use codewhale_models::{ImageUrlContent, ToolCaller};
     use tempfile::TempDir;
 
     fn test_app(tmpdir: &TempDir) -> App {

@@ -2330,7 +2330,7 @@ impl ProviderPickerView {
 
     fn apply_plan_tier(&mut self) {
         self.selected_context_window = Some(match self.kimi_code_plan_tier {
-            KimiCodePlanTier::Safe262k => crate::models::KIMI_CODE_K3_CONTEXT_WINDOW_TOKENS,
+            KimiCodePlanTier::Safe262k => codewhale_models::KIMI_CODE_K3_CONTEXT_WINDOW_TOKENS,
             KimiCodePlanTier::OneMillion => 1_048_576,
         });
         self.enter_confirm();

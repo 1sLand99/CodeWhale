@@ -779,8 +779,8 @@ fn statusline_full_frame_custom_cost_preserves_evidence_and_width_shedding() {
 #[test]
 fn statusline_full_frame_context_reading_updates_below_and_at_warning() {
     use crate::config::{ChromeRowPreset, StatusItem};
-    use crate::models::{ContentBlock, Message, Role};
     use crate::tui::tideline::InteractionTargetId;
+    use codewhale_models::{ContentBlock, Message, Role};
     use codewhale_palette::ChromeInk;
 
     for (width, height) in [(40, 12), (60, 16), (80, 24), (100, 32)] {

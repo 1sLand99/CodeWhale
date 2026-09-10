@@ -32,12 +32,6 @@ use crate::core::model_client::SharedModelClient;
 use crate::error_taxonomy::{ErrorCategory, ErrorEnvelope, ErrorSeverity, StreamError};
 use crate::features::{Feature, Features};
 use crate::mcp::{McpConfig, McpPool};
-#[cfg(test)]
-use crate::models::ToolCaller;
-use crate::models::{
-    ContentBlock, ContentBlockStart, Delta, Message, StreamEvent, SystemPrompt, Tool, Usage,
-    is_incomplete_stop_reason, is_output_limit_stop_reason, stop_reason_detail,
-};
 use crate::prompts;
 use crate::purge::{emit_purge_completed, emit_purge_failed, emit_purge_started, run_purge};
 #[cfg(test)]
@@ -71,6 +65,12 @@ use crate::worker_profile::WorkerRuntimeProfile;
 use crate::working_set::WorkingSet;
 use codewhale_config::AppMode;
 use codewhale_execpolicy::ApprovalMode;
+#[cfg(test)]
+use codewhale_models::ToolCaller;
+use codewhale_models::{
+    ContentBlock, ContentBlockStart, Delta, Message, StreamEvent, SystemPrompt, Tool, Usage,
+    is_incomplete_stop_reason, is_output_limit_stop_reason, stop_reason_detail,
+};
 
 #[cfg(test)]
 use super::authority::agent_approval_mode_for_turn;
@@ -85,7 +85,7 @@ use super::ops::{
 use super::session::Session;
 use super::tool_parser;
 use super::turn::{TurnContext, post_turn_snapshot, pre_turn_snapshot};
-use crate::models::Role;
+use codewhale_models::Role;
 
 const ENGINE_OP_CHANNEL_CAPACITY: usize = 32;
 const GOAL_CONTINUATION_FAILURE_DETAIL_MAX_BYTES: usize = 512;
@@ -3539,7 +3539,7 @@ impl Engine {
         let already_committed = self.session.messages.last().is_some_and(|last| {
             matches!(
                 last.role.as_str(),
-                "assistant" | crate::models::INTERRUPTED_ASSISTANT_ROLE
+                "assistant" | codewhale_models::INTERRUPTED_ASSISTANT_ROLE
             ) && last.content == message.content
         });
         if already_committed {
@@ -5518,7 +5518,7 @@ impl Engine {
                 })
                 .clone();
 
-            let advisor_messages: Vec<crate::models::Message> = self.session.messages.to_vec();
+            let advisor_messages: Vec<codewhale_models::Message> = self.session.messages.to_vec();
             let advisor_config = self.config.advisor_config.clone();
             // This clone is frozen before the detached task starts and keeps
             // every configured provider route available for an explicit

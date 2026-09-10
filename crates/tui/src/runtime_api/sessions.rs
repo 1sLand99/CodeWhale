@@ -7,7 +7,6 @@ use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::models::{ContentBlock, Message};
 use crate::runtime_threads::{
     CreateThreadRequest, RuntimeTurnStatus, ThreadDetail, ThreadListFilter, TurnItemKind,
     TurnItemLifecycleStatus,
@@ -18,9 +17,10 @@ use crate::session_manager::{
 };
 use crate::session_peek::{MAX_PEEK_ENTRIES, SessionPeek, build_peek};
 use crate::session_projection::{SessionQuery, SessionSortMode, SessionSummary, project_sessions};
+use codewhale_models::{ContentBlock, Message};
 
 use super::{ApiError, RuntimeApiState, map_thread_err, truncate_text};
-use crate::models::Role;
+use codewhale_models::Role;
 
 #[derive(Debug, Serialize)]
 pub(super) struct SessionsResponse {
@@ -895,13 +895,13 @@ pub(super) fn session_to_detail(session: SavedSession) -> SessionDetailResponse 
                 .content
                 .iter()
                 .map(|block| match block {
-                    crate::models::ContentBlock::Text { text, .. } => {
+                    codewhale_models::ContentBlock::Text { text, .. } => {
                         json!({ "type": "text", "text": text })
                     }
-                    crate::models::ContentBlock::Thinking { thinking, .. } => {
+                    codewhale_models::ContentBlock::Thinking { thinking, .. } => {
                         json!({ "type": "thinking", "text": thinking })
                     }
-                    crate::models::ContentBlock::ToolUse {
+                    codewhale_models::ContentBlock::ToolUse {
                         id,
                         name,
                         input,
@@ -913,7 +913,7 @@ pub(super) fn session_to_detail(session: SavedSession) -> SessionDetailResponse 
                         }
                         obj
                     }
-                    crate::models::ContentBlock::ToolResult {
+                    codewhale_models::ContentBlock::ToolResult {
                         tool_use_id,
                         content,
                         is_error,
@@ -934,22 +934,22 @@ pub(super) fn session_to_detail(session: SavedSession) -> SessionDetailResponse 
                         }
                         obj
                     }
-                    crate::models::ContentBlock::ServerToolUse { id, name, input } => {
+                    codewhale_models::ContentBlock::ServerToolUse { id, name, input } => {
                         json!({ "type": "tool_use", "id": id, "name": name, "input": input })
                     }
-                    crate::models::ContentBlock::ToolSearchToolResult {
+                    codewhale_models::ContentBlock::ToolSearchToolResult {
                         tool_use_id,
                         content,
                     } => {
                         json!({ "type": "tool_result", "tool_use_id": tool_use_id, "content": content })
                     }
-                    crate::models::ContentBlock::CodeExecutionToolResult {
+                    codewhale_models::ContentBlock::CodeExecutionToolResult {
                         tool_use_id,
                         content,
                     } => {
                         json!({ "type": "tool_result", "tool_use_id": tool_use_id, "content": content })
                     }
-                    crate::models::ContentBlock::ImageUrl { .. } => Value::Null,
+                    codewhale_models::ContentBlock::ImageUrl { .. } => Value::Null,
                 })
                 .collect();
             json!({

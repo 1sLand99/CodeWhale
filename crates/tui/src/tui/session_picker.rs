@@ -15,7 +15,6 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::models::Role;
 use crate::session_manager::{
     SavedSession, SessionListFilter, SessionManager, SessionMetadata, extract_title,
     extract_user_prompt, strip_thinking_tags,
@@ -28,6 +27,7 @@ use crate::tui::views::{
 };
 use crate::tui::views::{ModalKind, ModalView, ViewAction, ViewEvent};
 use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_models::Role;
 use codewhale_palette as palette;
 
 fn section_block(title: &str) -> Block<'static> {
@@ -1114,24 +1114,24 @@ fn build_preview_lines(session: &SavedSession, locale: Locale) -> Vec<String> {
     out
 }
 
-fn message_text_for_history(message: &crate::models::Message, locale: Locale) -> String {
+fn message_text_for_history(message: &codewhale_models::Message, locale: Locale) -> String {
     let mut text = String::new();
     for block in &message.content {
         let part = match block {
-            crate::models::ContentBlock::Text { text: body, .. } => {
+            codewhale_models::ContentBlock::Text { text: body, .. } => {
                 if message.role == Role::User {
                     extract_user_prompt(body).to_string()
                 } else {
                     strip_thinking_tags(body)
                 }
             }
-            crate::models::ContentBlock::Thinking { .. } => String::new(),
-            crate::models::ContentBlock::ToolUse { name, input, .. } => {
+            codewhale_models::ContentBlock::Thinking { .. } => String::new(),
+            codewhale_models::ContentBlock::ToolUse { name, input, .. } => {
                 tr(locale, MessageId::SessionsToolCall)
                     .replace("{name}", name)
                     .replace("{input}", &truncate(&input.to_string(), 180))
             }
-            crate::models::ContentBlock::ToolResult {
+            codewhale_models::ContentBlock::ToolResult {
                 content, is_error, ..
             } => {
                 let id = if is_error.unwrap_or(false) {
@@ -1141,17 +1141,17 @@ fn message_text_for_history(message: &crate::models::Message, locale: Locale) ->
                 };
                 tr(locale, id).replace("{content}", &truncate(&content.replace('\n', " "), 220))
             }
-            crate::models::ContentBlock::ServerToolUse { name, input, .. } => {
+            codewhale_models::ContentBlock::ServerToolUse { name, input, .. } => {
                 tr(locale, MessageId::SessionsServerTool)
                     .replace("{name}", name)
                     .replace("{input}", &truncate(&input.to_string(), 180))
             }
-            crate::models::ContentBlock::ToolSearchToolResult { content, .. }
-            | crate::models::ContentBlock::CodeExecutionToolResult { content, .. } => {
+            codewhale_models::ContentBlock::ToolSearchToolResult { content, .. }
+            | codewhale_models::ContentBlock::CodeExecutionToolResult { content, .. } => {
                 tr(locale, MessageId::SessionsToolResult)
                     .replace("{content}", &truncate(&content.to_string(), 220))
             }
-            crate::models::ContentBlock::ImageUrl { .. } => {
+            codewhale_models::ContentBlock::ImageUrl { .. } => {
                 tr(locale, MessageId::SessionsImage).into_owned()
             }
         };
@@ -1305,17 +1305,17 @@ mod tests {
         s
     }
 
-    fn text_message(role: &str, text: &str) -> crate::models::Message {
-        crate::models::Message {
+    fn text_message(role: &str, text: &str) -> codewhale_models::Message {
+        codewhale_models::Message {
             role: Role::from(role),
-            content: vec![crate::models::ContentBlock::Text {
+            content: vec![codewhale_models::ContentBlock::Text {
                 text: text.to_string(),
                 cache_control: None,
             }],
         }
     }
 
-    fn saved_session_with_messages(messages: Vec<crate::models::Message>) -> SavedSession {
+    fn saved_session_with_messages(messages: Vec<codewhale_models::Message>) -> SavedSession {
         let mut session = crate::session_manager::create_saved_session(
             &messages,
             "deepseek-v4-pro",

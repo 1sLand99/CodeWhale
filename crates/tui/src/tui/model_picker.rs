@@ -3117,14 +3117,14 @@ fn effective_picker_metadata_with_codex(
         && context_override.is_none()
         && provider != ApiProvider::OpenaiCodex
         && !preserves_unknown_limits
-        && crate::model_catalog::resolved_context_window(id).is_none();
+        && codewhale_models::model_catalog::resolved_context_window(id).is_none();
     let max_output_unverified = max_output.is_some()
         && matches!(
             provider,
             ApiProvider::Anthropic | ApiProvider::MinimaxAnthropic | ApiProvider::Openmodel
         )
         && !preserves_unknown_limits
-        && crate::models::max_output_tokens_for_model(id).is_none();
+        && codewhale_models::max_output_tokens_for_model(id).is_none();
 
     EffectivePickerMetadata {
         context_window,
@@ -3177,7 +3177,7 @@ fn render_picker_model_hint(
             ));
         } else if provider == Some(ApiProvider::Moonshot)
             && id.trim().eq_ignore_ascii_case("k3")
-            && context_window == crate::models::KIMI_CODE_K3_CONTEXT_WINDOW_TOKENS
+            && context_window == codewhale_models::KIMI_CODE_K3_CONTEXT_WINDOW_TOKENS
         {
             // The membership route's real window is plan-tier dependent
             // (256K on lower tiers, up to 1M on higher ones); this default

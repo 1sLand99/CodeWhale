@@ -6,10 +6,10 @@
 //! - a compact working-set summary block for the system prompt
 //! - pinned message indices that compaction should preserve
 
-use crate::models::{ContentBlock, Message};
 use crate::workspace_discovery::{
     DISCOVERY_ALWAYS_DIRS, path_is_excluded_from_discovery, should_skip_unignored_discovery_entry,
 };
+use codewhale_models::{ContentBlock, Message};
 use ignore::WalkBuilder;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -1590,7 +1590,7 @@ const IGNORED_ROOT_DIRS: &[&str] = &["target", "node_modules", "dist", "build", 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::Role;
+    use codewhale_models::Role;
     use tempfile::TempDir;
 
     fn make_message(role: &str, text: &str) -> Message {

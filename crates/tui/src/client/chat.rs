@@ -40,7 +40,7 @@ use crate::config::ApiProvider;
 use crate::llm_client::StreamEventBox;
 use crate::llm_client::sanitize_http_error_body;
 use crate::logging;
-use crate::models::{
+use codewhale_models::{
     ContentBlock, ContentBlockStart, Delta, Message, MessageDelta, MessageRequest, MessageResponse,
     StreamEvent, SystemPrompt, Tool, ToolCaller, Usage, is_openai_gpt_56_api_model,
     model_is_openai_reasoning_family, model_supports_reasoning,
@@ -55,7 +55,7 @@ use super::{
     apply_reasoning_effort, bounded_error_text, from_api_tool_name, parse_usage,
     release_stream_buffer, system_to_instructions, to_api_tool_name,
 };
-use crate::models::Role;
+use codewhale_models::Role;
 
 fn apply_provider_token_limit(
     body: &mut Value,
@@ -1079,7 +1079,7 @@ pub(crate) fn build_chat_wire_body(
         build_chat_messages_for_request_and_provider_and_route(request, provider, base_url);
     let model = {
         let wire = wire_model_for_provider_route(provider, base_url, &request.model);
-        crate::models::effective_muse_wire_id(&wire).to_string()
+        codewhale_models::effective_muse_wire_id(&wire).to_string()
     };
     validate_google_thought_signature_replay(base_url, &model, &messages)?;
     let mut body = if stream {
@@ -2693,7 +2693,7 @@ fn build_chat_messages_with_reasoning(
             let content = if placement == RolePlacement::InterruptedAssistant {
                 format!(
                     "{}{}",
-                    crate::models::INTERRUPTED_ASSISTANT_CONTEXT_PREFIX,
+                    codewhale_models::INTERRUPTED_ASSISTANT_CONTEXT_PREFIX,
                     text_parts.join("\n")
                 )
             } else {
@@ -4440,7 +4440,7 @@ mod stream_diagnostics_tests {
 mod arcee_waf_message_encoding_tests {
     use super::build_chat_messages_for_request_and_provider;
     use crate::config::ApiProvider;
-    use crate::models::{MessageRequest, SystemPrompt};
+    use codewhale_models::{MessageRequest, SystemPrompt};
     use serde_json::Value;
 
     fn request_with_system(system: &str) -> MessageRequest {
@@ -4523,8 +4523,8 @@ mod minimax_reasoning_replay_tests {
         ApiProvider, DEFAULT_KIMI_CODE_BASE_URL, DEFAULT_MINIMAX_MODEL,
         DEFAULT_MODELSTUDIO_TOKEN_PLAN_BASE_URL, DEFAULT_MOONSHOT_BASE_URL, KIMI_CODE_K3_MODEL,
     };
-    use crate::models::Role;
-    use crate::models::{ContentBlock, Message, MessageRequest};
+    use codewhale_models::Role;
+    use codewhale_models::{ContentBlock, Message, MessageRequest};
 
     fn request_with_assistant_thinking() -> MessageRequest {
         MessageRequest {
@@ -6229,8 +6229,8 @@ mod image_block_wire_tests {
     //! message whose `content` is an array of parts, with the image as
     //! `{"type":"image_url","image_url":{"url":…}}`.
     use super::{ApiProvider, build_chat_messages, build_chat_wire_body};
-    use crate::models::Role;
-    use crate::models::{ContentBlock, ImageUrlContent, Message, MessageRequest};
+    use codewhale_models::Role;
+    use codewhale_models::{ContentBlock, ImageUrlContent, Message, MessageRequest};
 
     const DATA_URL: &str = "data:image/png;base64,QUJD";
 
@@ -7116,10 +7116,13 @@ mod mistral_reasoning_tests {
             "mistral-small-latest",
             "magistral-small-latest",
         ] {
-            assert!(crate::models::model_supports_reasoning(model), "{model}");
+            assert!(codewhale_models::model_supports_reasoning(model), "{model}");
         }
         for model in ["mistral-code-latest", "mistral-large-latest"] {
-            assert!(!crate::models::model_supports_reasoning(model), "{model}");
+            assert!(
+                !codewhale_models::model_supports_reasoning(model),
+                "{model}"
+            );
         }
     }
 }

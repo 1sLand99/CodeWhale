@@ -3,10 +3,10 @@
 //! Historically, "what is this model's context window / max output / does it
 //! reason?" was answered by several hard-coded sites:
 //!
-//! * [`crate::models::context_window_for_model`] /
+//! * [`codewhale_models::context_window_for_model`] /
 //!   the models module's context-window lookup for context windows,
-//! * [`crate::models::max_output_tokens_for_model`] for output caps,
-//! * [`crate::models::model_supports_reasoning`] for the reasoning flag,
+//! * [`codewhale_models::max_output_tokens_for_model`] for output caps,
+//! * [`codewhale_models::model_supports_reasoning`] for the reasoning flag,
 //! * the `DEFAULT_*` model-id constants in `crates/config/src/lib.rs` for the
 //!   canonical model each provider ships by default.
 //!
@@ -20,7 +20,7 @@
 //!
 //! The registry does not re-declare context-window / max-output / reasoning
 //! numbers. Instead it **seeds** each entry by calling the existing
-//! `crate::models` functions, so the registry can never silently disagree with
+//! `codewhale_models` functions, so the registry can never silently disagree with
 //! `models.rs`. The canonical model ids come from the same provider defaults
 //! the config crate ships (see [`SEED_MODEL_IDS`]). The
 //! The `registry_context_window_matches_models_rs` drift guard then
@@ -34,7 +34,7 @@
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-use crate::models::{
+use codewhale_models::{
     context_window_for_model, max_output_tokens_for_model, model_supports_reasoning,
 };
 
@@ -84,7 +84,7 @@ pub enum ModelProvider {
 
 /// One row of model facts, looked up in [`lookup`].
 ///
-/// All numeric fields are seeded from `crate::models` so they stay in lockstep
+/// All numeric fields are seeded from `codewhale_models` so they stay in lockstep
 /// with the legacy lookups (see module docs).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelMetadata {
@@ -103,7 +103,7 @@ pub struct ModelMetadata {
 
 impl ModelMetadata {
     /// Build a metadata row for `id` by seeding every fact from the existing
-    /// `crate::models` lookups. This is the only constructor, which is what
+    /// `codewhale_models` lookups. This is the only constructor, which is what
     /// keeps the registry from drifting away from `models.rs`.
     fn seed(id: &'static str, provider: ModelProvider) -> Self {
         Self {
@@ -238,7 +238,7 @@ fn registry() -> &'static BTreeMap<&'static str, ModelMetadata> {
 ///
 /// Returns a pre-seeded [`ModelMetadata`] when `model` is one of the canonical
 /// [`SEED_MODEL_IDS`] (case-insensitive). For any other id, this falls back to
-/// the same `crate::models` heuristics (explicit `_Nk` suffix, DeepSeek/Claude
+/// the same `codewhale_models` heuristics (explicit `_Nk` suffix, DeepSeek/Claude
 /// family rules, etc.) and reports the provider as [`ModelProvider::Other`], so
 /// callers always get a usable answer rather than `None` for a real model.
 ///
@@ -285,7 +285,7 @@ mod tests {
 
     /// DRIFT GUARD (#3071, #3073).
     ///
-    /// The registry must agree with `crate::models` for the context window of
+    /// The registry must agree with `codewhale_models` for the context window of
     /// every model it claims to know. Today they agree because the registry is
     /// *seeded* from `models.rs`; this test exists so that if a future change
     /// replaces a seed with a hard-coded literal that drifts from `models.rs`,

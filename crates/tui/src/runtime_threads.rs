@@ -40,8 +40,6 @@ use crate::cost_status::{
     EffectiveRouteEnvelope, EffectiveRouteUsage, RouteBillingMode, RuntimeUsageDropRecord,
     RuntimeUsageRecord,
 };
-use crate::models::Role;
-use crate::models::{ContentBlock, Message, SystemPrompt, Usage};
 use crate::provider_catalog_live::ProviderLivePricingQuote;
 use crate::route_budget::{
     auto_compact_default_for_route, compaction_threshold_for_route_at_percent, known_route_limits,
@@ -57,6 +55,8 @@ use crate::tools::todo::new_shared_todo_list;
 #[cfg(test)]
 use codewhale_config::AppMode;
 use codewhale_execpolicy::ApprovalMode;
+use codewhale_models::Role;
+use codewhale_models::{ContentBlock, Message, SystemPrompt, Usage};
 use codewhale_protocol::agent_mail::{
     AGENT_MAIL_EVENT_DELIVERED, AGENT_MAIL_EVENT_DELIVERING, AGENT_MAIL_EVENT_DELIVERY_FAILED,
     AGENT_MAIL_EVENT_QUEUED, AGENT_MAIL_EVENT_READ, AGENT_MAIL_SCHEMA_VERSION, AgentMailAddress,

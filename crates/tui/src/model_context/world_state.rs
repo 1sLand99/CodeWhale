@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::models::SystemBlock;
+use codewhale_models::SystemBlock;
 
 use super::fragment::{FragmentId, FragmentRender, FragmentRole, ModelContextFragment};
 

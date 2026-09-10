@@ -426,7 +426,7 @@ mod recovery {
         let response = |text: &str, stop: &str| {
             let mut events = canned::simple_text_turn(text);
             for event in &mut events {
-                if let crate::models::StreamEvent::MessageDelta { delta, usage } = event {
+                if let codewhale_models::StreamEvent::MessageDelta { delta, usage } = event {
                     delta.stop_reason = Some(stop.into());
                     *usage = Some(Usage {
                         input_tokens: 11,
@@ -7584,7 +7584,7 @@ async fn monitor_separates_lifecycle_start_from_billing_dispatch_and_child_usage
                 input_tokens: 10,
                 output_tokens: 4,
                 reasoning_replay_tokens: Some(6),
-                server_tool_use: Some(crate::models::ServerToolUsage {
+                server_tool_use: Some(codewhale_models::ServerToolUsage {
                     code_execution_requests: Some(2),
                     tool_search_requests: Some(3),
                 }),
@@ -7594,7 +7594,7 @@ async fn monitor_separates_lifecycle_start_from_billing_dispatch_and_child_usage
                 input_tokens: 10,
                 output_tokens: 4,
                 reasoning_replay_tokens: Some(6),
-                server_tool_use: Some(crate::models::ServerToolUsage {
+                server_tool_use: Some(codewhale_models::ServerToolUsage {
                     code_execution_requests: Some(2),
                     tool_search_requests: Some(3),
                 }),
@@ -7640,7 +7640,7 @@ async fn monitor_separates_lifecycle_start_from_billing_dispatch_and_child_usage
     assert_eq!(persisted_usage.reasoning_replay_tokens, Some(6));
     assert_eq!(
         persisted_usage.server_tool_use,
-        Some(crate::models::ServerToolUsage {
+        Some(codewhale_models::ServerToolUsage {
             code_execution_requests: Some(2),
             tool_search_requests: Some(3),
         })

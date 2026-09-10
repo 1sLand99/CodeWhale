@@ -4049,11 +4049,11 @@ impl McpPool {
     }
 
     /// Convert discovered tools to API Tool format
-    pub fn to_api_tools(&self) -> Vec<crate::models::Tool> {
+    pub fn to_api_tools(&self) -> Vec<codewhale_models::Tool> {
         let mut api_tools = Vec::new();
         // Add regular tools
         for (name, tool) in self.all_tools() {
-            api_tools.push(crate::models::Tool {
+            api_tools.push(codewhale_models::Tool {
                 tool_type: None,
                 name,
                 description: tool.description.clone().unwrap_or_default(),
@@ -4095,7 +4095,7 @@ impl McpPool {
                 if api_tools.iter().any(|tool| tool.name == name) {
                     continue;
                 }
-                api_tools.push(crate::models::Tool {
+                api_tools.push(codewhale_models::Tool {
                     tool_type: None,
                     name,
                     description: oauth::authenticate_tool_description(server),
@@ -4119,7 +4119,7 @@ impl McpPool {
         // and prompt tokens. Gate each on its own non-empty collection, mirroring
         // the `mcp_read_resource` guard below (`!resources.is_empty()`).
         if !self.all_resources().is_empty() {
-            api_tools.push(crate::models::Tool {
+            api_tools.push(codewhale_models::Tool {
                 tool_type: None,
                 name: "list_mcp_resources".to_string(),
                 description: "List available MCP resources across servers (optionally filtered by server).".to_string(),
@@ -4137,7 +4137,7 @@ impl McpPool {
             });
         }
         if !self.all_resource_templates().is_empty() {
-            api_tools.push(crate::models::Tool {
+            api_tools.push(codewhale_models::Tool {
                 tool_type: None,
                 name: "list_mcp_resource_templates".to_string(),
                 description: "List available MCP resource templates across servers (optionally filtered by server).".to_string(),
@@ -4158,7 +4158,7 @@ impl McpPool {
         // Add resource reading tools if resources exist
         let resources = self.all_resources();
         if !resources.is_empty() {
-            api_tools.push(crate::models::Tool {
+            api_tools.push(codewhale_models::Tool {
                 tool_type: None,
                 name: "mcp_read_resource".to_string(),
                 description: "Read a resource from an MCP server using its URI".to_string(),
@@ -4176,7 +4176,7 @@ impl McpPool {
                 strict: None,
                 cache_control: None,
             });
-            api_tools.push(crate::models::Tool {
+            api_tools.push(codewhale_models::Tool {
                 tool_type: None,
                 name: "read_mcp_resource".to_string(),
                 description: "Alias for mcp_read_resource.".to_string(),
@@ -4199,7 +4199,7 @@ impl McpPool {
         // Add prompt getting tools if prompts exist
         let prompts = self.all_prompts();
         if !prompts.is_empty() {
-            api_tools.push(crate::models::Tool {
+            api_tools.push(codewhale_models::Tool {
                 tool_type: None,
                 name: "mcp_get_prompt".to_string(),
                 description: "Get a prompt from an MCP server".to_string(),

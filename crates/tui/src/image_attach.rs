@@ -53,7 +53,7 @@ use std::path::Path;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use crate::model_profile::SupportState;
-use crate::models::{ContentBlock, ImageUrlContent};
+use codewhale_models::{ContentBlock, ImageUrlContent};
 
 /// Largest source image accepted, in bytes, before base64 expansion.
 ///
@@ -401,8 +401,8 @@ pub(crate) fn safe_tool_result_content_blocks(
 
 #[must_use]
 pub(crate) fn safe_tool_result_message_projection(
-    messages: &[crate::models::Message],
-) -> Vec<crate::models::Message> {
+    messages: &[codewhale_models::Message],
+) -> Vec<codewhale_models::Message> {
     let mut projected = messages.to_vec();
     for message in &mut projected {
         for block in &mut message.content {
@@ -641,7 +641,7 @@ fn tag_block(text: &str) -> ContentBlock {
 /// The image is replaced in place rather than removed, so the model is told
 /// why it is looking at a gap instead of being left to invent one.
 pub fn strip_images_when_unsupported(
-    messages: &mut [crate::models::Message],
+    messages: &mut [codewhale_models::Message],
     vision: SupportState,
     model: &str,
 ) -> usize {

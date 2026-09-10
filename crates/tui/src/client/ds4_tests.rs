@@ -1,9 +1,9 @@
 use super::DeepSeekClient;
 use super::chat::{parse_chat_message, parse_sse_chunk};
 use crate::config::{Config, ProviderConfig, ProvidersConfig};
-use crate::models::Role;
-use crate::models::{ContentBlock, Delta, Message, MessageRequest, StreamEvent, Tool};
 use anyhow::Result;
+use codewhale_models::Role;
+use codewhale_models::{ContentBlock, Delta, Message, MessageRequest, StreamEvent, Tool};
 use serde_json::{Value, json};
 
 fn ds4_client() -> DeepSeekClient {

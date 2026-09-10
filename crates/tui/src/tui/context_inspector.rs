@@ -18,7 +18,6 @@ use crate::compaction::{
     CompactionPath, estimate_input_tokens_for_pressure, inspect_compaction_keep,
     last_round_kept_count, last_round_start, pinned_anchors_text,
 };
-use crate::models::{SystemPrompt, Tool};
 use crate::session_manager::SessionContextReference;
 use crate::tui::app::{App, ToolDetailRecord};
 use crate::tui::menu_style;
@@ -28,6 +27,7 @@ use crate::tui::views::{
 };
 use codewhale_core::ContextReferenceSource;
 use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_models::{SystemPrompt, Tool};
 use codewhale_palette as palette;
 
 /// Marker used by per-turn working-set metadata. Replicated here so the
@@ -303,7 +303,7 @@ fn compaction_assistant_clause(kept: bool, locale: Locale) -> Cow<'static, str> 
     }
 }
 
-fn last_round_messages(messages: &[crate::models::Message]) -> &[crate::models::Message] {
+fn last_round_messages(messages: &[codewhale_models::Message]) -> &[codewhale_models::Message] {
     let start = last_round_start(messages).min(messages.len());
     &messages[start..]
 }
@@ -1001,7 +1001,7 @@ impl ModalView for ContextInspectorView {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::models::Role;
+    use codewhale_models::Role;
 
     #[test]
     fn short_tool_id_never_panics_on_multibyte() {
@@ -1015,11 +1015,11 @@ mod tests {
     }
 
     use crate::mcp::{McpDiscoveredItem, McpManagerSnapshot, McpServerSnapshot};
-    use crate::models::{ContentBlock, Message, Tool};
     use crate::session_manager::SessionContextReference;
     use crate::tui::app::TuiOptions;
     use crate::tui::history::HistoryCell;
     use codewhale_core::{ContextReference, ContextReferenceKind, ContextReferenceSource};
+    use codewhale_models::{ContentBlock, Message, Tool};
     use std::path::PathBuf;
 
     use codewhale_localization::Locale;
@@ -1269,7 +1269,7 @@ mod tests {
     #[test]
     fn inspector_blocks_format_shows_stable_prefix_and_working_set() {
         let mut app = test_app();
-        use crate::models::SystemBlock;
+        use codewhale_models::SystemBlock;
         app.system_prompt = Some(SystemPrompt::Blocks(vec![
             SystemBlock {
                 block_type: "text".to_string(),
@@ -1310,7 +1310,7 @@ mod tests {
     #[test]
     fn inspector_blocks_without_working_set_shows_stable_only() {
         let mut app = test_app();
-        use crate::models::SystemBlock;
+        use codewhale_models::SystemBlock;
         app.system_prompt = Some(SystemPrompt::Blocks(vec![
             SystemBlock {
                 block_type: "text".to_string(),
@@ -1366,7 +1366,7 @@ mod tests {
 
     #[test]
     fn inspector_localizes_to_zh_hans() {
-        use crate::models::SystemBlock;
+        use codewhale_models::SystemBlock;
         let mut app = test_app();
         app.system_prompt = Some(SystemPrompt::Blocks(vec![
             SystemBlock {

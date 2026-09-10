@@ -1235,8 +1235,8 @@ mod tests {
 mod dialect_seam_tests {
     use super::*;
     use crate::config::{Config, ProviderConfig, ProvidersConfig};
-    use crate::models::Role;
-    use crate::models::{ContentBlock, Message, MessageRequest, SystemPrompt, Tool};
+    use codewhale_models::Role;
+    use codewhale_models::{ContentBlock, Message, MessageRequest, SystemPrompt, Tool};
     use serde_json::json;
 
     use super::super::DeepSeekClient;

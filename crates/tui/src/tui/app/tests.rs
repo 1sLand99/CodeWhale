@@ -1,6 +1,5 @@
 use super::*;
 use crate::config::{ApiProvider, Config, ProviderConfig, ProvidersConfig};
-use crate::models::Usage;
 use crate::settings::Settings;
 use crate::test_support::{EnvVarGuard, lock_test_env};
 use crate::tools::plan::{PlanItemArg, StepStatus, UpdatePlanArgs};
@@ -8,6 +7,7 @@ use crate::tools::todo::TodoStatus;
 use crate::tui::clipboard::{ClipboardHandler, PastedImage};
 use crate::tui::history::{GenericToolCell, HistoryCell, ToolCell, ToolStatus};
 use crate::tui::motion::MotionMode;
+use codewhale_models::Usage;
 
 fn test_options(yolo: bool) -> TuiOptions {
     TuiOptions {
@@ -2156,7 +2156,7 @@ fn subscription_route_hides_stale_session_dollars_in_footer() {
 #[test]
 fn provider_switch_keeps_audited_cumulative_spend_visible() {
     let mut app = App::new(test_options(false), &Config::default());
-    let usage = crate::models::Usage {
+    let usage = codewhale_models::Usage {
         input_tokens: 10_000,
         output_tokens: 1_000,
         ..Default::default()

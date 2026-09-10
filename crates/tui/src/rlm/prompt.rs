@@ -4,7 +4,7 @@
 //! The prompt is deliberately strict: the only way to make progress is
 //! through a `repl` block. There is no fall-through prose path.
 
-use crate::models::SystemPrompt;
+use codewhale_models::SystemPrompt;
 
 /// Build the system prompt for a Recursive Language Model (RLM) root call.
 pub fn rlm_system_prompt() -> SystemPrompt {

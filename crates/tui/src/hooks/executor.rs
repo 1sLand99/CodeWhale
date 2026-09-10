@@ -905,7 +905,7 @@ pub struct TurnEndPayloadInput<'a> {
     pub status: &'a str,
     pub error: Option<&'a str>,
     pub duration: Duration,
-    pub usage: &'a crate::models::Usage,
+    pub usage: &'a codewhale_models::Usage,
     pub totals: TurnEndTotals,
     pub tool_count: usize,
     pub queued_message_count: usize,
@@ -3326,7 +3326,7 @@ NOEQUAL line dropped
             .with_mode("agent")
             .with_model("deepseek-v4")
             .with_tokens(125);
-        let usage = crate::models::Usage {
+        let usage = codewhale_models::Usage {
             input_tokens: 40,
             output_tokens: 9,
             prompt_cache_hit_tokens: Some(10),
@@ -3779,7 +3779,7 @@ printf '%s\n' '{{"text":"stdout is not a mutation contract"}}'
             },
             dir.path().to_path_buf(),
         );
-        let usage = crate::models::Usage {
+        let usage = codewhale_models::Usage {
             input_tokens: 12,
             output_tokens: 3,
             prompt_cache_hit_tokens: None,
@@ -5334,7 +5334,7 @@ command = "echo project"
     #[test]
     fn turn_end_error_is_sanitized_and_bounded() {
         let context = HookContext::new();
-        let usage = crate::models::Usage::default();
+        let usage = codewhale_models::Usage::default();
         let error = format!(
             "boom\u{1b}[2J{}",
             "x".repeat(super::HOOK_TURN_ERROR_MAX_CHARS * 2)

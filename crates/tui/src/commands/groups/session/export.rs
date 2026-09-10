@@ -15,10 +15,10 @@ use regex::Regex;
 use serde_json::Value;
 
 use crate::commands::traits::{CommandInfo, RegisterCommand};
-use crate::models::{ContentBlock, Message, Role};
 use crate::tui::app::App;
 use crate::tui::history::HistoryCell;
 use codewhale_localization::MessageId;
+use codewhale_models::{ContentBlock, Message, Role};
 
 use super::CommandResult;
 
@@ -950,9 +950,9 @@ fn set_owner_only(_path: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::models::{ImageUrlContent, ToolCaller};
     use crate::tui::app::{App, TuiOptions};
     use crate::tui::clipboard::ClipboardHandler;
+    use codewhale_models::{ImageUrlContent, ToolCaller};
     use tempfile::TempDir;
 
     fn test_app(tmpdir: &TempDir) -> App {

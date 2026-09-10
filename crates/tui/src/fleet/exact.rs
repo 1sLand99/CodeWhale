@@ -54,8 +54,8 @@ use super::role::{
 };
 use crate::config::{ApiProvider, Config};
 use crate::llm_client::LlmClient;
-use crate::models::Role;
 use crate::reasoning_preference::ReasoningEffort;
+use codewhale_models::Role;
 
 /// Where exact Fleet definitions and Reasoning Router profiles are looked up,
 /// labelled so an identity can be qualified (`workspace/glm-pair`) instead of
@@ -452,7 +452,7 @@ impl FleetRouterCaller for LiveFleetRouter {
     }
 
     async fn decide(&self, input: &RouterCallInput) -> Result<String, String> {
-        use crate::models::{ContentBlock, Message, MessageRequest, SystemPrompt};
+        use codewhale_models::{ContentBlock, Message, MessageRequest, SystemPrompt};
 
         // The bounded, redacted summary is transmitted exactly once, in the
         // user turn. The system prompt carries the contract and the frozen
@@ -495,10 +495,10 @@ impl FleetRouterCaller for LiveFleetRouter {
             .create_message(request)
             .await
             .map_err(|error| error.to_string())?;
-        if crate::models::is_incomplete_stop_reason(response.stop_reason.as_deref()) {
+        if codewhale_models::is_incomplete_stop_reason(response.stop_reason.as_deref()) {
             return Err(format!(
                 "reasoning router response incomplete: provider stop reason `{}`",
-                crate::models::stop_reason_detail(response.stop_reason.as_deref())
+                codewhale_models::stop_reason_detail(response.stop_reason.as_deref())
             ));
         }
         let text = response

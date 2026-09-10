@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod model_catalog;
+
 /// Context window used only for legacy DeepSeek model IDs that do not name a
 /// newer V4 alias and do not carry an explicit `*k` suffix.
 pub const LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS: u32 = 128_000;
@@ -36,7 +38,7 @@ pub const DIRECT_KIMI_K3_MAX_OUTPUT_TOKENS: u32 = 1_048_576;
 /// models resolve to their own scaled value via
 /// `compaction_threshold_for_model` (#664).
 pub const DEFAULT_COMPACTION_TOKEN_THRESHOLD: usize = 102_400;
-pub(crate) fn canonical_official_deepseek_model_id(model: &str) -> Option<&'static str> {
+pub fn canonical_official_deepseek_model_id(model: &str) -> Option<&'static str> {
     match model.trim().to_ascii_lowercase().as_str() {
         "deepseek-v4-pro"
         | "deepseek-v4pro"
@@ -54,7 +56,7 @@ pub(crate) fn canonical_official_deepseek_model_id(model: &str) -> Option<&'stat
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const COMPACTION_THRESHOLD_PERCENT: u32 = 80;
 
 // === Core Message Types ===
@@ -109,7 +111,7 @@ pub struct MessageResponse {
 /// True when the provider ended generation because its output allowance was
 /// exhausted. Providers use several wire spellings for the same condition.
 #[must_use]
-pub(crate) fn is_output_limit_stop_reason(reason: Option<&str>) -> bool {
+pub fn is_output_limit_stop_reason(reason: Option<&str>) -> bool {
     reason.is_some_and(|reason| {
         let reason = reason
             .trim()
@@ -126,7 +128,7 @@ pub(crate) fn is_output_limit_stop_reason(reason: Option<&str>) -> bool {
 /// response. Responses API reasons carry an `incomplete:` prefix so unknown
 /// future reasons cannot accidentally be accepted as a finished answer.
 #[must_use]
-pub(crate) fn is_incomplete_stop_reason(reason: Option<&str>) -> bool {
+pub fn is_incomplete_stop_reason(reason: Option<&str>) -> bool {
     is_output_limit_stop_reason(reason)
         || reason.is_some_and(|reason| {
             let reason = reason.trim().to_ascii_lowercase();
@@ -139,7 +141,7 @@ pub(crate) fn is_incomplete_stop_reason(reason: Option<&str>) -> bool {
 }
 
 #[must_use]
-pub(crate) fn stop_reason_detail(reason: Option<&str>) -> &str {
+pub fn stop_reason_detail(reason: Option<&str>) -> &str {
     reason
         .map(str::trim)
         .and_then(|reason| reason.strip_prefix("incomplete:").or(Some(reason)))
@@ -570,7 +572,7 @@ pub fn effective_muse_wire_id(model: &str) -> &str {
 }
 
 #[must_use]
-pub(crate) fn model_is_openai_reasoning_family(model: &str) -> bool {
+pub fn model_is_openai_reasoning_family(model: &str) -> bool {
     let lower = model.to_lowercase();
     is_openai_gpt_55_api_model(&lower)
         || is_openai_gpt_56_api_model(&lower)
@@ -583,7 +585,7 @@ fn is_openai_gpt_55_api_model(model_lower: &str) -> bool {
         || has_date_snapshot_suffix(model_lower, "gpt-5.5-pro-")
 }
 
-pub(crate) fn is_openai_gpt_56_api_model(model_lower: &str) -> bool {
+pub fn is_openai_gpt_56_api_model(model_lower: &str) -> bool {
     matches!(
         model_lower,
         "gpt-5.6" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna"
@@ -608,7 +610,7 @@ fn is_openai_codex_model(model_lower: &str) -> bool {
     )
 }
 
-pub(crate) fn has_date_snapshot_suffix(model_lower: &str, prefix: &str) -> bool {
+pub fn has_date_snapshot_suffix(model_lower: &str, prefix: &str) -> bool {
     let Some(rest) = model_lower.strip_prefix(prefix) else {
         return false;
     };
@@ -631,7 +633,7 @@ pub(crate) fn has_date_snapshot_suffix(model_lower: &str, prefix: &str) -> bool 
 /// a fact about the route, and every surface that shows such a window must
 /// mark it unverified.
 #[must_use]
-pub(crate) fn name_suffix_context_window_hint(model: &str) -> Option<u32> {
+pub fn name_suffix_context_window_hint(model: &str) -> Option<u32> {
     if crate::model_catalog::resolved_context_window(model).is_some() {
         return None;
     }
@@ -674,7 +676,7 @@ fn explicit_context_window_hint(model_lower: &str) -> Option<u32> {
 /// Derive a compaction token threshold from model context and a caller-supplied
 /// percentage.
 #[must_use]
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn compaction_threshold_for_model_at_percent(model: &str, percent: f64) -> usize {
     let Some(window) = context_window_for_model(model) else {
         return DEFAULT_COMPACTION_TOKEN_THRESHOLD;

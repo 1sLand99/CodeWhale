@@ -387,7 +387,7 @@ impl CommandSessionLifecycleContext for SessionLifecycleAdapter<'_> {
                     .content
                     .iter()
                     .filter_map(|b| match b {
-                        crate::models::ContentBlock::Text { text, .. } => Some(text.as_str()),
+                        codewhale_models::ContentBlock::Text { text, .. } => Some(text.as_str()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
@@ -627,7 +627,7 @@ impl CommandSessionLifecycleContext for SessionLifecycleAdapter<'_> {
             source_session
                 .system_prompt
                 .as_ref()
-                .map(|s| crate::models::SystemPrompt::Text(s.clone()))
+                .map(|s| codewhale_models::SystemPrompt::Text(s.clone()))
                 .as_ref(),
             source_session.metadata.mode.as_deref(),
         );
@@ -671,7 +671,7 @@ impl CommandSessionLifecycleContext for SessionLifecycleAdapter<'_> {
                 system_prompt: forked
                     .system_prompt
                     .as_ref()
-                    .map(|s| crate::models::SystemPrompt::Text(s.clone())),
+                    .map(|s| codewhale_models::SystemPrompt::Text(s.clone())),
                 model: forked.metadata.model.clone(),
                 workspace: app.workspace.clone(),
                 mode,
@@ -4043,8 +4043,8 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::Role;
     use codewhale_localization::Locale;
+    use codewhale_models::Role;
     use tempfile::TempDir;
 
     fn test_app() -> App {
@@ -4711,9 +4711,9 @@ mod tests {
         app.session.total_conversation_tokens = 2_000;
         app.goal_continuation_waiting = true;
         app.is_loading = false;
-        app.api_messages.push(crate::models::Message {
-            role: crate::models::Role::User,
-            content: vec![crate::models::ContentBlock::Text {
+        app.api_messages.push(codewhale_models::Message {
+            role: codewhale_models::Role::User,
+            content: vec![codewhale_models::ContentBlock::Text {
                 text: "work".to_string(),
                 cache_control: None,
             }],
@@ -5604,8 +5604,8 @@ mod tests {
 
     fn user_message(text: &str) -> Message {
         Message {
-            role: crate::models::Role::User,
-            content: vec![crate::models::ContentBlock::Text {
+            role: codewhale_models::Role::User,
+            content: vec![codewhale_models::ContentBlock::Text {
                 text: text.to_string(),
                 cache_control: None,
             }],

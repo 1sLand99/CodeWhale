@@ -50,10 +50,6 @@ use crate::fleet::role::{
     VALID_ROLE_ALIASES, migrate_legacy_role_token, public_role_label,
 };
 use crate::llm_client::{LlmClient, LlmError};
-use crate::models::{
-    ContentBlock, Message, MessageRequest, MessageResponse, SystemPrompt, Tool, Usage,
-    is_incomplete_stop_reason, is_output_limit_stop_reason, stop_reason_detail,
-};
 use crate::reasoning_preference::ReasoningEffort;
 use crate::request_tuning::RequestTuning;
 use crate::tools::canonical_action::{
@@ -80,6 +76,10 @@ use crate::worker_profile::{
 };
 use codewhale_config::AppMode;
 use codewhale_execpolicy::ApprovalMode;
+use codewhale_models::{
+    ContentBlock, Message, MessageRequest, MessageResponse, SystemPrompt, Tool, Usage,
+    is_incomplete_stop_reason, is_output_limit_stop_reason, stop_reason_detail,
+};
 use coord::{
     CoordinationDetailMetrics, CoordinationHotPath, CoordinationLedger, DecisionRecord,
     DecisionStatus, PersistedWriteClaim, ReconciliationReceipt, WriteScopeClaim,
@@ -95,12 +95,12 @@ use worktree::{SubAgentWorktreeRequest, prepare_child_workspace};
 #[cfg(test)]
 use worktree::{create_isolated_worktree, git_repo_root};
 
-use crate::models::Role;
 #[allow(unused_imports)] // re-exported for hosts / tests; registration uses concrete types
 pub use advisor::{
     AdvisorConfig, EmissionGuard, ToolCallPair, build_advisor_prompt, extract_tool_call_pairs,
     run_advisor_for_turn,
 };
+use codewhale_models::Role;
 #[allow(unused_imports)] // re-exported for hosts / tests; registration uses concrete types
 pub use coord::{
     AgentsCoordinateTool, AgentsFollowupTool, AgentsInterruptTool, AgentsListTool,
@@ -6456,7 +6456,7 @@ impl SubAgentManager {
         &mut self,
         name: &str,
         workspace: &Path,
-        messages: Vec<crate::models::Message>,
+        messages: Vec<codewhale_models::Message>,
     ) -> (String, String) {
         let agent_id = self.insert_test_running_agent(name, workspace);
         let checkpoint = build_subagent_checkpoint(&agent_id, "test_interrupt", &messages, 1, true);
@@ -13933,7 +13933,7 @@ async fn resolved_spawn_roster_entry(
             let limits = child.client.route_limits();
             // Inspect nonzero text classes through the existing route audit;
             // this does not record usage or claim a future task's total cost.
-            let audit = envelope.audit(&crate::models::Usage {
+            let audit = envelope.audit(&codewhale_models::Usage {
                 input_tokens: 1,
                 output_tokens: 1,
                 ..Default::default()

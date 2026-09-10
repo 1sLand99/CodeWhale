@@ -54,8 +54,8 @@ use futures_util::StreamExt;
 
 use crate::llm_client::LlmClient;
 use crate::llm_client::mock::{MockLlmClient, canned};
-use crate::models::Role;
-use crate::models::{ContentBlock, Delta, Message, MessageRequest, StreamEvent, Usage};
+use codewhale_models::Role;
+use codewhale_models::{ContentBlock, Delta, Message, MessageRequest, StreamEvent, Usage};
 
 // === Helpers ===============================================================
 
@@ -290,7 +290,7 @@ async fn tool_call_round_trip_streams_args_then_continues() {
     while let Some(ev) = s1.next().await {
         match ev.unwrap() {
             StreamEvent::ContentBlockStart { content_block, .. } => {
-                use crate::models::ContentBlockStart;
+                use codewhale_models::ContentBlockStart;
                 if let ContentBlockStart::ToolUse { name, .. } = content_block {
                     assert_eq!(name, "read_file");
                     tool_use_seen = true;
@@ -357,7 +357,7 @@ async fn parallel_tool_calls_preserve_ordering_in_turn_payload() {
             content_block,
         } = ev.unwrap()
         {
-            use crate::models::ContentBlockStart;
+            use codewhale_models::ContentBlockStart;
             if let ContentBlockStart::ToolUse { id, .. } = content_block {
                 starts.push((index, id));
             }
@@ -373,7 +373,7 @@ async fn parallel_tool_calls_preserve_ordering_in_turn_payload() {
 
 #[tokio::test]
 async fn compaction_non_streaming_returns_queued_message_response() {
-    use crate::models::MessageResponse;
+    use codewhale_models::MessageResponse;
 
     let mock = MockLlmClient::new(vec![]);
     mock.push_message_response(MessageResponse {
@@ -457,7 +457,7 @@ Child results are self-reports; verify side effects with tools like read_file or
     while let Some(ev) = stream.next().await {
         match ev.unwrap() {
             StreamEvent::ContentBlockStart { content_block, .. } => {
-                use crate::models::ContentBlockStart;
+                use codewhale_models::ContentBlockStart;
                 if let ContentBlockStart::ToolUse { name, .. } = content_block {
                     tool_name = Some(name);
                 }
@@ -544,7 +544,8 @@ fn compaction_config_defaults_are_enabled_for_session_survivability() {
     // This test is a smoke check that the defaults compile and are correct.
     // The production `CompactionConfig::default()` is exercised by
     // `compaction::tests::should_compact_respects_enabled_flag` etc.
-    let config = crate::models::compaction_threshold_for_model_at_percent("deepseek-v4-pro", 80.0);
+    let config =
+        codewhale_models::compaction_threshold_for_model_at_percent("deepseek-v4-pro", 80.0);
     // Verify the threshold is reasonable (> 0 and < context window).
     assert!(config > 0, "compaction threshold must be positive");
     assert!(config < 1_000_000, "compaction threshold must be below 1M");

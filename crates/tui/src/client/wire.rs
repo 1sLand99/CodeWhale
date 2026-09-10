@@ -6,7 +6,7 @@
 use anyhow::Result;
 use serde_json::Value;
 
-use crate::models::{ServerToolUsage, Usage};
+use codewhale_models::{ServerToolUsage, Usage};
 
 pub(crate) fn saturating_u32(value: u64) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
@@ -392,7 +392,7 @@ mod tests {
 
             // Invariant 2: pricing does not add reasoning a second time. The same
             // usage with the reasoning field removed must cost the same.
-            let without = crate::models::Usage {
+            let without = codewhale_models::Usage {
                 reasoning_tokens: None,
                 ..usage.clone()
             };

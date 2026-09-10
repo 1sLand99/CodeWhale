@@ -24,7 +24,6 @@ use crate::config::{
 use crate::core::authority::{ModeSessionPrefs, base_policy_for_mode};
 use crate::core::events::TurnRoute;
 use crate::hooks::{HookContext, HookEvent, HookExecutor, HookResult};
-use crate::models::{Message, SystemPrompt, Tool, Usage};
 use crate::pricing::{CostCurrency, CostEstimate};
 use crate::reasoning_preference::{EffectiveReasoningEffort, ReasoningEffort};
 use crate::session_manager::{SessionContextReference, SessionMetadata, SessionWorkState};
@@ -47,6 +46,7 @@ use crate::tui::streaming::StreamingState;
 use crate::tui::transcript::TranscriptViewCache;
 use crate::tui::views::ViewStack;
 use codewhale_localization::{Locale, MessageId, resolve_locale, tr};
+use codewhale_models::{Message, SystemPrompt, Tool, Usage};
 use codewhale_palette::{self as palette, UiTheme};
 
 mod composer;

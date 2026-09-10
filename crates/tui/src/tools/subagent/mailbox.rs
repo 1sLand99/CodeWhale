@@ -17,8 +17,8 @@ use tokio_util::sync::CancellationToken;
 
 #[cfg(test)]
 use crate::config::ApiProvider;
-use crate::models::Usage;
 use crate::tools::todo::TodoListSnapshot;
+use codewhale_models::Usage;
 
 use super::FleetRole;
 

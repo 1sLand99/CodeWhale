@@ -8,7 +8,6 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use crate::models::{ContentBlock, Message};
 use crate::tools::plan::PlanSnapshot;
 use crate::tools::review::ReviewOutput;
 use crate::tui::app::TranscriptSpacing;
@@ -16,6 +15,7 @@ use crate::tui::diff_render;
 use crate::tui::motion::MotionMode;
 use crate::tui::ui_text::CopyLineSeparator;
 use codewhale_localization::Locale;
+use codewhale_models::{ContentBlock, Message};
 use codewhale_palette as palette;
 
 mod agent_activity;
@@ -705,7 +705,7 @@ pub fn history_cells_from_message(msg: &Message) -> Vec<HistoryCell> {
                 }
                 // Check if this is an `<archived_context>` block.
                 if (msg.role == "assistant"
-                    || msg.role == crate::models::INTERRUPTED_ASSISTANT_ROLE)
+                    || msg.role == codewhale_models::INTERRUPTED_ASSISTANT_ROLE)
                     && let Some(archived) = parse_archived_context(text)
                 {
                     cells.push(archived);
