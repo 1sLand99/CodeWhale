@@ -104,9 +104,12 @@ pub const GATE_TOO_LARGE_MARKER: &str = "workspace too large for snapshots";
 pub const GATE_TOO_MANY_ENTRIES_MARKER: &str = "workspace has too many files for snapshots";
 pub const GATE_UNSAFE_LOCATION_MARKER: &str = "workspace snapshots are disabled";
 
-/// Display a workspace path in gate diagnostics without Windows verbatim
-/// (`\\?\`) prefixes. `Path::canonicalize` embeds that prefix; users and
-/// tests name the workspace without it, so leave it out of the message.
+/// Display a workspace path in gate diagnostics. The diagnostic names the
+/// path the caller passed in — canonicalization is for filesystem and
+/// security logic, not for the message. On Windows `Path::canonicalize`
+/// rewrites more than the verbatim (`\\?\`) prefix (case, 8.3 names), so a
+/// canonical spelling can never be relied on to match what users name; the
+/// verbatim prefix is still stripped when present for readability.
 fn display_workspace_for_gate(workspace: &Path) -> String {
     let raw = workspace.display().to_string();
     raw.strip_prefix(r"\\?\")
@@ -287,7 +290,7 @@ impl SnapshotRepo {
                 io::ErrorKind::InvalidInput,
                 format!(
                     "{GATE_UNSAFE_LOCATION_MARKER} for {reason}: {}",
-                    display_workspace_for_gate(&work_tree)
+                    display_workspace_for_gate(workspace)
                 ),
             ));
         }
@@ -309,7 +312,7 @@ impl SnapshotRepo {
             {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    gate.describe(cap_bytes, &work_tree),
+                    gate.describe(cap_bytes, workspace),
                 ));
             }
             let parent = git_dir.parent().ok_or_else(|| {
