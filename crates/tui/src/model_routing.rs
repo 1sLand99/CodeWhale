@@ -17,7 +17,7 @@ use crate::llm_client::LlmClient;
 use crate::model_inventory::ModelInventory;
 use crate::models::Role;
 use crate::models::{ContentBlock, Message, MessageRequest, MessageResponse, SystemPrompt};
-use crate::tui::app::ReasoningEffort;
+use crate::reasoning_preference::ReasoningEffort;
 
 /// Big/cheap model pair the auto-router may choose between for the active
 /// provider (#3018).

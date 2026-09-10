@@ -54,6 +54,7 @@ use crate::models::{
     ContentBlock, Message, MessageRequest, MessageResponse, SystemPrompt, Tool, Usage,
     is_incomplete_stop_reason, is_output_limit_stop_reason, stop_reason_detail,
 };
+use crate::reasoning_preference::ReasoningEffort;
 use crate::request_tuning::RequestTuning;
 use crate::tools::canonical_action::{
     CANONICAL_ACTION_ALIASES, canonical_action_alias, is_action_family,
@@ -69,7 +70,6 @@ use crate::tools::spec::{
 use crate::tools::todo::SharedTodoList;
 #[cfg(test)]
 use crate::tools::todo::TodoList;
-use crate::tui::app::ReasoningEffort;
 use crate::utils::spawn_supervised;
 use crate::work_graph::{
     EvidenceKind, EvidenceRef, OperationIntent, OperationOwnerSnapshot, OwnerState,

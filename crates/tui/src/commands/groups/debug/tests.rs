@@ -566,7 +566,7 @@ fn cache_inspect_json_keys_auto_replay_to_the_last_concrete_route() {
     let mut app = create_test_app();
     app.model = "auto".to_string();
     app.auto_model = true;
-    app.reasoning_effort = crate::tui::app::ReasoningEffort::Off;
+    app.reasoning_effort = crate::reasoning_preference::ReasoningEffort::Off;
     app.last_effective_provider = Some(crate::config::ApiProvider::OpenaiCodex);
     app.last_effective_provider_identity =
         Some(crate::config::ApiProvider::OpenaiCodex.as_str().to_string());

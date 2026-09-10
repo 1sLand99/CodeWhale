@@ -39,8 +39,9 @@ use crate::palette;
 use crate::provider_lake::{
     catalog_offering_for_model, catalog_offering_for_model_identity, configured_providers,
 };
+use crate::reasoning_preference::ReasoningEffort;
 use crate::settings::PinnedModel;
-use crate::tui::app::{App, ReasoningEffort};
+use crate::tui::app::App;
 use crate::tui::menu_style;
 use crate::tui::views::{
     ActionHint, ListDetailLayout, ModalKind, ModalView, ViewAction, ViewEvent, render_modal_footer,

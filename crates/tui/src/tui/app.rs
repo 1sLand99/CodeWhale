@@ -26,6 +26,7 @@ use crate::localization::{Locale, MessageId, resolve_locale, tr};
 use crate::models::{Message, SystemPrompt, Tool, Usage};
 use crate::palette::{self, UiTheme};
 use crate::pricing::{CostCurrency, CostEstimate};
+use crate::reasoning_preference::{EffectiveReasoningEffort, ReasoningEffort};
 use crate::session_manager::{SessionContextReference, SessionMetadata, SessionWorkState};
 use crate::settings::{InlineDiffMode, Settings};
 use crate::tools::plan::{PlanState, SharedPlanState, new_shared_plan_state};
@@ -69,13 +70,12 @@ pub(crate) enum RedactionGateNotice {
 }
 pub use types::{
     AppAction, AppMode, AppModeUi, AutomationAction, ComposerDensity, ComposerSubmitAction,
-    ComposerSubmitChord, InitialInput, McpUiAction, QueuedMessage, ReasoningEffort, ScreenMode,
-    SettingSelection, ShellJobAction, SubmitDisposition, TaskPanelEntry, TaskPanelEntryKind,
-    ToolCollapseMode, ToolDetailRecord, TranscriptSpacing, TuiOptions, VimMode,
+    ComposerSubmitChord, InitialInput, McpUiAction, QueuedMessage, ScreenMode, SettingSelection,
+    ShellJobAction, SubmitDisposition, TaskPanelEntry, TaskPanelEntryKind, ToolCollapseMode,
+    ToolDetailRecord, TranscriptSpacing, TuiOptions, VimMode,
 };
 pub(crate) use types::{
-    CacheReplayTarget, EffectiveReasoningEffort, GoalControlIntent, PendingGoalControl,
-    WORKFLOW_DRAFT_INSTRUCTION_PREFIX,
+    CacheReplayTarget, GoalControlIntent, PendingGoalControl, WORKFLOW_DRAFT_INSTRUCTION_PREFIX,
 };
 
 // === Types ===

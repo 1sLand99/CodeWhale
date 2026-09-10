@@ -19,10 +19,11 @@
 
 use crate::compaction::CompactionConfig;
 use crate::config::{ApiProvider, Config, ProviderIdentity};
+use crate::reasoning_preference::ReasoningEffort;
 use crate::route_runtime::{
     ResolvedRuntimeRoute, resolve_runtime_route, resolve_runtime_route_for_identity,
 };
-use crate::tui::app::{AppMode, ReasoningEffort};
+use crate::tui::app::AppMode;
 
 /// Everything the shared turn-route planner needs.
 ///

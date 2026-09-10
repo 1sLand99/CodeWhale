@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::{expand_path, normalize_model_name};
 use crate::localization::normalize_configured_locale;
 use crate::palette::{normalize_hex_rgb_color, normalize_theme_setting};
-use crate::tui::app::ReasoningEffort;
+use crate::reasoning_preference::ReasoningEffort;
 use codewhale_config::resolve::Layer;
 
 const SETTINGS_FILE_NAME: &str = "settings.toml";

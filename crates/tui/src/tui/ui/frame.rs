@@ -2460,7 +2460,7 @@ mod tests {
         app.auto_model = false;
         app.active_route_base_url = "https://gateway.example/v1".to_string();
         app.model = "vendor-model-x".to_string();
-        app.reasoning_effort = crate::tui::app::ReasoningEffort::High;
+        app.reasoning_effort = crate::reasoning_preference::ReasoningEffort::High;
         assert_eq!(
             app.reasoning_effort_display_label(),
             "high→effective unavailable",

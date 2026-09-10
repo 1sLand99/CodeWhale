@@ -131,15 +131,17 @@ use crate::tui::views::subagent_view_agents;
 use crate::tui::vim_mode;
 use crate::tui::workspace_context;
 
+use crate::reasoning_preference::{EffectiveReasoningEffort, ReasoningEffort};
+
 use super::key_actions;
 
 use super::app::{
     ActiveCompaction, ActiveTurnMetadata, AgentCurrentActivity, App, AppAction, AppMode,
-    ComposerSubmitAction, ComposerSubmitChord, EffectiveReasoningEffort, GoalControlIntent,
-    OnboardingState, PendingGoalControl, PendingProviderSwitch, QueuedMessage, ReasoningEffort,
-    RedactionGateNotice, ScreenMode, StatusToast, StatusToastLevel, SubmitDisposition,
-    TaskPanelEntry, TaskPanelEntryKind, ToolEvidence, TuiOptions, bound_agent_activity_text,
-    is_stop_word, looks_like_slash_command_input, shell_command_from_bang_input,
+    ComposerSubmitAction, ComposerSubmitChord, GoalControlIntent, OnboardingState,
+    PendingGoalControl, PendingProviderSwitch, QueuedMessage, RedactionGateNotice, ScreenMode,
+    StatusToast, StatusToastLevel, SubmitDisposition, TaskPanelEntry, TaskPanelEntryKind,
+    ToolEvidence, TuiOptions, bound_agent_activity_text, is_stop_word,
+    looks_like_slash_command_input, shell_command_from_bang_input,
 };
 use super::approval::{
     ApprovalMode, ApprovalRequest, ApprovalView, ElevationRequest, ElevationView, ReviewDecision,

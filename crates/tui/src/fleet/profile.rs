@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
-use crate::tui::app::ReasoningEffort;
+use crate::reasoning_preference::ReasoningEffort;
 
 #[allow(unused_imports)]
 pub use codewhale_config::{

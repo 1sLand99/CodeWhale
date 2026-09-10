@@ -17,11 +17,9 @@ use crate::config_persistence::{
     persist_tui_integer_key, persist_unset_root_key,
 };
 use crate::localization::{MessageId, resolve_locale, tr};
+use crate::reasoning_preference::ReasoningEffort;
 use crate::settings::Settings;
-use crate::tui::app::{
-    App, AppAction, AppMode, OnboardingState, ReasoningEffort, ScreenMode, SettingSelection,
-    VimMode,
-};
+use crate::tui::app::{App, AppAction, AppMode, OnboardingState, ScreenMode, SettingSelection, VimMode};
 use anyhow::Result;
 use codewhale_execpolicy::ApprovalMode;
 use std::path::{Path, PathBuf};

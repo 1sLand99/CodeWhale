@@ -11,9 +11,10 @@ use tempfile::TempDir;
 use crate::commands::CommandResult;
 use crate::config::Config;
 use crate::models::Role;
+use crate::reasoning_preference::ReasoningEffort;
 use crate::session_manager::create_saved_session_with_id_and_mode;
 use crate::test_support::EnvVarGuard;
-use crate::tui::app::{App, AppAction, AppMode, ReasoningEffort, TuiOptions, TurnCacheRecord};
+use crate::tui::app::{App, AppAction, AppMode, TuiOptions, TurnCacheRecord};
 use crate::tui::history::HistoryCell;
 
 fn dispatch_lifecycle(app: &mut App, name: &str, arg: Option<&str>) -> CommandResult {
@@ -123,7 +124,7 @@ fn save_preserves_latest_auto_route_receipt() {
     app.last_effective_model = Some(crate::config::ZAI_GLM_5_TURBO_MODEL.to_string());
     app.last_auto_route_receipt = Some(receipt.clone());
     app.last_effective_reasoning_effort =
-        Some(crate::tui::app::EffectiveReasoningEffort::ThinkingEnabledGranularityUnavailable);
+        Some(crate::reasoning_preference::EffectiveReasoningEffort::ThinkingEnabledGranularityUnavailable);
 
     let result = save(&mut app, Some(save_path.to_str().unwrap()));
 
@@ -635,7 +636,7 @@ fn load_auto_model_session_defers_model_restore_to_event_loop() {
     saved_app.set_model_selection("auto".to_string());
     saved_app.last_effective_model = Some("deepseek-v4-flash".to_string());
     saved_app.last_effective_reasoning_effort = Some(
-        crate::tui::app::EffectiveReasoningEffort::Tier(ReasoningEffort::Low),
+        crate::reasoning_preference::EffectiveReasoningEffort::Tier(ReasoningEffort::Low),
     );
     let save_path = tmpdir.path().join("auto_model.json");
     save(&mut saved_app, Some(save_path.to_str().unwrap()));

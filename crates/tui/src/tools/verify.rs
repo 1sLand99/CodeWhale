@@ -48,7 +48,7 @@ use crate::dependencies::ExternalTool;
 use crate::features::Feature;
 use crate::llm_client::LlmClient;
 use crate::models::{ContentBlock, Message, MessageRequest, SystemPrompt, Usage};
-use crate::tui::app::ReasoningEffort;
+use crate::reasoning_preference::ReasoningEffort;
 use crate::utils::truncate_with_ellipsis;
 
 use super::spec::{

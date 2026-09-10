@@ -874,9 +874,9 @@ pub(crate) async fn apply_model_picker_choice(
     model: String,
     target_provider: Option<ApiProvider>,
     target_provider_id: Option<String>,
-    effort: crate::tui::app::ReasoningEffort,
+    effort: crate::reasoning_preference::ReasoningEffort,
     previous_model: String,
-    previous_effort: crate::tui::app::ReasoningEffort,
+    previous_effort: crate::reasoning_preference::ReasoningEffort,
     save_as_startup_default: bool,
 ) {
     if app.reject_setting_change_while_busy(

@@ -18,8 +18,9 @@ use crate::config::{
     ProviderConfig, ProvidersConfig,
 };
 use crate::core::engine::mock_engine_handle;
+use crate::reasoning_preference::ReasoningEffort;
 use crate::tui::active_cell::ActiveCell;
-use crate::tui::app::{ReasoningEffort, ToolDetailRecord};
+use crate::tui::app::ToolDetailRecord;
 use crate::tui::file_mention::{
     apply_mention_menu_selection, find_file_mention_completions, partial_file_mention_at_cursor,
     try_autocomplete_file_mention, user_request_with_file_mentions, visible_mention_menu_entries,

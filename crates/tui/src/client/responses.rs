@@ -917,8 +917,8 @@ fn tool_to_responses_function(tool: &Tool) -> Value {
 }
 
 fn codex_responses_reasoning_effort(raw: &str) -> Option<&'static str> {
-    crate::tui::app::ReasoningEffort::parse_strict(raw)
-        .unwrap_or(crate::tui::app::ReasoningEffort::Medium)
+    crate::reasoning_preference::ReasoningEffort::parse_strict(raw)
+        .unwrap_or(crate::reasoning_preference::ReasoningEffort::Medium)
         .api_value_for_provider(ApiProvider::OpenaiCodex)
 }
 

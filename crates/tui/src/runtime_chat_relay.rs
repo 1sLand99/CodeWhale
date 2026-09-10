@@ -1236,7 +1236,7 @@ impl RuntimeChatPrompt {
             return Err("Runtime relay turns must use Chat mode.".to_string());
         }
         if let Some(reasoning) = self.reasoning_effort.as_deref()
-            && crate::tui::app::ReasoningEffort::parse_strict(reasoning).is_err()
+            && crate::reasoning_preference::ReasoningEffort::parse_strict(reasoning).is_err()
         {
             return Err("The Runtime Chat reasoning effort is invalid.".to_string());
         }

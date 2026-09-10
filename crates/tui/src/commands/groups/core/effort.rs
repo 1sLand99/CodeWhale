@@ -8,7 +8,8 @@
 
 use crate::commands::{CommandResult, traits::CommandInfo};
 use crate::localization::{MessageId, tr};
-use crate::tui::app::{App, ReasoningEffort};
+use crate::reasoning_preference::ReasoningEffort;
+use crate::tui::app::App;
 
 pub const EFFORT_INFO: CommandInfo = CommandInfo {
     name: "effort",

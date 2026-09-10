@@ -975,7 +975,7 @@ impl HotbarAction for AppHotbarAction {
             AppHotbarKind::SessionCompact => app.is_compacting || app.manual_compaction_queued,
             AppHotbarKind::Mode(mode) => app.mode == mode,
             AppHotbarKind::ReasoningCycle => {
-                app.reasoning_effort != crate::tui::app::ReasoningEffort::Off
+                app.reasoning_effort != crate::reasoning_preference::ReasoningEffort::Off
             }
             AppHotbarKind::SidebarToggle => {
                 app.work_surface.placement != crate::tui::work_surface::WorkSurfacePlacement::Off
@@ -1439,7 +1439,8 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::config::{ApiProvider, Config};
-    use crate::tui::app::{ReasoningEffort, TuiOptions};
+    use crate::reasoning_preference::ReasoningEffort;
+    use crate::tui::app::TuiOptions;
     use crate::tui::views::ModalKind;
 
     use super::*;

@@ -748,9 +748,9 @@ pub enum ViewEvent {
         /// Exact named custom route key when the selected provider enum is
         /// `Custom`; built-in routes leave this unset.
         provider_id: Option<String>,
-        effort: crate::tui::app::ReasoningEffort,
+        effort: crate::reasoning_preference::ReasoningEffort,
         previous_model: String,
-        previous_effort: crate::tui::app::ReasoningEffort,
+        previous_effort: crate::reasoning_preference::ReasoningEffort,
         save_as_startup_default: bool,
     },
     /// Emitted by the `/model` picker on Esc so the next open can restore
@@ -2082,7 +2082,7 @@ impl ConfigView {
                 value: settings.reasoning_effort.as_deref().map_or_else(
                     || tr(app.ui_locale, MessageId::ConfigDefaultReasoning).to_string(),
                     |value| {
-                        crate::tui::app::ReasoningEffort::from_setting_for_provider(
+                        crate::reasoning_preference::ReasoningEffort::from_setting_for_provider(
                             value,
                             app.api_provider,
                         )

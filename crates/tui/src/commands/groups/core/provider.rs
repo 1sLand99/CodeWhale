@@ -752,7 +752,7 @@ mod tests {
                             ),
                             crate::config::DEEPSEEK_ALIAS_REPLACEMENT
                         );
-                        app.reasoning_effort = crate::tui::app::ReasoningEffort::Max;
+                        app.reasoning_effort = crate::reasoning_preference::ReasoningEffort::Max;
                         app.reasoning_effort_preference = None;
                         app.apply_provider_switch_reasoning_effort(
                             provider,
@@ -762,9 +762,9 @@ mod tests {
                         assert_eq!(
                             app.reasoning_effort,
                             if alias == "deepseek-chat" {
-                                crate::tui::app::ReasoningEffort::Off
+                                crate::reasoning_preference::ReasoningEffort::Off
                             } else {
-                                crate::tui::app::ReasoningEffort::High
+                                crate::reasoning_preference::ReasoningEffort::High
                             },
                             "{provider:?} {alias}"
                         );
@@ -805,7 +805,7 @@ mod tests {
             ),
             "deepseek-reasoner"
         );
-        app.reasoning_effort = crate::tui::app::ReasoningEffort::Max;
+        app.reasoning_effort = crate::reasoning_preference::ReasoningEffort::Max;
         app.reasoning_effort_preference = None;
         app.apply_provider_switch_reasoning_effort(
             provider,
@@ -814,11 +814,11 @@ mod tests {
         );
         assert_eq!(
             app.reasoning_effort,
-            crate::tui::app::ReasoningEffort::Max,
+            crate::reasoning_preference::ReasoningEffort::Max,
             "custom endpoint owns alias semantics"
         );
 
-        app.reasoning_effort_preference = Some(crate::tui::app::ReasoningEffort::Max);
+        app.reasoning_effort_preference = Some(crate::reasoning_preference::ReasoningEffort::Max);
         app.apply_provider_switch_reasoning_effort(
             provider,
             crate::config::DEFAULT_DEEPSEEK_BASE_URL,
@@ -826,7 +826,7 @@ mod tests {
         );
         assert_eq!(
             app.reasoning_effort,
-            crate::tui::app::ReasoningEffort::Max,
+            crate::reasoning_preference::ReasoningEffort::Max,
             "explicit effort must beat compatibility inference"
         );
     }

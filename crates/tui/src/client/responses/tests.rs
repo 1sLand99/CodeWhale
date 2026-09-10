@@ -540,7 +540,7 @@ fn codex_reasoning_effort_uses_responses_labels() {
 
 #[tokio::test]
 async fn codex_selected_effort_reaches_preview_wire_and_restored_receipt_unchanged() {
-    use crate::tui::app::{EffectiveReasoningEffort, ReasoningEffort};
+    use crate::reasoning_preference::{EffectiveReasoningEffort, ReasoningEffort};
     use crate::work_graph::WorkActivityEvent;
 
     let server = MockServer::start().await;

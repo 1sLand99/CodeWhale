@@ -70,7 +70,8 @@ use crate::dependencies::ExternalTool as _;
 use crate::localization::{MessageId, tr};
 use crate::network_policy::NetworkPolicy;
 use crate::pricing::CostCurrency;
-use crate::tui::app::{App, ReasoningEffort};
+use crate::reasoning_preference::ReasoningEffort;
+use crate::tui::app::App;
 use crate::tui::history::HistoryCell;
 
 // ---------------------------------------------------------------------------

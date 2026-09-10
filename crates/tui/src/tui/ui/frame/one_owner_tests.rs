@@ -653,7 +653,7 @@ fn statusline_full_frame_custom_cost_preserves_evidence_and_width_shedding() {
         app.set_provider_identity(ApiProvider::Custom, "my-gateway");
         app.active_route_base_url = "https://gateway.example/v1".to_string();
         app.model = "vendor-model-x".to_string();
-        app.reasoning_effort = crate::tui::app::ReasoningEffort::High;
+        app.reasoning_effort = crate::reasoning_preference::ReasoningEffort::High;
         app.billing_presentation = BillingPresentation::Unknown;
         app.session.cost_coverage_unknown_legacy = true;
         app.status_items = vec![StatusItem::ContextPercent, StatusItem::Cost];

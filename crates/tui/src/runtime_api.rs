@@ -6381,7 +6381,7 @@ fn provider_model_entry_for_api(
     provider: ApiProvider,
     model: String,
 ) -> ProviderModelEntry {
-    use crate::tui::app::ReasoningEffort;
+    use crate::reasoning_preference::ReasoningEffort;
     use codewhale_config::route::CapabilityState;
 
     let mut entry = ProviderModelEntry {

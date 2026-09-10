@@ -3080,8 +3080,10 @@ pub struct StartTurnRequest {
     pub environment_id: Option<String>,
 }
 
-fn parse_runtime_reasoning_effort(value: &str) -> Result<crate::tui::app::ReasoningEffort> {
-    crate::tui::app::ReasoningEffort::parse_strict(value).map_err(anyhow::Error::msg)
+fn parse_runtime_reasoning_effort(
+    value: &str,
+) -> Result<crate::reasoning_preference::ReasoningEffort> {
+    crate::reasoning_preference::ReasoningEffort::parse_strict(value).map_err(anyhow::Error::msg)
 }
 
 fn canonical_runtime_reasoning_effort(value: Option<&str>) -> Result<Option<String>> {
@@ -3175,7 +3177,7 @@ fn runtime_turn_request_fingerprint(
     prompt: &str,
     input_summary: Option<&str>,
     requested_model: &str,
-    reasoning_effort: Option<crate::tui::app::ReasoningEffort>,
+    reasoning_effort: Option<crate::reasoning_preference::ReasoningEffort>,
     allowed_tools: Option<&[String]>,
     policy: RuntimePolicyProjection,
     allow_shell: bool,
@@ -8865,7 +8867,7 @@ impl RuntimeThreadManager {
         let cfg_snapshot = self.config.read().clone();
         let configured_reasoning_preference = cfg_snapshot
             .reasoning_effort()
-            .map(crate::tui::app::ReasoningEffort::from_setting);
+            .map(crate::reasoning_preference::ReasoningEffort::from_setting);
         // Runtime API precedence is explicit and stable: a turn override wins
         // over its persisted thread default, which wins over normal config.
         let reasoning_preference = turn_reasoning_preference
@@ -9016,10 +9018,10 @@ impl RuntimeThreadManager {
             )?;
             let auto_controls_reasoning = matches!(
                 reasoning_preference,
-                Some(crate::tui::app::ReasoningEffort::Auto)
+                Some(crate::reasoning_preference::ReasoningEffort::Auto)
             );
             let selected_reasoning = reasoning_preference.map(|effort| {
-                if effort == crate::tui::app::ReasoningEffort::Auto {
+                if effort == crate::reasoning_preference::ReasoningEffort::Auto {
                     crate::auto_reasoning::select(false, &prompt)
                 } else {
                     effort

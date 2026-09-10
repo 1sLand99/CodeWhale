@@ -55,7 +55,7 @@ use super::role::{
 use crate::config::{ApiProvider, Config};
 use crate::llm_client::LlmClient;
 use crate::models::Role;
-use crate::tui::app::ReasoningEffort;
+use crate::reasoning_preference::ReasoningEffort;
 
 /// Where exact Fleet definitions and Reasoning Router profiles are looked up,
 /// labelled so an identity can be qualified (`workspace/glm-pair`) instead of

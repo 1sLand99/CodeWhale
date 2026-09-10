@@ -761,9 +761,9 @@ async fn plan_for(
         model,
         auto_model,
         if auto_model {
-            crate::tui::app::ReasoningEffort::Auto
+            crate::reasoning_preference::ReasoningEffort::Auto
         } else {
-            crate::tui::app::ReasoningEffort::High
+            crate::reasoning_preference::ReasoningEffort::High
         },
         prompt,
     )
@@ -779,7 +779,7 @@ async fn plan_with_reasoning(
     provider: ApiProvider,
     model: &str,
     auto_model: bool,
-    reasoning_effort: crate::tui::app::ReasoningEffort,
+    reasoning_effort: crate::reasoning_preference::ReasoningEffort,
     prompt: &str,
 ) -> crate::turn_route_plan::PlannedTurnRoute {
     crate::turn_route_plan::plan_turn_route(crate::turn_route_plan::TurnRoutePlanRequest {
@@ -1334,7 +1334,7 @@ struct MatrixRoute {
     provider_key: &'static str,
     base_url: &'static str,
     model: &'static str,
-    requested_reasoning: crate::tui::app::ReasoningEffort,
+    requested_reasoning: crate::reasoning_preference::ReasoningEffort,
     requested_reasoning_label: &'static str,
     /// Reasoning-control keys the manifest must report, in receipt order.
     expect_control_keys: &'static [&'static str],
@@ -1354,7 +1354,7 @@ fn glm_5_2_zai_coding() -> MatrixRoute {
         provider_key: "zai",
         base_url: crate::config::DEFAULT_ZAI_BASE_URL,
         model: crate::config::ZAI_GLM_5_2_MODEL,
-        requested_reasoning: crate::tui::app::ReasoningEffort::High,
+        requested_reasoning: crate::reasoning_preference::ReasoningEffort::High,
         requested_reasoning_label: "high",
         expect_control_keys: &["reasoning_effort", "thinking"],
         expect_wire_effort: Some("high"),
@@ -1371,7 +1371,7 @@ fn glm_5_turbo_zai() -> MatrixRoute {
         provider_key: "zai",
         base_url: crate::config::DEFAULT_ZAI_BASE_URL,
         model: crate::config::ZAI_GLM_5_TURBO_MODEL,
-        requested_reasoning: crate::tui::app::ReasoningEffort::High,
+        requested_reasoning: crate::reasoning_preference::ReasoningEffort::High,
         requested_reasoning_label: "high",
         // No invented granularity: the toggle ships, the tier does not.
         expect_control_keys: &["thinking"],
@@ -1390,7 +1390,7 @@ fn kimi_k3_moonshot_direct() -> MatrixRoute {
         base_url: crate::config::DEFAULT_MOONSHOT_BASE_URL,
         model: crate::config::MOONSHOT_KIMI_K3_MODEL,
         // The visible normalization: `off` is not a tier this route has.
-        requested_reasoning: crate::tui::app::ReasoningEffort::Off,
+        requested_reasoning: crate::reasoning_preference::ReasoningEffort::Off,
         requested_reasoning_label: "off",
         expect_control_keys: &["reasoning_effort"],
         expect_wire_effort: Some("low"),
@@ -1407,7 +1407,7 @@ fn k3_kimi_code() -> MatrixRoute {
         provider_key: "moonshot",
         base_url: crate::config::DEFAULT_KIMI_CODE_BASE_URL,
         model: crate::config::KIMI_CODE_K3_MODEL,
-        requested_reasoning: crate::tui::app::ReasoningEffort::Off,
+        requested_reasoning: crate::reasoning_preference::ReasoningEffort::Off,
         requested_reasoning_label: "off",
         expect_control_keys: &["thinking"],
         expect_wire_effort: Some("low"),
@@ -1424,7 +1424,7 @@ fn minimax_m3() -> MatrixRoute {
         provider_key: "minimax",
         base_url: crate::config::DEFAULT_MINIMAX_BASE_URL,
         model: crate::config::DEFAULT_MINIMAX_MODEL,
-        requested_reasoning: crate::tui::app::ReasoningEffort::High,
+        requested_reasoning: crate::reasoning_preference::ReasoningEffort::High,
         requested_reasoning_label: "high",
         expect_control_keys: &["thinking", "reasoning_split"],
         expect_wire_effort: None,

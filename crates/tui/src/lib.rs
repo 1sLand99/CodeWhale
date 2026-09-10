@@ -98,6 +98,7 @@ mod provider_catalog_live;
 mod provider_lake;
 mod provider_readiness;
 mod purge;
+pub mod reasoning_preference;
 mod regex_cache;
 mod remote_control;
 mod remote_setup;
@@ -11198,7 +11199,7 @@ async fn run_interactive_with_notice(
 struct CliAutoRoute {
     provider: crate::config::ApiProvider,
     model: String,
-    reasoning_effort: Option<crate::tui::app::ReasoningEffort>,
+    reasoning_effort: Option<crate::reasoning_preference::ReasoningEffort>,
     /// Whether the runtime should continue resolving reasoning per prompt.
     ///
     /// This is independent from `auto_model`: an Auto model can carry a fixed
@@ -11210,7 +11211,7 @@ struct CliAutoRoute {
 fn cli_reasoning_effort_value(
     config: &Config,
     model: &str,
-    effort: crate::tui::app::ReasoningEffort,
+    effort: crate::reasoning_preference::ReasoningEffort,
 ) -> Option<String> {
     effort
         .api_value_for_route(config.api_provider(), &config.deepseek_base_url(), model)
@@ -11220,10 +11221,10 @@ fn cli_reasoning_effort_value(
 fn cli_reasoning_effort_value_for_prompt(
     config: &Config,
     model: &str,
-    effort: crate::tui::app::ReasoningEffort,
+    effort: crate::reasoning_preference::ReasoningEffort,
     prompt: &str,
 ) -> Option<String> {
-    let resolved = if effort == crate::tui::app::ReasoningEffort::Auto {
+    let resolved = if effort == crate::reasoning_preference::ReasoningEffort::Auto {
         crate::auto_reasoning::select(false, prompt)
     } else {
         effort
@@ -11242,7 +11243,7 @@ fn normalize_cli_reasoning_effort(value: &str) -> Result<Option<String>> {
     ) {
         return Ok(None);
     }
-    crate::tui::app::ReasoningEffort::parse_strict(trimmed)
+    crate::reasoning_preference::ReasoningEffort::parse_strict(trimmed)
         .map(|effort| Some(effort.as_setting().to_string()))
         .map_err(anyhow::Error::msg)
 }
@@ -11272,7 +11273,7 @@ async fn resolve_cli_auto_route(
         let preference = config
             .reasoning_effort()
             .filter(|_| config.reasoning_effort_is_explicit())
-            .map(crate::tui::app::ReasoningEffort::from_setting);
+            .map(crate::reasoning_preference::ReasoningEffort::from_setting);
         let (reasoning_effort, auto_controls_reasoning) =
             model_routing::resolve_auto_model_reasoning(preference, selection.reasoning_effort);
         Ok(CliAutoRoute {
@@ -11287,7 +11288,7 @@ async fn resolve_cli_auto_route(
         {
             let auto_controls_reasoning = matches!(
                 selection.reasoning_effort,
-                Some(crate::tui::app::ReasoningEffort::Auto)
+                Some(crate::reasoning_preference::ReasoningEffort::Auto)
             );
             return Ok(CliAutoRoute {
                 provider: selection.provider,
@@ -11321,13 +11322,13 @@ async fn resolve_cli_auto_route(
         // 30+ second SSE idle timeouts on trivial prompts.
         let reasoning_effort = config
             .reasoning_effort()
-            .map(crate::tui::app::ReasoningEffort::from_setting);
+            .map(crate::reasoning_preference::ReasoningEffort::from_setting);
         Ok(CliAutoRoute {
             provider: config.api_provider(),
             model: model.to_string(),
             auto_controls_reasoning: matches!(
                 reasoning_effort,
-                Some(crate::tui::app::ReasoningEffort::Auto)
+                Some(crate::reasoning_preference::ReasoningEffort::Auto)
             ),
             reasoning_effort,
             auto_model: false,
@@ -11344,13 +11345,13 @@ async fn resolve_cli_exec_route(
     if force_configured_route && !model.trim().eq_ignore_ascii_case("auto") {
         let reasoning_effort = config
             .reasoning_effort()
-            .map(crate::tui::app::ReasoningEffort::from_setting);
+            .map(crate::reasoning_preference::ReasoningEffort::from_setting);
         return Ok(CliAutoRoute {
             provider: config.api_provider(),
             model: model.to_string(),
             auto_controls_reasoning: matches!(
                 reasoning_effort,
-                Some(crate::tui::app::ReasoningEffort::Auto)
+                Some(crate::reasoning_preference::ReasoningEffort::Auto)
             ),
             reasoning_effort,
             auto_model: false,
@@ -15131,7 +15132,7 @@ reasoning = "high"
         assert!(route.auto_model);
         assert_eq!(
             route.reasoning_effort,
-            Some(crate::tui::app::ReasoningEffort::Low)
+            Some(crate::reasoning_preference::ReasoningEffort::Low)
         );
         assert!(
             !route.auto_controls_reasoning,
@@ -16784,7 +16785,7 @@ api_key = "test-only-key"
                 cli_reasoning_effort_value_for_prompt(
                     &config,
                     crate::config::KIMI_CODE_K3_MODEL,
-                    crate::tui::app::ReasoningEffort::Auto,
+                    crate::reasoning_preference::ReasoningEffort::Auto,
                     prompt,
                 )
                 .as_deref(),
@@ -16797,7 +16798,7 @@ api_key = "test-only-key"
             cli_reasoning_effort_value_for_prompt(
                 &config,
                 crate::config::KIMI_CODE_K3_MODEL,
-                crate::tui::app::ReasoningEffort::Off,
+                crate::reasoning_preference::ReasoningEffort::Off,
                 "debug must not override an explicit effort",
             )
             .as_deref(),
@@ -16808,7 +16809,7 @@ api_key = "test-only-key"
 
     #[test]
     fn cli_route_tracks_auto_reasoning_independently_from_auto_model() {
-        use crate::tui::app::ReasoningEffort;
+        use crate::reasoning_preference::ReasoningEffort;
 
         let fixed_model_auto_reasoning = CliAutoRoute {
             provider: crate::config::ApiProvider::Deepseek,
@@ -16861,7 +16862,7 @@ api_key = "test-only-key"
         let resolved = cli_reasoning_effort_value_for_prompt(
             &config,
             crate::config::ZAI_GLM_5_2_MODEL,
-            crate::tui::app::ReasoningEffort::Auto,
+            crate::reasoning_preference::ReasoningEffort::Auto,
             "debug this failing integration test",
         )
         .expect("Auto must resolve to a concrete tier");

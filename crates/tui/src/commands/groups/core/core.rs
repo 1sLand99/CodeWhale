@@ -9,7 +9,7 @@ use crate::config::{
 };
 use crate::localization::{Locale, MessageId, tr};
 #[cfg(test)]
-use crate::tui::app::ReasoningEffort;
+use crate::reasoning_preference::ReasoningEffort;
 use crate::tui::app::{App, AppAction, AppMode};
 use crate::tui::views::{HelpView, ModalKind, SubAgentsView, subagent_view_agents};
 

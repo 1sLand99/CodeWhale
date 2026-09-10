@@ -48,7 +48,7 @@ use crate::provider_readiness::{
     CredentialState, ProviderReadinessSnapshot, ProviderRouteIdentity, ResolvedProviderReadiness,
     credential_state_for_provider, route_identity_for_model,
 };
-use crate::tui::app::ReasoningEffort;
+use crate::reasoning_preference::ReasoningEffort;
 use crate::tui::menu_style;
 use crate::tui::views::{
     ActionHint, EmptyState, ListDetailLayout, ModalKind, ModalView, ViewAction, ViewEvent,
