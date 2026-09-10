@@ -325,15 +325,15 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
         "theme" | "ui_theme" => Some(
             if app
                 .theme_name
-                .starts_with(crate::palette::USER_THEME_PREFIX)
+                .starts_with(codewhale_palette::USER_THEME_PREFIX)
             {
                 app.theme_name.clone()
             } else {
-                crate::palette::theme_label_for_mode(app.ui_theme.mode).to_string()
+                codewhale_palette::theme_label_for_mode(app.ui_theme.mode).to_string()
             },
         ),
         "background_color" | "background" | "bg" => {
-            crate::palette::hex_rgb_string(app.ui_theme.surface_bg)
+            codewhale_palette::hex_rgb_string(app.ui_theme.surface_bg)
                 .or_else(|| Some("(default)".to_string()))
         }
         "auto_compact" | "compact" => {
@@ -2616,11 +2616,11 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
                 settings
                     .background_color
                     .as_deref()
-                    .and_then(crate::palette::parse_hex_rgb_color)
+                    .and_then(codewhale_palette::parse_hex_rgb_color)
             };
             let background_setting =
-                background_color_override.and_then(crate::palette::hex_rgb_string);
-            let (theme_name, theme_id, ui_theme) = match crate::palette::resolve_theme_setting(
+                background_color_override.and_then(codewhale_palette::hex_rgb_string);
+            let (theme_name, theme_id, ui_theme) = match codewhale_palette::resolve_theme_setting(
                 &settings.theme,
                 background_setting.as_deref(),
             ) {
@@ -2936,8 +2936,8 @@ fn switch_yolo_compat_with_status(app: &mut App) -> (String, bool) {
 pub fn theme(app: &mut App, arg: Option<&str>) -> CommandResult {
     match arg.map(str::trim).filter(|s| !s.is_empty()) {
         None => CommandResult::action(AppAction::OpenThemePicker),
-        Some("schema") => CommandResult::message(crate::palette::user_theme_schema_json()),
-        Some("path") => match crate::palette::user_themes_dir() {
+        Some("schema") => CommandResult::message(codewhale_palette::user_theme_schema_json()),
+        Some("path") => match codewhale_palette::user_themes_dir() {
             Ok(path) => CommandResult::message(format!(
                 "User themes: {}\nSelect with: /theme custom:<name>",
                 path.display()
@@ -5435,8 +5435,8 @@ context_window = 262144
         let result = theme(&mut app, Some("grayscale"));
 
         assert_eq!(result.message.unwrap(), "theme = grayscale (saved)");
-        assert_eq!(app.theme_id, crate::palette::ThemeId::Grayscale);
-        assert_eq!(app.ui_theme.mode, crate::palette::PaletteMode::Grayscale);
+        assert_eq!(app.theme_id, codewhale_palette::ThemeId::Grayscale);
+        assert_eq!(app.ui_theme.mode, codewhale_palette::PaletteMode::Grayscale);
         assert!(app.needs_redraw);
     }
 
@@ -5463,7 +5463,11 @@ context_window = 262144
                 Some("theme = underwater (saved)"),
                 "{alias}"
             );
-            assert_eq!(app.theme_id, crate::palette::ThemeId::Underwater, "{alias}");
+            assert_eq!(
+                app.theme_id,
+                codewhale_palette::ThemeId::Underwater,
+                "{alias}"
+            );
             assert_eq!(app.ui_theme.name, "underwater", "{alias}");
             assert!(
                 crate::tui::ocean::OceanRamp::for_theme(&app.ui_theme).is_some(),
@@ -5494,7 +5498,7 @@ context_window = 262144
         let result = set_config_value(&mut app, "theme", "underwater", true);
 
         assert!(!result.is_error, "{:?}", result.message);
-        assert_eq!(app.theme_id, crate::palette::ThemeId::Underwater);
+        assert_eq!(app.theme_id, codewhale_palette::ThemeId::Underwater);
         let persisted = Settings::load_persisted().expect("persisted selection");
         assert_eq!(persisted.theme, "underwater");
         assert_eq!(
@@ -5527,7 +5531,7 @@ context_window = 262144
 
         assert!(!result.is_error, "{:?}", result.message);
         assert_eq!(app.theme_name, "custom:midnight");
-        assert_eq!(app.theme_id, crate::palette::ThemeId::Whale);
+        assert_eq!(app.theme_id, codewhale_palette::ThemeId::Whale);
         assert_eq!(
             app.ui_theme.accent_primary,
             ratatui::style::Color::Rgb(0x12, 0x34, 0x56)
@@ -5587,7 +5591,7 @@ context_window = 262144
         let result = set_config_value(&mut app, "theme", "dark", false);
 
         assert!(!result.is_error, "{:?}", result.message);
-        assert_eq!(app.theme_id, crate::palette::ThemeId::Whale);
+        assert_eq!(app.theme_id, codewhale_palette::ThemeId::Whale);
         assert_eq!(app.background_color_override, Some(explicit_base3));
         assert_eq!(app.ui_theme.surface_bg, explicit_base3);
         assert!(
@@ -5616,7 +5620,7 @@ context_window = 262144
 
         let preview = set_config_value(&mut app, "theme", "underwater", false);
         assert!(!preview.is_error, "{:?}", preview.message);
-        assert_eq!(app.theme_id, crate::palette::ThemeId::Underwater);
+        assert_eq!(app.theme_id, codewhale_palette::ThemeId::Underwater);
         assert_eq!(app.background_color_override, Some(custom));
         assert_eq!(app.ui_theme.surface_bg, custom);
         assert!(
@@ -5695,7 +5699,7 @@ context_window = 262144
         let msg = result.message.unwrap();
 
         assert_eq!(msg, "theme = grayscale (saved)");
-        assert_eq!(app.ui_theme.mode, crate::palette::PaletteMode::Grayscale);
+        assert_eq!(app.ui_theme.mode, codewhale_palette::PaletteMode::Grayscale);
 
         let settings_path = Settings::path().unwrap();
         let saved = fs::read_to_string(settings_path).unwrap();

@@ -37,10 +37,10 @@ use crate::automation_manager::{
     AutomationRecord, AutomationRunRecord, AutomationRunStatus, AutomationStatus,
     SharedAutomationManager,
 };
-use crate::palette;
 use crate::tui::app::App;
 use crate::tui::list_nav::wrap_index;
 use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_palette as palette;
 
 mod editor;
 use editor::{AutomationEditor, EditorAction};

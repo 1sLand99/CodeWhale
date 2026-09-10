@@ -9,7 +9,6 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::models::{ContentBlock, Message};
-use crate::palette;
 use crate::tools::plan::PlanSnapshot;
 use crate::tools::review::ReviewOutput;
 use crate::tui::app::TranscriptSpacing;
@@ -17,6 +16,7 @@ use crate::tui::diff_render;
 use crate::tui::motion::MotionMode;
 use crate::tui::ui_text::CopyLineSeparator;
 use codewhale_localization::Locale;
+use codewhale_palette as palette;
 
 mod agent_activity;
 mod archived_context;
@@ -181,8 +181,8 @@ pub enum SubAgentCell {
 impl SubAgentCell {
     pub fn lines(&self, width: u16) -> Vec<Line<'static>> {
         match self {
-            SubAgentCell::Delegate(card) => card.render_lines(width, &crate::palette::UI_THEME),
-            SubAgentCell::Fanout(card) => card.render_lines(width, &crate::palette::UI_THEME),
+            SubAgentCell::Delegate(card) => card.render_lines(width, &codewhale_palette::UI_THEME),
+            SubAgentCell::Fanout(card) => card.render_lines(width, &codewhale_palette::UI_THEME),
         }
     }
 }

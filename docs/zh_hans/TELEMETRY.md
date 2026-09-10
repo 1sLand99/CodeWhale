@@ -177,7 +177,7 @@ Codewhale 没有恢复出厂设置命令，因此本文档也不会声称有。
 | `mcp_server_connected` | `crates/tui/src/mcp.rs:4254-4261` 快照中 `.connected` 的计数；绝不统计 `name`、`command_or_url` 或 `error`——服务器名是用户自选的，往往是内部基础设施 |
 | `memory_search` | `crates/tui/src/tools/native_memory.rs:60-61` 处的工具名，在 tool_execution 瓶颈点计数 |
 | `approval_modal_shown` | `crates/tui/src/tui/ui/event_loop.rs:2372`（`Event::ApprovalRequired` 的消费者，`crates/tui/src/core/events.rs:444`） |
-| `approval_auto_allowed` | `crates/tui/src/core/engine.rs:5714`。只计数。绝不统计 `matched_rule`、`reason()`、命令或 argv——`auto_allow` 模式是用户编写的命令字符串（`crates/tui/src/command_safety.rs:35/309`） |
+| `approval_auto_allowed` | `crates/tui/src/core/engine.rs:5714`。只计数。绝不统计 `matched_rule`、`reason()`、命令或 argv——`auto_allow` 模式是用户编写的命令字符串（`crates/execpolicy/src/command_safety.rs:35/309`） |
 | `command_palette_open` | `crates/tui/src/tui/ui/event_loop.rs:3941` 和 `crates/tui/src/tui/mouse_ui.rs:1346` |
 
 **`errors`** ——封闭字段集。每个值都是**变体判别值**，绝不是 `err.to_string()`：

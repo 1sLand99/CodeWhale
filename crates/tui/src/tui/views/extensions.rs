@@ -23,9 +23,9 @@ use super::{
     CommandPaletteAction, ModalKind, ModalView, ViewAction, ViewEvent, render_modal_footer,
     render_underwater_surface, truncate_view_text,
 };
-use crate::palette;
 use crate::tui::app::App;
 use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_palette as palette;
 
 fn localize(locale: Locale, id: MessageId, replacements: &[(&str, &str)]) -> String {
     let mut value = tr(locale, id).into_owned();
@@ -190,8 +190,8 @@ pub enum ExtensionTone {
 }
 
 impl ExtensionTone {
-    fn ink(self) -> crate::palette::ChromeInk {
-        use crate::palette::ChromeInk;
+    fn ink(self) -> codewhale_palette::ChromeInk {
+        use codewhale_palette::ChromeInk;
         match self {
             Self::Ready => ChromeInk::Outcome,
             Self::Attention => ChromeInk::Attention,
@@ -1295,7 +1295,7 @@ pub struct ExtensionsView {
     folded_groups: BTreeSet<String>,
     /// The live theme, captured at open so row ink resolves through the same
     /// grammar the rest of the chrome uses instead of raw palette constants.
-    theme: crate::palette::UiTheme,
+    theme: codewhale_palette::UiTheme,
     hits: RefCell<HitAreas>,
 }
 
@@ -1322,7 +1322,7 @@ impl ExtensionsView {
             selected: [0; 5],
             scroll: [0; 5],
             folded_groups: BTreeSet::new(),
-            theme: crate::palette::UI_THEME,
+            theme: codewhale_palette::UI_THEME,
             hits: RefCell::new(HitAreas::default()),
         };
         // `/mcp` opens on the first server that needs a login, not on that
@@ -1703,7 +1703,7 @@ impl ModalView for ExtensionsView {
             // chip is an invitation, the state is a verdict, the description
             // is background. A selected row keeps one style — a highlight the
             // eye can follow beats four colours fighting a fill.
-            let mut parts: Vec<(String, Option<crate::palette::ChromeInk>)> = Vec::new();
+            let mut parts: Vec<(String, Option<codewhale_palette::ChromeInk>)> = Vec::new();
             match entry {
                 VisibleEntry::Group(group) => {
                     let folded = self.folded_groups.contains(&self.fold_key(group));
@@ -1724,7 +1724,7 @@ impl ModalView for ExtensionsView {
                             format!("[{}] ", action.label()),
                             Some(match action {
                                 ExtensionAction::Command { .. } => {
-                                    crate::palette::ChromeInk::Identity
+                                    codewhale_palette::ChromeInk::Identity
                                 }
                                 ExtensionAction::Status { .. } => item.tone.ink(),
                             }),
@@ -1735,13 +1735,13 @@ impl ModalView for ExtensionsView {
                     if spacious && !item.description.is_empty() {
                         parts.push((
                             format!(" — {}", item.description),
-                            Some(crate::palette::ChromeInk::MetadataHint),
+                            Some(codewhale_palette::ChromeInk::MetadataHint),
                         ));
                     }
                 }
                 VisibleEntry::Problem(problem) => parts.push((
                     format!("! {problem}"),
-                    Some(crate::palette::ChromeInk::Failure),
+                    Some(codewhale_palette::ChromeInk::Failure),
                 )),
                 VisibleEntry::Empty => parts.push((
                     if self.query.is_empty() {
@@ -1753,7 +1753,7 @@ impl ModalView for ExtensionsView {
                             &[("query", &self.query)],
                         )
                     },
-                    Some(crate::palette::ChromeInk::MetadataHint),
+                    Some(codewhale_palette::ChromeInk::MetadataHint),
                 )),
             }
 
@@ -1868,8 +1868,8 @@ mod tests {
     /// is not coloured.
     #[test]
     fn every_tone_paints_a_distinct_ink() {
-        use crate::palette::ChromeInk;
-        let theme = crate::palette::ThemeId::Whale.ui_theme();
+        use codewhale_palette::ChromeInk;
+        let theme = codewhale_palette::ThemeId::Whale.ui_theme();
         let inks: Vec<ChromeInk> = [
             ExtensionTone::Ready,
             ExtensionTone::Attention,

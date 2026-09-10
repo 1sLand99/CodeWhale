@@ -3,7 +3,7 @@
 //! share the reserved `work_*` golden names).
 
 use super::tideline_stream::{TidelineReceiptState, TidelineStreamEvent, tideline_stream_hitboxes};
-use crate::palette::ChromeInk;
+use codewhale_palette::ChromeInk;
 
 #[test]
 fn receipt_states_pair_marks_with_words_and_ink_families() {
@@ -36,7 +36,7 @@ fn stream_hitboxes_empty_on_degenerate_area() {
     let events = vec![TidelineStreamEvent::UserTurn {
         text: "x".to_string(),
     }];
-    let theme = crate::palette::UI_THEME;
+    let theme = codewhale_palette::UI_THEME;
     let stream = super::tideline_stream::TidelineStream::new(&theme, &events);
     assert!(tideline_stream_hitboxes(ratatui::layout::Rect::new(0, 0, 2, 1), &stream).is_empty());
 }

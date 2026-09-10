@@ -37,9 +37,9 @@ use syntect::parsing::{ParseState as SyntectParseState, SyntaxSet};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::palette;
 use crate::tui::osc8;
 use crate::tui::ui_text::CopyLineSeparator;
+use codewhale_palette as palette;
 
 // Thread-local counter incremented every time `parse` runs. Used by tests to
 // prove that width-only changes hit the cached-AST path and skip parsing.

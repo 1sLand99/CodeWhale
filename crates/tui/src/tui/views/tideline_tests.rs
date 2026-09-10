@@ -14,12 +14,12 @@ use super::{
     render_tideline_settings_stage, render_tideline_settings_strip, tideline_settings_categories,
     tideline_settings_rail_hitboxes,
 };
-use crate::palette::{SELECTABLE_THEMES, UI_THEME};
 use crate::tui::golden_harness::{BLOCKER_SIZES, assert_matches_golden, render_golden_text};
 use crate::tui::theme_picker::{
     TidelineThemeList, render_tideline_theme_list, tideline_theme_list_hitboxes,
 };
 use codewhale_localization::Locale;
+use codewhale_palette::{SELECTABLE_THEMES, UI_THEME};
 
 fn draw_stage(width: u16, height: u16) -> String {
     render_golden_text(width, height, |buf| {

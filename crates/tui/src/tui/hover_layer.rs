@@ -16,10 +16,10 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::palette;
 use crate::tui::hover_hit::{
     HoverHit, HoverTargetKind, copy_affordance, hit_test, link_hover_style,
 };
+use codewhale_palette as palette;
 
 /// Pointer position from the last mouse move (column, row).
 static POINTER: Mutex<Option<(u16, u16)>> = Mutex::new(None);

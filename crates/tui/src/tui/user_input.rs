@@ -5,12 +5,12 @@ use ratatui::layout::{Alignment, Rect};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Padding, Paragraph, Widget, Wrap};
 
-use crate::palette;
 use crate::tools::user_input::{
     UserInputAnswer, UserInputQuestion, UserInputRequest, UserInputResponse,
 };
 use crate::tui::menu_style;
 use crate::tui::views::{ModalKind, ModalView, ViewAction, ViewEvent, render_modal_surface};
+use codewhale_palette as palette;
 
 fn modal_block(title: &str) -> Block<'static> {
     Block::default()

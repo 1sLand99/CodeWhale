@@ -57,8 +57,8 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::palette::{ChromeInk, UiTheme};
 use crate::tui::glyphs;
+use codewhale_palette::{ChromeInk, UiTheme};
 
 /// Separator between items — the row's one piece of punctuation.
 const ITEM_JOIN: &str = " · ";
@@ -381,7 +381,7 @@ impl Widget for InfoLine<'_> {
 }
 
 fn chrome(theme: &UiTheme, ink: ChromeInk) -> Style {
-    crate::palette::grammar::chrome_style(theme, ink)
+    codewhale_palette::grammar::chrome_style(theme, ink)
 }
 
 /// Recorded hitboxes for one rendered row. Mirrors the

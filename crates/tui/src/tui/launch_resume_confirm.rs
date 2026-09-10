@@ -12,12 +12,12 @@ use ratatui::layout::Rect;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Padding, Paragraph, Widget, Wrap};
 
-use crate::palette;
 use crate::tui::views::{
     ActionHint, ModalKind, ModalView, ViewAction, ViewEvent, centered_modal_area,
     render_modal_footer, render_modal_surface,
 };
 use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_palette as palette;
 
 pub struct LaunchResumeConfirmView {
     session_id: String,

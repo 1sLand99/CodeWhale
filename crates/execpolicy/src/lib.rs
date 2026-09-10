@@ -1,5 +1,6 @@
 pub mod approval_mode;
 pub mod bash_arity;
+pub mod command_safety;
 pub mod shell_expand;
 
 pub use approval_mode::ApprovalMode;

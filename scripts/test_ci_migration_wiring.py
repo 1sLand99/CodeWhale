@@ -120,7 +120,7 @@ class CiWiringTests(unittest.TestCase):
         block = ci[start:next_step]
         self.assertIn(
             "sh scripts/with-hermetic-test-home.sh cargo test -p codewhale-tui "
-            "--lib --locked -- command_safety auto_review authority sandbox", block
+            "--lib --locked -- auto_review authority sandbox", block
         )
         self.assertIn(
             "sh scripts/with-hermetic-test-home.sh cargo test -p codewhale-execpolicy --locked",

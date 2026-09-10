@@ -326,7 +326,46 @@ fn apply_colors(theme: &mut UiTheme, colors: &UserThemeColors) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::EnvVarGuard;
+    use std::ffi::{OsStr, OsString};
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    /// Serialise env-mutating tests: these poke `CODEWHALE_HOME`, which is
+    /// process-global. Same shape as `crates/secrets` and `crates/config`.
+    fn lock_test_env() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Restore one environment variable when dropped. Callers hold
+    /// [`lock_test_env`] until after the guard drops.
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: callers hold the process-wide test env mutex.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: callers hold the process-wide test env mutex until after
+            // this guard is dropped.
+            unsafe {
+                match self.previous.take() {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
 
     #[test]
     fn selector_rejects_paths_and_accepts_bounded_slugs() {
@@ -341,7 +380,7 @@ mod tests {
 
     #[test]
     fn user_theme_loads_fixed_file_and_rejects_unknown_fields() {
-        let _lock = crate::test_support::lock_test_env();
+        let _lock = lock_test_env();
         let temp = tempfile::tempdir().unwrap();
         let _home = EnvVarGuard::set("CODEWHALE_HOME", temp.path());
         let themes = temp.path().join("themes");
@@ -367,7 +406,7 @@ mod tests {
     #[test]
     fn user_theme_refuses_symlink_files() {
         use std::os::unix::fs::symlink;
-        let _lock = crate::test_support::lock_test_env();
+        let _lock = lock_test_env();
         let temp = tempfile::tempdir().unwrap();
         let _home = EnvVarGuard::set("CODEWHALE_HOME", temp.path());
         let themes = temp.path().join("themes");
@@ -380,7 +419,7 @@ mod tests {
 
     #[test]
     fn list_user_theme_options_keeps_only_valid_sorted_overlays() {
-        let _lock = crate::test_support::lock_test_env();
+        let _lock = lock_test_env();
         let temp = tempfile::tempdir().unwrap();
         let _home = EnvVarGuard::set("CODEWHALE_HOME", temp.path());
         let themes = temp.path().join("themes");

@@ -16,8 +16,8 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::palette::{ChromeInk, UiTheme, chrome_style};
 use crate::tui::history::TidelineStream;
+use codewhale_palette::{ChromeInk, UiTheme, chrome_style};
 
 /// Rail width ladder (spec §5b): 22 at ≥120, 16 at ≥100, hidden below.
 #[must_use]

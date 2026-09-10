@@ -18,8 +18,8 @@ pub enum StatusToastLevel {
 
 impl StatusToastLevel {
     /// Resolve every toast surface through the same semantic theme slots.
-    pub(crate) fn ink(self) -> crate::palette::ChromeInk {
-        use crate::palette::ChromeInk;
+    pub(crate) fn ink(self) -> codewhale_palette::ChromeInk {
+        use codewhale_palette::ChromeInk;
         match self {
             Self::Info => ChromeInk::Info,
             Self::Success => ChromeInk::Outcome,

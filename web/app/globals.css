@@ -15,7 +15,7 @@
  *
  * The token NAMES keep their historical shape (`--paper`, `--ink`,
  * `--indigo`) so every component rule stays diffable; the VALUES resolve
- * through ./tokens.css, generated from crates/tui/src/palette/tokens.rs by
+ * through ./tokens.css, generated from crates/palette/src/tokens.rs by
  * scripts/export-design-tokens.py — no hand-copied hexes.
  */
 :root {
@@ -67,7 +67,7 @@
   --stage-soft: var(--whale-text-soft);
   --stage-muted: var(--whale-text-muted);
 
-  /* The water column, verbatim from crates/tui/src/palette/tokens.rs. */
+  /* The water column, verbatim from crates/palette/src/tokens.rs. */
   --stage-field-top: var(--whale-panel); /* surface */
   --stage-field-mid: var(--whale-chrome); /* the authored 42% break */
   --stage-field-deep: var(--whale-bg); /* deep field, and the footer seabed */

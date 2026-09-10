@@ -10,13 +10,13 @@ use ratatui::{
 };
 
 use crate::config::Config;
-use crate::palette;
 use crate::tui::app::App;
 use crate::tui::views::{
     ActionHint, EmptyState, ListDetailLayout, ModalKind, ModalView, ViewAction, ViewEvent,
     centered_modal_area, render_modal_footer, render_modal_surface,
 };
 use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_palette as palette;
 
 #[cfg(test)]
 use super::actions::HotbarRecommendation;

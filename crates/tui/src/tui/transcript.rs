@@ -989,7 +989,7 @@ fn line_with_group_rail(
     let mut spans = Vec::with_capacity(rendered.spans.len() + 1);
     spans.push(Span::styled(
         format!("{glyph} "),
-        Style::default().fg(crate::palette::TEXT_DIM),
+        Style::default().fg(codewhale_palette::TEXT_DIM),
     ));
     spans.extend(rendered.spans);
     rendered.spans = truncate_spans_to_width(spans, max_width);

@@ -2,7 +2,7 @@
 //!
 //! Startup asks the terminal three questions whose answers arrive on stdin —
 //! the OSC 11 background query, the kitty graphics probe, and the sixel
-//! primary-DA probe (see [`crate::palette::osc11`]). All three run after raw
+//! primary-DA probe (see [`codewhale_palette::osc11`]). All three run after raw
 //! mode is on and before the [`crate::tui::ui::TerminalInputPump`] exists, so
 //! for that window Codewhale is the only reader of the tty. Anything the user
 //! has already typed sits in the same buffer as the replies.
@@ -25,7 +25,7 @@ use std::collections::VecDeque;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
-use crate::palette::osc11;
+use codewhale_palette::osc11;
 
 /// What [`decode`] could and could not turn back into key events.
 #[derive(Debug, Default, PartialEq, Eq)]

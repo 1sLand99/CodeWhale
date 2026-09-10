@@ -20,12 +20,12 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-use crate::palette;
 use crate::tui::app::{App, RedactionGateNotice, StatusToastKind};
 use crate::tui::onboarding::wrap_words;
 use crate::tui::shell_key_routing::{ShellBindingId, binding};
 use crate::tui::views::{ActionHint, render_modal_footer, render_underwater_surface};
 use codewhale_localization::MessageId;
+use codewhale_palette as palette;
 
 /// Whether the startup gate must ask before the current config's
 /// `[redaction] model_bound` request can take effect.

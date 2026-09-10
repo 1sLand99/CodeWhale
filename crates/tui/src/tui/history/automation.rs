@@ -11,9 +11,9 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::palette::ChromeInk;
 use crate::tui::glyphs;
 use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_palette::ChromeInk;
 
 /// What happened to the automation or its run. Drives the card's ink; the
 /// visible verb phrase comes from the producer (localized at construction).
@@ -138,7 +138,7 @@ impl AutomationCell {
     /// Render the one-line card at `width`. The card never wraps: the detail
     /// segment sheds first, then the name/verb truncate.
     pub(crate) fn render(&self, width: u16) -> Vec<Line<'static>> {
-        let color = self.kind.chrome_ink().color(&crate::palette::UI_THEME);
+        let color = self.kind.chrome_ink().color(&codewhale_palette::UI_THEME);
         let bullet_width = 2usize; // `● ` — the charter's current marker + space
         let budget = usize::from(width).saturating_sub(bullet_width);
         let mut text = self.name.clone();
@@ -162,7 +162,7 @@ impl AutomationCell {
         if let Some(detail) = detail {
             spans.push(Span::styled(
                 format!("  {detail}"),
-                Style::default().fg(crate::palette::TEXT_DIM),
+                Style::default().fg(codewhale_palette::TEXT_DIM),
             ));
         }
         vec![Line::from(spans)]
@@ -212,7 +212,7 @@ mod tests {
     /// genuinely crashed run, never a report job.
     #[test]
     fn no_automation_receipt_ink_spends_failure_red_but_the_crashed_run() {
-        for theme_id in crate::palette::SELECTABLE_THEMES {
+        for theme_id in codewhale_palette::SELECTABLE_THEMES {
             let theme = theme_id.ui_theme();
             for kind in [
                 AutomationCellKind::Fired,

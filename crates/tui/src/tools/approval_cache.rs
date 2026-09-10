@@ -36,8 +36,8 @@ use std::fmt::Write as _;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::command_safety::classify_command;
 use crate::tools::apply_patch::{NormalizedApplyPatchInput, normalize_apply_patch_input};
+use codewhale_execpolicy::command_safety::classify_command;
 
 /// The fingerprint of a tool call — stable enough to match repeated
 /// calls but specific enough to avoid privilege confusion.

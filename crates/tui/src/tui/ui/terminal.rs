@@ -998,8 +998,8 @@ mod screen_mode_tests {
         // independent of where the cursor happened to be.
         let backend = crate::tui::color_compat::ColorCompatBackend::new(
             io::stdout(),
-            crate::palette::ColorDepth::TrueColor,
-            crate::palette::PaletteMode::Dark,
+            codewhale_palette::ColorDepth::TrueColor,
+            codewhale_palette::PaletteMode::Dark,
         );
         let mut backend = backend;
         backend.set_terminal_size(Size::new(80, 24));

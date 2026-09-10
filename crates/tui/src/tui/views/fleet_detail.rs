@@ -23,11 +23,11 @@ use crate::fleet::store::{
     FleetFile, FleetMember, FleetOperator, FleetScope, MemberCapability, load_fleet_in_scope,
     save_fleet, set_selected,
 };
-use crate::palette;
 use crate::tui::app::App;
 use crate::tui::views::{
     ActionHint, ModalKind, ModalView, ViewAction, ViewEvent, render_modal_footer,
 };
+use codewhale_palette as palette;
 
 /// The built-in role vocabulary offered when adding a member, in a useful
 /// order. A Fleet member is a role; the user can name anything, these are the

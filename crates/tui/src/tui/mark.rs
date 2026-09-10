@@ -212,13 +212,14 @@ fn kitty_query_accepted(reply: Option<&[u8]>) -> bool {
 
 /// Ask the terminal once whether it draws kitty graphics, and cache the
 /// answer for the process. Call from the TUI entry point in the same window
-/// as `palette::probe_terminal_background` — raw mode on, event loop not yet
+/// as `codewhale_palette::probe_terminal_background` — raw mode on, event loop not yet
 /// reading stdin — since the reply comes back on stdin.
 pub fn probe_kitty_graphics() -> bool {
     *KITTY_GRAPHICS.get_or_init(|| {
         kitty_candidate_env(|key| std::env::var(key).ok())
             && kitty_query_accepted(
-                crate::palette::osc11::query_terminal(KITTY_QUERY, KITTY_QUERY_TIMEOUT).as_deref(),
+                codewhale_palette::osc11::query_terminal(KITTY_QUERY, KITTY_QUERY_TIMEOUT)
+                    .as_deref(),
             )
     })
 }
@@ -375,7 +376,7 @@ pub fn probe_sixel_graphics() -> bool {
         !kitty_graphics_supported()
             && sixel_candidate_env(|key| std::env::var(key).ok())
             && da_reports_sixel(
-                crate::palette::osc11::query_terminal_csi(SIXEL_QUERY, SIXEL_QUERY_TIMEOUT)
+                codewhale_palette::osc11::query_terminal_csi(SIXEL_QUERY, SIXEL_QUERY_TIMEOUT)
                     .as_deref(),
             )
     })
@@ -417,7 +418,7 @@ pub fn set_sixel_supported_for_tests(supported: bool) {
 /// keeps the braille tier.
 #[must_use]
 pub fn sixel_field_bg(
-    theme: &crate::palette::UiTheme,
+    theme: &codewhale_palette::UiTheme,
     terminal_bg: Option<Color>,
 ) -> Option<(u8, u8, u8)> {
     match theme.surface_bg {
@@ -958,7 +959,7 @@ mod tests {
 
     #[test]
     fn sixel_field_bg_prefers_theme_rgb_then_probed_reset() {
-        let mut theme = crate::palette::ThemeId::Underwater.ui_theme();
+        let mut theme = codewhale_palette::ThemeId::Underwater.ui_theme();
         theme.surface_bg = Color::Rgb(1, 2, 3);
         assert_eq!(sixel_field_bg(&theme, None), Some((1, 2, 3)));
         theme.surface_bg = Color::Reset;

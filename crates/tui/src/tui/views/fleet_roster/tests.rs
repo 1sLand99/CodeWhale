@@ -278,7 +278,7 @@ fn hover_tints_roster_row_without_moving_selection() {
     view.render(area, &mut hovered_buf);
     assert_eq!(
         hovered_buf[(manager_row.x, manager_row.y)].bg,
-        crate::palette::SURFACE_ELEVATED,
+        codewhale_palette::SURFACE_ELEVATED,
         "hovered roster row must show the shared hover band"
     );
 

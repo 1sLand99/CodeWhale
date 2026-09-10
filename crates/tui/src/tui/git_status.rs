@@ -283,8 +283,8 @@ pub fn chrome_label(snap: &GitStatusSnapshot) -> Option<String> {
 /// Status-bar ink for repository chrome. Location is metadata, not a
 /// failure — dirtiness is the `*` on the same gray string.
 #[must_use]
-pub fn chrome_ink() -> crate::palette::ChromeInk {
-    crate::palette::ChromeInk::Metadata
+pub fn chrome_ink() -> codewhale_palette::ChromeInk {
+    codewhale_palette::ChromeInk::Metadata
 }
 
 /// Create a new worktree at `path` tracking `branch` (or a new branch name).
@@ -452,10 +452,10 @@ locked
 
     #[test]
     fn chrome_ink_is_metadata_not_failure() {
-        assert_eq!(chrome_ink(), crate::palette::ChromeInk::Metadata);
+        assert_eq!(chrome_ink(), codewhale_palette::ChromeInk::Metadata);
         assert_eq!(
             chrome_ink().family(),
-            crate::palette::SemanticFamily::Metadata
+            codewhale_palette::SemanticFamily::Metadata
         );
     }
 

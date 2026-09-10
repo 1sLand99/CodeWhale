@@ -34,7 +34,6 @@ use crate::model_profile::{
 };
 use crate::model_registry;
 use crate::models_dev_live::{self, ModelsDevFreshness};
-use crate::palette;
 use crate::provider_lake::{
     catalog_offering_for_model, catalog_offering_for_model_identity, configured_providers,
 };
@@ -47,6 +46,7 @@ use crate::tui::views::{
     render_underwater_surface,
 };
 use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_palette as palette;
 
 /// Thinking-effort rows shown for DeepSeek-style providers, in the order
 /// DeepSeek behaviorally distinguishes them.

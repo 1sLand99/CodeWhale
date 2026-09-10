@@ -1817,7 +1817,7 @@ fn approval_footer_hints_use_muted_contrast_tier() {
     // #3380: the footer key hints ("Pg↑/↓ review · Alt+V/⌥V details · Esc abort")
     // must render one contrast tier above TEXT_HINT — TEXT_MUTED, the same
     // color the app-wide ActionHint modal footers use for labels.
-    use crate::palette;
+    use codewhale_palette as palette;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 

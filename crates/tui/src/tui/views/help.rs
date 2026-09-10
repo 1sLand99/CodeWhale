@@ -31,7 +31,6 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::commands;
-use crate::palette;
 use crate::tui::keybindings::KEYBINDINGS;
 use crate::tui::menu_style;
 use crate::tui::views::{
@@ -39,6 +38,7 @@ use crate::tui::views::{
     render_underwater_surface,
 };
 use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_palette as palette;
 
 /// Two top-level sections rendered in the overlay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

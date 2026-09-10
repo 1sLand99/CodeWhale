@@ -4,9 +4,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use crate::palette;
 use crate::tui::markdown_render;
 use crate::tui::ui_text::CopyLineSeparator;
+use codewhale_palette as palette;
 
 use super::{ASSISTANT_GLYPH, USER_GLYPH};
 

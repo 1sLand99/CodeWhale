@@ -284,7 +284,7 @@ The workhorse. Everything a session accumulated ships here, once.
 | `mcp_server_connected` | count of `.connected` in the snapshot at `crates/tui/src/mcp.rs:4254-4261`; never `name`, `command_or_url`, or `error` — server names are user-chosen and routinely internal infra |
 | `memory_search` | tool name at `crates/tui/src/tools/native_memory.rs:60-61`, counted at the tool_execution choke point |
 | `approval_modal_shown` | `crates/tui/src/tui/ui/event_loop.rs:2372` (consumer of `Event::ApprovalRequired`, `crates/tui/src/core/events.rs:444`) |
-| `approval_auto_allowed` | `crates/tui/src/core/engine.rs:5714`. Count only. Never `matched_rule`, `reason()`, the command, or argv — `auto_allow` patterns are user-authored command strings (`crates/tui/src/command_safety.rs:35/309`) |
+| `approval_auto_allowed` | `crates/tui/src/core/engine.rs:5714`. Count only. Never `matched_rule`, `reason()`, the command, or argv — `auto_allow` patterns are user-authored command strings (`crates/execpolicy/src/command_safety.rs:35/309`) |
 | `command_palette_open` | `crates/tui/src/tui/ui/event_loop.rs:3941` and `crates/tui/src/tui/mouse_ui.rs:1346` |
 
 **`errors`** — closed field set. Every value is a **variant discriminant**, never `err.to_string()`:

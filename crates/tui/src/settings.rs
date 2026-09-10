@@ -12,10 +12,10 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{expand_path, normalize_model_name};
-use crate::palette::{normalize_hex_rgb_color, normalize_theme_setting};
 use crate::reasoning_preference::ReasoningEffort;
 use codewhale_config::resolve::Layer;
 use codewhale_localization::normalize_configured_locale;
+use codewhale_palette::{normalize_hex_rgb_color, normalize_theme_setting};
 
 const SETTINGS_FILE_NAME: &str = "settings.toml";
 
@@ -4016,9 +4016,9 @@ mod tests {
         // end from `Settings::default()` through theme resolution.
         let settings = Settings::default();
         assert_eq!(settings.theme, "underwater");
-        let (name, id, theme) =
-            crate::palette::resolve_theme_setting(&settings.theme, None).expect("default resolves");
-        assert_eq!(id, crate::palette::ThemeId::Underwater);
+        let (name, id, theme) = codewhale_palette::resolve_theme_setting(&settings.theme, None)
+            .expect("default resolves");
+        assert_eq!(id, codewhale_palette::ThemeId::Underwater);
         assert_eq!(name, "underwater");
         assert_eq!(theme.name, "underwater");
     }

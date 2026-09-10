@@ -317,7 +317,7 @@ jobs:
         env:
           RUST_MIN_STACK: "8388608"
         run: |
-          sh scripts/with-hermetic-test-home.sh cargo test -p codewhale-tui --lib --locked -- command_safety auto_review authority sandbox
+          sh scripts/with-hermetic-test-home.sh cargo test -p codewhale-tui --lib --locked -- auto_review authority sandbox
           sh scripts/with-hermetic-test-home.sh cargo test -p codewhale-execpolicy --locked
 
   lint:

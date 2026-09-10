@@ -9,7 +9,7 @@ use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use unicode_width::UnicodeWidthStr;
 
 use super::{InfoLine, InfoSegment, InfoSegmentId, context_meter_hitbox, infoline_hitboxes};
-use crate::palette::{ChromeInk, UI_THEME, UiTheme};
+use codewhale_palette::{ChromeInk, UI_THEME, UiTheme};
 
 /// The hint the live shell advertises, from the one binding module that owns
 /// it — a fixture string here would let chrome and routing drift apart.
@@ -281,7 +281,7 @@ fn infoline_compact_drops_the_telemetry_and_help_before_width_does() {
 #[test]
 fn infoline_context_takes_the_error_token_at_eighty() {
     let theme = &UI_THEME;
-    let failure = crate::palette::grammar::chrome_style(theme, ChromeInk::Failure)
+    let failure = codewhale_palette::grammar::chrome_style(theme, ChromeInk::Failure)
         .fg
         .expect("failure ink has a colour");
     for (pct, expect_failure) in [(79u8, false), (80, true), (99, true)] {

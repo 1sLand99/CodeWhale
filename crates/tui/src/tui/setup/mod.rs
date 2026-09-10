@@ -20,7 +20,6 @@ use ratatui::{
 };
 
 use crate::config::{Config, has_api_key};
-use crate::palette;
 use crate::prompts::{
     BASE_PROMPT_OVERRIDE_OPT_IN_ENV, CONSTITUTION_OVERRIDE_FILE, base_prompt_override_opt_in,
 };
@@ -31,6 +30,7 @@ use crate::tui::views::{
     render_panel_scroll_rail, render_underwater_surface,
 };
 use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_palette as palette;
 
 use codewhale_config::{
     AutonomyPreference, ConstitutionAuthoring, ConstitutionChoice, ConstitutionSource,

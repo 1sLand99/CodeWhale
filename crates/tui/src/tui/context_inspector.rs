@@ -19,7 +19,6 @@ use crate::compaction::{
     last_round_kept_count, last_round_start, pinned_anchors_text,
 };
 use crate::models::{SystemPrompt, Tool};
-use crate::palette;
 use crate::session_manager::SessionContextReference;
 use crate::tui::app::{App, ToolDetailRecord};
 use crate::tui::menu_style;
@@ -29,6 +28,7 @@ use crate::tui::views::{
 };
 use codewhale_core::ContextReferenceSource;
 use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_palette as palette;
 
 /// Marker used by per-turn working-set metadata. Replicated here so the
 /// context inspector can distinguish stable prompt blocks from volatile

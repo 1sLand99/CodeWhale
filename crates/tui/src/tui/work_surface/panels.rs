@@ -17,7 +17,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::palette::{ChromeInk, UiTheme, chrome_style};
+use codewhale_palette::{ChromeInk, UiTheme, chrome_style};
 
 /// WHALE column width — names are short by contract and never truncate.
 const WHALE_CELLS: usize = 10;

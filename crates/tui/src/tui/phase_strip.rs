@@ -24,12 +24,12 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::palette::ChromeInk;
 use crate::tui::{
     app::App,
     underwater::{LiveActivity, ShellPhase, ShellTier, phase_marker_with_activity},
 };
 use codewhale_localization::{MessageId, tr};
+use codewhale_palette::ChromeInk;
 
 /// Fixed one-row reservation for the identity band below the composer.
 #[must_use]
@@ -270,7 +270,7 @@ mod tests {
         // Match Terminal intentionally aliases both roles to ANSI Cyan. Use
         // the branded palette here to prove the renderer selects the working
         // slot rather than merely observing an equal terminal color.
-        app.ui_theme = crate::palette::UI_THEME;
+        app.ui_theme = codewhale_palette::UI_THEME;
         assert_eq!(ShellPhase::Working.color(&app), app.ui_theme.status_working);
         assert_ne!(ShellPhase::Working.color(&app), app.ui_theme.info);
         assert_eq!(
@@ -283,7 +283,7 @@ mod tests {
         );
         assert_ne!(
             crate::tui::underwater::phase_ink(ShellPhase::Working).family(),
-            crate::palette::SemanticFamily::Failure
+            codewhale_palette::SemanticFamily::Failure
         );
     }
 
@@ -590,20 +590,20 @@ const COUNT_SEPARATOR: &str = ", ";
 
 /// What the caller owes the posture bar. All injected, deterministic.
 pub struct TidelineFooter<'a> {
-    pub theme: &'a crate::palette::UiTheme,
+    pub theme: &'a codewhale_palette::UiTheme,
     /// Permission chip (`ask` / `auto` / `full access`, plus the filesystem
     /// scope notice when it deviates) in its Permission ink. Never sheds.
-    pub permission_chip: (&'a str, crate::palette::ChromeInk),
+    pub permission_chip: (&'a str, codewhale_palette::ChromeInk),
     /// The chord that cycles the permission posture, when the binding is
     /// live for the current focus (`Shift+Tab`).
     pub permission_key: Option<&'a str>,
     /// Mode chip (`work` / `plan` / `operate`) in its Policy ink.
-    pub mode_chip: Option<(&'a str, crate::palette::ChromeInk)>,
+    pub mode_chip: Option<(&'a str, codewhale_palette::ChromeInk)>,
     /// The chord that cycles the mode, when the binding is live (`Tab`).
     pub mode_key: Option<&'a str>,
     /// The turn half of the working clock (`working 1m 15s`): what the
     /// session is doing right now and for how long. `None` between turns.
-    pub turn_clock: Option<(&'a str, crate::palette::ChromeInk)>,
+    pub turn_clock: Option<(&'a str, codewhale_palette::ChromeInk)>,
     /// Live counts (`2 agents`, `1 task`) in their own inks, joined with
     /// `, `.
     pub counts: &'a [(String, ChromeInk)],
@@ -612,16 +612,16 @@ pub struct TidelineFooter<'a> {
     /// looking for and could not find (#5914). Outlives the turn half, and
     /// sheds before the hint and the counts. `None` until the session has
     /// worked a minute.
-    pub session_clock: Option<(&'a str, crate::palette::ChromeInk)>,
+    pub session_clock: Option<(&'a str, codewhale_palette::ChromeInk)>,
     /// The one hint that applies right now (`Esc to interrupt`).
-    pub hint: Option<(&'a str, crate::palette::ChromeInk)>,
+    pub hint: Option<(&'a str, codewhale_palette::ChromeInk)>,
     /// Context window percentage 0–100. The metrics line paints the reading;
     /// this bar only uses it to decide whether the ≥80% cap warning outranks
     /// `hint`.
     pub context_percent: u8,
     /// Pinned right: a live notice (status toast / boot activity chip) or
     /// the remote-control state.
-    pub right: Option<(&'a str, crate::palette::ChromeInk)>,
+    pub right: Option<(&'a str, codewhale_palette::ChromeInk)>,
     pub ascii_safe: bool,
     /// `tui.posture_bar = "compact"` (#5950): start the shed ladder at
     /// [`COMPACT_SHED`] instead of rung 0, so the row states its posture —
@@ -633,8 +633,8 @@ pub struct TidelineFooter<'a> {
 impl<'a> TidelineFooter<'a> {
     #[must_use]
     pub fn new(
-        theme: &'a crate::palette::UiTheme,
-        permission_chip: (&'a str, crate::palette::ChromeInk),
+        theme: &'a codewhale_palette::UiTheme,
+        permission_chip: (&'a str, codewhale_palette::ChromeInk),
     ) -> Self {
         Self {
             theme,
@@ -660,7 +660,7 @@ impl<'a> TidelineFooter<'a> {
     }
 
     #[must_use]
-    pub fn mode_chip(mut self, chip: Option<(&'a str, crate::palette::ChromeInk)>) -> Self {
+    pub fn mode_chip(mut self, chip: Option<(&'a str, codewhale_palette::ChromeInk)>) -> Self {
         self.mode_chip = chip;
         self
     }
@@ -672,13 +672,13 @@ impl<'a> TidelineFooter<'a> {
     }
 
     #[must_use]
-    pub fn turn_clock(mut self, clock: Option<(&'a str, crate::palette::ChromeInk)>) -> Self {
+    pub fn turn_clock(mut self, clock: Option<(&'a str, codewhale_palette::ChromeInk)>) -> Self {
         self.turn_clock = clock;
         self
     }
 
     #[must_use]
-    pub fn session_clock(mut self, clock: Option<(&'a str, crate::palette::ChromeInk)>) -> Self {
+    pub fn session_clock(mut self, clock: Option<(&'a str, codewhale_palette::ChromeInk)>) -> Self {
         self.session_clock = clock;
         self
     }
@@ -690,7 +690,7 @@ impl<'a> TidelineFooter<'a> {
     }
 
     #[must_use]
-    pub fn hint(mut self, hint: Option<(&'a str, crate::palette::ChromeInk)>) -> Self {
+    pub fn hint(mut self, hint: Option<(&'a str, codewhale_palette::ChromeInk)>) -> Self {
         self.hint = hint;
         self
     }
@@ -702,7 +702,7 @@ impl<'a> TidelineFooter<'a> {
     }
 
     #[must_use]
-    pub fn right(mut self, right: Option<(&'a str, crate::palette::ChromeInk)>) -> Self {
+    pub fn right(mut self, right: Option<(&'a str, codewhale_palette::ChromeInk)>) -> Self {
         self.right = right;
         self
     }
@@ -763,8 +763,8 @@ impl<'a> TidelineFooter<'a> {
     }
 }
 
-fn tchrome(theme: &crate::palette::UiTheme, ink: crate::palette::ChromeInk) -> Style {
-    crate::palette::grammar::chrome_style(theme, ink)
+fn tchrome(theme: &codewhale_palette::UiTheme, ink: codewhale_palette::ChromeInk) -> Style {
+    codewhale_palette::grammar::chrome_style(theme, ink)
 }
 
 fn tput(buf: &mut Buffer, x: u16, y: u16, text: &str, style: Style) {
@@ -1027,9 +1027,9 @@ fn truncate_owned(text: &str, width: usize) -> String {
 /// Owned posture facts, built from real `App` state at render time and lent
 /// to [`TidelineFooter`] for painting.
 pub(crate) struct TidelineFooterFacts {
-    pub permission_chip: (String, crate::palette::ChromeInk),
+    pub permission_chip: (String, codewhale_palette::ChromeInk),
     pub permission_key: Option<&'static str>,
-    pub mode_chip: Option<(String, crate::palette::ChromeInk)>,
+    pub mode_chip: Option<(String, codewhale_palette::ChromeInk)>,
     pub mode_key: Option<&'static str>,
     pub turn_clock: ClockReading,
     pub counts: Vec<(String, ChromeInk)>,
@@ -1037,16 +1037,16 @@ pub(crate) struct TidelineFooterFacts {
     /// The dock view each entry of `counts` opens when clicked — same
     /// length, same order.
     pub count_panels: Vec<crate::tui::work_surface::RailPanel>,
-    pub hint: Option<(String, crate::palette::ChromeInk)>,
+    pub hint: Option<(String, codewhale_palette::ChromeInk)>,
     pub context_percent: u8,
-    pub right: Option<(String, crate::palette::ChromeInk)>,
+    pub right: Option<(String, codewhale_palette::ChromeInk)>,
 }
 
 impl TidelineFooterFacts {
     /// Borrow the facts as the deterministic widget's input.
     pub(crate) fn widget<'a>(
         &'a self,
-        theme: &'a crate::palette::UiTheme,
+        theme: &'a codewhale_palette::UiTheme,
         ascii_safe: bool,
     ) -> TidelineFooter<'a> {
         let borrow = |chip: &'a Option<(String, ChromeInk)>| {

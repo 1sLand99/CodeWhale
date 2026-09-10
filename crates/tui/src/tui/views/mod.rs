@@ -13,7 +13,6 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::config::{ApiProvider, ApprovalPolicyControl, Config};
 use crate::features::{FEATURES, Stage};
-use crate::palette;
 use crate::settings::Settings;
 use crate::tools::UserInputResponse;
 use crate::tools::subagent::{
@@ -29,6 +28,7 @@ use crate::tui::widgets::agent_card::AgentLifecycle;
 use codewhale_localization::{
     Locale, MessageId, configured_locale_is_partial_pack, normalize_configured_locale, tr, tr_key,
 };
+use codewhale_palette as palette;
 
 pub mod automations;
 pub mod extensions;
@@ -1132,7 +1132,7 @@ pub struct ViewStack {
     focus_texture: FocusTextureMode,
     /// Theme snapshot for the texture pass, set alongside the mode each
     /// frame. `None` (e.g. tests that never opt in) disables the texture.
-    focus_texture_theme: Option<crate::palette::UiTheme>,
+    focus_texture_theme: Option<codewhale_palette::UiTheme>,
 }
 
 impl ViewStack {
@@ -1147,7 +1147,7 @@ impl ViewStack {
     /// Set the focus-context texture mode and theme for subsequent renders
     /// (#4823 prototype). Called once per frame from the UI render path with
     /// the parsed setting; a plain enum/theme copy, no allocation.
-    pub fn set_focus_texture(&mut self, mode: FocusTextureMode, theme: crate::palette::UiTheme) {
+    pub fn set_focus_texture(&mut self, mode: FocusTextureMode, theme: codewhale_palette::UiTheme) {
         self.focus_texture = mode;
         self.focus_texture_theme = Some(theme);
     }
@@ -3468,7 +3468,7 @@ fn config_hint_for_key(locale: Locale, key: &str) -> Cow<'static, str> {
         "theme" => {
             static THEME_HINT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
             return Cow::Borrowed(THEME_HINT.get_or_init(|| {
-                crate::palette::SELECTABLE_THEMES
+                codewhale_palette::SELECTABLE_THEMES
                     .iter()
                     .map(|id| id.name())
                     .collect::<Vec<_>>()
@@ -3520,7 +3520,7 @@ fn config_choice_values(key: &str) -> Option<Vec<String>> {
     match key {
         "theme" => {
             return Some(
-                crate::palette::SELECTABLE_THEMES
+                codewhale_palette::SELECTABLE_THEMES
                     .iter()
                     .map(|id| id.name().to_string())
                     .collect(),
@@ -6274,7 +6274,6 @@ mod tests {
         truncate_view_text,
     };
     use crate::config::Config;
-    use crate::palette;
     use crate::settings::Settings;
     use crate::tools::subagent::{FleetRole, SubAgentAssignment, SubAgentResult, SubAgentStatus};
     use crate::tui::app::{App, TuiOptions};
@@ -6282,6 +6281,7 @@ mod tests {
     use crate::tui::views::{CommandPaletteAction, SubAgentsView};
     use crate::tui::widgets::agent_card::{AgentLifecycle, FanoutCard};
     use codewhale_localization::{Locale, MessageId, tr, tr_key};
+    use codewhale_palette as palette;
     use crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
@@ -6623,7 +6623,7 @@ mod tests {
     #[test]
     fn focus_texture_modes_keep_fullscreen_modal_usable_and_opaque() {
         let _lock = crate::test_support::lock_test_env();
-        let theme = crate::palette::ThemeId::Whale.ui_theme();
+        let theme = codewhale_palette::ThemeId::Whale.ui_theme();
         for mode in [FocusTextureMode::Scrim, FocusTextureMode::Grain] {
             for (w, h) in BLOCKER_SIZES {
                 let area = Rect::new(0, 0, w, h);
@@ -6681,7 +6681,7 @@ mod tests {
     /// survive at every blocker size.
     #[test]
     fn focus_texture_modes_keep_inline_modal_usable() {
-        let theme = crate::palette::ThemeId::Whale.ui_theme();
+        let theme = codewhale_palette::ThemeId::Whale.ui_theme();
         for mode in [FocusTextureMode::Scrim, FocusTextureMode::Grain] {
             for (w, h) in BLOCKER_SIZES {
                 let area = Rect::new(0, 0, w, h);
@@ -11204,7 +11204,7 @@ pub fn tideline_settings_categories(locale: Locale) -> [Cow<'static, str>; 7] {
 /// What the caller owes the settings rail.
 #[allow(dead_code)] // stage scaffolding: composed by the landing slice
 pub struct TidelineSettingsRail<'a> {
-    pub theme: &'a crate::palette::UiTheme,
+    pub theme: &'a codewhale_palette::UiTheme,
     /// Index into [`ConfigCategory::ALL`].
     pub selected: usize,
     pub ascii_safe: bool,
@@ -11218,7 +11218,7 @@ impl TidelineSettingsRail<'_> {
     }
 
     fn nav_style(&self) -> CategoryNavStyle {
-        use crate::palette::{ChromeInk, chrome_style};
+        use codewhale_palette::{ChromeInk, chrome_style};
         CategoryNavStyle {
             selected: chrome_style(self.theme, ChromeInk::Identity).add_modifier(Modifier::BOLD),
             normal: chrome_style(self.theme, ChromeInk::MetadataValue),
@@ -11268,7 +11268,10 @@ pub fn render_tideline_settings_rail(
                 area.x,
                 row_y,
                 meta,
-                crate::palette::chrome_style(rail.theme, crate::palette::ChromeInk::MetadataHint),
+                codewhale_palette::chrome_style(
+                    rail.theme,
+                    codewhale_palette::ChromeInk::MetadataHint,
+                ),
             );
         }
     }

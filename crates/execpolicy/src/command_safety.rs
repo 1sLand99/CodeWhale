@@ -418,7 +418,7 @@ const GITHUB_READONLY_PREFIXES: &[&str] = &[
 ///
 /// Words that do not look like Windows absolute paths are untouched, so POSIX
 /// escapes and unix hosts are unaffected.
-pub(crate) fn normalize_windows_command_paths(command: &str) -> String {
+pub fn normalize_windows_command_paths(command: &str) -> String {
     let stripped = command.replace(r"\\?\", "");
     let mut out = String::with_capacity(stripped.len());
     let mut word_start = 0;

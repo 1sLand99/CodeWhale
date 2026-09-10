@@ -20,9 +20,9 @@ use crate::automation_manager::{
     CreateAutomationRequest, UpdateAutomationRequest,
 };
 use crate::config::Config;
-use crate::palette;
 use crate::tui::ui_text::{grapheme_display_width, text_display_width};
 use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_palette as palette;
 
 const DAYS: [Weekday; 7] = [
     Weekday::Mon,

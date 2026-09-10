@@ -10,59 +10,6 @@
 // `crate::config`, `crate::shell_dispatcher`, etc. resolve when the same
 // files are compiled as `crate::integration::<test>::<module>`.
 
-// Shim for `crate::test_support` used by `palette`'s inline tests when compiled
-// as part of the integration harness. Mirrors the shim that used to live inside
-// `palette_audit.rs` when it was a standalone binary.
-#[allow(dead_code)]
-mod test_support {
-    use std::ffi::{OsStr, OsString};
-    use std::sync::{Mutex, MutexGuard, OnceLock};
-
-    fn lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(Mutex::default)
-    }
-
-    pub(super) struct TestEnvLock {
-        _guard: MutexGuard<'static, ()>,
-    }
-
-    pub(super) fn lock_test_env() -> TestEnvLock {
-        let guard = match lock().lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        TestEnvLock { _guard: guard }
-    }
-
-    pub(super) struct EnvVarGuard {
-        key: &'static str,
-        previous: Option<OsString>,
-    }
-
-    impl EnvVarGuard {
-        pub(super) fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
-            let previous = std::env::var_os(key);
-            // SAFETY: callers hold the process-wide test env mutex.
-            unsafe { std::env::set_var(key, value) };
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            // SAFETY: callers hold the process-wide test env mutex until drop.
-            unsafe {
-                if let Some(value) = self.previous.take() {
-                    std::env::set_var(self.key, value);
-                } else {
-                    std::env::remove_var(self.key);
-                }
-            }
-        }
-    }
-}
-
 #[path = "../../src/config/home.rs"]
 #[allow(dead_code)]
 mod config;
@@ -83,9 +30,6 @@ mod network_policy;
 #[path = "../../src/skills/package_digest.rs"]
 #[allow(dead_code)]
 mod package_digest;
-#[path = "../../src/palette/mod.rs"]
-#[allow(dead_code)]
-mod palette;
 #[path = "../../src/shell_dispatcher.rs"]
 mod shell_dispatcher;
 // The legacy text tool-call parser lives in codewhale-core now; keep the

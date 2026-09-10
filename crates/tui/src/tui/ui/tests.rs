@@ -5077,8 +5077,8 @@ fn bottom_placement_keeps_the_stage_and_queued_preview_at_twelve_rows() {
 #[test]
 fn wide_underwater_canvas_carries_the_ocean_to_both_terminal_edges() {
     let mut app = create_test_app();
-    app.theme_id = crate::palette::ThemeId::Underwater;
-    app.ui_theme = crate::palette::UNDERWATER_UI_THEME;
+    app.theme_id = codewhale_palette::ThemeId::Underwater;
+    app.ui_theme = codewhale_palette::UNDERWATER_UI_THEME;
     app.onboarding_workspace_trust_gate = false;
     app.onboarding = OnboardingState::None;
     let surface_bg = app.ui_theme.surface_bg;
@@ -6289,8 +6289,8 @@ async fn cached_denial_explanation_survives_tool_completion_and_done_render() {
     let mut app = create_test_app();
     app.onboarding = OnboardingState::None;
     app.launch.visible = false;
-    app.theme_id = crate::palette::ThemeId::Underwater;
-    app.ui_theme = crate::palette::UNDERWATER_UI_THEME;
+    app.theme_id = codewhale_palette::ThemeId::Underwater;
+    app.ui_theme = codewhale_palette::UNDERWATER_UI_THEME;
     app.is_loading = true;
     app.runtime_turn_status = Some("in_progress".to_string());
 
@@ -26779,7 +26779,7 @@ fn startup_typeahead_dispatches_as_a_command_not_a_prompt() {
     let _lock = startup_input_test_lock();
     let _home = SettingsHomeGuard::new();
     // What a startup probe consumed off the tty before the input pump existed.
-    crate::palette::osc11::carry_typed_ahead(b"/plugin list\r");
+    codewhale_palette::osc11::carry_typed_ahead(b"/plugin list\r");
 
     let mut pending: VecDeque<Event> = VecDeque::new();
     let receipt = crate::tui::startup_input::replay_into(&mut pending);
@@ -26811,8 +26811,8 @@ fn startup_that_cannot_account_for_its_bytes_keeps_the_line_in_the_composer() {
     let _home = SettingsHomeGuard::new();
     // The pre-fix shape: a probe swallowed `/plu` (here: consumed bytes it
     // cannot replay) and only the tail reached the composer.
-    crate::palette::osc11::note_consumed_unreplayable(b"/plu");
-    crate::palette::osc11::carry_typed_ahead(b"gin install /tmp/bundle\r\rsecond line\r");
+    codewhale_palette::osc11::note_consumed_unreplayable(b"/plu");
+    codewhale_palette::osc11::carry_typed_ahead(b"gin install /tmp/bundle\r\rsecond line\r");
 
     let mut pending: VecDeque<Event> = VecDeque::new();
     let receipt = crate::tui::startup_input::replay_into(&mut pending);
@@ -26861,7 +26861,7 @@ fn startup_that_cannot_account_for_its_bytes_keeps_the_line_in_the_composer() {
 fn delayed_terminal_color_reply_preserves_actual_composer_command_dispatch() {
     let _lock = startup_input_test_lock();
     let _home = SettingsHomeGuard::new();
-    crate::palette::osc11::carry_typed_ahead(b"\x1b]11;rgb:1e1e/1e1e/1e1e\x07/plugin list\r");
+    codewhale_palette::osc11::carry_typed_ahead(b"\x1b]11;rgb:1e1e/1e1e/1e1e\x07/plugin list\r");
     let mut pending = VecDeque::new();
     let receipt = crate::tui::startup_input::replay_into(&mut pending);
     assert!(receipt.whole_line_proven(), "{receipt:?}");
@@ -26878,7 +26878,7 @@ fn delayed_terminal_color_reply_preserves_actual_composer_command_dispatch() {
 fn startup_terminal_replies_allow_a_fresh_long_paste_to_send_once() {
     let _lock = startup_input_test_lock();
     let _home = SettingsHomeGuard::new();
-    crate::palette::osc11::carry_typed_ahead(
+    codewhale_palette::osc11::carry_typed_ahead(
         b"\x1b[I\x1b]11;rgb:1e1e/1e1e/1e1e\x07\x1b_Gi=31;OK\x1b\\",
     );
     let mut pending = VecDeque::new();
@@ -27353,7 +27353,7 @@ async fn notification_approval_settlement_retires_the_prompt_and_preserves_warni
         facts.right,
         Some((
             "Keep this receipt".into(),
-            crate::palette::ChromeInk::Attention
+            codewhale_palette::ChromeInk::Attention
         ))
     );
 }
@@ -27405,7 +27405,7 @@ fn notification_input_failure_keeps_the_request_and_success_retires_only_its_act
     let facts = crate::tui::phase_strip::tideline_footer_from_app(&mut app, 500);
     assert_eq!(
         facts.right,
-        Some((error_text, crate::palette::ChromeInk::Failure))
+        Some((error_text, codewhale_palette::ChromeInk::Failure))
     );
 }
 

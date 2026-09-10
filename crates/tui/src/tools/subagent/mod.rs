@@ -16469,7 +16469,7 @@ fn reject_network_reaching_input(name: &str, input: &Value) -> Result<()> {
         && input
             .get("command")
             .and_then(Value::as_str)
-            .is_some_and(crate::command_safety::is_github_readonly_command);
+            .is_some_and(codewhale_execpolicy::command_safety::is_github_readonly_command);
     if !github_shell_read && !carries_network_url(input) {
         return Ok(());
     }

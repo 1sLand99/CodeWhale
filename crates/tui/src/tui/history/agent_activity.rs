@@ -3,7 +3,7 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use crate::palette;
+use codewhale_palette as palette;
 
 use super::{
     GenericToolCell, render_tool_header_with_family_and_summary, tool_status_label, truncate_text,

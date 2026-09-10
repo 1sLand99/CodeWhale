@@ -16,9 +16,9 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Padding, Paragraph, Wrap},
 };
 
-use crate::palette;
 use crate::tui::menu_style;
 use crate::tui::ui_text::truncate_line_to_width;
+use codewhale_palette as palette;
 
 // ---------------------------------------------------------------------------
 // Public API

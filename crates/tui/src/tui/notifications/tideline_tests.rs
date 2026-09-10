@@ -10,8 +10,8 @@ use super::{
     NotificationKind, TidelineInbox, TidelineInboxRecord, render_tideline_inbox,
     tideline_inbox_hitboxes,
 };
-use crate::palette::UI_THEME;
 use crate::tui::golden_harness::{BLOCKER_SIZES, assert_matches_golden, render_golden_text};
+use codewhale_palette::UI_THEME;
 
 fn record(kind: NotificationKind, title: &str, at: &str, read: bool) -> TidelineInboxRecord {
     TidelineInboxRecord {

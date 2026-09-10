@@ -27,12 +27,12 @@ use ratatui::{
 };
 
 use super::{ActionHint, ModalKind, ModalView, ViewAction, render_modal_footer};
-use crate::palette;
 use crate::tools::workflow::{
     HostWorkflowChildRow, HostWorkflowRunDetail, host_cancel_workflow, host_workflow_run_details,
 };
 use crate::tui::app::App;
 use crate::tui::list_nav::wrap_index;
+use codewhale_palette as palette;
 
 fn now_ms() -> u64 {
     SystemTime::now()

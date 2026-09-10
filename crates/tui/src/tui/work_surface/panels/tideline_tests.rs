@@ -11,8 +11,8 @@ use super::{
     TidelineLedgerColumns, TidelineLedgerRow, TidelinePodLedger, TidelineWhaleState,
     render_tideline_ledger, tideline_ledger_hitboxes,
 };
-use crate::palette::UI_THEME;
 use crate::tui::golden_harness::{BLOCKER_SIZES, assert_matches_golden, render_golden_text};
+use codewhale_palette::UI_THEME;
 
 fn row(
     whale: &str,
@@ -145,7 +145,7 @@ fn ledger_state_marks_carry_words() {
     }
     assert_eq!(
         TidelineWhaleState::Failed.ink(),
-        crate::palette::ChromeInk::Failure
+        codewhale_palette::ChromeInk::Failure
     );
 }
 

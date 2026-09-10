@@ -3386,10 +3386,6 @@ pub fn new_shared_shell_manager(workspace: PathBuf) -> SharedShellManager {
 
 // === ToolSpec Implementations ===
 
-use crate::command_safety::{
-    SafetyLevel, analyze_command, extract_primary_command, is_agent_readonly_shell_command,
-    is_github_readonly_command, is_parallel_readonly_command, normalize_windows_command_paths,
-};
 use crate::execpolicy::{ExecPolicyDecision, load_default_policy};
 use crate::features::Feature;
 use crate::tools::cargo_failure_summary::summarize_cargo_failure;
@@ -3398,6 +3394,10 @@ use crate::tools::spec::{
     optional_bool, optional_str, optional_u64, required_str, type_mismatch,
 };
 use async_trait::async_trait;
+use codewhale_execpolicy::command_safety::{
+    SafetyLevel, analyze_command, extract_primary_command, is_agent_readonly_shell_command,
+    is_github_readonly_command, is_parallel_readonly_command, normalize_windows_command_paths,
+};
 use serde_json::json;
 
 const FOREGROUND_TIMEOUT_RECOVERY_HINT: &str = "Foreground Bash is for bounded commands. \

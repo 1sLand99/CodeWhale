@@ -28,7 +28,6 @@ mod child_env;
 mod client;
 pub mod cloud_dispatch;
 mod codex_model_cache;
-mod command_safety;
 mod commands;
 mod compaction;
 mod composer_history;
@@ -81,7 +80,6 @@ mod native_memory;
 mod network_policy;
 mod oauth;
 mod operate;
-mod palette;
 mod plugins;
 mod prefix_cache;
 mod pricing;
@@ -3766,7 +3764,7 @@ fn run_setup(
         return run_setup_clean(&default_checkpoints_dir(), args.force);
     }
 
-    use crate::palette;
+    use codewhale_palette as palette;
     use colored::Colorize;
 
     let (aqua_r, aqua_g, aqua_b) = palette::WHALE_ACTION_RGB;
@@ -4113,7 +4111,7 @@ fn run_setup_status(
     workspace: &Path,
     plugins: &crate::plugins::PluginRegistry,
 ) -> Result<()> {
-    use crate::palette;
+    use codewhale_palette as palette;
     use colored::Colorize;
 
     let (aqua_r, aqua_g, aqua_b) = palette::WHALE_ACTION_RGB;
@@ -4393,7 +4391,7 @@ async fn run_doctor(
     probes: crate::doctor::DoctorProbeRequest,
     plugins: &crate::plugins::PluginRegistry,
 ) {
-    use crate::palette;
+    use codewhale_palette as palette;
     use colored::Colorize;
 
     let (accent_r, accent_g, accent_b) = palette::WHALE_HUMAN_RGB;
@@ -7838,7 +7836,7 @@ fn sessions_resume_command() -> &'static str {
 }
 
 fn list_sessions(limit: usize, search: Option<String>) -> Result<()> {
-    use crate::palette;
+    use codewhale_palette as palette;
     use colored::Colorize;
     use session_manager::{SessionManager, format_session_line};
 
@@ -7907,7 +7905,7 @@ fn list_sessions(limit: usize, search: Option<String>) -> Result<()> {
 
 /// Initialize a new project with AGENTS.md
 fn init_project() -> Result<()> {
-    use crate::palette;
+    use codewhale_palette as palette;
     use colored::Colorize;
     use project_context::create_default_agents_md;
 

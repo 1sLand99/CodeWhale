@@ -27,11 +27,11 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::palette;
 use crate::tui::views::{
     ActionHint, ModalKind, ModalView, ViewAction, ViewEvent, render_modal_footer,
     render_panel_scroll_rail, render_underwater_surface,
 };
+use codewhale_palette as palette;
 
 #[derive(Debug, Clone)]
 struct PagerDestructiveAction {

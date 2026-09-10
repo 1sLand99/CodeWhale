@@ -596,7 +596,7 @@ fn enforce_tool_authority(
             let networked_read = input
                 .get("command")
                 .and_then(Value::as_str)
-                .is_some_and(crate::command_safety::is_github_readonly_command);
+                .is_some_and(codewhale_execpolicy::command_safety::is_github_readonly_command);
             if networked_read && authority.network_access != Some(true) {
                 return Err(ToolError::permission_denied(format!(
                     "worker '{}' cannot use read-only GitHub CLI access: its machine-readable authority envelope does not grant network access",

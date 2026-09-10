@@ -41,7 +41,6 @@ use crate::model_profile::{
     SupportState, resolved_capability_profile, resolved_capability_profile_for_route,
 };
 use crate::models_dev_live::{self, ModelsDevFreshness};
-use crate::palette;
 use crate::provider_lake::{catalog_model_count_for_provider, catalog_offering_for_model};
 use crate::provider_readiness::{
     CredentialState, ProviderReadinessSnapshot, ProviderRouteIdentity, ResolvedProviderReadiness,
@@ -61,6 +60,7 @@ use codewhale_config::{
     provider_setup_template, provider_setup_templates,
 };
 use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_palette as palette;
 use serde_json::Value;
 use std::borrow::Cow;
 use std::cell::RefCell;

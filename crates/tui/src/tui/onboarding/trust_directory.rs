@@ -7,9 +7,9 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::palette;
 use crate::tui::app::App;
 use codewhale_localization::MessageId;
+use codewhale_palette as palette;
 
 /// Wrap a path-bearing line at `/` boundaries so a deep workspace never
 /// hard-splits mid-component under ratatui's whitespace-only `Wrap`.

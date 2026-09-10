@@ -31,7 +31,6 @@ use ratatui::{
     widgets::{Paragraph, Widget},
 };
 
-use crate::palette;
 use crate::tui::menu_style;
 use crate::tui::views::{
     ActionHint, ModalKind, ModalView, ViewAction, ViewEvent, render_modal_footer,
@@ -39,6 +38,7 @@ use crate::tui::views::{
 };
 use crate::workspace_discovery::{DISCOVERY_ALWAYS_DIRS, path_is_excluded_from_discovery};
 use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_palette as palette;
 
 /// Maximum number of candidates collected from the initial walk. Keeps memory
 /// bounded for very large monorepos; matches the limits codex-rs uses for the

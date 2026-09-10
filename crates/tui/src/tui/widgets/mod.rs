@@ -16,7 +16,6 @@ use std::time::Duration;
 use crate::commands;
 #[cfg(test)]
 use crate::config::ApiProvider;
-use crate::palette;
 #[cfg(test)]
 use crate::provider_lake::all_catalog_models_for_provider;
 use crate::tui::app::{App, ComposerDensity, ViewportState};
@@ -31,6 +30,7 @@ use crate::tui::underwater::ShellPhase;
 use codewhale_config::AppMode;
 use codewhale_execpolicy::ApprovalMode;
 use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_palette as palette;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -187,7 +187,7 @@ impl ChatWidget {
         // The ordinary shell inherits its host/theme surface. Underwater life
         // is earned by the underwater theme, never painted over a user's
         // terminal simply because the app happens to be active.
-        let underwater_atmosphere = app.theme_id == crate::palette::ThemeId::Underwater;
+        let underwater_atmosphere = app.theme_id == codewhale_palette::ThemeId::Underwater;
         let ocean_ramp = underwater_atmosphere
             .then(|| crate::tui::ocean::OceanRamp::for_theme(&app.ui_theme))
             .flatten();
@@ -4599,7 +4599,6 @@ mod tests {
         wrap_input_lines_for_mouse, wrap_text,
     };
     use crate::config::{ApiProvider, Config};
-    use crate::palette;
     use crate::tui::active_cell::ActiveCell;
     use crate::tui::app::{
         App, ComposerDensity, QueuedMessage, TaskPanelEntry, TaskPanelEntryKind, ToolCollapseMode,
@@ -4611,6 +4610,7 @@ mod tests {
     use crate::tui::scrolling::{TranscriptLineMeta, TranscriptScroll};
     use codewhale_config::AppMode;
     use codewhale_localization::Locale;
+    use codewhale_palette as palette;
     use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::{
         buffer::Buffer,
@@ -4636,7 +4636,7 @@ mod tests {
         // Most widget fixtures exercise the underwater theme's field. Other
         // themes keep the terminal-owned shell; keep tests that inspect fish
         // and caustics intentional rather than coupled to that choice.
-        app.theme_id = crate::palette::ThemeId::Underwater;
+        app.theme_id = codewhale_palette::ThemeId::Underwater;
         app.ui_theme = palette::UNDERWATER_UI_THEME;
         app
     }
@@ -7312,7 +7312,7 @@ mod tests {
         // isolated settings home in parallel, so this visual contract must pin
         // the theme it is actually asserting instead of inheriting a transient
         // non-underwater choice from the process.
-        app.theme_id = crate::palette::ThemeId::Underwater;
+        app.theme_id = codewhale_palette::ThemeId::Underwater;
         app.ui_theme = palette::UNDERWATER_UI_THEME;
         app.low_motion = false;
         app.fancy_animations = true;
@@ -7364,7 +7364,7 @@ mod tests {
     #[test]
     fn terminal_owned_theme_keeps_theme_surface_without_ambient_life() {
         let mut app = create_test_app();
-        app.theme_id = crate::palette::ThemeId::Whale;
+        app.theme_id = codewhale_palette::ThemeId::Whale;
         app.ui_theme = palette::UI_THEME;
         app.low_motion = false;
         app.fancy_animations = true;
@@ -7387,8 +7387,8 @@ mod tests {
     #[test]
     fn solarized_light_keeps_canonical_surface_without_a_field() {
         let mut app = create_test_app();
-        app.theme_id = crate::palette::ThemeId::SolarizedLight;
-        app.ui_theme = crate::palette::SOLARIZED_LIGHT_UI_THEME;
+        app.theme_id = codewhale_palette::ThemeId::SolarizedLight;
+        app.ui_theme = codewhale_palette::SOLARIZED_LIGHT_UI_THEME;
         app.low_motion = false;
         app.fancy_animations = true;
         // The old cyan-tinted ramp produced the reported #e1e9da at row 16
@@ -7420,7 +7420,7 @@ mod tests {
     fn underwater_custom_background_keeps_field_depth() {
         let mut app = create_test_app();
         let custom = Color::Rgb(0x1a, 0x1b, 0x26);
-        app.theme_id = crate::palette::ThemeId::Underwater;
+        app.theme_id = codewhale_palette::ThemeId::Underwater;
         app.ui_theme = palette::UNDERWATER_UI_THEME.with_background_color(custom);
 
         let area = Rect::new(0, 0, 100, 30);
@@ -7438,8 +7438,8 @@ mod tests {
     #[test]
     fn terminal_owned_background_stays_visually_quiet_without_deepsea() {
         let mut app = create_test_app();
-        app.theme_id = crate::palette::ThemeId::Terminal;
-        app.ui_theme = crate::palette::TERMINAL_UI_THEME;
+        app.theme_id = codewhale_palette::ThemeId::Terminal;
+        app.ui_theme = codewhale_palette::TERMINAL_UI_THEME;
         app.low_motion = false;
         app.fancy_animations = true;
         let area = Rect::new(0, 0, 100, 20);
@@ -7529,7 +7529,7 @@ mod tests {
     #[test]
     fn reduced_motion_freezes_the_ocean_without_removing_depth() {
         let mut app = create_test_app();
-        app.theme_id = crate::palette::ThemeId::Underwater;
+        app.theme_id = codewhale_palette::ThemeId::Underwater;
         app.ui_theme = palette::UNDERWATER_UI_THEME;
         app.low_motion = true;
         app.fancy_animations = true;
@@ -8039,7 +8039,7 @@ mod tests {
     fn chat_widget_uses_configured_surface_background() {
         let mut app = create_test_app();
         let custom = ratatui::style::Color::Rgb(26, 27, 38);
-        app.theme_id = crate::palette::ThemeId::Whale;
+        app.theme_id = codewhale_palette::ThemeId::Whale;
         app.ui_theme = palette::UI_THEME.with_background_color(custom);
         app.add_message(HistoryCell::Assistant {
             content: "ready".to_string(),

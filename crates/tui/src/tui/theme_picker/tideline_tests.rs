@@ -3,8 +3,8 @@
 //! `settings_*` golden names).
 
 use super::{TidelineThemeList, render_tideline_theme_list, tideline_theme_rows};
-use crate::palette::SELECTABLE_THEMES;
 use crate::tui::golden_harness::render_golden_text;
+use codewhale_palette::SELECTABLE_THEMES;
 
 #[test]
 fn theme_rows_are_the_fourteen_selectable_themes() {
@@ -14,7 +14,7 @@ fn theme_rows_are_the_fourteen_selectable_themes() {
 
 #[test]
 fn theme_list_selected_row_is_boxed_with_check() {
-    let list = TidelineThemeList::new(&crate::palette::UI_THEME, 6);
+    let list = TidelineThemeList::new(&codewhale_palette::UI_THEME, 6);
     let text = render_golden_text(30, 20, |buf| {
         render_tideline_theme_list(ratatui::layout::Rect::new(0, 0, 30, 20), buf, &list);
     });
@@ -29,14 +29,14 @@ fn theme_list_selected_row_is_boxed_with_check() {
 
 #[test]
 fn theme_list_motion_toggles_reflect_settings() {
-    let on = TidelineThemeList::new(&crate::palette::UI_THEME, 0).motion(true, true);
+    let on = TidelineThemeList::new(&codewhale_palette::UI_THEME, 0).motion(true, true);
     let text = render_golden_text(30, 20, |buf| {
         render_tideline_theme_list(ratatui::layout::Rect::new(0, 0, 30, 20), buf, &on);
     });
     assert!(text.contains("◉ low motion"), "on mark: {text}");
     assert!(text.contains("◉ ambient life"), "{text}");
 
-    let off = TidelineThemeList::new(&crate::palette::UI_THEME, 0).motion(false, false);
+    let off = TidelineThemeList::new(&codewhale_palette::UI_THEME, 0).motion(false, false);
     let text = render_golden_text(30, 20, |buf| {
         render_tideline_theme_list(ratatui::layout::Rect::new(0, 0, 30, 20), buf, &off);
     });

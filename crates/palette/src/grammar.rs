@@ -142,7 +142,7 @@ pub fn chrome_style(theme: &UiTheme, ink: ChromeInk) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::palette::themes::UI_THEME;
+    use crate::themes::UI_THEME;
 
     #[test]
     fn vocabulary_is_exactly_seven_families() {
@@ -209,7 +209,7 @@ mod tests {
     /// `palette::themes` owns that ramp's separation.
     #[test]
     fn every_selectable_theme_reserves_failure_red() {
-        for theme_id in crate::palette::themes::SELECTABLE_THEMES {
+        for theme_id in crate::themes::SELECTABLE_THEMES {
             let theme = theme_id.ui_theme();
             let red = ChromeInk::Failure.color(&theme);
             for ink in ChromeInk::ALL {

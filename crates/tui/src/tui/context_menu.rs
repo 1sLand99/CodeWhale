@@ -17,10 +17,10 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::palette;
 use crate::tui::menu_style;
 use crate::tui::ocean;
 use crate::tui::views::{ContextMenuAction, ModalKind, ModalView, ViewAction, ViewEvent};
+use codewhale_palette as palette;
 
 #[derive(Debug, Clone)]
 pub struct ContextMenuEntry {

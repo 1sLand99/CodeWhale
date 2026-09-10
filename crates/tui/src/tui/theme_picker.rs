@@ -28,7 +28,6 @@ use ratatui::{
     widgets::{Paragraph, Widget},
 };
 
-use crate::palette::{SELECTABLE_THEMES, ThemeId, UiTheme};
 use crate::tui::menu_style;
 use crate::tui::settings_picker::{
     PickerNavResult, SettingAvailability, SettingOption, SettingValues, SettingsPickerController,
@@ -39,6 +38,7 @@ use crate::tui::views::{
     render_panel_scroll_rail, render_underwater_surface,
 };
 use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_palette::{SELECTABLE_THEMES, ThemeId, UiTheme};
 
 pub struct ThemePickerView {
     controller: SettingsPickerController,
@@ -59,7 +59,7 @@ pub struct ThemePickerView {
     /// UI locale captured from the app at construction (#4057 wave 2).
     locale: Locale,
     /// Valid user overlays loaded once when the picker opens.
-    custom_themes: Vec<crate::palette::UserThemeOption>,
+    custom_themes: Vec<codewhale_palette::UserThemeOption>,
 }
 
 impl ThemePickerView {
@@ -204,14 +204,16 @@ impl ThemePickerView {
     }
 }
 
-fn theme_options(current_name: &str) -> (Vec<SettingOption>, Vec<crate::palette::UserThemeOption>) {
-    theme_options_with_custom(current_name, crate::palette::list_user_theme_options())
+fn theme_options(
+    current_name: &str,
+) -> (Vec<SettingOption>, Vec<codewhale_palette::UserThemeOption>) {
+    theme_options_with_custom(current_name, codewhale_palette::list_user_theme_options())
 }
 
 fn theme_options_with_custom(
     current_name: &str,
-    custom_themes: Vec<crate::palette::UserThemeOption>,
-) -> (Vec<SettingOption>, Vec<crate::palette::UserThemeOption>) {
+    custom_themes: Vec<codewhale_palette::UserThemeOption>,
+) -> (Vec<SettingOption>, Vec<codewhale_palette::UserThemeOption>) {
     let current = current_name.trim().to_ascii_lowercase();
     let mut options = SELECTABLE_THEMES
         .iter()
@@ -238,7 +240,7 @@ fn theme_options_with_custom(
     for custom in &custom_themes {
         let label = custom
             .selector
-            .strip_prefix(crate::palette::USER_THEME_PREFIX)
+            .strip_prefix(codewhale_palette::USER_THEME_PREFIX)
             .map_or_else(|| custom.selector.clone(), |slug| format!("Custom: {slug}"));
         options.push(
             SettingOption::builder(custom.selector.clone(), label)
@@ -639,7 +641,7 @@ mod tests {
     fn custom_theme_rows_preview_and_commit_their_selector() {
         let mut custom_theme = ThemeId::Whale.ui_theme();
         custom_theme.accent_primary = Color::Rgb(0x12, 0x34, 0x56);
-        let custom = crate::palette::UserThemeOption {
+        let custom = codewhale_palette::UserThemeOption {
             selector: "custom:midnight".to_string(),
             base: ThemeId::Whale,
             theme: custom_theme,
@@ -908,8 +910,8 @@ use unicode_width::UnicodeWidthStr as _TidelineWidth;
 
 /// The 14 themes in display order: 4 mode rows then 10 presets.
 #[allow(dead_code)] // translation scaffolding: wired by the landing slice
-pub fn tideline_theme_rows() -> Vec<crate::palette::ThemeId> {
-    crate::palette::SELECTABLE_THEMES.to_vec()
+pub fn tideline_theme_rows() -> Vec<codewhale_palette::ThemeId> {
+    codewhale_palette::SELECTABLE_THEMES.to_vec()
 }
 
 /// What the caller owes the theme-list render.
@@ -974,8 +976,8 @@ fn tput(buf: &mut Buffer, x: u16, y: u16, text: &str, style: Style) {
     buf.set_stringn(x, y, text, _TidelineWidth::width(text), style);
 }
 
-fn tchrome(theme: &UiTheme, ink: crate::palette::ChromeInk) -> Style {
-    crate::palette::chrome_style(theme, ink)
+fn tchrome(theme: &UiTheme, ink: codewhale_palette::ChromeInk) -> Style {
+    codewhale_palette::chrome_style(theme, ink)
 }
 
 /// Paint the theme list: 14 rows (4 modes + 10 presets) with the selected
@@ -1000,9 +1002,9 @@ pub fn render_tideline_theme_list(area: Rect, buf: &mut Buffer, list: &TidelineT
             format!("  {label}  ")
         };
         let ink = if selected {
-            crate::palette::ChromeInk::Identity
+            codewhale_palette::ChromeInk::Identity
         } else {
-            crate::palette::ChromeInk::MetadataValue
+            codewhale_palette::ChromeInk::MetadataValue
         };
         let mut style = tchrome(theme, ink);
         if selected {
@@ -1018,7 +1020,7 @@ pub fn render_tideline_theme_list(area: Rect, buf: &mut Buffer, list: &TidelineT
             area.x,
             y,
             "MOTION (OPTIONAL)",
-            tchrome(theme, crate::palette::ChromeInk::MetadataDim).add_modifier(Modifier::BOLD),
+            tchrome(theme, codewhale_palette::ChromeInk::MetadataDim).add_modifier(Modifier::BOLD),
         );
         y += 1;
     }
@@ -1032,9 +1034,9 @@ pub fn render_tideline_theme_list(area: Rect, buf: &mut Buffer, list: &TidelineT
         let mark = if on { "◉" } else { "○" };
         let row = format!("{} {}", list.sym(mark), label);
         let ink = if on {
-            crate::palette::ChromeInk::Active
+            codewhale_palette::ChromeInk::Active
         } else {
-            crate::palette::ChromeInk::MetadataDim
+            codewhale_palette::ChromeInk::MetadataDim
         };
         tput(buf, area.x + 1, y, &row, tchrome(theme, ink));
         y += 1;

@@ -12,9 +12,9 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::palette;
 use crate::tui::app::App;
 use codewhale_localization::MessageId;
+use codewhale_palette as palette;
 use unicode_width::UnicodeWidthStr;
 
 /// Locale options shown in the picker. Order matches the keyboard hotkeys.

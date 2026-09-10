@@ -12,8 +12,8 @@ use unicode_width::UnicodeWidthChar;
 const TIDELINE_COMPOSER_HEIGHT: u16 = 4;
 
 use super::{TidelineComposer, render_tideline_composer};
-use crate::palette::UI_THEME;
 use crate::tui::golden_harness::{BLOCKER_SIZES, assert_matches_golden, render_golden_text};
+use codewhale_palette::UI_THEME;
 
 /// Dock the composer at the bottom of a blocker-size buffer, exactly where
 /// the work-screen shell places it (spec §5b: `Constraint::Length(4)`).

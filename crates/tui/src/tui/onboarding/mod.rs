@@ -25,10 +25,10 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-use crate::palette;
 use crate::tui::app::{App, OnboardingState};
 use crate::tui::views::{ActionHint, render_modal_footer, render_underwater_surface};
 use codewhale_localization::MessageId;
+use codewhale_palette as palette;
 
 const ONBOARDED_MARKER_FILE: &str = ".onboarded";
 

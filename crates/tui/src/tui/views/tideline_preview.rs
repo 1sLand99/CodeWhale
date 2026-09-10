@@ -15,7 +15,6 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::palette::{ChromeInk, UiTheme, chrome_style};
 use crate::tui::composer_chrome::TidelineComposer;
 use crate::tui::history::tideline_exports::{
     TidelineReceiptState, TidelineStream, TidelineStreamEvent,
@@ -23,6 +22,7 @@ use crate::tui::history::tideline_exports::{
 use crate::tui::phase_strip::TidelineFooter;
 use crate::tui::work_surface::panels::{TidelineLedgerRow, TidelinePodLedger, TidelineWhaleState};
 use crate::tui::work_surface::tideline::render_tideline_rail;
+use codewhale_palette::{ChromeInk, UiTheme, chrome_style};
 
 /// Fixture transcript the preview replays — small, deterministic, and
 /// exercising every stream shape (turn, tree, receipts, conclusion).

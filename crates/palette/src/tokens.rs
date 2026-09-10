@@ -20,9 +20,7 @@ pub const WHALE_TEXT_HINT_RGB: (u8, u8, u8) = (138, 153, 179); // #8A99B3 — AA
 pub const WHALE_ACTION_RGB: (u8, u8, u8) = (106, 166, 220); // #6AA6DC Ombre sky — owns interaction on dark
 // No TUI consumer yet; the web reads these through scripts/export-design-tokens.py
 // (`--whale-cobalt`, `--whale-ice`), so they are not dead.
-#[expect(dead_code)]
 pub const WHALE_COBALT_RGB: (u8, u8, u8) = (21, 53, 178); // #1535B2 Ombre cobalt — light-mode action
-#[expect(dead_code)]
 pub const WHALE_ICE_RGB: (u8, u8, u8) = (221, 238, 249); // #DDEEF9 Ice — structure on dark
 pub const WHALE_CYAN_RGB: (u8, u8, u8) = (120, 188, 232); // #78BCE8 Cyan — bounded accents only
 pub const WHALE_ACCENT_SECONDARY_RGB: (u8, u8, u8) = (79, 209, 197); // #4FD1C5 Seafoam
@@ -53,7 +51,6 @@ pub const SOLARIZED_BASE01_RGB: (u8, u8, u8) = (0x52, 0x66, 0x6D); // lifted for
 pub const SOLARIZED_BASE00_RGB: (u8, u8, u8) = (0x65, 0x7B, 0x83);
 pub const SOLARIZED_BASE0_RGB: (u8, u8, u8) = (0x72, 0x81, 0x82); // lifted for 3:1 hint text
 pub const SOLARIZED_BASE1_RGB: (u8, u8, u8) = (0x93, 0xA1, 0xA1);
-#[expect(dead_code)]
 pub const SOLARIZED_BASE2_RGB: (u8, u8, u8) = (0xEE, 0xE8, 0xD5);
 pub const SOLARIZED_BASE3_RGB: (u8, u8, u8) = (0xFD, 0xF6, 0xE3);
 pub const SOLARIZED_YELLOW_RGB: (u8, u8, u8) = (0xB4, 0x88, 0x00); // lifted for 3:1 on ivory

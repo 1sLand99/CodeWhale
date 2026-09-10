@@ -1563,7 +1563,7 @@ mod tests {
             panic!("expected delegate card");
         };
         let rendered = card
-            .render_lines(120, &crate::palette::UI_THEME)
+            .render_lines(120, &codewhale_palette::UI_THEME)
             .into_iter()
             .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
             .collect::<String>();
@@ -2047,7 +2047,7 @@ mod tests {
             panic!("expected delegate card");
         };
         let rendered: String = card
-            .render_lines(120, &crate::palette::UI_THEME)
+            .render_lines(120, &codewhale_palette::UI_THEME)
             .into_iter()
             .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
             .collect();

@@ -20,7 +20,6 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::config::HeaderItem;
-use crate::palette::{ChromeInk, chrome_style};
 use crate::tui::ui_text::{semantic_truncate, text_display_width};
 use crate::tui::{
     app::{App, HeaderActionTarget, HeaderHitbox, OnboardingState},
@@ -31,6 +30,7 @@ use crate::tui::{
 use codewhale_config::AppMode;
 use codewhale_execpolicy::ApprovalMode;
 use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_palette::{ChromeInk, chrome_style};
 
 /// Responsive density tier. It changes how much truth is shown, never the
 /// underlying state grammar.
@@ -2718,11 +2718,11 @@ mod header_tests {
         FIELD_JOIN, GROUP_GAP, filesystem_scope_notice, header_hitboxes,
         render_header_with_git_status,
     };
-    use crate::palette::ChromeInk;
     use crate::tui::app::App;
     use crate::tui::widgets::workflow_panel::{WorkflowPanel, WorkflowPanelLifecycle};
     use codewhale_config::AppMode;
     use codewhale_execpolicy::ApprovalMode;
+    use codewhale_palette::ChromeInk;
     use ratatui::{buffer::Buffer, layout::Rect};
 
     fn app() -> App {
@@ -2947,6 +2947,6 @@ pub fn launch_motion_active(app: &App, obscured: bool, ambient_settled: bool) ->
     let surfacing = crate::tui::mark::surface_progress(now, MARK_SURFACE_MS) < 1.0;
     let dissolve = app.launch.card_dissolve_progress(now, true);
     let dissolving = dissolve > 0.0 && dissolve < 1.0;
-    let water_alive = app.theme_id == crate::palette::ThemeId::Underwater && !ambient_settled;
+    let water_alive = app.theme_id == codewhale_palette::ThemeId::Underwater && !ambient_settled;
     surfacing || dissolving || water_alive
 }

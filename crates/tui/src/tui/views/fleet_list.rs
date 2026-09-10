@@ -29,13 +29,13 @@ use crate::fleet::store::{
     FleetEntry, FleetScope, SelectedFleet, delete_fleet, list_fleets, migrate_legacy_roster,
     selected_fleet, set_selected,
 };
-use crate::palette;
 use crate::tui::app::App;
 use crate::tui::menu_style;
 use crate::tui::views::{
     ActionHint, ModalKind, ModalView, ViewAction, ViewEvent, render_modal_footer,
 };
 use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_palette as palette;
 
 /// What the host should do after this view acted on the store.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1059,7 +1059,7 @@ provider = "deepseek"
         view.render(area, &mut hovered_buf);
         assert_eq!(
             hovered_buf[(second.x, second.y)].bg,
-            crate::palette::SURFACE_ELEVATED,
+            codewhale_palette::SURFACE_ELEVATED,
             "hovered entry must show the shared hover band"
         );
     }

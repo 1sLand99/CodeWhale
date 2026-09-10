@@ -53,7 +53,7 @@ jobs:
         # when website version / command snippets are stale.
         run: npm run check:docs
       - name: Check design tokens
-        # app/tokens.css is generated from crates/tui/src/palette/tokens.rs.
+        # app/tokens.css is generated from crates/palette/src/tokens.rs.
         # Fails CI when the palette moved and the export was not re-run.
         run: npm run check:tokens
       - name: Run tests

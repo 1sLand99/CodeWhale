@@ -595,7 +595,7 @@ fn theme_semantic_foreground_role(color: Color, ui: &UiTheme) -> Option<Semantic
 /// resolved theme value; ANSI-16 uses a fixed, injective role matrix instead of
 /// an arbitrary nearest-color guess.
 #[must_use]
-pub(crate) fn adapt_fg_for_depth(
+pub fn adapt_fg_for_depth(
     source: Color,
     resolved: Color,
     depth: ColorDepth,

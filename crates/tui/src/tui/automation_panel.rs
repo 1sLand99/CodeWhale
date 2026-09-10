@@ -26,8 +26,8 @@ use chrono::{DateTime, Utc};
 use crate::automation_manager::{
     AutomationRecord, AutomationRunRecord, AutomationRunStatus, AutomationStatus,
 };
-use crate::palette::ChromeInk;
 use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_palette::ChromeInk;
 
 /// Band glyph for the automation slot. Composed in code (locales/AGENTS.md);
 /// the ASCII-safe projection comes from `glyphs::ascii_fallback`.
@@ -655,7 +655,7 @@ mod tests {
     /// ink may resolve to the theme's failure color in any selectable preset.
     #[test]
     fn automation_band_ink_never_resolves_to_failure_red() {
-        for theme_id in crate::palette::SELECTABLE_THEMES {
+        for theme_id in codewhale_palette::SELECTABLE_THEMES {
             let theme = theme_id.ui_theme();
             for ink in [ChromeInk::Info, ChromeInk::Active, ChromeInk::Attention] {
                 assert_ne!(

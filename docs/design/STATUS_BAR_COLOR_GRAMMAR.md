@@ -4,9 +4,9 @@ The full-screen TUI already speaks a **color vocabulary**. This note names
 that vocabulary so chrome cannot pick up an eighth meaning, or spend true
 red on something that is not a failure.
 
-RGB values and theme presets stay in `crates/tui/src/palette/`. Widgets do
+RGB values and theme presets stay in `crates/palette/src/`. Widgets do
 not invent colors. Status-bar ink goes through
-`crates/tui/src/palette/grammar.rs` (`SemanticFamily` + `ChromeInk`).
+`crates/palette/src/grammar.rs` (`SemanticFamily` + `ChromeInk`).
 Each colour has one token name: the Identity blue is `WHALE_ACTION`
 (`WHALE_INFO`, `WHALE_ACCENT_PRIMARY`, `STATUS_INFO` were aliases of it and
 are gone), and the whale theme's `info` / `accent_primary` slots both hold it.

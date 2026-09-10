@@ -144,7 +144,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::palette::{ChromeInk, UiTheme, chrome_style};
+use codewhale_palette::{ChromeInk, UiTheme, chrome_style};
 
 /// Fixed width of the painted `[↑]` submit control.
 pub const TIDELINE_COMPOSER_SUBMIT_WIDTH: u16 = 3;

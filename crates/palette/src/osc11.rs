@@ -132,7 +132,7 @@ pub fn query_terminal_background(timeout: std::time::Duration) -> Option<(u8, u8
 /// same caveat as [`query_terminal_background`]: raw mode on, event loop not
 /// yet reading stdin.
 #[cfg(unix)]
-pub(crate) fn query_terminal(query: &[u8], timeout: std::time::Duration) -> Option<Vec<u8>> {
+pub fn query_terminal(query: &[u8], timeout: std::time::Duration) -> Option<Vec<u8>> {
     query_terminal_inner(query, timeout, false)
 }
 
@@ -143,7 +143,7 @@ pub(crate) fn query_terminal(query: &[u8], timeout: std::time::Duration) -> Opti
 /// until its byte cap. Stops after the final byte of a reply that opened
 /// with `ESC [` and keeps the same raw-mode caveat.
 #[cfg(unix)]
-pub(crate) fn query_terminal_csi(query: &[u8], timeout: std::time::Duration) -> Option<Vec<u8>> {
+pub fn query_terminal_csi(query: &[u8], timeout: std::time::Duration) -> Option<Vec<u8>> {
     query_terminal_inner(query, timeout, true)
 }
 
@@ -485,12 +485,12 @@ fn wait_readable(fd: std::os::fd::RawFd, timeout: std::time::Duration) -> bool {
 /// the console handle, so detection falls through to the environment-based
 /// sources. Callers treat `None` as "no evidence", never as "dark".
 #[cfg(not(unix))]
-pub(crate) fn query_terminal(_query: &[u8], _timeout: std::time::Duration) -> Option<Vec<u8>> {
+pub fn query_terminal(_query: &[u8], _timeout: std::time::Duration) -> Option<Vec<u8>> {
     None
 }
 
 /// Non-Unix twin of [`query_terminal_csi`]: no console to ask, no evidence.
 #[cfg(not(unix))]
-pub(crate) fn query_terminal_csi(_query: &[u8], _timeout: std::time::Duration) -> Option<Vec<u8>> {
+pub fn query_terminal_csi(_query: &[u8], _timeout: std::time::Duration) -> Option<Vec<u8>> {
     None
 }

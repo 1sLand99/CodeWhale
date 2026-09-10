@@ -127,9 +127,9 @@ pub(super) fn build_persistent_allow_rules(
             return Vec::new();
         };
         if !matches!(
-            crate::command_safety::analyze_command(command).level,
-            crate::command_safety::SafetyLevel::Safe
-                | crate::command_safety::SafetyLevel::WorkspaceSafe
+            codewhale_execpolicy::command_safety::analyze_command(command).level,
+            codewhale_execpolicy::command_safety::SafetyLevel::Safe
+                | codewhale_execpolicy::command_safety::SafetyLevel::WorkspaceSafe
         ) {
             return Vec::new();
         }

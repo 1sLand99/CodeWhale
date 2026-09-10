@@ -33,12 +33,12 @@ use std::borrow::Cow;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 
-use crate::palette::{self, UiTheme};
 use crate::tools::subagent::{AgentWorkerStatus, FleetRole, SubAgentResult, SubAgentStatus};
 use crate::tui::glyphs;
 use crate::tui::motion::mode::MotionMode;
 use crate::tui::underwater::ShellPhase;
 use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_palette::{self as palette, UiTheme};
 
 /// Cells occupied by a badge (species mark + body).
 pub const BADGE_WIDTH: usize = 2;
@@ -463,7 +463,7 @@ pub fn badge_ascii(species: WhaleSpecies) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::palette::contrast_ratio;
+    use codewhale_palette::contrast_ratio;
 
     fn theme_dark() -> UiTheme {
         palette::UI_THEME

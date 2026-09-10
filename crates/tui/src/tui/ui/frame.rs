@@ -60,8 +60,8 @@ fn output_tokens(app: &App) -> Option<u64> {
 /// row ignored that list entirely and the picker's toggles did nothing.
 pub(crate) fn info_segments(app: &App, width: u16) -> Vec<InfoSegment> {
     use crate::config::StatusItem;
-    use crate::palette::ChromeInk;
     use codewhale_localization::MessageId;
+    use codewhale_palette::ChromeInk;
     let mut segments = Vec::new();
     let tier = crate::tui::underwater::ShellTier::for_chrome_width(width);
     let shows = |item: StatusItem| app.status_items.contains(&item);
@@ -2372,7 +2372,7 @@ mod tests {
             assert_eq!(segment.value, format!("{pct}%"));
             assert_eq!(
                 segment.ink,
-                crate::palette::ChromeInk::Info,
+                codewhale_palette::ChromeInk::Info,
                 "{pct}%: below the cap the reading is a status, not a failure"
             );
             // Narrow rows keep it too: the reading is the row's floor and
@@ -2392,9 +2392,9 @@ mod tests {
     #[test]
     fn context_reading_keeps_its_warning_threshold() {
         for (pct, expected) in [
-            (10u8, crate::palette::ChromeInk::Info),
-            (79, crate::palette::ChromeInk::Info),
-            (80, crate::palette::ChromeInk::Failure),
+            (10u8, codewhale_palette::ChromeInk::Info),
+            (79, codewhale_palette::ChromeInk::Info),
+            (80, codewhale_palette::ChromeInk::Failure),
         ] {
             let app = app_with_context_percent(pct);
             let segment = super::info_segments(&app, 160)

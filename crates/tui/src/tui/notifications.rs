@@ -1818,7 +1818,7 @@ mod tests {
                     facts.right,
                     Some((
                         payload.headline().into(),
-                        crate::palette::ChromeInk::Attention
+                        codewhale_palette::ChromeInk::Attention
                     ))
                 );
             }
@@ -2336,7 +2336,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::palette::{ChromeInk, UiTheme, chrome_style};
+use codewhale_palette::{ChromeInk, UiTheme, chrome_style};
 
 /// One attention record: a typed projection of a status toast / sticky
 /// status / desktop payload. `at` is an injected clock string so renders

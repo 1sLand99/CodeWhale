@@ -7,8 +7,8 @@ use ratatui::layout::Rect;
 use unicode_width::UnicodeWidthChar;
 
 use super::{ChromeInk, TidelineFooter, render_tideline_footer};
-use crate::palette::UI_THEME;
 use crate::tui::golden_harness::{BLOCKER_SIZES, assert_matches_golden, render_golden_text};
+use codewhale_palette::UI_THEME;
 
 struct Fixture {
     permission: (&'static str, ChromeInk),
@@ -40,7 +40,7 @@ fn working() -> Fixture {
 }
 
 impl Fixture {
-    fn widget<'a>(&'a self, theme: &'a crate::palette::UiTheme) -> TidelineFooter<'a> {
+    fn widget<'a>(&'a self, theme: &'a codewhale_palette::UiTheme) -> TidelineFooter<'a> {
         TidelineFooter::new(theme, self.permission)
             .permission_key(self.permission_key)
             .mode_chip(self.mode)

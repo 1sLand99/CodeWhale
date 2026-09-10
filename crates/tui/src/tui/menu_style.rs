@@ -16,8 +16,8 @@
 
 use ratatui::style::{Color, Modifier, Style};
 
-use crate::palette::{self, UiTheme};
 use crate::tui::glyphs;
+use codewhale_palette::{self as palette, UiTheme};
 
 /// Canonical selected-row treatment: selection ink on the selection
 /// background, bolded so the active row reads even without color.

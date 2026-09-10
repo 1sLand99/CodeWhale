@@ -32,7 +32,8 @@ fn contrast_ratio(foreground: Color, background: Color) -> f64 {
 
 #[test]
 fn whale_ramp_is_perceptibly_deep_not_merely_non_equal() {
-    let ramp = OceanRamp::for_theme(&crate::palette::UNDERWATER_UI_THEME).expect("underwater ramp");
+    let ramp =
+        OceanRamp::for_theme(&codewhale_palette::UNDERWATER_UI_THEME).expect("underwater ramp");
     assert_eq!(ramp.surface, Color::Rgb(0x10, 0x2a, 0x45));
     assert_eq!(ramp.middle, Color::Rgb(0x0a, 0x1e, 0x33));
     assert_eq!(ramp.deep, Color::Rgb(0x06, 0x13, 0x20));
@@ -48,7 +49,7 @@ fn whale_ramp_is_perceptibly_deep_not_merely_non_equal() {
 
 #[test]
 fn whale_column_stays_blue_and_gently_banded_at_full_screen_depth() {
-    let theme = crate::palette::UNDERWATER_UI_THEME;
+    let theme = codewhale_palette::UNDERWATER_UI_THEME;
     let ramp = OceanRamp::for_theme(&theme).expect("underwater ramp");
     let mut previous = ramp.color_at_context(0, 80, 0);
 
@@ -60,7 +61,7 @@ fn whale_column_stays_blue_and_gently_banded_at_full_screen_depth() {
             "row {row} lost the authored blue-ocean ordering: {current:?}"
         );
         assert!(
-            relative_luminance(current) > relative_luminance(crate::palette::WHALE_BG),
+            relative_luminance(current) > relative_luminance(codewhale_palette::WHALE_BG),
             "row {row} fell back into the near-black shell field"
         );
         assert!(
@@ -76,7 +77,7 @@ fn whale_column_stays_blue_and_gently_banded_at_full_screen_depth() {
 
 #[test]
 fn whale_ocean_keeps_text_and_semantic_roles_readable() {
-    let theme = crate::palette::UNDERWATER_UI_THEME;
+    let theme = codewhale_palette::UNDERWATER_UI_THEME;
     let ramp = OceanRamp::for_theme(&theme).expect("underwater ramp");
     let foregrounds = [
         ("body", theme.text_body),
@@ -113,7 +114,7 @@ fn whale_ocean_keeps_text_and_semantic_roles_readable() {
 #[test]
 fn underwater_custom_background_keeps_the_field() {
     let custom = Color::Rgb(0x12, 0x1a, 0x2d);
-    let theme = crate::palette::UNDERWATER_UI_THEME.with_background_color(custom);
+    let theme = codewhale_palette::UNDERWATER_UI_THEME.with_background_color(custom);
     let ramp = OceanRamp::for_theme(&theme).expect("the field survives a background override");
 
     assert_ne!(ramp.surface, ramp.deep);
@@ -121,7 +122,7 @@ fn underwater_custom_background_keeps_the_field() {
 
 #[test]
 fn themes_other_than_underwater_own_no_field() {
-    use crate::palette::{SELECTABLE_THEMES, ThemeId};
+    use codewhale_palette::{SELECTABLE_THEMES, ThemeId};
 
     for id in SELECTABLE_THEMES {
         let ramp = OceanRamp::for_theme(&id.ui_theme());
@@ -141,7 +142,7 @@ fn themes_other_than_underwater_own_no_field() {
     // theme that does not own one.
     let custom = Color::Rgb(0x12, 0x1a, 0x2d);
     assert_eq!(
-        OceanRamp::for_theme(&crate::palette::UI_THEME.with_background_color(custom)),
+        OceanRamp::for_theme(&codewhale_palette::UI_THEME.with_background_color(custom)),
         None
     );
 }
@@ -149,14 +150,14 @@ fn themes_other_than_underwater_own_no_field() {
 #[test]
 fn inherited_terminal_background_reports_no_ramp() {
     assert_eq!(
-        OceanRamp::for_theme(&crate::palette::TERMINAL_UI_THEME),
+        OceanRamp::for_theme(&codewhale_palette::TERMINAL_UI_THEME),
         None
     );
 }
 
 #[test]
 fn solarized_light_preserves_its_canonical_base3_background() {
-    let theme = crate::palette::SOLARIZED_LIGHT_UI_THEME;
+    let theme = codewhale_palette::SOLARIZED_LIGHT_UI_THEME;
 
     assert_eq!(theme.surface_bg, Color::Rgb(0xfd, 0xf6, 0xe3));
     assert_eq!(OceanRamp::for_theme(&theme), None);
@@ -165,14 +166,17 @@ fn solarized_light_preserves_its_canonical_base3_background() {
 #[test]
 fn solarized_light_custom_background_stays_field_free() {
     let custom = Color::Rgb(0x1a, 0x1b, 0x26);
-    let theme = crate::palette::SOLARIZED_LIGHT_UI_THEME.with_background_color(custom);
+    let theme = codewhale_palette::SOLARIZED_LIGHT_UI_THEME.with_background_color(custom);
     assert_eq!(OceanRamp::for_theme(&theme), None);
     assert_eq!(theme.surface_bg, custom);
 }
 
 #[test]
 fn terminal_native_themes_keep_reset_shells_while_underwater_paints_the_column() {
-    for theme in [crate::palette::UI_THEME, crate::palette::LIGHT_UI_THEME] {
+    for theme in [
+        codewhale_palette::UI_THEME,
+        codewhale_palette::LIGHT_UI_THEME,
+    ] {
         assert_eq!(
             OceanRamp::for_theme(&theme),
             None,
@@ -190,7 +194,7 @@ fn terminal_native_themes_keep_reset_shells_while_underwater_paints_the_column()
         }
     }
 
-    let theme = crate::palette::UNDERWATER_UI_THEME;
+    let theme = codewhale_palette::UNDERWATER_UI_THEME;
     let ramp = OceanRamp::for_theme(&theme).expect("underwater ramp");
     for painted in [ramp.surface, ramp.middle, ramp.deep, ramp.ambient] {
         assert_ne!(painted, Color::Reset, "underwater paint");
@@ -216,7 +220,7 @@ fn terminal_native_themes_keep_reset_shells_while_underwater_paints_the_column()
 fn ambient_ink_matches_sunk_sky_shades_and_survives_reset_surfaces() {
     // The underwater theme's authored RGB ramp gives its shell two sunk sky
     // shades; seafoam remains live-work ink.
-    let theme = crate::palette::UNDERWATER_UI_THEME;
+    let theme = codewhale_palette::UNDERWATER_UI_THEME;
     let ramp = OceanRamp::for_theme(&theme).expect("underwater ramp");
     let baseline = crate::tui::ambient_life::AmbientActivity::Baseline;
     let (primary, secondary) = ambient_inks_for_activity(&theme, baseline);
@@ -226,7 +230,7 @@ fn ambient_ink_matches_sunk_sky_shades_and_survives_reset_surfaces() {
 
     // Terminal-owned surfaces have no RGB base; the raw secondary accent
     // lets the terminal's own palette color the life.
-    let terminal = crate::palette::TERMINAL_UI_THEME;
+    let terminal = codewhale_palette::TERMINAL_UI_THEME;
     assert_eq!(
         ambient_inks_for_activity(&terminal, baseline),
         (terminal.info, terminal.info)
@@ -236,7 +240,7 @@ fn ambient_ink_matches_sunk_sky_shades_and_survives_reset_surfaces() {
 #[test]
 fn ambient_ink_reads_the_activity_at_a_glance() {
     use crate::tui::ambient_life::AmbientActivity;
-    let theme = crate::palette::UNDERWATER_UI_THEME;
+    let theme = codewhale_palette::UNDERWATER_UI_THEME;
     let baseline = ambient_inks_for_activity(&theme, AmbientActivity::Baseline);
     let reasoning = ambient_inks_for_activity(&theme, AmbientActivity::Reasoning);
     let tools = ambient_inks_for_activity(&theme, AmbientActivity::Tools);
@@ -258,7 +262,8 @@ fn ambient_ink_reads_the_activity_at_a_glance() {
 #[test]
 fn attention_phases_tint_the_water_even_when_life_has_settled() {
     let viewport = Rect::new(0, 0, 80, 24);
-    let ramp = OceanRamp::for_theme(&crate::palette::UNDERWATER_UI_THEME).expect("underwater ramp");
+    let ramp =
+        OceanRamp::for_theme(&codewhale_palette::UNDERWATER_UI_THEME).expect("underwater ramp");
     // presence 0 + animated false is the fully settled, reduced-motion case —
     // exactly where the old treatment went neutral and a blocked session was
     // indistinguishable from an idle one across the room.
@@ -279,7 +284,8 @@ fn attention_phases_tint_the_water_even_when_life_has_settled() {
 /// bottom row at 0%, so the abyss visibly rises as context fills.
 #[test]
 fn context_fill_drags_the_water_column_toward_the_deep() {
-    let ramp = OceanRamp::for_theme(&crate::palette::UNDERWATER_UI_THEME).expect("underwater ramp");
+    let ramp =
+        OceanRamp::for_theme(&codewhale_palette::UNDERWATER_UI_THEME).expect("underwater ramp");
     let surface_row = ramp.color_at_context(0, 24, 0);
     let abyss_row = ramp.color_at_context(0, 24, 100);
     assert_ne!(surface_row, abyss_row);
@@ -288,7 +294,8 @@ fn context_fill_drags_the_water_column_toward_the_deep() {
 
 #[test]
 fn shimmer_is_subtle_and_concentrated_near_the_surface() {
-    let ramp = OceanRamp::for_theme(&crate::palette::UNDERWATER_UI_THEME).expect("underwater ramp");
+    let ramp =
+        OceanRamp::for_theme(&codewhale_palette::UNDERWATER_UI_THEME).expect("underwater ramp");
     let surface_a = ramp.color_at_phase_context(0, 20, 0, ShellPhase::Idle, 0);
     let surface_b = ramp.color_at_phase_context(0, 20, 22_500, ShellPhase::Idle, 0);
     let deep_a = ramp.color_at_phase_context(19, 20, 0, ShellPhase::Idle, 0);
@@ -307,7 +314,8 @@ fn shimmer_is_subtle_and_concentrated_near_the_surface() {
 
 #[test]
 fn attention_phases_carry_their_own_water_and_work_phases_have_distinct_depth_bias() {
-    let ramp = OceanRamp::for_theme(&crate::palette::UNDERWATER_UI_THEME).expect("underwater ramp");
+    let ramp =
+        OceanRamp::for_theme(&codewhale_palette::UNDERWATER_UI_THEME).expect("underwater ramp");
     // Attention tints are steady — the color itself is the signal, and a
     // slow breath read as flicker rather than intent — but never neutral:
     // each attention phase differs from the plain water.
@@ -336,7 +344,8 @@ fn tall_columns_darken_continuously_without_an_anchor_shelf() {
     // The old two-segment ramp met at 0.42 with zero color velocity on both
     // sides: on a tall window that shelf read as a horizontal seam. The
     // Bézier column must keep moving through the former anchor zone.
-    let ramp = OceanRamp::for_theme(&crate::palette::UNDERWATER_UI_THEME).expect("underwater ramp");
+    let ramp =
+        OceanRamp::for_theme(&codewhale_palette::UNDERWATER_UI_THEME).expect("underwater ramp");
     let height = 120;
     let anchor = 50; // ~0.42 of 120
     let above = ramp.color_at_context(anchor - 6, height, 0);
@@ -350,7 +359,8 @@ fn tall_columns_darken_continuously_without_an_anchor_shelf() {
 
 #[test]
 fn completion_breath_peaks_once_then_settles() {
-    let ramp = OceanRamp::for_theme(&crate::palette::UNDERWATER_UI_THEME).expect("underwater ramp");
+    let ramp =
+        OceanRamp::for_theme(&codewhale_palette::UNDERWATER_UI_THEME).expect("underwater ramp");
     let start = ramp.color_at_completion_context(0, 20, 0, 0);
     let peak = ramp.color_at_completion_context(0, 20, 320, 0);
     let settled = ramp.color_at_completion_context(0, 20, 800, 0);
@@ -476,7 +486,8 @@ fn each_ramp_color_participates_in_the_typed_cache_identity() {
 
 #[test]
 fn identical_semantic_cache_inputs_have_identical_identity() {
-    let ramp = OceanRamp::for_theme(&crate::palette::UNDERWATER_UI_THEME).expect("underwater ramp");
+    let ramp =
+        OceanRamp::for_theme(&codewhale_palette::UNDERWATER_UI_THEME).expect("underwater ramp");
     let viewport = Rect::new(3, 5, 80, 24);
     let first = OceanColumn::new(
         ramp,
@@ -505,7 +516,7 @@ fn identical_semantic_cache_inputs_have_identical_identity() {
 
 #[test]
 fn split_shell_surfaces_share_one_absolute_row_column() {
-    let theme = crate::palette::UNDERWATER_UI_THEME;
+    let theme = codewhale_palette::UNDERWATER_UI_THEME;
     let ramp = OceanRamp::for_theme(&theme).expect("underwater ramp");
     let viewport = Rect::new(0, 0, 12, 12);
     let header = Rect::new(0, 0, 12, 2);
@@ -539,7 +550,7 @@ fn split_shell_surfaces_share_one_absolute_row_column() {
 
 #[test]
 fn full_viewport_water_column_reaches_both_terminal_edges() {
-    let theme = crate::palette::UNDERWATER_UI_THEME;
+    let theme = codewhale_palette::UNDERWATER_UI_THEME;
     let ramp = OceanRamp::for_theme(&theme).expect("underwater ramp");
     let viewport = Rect::new(0, 0, 120, 32);
     let mut buf = Buffer::empty(viewport);

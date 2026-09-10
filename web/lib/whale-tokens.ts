@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 /**
  * The whale palette as the site actually resolves it.
  *
- * `app/tokens.css` is generated from `crates/tui/src/palette/tokens.rs` by
+ * `app/tokens.css` is generated from `crates/palette/src/tokens.rs` by
  * `scripts/export-design-tokens.py`, so `globals.css` states which whale token
  * each site variable uses (`--paper: var(--whale-bg)`) instead of repeating the
  * hex. The contract tests still need the literal color to check parity and

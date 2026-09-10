@@ -19,12 +19,12 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::fleet::role::public_role_label;
-use crate::palette;
 use crate::todo_snapshot::{TodoCardProjection, card_omission_line, card_todo_projection};
 use crate::tools::subagent::MailboxMessage;
 use crate::tools::todo::TodoListSnapshot;
 use crate::tui::ui_text::truncate_line_to_width;
 use crate::tui::widgets::tool_card::{ToolFamily, family_glyph};
+use codewhale_palette as palette;
 use unicode_width::UnicodeWidthStr;
 
 /// Maximum number of recent actions kept on a `DelegateCard`. Older entries
@@ -67,14 +67,14 @@ impl AgentLifecycle {
     /// Semantic status color only — never the whole-card identity tint.
     /// cyan/teal = running, amber = waiting/pending, green = done, red = failed.
     #[must_use]
-    pub fn ink(self) -> crate::palette::grammar::ChromeInk {
+    pub fn ink(self) -> codewhale_palette::grammar::ChromeInk {
         match self {
-            Self::Pending => crate::palette::grammar::ChromeInk::Waiting,
-            Self::Running => crate::palette::grammar::ChromeInk::Active,
-            Self::Completed => crate::palette::grammar::ChromeInk::Outcome,
-            Self::Failed => crate::palette::grammar::ChromeInk::Failure,
-            Self::Cancelled => crate::palette::grammar::ChromeInk::Metadata,
-            Self::Interrupted => crate::palette::grammar::ChromeInk::Attention,
+            Self::Pending => codewhale_palette::grammar::ChromeInk::Waiting,
+            Self::Running => codewhale_palette::grammar::ChromeInk::Active,
+            Self::Completed => codewhale_palette::grammar::ChromeInk::Outcome,
+            Self::Failed => codewhale_palette::grammar::ChromeInk::Failure,
+            Self::Cancelled => codewhale_palette::grammar::ChromeInk::Metadata,
+            Self::Interrupted => codewhale_palette::grammar::ChromeInk::Attention,
         }
     }
 
@@ -210,7 +210,8 @@ impl DelegateCard {
                 Span::styled(prefix, Style::default().fg(palette::TEXT_DIM)),
                 Span::styled(
                     truncate_action(&todo.header, line_detail_width(content_width, prefix)),
-                    Style::default().fg(crate::palette::grammar::ChromeInk::Metadata.color(theme)),
+                    Style::default()
+                        .fg(codewhale_palette::grammar::ChromeInk::Metadata.color(theme)),
                 ),
             ]));
             let item_prefix = "  ";
@@ -220,7 +221,7 @@ impl DelegateCard {
                     Span::styled(
                         truncate_action(item, line_detail_width(content_width, item_prefix)),
                         Style::default()
-                            .fg(crate::palette::grammar::ChromeInk::Metadata.color(theme)),
+                            .fg(codewhale_palette::grammar::ChromeInk::Metadata.color(theme)),
                     ),
                 ]));
             }
@@ -233,7 +234,7 @@ impl DelegateCard {
                             line_detail_width(content_width, item_prefix),
                         ),
                         Style::default()
-                            .fg(crate::palette::grammar::ChromeInk::Metadata.color(theme)),
+                            .fg(codewhale_palette::grammar::ChromeInk::Metadata.color(theme)),
                     ),
                 ]));
             }
@@ -241,7 +242,7 @@ impl DelegateCard {
         if self.truncated {
             lines.push(Line::from(Span::styled(
                 "\u{2026}".to_string(), // …
-                Style::default().fg(crate::palette::grammar::ChromeInk::Metadata.color(theme)),
+                Style::default().fg(codewhale_palette::grammar::ChromeInk::Metadata.color(theme)),
             )));
         }
         for action in self
@@ -253,11 +254,13 @@ impl DelegateCard {
             lines.push(Line::from(vec![
                 Span::styled(
                     prefix,
-                    Style::default().fg(crate::palette::grammar::ChromeInk::Metadata.color(theme)),
+                    Style::default()
+                        .fg(codewhale_palette::grammar::ChromeInk::Metadata.color(theme)),
                 ),
                 Span::styled(
                     truncate_action(action, line_detail_width(content_width, prefix).min(200)),
-                    Style::default().fg(crate::palette::grammar::ChromeInk::Metadata.color(theme)),
+                    Style::default()
+                        .fg(codewhale_palette::grammar::ChromeInk::Metadata.color(theme)),
                 ),
             ]));
         }
@@ -456,14 +459,14 @@ impl FanoutCard {
             Span::styled(
                 format!("{count} {count_label}"),
                 Style::default()
-                    .fg(crate::palette::grammar::ChromeInk::Identity.color(theme))
+                    .fg(codewhale_palette::grammar::ChromeInk::Identity.color(theme))
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" "),
             Span::styled(
                 self.dot_grid(),
                 Style::default()
-                    .fg(crate::palette::grammar::ChromeInk::Metadata.color(theme))
+                    .fg(codewhale_palette::grammar::ChromeInk::Metadata.color(theme))
                     .add_modifier(Modifier::BOLD),
             ),
         ])]
@@ -528,13 +531,13 @@ fn delegate_header(
         Span::styled(
             role.to_string(),
             Style::default()
-                .fg(crate::palette::grammar::ChromeInk::Identity.color(theme))
+                .fg(codewhale_palette::grammar::ChromeInk::Identity.color(theme))
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
         Span::styled(
             detail,
-            Style::default().fg(crate::palette::grammar::ChromeInk::Metadata.color(theme)),
+            Style::default().fg(codewhale_palette::grammar::ChromeInk::Metadata.color(theme)),
         ),
     ];
     Line::from(spans)
@@ -699,7 +702,7 @@ mod tests {
     fn delegate_card_header_does_not_duplicate_verb_as_role() {
         let card = DelegateCard::new("agent_1", "explore");
         let rendered =
-            render_to_strings(&card.render_lines(80, &crate::palette::UI_THEME)).join("\n");
+            render_to_strings(&card.render_lines(80, &codewhale_palette::UI_THEME)).join("\n");
         assert!(
             !rendered.contains("delegate"),
             "delegate must not be visible in the card: {rendered:?}"
@@ -707,7 +710,7 @@ mod tests {
         assert!(!rendered.contains("[running]"), "{rendered:?}");
         let explore = DelegateCard::new("agent_2", "scout");
         let explore_rendered =
-            render_to_strings(&explore.render_lines(80, &crate::palette::UI_THEME)).join("\n");
+            render_to_strings(&explore.render_lines(80, &codewhale_palette::UI_THEME)).join("\n");
         assert!(explore_rendered.contains("explore"), "{explore_rendered:?}");
     }
 
@@ -720,7 +723,7 @@ mod tests {
         );
         card.push_action("objective: QUESTION: Add Zhipu GLM as a first-class provider-scoped route for 中文输出".to_string());
 
-        let rendered = render_to_strings(&card.render_lines(40, &crate::palette::UI_THEME));
+        let rendered = render_to_strings(&card.render_lines(40, &codewhale_palette::UI_THEME));
 
         assert!(rendered[0].contains("implement"), "{rendered:?}");
         for line in rendered {
@@ -748,7 +751,7 @@ mod tests {
             "stable steady-state size"
         );
 
-        let rendered = render_to_strings(&card.render_lines(80, &crate::palette::UI_THEME));
+        let rendered = render_to_strings(&card.render_lines(80, &codewhale_palette::UI_THEME));
         assert!(
             rendered.iter().any(|line| line.contains('\u{2026}')),
             "ellipsis indicator must render: got {rendered:?}"
@@ -782,7 +785,7 @@ mod tests {
         };
         assert!(apply_to_delegate(&mut card, &msg));
         assert_eq!(card.status, AgentLifecycle::Completed);
-        let rendered = render_to_strings(&card.render_lines(80, &crate::palette::UI_THEME));
+        let rendered = render_to_strings(&card.render_lines(80, &codewhale_palette::UI_THEME));
         assert!(
             rendered.iter().any(|line| line.contains("╰ done")),
             "terminal status row renders done: got {rendered:?}"
@@ -809,7 +812,7 @@ mod tests {
         );
 
         let rendered =
-            render_to_strings(&card.render_lines(80, &crate::palette::UI_THEME)).join("\n");
+            render_to_strings(&card.render_lines(80, &codewhale_palette::UI_THEME)).join("\n");
         assert!(!rendered.contains("step 1/100"), "{rendered}");
         assert!(
             !rendered.contains("requesting model response"),
@@ -844,7 +847,7 @@ mod tests {
         ));
 
         let rendered =
-            render_to_strings(&card.render_lines(80, &crate::palette::UI_THEME)).join("\n");
+            render_to_strings(&card.render_lines(80, &codewhale_palette::UI_THEME)).join("\n");
         assert!(rendered.contains("read_file"), "{rendered}");
         assert!(
             !rendered.contains("[7]"),
@@ -885,7 +888,7 @@ mod tests {
         card.upsert_worker("w_3", AgentLifecycle::Completed);
         card.upsert_worker("w_4", AgentLifecycle::Failed);
         let rendered =
-            render_to_strings(&card.render_lines(80, &crate::palette::UI_THEME)).join("\n");
+            render_to_strings(&card.render_lines(80, &codewhale_palette::UI_THEME)).join("\n");
         assert!(
             rendered.contains("4 agents"),
             "header should show count: {rendered}"
@@ -999,7 +1002,7 @@ mod tests {
         assert_eq!(card.status, AgentLifecycle::Interrupted);
 
         let rendered =
-            render_to_strings(&card.render_lines(80, &crate::palette::UI_THEME)).join("\n");
+            render_to_strings(&card.render_lines(80, &codewhale_palette::UI_THEME)).join("\n");
         assert!(rendered.contains("╰ interrupted"), "{rendered}");
         assert!(rendered.contains("API call timed out"), "{rendered}");
     }
@@ -1027,7 +1030,7 @@ mod tests {
         // Copy dedupe (Wave 5c #4): the counts line is gone — the header and
         // dot grid carry the aggregate state instead.
         let rendered =
-            render_to_strings(&card.render_lines(80, &crate::palette::UI_THEME)).join("\n");
+            render_to_strings(&card.render_lines(80, &codewhale_palette::UI_THEME)).join("\n");
         assert!(rendered.contains("2 agents"), "{rendered}");
         assert!(
             rendered.contains('\u{25D0}'),
@@ -1044,7 +1047,7 @@ mod tests {
         };
         assert!(apply_to_fanout(&mut card, &msg));
         let rendered =
-            render_to_strings(&card.render_lines(80, &crate::palette::UI_THEME)).join("\n");
+            render_to_strings(&card.render_lines(80, &codewhale_palette::UI_THEME)).join("\n");
         assert!(rendered.contains("2 agents"), "{rendered}");
     }
 
@@ -1057,7 +1060,7 @@ mod tests {
         }
         card.upsert_worker("w_12", AgentLifecycle::Running);
 
-        let rendered = render_to_strings(&card.render_lines(80, &crate::palette::UI_THEME));
+        let rendered = render_to_strings(&card.render_lines(80, &codewhale_palette::UI_THEME));
         assert!(
             rendered.iter().any(|line| line.contains('\u{25CF}')),
             "dot grid should remain: {rendered:?}"
@@ -1123,7 +1126,7 @@ mod tests {
         ));
 
         let rendered =
-            render_to_strings(&card.render_lines(100, &crate::palette::UI_THEME)).join("\n");
+            render_to_strings(&card.render_lines(100, &codewhale_palette::UI_THEME)).join("\n");
         assert!(rendered.contains("To-do 1/2"), "{rendered}");
         assert!(rendered.contains("50% settled"), "{rendered}");
         assert!(
@@ -1151,7 +1154,7 @@ mod tests {
         ));
         assert!(card.todo_projection().is_none());
         let rendered =
-            render_to_strings(&card.render_lines(100, &crate::palette::UI_THEME)).join("\n");
+            render_to_strings(&card.render_lines(100, &codewhale_palette::UI_THEME)).join("\n");
         assert!(!rendered.contains("sibling only work"), "{rendered}");
         assert!(!rendered.contains("To-do"), "{rendered}");
     }
@@ -1195,7 +1198,7 @@ mod tests {
         );
 
         let rendered =
-            render_to_strings(&card.render_lines(100, &crate::palette::UI_THEME)).join("\n");
+            render_to_strings(&card.render_lines(100, &codewhale_palette::UI_THEME)).join("\n");
         assert_eq!(card.status, AgentLifecycle::Running, "still mid-turn");
         assert!(rendered.contains("[~] #2 add the regression"), "{rendered}");
         assert!(rendered.contains("[x] #1 draft the fix"), "{rendered}");
@@ -1228,7 +1231,7 @@ mod tests {
 
         assert!(card.todo_projection().is_none());
         let rendered =
-            render_to_strings(&card.render_lines(100, &crate::palette::UI_THEME)).join("\n");
+            render_to_strings(&card.render_lines(100, &codewhale_palette::UI_THEME)).join("\n");
         assert!(
             !rendered.contains("To-do"),
             "an empty list states nothing: {rendered}"
@@ -1279,7 +1282,7 @@ mod tests {
             "the active item is never the one dropped: {projection:?}"
         );
 
-        let rendered = render_to_strings(&card.render_lines(60, &crate::palette::UI_THEME));
+        let rendered = render_to_strings(&card.render_lines(60, &codewhale_palette::UI_THEME));
         assert!(
             rendered.iter().any(|line| line.contains("+6 more")),
             "elision must be stated: {rendered:?}"
@@ -1324,7 +1327,7 @@ mod tests {
             apply_to_delegate(&mut card, &terminal);
 
             let rendered =
-                render_to_strings(&card.render_lines(100, &crate::palette::UI_THEME)).join("\n");
+                render_to_strings(&card.render_lines(100, &codewhale_palette::UI_THEME)).join("\n");
             assert!(card.status.is_terminal(), "{:?}", card.status);
             assert!(
                 rendered.contains("[~] #2 run the suite"),
@@ -1346,7 +1349,7 @@ mod tests {
             ),
         ));
         let rendered =
-            render_to_strings(&card.render_lines(100, &crate::palette::UI_THEME)).join("\n");
+            render_to_strings(&card.render_lines(100, &codewhale_palette::UI_THEME)).join("\n");
         assert!(!rendered.contains("worker one work"), "{rendered}");
         assert!(!rendered.contains("To-do"), "{rendered}");
     }

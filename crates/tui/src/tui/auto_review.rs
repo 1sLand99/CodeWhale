@@ -446,9 +446,9 @@ fn shell_params_are_auto_review_routine(params: &Value) -> bool {
     !segments.is_empty()
         && segments.iter().all(|segment| {
             matches!(
-                crate::command_safety::analyze_command(segment).level,
-                crate::command_safety::SafetyLevel::Safe
-                    | crate::command_safety::SafetyLevel::WorkspaceSafe
+                codewhale_execpolicy::command_safety::analyze_command(segment).level,
+                codewhale_execpolicy::command_safety::SafetyLevel::Safe
+                    | codewhale_execpolicy::command_safety::SafetyLevel::WorkspaceSafe
             ) || shell_segment_is_exact_readonly_git_probe(segment)
         })
 }
@@ -646,8 +646,8 @@ fn shell_params_are_destructive_like(params: &Value) -> bool {
     split_shell_segments_for_review(command)
         .iter()
         .any(|segment| {
-            crate::command_safety::analyze_command(segment).level
-                == crate::command_safety::SafetyLevel::Dangerous
+            codewhale_execpolicy::command_safety::analyze_command(segment).level
+                == codewhale_execpolicy::command_safety::SafetyLevel::Dangerous
                 || segment_is_device_or_filesystem_destroyer(segment)
         })
 }
@@ -793,7 +793,7 @@ fn shell_tokens_are_publish_like(tokens: &[&str]) -> bool {
         return true;
     }
 
-    let canonical = crate::command_safety::classify_command(tokens);
+    let canonical = codewhale_execpolicy::command_safety::classify_command(tokens);
     match canonical.as_str() {
         // A git push is publish-like only when it can reach a protected or
         // ambiguous target. A routine explicit feature-branch push follows

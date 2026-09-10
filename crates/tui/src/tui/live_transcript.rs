@@ -32,7 +32,6 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Padding, Paragraph, Widget, Wrap},
 };
 
-use crate::palette;
 use crate::tui::app::App;
 use crate::tui::backtrack::Direction;
 use crate::tui::history::{HistoryCell, TranscriptRenderOptions};
@@ -40,6 +39,7 @@ use crate::tui::transcript_cache::{CachedTranscriptLine, CellId, TranscriptCache
 use crate::tui::views::{
     ActionHint, ModalKind, ModalView, ViewAction, ViewEvent, render_modal_footer,
 };
+use codewhale_palette as palette;
 
 /// Render mode for the overlay. `Tail` is the original sticky-tail
 /// behaviour (#94). `BacktrackPreview` (#133) highlights the Nth-from-tail

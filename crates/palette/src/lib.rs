@@ -1,6 +1,6 @@
 //! Codewhale color palette and semantic roles.
 //!
-//! This module defines the color system for the TUI in three layers:
+//! This crate defines the color system for the TUI in three layers:
 //!
 //! 1. **RGB tuples** (`*_RGB` constants) — raw color values used by theme
 //!    generation and runtime palette construction.
@@ -13,7 +13,7 @@ mod adapt;
 mod contrast;
 mod detect;
 pub mod grammar;
-pub(crate) mod osc11;
+pub mod osc11;
 mod themes;
 mod tokens;
 mod user_theme;

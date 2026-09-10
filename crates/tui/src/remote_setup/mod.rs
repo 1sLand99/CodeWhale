@@ -128,7 +128,7 @@ pub fn run_remote_setup(args: RemoteSetupArgs) -> Result<()> {
 }
 
 fn print_header() {
-    use crate::palette;
+    use codewhale_palette as palette;
     use colored::Colorize;
     let (r, g, b) = palette::WHALE_ACTION_RGB;
     println!("{}", "Codewhale Remote Setup".truecolor(r, g, b).bold());

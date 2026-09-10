@@ -17,7 +17,6 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::commands;
-use crate::palette;
 use crate::skills;
 use crate::tools::spec::ApprovalRequirement;
 use crate::tools::spec::ToolCapability;
@@ -28,6 +27,7 @@ use crate::tui::views::{
     centered_modal_area, render_modal_footer, render_modal_surface,
 };
 use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_palette as palette;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PaletteSection {
@@ -2242,7 +2242,7 @@ mod tests {
         view.render(area, &mut hovered_buf);
         assert_eq!(
             hovered_buf[(rect.x, rect.y)].bg,
-            crate::palette::SURFACE_ELEVATED,
+            codewhale_palette::SURFACE_ELEVATED,
             "hovered palette entry must show the shared hover band"
         );
     }

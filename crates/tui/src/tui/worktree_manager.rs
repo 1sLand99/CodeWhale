@@ -17,10 +17,10 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::palette;
 use crate::tui::git_status::{self, GitStatusSnapshot, WorktreeEntry};
 use crate::tui::menu_style;
 use crate::tui::views::{ModalKind, ModalView, ViewAction, ViewEvent};
+use codewhale_palette as palette;
 
 /// Modes inside the worktree manager.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

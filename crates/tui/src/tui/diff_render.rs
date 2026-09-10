@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span};
 use similar::{ChangeTag, TextDiff};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::palette;
+use codewhale_palette as palette;
 
 const LINE_NUMBER_WIDTH: usize = 4;
 

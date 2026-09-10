@@ -22,13 +22,13 @@ use ratatui::{
 };
 
 use crate::config::{ApiProvider, StatusItem};
-use crate::palette;
 use crate::tui::menu_style;
 use crate::tui::views::{
     ActionHint, ModalKind, ModalView, ViewAction, ViewEvent, centered_modal_area,
     render_modal_footer, render_modal_surface,
 };
 use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_palette as palette;
 use unicode_width::UnicodeWidthStr;
 
 /// Picker state. We hold both the user's working selection AND the original

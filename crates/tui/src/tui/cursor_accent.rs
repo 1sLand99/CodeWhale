@@ -8,7 +8,7 @@
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::palette::WHALE_ACTION_RGB;
+use codewhale_palette::WHALE_ACTION_RGB;
 use ratatui::style::Color;
 
 const OSC12_RESET: &[u8] = b"\x1b]112\x07";

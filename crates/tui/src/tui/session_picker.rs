@@ -16,7 +16,6 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::models::Role;
-use crate::palette;
 use crate::session_manager::{
     SavedSession, SessionListFilter, SessionManager, SessionMetadata, extract_title,
     extract_user_prompt, strip_thinking_tags,
@@ -29,6 +28,7 @@ use crate::tui::views::{
 };
 use crate::tui::views::{ModalKind, ModalView, ViewAction, ViewEvent};
 use codewhale_localization::{Locale, MessageId, tr};
+use codewhale_palette as palette;
 
 fn section_block(title: &str) -> Block<'static> {
     Block::default()

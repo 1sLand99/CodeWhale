@@ -206,7 +206,7 @@ bundle is a dual-face DSH plugin:
 `TOKENS` is a bounded map of `--dsw-alias-*` names (backgrounds, borders,
 brand, buttons, labels, error/success/warn states, code blocks, scrollbar,
 toast, tooltip) onto light/dark values rendered from the TUI's real palette
-(`crates/tui/src/palette`, Blue Stage dark and light) — palette constants
+(`crates/palette/src`, Blue Stage dark and light) — palette constants
 only, no user data or environment. The receipt records `skin: true|false`
 and `skin_sha256` (SHA-256 of the rendered `TOKENS` JSON); `package.json`
 carries the same hash under `codewhale.skin_sha256`.

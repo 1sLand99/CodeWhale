@@ -780,8 +780,8 @@ fn statusline_full_frame_custom_cost_preserves_evidence_and_width_shedding() {
 fn statusline_full_frame_context_reading_updates_below_and_at_warning() {
     use crate::config::{ChromeRowPreset, StatusItem};
     use crate::models::{ContentBlock, Message, Role};
-    use crate::palette::ChromeInk;
     use crate::tui::tideline::InteractionTargetId;
+    use codewhale_palette::ChromeInk;
 
     for (width, height) in [(40, 12), (60, 16), (80, 24), (100, 32)] {
         let mut app = frame_app();
@@ -849,7 +849,7 @@ fn statusline_full_frame_context_reading_updates_below_and_at_warning() {
             for (x, ink) in [(context.area.x, label_ink), (context.area.x + 4, value_ink)] {
                 assert_eq!(
                     buffer[(x, context.area.y)].fg,
-                    crate::palette::grammar::chrome_style(&app.ui_theme, ink)
+                    codewhale_palette::grammar::chrome_style(&app.ui_theme, ink)
                         .fg
                         .unwrap(),
                     "warning ink must also clear after 80%: {evidence}",

@@ -9,8 +9,8 @@
 
 use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
-use crate::palette::UiTheme;
 use crate::tui::underwater::ShellPhase;
+use codewhale_palette::UiTheme;
 
 /// Minimum empty-water size that earns decorative ambient life when the
 /// underwater theme is selected. Below this, content and controls own
@@ -361,7 +361,7 @@ impl OceanRamp {
         // other theme leaves the terminal's ground alone. A user-supplied
         // `background_color` rewrites the underwater surfaces through
         // `with_background_color` and remains the source of truth there.
-        if theme.name != crate::palette::UNDERWATER_UI_THEME.name {
+        if theme.name != codewhale_palette::UNDERWATER_UI_THEME.name {
             return None;
         }
 

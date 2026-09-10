@@ -16,7 +16,7 @@ use ratatui::{
     layout::{Position, Size},
 };
 
-use crate::palette::{self, ColorDepth, PaletteMode, ThemeId, UiTheme};
+use codewhale_palette::{self as palette, ColorDepth, PaletteMode, ThemeId, UiTheme};
 
 const RENDER_DEBUG_ENV: &str = "CODEWHALE_TUI_DEBUG";
 const ASCII_SAFE_ENV: &str = "CODEWHALE_ASCII_SAFE";

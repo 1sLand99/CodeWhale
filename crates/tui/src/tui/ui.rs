@@ -66,7 +66,6 @@ use crate::core::ops::{Op, ProviderRuntimeStatus, USER_SHELL_TOOL_ID_PREFIX, Use
 use crate::hooks::{HookEvent, HookExecutor, TurnEndPayloadInput, TurnEndTotals};
 use crate::llm_client::LlmClient;
 use crate::models::{ContentBlock, Message, MessageRequest, SystemPrompt, Usage};
-use crate::palette;
 use crate::prompts;
 use crate::route_runtime::{resolve_runtime_route, resolve_runtime_route_for_identity};
 use crate::session_manager::{
@@ -106,6 +105,7 @@ use crate::tui::scrolling::TranscriptScroll;
 use crate::turn_route_plan::{PlannedTurnRoute, TurnRoutePlanRequest, plan_turn_route};
 use crate::work_graph::task_owner_snapshot;
 use codewhale_localization::{MessageId, tr};
+use codewhale_palette as palette;
 // SelectionAutoscroll unused
 use crate::tui::motion::{FrameRequester, MotionMode};
 use crate::tui::session_picker::SessionPickerView;

@@ -8,7 +8,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::palette::{ChromeInk, UiTheme, chrome_style};
+use codewhale_palette::{ChromeInk, UiTheme, chrome_style};
 
 /// Typed receipt state — the marks from the §1 cell inventory, each with a
 /// word so color never invents state (§7).

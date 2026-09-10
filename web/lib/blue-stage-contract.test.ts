@@ -4,7 +4,7 @@ import { resolveWhale } from "./whale-tokens";
 
 const CSS = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
 const TUI_TOKENS = readFileSync(
-  new URL("../../crates/tui/src/palette/tokens.rs", import.meta.url),
+  new URL("../../crates/palette/src/tokens.rs", import.meta.url),
   "utf8",
 );
 

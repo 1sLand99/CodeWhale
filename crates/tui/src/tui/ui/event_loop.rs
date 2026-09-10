@@ -4225,7 +4225,7 @@ pub(crate) async fn run_event_loop(
         // The ordinary terminal stays quiet. Only the underwater theme earns
         // ambient redraws; its column can breathe at any usable size and its
         // life needs the collision-safe water budget.
-        let underwater_atmosphere_enabled = app.theme_id == crate::palette::ThemeId::Underwater;
+        let underwater_atmosphere_enabled = app.theme_id == codewhale_palette::ThemeId::Underwater;
         let deepsea_field_breathes = underwater_atmosphere_enabled
             && crate::tui::ocean::OceanRamp::for_theme(&app.ui_theme).is_some();
         let browsing_history = !app.viewport.transcript_scroll.is_at_tail();

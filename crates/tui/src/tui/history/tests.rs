@@ -997,7 +997,7 @@ fn disabling_the_reasoning_highlight_leaves_no_span_with_a_background() {
         .any(|span| span.style.bg.is_some());
     assert_eq!(
         enabled_has_background,
-        crate::palette::reasoning_surface_tint(cached_color_depth()).is_some(),
+        codewhale_palette::reasoning_surface_tint(cached_color_depth()).is_some(),
         "the enabled highlight must follow the terminal color-depth contract"
     );
 }
@@ -1105,7 +1105,7 @@ fn reduced_and_still_motion_render_a_frame_that_does_not_move() {
 /// itself is off the crest — a busy wait, not a sleep.
 #[test]
 fn assistant_marker_pulses_when_streaming_and_motion_is_allowed() {
-    use crate::palette::{self, pulse_brightness};
+    use codewhale_palette::{self as palette, pulse_brightness};
 
     let idle = assistant_label_style_for(false, false).fg;
     assert_eq!(

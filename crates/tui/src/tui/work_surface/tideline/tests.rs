@@ -13,12 +13,12 @@ use super::{
     TidelineRail, TidelineWorkStage, render_tideline_rail, render_tideline_work_stage,
     tideline_rail_groups, tideline_rail_hitboxes, tideline_rail_width,
 };
-use crate::palette::UI_THEME;
 use crate::tui::golden_harness::{BLOCKER_SIZES, assert_matches_golden, render_golden_text};
 use crate::tui::history::tideline_exports::{
     TidelineReceiptState, TidelineStream, TidelineStreamEvent, render_tideline_stream,
     tideline_stream_hitboxes,
 };
+use codewhale_palette::UI_THEME;
 
 fn events() -> Vec<TidelineStreamEvent> {
     use TidelineStreamEvent::*;

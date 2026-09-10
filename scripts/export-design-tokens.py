@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Export the TUI whale palette to the other Codewhale clients.
 
-`crates/tui/src/palette/tokens.rs` is the single source for the whale colors.
+`crates/palette/src/tokens.rs` is the single source for the whale colors.
 This script parses its `WHALE_*_RGB` and `LIGHT_*_RGB` consts (aliases
 included) and writes the same values as CSS custom properties so the web app
 stops hand-copying hexes.
@@ -22,8 +22,8 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-TOKENS_RS = REPO / "crates/tui/src/palette/tokens.rs"
-SOURCE_LABEL = "crates/tui/src/palette/tokens.rs"
+TOKENS_RS = REPO / "crates/palette/src/tokens.rs"
+SOURCE_LABEL = "crates/palette/src/tokens.rs"
 
 CONST_RE = re.compile(
     r"^pub const ((?:WHALE|LIGHT)_[A-Z0-9_]+)_RGB: \(u8, u8, u8\) = "
