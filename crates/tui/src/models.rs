@@ -222,6 +222,15 @@ fn known_context_window_for_model(model_lower: &str) -> Option<u32> {
         "claude-opus-4-8" | "claude-opus-5" | "claude-sonnet-4-6" | "claude-sonnet-5"
         | "claude-fable-5" => Some(1_000_000),
         "claude-haiku-4-5" => Some(200_000),
+        // DeepSeek V4.1 Flash, id verified live on api.deepseek.com /v1/models
+        // 2026-09-10. The V4 family ships 1M context / 384K output, and the
+        // vendor's own notice puts V4.1 Flash above V4 Pro on every metric.
+        // Listed here as an exact-id context fact; its price is time-varying
+        // and lives in `pricing.rs`, which is why this does not route through
+        // `canonical_official_deepseek_model_id`.
+        "deepseek-flash" | "deepseek/deepseek-flash" | "deepseek-ai/deepseek-flash" => {
+            Some(DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS)
+        }
         "trinity-mini" => Some(128_000),
         "arcee-ai/trinity-large-thinking" | "trinity-large-thinking" | "trinity-large-preview" => {
             Some(262_144)

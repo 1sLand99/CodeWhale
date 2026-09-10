@@ -5,7 +5,14 @@
 //! are unchanged. Re-exported `pub(crate)` at the crate root so existing
 //! `crate::DEFAULT_*` references keep resolving.
 
-pub(crate) const DEFAULT_DEEPSEEK_MODEL: &str = "deepseek-v4-pro";
+// V4.1 Flash, shipped as the unversioned id `deepseek-flash` and verified live
+// on api.deepseek.com /v1/models 2026-09-10. It replaces `deepseek-v4-pro` as
+// the default because the vendor stops serving Pro at 12:00 Beijing on
+// 2026-09-14 and routes it here anyway — and because their own notice puts
+// V4.1 Flash above V4 Pro on performance, cost, speed and task completion.
+// Defaulting to a model that is about to be silently rerouted would leave new
+// users on a route whose price and identity both change under them.
+pub(crate) const DEFAULT_DEEPSEEK_MODEL: &str = "deepseek-flash";
 pub(crate) const DEFAULT_DEEPSEEK_ANTHROPIC_MODEL: &str = DEFAULT_DEEPSEEK_MODEL;
 pub(crate) const DEFAULT_NVIDIA_NIM_MODEL: &str = "deepseek-ai/deepseek-v4-pro";
 pub(crate) const DEFAULT_NVIDIA_NIM_FLASH_MODEL: &str = "deepseek-ai/deepseek-v4-flash";

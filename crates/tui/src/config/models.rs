@@ -185,6 +185,11 @@ pub const COMMON_DEEPSEEK_MODELS: &[&str] = &[
 ];
 pub const OFFICIAL_DEEPSEEK_MODELS: &[&str] = &[
     "deepseek-v4-pro",
+    // V4.1 Flash ships as the unversioned id `deepseek-flash`, verified live on
+    // api.deepseek.com /v1/models 2026-09-10 — the account roster returns
+    // exactly `deepseek-flash` and `deepseek-v4-pro`. The version number was
+    // dropped, so guessing `deepseek-v4.1-flash` would have been a dead route.
+    "deepseek-flash",
     "deepseek-v4-flash",
     // Vision-experimental sibling of v4-flash; verified live on
     // api.deepseek.com /models 2026-08-21. Same family aliases apply.

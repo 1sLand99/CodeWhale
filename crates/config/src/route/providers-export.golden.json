@@ -163,7 +163,7 @@
       "label": "DeepSeek",
       "endpoint": "https://api.deepseek.com/beta",
       "wire": "model-aware",
-      "defaultModel": "deepseek-v4-pro",
+      "defaultModel": "deepseek-flash",
       "envVars": [
         "DEEPSEEK_API_KEY"
       ],
@@ -196,7 +196,7 @@
       "label": "DeepSeek",
       "endpoint": "https://api.deepseek.com/anthropic",
       "wire": "anthropic-messages",
-      "defaultModel": "deepseek-v4-pro",
+      "defaultModel": "deepseek-flash",
       "envVars": [
         "DEEPSEEK_API_KEY"
       ],

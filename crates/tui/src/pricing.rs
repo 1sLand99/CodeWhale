@@ -662,6 +662,7 @@ fn pricing_for_model_at(model: &str, now: DateTime<Utc>) -> Option<ModelPricing>
     match lower.as_str() {
         "deepseek-v4-pro" => Some(deepseek_v4_pro_pricing(now)),
         "deepseek-v4-flash" => Some(deepseek_v4_flash_pricing(now)),
+        "deepseek-flash" => Some(deepseek_flash_pricing(now)),
         _ => None,
     }
 }
@@ -1014,7 +1015,27 @@ fn deepseek_is_peak(now: DateTime<Utc>) -> bool {
     !deepseek_weekend_off_peak(now) && deepseek_peak_hour(now.hour())
 }
 
+/// 12:00 Beijing on 2026-09-14, when DeepSeek stops serving V4 Pro.
+///
+/// The vendor's 2026-09-10 notice: "we plan to postpone the discontinuation of
+/// the V4 Pro service to 12:00 Beijing Time on September 14, 2026. At that
+/// time, all requests to the Pro model will be routed to V4.1 Flash and billed
+/// at Flash's price."
+const DEEPSEEK_V4_PRO_SUNSET: &str = "2026-09-14T04:00:00Z";
+
 fn deepseek_v4_pro_pricing(now: DateTime<Utc>) -> ModelPricing {
+    // After the sunset a `deepseek-v4-pro` request is served by V4.1 Flash and
+    // billed at Flash's rates. Reporting Pro's rates past that instant would
+    // overstate what the user is actually charged by more than 3x — a
+    // fabricated receipt, which is the one thing cost reporting must never do.
+    // This is what the `now` parameter was always for.
+    if now
+        >= DEEPSEEK_V4_PRO_SUNSET
+            .parse::<DateTime<Utc>>()
+            .expect("valid sunset timestamp")
+    {
+        return deepseek_flash_pricing(now);
+    }
     let peak = deepseek_is_peak(now);
     let (hit, miss, out) = if peak {
         (0.044, 1.32, 3.96)
@@ -1025,6 +1046,51 @@ fn deepseek_v4_pro_pricing(now: DateTime<Utc>) -> ModelPricing {
         (0.30, 9.0, 27.0)
     } else {
         (0.15, 4.5, 13.5)
+    };
+    ModelPricing {
+        usd: CurrencyPricing {
+            input_cache_hit_per_million: hit,
+            input_cache_miss_per_million: miss,
+            output_per_million: out,
+            cache_write: CacheWritePolicy::DocumentedAsInputRate(DEEPSEEK_CACHE_WRITE_IS_FREE),
+        },
+        cny: Some(CurrencyPricing {
+            input_cache_hit_per_million: cny_hit,
+            input_cache_miss_per_million: cny_miss,
+            output_per_million: cny_out,
+            cache_write: CacheWritePolicy::DocumentedAsInputRate(DEEPSEEK_CACHE_WRITE_IS_FREE),
+        }),
+    }
+}
+
+/// DeepSeek V4.1 Flash, shipped as the unversioned id `deepseek-flash`.
+///
+/// Rates and effective time are the vendor's own 2026-09-10 notice, not a
+/// relay: cache hit $0.003, cache miss $0.15, output $0.60 per 1M off-peak,
+/// doubling at peak, effective 04:00 UTC on 2026-09-10. The same notice
+/// postponed the V4 Pro shutdown to 12:00 Beijing on 2026-09-14, after which
+/// Pro requests are served by this model and billed at these rates.
+///
+/// CNY rates are the vendor's own Chinese-language notice: cache hit 0.02 元,
+/// cache miss 1 元, output 4 元 off-peak, doubling at peak. Taken from the
+/// published table rather than converted from USD — a converted rate would be
+/// a receipt the vendor never issued.
+///
+/// That notice states the peak windows in Beijing time (Mon-Fri 09:00-12:00 and
+/// 14:00-18:00), which is UTC+8 and therefore exactly the 01:00-04:00 and
+/// 06:00-10:00 UTC the English notice gives. Both agree, so `deepseek_is_peak`
+/// needs no change.
+fn deepseek_flash_pricing(now: DateTime<Utc>) -> ModelPricing {
+    let peak = deepseek_is_peak(now);
+    let (hit, miss, out) = if peak {
+        (0.006, 0.30, 1.20)
+    } else {
+        (0.003, 0.15, 0.60)
+    };
+    let (cny_hit, cny_miss, cny_out) = if peak {
+        (0.04, 2.0, 8.0)
+    } else {
+        (0.02, 1.0, 4.0)
     };
     ModelPricing {
         usd: CurrencyPricing {
@@ -2317,9 +2383,13 @@ fn provider_owned_hand_pricing_at(
     }
     let provider_owns_row = match provider {
         ApiProvider::Deepseek | ApiProvider::DeepseekCN | ApiProvider::DeepseekAnthropic => {
+            // `deepseek-flash` is V4.1 Flash on the first-party API. Only the
+            // first-party family gains it: third-party hosts below keep their
+            // own published tables and must not be assumed to serve a model
+            // just because DeepSeek does.
             matches!(
                 model_lower.as_str(),
-                "deepseek-v4-pro" | "deepseek-v4-flash"
+                "deepseek-v4-pro" | "deepseek-v4-flash" | "deepseek-flash"
             )
         }
         ApiProvider::Openai => matches!(
