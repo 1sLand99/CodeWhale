@@ -475,32 +475,18 @@ pub fn model_supports_reasoning(model: &str) -> bool {
     }
     matches!(
         lower.as_str(),
-        "claude-opus-4-8"
-            | "claude-opus-5"
-            | "claude-sonnet-4-6"
-            | "claude-sonnet-5"
-            | "claude-fable-5"
-            | "gpt-5-codex"
-            | "gpt-5.3-codex"
-            | "trinity-mini"
-            | "arcee-ai/trinity-large-thinking"
-            | "trinity-large-thinking"
+        "arcee-ai/trinity-large-thinking"
             | "thinkingmachines/inkling"
             | "google/gemma-4-31b-it"
             | "google/gemma-4-31b-it:free"
             | "google/gemma-4-26b-a4b-it"
             | "google/gemma-4-26b-a4b-it:free"
-            | "moonshotai/kimi-k2.7-code"
             | "moonshotai/kimi-k2.7-code-highspeed"
             | "moonshotai/kimi-k2.6"
             | "moonshotai/kimi-k2.6:free"
-            | "kimi-k2.7-code"
             | "kimi-k2.6"
             | "kimi-for-coding"
-            | "minimax/minimax-m3"
-            | "minimax/minimax-m2.7"
             | "minimax-m3"
-            | "minimax-m2.7"
             | "minimax-m2.7-highspeed"
             | "minimax-m2.5"
             | "minimax-m2.5-highspeed"
@@ -511,7 +497,6 @@ pub fn model_supports_reasoning(model: &str) -> bool {
             | "nvidia/nemotron-3-ultra-550b-a55b"
             | "nvidia/nemotron-3-ultra-550b-a55b:free"
             | "qwen/qwen3.8-flash"
-            | "qwen/qwen3.6-flash"
             | "qwen/qwen3.6-35b-a3b"
             | "qwen/qwen3.6-max-preview"
             | "qwen/qwen3.6-27b"
@@ -537,27 +522,15 @@ pub fn model_supports_reasoning(model: &str) -> bool {
             | "tencent/hy3-preview"
             | "xiaomi/mimo-v2.5-pro"
             | "xiaomi/mimo-v2.5"
-            | "mimo-v2.5-pro"
-            | "mimo-v2.5-pro-ultraspeed"
-            | "mimo-v2.5"
             | "z-ai/glm-5.1"
-            | "z-ai/glm-5.2"
-            | "z-ai/glm-5.3"
-            | "z-ai/glm-5.3-flash"
             | "z-ai/glm-5-turbo"
             | "glm-5.1"
-            | "glm-5.2"
-            | "glm-5.3"
-            | "glm-5.3-flash"
             | "glm-5-turbo"
             | "grok-4.6"
             | "grok-4.5"
             | "grok-4.3"
             | "grok-build"
             | "grok-4.20-0309-reasoning"
-            | "muse-spark-1.1"
-            | "muse-spark-1.2"
-            | "muse-spark-1.2-contributor"
     ) || is_openai_gpt_55_api_model(&lower)
         || is_openai_gpt_56_api_model(&lower)
         || is_openai_codex_model(&lower)
@@ -805,6 +778,58 @@ mod tests {
     use super::*;
     use std::any::TypeId;
     use std::collections::BTreeMap;
+
+    /// #6032: `model_supports_reasoning` consults the catalog before its
+    /// hand-maintained pile, so a literal arm that duplicates a catalog row is
+    /// unreachable. These 27 arms were exactly that and were deleted. They must
+    /// keep answering `true` from the catalog *alone* — if a row is ever
+    /// dropped, this fails loudly here rather than silently reverting them to
+    /// "reasoning not expected", which leaks their `reasoning_content` into
+    /// ordinary prose (#6044).
+    #[test]
+    fn catalog_alone_covers_the_models_removed_from_the_heuristic_pile() {
+        let removed = [
+            "claude-opus-4-8",
+            "claude-opus-5",
+            "claude-sonnet-4-6",
+            "claude-sonnet-5",
+            "claude-fable-5",
+            "gpt-5-codex",
+            "gpt-5.3-codex",
+            "trinity-mini",
+            "trinity-large-thinking",
+            "moonshotai/kimi-k2.7-code",
+            "kimi-k2.7-code",
+            "minimax/minimax-m3",
+            "minimax/minimax-m2.7",
+            "minimax-m2.7",
+            "qwen/qwen3.6-flash",
+            "mimo-v2.5",
+            "mimo-v2.5-pro",
+            "mimo-v2.5-pro-ultraspeed",
+            "z-ai/glm-5.2",
+            "z-ai/glm-5.3",
+            "z-ai/glm-5.3-flash",
+            "glm-5.2",
+            "glm-5.3",
+            "glm-5.3-flash",
+            "muse-spark-1.1",
+            "muse-spark-1.2",
+            "muse-spark-1.2-contributor",
+        ];
+        for model in removed {
+            assert_eq!(
+                crate::model_catalog::resolved_supports_reasoning(model),
+                Some(true),
+                "{model} no longer has a catalog row, but its heuristic arm was \
+                 deleted in #6032 — restore the row, or put the arm back"
+            );
+            assert!(
+                model_supports_reasoning(model),
+                "{model} must still classify as reasoning-capable"
+            );
+        }
+    }
 
     #[test]
     fn output_limit_stop_reason_accepts_provider_aliases_only() {
