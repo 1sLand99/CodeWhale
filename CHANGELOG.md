@@ -40,6 +40,9 @@ and `/mcp reload` no longer freezes the interface while servers reconnect.
   so math subscripts no longer italicize the prose between them
   (`[t_, b_p]. Actually — hold on, do we even tile all the way from t_?`
   rendered 60 characters italic) (#6042).
+- An MCP server configured for OAuth that answers 401 before its first login
+  now points at `/mcp login <name>` in the failure hint instead of a bearer
+  token that does not exist (#6030).
 - Cancelling a foreground shell wait stops its owned process group even when
   the tool future is dropped. Explicitly backgrounded jobs retain their
   ownership. Interrupted tool receipts distinguish work that started from

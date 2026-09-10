@@ -109,7 +109,7 @@ impl StreamableHttpTransport {
                         }
                     }
                 }
-                let hint = unauthorized_session_hint(self.auth.oauth.is_some());
+                let hint = unauthorized_session_hint(self.auth.oauth_configured);
                 return Err(StreamableSendError::Other(anyhow::anyhow!(
                     "MCP server {} rejected the request with {status}; the session is no longer accepted. {hint}",
                     mask_url_secrets(&self.url),
@@ -224,6 +224,13 @@ fn oauth_refresh_failed_hint() -> &'static str {
     super::oauth::tui_reauth_refresh_failed_hint()
 }
 
+/// TUI recovery for a rejected OAuth session. `oauth_configured` is the
+/// server's configured auth path ([`McpHttpAuth::oauth_configured`]), not the
+/// presence of a cached token, so a first-run OAuth server — a 401 with
+/// nothing stored yet — is still pointed at `/mcp login <name>` rather than at
+/// a bearer token it never had (#6030). Servers where a bearer credential is
+/// genuinely configured (or that are plugin-contributed, where OAuth login is
+/// disabled) keep the bearer-token copy.
 fn unauthorized_session_hint(oauth_configured: bool) -> &'static str {
     if oauth_configured {
         super::oauth::tui_reauth_hint()
@@ -256,7 +263,42 @@ fn is_streamable_http_stale_session_status(status: StatusCode, body_excerpt: &st
 
 #[cfg(test)]
 mod tests {
-    use super::{oauth_refresh_failed_hint, unauthorized_session_hint};
+    use super::{McpHttpAuth, oauth_refresh_failed_hint, unauthorized_session_hint};
+    use crate::mcp::McpServerConfig;
+
+    fn server_config(json: serde_json::Value) -> McpServerConfig {
+        serde_json::from_value(json).expect("MCP server config fixture")
+    }
+
+    #[test]
+    fn oauth_configured_server_without_a_cached_token_names_login() {
+        // The OAuth fields are optional in MCP config, so a URL-based server
+        // with no manual bearer configuration is OAuth's to claim — including
+        // before the first login, when there is no runtime to observe.
+        let auth = McpHttpAuth::from_config(
+            "remote",
+            &server_config(serde_json::json!({ "url": "https://example.invalid/mcp" })),
+            None,
+        );
+        assert!(auth.oauth.is_none(), "precondition: no cached credential");
+        assert!(auth.oauth_configured, "a URL server is OAuth-servable");
+        assert!(
+            unauthorized_session_hint(auth.oauth_configured).contains("/mcp login <name>"),
+            "a first-run OAuth 401 must name the login command, not a bearer token"
+        );
+
+        // A server whose bearer token is genuinely expected keeps that copy.
+        let bearer = McpHttpAuth::from_config(
+            "remote",
+            &server_config(serde_json::json!({
+                "url": "https://example.invalid/mcp",
+                "bearer_token_env_var": "EXAMPLE_MCP_TOKEN",
+            })),
+            None,
+        );
+        assert!(!bearer.oauth_configured);
+        assert!(unauthorized_session_hint(bearer.oauth_configured).contains("bearer token"));
+    }
 
     #[test]
     fn unauthorized_oauth_hints_name_the_login_command() {
