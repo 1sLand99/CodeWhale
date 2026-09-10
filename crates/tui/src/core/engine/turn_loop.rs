@@ -996,8 +996,11 @@ impl Engine {
             // Billing usage accumulates every parent step and child-model
             // call. Only the most recent parent-route request describes the
             // live message list whose pressure we are checking here.
-            let billed_input_tokens =
-                turn.billed_input_tokens_for_compaction(self.session.latest_parent_input_tokens);
+            let billed_input_tokens = turn.live_input_tokens_for_compaction(
+                &self.session.messages,
+                self.session.system_prompt.as_ref(),
+                self.session.latest_parent_input_tokens,
+            );
             let prepared = if crate::compaction::compaction_pressure_reached_with_billed(
                 &self.session.messages,
                 self.session.system_prompt.as_ref(),
@@ -1667,6 +1670,7 @@ impl Engine {
             // transport error is still a billed, incomplete response; it must
             // not be discarded and re-issued.
             turn.add_parent_usage(&usage);
+            turn.note_parent_prompt_len(self.session.messages.len());
             self.session.latest_parent_input_tokens = turn.latest_parent_input_tokens;
             if usage_reported {
                 let _ = self

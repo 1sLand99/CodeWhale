@@ -6004,9 +6004,13 @@ pub(crate) async fn run_event_loop(
                             clear_transcript_selection(app);
                         }
                         CtrlCDisposition::CancelTurn => {
-                            if try_cancel_compaction(app, &engine_handle) {
-                                app.disarm_quit();
-                                continue;
+                            let compacting = app.is_compacting || app.manual_compaction_queued;
+                            if compacting {
+                                try_cancel_compaction(app, &engine_handle);
+                                if !compact_interrupt_should_stop_turn(app) {
+                                    app.disarm_quit();
+                                    continue;
+                                }
                             }
                             let was_waiting = app.goal_continuation_waiting;
                             engine_handle.cancel();

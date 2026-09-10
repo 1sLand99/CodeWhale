@@ -351,6 +351,15 @@ pub(crate) fn apply_compaction_cancelled(app: &mut App, id: &str, auto: bool, me
     }
 }
 
+/// Esc/Ctrl+C during a compact that is serving an in-flight turn must stop
+/// the turn. Compact-only (manual `/compact` with no model request) still
+/// cancels just the pass.
+#[must_use]
+pub(crate) fn compact_interrupt_should_stop_turn(app: &App) -> bool {
+    (app.is_compacting || app.manual_compaction_queued)
+        && (app.is_loading || matches!(app.runtime_turn_status.as_deref(), Some("in_progress")))
+}
+
 /// Cancel the exact queued or running pass without cancelling an unrelated
 /// model turn. A locally deferred request has never entered the engine, so it
 /// can settle synchronously with no provider call; all dispatched requests

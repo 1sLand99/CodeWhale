@@ -1082,8 +1082,14 @@ pub(crate) fn escape_cancel_request(
     current_streaming_text: &mut String,
     stream_display_clock: &mut StreamDisplayClock,
 ) -> bool {
-    if try_cancel_compaction(app, engine_handle) {
-        return true;
+    let compacting = app.is_compacting || app.manual_compaction_queued;
+    if compacting {
+        try_cancel_compaction(app, engine_handle);
+        if !compact_interrupt_should_stop_turn(app) {
+            return true;
+        }
+        // Mid-turn compact is collateral. Esc/interrupt stops the turn
+        // (Codex/GrokBuild): cancel_compaction alone continues the loop.
     }
     if app.paused || app.paused_goal_objective.is_some() {
         clear_paused_command_state(app, engine_handle);

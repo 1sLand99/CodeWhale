@@ -1,7 +1,7 @@
 use super::activity_detail::*;
 use super::compaction_flow::{
-    apply_compaction_started, maybe_warn_context_pressure, should_auto_compact_before_send,
-    should_auto_compact_before_send_with_config,
+    apply_compaction_started, compact_interrupt_should_stop_turn, maybe_warn_context_pressure,
+    should_auto_compact_before_send, should_auto_compact_before_send_with_config,
 };
 use super::event_loop::{TabDispatch, dispatch_tab_key, shell_binding_for_key};
 use super::observer_hooks::{
@@ -15637,6 +15637,27 @@ fn test_esc_priority_order_matches_cancel_stack() {
 
     app.queued_draft = None;
     assert_eq!(next_escape_action(&app, false), EscapeAction::Noop);
+}
+
+#[test]
+fn compact_interrupt_stops_the_turn_not_just_the_pass() {
+    let mut app = create_test_app();
+    app.is_compacting = true;
+    app.is_loading = true;
+    assert!(
+        compact_interrupt_should_stop_turn(&app),
+        "Esc during mid-turn compact must stop the turn"
+    );
+
+    app.is_loading = false;
+    app.runtime_turn_status = None;
+    assert!(
+        !compact_interrupt_should_stop_turn(&app),
+        "manual compact with no turn still cancels only the pass"
+    );
+
+    app.runtime_turn_status = Some("in_progress".to_string());
+    assert!(compact_interrupt_should_stop_turn(&app));
 }
 
 #[test]
