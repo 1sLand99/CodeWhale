@@ -6,10 +6,29 @@
 //! - `~/.codewhale/audit.log`   — one JSON line per event (approvals, credentials)
 //! - `~/.codewhale/sessions/`   — saved session JSON files (tool call history)
 //! - `~/.codewhale/tasks/runtime/events/` — runtime thread JSONL event streams
+//! - `~/.codewhale/sessions/<id>/runtime/events/` — session-scoped runtime
+//!   stores (`default_runtime_store_root` in `crates/tui/src/runtime_threads.rs`)
+//!
+//! `CODEWHALE_RUNTIME_DIR` / `DEEPSEEK_RUNTIME_DIR` is an *exclusive* store root
+//! for every Runtime store in the writing process, so when it is set the reader
+//! uses it alone. Mixing it with the default roots would count one call twice.
 //!
 //! Default-root audit history includes retained rotations and legacy receipts,
 //! excluding records copied across roots. An explicit `CODEWHALE_HOME` never
 //! reads outside that root.
+//!
+//! The three sources overlap and are deliberately not de-duplicated against
+//! each other: an approval receipt, a saved-session transcript entry, and a
+//! runtime `item.*` receipt each describe one tool call from a different
+//! vantage point, and collapsing them would assert an identity the data does
+//! not carry. Cross-reference with `--json` when an exact count matters.
+//!
+//! There is no fourth source. The opt-in tool audit file behind
+//! `CODEWHALE_TOOL_AUDIT_LOG` / `DEEPSEEK_TOOL_AUDIT_LOG` (`emit_tool_audit`)
+//! is a *different* file from `~/.codewhale/audit.log` and is not discovered
+//! here. Because that variable can be pointed at the audit log itself, and
+//! because `emit_tool_audit` puts `tool_name` and `success` at the JSON top
+//! level rather than under `details`, the audit reader accepts both shapes.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -40,9 +59,8 @@ pub fn run(args: MetricsArgs) -> Result<()> {
     // cannot resolve is an error rather than a silent all-zero report.
     let audit_roots = resolve_audit_roots()?;
     let sessions = codewhale_config::resolve_state_dir("sessions")?;
-    let runtime_events = codewhale_config::resolve_state_dir("tasks")?
-        .join("runtime")
-        .join("events");
+    let tasks = codewhale_config::resolve_state_dir("tasks")?;
+    let runtime_events = runtime_event_dirs(&tasks, &sessions);
 
     // Collect data from every source; treat missing files as empty.
     let mut rollup = Rollup::default();
@@ -136,6 +154,16 @@ pub struct ToolStats {
     pub successes: u64,
     /// Failed calls.
     pub failures: u64,
+    /// Calls an approval receipt blocked before they ran. A denial is neither
+    /// a success nor a failure, so it stays out of `success_rate_pct`.
+    pub denied: u64,
+    /// Durable receipts whose outcome could not be read. Never folded into
+    /// `failures`: an unrecorded outcome is unknown, not a failure.
+    pub outcome_unknown: u64,
+    /// Terminal receipts with no usable `started_at`/`ended_at` pair. Counted
+    /// rather than contributing a 0 ms sample, which would understate a call
+    /// that was actually slow.
+    pub elapsed_unavailable: u64,
 }
 
 impl ToolStats {
@@ -434,30 +462,35 @@ fn read_audit_log(
         let event = v.get("event").and_then(|e| e.as_str()).unwrap_or("");
 
         match event {
-            "tool.approval.auto_approve" => {
-                let tool_name = v
-                    .pointer("/details/tool_name")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("unknown");
+            // `log_sensitive_event` emits `auto_approve_session`
+            // (`crates/tui/src/tui/ui/event_loop.rs`). The bare `auto_approve`
+            // name only ever appears in older logs; keep it as an alias.
+            "tool.approval.auto_approve" | "tool.approval.auto_approve_session" => {
+                let tool_name = audit_tool_name(&v);
                 let stats = rollup.tool_mut(tool_name);
                 stats.calls += 1;
                 stats.auto_approved += 1;
             }
+            // Every denial name written by `log_sensitive_event` and
+            // `auto_deny_session_approval`. The call never ran, so it is
+            // counted as its own class rather than as a failed execution.
+            "tool.approval.auto_deny"
+            | "tool.approval.auto_deny_session"
+            | "tool.approval.auto_deny_auto_review"
+            | "tool.approval.auto_deny_full_access_policy" => {
+                let tool_name = audit_tool_name(&v);
+                let stats = rollup.tool_mut(tool_name);
+                stats.calls += 1;
+                stats.denied += 1;
+            }
             "tool.approval.prompted" => {
-                let tool_name = v
-                    .pointer("/details/tool_name")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("unknown");
+                let tool_name = audit_tool_name(&v);
                 let stats = rollup.tool_mut(tool_name);
                 stats.calls += 1;
                 stats.prompted += 1;
             }
             "tool.completed" | "tool.result" => {
-                let tool_name = v
-                    .pointer("/details/tool_name")
-                    .or_else(|| v.pointer("/payload/tool_name"))
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("unknown");
+                let tool_name = audit_tool_name(&v);
                 let stats = rollup.tool_mut(tool_name);
                 stats.calls += 1;
 
@@ -465,22 +498,25 @@ fn read_audit_log(
                 if let Some(ms) = v
                     .pointer("/details/elapsed_ms")
                     .or_else(|| v.pointer("/payload/elapsed_ms"))
+                    .or_else(|| v.get("elapsed_ms"))
                     .and_then(|v| v.as_u64())
                 {
                     stats.total_elapsed_ms += ms;
                     stats.elapsed_samples += 1;
                 }
 
-                // Success / failure
-                let success = v
+                // Success / failure. An absent outcome is unknown, not a
+                // success — the previous default silently graded every
+                // outcome-free receipt as passing.
+                match v
                     .pointer("/details/success")
                     .or_else(|| v.pointer("/payload/success"))
+                    .or_else(|| v.get("success"))
                     .and_then(|b| b.as_bool())
-                    .unwrap_or(true);
-                if success {
-                    stats.successes += 1;
-                } else {
-                    stats.failures += 1;
+                {
+                    Some(true) => stats.successes += 1,
+                    Some(false) => stats.failures += 1,
+                    None => stats.outcome_unknown += 1,
                 }
             }
             "compaction.completed" | "context.compaction" => {
@@ -676,8 +712,58 @@ fn read_session_file(path: &Path, since: Option<DateTime<Utc>>, rollup: &mut Rol
     }
 }
 
-/// Read JSONL event streams from the tasks runtime events directory.
-fn read_runtime_events(events_dir: &Path, since: Option<DateTime<Utc>>, rollup: &mut Rollup) {
+/// Every Runtime event directory this install can have written to.
+///
+/// Mirrors `default_runtime_store_root` / `runtime_dir_override` in
+/// `crates/tui/src/runtime_threads.rs`: the task-scoped store lives at
+/// `<tasks>/runtime`, a session-scoped store at `<sessions>/<id>/runtime`, and
+/// an explicit `CODEWHALE_RUNTIME_DIR` replaces both. Missing directories are
+/// simply empty; the walk stays inside the resolved state roots.
+fn runtime_event_dirs(tasks: &Path, sessions: &Path) -> Vec<PathBuf> {
+    if let Some(root) = runtime_dir_override() {
+        return vec![root.join("events")];
+    }
+    let mut dirs = vec![tasks.join("runtime").join("events")];
+    let Ok(rd) = std::fs::read_dir(sessions) else {
+        return dirs;
+    };
+    let mut session_dirs: Vec<PathBuf> = rd
+        .flatten()
+        // `DirEntry::file_type` does not follow symlinks, so a link planted in
+        // `sessions/` cannot walk the reader into another root.
+        .filter(|entry| entry.file_type().is_ok_and(|ty| ty.is_dir()))
+        .map(|entry| entry.path().join("runtime").join("events"))
+        .collect();
+    session_dirs.sort();
+    dirs.append(&mut session_dirs);
+    dirs
+}
+
+/// The writer's exclusive store-root override (`runtime_dir_override`).
+fn runtime_dir_override() -> Option<PathBuf> {
+    std::env::var("CODEWHALE_RUNTIME_DIR")
+        .or_else(|_| std::env::var("DEEPSEEK_RUNTIME_DIR"))
+        .ok()
+        .filter(|dir| !dir.trim().is_empty())
+        .map(PathBuf::from)
+}
+
+/// Read every runtime event root under one de-duplication scope, so the same
+/// `(thread_id, seq)` receipt is counted once however many roots list it.
+fn read_runtime_events(events_dirs: &[PathBuf], since: Option<DateTime<Utc>>, rollup: &mut Rollup) {
+    let mut dedup = RuntimeEventDedup::default();
+    for dir in events_dirs {
+        read_runtime_events_dir(dir, since, rollup, &mut dedup);
+    }
+}
+
+/// Read JSONL event streams from one runtime events directory.
+fn read_runtime_events_dir(
+    events_dir: &Path,
+    since: Option<DateTime<Utc>>,
+    rollup: &mut Rollup,
+    dedup: &mut RuntimeEventDedup,
+) {
     let rd = match std::fs::read_dir(events_dir) {
         Ok(rd) => rd,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
@@ -691,13 +777,12 @@ fn read_runtime_events(events_dir: &Path, since: Option<DateTime<Utc>>, rollup: 
         }
     };
 
-    let mut dedup = RuntimeEventDedup::default();
     for entry in rd.flatten() {
         let path = entry.path();
         if path.extension().map(|e| e != "jsonl").unwrap_or(true) {
             continue;
         }
-        read_events_jsonl(&path, since, rollup, &mut dedup);
+        read_events_jsonl(&path, since, rollup, dedup);
     }
 }
 
@@ -753,36 +838,13 @@ fn read_events_jsonl(
         match event {
             "turn.completed" => record_terminal_request_diagnostics(&v, rollup, dedup),
             "turn.usage" => record_provider_usage_receipt(&v, rollup, dedup),
-            "tool.started" | "tool.completed" | "tool.failed" => {
-                let tool_name = v
-                    .pointer("/payload/tool_name")
-                    .or_else(|| v.pointer("/payload/name"))
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("unknown");
-                let stats = rollup.tool_mut(tool_name);
-
-                if event == "tool.started" {
-                    stats.calls += 1;
-                } else if event == "tool.completed" {
-                    stats.successes += 1;
-                    if let Some(ms) = v.pointer("/payload/elapsed_ms").and_then(|v| v.as_u64()) {
-                        stats.total_elapsed_ms += ms;
-                        stats.elapsed_samples += 1;
-                    }
-                } else {
-                    // tool.failed
-                    stats.failures += 1;
-                }
-            }
-            "compaction.completed" => {
-                rollup.compaction.events += 1;
-                if let Some(ratio) = v
-                    .pointer("/payload/reduction_ratio")
-                    .and_then(|r| r.as_f64())
-                {
-                    rollup.compaction.ratio_sum += ratio;
-                    rollup.compaction.ratio_samples += 1;
-                }
+            // Tool and compaction receipts are durable *item* records. The
+            // `tool.started` / `tool.completed` names this reader used to
+            // match are synthesized for HTTP clients by
+            // `map_compat_stream_event` (`crates/tui/src/runtime_api.rs`) and
+            // are never persisted, so those arms counted nothing.
+            "item.started" | "item.completed" | "item.failed" => {
+                record_runtime_item_receipt(event, &v, rollup, dedup);
             }
             "agent.spawned" | "subagent.spawned" => {
                 rollup.agents.spawns += 1;
@@ -881,6 +943,107 @@ fn record_terminal_request_diagnostics(
     stats.stream_resumes = stats.stream_resumes.saturating_add(stream_resumes);
 }
 
+/// Fold one durable `item.*` receipt into the tool or compaction rollup.
+///
+/// Reads only the fields a rollup needs — `kind`, `metadata.tool_name`,
+/// `metadata.is_error`, the two timestamps, and the compaction message counts.
+/// `item.detail` and `metadata.tool_input` carry tool output and arguments and
+/// are deliberately never read here.
+fn record_runtime_item_receipt(
+    event: &str,
+    v: &Value,
+    rollup: &mut Rollup,
+    dedup: &mut RuntimeEventDedup,
+) {
+    let Some(item) = v.pointer("/payload/item") else {
+        return;
+    };
+    let kind = item.get("kind").and_then(Value::as_str).unwrap_or_default();
+    let is_tool = matches!(kind, "tool_call" | "file_change" | "command_execution");
+    if !is_tool && kind != "context_compaction" {
+        return;
+    }
+    // One receipt, counted once. A record with no verifiable runtime identity
+    // cannot be de-duplicated, so it is counted without one rather than
+    // dropped — `thread_id` and `seq` are required fields of every record the
+    // store writes, so this only affects hand-edited logs.
+    if let Some(identity) = runtime_event_identity(v)
+        && !dedup.event_records.insert(identity)
+    {
+        return;
+    }
+
+    if !is_tool {
+        record_compaction_item_receipt(event, v, rollup);
+        return;
+    }
+
+    // `tool_name` is copied forward into the completion metadata, but the
+    // redaction and error branches rewrite or leave that object alone, so fall
+    // back to the started record's `tool` projection before giving up. An
+    // unresolvable name is bucketed, never dropped.
+    let tool_name = item
+        .pointer("/metadata/tool_name")
+        .or_else(|| v.pointer("/payload/tool/name"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let elapsed_ms = item_elapsed_ms(item);
+    let stats = rollup.tool_mut(tool_name);
+    match event {
+        "item.started" => stats.calls += 1,
+        "item.completed" => match item.pointer("/metadata/is_error").and_then(Value::as_bool) {
+            Some(false) => stats.successes += 1,
+            Some(true) => stats.failures += 1,
+            None => stats.outcome_unknown += 1,
+        },
+        // `item.failed` is the engine's own error branch: the tool call did
+        // run and did not succeed.
+        _ => stats.failures += 1,
+    }
+    if event != "item.started" {
+        match elapsed_ms {
+            Some(ms) => {
+                stats.total_elapsed_ms = stats.total_elapsed_ms.saturating_add(ms);
+                stats.elapsed_samples += 1;
+            }
+            None => stats.elapsed_unavailable += 1,
+        }
+    }
+}
+
+/// A compaction is only counted when it completed. The size reduction comes
+/// from the two persisted message counts or it stays unknown — a compaction
+/// with no counts must never average in as a 0% reduction.
+fn record_compaction_item_receipt(event: &str, v: &Value, rollup: &mut Rollup) {
+    if event != "item.completed" {
+        return;
+    }
+    rollup.compaction.events += 1;
+    let before = v
+        .pointer("/payload/messages_before")
+        .and_then(Value::as_u64);
+    let after = v.pointer("/payload/messages_after").and_then(Value::as_u64);
+    let (Some(before), Some(after)) = (before, after) else {
+        return;
+    };
+    if before == 0 {
+        return;
+    }
+    rollup.compaction.ratio_sum += 1.0 - (after as f64 / before as f64);
+    rollup.compaction.ratio_samples += 1;
+}
+
+/// Exact interval between two persisted item timestamps, or `None`.
+///
+/// Both fields are optional on the record, and a reversed pair is not a
+/// measurement. Neither case may contribute a 0 ms sample, and neither is
+/// evidence about a provider charge.
+fn item_elapsed_ms(item: &Value) -> Option<u64> {
+    let started = parse_ts_field(item, "started_at")?;
+    let ended = parse_ts_field(item, "ended_at")?;
+    u64::try_from((ended - started).num_milliseconds()).ok()
+}
+
 fn record_provider_usage_receipt(v: &Value, rollup: &mut Rollup, dedup: &mut RuntimeEventDedup) {
     let Some(identity) = runtime_event_identity(v) else {
         rollup
@@ -966,7 +1129,7 @@ fn print_human(rollup: &Rollup) {
             .values()
             .map(|t| t.successes + t.failures)
             .sum();
-        let overall_rate = if total_judged > 0 {
+        let mut overall_rate = if total_judged > 0 {
             format!(
                 "{:.1}% success",
                 total_ok as f64 / total_judged as f64 * 100.0
@@ -977,6 +1140,16 @@ fn print_human(rollup: &Rollup) {
             let prompted: u64 = rollup.tools.values().map(|t| t.prompted).sum();
             format!("{auto} auto-approved, {prompted} prompted")
         };
+        // Denied and outcome-unknown calls are excluded from the rate above by
+        // construction, so they are named rather than silently dropped.
+        let total_denied: u64 = rollup.tools.values().map(|t| t.denied).sum();
+        if total_denied > 0 {
+            overall_rate.push_str(&format!(", {} denied", fmt_num(total_denied)));
+        }
+        let total_unknown: u64 = rollup.tools.values().map(|t| t.outcome_unknown).sum();
+        if total_unknown > 0 {
+            overall_rate.push_str(&format!(", {} outcome unknown", fmt_num(total_unknown)));
+        }
 
         println!(
             "Tools: {:>6} calls ({})",
@@ -990,6 +1163,14 @@ fn print_human(rollup: &Rollup) {
         for (name, stats) in tools.iter().take(15) {
             let rate_str = match stats.success_rate_pct() {
                 Some(pct) => format!("{pct:5.1}%"),
+                None if stats.denied > 0 => {
+                    // Nothing ran, so an approval breakdown would read as if
+                    // it had.
+                    format!("{} denied", fmt_num(stats.denied))
+                }
+                None if stats.outcome_unknown > 0 => {
+                    format!("{} unknown", fmt_num(stats.outcome_unknown))
+                }
                 None => {
                     // Only approval data available — show auto/prompted breakdown.
                     let a = stats.auto_approved;
@@ -1021,7 +1202,9 @@ fn print_human(rollup: &Rollup) {
     if rollup.compaction.events > 0 {
         let avg_str = match rollup.compaction.avg_reduction_pct() {
             Some(pct) => format!(", avg {pct:.0}% size reduction"),
-            None => String::new(),
+            // No message counts were recorded. Saying nothing here reads as
+            // "no reduction"; say that it is unknown.
+            None => ", size reduction unknown".to_string(),
         };
         println!(
             "Compaction: {} events{}",
@@ -1128,6 +1311,18 @@ fn resolve_audit_roots() -> Result<Vec<PathBuf>> {
         }
     }
     Ok(roots)
+}
+
+/// Resolve the tool a durable audit record is about.
+///
+/// `~/.codewhale/audit.log` nests its payload under `details`; the opt-in
+/// `CODEWHALE_TOOL_AUDIT_LOG` file writes `tool_name` at the top level.
+fn audit_tool_name(v: &Value) -> &str {
+    v.pointer("/details/tool_name")
+        .or_else(|| v.pointer("/payload/tool_name"))
+        .or_else(|| v.get("tool_name"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
 }
 
 /// Parse a timestamp from a JSON value field (tries RFC3339).
@@ -1704,6 +1899,397 @@ mod tests {
         assert_eq!(runtime.provider_usage_receipts, 1);
         assert_eq!(runtime.provider_reported_input_tokens, 10);
         assert_eq!(runtime.provider_reported_output_tokens, 1);
+    }
+
+    // ── Durable runtime item receipts ──
+    //
+    // These pin *which* runtime event names carry tool and compaction data.
+    // Before the fix this reader matched `tool.started` / `tool.completed` /
+    // `tool.failed` and `compaction.completed`, none of which the Runtime
+    // store has ever written, so every per-tool counter was structurally 0.
+
+    fn tool_item(kind: &str, tool_name: &str, extra: Value) -> Value {
+        let mut item = serde_json::json!({
+            "schema_version": 4,
+            "id": "item_abc",
+            "turn_id": "turn-a",
+            "kind": kind,
+            "status": "completed",
+            "summary": "exec_shell: ok",
+            "metadata": { "tool_use_id": "call-1", "tool_name": tool_name },
+            "started_at": "2026-09-08T10:00:00Z",
+        });
+        merge_json(&mut item, extra);
+        item
+    }
+
+    fn merge_json(target: &mut Value, extra: Value) {
+        let Value::Object(extra) = extra else { return };
+        let Some(target) = target.as_object_mut() else {
+            return;
+        };
+        for (key, value) in extra {
+            let nested = matches!(value, Value::Object(_))
+                && matches!(target.get(&key), Some(Value::Object(_)));
+            if nested {
+                merge_json(target.get_mut(&key).expect("checked above"), value);
+            } else {
+                target.insert(key, value);
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_tool_receipts_come_from_durable_item_events() {
+        let started = runtime_event(
+            60,
+            "2026-09-08T10:00:00Z",
+            "thread-a",
+            Some("turn-a"),
+            "item.started",
+            serde_json::json!({
+                "item": tool_item("tool_call", "exec_shell", serde_json::json!({
+                    "status": "in_progress",
+                    "metadata": { "tool_input": "{}" },
+                })),
+                "tool": { "id": "call-1", "name": "exec_shell", "input": {} },
+            }),
+        );
+        let completed = runtime_event(
+            61,
+            "2026-09-08T10:00:02Z",
+            "thread-a",
+            Some("turn-a"),
+            "item.completed",
+            serde_json::json!({
+                "item": tool_item("tool_call", "exec_shell", serde_json::json!({
+                    "ended_at": "2026-09-08T10:00:02Z",
+                    "metadata": { "is_error": false },
+                })),
+            }),
+        );
+        let tmp = write_runtime_events(&[started, completed]);
+        let mut rollup = Rollup::default();
+        read_runtime_test_log(tmp.path(), None, &mut rollup);
+
+        let stats = &rollup.tools["exec_shell"];
+        assert_eq!(stats.calls, 1);
+        assert_eq!(stats.successes, 1);
+        assert_eq!(stats.failures, 0);
+        assert_eq!(stats.outcome_unknown, 0);
+        assert_eq!(stats.elapsed_samples, 1);
+        assert_eq!(stats.total_elapsed_ms, 2_000);
+        assert_eq!(stats.elapsed_unavailable, 0);
+    }
+
+    #[test]
+    fn runtime_file_change_and_command_execution_items_count_as_tools() {
+        // `tool_kind_for_name` splits one tool call across three item kinds;
+        // dropping two of them would hide every shell and edit receipt.
+        let events: Vec<_> = [
+            ("file_change", "apply_patch"),
+            ("command_execution", "exec_shell"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (kind, name))| {
+            runtime_event(
+                70 + i as u64,
+                "2026-09-08T10:00:00Z",
+                "thread-a",
+                Some("turn-a"),
+                "item.completed",
+                serde_json::json!({
+                    "item": tool_item(kind, name, serde_json::json!({
+                        "ended_at": "2026-09-08T10:00:01Z",
+                        "metadata": { "is_error": false },
+                    })),
+                }),
+            )
+        })
+        .collect();
+        let tmp = write_runtime_events(&events);
+        let mut rollup = Rollup::default();
+        read_runtime_test_log(tmp.path(), None, &mut rollup);
+
+        assert_eq!(rollup.tools["apply_patch"].successes, 1);
+        assert_eq!(rollup.tools["exec_shell"].successes, 1);
+        assert_eq!(rollup.tools["exec_shell"].total_elapsed_ms, 1_000);
+    }
+
+    #[test]
+    fn runtime_tool_outcome_without_is_error_is_unknown_not_success() {
+        let completed = runtime_event(
+            80,
+            "2026-09-08T10:00:00Z",
+            "thread-a",
+            Some("turn-a"),
+            "item.completed",
+            serde_json::json!({
+                "item": tool_item("tool_call", "exec_shell", serde_json::json!({})),
+            }),
+        );
+        let tmp = write_runtime_events(&[completed]);
+        let mut rollup = Rollup::default();
+        read_runtime_test_log(tmp.path(), None, &mut rollup);
+
+        let stats = &rollup.tools["exec_shell"];
+        assert_eq!(stats.successes, 0);
+        assert_eq!(stats.failures, 0, "unknown is never folded into failures");
+        assert_eq!(stats.outcome_unknown, 1);
+        assert_eq!(stats.success_rate_pct(), None);
+        assert_eq!(
+            stats.elapsed_unavailable, 1,
+            "a missing ended_at is not a 0 ms call"
+        );
+        assert_eq!(stats.elapsed_samples, 0);
+        assert_eq!(stats.avg_elapsed_ms(), None);
+    }
+
+    #[test]
+    fn sse_only_tool_event_names_are_not_durable_receipts() {
+        // `tool.started` / `tool.completed` / `tool.failed` are synthesized by
+        // `map_compat_stream_event` for HTTP clients and never persisted.
+        let events: Vec<_> = ["tool.started", "tool.completed", "tool.failed"]
+            .into_iter()
+            .enumerate()
+            .map(|(i, event)| {
+                runtime_event(
+                    90 + i as u64,
+                    "2026-09-08T10:00:00Z",
+                    "thread-a",
+                    Some("turn-a"),
+                    event,
+                    serde_json::json!({ "tool_name": "exec_shell", "elapsed_ms": 5 }),
+                )
+            })
+            .collect();
+        let tmp = write_runtime_events(&events);
+        let mut rollup = Rollup::default();
+        read_runtime_test_log(tmp.path(), None, &mut rollup);
+
+        assert_eq!(rollup.total_tool_calls(), 0);
+        assert!(rollup.tools.is_empty());
+    }
+
+    #[test]
+    fn duplicate_item_receipts_are_counted_once() {
+        let completed = runtime_event(
+            100,
+            "2026-09-08T10:00:00Z",
+            "thread-a",
+            Some("turn-a"),
+            "item.completed",
+            serde_json::json!({
+                "item": tool_item("tool_call", "exec_shell", serde_json::json!({
+                    "ended_at": "2026-09-08T10:00:01Z",
+                    "metadata": { "is_error": false },
+                })),
+            }),
+        );
+        let tmp = write_runtime_events(&[completed.clone(), completed]);
+        let mut rollup = Rollup::default();
+        read_runtime_test_log(tmp.path(), None, &mut rollup);
+
+        let stats = &rollup.tools["exec_shell"];
+        assert_eq!(stats.successes, 1);
+        assert_eq!(stats.elapsed_samples, 1);
+        assert_eq!(stats.total_elapsed_ms, 1_000);
+    }
+
+    #[test]
+    fn compaction_reduction_is_computed_from_message_counts() {
+        let completed = runtime_event(
+            110,
+            "2026-09-08T10:00:00Z",
+            "thread-a",
+            Some("turn-a"),
+            "item.completed",
+            serde_json::json!({
+                "item": { "kind": "context_compaction", "status": "completed" },
+                "auto": true,
+                "messages_before": 40,
+                "messages_after": 10,
+            }),
+        );
+        let tmp = write_runtime_events(&[completed]);
+        let mut rollup = Rollup::default();
+        read_runtime_test_log(tmp.path(), None, &mut rollup);
+
+        assert_eq!(rollup.compaction.events, 1);
+        assert_eq!(rollup.compaction.ratio_samples, 1);
+        assert_eq!(rollup.compaction.avg_reduction_pct(), Some(75.0));
+    }
+
+    #[test]
+    fn compaction_without_message_counts_stays_unknown() {
+        let completed = runtime_event(
+            120,
+            "2026-09-08T10:00:00Z",
+            "thread-a",
+            Some("turn-a"),
+            "item.completed",
+            serde_json::json!({
+                "item": { "kind": "context_compaction", "status": "completed" },
+                "auto": true,
+            }),
+        );
+        let tmp = write_runtime_events(&[completed]);
+        let mut rollup = Rollup::default();
+        read_runtime_test_log(tmp.path(), None, &mut rollup);
+
+        assert_eq!(rollup.compaction.events, 1);
+        assert_eq!(rollup.compaction.ratio_samples, 0);
+        assert_eq!(
+            rollup.compaction.avg_reduction_pct(),
+            None,
+            "no counts is unknown, never a 0% reduction"
+        );
+    }
+
+    // ── Approval receipts ──
+
+    #[test]
+    fn session_auto_approvals_are_counted_under_their_emitted_name() {
+        let events = [
+            serde_json::json!({
+                "ts": "2026-09-08T10:00:00Z",
+                "event": "tool.approval.auto_approve_session",
+                "details": { "tool_name": "exec_shell" },
+            }),
+            serde_json::json!({
+                "ts": "2026-09-08T10:00:01Z",
+                "event": "tool.approval.auto_approve",
+                "details": { "tool_name": "exec_shell" },
+            }),
+        ];
+        let tmp = write_runtime_events(&events);
+        let mut rollup = Rollup::default();
+        read_audit_test_log(tmp.path(), None, &mut rollup);
+
+        let stats = &rollup.tools["exec_shell"];
+        assert_eq!(stats.auto_approved, 2, "emitted name plus legacy alias");
+        assert_eq!(stats.calls, 2);
+    }
+
+    #[test]
+    fn tool_denials_are_a_class_of_their_own() {
+        let events: Vec<_> = [
+            "tool.approval.auto_deny",
+            "tool.approval.auto_deny_session",
+            "tool.approval.auto_deny_auto_review",
+            "tool.approval.auto_deny_full_access_policy",
+        ]
+        .into_iter()
+        .map(|event| {
+            serde_json::json!({
+                "ts": "2026-09-08T10:00:00Z",
+                "event": event,
+                "details": { "tool_name": "exec_shell" },
+            })
+        })
+        .collect();
+        let tmp = write_runtime_events(&events);
+        let mut rollup = Rollup::default();
+        read_audit_test_log(tmp.path(), None, &mut rollup);
+
+        let stats = &rollup.tools["exec_shell"];
+        assert_eq!(stats.denied, 4);
+        assert_eq!(stats.calls, 4);
+        assert_eq!(stats.successes, 0);
+        assert_eq!(stats.failures, 0);
+        assert_eq!(
+            stats.success_rate_pct(),
+            None,
+            "a blocked call is not a judged outcome"
+        );
+    }
+
+    #[test]
+    fn opt_in_tool_audit_records_resolve_their_top_level_tool_name() {
+        // `emit_tool_audit` writes `tool_name` at the top level, not under
+        // `details`, so pointing `--since` at that file used to bucket every
+        // record as "unknown" and grade an absent outcome as a success.
+        let events = [
+            serde_json::json!({
+                "event": "tool.result",
+                "tool_id": "call-1",
+                "tool_name": "exec_shell",
+                "success": false,
+            }),
+            serde_json::json!({
+                "event": "tool.result",
+                "tool_id": "call-2",
+                "tool_name": "exec_shell",
+            }),
+        ];
+        let tmp = write_runtime_events(&events);
+        let mut rollup = Rollup::default();
+        read_audit_test_log(tmp.path(), None, &mut rollup);
+
+        let stats = &rollup.tools["exec_shell"];
+        assert_eq!(stats.calls, 2);
+        assert_eq!(stats.failures, 1);
+        assert_eq!(stats.successes, 0);
+        assert_eq!(stats.outcome_unknown, 1);
+        assert!(!rollup.tools.contains_key("unknown"));
+    }
+
+    #[test]
+    fn rollup_json_exposes_the_new_tool_classes() {
+        let mut rollup = Rollup::default();
+        let stats = rollup.tool_mut("exec_shell");
+        stats.denied = 2;
+        stats.outcome_unknown = 1;
+        stats.elapsed_unavailable = 3;
+        let json = serde_json::to_value(&rollup).unwrap();
+        assert_eq!(json["tools"]["exec_shell"]["denied"], 2);
+        assert_eq!(json["tools"]["exec_shell"]["outcome_unknown"], 1);
+        assert_eq!(json["tools"]["exec_shell"]["elapsed_unavailable"], 3);
+        // Existing keys keep their names and positions for JSON consumers.
+        assert_eq!(json["tools"]["exec_shell"]["calls"], 0);
+        assert_eq!(json["tools"]["exec_shell"]["successes"], 0);
+        assert_eq!(json["tools"]["exec_shell"]["failures"], 0);
+    }
+
+    // ── Runtime store roots ──
+
+    #[test]
+    fn every_runtime_store_root_is_read_including_session_scoped_stores() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let tasks = dir.path().join("tasks");
+        let sessions = dir.path().join("sessions");
+        std::fs::create_dir_all(sessions.join("sess-1").join("runtime").join("events")).unwrap();
+        std::fs::create_dir_all(&tasks).unwrap();
+        std::fs::write(sessions.join("loose.json"), "{}").unwrap();
+
+        let _lock = crate::tests::env_lock();
+        let _override = crate::tests::ScopedEnvVar::remove("CODEWHALE_RUNTIME_DIR");
+        let _legacy = crate::tests::ScopedEnvVar::remove("DEEPSEEK_RUNTIME_DIR");
+        assert_eq!(
+            runtime_event_dirs(&tasks, &sessions),
+            vec![
+                tasks.join("runtime").join("events"),
+                sessions.join("sess-1").join("runtime").join("events"),
+            ],
+            "a loose session file is not a store root"
+        );
+    }
+
+    #[test]
+    fn an_explicit_runtime_dir_override_is_the_only_root_read() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let override_dir = dir.path().join("elsewhere");
+        let _lock = crate::tests::env_lock();
+        let _override = crate::tests::ScopedEnvVar::set(
+            "CODEWHALE_RUNTIME_DIR",
+            &override_dir.to_string_lossy(),
+        );
+        assert_eq!(
+            runtime_event_dirs(&dir.path().join("tasks"), &dir.path().join("sessions")),
+            vec![override_dir.join("events")],
+            "mixing an override with the default roots would double count"
+        );
     }
 
     // ── State-root resolution ──
