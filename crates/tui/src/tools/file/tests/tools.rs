@@ -2504,6 +2504,13 @@ async fn expected_hash_is_advertised_on_every_mutating_action() {
 /// applies to the built-in defaults with no config required.
 #[test]
 fn read_tools_refuse_paths_under_the_default_sandbox_read_denylist() {
+    // Take the env lock WITHOUT rebinding `HOME`. The sandbox denylist is a
+    // process-wide `OnceLock` (sandbox/read_guard.rs:346-347, 411-416) that
+    // snapshots the home directory the first time it is built, so pointing
+    // `HOME` at a fixture here could never match the cached table. What this
+    // test needs is mutual exclusion against siblings that DO rebind `HOME`,
+    // not a home of its own.
+    let _env_lock = crate::test_support::lock_test_env();
     let Some(home) = dirs::home_dir() else {
         // No home directory: only machine-wide rules exist and the assertion
         // below would be vacuous. Skip rather than pretend to have evidence.
@@ -2536,8 +2543,16 @@ fn read_tools_refuse_paths_under_the_default_sandbox_read_denylist() {
 /// theater, and `resolve_path` deliberately *permits* a workspace symlink that
 /// resolves outside the workspace.
 #[cfg(unix)]
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn read_file_refuses_a_workspace_symlink_pointing_at_a_denied_tree() {
+    // Take the env lock WITHOUT rebinding `HOME`. The sandbox denylist is a
+    // process-wide `OnceLock` (sandbox/read_guard.rs:346-347, 411-416) that
+    // snapshots the home directory the first time it is built, so pointing
+    // `HOME` at a fixture here could never match the cached table. What this
+    // test needs is mutual exclusion against siblings that DO rebind `HOME`,
+    // not a home of its own.
+    let _env_lock = crate::test_support::lock_test_env();
     let Some(home) = dirs::home_dir() else {
         return;
     };
@@ -2567,8 +2582,16 @@ async fn read_file_refuses_a_workspace_symlink_pointing_at_a_denied_tree() {
 /// F1: `list_dir ~/.ssh` used to hand back the key file names — enumerating a
 /// denied directory is a read of it, exactly what Seatbelt's
 /// `deny file-read*` blocks at the OS layer.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn list_dir_refuses_to_enumerate_a_denied_directory() {
+    // Take the env lock WITHOUT rebinding `HOME`. The sandbox denylist is a
+    // process-wide `OnceLock` (sandbox/read_guard.rs:346-347, 411-416) that
+    // snapshots the home directory the first time it is built, so pointing
+    // `HOME` at a fixture here could never match the cached table. What this
+    // test needs is mutual exclusion against siblings that DO rebind `HOME`,
+    // not a home of its own.
+    let _env_lock = crate::test_support::lock_test_env();
     let ctx = ToolContext::new(std::env::temp_dir());
 
     // Deterministic anchor independent of the machine's home layout: the
@@ -2611,8 +2634,16 @@ async fn list_dir_refuses_to_enumerate_a_denied_directory() {
 /// resolved path answers the probe ("where does this link really go?") in the
 /// error text. The raw-spelling check runs before resolution, so it wins.
 #[cfg(unix)]
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn read_file_refusal_names_the_callers_spelling_not_the_symlink_target() {
+    // Take the env lock WITHOUT rebinding `HOME`. The sandbox denylist is a
+    // process-wide `OnceLock` (sandbox/read_guard.rs:346-347, 411-416) that
+    // snapshots the home directory the first time it is built, so pointing
+    // `HOME` at a fixture here could never match the cached table. What this
+    // test needs is mutual exclusion against siblings that DO rebind `HOME`,
+    // not a home of its own.
+    let _env_lock = crate::test_support::lock_test_env();
     let Some(home) = dirs::home_dir() else {
         return;
     };
@@ -2645,8 +2676,17 @@ async fn read_file_refusal_names_the_callers_spelling_not_the_symlink_target() {
     );
 }
 
+// Reads process-global `HOME` (via `effective_home_dir`) and then resolves `~`
+// again through the tool, so it must hold the env lock for the whole span: any
+// sibling that rebinds `HOME` between those two reads makes the fixture path
+// stop matching the tilde path.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn read_and_write_file_home_path_in_allowed_real_home_fixture() {
+    let _env_lock = crate::test_support::lock_test_env();
+    let home = tempfile::tempdir().expect("home tempdir");
+    let _home = crate::test_support::EnvVarGuard::set("HOME", home.path());
+    let _userprofile = crate::test_support::EnvVarGuard::set("USERPROFILE", home.path());
     let real_home = crate::config::effective_home_dir().expect("test home must be available");
     let home_fixture = tempfile::Builder::new()
         .prefix("cw_home_tool_fixture_")
@@ -2755,8 +2795,16 @@ async fn read_file_home_path_restricted_refusal() {
     );
 }
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn read_file_home_path_trusted_external_allowance() {
+    // Take the env lock WITHOUT rebinding `HOME`. The sandbox denylist is a
+    // process-wide `OnceLock` (sandbox/read_guard.rs:346-347, 411-416) that
+    // snapshots the home directory the first time it is built, so pointing
+    // `HOME` at a fixture here could never match the cached table. What this
+    // test needs is mutual exclusion against siblings that DO rebind `HOME`,
+    // not a home of its own.
+    let _env_lock = crate::test_support::lock_test_env();
     let real_home = crate::config::effective_home_dir().expect("test home must be available");
     let trusted_fixture = tempfile::Builder::new()
         .prefix("cw_home_trusted_fixture_")
@@ -2820,8 +2868,27 @@ async fn read_file_no_shell_expansion() {
     assert!(result.content.contains("literal $HOME file"));
 }
 
+// Seals `HOME` to a fixture: this test used to resolve `~` against the
+// developer's real home, so a sibling test setting `CODEWHALE_HOME` between the
+// tilde expansion and the guard's own lookup could flip it to a pass — and the
+// failure printed the developer's actual config file, credentials included.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn read_file_denies_home_credential_path() {
+    let _env_lock = crate::test_support::lock_test_env();
+    let home = tempfile::tempdir().expect("home tempdir");
+    let _home = crate::test_support::EnvVarGuard::set("HOME", home.path());
+    let _userprofile = crate::test_support::EnvVarGuard::set("USERPROFILE", home.path());
+    let _codewhale_home = crate::test_support::EnvVarGuard::remove("CODEWHALE_HOME");
+    let _config_path = crate::test_support::EnvVarGuard::remove("CODEWHALE_CONFIG_PATH");
+    let _legacy_config_path = crate::test_support::EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH");
+    fs::create_dir_all(home.path().join(".codewhale")).expect("create fixture home");
+    fs::write(
+        home.path().join(".codewhale").join("config.toml"),
+        "api_key = \"fixture-secret\"\n",
+    )
+    .expect("write fixture config");
+
     let workspace = tempfile::tempdir().expect("tempdir");
     // Even in trust mode, credential paths must be blocked
     let ctx = ToolContext::new(workspace.path().to_path_buf()).with_trust_mode(true);
@@ -2841,9 +2908,73 @@ async fn read_file_denies_home_credential_path() {
     );
 }
 
+/// `CODEWHALE_HOME` relocates the runtime home. It must not un-guard the user's
+/// real `~/.codewhale/config.toml`: the guard derived every root from
+/// `codewhale_home()`, which returns the override when set, so pointing that
+/// variable anywhere else left the ambient config (OAuth tokens included)
+/// readable in trust mode. `sandbox::read_guard` only covers
+/// `~/.codewhale/secrets`, so nothing else was denying this file.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn read_file_denies_ambient_home_config_even_when_codewhale_home_is_relocated() {
+    let _env_lock = crate::test_support::lock_test_env();
+    let home = tempfile::tempdir().expect("home tempdir");
+    let relocated = tempfile::tempdir().expect("relocated home tempdir");
+    let _home = crate::test_support::EnvVarGuard::set("HOME", home.path());
+    let _userprofile = crate::test_support::EnvVarGuard::set("USERPROFILE", home.path());
+    // The override points somewhere else entirely — the ambient store must stay guarded.
+    let _codewhale_home =
+        crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", relocated.path());
+    let _config_path = crate::test_support::EnvVarGuard::remove("CODEWHALE_CONFIG_PATH");
+    let _legacy_config_path = crate::test_support::EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH");
+
+    let ambient = home.path().join(".codewhale");
+    fs::create_dir_all(&ambient).expect("create ambient home");
+    fs::write(
+        ambient.join("config.toml"),
+        "[providers.openai]\napi_key = \"sk-ambient-must-not-leak\"\n",
+    )
+    .expect("write ambient config");
+    fs::write(
+        ambient.join("config.toml.bak"),
+        "[providers.openai]\napi_key = \"sk-ambient-backup-must-not-leak\"\n",
+    )
+    .expect("write ambient config backup");
+
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let ctx = ToolContext::new(workspace.path().to_path_buf()).with_trust_mode(true);
+
+    for name in ["config.toml", "config.toml.bak"] {
+        let target = ambient.join(name);
+        let error = ReadFileTool
+            .execute(json!({ "path": target.to_string_lossy() }), &ctx)
+            .await
+            .err()
+            .unwrap_or_else(|| {
+                panic!("reading the ambient {name} must be denied despite CODEWHALE_HOME")
+            });
+        assert!(
+            matches!(error, ToolError::PermissionDenied { .. }),
+            "expected permission denied for {name}, got: {error:?}"
+        );
+        assert!(
+            !error.to_string().contains("must-not-leak"),
+            "the denial must not echo credential content for {name}"
+        );
+    }
+}
+
 #[cfg(unix)]
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn read_file_refusal_names_home_spelling_not_denied_symlink_target() {
+    // Take the env lock WITHOUT rebinding `HOME`. The sandbox denylist is a
+    // process-wide `OnceLock` (sandbox/read_guard.rs:346-347, 411-416) that
+    // snapshots the home directory the first time it is built, so pointing
+    // `HOME` at a fixture here could never match the cached table. What this
+    // test needs is mutual exclusion against siblings that DO rebind `HOME`,
+    // not a home of its own.
+    let _env_lock = crate::test_support::lock_test_env();
     let real_home = crate::config::effective_home_dir().expect("test home must be available");
     let home_fixture = tempfile::Builder::new()
         .prefix("cw_home_symlink_fixture_")

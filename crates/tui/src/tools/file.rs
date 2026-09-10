@@ -477,11 +477,21 @@ pub(crate) fn is_codewhale_credential_path(path: &Path) -> bool {
         return true;
     }
 
-    let roots = [
-        codewhale_config::codewhale_home(),
-        codewhale_config::legacy_deepseek_home(),
-    ];
-    for root in roots.into_iter().flatten() {
+    // `CODEWHALE_HOME` relocates the *runtime* home; it is not a licence to read
+    // the user's real `~/.codewhale/config.toml`. `codewhale_home()` returns the
+    // override when one is set, so relying on it alone left the ambient store
+    // unguarded whenever that variable pointed elsewhere. Keep the ambient root
+    // in the set alongside the override, mirroring the deliberately
+    // unconditional `~/.codewhale/secrets` entry in `sandbox::read_guard`
+    // (read_guard.rs:481-487). `legacy_deepseek_home()` is already ambient by
+    // construction (paths/src/lib.rs:183-185), so it needs no counterpart.
+    let mut roots: Vec<PathBuf> = Vec::with_capacity(3);
+    roots.extend(codewhale_config::codewhale_home().ok());
+    roots.extend(codewhale_config::legacy_deepseek_home().ok());
+    roots.extend(
+        codewhale_paths::user_home().map(|home| home.join(codewhale_config::CODEWHALE_APP_DIR)),
+    );
+    for root in roots {
         if is_config_or_backup(&candidate, &root.join(codewhale_config::CONFIG_FILE_NAME)) {
             return true;
         }
