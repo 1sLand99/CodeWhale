@@ -24,6 +24,12 @@ release_crates=(
   # Prototype command boundary depends on core; future TUI/commands adapters
   # consume it without changing current production dispatch in FEAT-014.
   codewhale-command-contract
+  # TUI support crates added in 0.9.13: localization (i18n), models (catalog
+  # facade), palette (design tokens). Only tui consumes them, so they sit
+  # after core/config/build-support and before tui.
+  codewhale-localization
+  codewhale-models
+  codewhale-palette
   codewhale-tui
   codewhale-app-server
   codewhale-cli
