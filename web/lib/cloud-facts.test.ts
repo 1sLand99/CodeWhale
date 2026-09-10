@@ -82,8 +82,21 @@ describe("cloud facts verification", () => {
     expect(result).toMatchObject({ kind: "ok", envelope: { applies_to: ">=99.0.0", facts_version: 8 } });
   });
 
-  it("has no production trust anchors and refuses empty or retired-only trust before any reads", async () => {
-    expect(TRUSTED_KEYS).toEqual([]);
+  it("pins a well-formed production anchor and refuses empty or retired-only trust before any reads", async () => {
+    // The anchor itself is checked for shape, not for a specific key: pinning a
+    // second key or rotating must not fail this test, but a malformed one must.
+    // Byte-for-byte agreement with the Rust table is `check-cloud-facts.mjs`.
+    expect(TRUSTED_KEYS.length).toBeGreaterThan(0);
+    for (const key of TRUSTED_KEYS) {
+      expect(key.keyId).toMatch(/^cwf-[A-Za-z0-9._-]+$/);
+      expect(["active", "retired"]).toContain(key.status);
+      // Standard base64 of a raw 32-byte Ed25519 public key.
+      expect(Buffer.from(key.publicKey, "base64")).toHaveLength(32);
+    }
+    expect(TRUSTED_KEYS.some((key) => key.status === "active")).toBe(true);
+
+    // The property that actually matters is unchanged: with no usable key the
+    // layer fails closed *before* any network or cache read.
     const fetchImpl = vi.fn();
     const get = vi.fn();
     for (const keys of [[], [{ ...TEST_KEY, status: "retired" as const }]]) {
@@ -371,8 +384,14 @@ describe("facts publisher boundaries", () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
-  it("the local facts gate verifies both public fixtures without any production anchor", () => {
+  it("the local facts gate verifies both public fixtures and reports the pinned anchor count", () => {
     const checker = fileURLToPath(new URL("../scripts/check-cloud-facts.mjs", import.meta.url));
-    expect(execFileSync(process.execPath, [checker], { encoding: "utf8" })).toContain("0 active production keys");
+    // Derived from the table rather than hardcoded, so rotating or adding an
+    // anchor does not require editing this assertion — only a gate that has
+    // drifted out of step with the table will fail it.
+    const active = TRUSTED_KEYS.filter((key) => key.status === "active").length;
+    expect(execFileSync(process.execPath, [checker], { encoding: "utf8" })).toContain(
+      `${active} active production keys`,
+    );
   });
 });
