@@ -36,7 +36,7 @@ Global key chords are not yet user-configurable — tracked for a future release
 | `Alt-L`              | Open the pager for the last message (composer empty)             |
 | `Alt-P` / `Alt-A` / `Alt-Y` | Jump to Plan / Work, or request Full Access (`Alt-Y` is the legacy permission channel — Work + Full Access — not a separate mode; it honors a locked approval policy) |
 | `Ctrl-X` (Activity workbar) | Cancel all running background shell jobs                  |
-| `Esc`                | Close topmost modal · cancel slash menu · dismiss toast        |
+| `Esc`                | Close topmost modal · cancel slash menu · dismiss toast. During a compact that is serving an in-flight turn, Esc stops the turn (the compact is collateral). |
 
 ## Composer
 
@@ -237,6 +237,26 @@ Archive (`e`) is undestructive and needs no confirmation: the session stays on
 disk and stays loadable, it just leaves the default list and stops being an
 auto-resume candidate. Press `e` again to bring it back. Delete (`d`) is the
 destructive one and keeps its confirmation.
+
+## Question sheet (`request_user_input`)
+
+When the model asks a question, a **bottom-anchored sheet** opens over the
+transcript. The conversation stays visible above it. The sheet grows with the
+question and options; if they still do not fit, it scrolls so the highlighted
+option and any typed custom response stay on screen. Resize is not required to
+reveal content.
+
+| Chord | Action |
+|-------|--------|
+| `↑` / `↓` / `k` / `j` | Move the highlight |
+| `1`–`9` | Quick-pick that option |
+| `Enter` | Confirm the highlight (or enter custom-response typing) |
+| `Space` | Toggle a multi-select option |
+| `←` / `h` | Previous question — change that answer. Esc is not back; it cancels the whole request. |
+| `Esc` | Cancel the whole question request |
+
+**Custom response.** The last numbered row is always "Other". Enter it, type,
+then `Enter` to submit or `Esc` to return to the options without sending.
 
 ## Approval modal (when a tool requests approval)
 

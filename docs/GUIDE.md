@@ -220,6 +220,13 @@ The interactive TUI has a few stable regions:
 - Status and footer areas: live activity, queued follow-ups, and short command
   hints.
 
+When the model asks a question (`request_user_input`), a bottom sheet opens
+over the transcript rather than a centered overlay. The conversation stays
+visible above it. Use `↑`/`↓` to move, `Enter` to confirm, `←`/`h` to go back
+to a previous question, and `Esc` to cancel the whole request. The last
+numbered row is always a custom typed response; that text stays on screen
+while you type. Keys for the sheet are in [KEYBINDINGS.md](KEYBINDINGS.md).
+
 The bottom chrome is configurable. Run `/statusline` to choose what is
 visible, or set `[tui].status_items` in `config.toml`. Each key owns exactly
 one thing on screen: `mode` is the posture bar's plan/act/operate chip, and

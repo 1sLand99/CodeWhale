@@ -75,7 +75,9 @@ pub struct UserInputView {
     selected: usize,
     mode: InputMode,
     other_input: String,
-    answers: Vec<UserInputAnswer>,
+    /// Answers committed for previous questions. Going back pops the last
+    /// batch so an accidental Enter is reversible.
+    answered: Vec<Vec<UserInputAnswer>>,
     /// Indices toggled into the pending multi-select set for the current
     /// question. Only used when `question.multi_select` is true.
     multi_pending: Vec<usize>,
@@ -90,7 +92,7 @@ impl UserInputView {
             selected: 0,
             mode: InputMode::Selecting,
             other_input: String::new(),
-            answers: Vec::new(),
+            answered: Vec::new(),
             multi_pending: Vec::new(),
         }
     }
@@ -183,11 +185,15 @@ impl UserInputView {
         }]
     }
 
+    fn committed_answers(&self) -> Vec<UserInputAnswer> {
+        self.answered.iter().flatten().cloned().collect()
+    }
+
     fn advance_question(&mut self, new_answers: Vec<UserInputAnswer>) -> ViewAction {
-        self.answers.extend(new_answers);
+        self.answered.push(new_answers);
         if self.question_index + 1 >= self.request.questions.len() {
             let response = UserInputResponse {
-                answers: self.answers.clone(),
+                answers: self.committed_answers(),
             };
             return ViewAction::EmitAndClose(ViewEvent::UserInputSubmitted {
                 tool_id: self.tool_id.clone(),
@@ -202,6 +208,30 @@ impl UserInputView {
         ViewAction::None
     }
 
+    fn go_back(&mut self) -> ViewAction {
+        if self.answered.is_empty() {
+            return ViewAction::None;
+        }
+        self.answered.pop();
+        self.question_index = self.question_index.saturating_sub(1);
+        self.selected = 0;
+        self.mode = InputMode::Selecting;
+        self.other_input.clear();
+        self.multi_pending.clear();
+        ViewAction::None
+    }
+
+    /// Content-line range that must stay on screen: the highlighted option,
+    /// or the typed custom-response row while editing it.
+    fn focused_line_range(&self) -> (usize, usize) {
+        if self.mode == InputMode::OtherInput {
+            let start = self.content_line_count().saturating_sub(4);
+            return (start, start.saturating_add(1));
+        }
+        let start = 5 + self.selected.saturating_mul(2);
+        (start, start.saturating_add(1))
+    }
+
     fn handle_selecting_key(&mut self, key: KeyEvent) -> ViewAction {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
@@ -212,6 +242,7 @@ impl UserInputView {
                 self.selected = (self.selected + 1).min(self.option_count().saturating_sub(1));
                 ViewAction::None
             }
+            KeyCode::Left | KeyCode::Char('h') => self.go_back(),
             KeyCode::Char(ch) if ch.is_ascii_digit() => {
                 let Some(number) = ch.to_digit(10) else {
                     return ViewAction::None;
@@ -485,6 +516,9 @@ impl ModalView for UserInputView {
                     Span::styled("Enter", Style::default().fg(palette::WHALE_ACTION).bold()),
                     Span::styled(" select/confirm", Style::default().fg(palette::TEXT_MUTED)),
                     Span::raw("  "),
+                    Span::styled("←/h", Style::default().fg(palette::WHALE_ACTION).bold()),
+                    Span::styled(" back", Style::default().fg(palette::TEXT_MUTED)),
+                    Span::raw("  "),
                     Span::styled("Esc", Style::default().fg(palette::WHALE_ACTION).bold()),
                     Span::styled(" cancel", Style::default().fg(palette::TEXT_MUTED)),
                 ]));
@@ -502,28 +536,32 @@ impl ModalView for UserInputView {
                     Span::styled("Enter", Style::default().fg(palette::WHALE_ACTION).bold()),
                     Span::styled(" confirm", Style::default().fg(palette::TEXT_MUTED)),
                     Span::raw("  "),
+                    Span::styled("←/h", Style::default().fg(palette::WHALE_ACTION).bold()),
+                    Span::styled(" back", Style::default().fg(palette::TEXT_MUTED)),
+                    Span::raw("  "),
                     Span::styled("Esc", Style::default().fg(palette::WHALE_ACTION).bold()),
                     Span::styled(" cancel", Style::default().fg(palette::TEXT_MUTED)),
                 ]));
             }
         }
 
+        let popup_area = sheet_rect(area, self.content_line_count());
+        let inner_h = popup_area.height.saturating_sub(4) as usize;
+        let scroll = scroll_to_keep_range_visible(self.focused_line_range(), lines.len(), inner_h);
         let paragraph = Paragraph::new(lines)
             .alignment(Alignment::Left)
             .wrap(Wrap { trim: true })
+            .scroll((scroll, 0))
             .block(modal_block(&header));
 
-        let popup_area = compact_popup_rect(area, self.content_line_count());
         render_modal_chrome(area, popup_area, buf);
         paragraph.render(popup_area, buf);
     }
 
     fn occupied_region(&self, area: Rect) -> Rect {
-        // The dialog only occupies its compact centered card; blanking the
-        // whole frame (the default) hid the live conversation the user is
-        // being asked about (v0.9.4, FINISH-0.9.4 #13). Cover the card plus
-        // the one-cell drop shadow `render_modal_surface` draws at +1/+1.
-        let popup = compact_popup_rect(area, self.content_line_count());
+        // Bottom sheet plus the one-cell drop shadow `render_modal_surface`
+        // draws at +1/+1. Transcript above the sheet stays undimmed.
+        let popup = sheet_rect(area, self.content_line_count());
         Rect {
             x: popup.x,
             y: popup.y,
@@ -533,37 +571,56 @@ impl ModalView for UserInputView {
     }
 }
 
-/// Compact centered overlay: bounded width (max 110 columns) and a height
-/// sized to the content (border + padding around `content_lines`, never more
-/// than 22 rows or 60% of the screen) so the live conversation stays visible
-/// behind the modal instead of being covered edge-to-edge.
-fn compact_popup_rect(r: Rect, content_lines: usize) -> Rect {
-    let width = r.width.min(110);
-    // Border (2 rows) + uniform padding (2 rows) around the content lines.
+/// Bottom-anchored sheet: grows with content, leaves a transcript strip
+/// above when the frame is tall enough, and never uses a fixed 22-row cap
+/// that clips options on every terminal ≥ 37 rows (#6045).
+fn sheet_rect(r: Rect, content_lines: usize) -> Rect {
+    if r.width == 0 || r.height == 0 {
+        return Rect {
+            x: r.x,
+            y: r.y.saturating_add(r.height),
+            width: 0,
+            height: 0,
+        };
+    }
     let desired = u16::try_from(content_lines)
         .unwrap_or(u16::MAX)
         .saturating_add(4);
-    let height = desired
-        .clamp(6, 22)
-        .min((r.height.saturating_mul(60) / 100).clamp(6, 22))
-        .min(r.height);
-    let popup_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(0),
-            Constraint::Length(height),
-            Constraint::Min(0),
-        ])
-        .split(r);
-    let horizontal = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Min(0),
-            Constraint::Length(width),
-            Constraint::Min(0),
-        ])
-        .split(popup_layout[1]);
-    horizontal[1]
+    let transcript_reserve = if r.height >= 16 {
+        4u16.min(r.height.saturating_sub(8))
+    } else {
+        0
+    };
+    let max_height = r
+        .height
+        .saturating_sub(transcript_reserve)
+        .max(6.min(r.height));
+    let height = desired.min(max_height).max(6.min(r.height)).min(r.height);
+    Rect {
+        x: r.x,
+        y: r.y.saturating_add(r.height.saturating_sub(height)),
+        width: r.width,
+        height,
+    }
+}
+
+fn scroll_to_keep_range_visible(
+    (focus_start, focus_end): (usize, usize),
+    total_lines: usize,
+    inner_h: usize,
+) -> u16 {
+    if inner_h == 0 || total_lines <= inner_h {
+        return 0;
+    }
+    let max_scroll = total_lines.saturating_sub(inner_h);
+    let mut scroll = 0usize;
+    if focus_end >= inner_h {
+        scroll = focus_end.saturating_add(1).saturating_sub(inner_h);
+    }
+    if focus_start < scroll {
+        scroll = focus_start;
+    }
+    u16::try_from(scroll.min(max_scroll)).unwrap_or(u16::MAX)
 }
 
 #[cfg(test)]
@@ -780,38 +837,138 @@ mod tests {
         assert!(view.multi_pending.is_empty(), "Space toggles option 0 out");
     }
 
+    fn many_option_view() -> UserInputView {
+        UserInputView::new(
+            "tool-1",
+            UserInputRequest {
+                questions: vec![
+                    UserInputQuestion {
+                        header: "Choose".to_string(),
+                        id: "q1".to_string(),
+                        question: "Which path?".to_string(),
+                        options: (1..=8)
+                            .map(|n| UserInputOption {
+                                label: format!("Option {n}"),
+                                description: format!(
+                                    "A longer description for option {n} that wraps on a narrow terminal"
+                                ),
+                            })
+                            .collect(),
+                        allow_free_text: true,
+                        multi_select: false,
+                    },
+                    UserInputQuestion {
+                        header: "Confirm".to_string(),
+                        id: "q2".to_string(),
+                        question: "Second question after the first.".to_string(),
+                        options: vec![UserInputOption {
+                            label: "Yes".to_string(),
+                            description: "Proceed".to_string(),
+                        }],
+                        allow_free_text: true,
+                        multi_select: false,
+                    },
+                ],
+            },
+        )
+    }
+
     #[test]
-    fn user_input_modal_popup_is_centered_and_sized_to_content() {
-        let area = Rect::new(0, 0, 120, 40);
-        let view = sample_view();
+    fn user_input_sheet_is_bottom_anchored_and_not_capped_at_22() {
+        let area = Rect::new(0, 0, 141, 38);
+        let view = many_option_view();
         let content = view.content_line_count();
-        let popup = compact_popup_rect(area, content);
+        let popup = sheet_rect(area, content);
 
-        // Height hugs the content (border + padding = 4 chrome rows), well
-        // under the 22-row / 60% cap for a 40-row screen.
-        assert_eq!(popup.height, u16::try_from(content).unwrap() + 4);
-        assert!(popup.height < area.height / 2);
-        assert_eq!(popup.width, 110);
-        // Centered: breathing room above and below.
-        assert!(popup.y > 0);
-        assert!(popup.y + popup.height < area.height);
+        assert_eq!(
+            popup.bottom(),
+            area.bottom(),
+            "sheet must sit on the bottom"
+        );
+        assert!(popup.y > 0, "transcript strip remains above the sheet");
+        assert_eq!(popup.width, area.width);
+        assert!(
+            popup.height > 22,
+            "141×38 must not be stuck at the old 22-row cap, got {}",
+            popup.height
+        );
 
-        // Long content is still bounded by the 22-row cap.
-        let capped = compact_popup_rect(area, 100);
-        assert_eq!(capped.height, 22);
+        let capped = sheet_rect(area, 100);
+        assert!(
+            capped.height > 22,
+            "long content may grow past 22 rows; got {}",
+            capped.height
+        );
+        assert_eq!(capped.bottom(), area.bottom());
+    }
+
+    #[test]
+    fn user_input_sheet_fits_80x24_and_keeps_selection_visible() {
+        let mut view = many_option_view();
+        view.selected = 7;
+        let rendered = render_view(&view, 80, 24);
+        assert!(
+            rendered.contains("Option 8") || rendered.contains("8) Option"),
+            "selected last option must be scrolled into view on 80×24:\n{rendered}"
+        );
+        let popup = sheet_rect(Rect::new(0, 0, 80, 24), view.content_line_count());
+        assert_eq!(popup.bottom(), 24);
+        assert!(popup.height <= 24);
+    }
+
+    #[test]
+    fn user_input_custom_response_stays_visible_while_typing() {
+        let mut view = many_option_view();
+        view.selected = view.option_count() - 1;
+        view.mode = InputMode::OtherInput;
+        view.other_input = "Need one more pass on the last option".to_string();
+        for (width, height) in [(141, 38), (80, 24)] {
+            let rendered = render_view(&view, width, height);
+            assert!(
+                rendered.contains("Need one more pass"),
+                "typed custom response must stay visible at {width}×{height}:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn user_input_left_goes_back_to_previous_question() {
+        let mut view = many_option_view();
+        let action = view.handle_selecting_key(KeyEvent::from(KeyCode::Enter));
+        assert!(matches!(action, ViewAction::None));
+        assert_eq!(view.question_index, 1);
+        assert_eq!(view.answered.len(), 1);
+
+        let action = view.handle_selecting_key(KeyEvent::from(KeyCode::Left));
+        assert!(matches!(action, ViewAction::None));
+        assert_eq!(view.question_index, 0);
+        assert!(view.answered.is_empty());
+
+        let action = view.handle_selecting_key(KeyEvent::from(KeyCode::Char('h')));
+        assert!(matches!(action, ViewAction::None));
+        assert_eq!(
+            view.question_index, 0,
+            "back on the first question is a no-op"
+        );
     }
 
     #[test]
     fn user_input_modal_occupied_region_matches_painted_card_plus_shadow() {
         let area = Rect::new(0, 0, 120, 40);
         let view = sample_view();
-        let popup = compact_popup_rect(area, view.content_line_count());
+        let popup = sheet_rect(area, view.content_line_count());
         let occupied = view.occupied_region(area);
 
         assert_eq!(occupied.x, popup.x);
         assert_eq!(occupied.y, popup.y);
-        assert_eq!(occupied.width, popup.width + 1);
-        assert_eq!(occupied.height, popup.height + 1);
+        assert_eq!(
+            occupied.width,
+            (popup.width.saturating_add(1)).min(area.right().saturating_sub(popup.x))
+        );
+        assert_eq!(
+            occupied.height,
+            (popup.height.saturating_add(1)).min(area.bottom().saturating_sub(popup.y))
+        );
         assert!(area.right() >= occupied.right());
         assert!(area.bottom() >= occupied.bottom());
     }
@@ -833,16 +990,15 @@ mod tests {
         stack.push(sample_view());
         stack.render(area, &mut buf);
 
-        // Cells outside the compact card survive untouched: the conversation
-        // stays visible around the dialog (FINISH-0.9.4 #13).
+        // Transcript above the bottom sheet survives untouched.
         assert_eq!(buf[(0, 0)].symbol(), "·");
         assert_eq!(buf[(119, 0)].symbol(), "·");
-        assert_eq!(buf[(0, 39)].symbol(), "·");
-        assert_eq!(buf[(119, 39)].symbol(), "·");
         assert_eq!(buf[(60, 0)].symbol(), "·");
-        assert_eq!(buf[(60, 39)].symbol(), "·");
-        // The card itself is blanked + repainted by the modal surface.
-        assert_ne!(buf[(60, 20)].symbol(), "·");
+        assert_eq!(buf[(60, 4)].symbol(), "·");
+        // The sheet itself is blanked + repainted by the modal surface.
+        assert_ne!(buf[(60, 39)].symbol(), "·");
+        assert_ne!(buf[(0, 39)].symbol(), "·");
+        assert_ne!(buf[(119, 39)].symbol(), "·");
     }
 
     #[test]
