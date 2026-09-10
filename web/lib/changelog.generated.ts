@@ -37,6 +37,9 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Fixed",
         "items": [
+          "Auto-compact could not fire mid-turn. The gate read max(last billed prompt, /4 estimate of the whole list), so as soon as the estimator undercounted the full list below the last bill, every tool result appended after that prompt was invisible to it, and a long turn could exhaust the context window with nothing compacted. It now reads live tokens — the billed prompt plus the growth since it, watermarked when the parent usage is recorded — and is still evaluated at the…",
+          "Esc or Ctrl+C during a compaction that is serving an in-flight turn now stops the turn. It previously cancelled only the compaction pass, so the turn resumed against the context that had just failed to shrink. A manual /compact with no request in flight still cancels only the pass.",
+          "The request_user_input dialog is a bottom-anchored sheet instead of a centered 22-row overlay. It leaves the transcript visible above it, grows with its content, and scrolls internally so the highlighted option and the custom response being typed stay on screen at 141x38 and 80x24. Left arrow or h goes back to the previous question; Esc still cancels the whole request. Documented in GUIDE.md and KEYBINDINGS.md (#6045).",
           "/mcp reload no longer freezes the interface. The reload was awaiting the whole reconnect batch on the TUI event loop; it now joins the same supervised background pass the session boot uses, the status chip counts the batch down live, and the finished receipt arrives as an event. With 23 configured servers (11 live, 10 awaiting auth, 2 failing) the first echoed keystroke after a reload lands in ~5 s instead of ~42 s (#5974).",
           "The posture bar no longer states the same duration twice on a first turn (#6041).",
           "Reasoning-capable models whose id carries no version substring (deepseek-flash) keep reasoning_content in the thinking block instead of the answer text. The gate only ever matched the literal deepseek-v4 version string, so it now consults the model catalog as well; the older literal arms remain for the V4 aliases they were written for (#6044).",
@@ -45,16 +48,14 @@ export const CHANGELOG: ChangelogRelease[] = [
           "Markdown _italic_ requires both delimiters to be flanking per CommonMark, so math subscripts no longer italicize the prose between them ([t_, b_p]. Actually — hold on, do we even tile all the way from t_? rendered 60 characters italic) (#6042).",
           "An MCP server configured for OAuth that answers 401 before its first login now points at /mcp login <name> in the failure hint instead of a bearer token that does not exist (#6030).",
           "Cancelling a foreground shell wait stops its owned process group even when the tool future is dropped. Explicitly backgrounded jobs retain their ownership. Interrupted tool receipts distinguish work that started from calls skipped before execution, and returned tool failures remain errors in the next model request.",
-          "Saved Fleet model identifiers retain exact spelling through selection, role pins, and roster changes, so changing one saved model does not modify another identifier that differs only in letter case.",
-          "Chat wrapping reserves its scrollbar gutter consistently, keeping long identifiers readable when the viewport changes.",
-          "The Engine keeps large send-message futures off the event loop's stack, preventing stack exhaustion when a restored session starts a provider turn.",
-          "New, imported, and live session titles skip runtime handoffs and use the first real user prompt. Explicitly renamed titles retain priority (#6012, thanks @SparkofSpike)."
+          "Saved Fleet model identifiers retain exact spelling through selection, role pins, and roster changes, so changing one saved model does not modify another identifier that differs only in letter case."
         ],
-        "itemCount": 38
+        "itemCount": 41
       },
       {
         "heading": "Changed",
         "items": [
+          "Reasoning capability for the Kimi coding routes and the qwen3.x Model Studio deep-thinking ids is catalog data now rather than hardcoded match arms, and model_reasoning_capability reports a model nothing knows about as unknown instead of silently not reasoning-capable. model_supports_reasoning keeps its bool shape for existing callers, where unknown still reads as false. The ids that have no cited source yet keep their literal arms (#6032).",
           "The website uses Shannon Sans with versioned local font assets and retained serif, monospace, and language fallbacks. Terminal fonts are unchanged.",
           "codewhale metrics reports recorded model requests and stream recovery separately from provider-reported token usage, with coverage for missing and duplicate receipts. Status messages and cumulative snapshots do not add requests or count tokens again.",
           "Runtime turn receipts retain the Engine's terminal model-request, stream-retry, and resume counters separately from displayed status and provider-reported usage. These counters do not count HTTP retries inside a provider client or establish provider billing.",
@@ -66,7 +67,7 @@ export const CHANGELOG: ChangelogRelease[] = [
           "codewhale account keys set|remove|list no longer carry a hardcoded eight-provider list. Provider ids come from the control plane's public catalog (GET /api/model-providers), are validated locally against ^[a-z0-9][a-z0-9-]{0,63}$ before they reach a URL path, and list shows every catalog provider with its label and stored-key state. --from-local maps a catalog row onto the local runtime provider through the catalog's own runtimeProvider field, so a newly supported provider…",
           "/mcp lists the servers that need a login first, as their own Needs login group above Needs attention, and opens with the cursor already on the first such row so the Enter the screen advertises runs /mcp login <server> straight away; translated in all 15 packs. A snapshot test pins the footer shape the chip landed with (MCP · N connected · N ◆ auth required · N failed) so an expired login never regresses into the failed count (#5926)."
         ],
-        "itemCount": 10
+        "itemCount": 11
       },
       {
         "heading": "Fixed",

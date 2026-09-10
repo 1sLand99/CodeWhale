@@ -21,6 +21,24 @@ reconnect.
 
 ### Fixed
 
+- Auto-compact could not fire mid-turn. The gate read `max(last billed
+  prompt, /4 estimate of the whole list)`, so as soon as the estimator
+  undercounted the full list below the last bill, every tool result appended
+  after that prompt was invisible to it, and a long turn could exhaust the
+  context window with nothing compacted. It now reads live tokens — the
+  billed prompt plus the growth since it, watermarked when the parent usage
+  is recorded — and is still evaluated at the pre-request boundary after
+  tools complete, never mid-tool-call.
+- Esc or Ctrl+C during a compaction that is serving an in-flight turn now
+  stops the turn. It previously cancelled only the compaction pass, so the
+  turn resumed against the context that had just failed to shrink. A manual
+  `/compact` with no request in flight still cancels only the pass.
+- The `request_user_input` dialog is a bottom-anchored sheet instead of a
+  centered 22-row overlay. It leaves the transcript visible above it, grows
+  with its content, and scrolls internally so the highlighted option and the
+  custom response being typed stay on screen at 141x38 and 80x24. Left arrow
+  or `h` goes back to the previous question; Esc still cancels the whole
+  request. Documented in GUIDE.md and KEYBINDINGS.md (#6045).
 - `/mcp reload` no longer freezes the interface. The reload was awaiting the
   whole reconnect batch on the TUI event loop; it now joins the same
   supervised background pass the session boot uses, the status chip counts
@@ -182,6 +200,12 @@ reconnect.
 
 ### Changed
 
+- Reasoning capability for the Kimi coding routes and the qwen3.x Model Studio
+  deep-thinking ids is catalog data now rather than hardcoded match arms, and
+  `model_reasoning_capability` reports a model nothing knows about as unknown
+  instead of silently not reasoning-capable. `model_supports_reasoning` keeps
+  its `bool` shape for existing callers, where unknown still reads as false.
+  The ids that have no cited source yet keep their literal arms (#6032).
 - The website uses Shannon Sans with versioned local font assets and retained
   serif, monospace, and language fallbacks. Terminal fonts are unchanged.
 - `codewhale metrics` reports recorded model requests and stream recovery
