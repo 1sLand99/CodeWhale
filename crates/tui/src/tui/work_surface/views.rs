@@ -4,7 +4,7 @@
 //! like a to-do or a sub-agent — a view is a subset of one row grammar, not
 //! a second widget system.
 
-use crate::tui::agent_roster::format_tokens;
+use crate::agent_roster::format_tokens;
 use crate::tui::app::{App, SidebarRowAction};
 
 use super::model::{RailPanel, WorkRow, WorkRowId, WorkTone};

@@ -6,9 +6,8 @@
 
 #![allow(dead_code)]
 
-use crate::tui::approval::{
-    ApprovalMode, RiskLevel, ToolCategory, classify_risk, get_tool_category_for_call,
-};
+use crate::tui::approval::{RiskLevel, ToolCategory, classify_risk, get_tool_category_for_call};
+use codewhale_execpolicy::ApprovalMode;
 use serde_json::{Value, json};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

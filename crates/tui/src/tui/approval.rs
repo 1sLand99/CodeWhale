@@ -75,11 +75,6 @@ pub use policy::{
     get_tool_category_for_call,
 };
 
-/// Determines when tool executions require user approval. Defined in
-/// codewhale-execpolicy (next to `AskForApproval`); re-exported here so
-/// `crate::tui::approval::ApprovalMode` keeps working.
-pub use codewhale_execpolicy::ApprovalMode;
-
 /// User's decision for a pending approval
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReviewDecision {

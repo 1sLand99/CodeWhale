@@ -20,16 +20,17 @@ use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
 #[cfg(test)]
 use crate::provider_lake::all_catalog_models_for_provider;
-use crate::tui::app::{App, AppMode, ComposerDensity, ViewportState};
+use crate::tui::app::{App, ComposerDensity, ViewportState};
 use crate::tui::approval::{
-    ApprovalMode, ApprovalRequest, ApprovalView, ElevationOption, ElevationRequest, RiskLevel,
-    ToolCategory,
+    ApprovalRequest, ApprovalView, ElevationOption, ElevationRequest, RiskLevel, ToolCategory,
 };
 use crate::tui::history::{GenericToolCell, HistoryCell, ToolCell, ToolRun, ToolStatus};
 use crate::tui::menu_style;
 use crate::tui::scrolling::TranscriptLineMeta;
 use crate::tui::ui_text::{grapheme_display_width, text_display_width};
 use crate::tui::underwater::ShellPhase;
+use codewhale_config::AppMode;
+use codewhale_execpolicy::ApprovalMode;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -4601,13 +4602,14 @@ mod tests {
     use crate::palette;
     use crate::tui::active_cell::ActiveCell;
     use crate::tui::app::{
-        App, AppMode, ComposerDensity, QueuedMessage, TaskPanelEntry, TaskPanelEntryKind,
-        ToolCollapseMode, TranscriptSpacing, TuiOptions,
+        App, ComposerDensity, QueuedMessage, TaskPanelEntry, TaskPanelEntryKind, ToolCollapseMode,
+        TranscriptSpacing, TuiOptions,
     };
     use crate::tui::history::{
         ExecCell, ExecSource, GenericToolCell, HistoryCell, ToolCell, ToolRun, ToolStatus,
     };
     use crate::tui::scrolling::{TranscriptLineMeta, TranscriptScroll};
+    use codewhale_config::AppMode;
     use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::{
         buffer::Buffer,

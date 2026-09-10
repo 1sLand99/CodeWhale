@@ -15,6 +15,9 @@ use std::time::{Duration, Instant};
 use crate::error_taxonomy::{ErrorCategory, ErrorEnvelope, ErrorSeverity};
 use crate::resource_telemetry::estimate_output_tokens_from_text;
 use anyhow::{Context, Result};
+use codewhale_config::AppMode;
+use codewhale_core::ContextReference;
+use codewhale_execpolicy::ApprovalMode;
 use codewhale_release::InstallMethod;
 // On Windows the push/pop helpers write the escapes directly; crossterm's
 // PushKeyboardEnhancementFlags / PopKeyboardEnhancementFlags commands are
@@ -88,7 +91,6 @@ use crate::tui::command_palette::{
 use crate::tui::composer_ui::*;
 use crate::tui::context_inspector::ContextInspectorView;
 use crate::tui::event_broker::EventBroker;
-use crate::tui::file_mention::ContextReference;
 use crate::tui::file_picker_relevance;
 use crate::tui::footer_ui::{friendly_subagent_progress, is_noisy_subagent_progress};
 use crate::tui::format_helpers;
@@ -136,7 +138,7 @@ use crate::reasoning_preference::{EffectiveReasoningEffort, ReasoningEffort};
 use super::key_actions;
 
 use super::app::{
-    ActiveCompaction, ActiveTurnMetadata, AgentCurrentActivity, App, AppAction, AppMode,
+    ActiveCompaction, ActiveTurnMetadata, AgentCurrentActivity, App, AppAction,
     ComposerSubmitAction, ComposerSubmitChord, GoalControlIntent, OnboardingState,
     PendingGoalControl, PendingProviderSwitch, QueuedMessage, RedactionGateNotice, ScreenMode,
     StatusToast, StatusToastLevel, SubmitDisposition, TaskPanelEntry, TaskPanelEntryKind,
@@ -144,7 +146,7 @@ use super::app::{
     looks_like_slash_command_input, shell_command_from_bang_input,
 };
 use super::approval::{
-    ApprovalMode, ApprovalRequest, ApprovalView, ElevationRequest, ElevationView, ReviewDecision,
+    ApprovalRequest, ApprovalView, ElevationRequest, ElevationView, ReviewDecision,
 };
 use super::history::{
     ExecCell, HistoryCell, ReasoningAction, ToolCell, ToolStatus, history_cells_from_message,

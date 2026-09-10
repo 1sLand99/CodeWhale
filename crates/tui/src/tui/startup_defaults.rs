@@ -115,7 +115,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::settings::Settings;
-use crate::tui::app::AppMode;
+use codewhale_config::AppMode;
 
 /// One user selection's worth of startup-default writes.
 ///

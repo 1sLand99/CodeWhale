@@ -29,8 +29,10 @@ The current dependencies explain the blockage:
 - CLI imports TUI for runtime dispatch and route preferences.
 - `core/engine.rs` imports approval policy, context thresholds, attachment
   parsing, and roster construction from `tui/`.
-- `core/events.rs` carries `tui::agent_roster::AgentRosterRow`.
-- `session_manager.rs` persists `tui::file_mention::ContextReference`.
+- `core/events.rs` carries the roster row and `session_manager.rs` persists
+  the durable context reference; both now name their owning crate
+  (`crate::agent_roster::AgentRosterRow`, `codewhale_core::ContextReference`)
+  rather than a `tui::` re-export.
 - `tools/subagent` imports engine policy/catalog functions, and implements
   its own repeated model-request/tool-result cycle in `run_subagent`.
 - `crates/core` owns request construction and some runtime/session services;

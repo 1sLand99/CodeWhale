@@ -526,8 +526,9 @@ mod tests {
     use super::*;
     use crate::config::{ApiProvider, Config};
     use crate::models::{ContentBlock, Message};
-    use crate::tui::app::{AppMode, TuiOptions};
+    use crate::tui::app::TuiOptions;
     use crate::tui::history::HistoryCell;
+    use codewhale_config::AppMode;
 
     #[test]
     fn status_keeps_current_session_snapshot_remedy_after_notice_delivery() {

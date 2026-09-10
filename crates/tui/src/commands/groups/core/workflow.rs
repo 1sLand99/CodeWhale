@@ -13,7 +13,8 @@ use crate::commands::traits::{CommandInfo, RegisterCommand};
 use crate::localization::MessageId;
 use crate::models::ContentBlock;
 use crate::tui::app::WORKFLOW_DRAFT_INSTRUCTION_PREFIX;
-use crate::tui::app::{App, AppAction, AppMode};
+use crate::tui::app::{App, AppAction};
+use codewhale_config::AppMode;
 #[cfg(test)]
 use codewhale_execpolicy::ApprovalMode;
 

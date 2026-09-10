@@ -3,12 +3,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use anyhow::Result;
+use codewhale_config::AppMode;
 
 use crate::commands::{self, CommandInfo, CommandResult};
 use crate::config::{ApiProvider, Config};
 use crate::localization::{Locale, MessageId, tr};
 use crate::provider_lake::all_catalog_models_for_provider;
-use crate::tui::app::{App, AppAction, AppMode};
+use crate::tui::app::{App, AppAction};
 use crate::tui::command_palette::{
     CommandPaletteView, build_entries as build_command_palette_entries,
 };

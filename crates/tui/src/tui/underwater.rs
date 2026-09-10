@@ -24,12 +24,13 @@ use crate::localization::{Locale, MessageId, tr};
 use crate::palette::{ChromeInk, chrome_style};
 use crate::tui::ui_text::{semantic_truncate, text_display_width};
 use crate::tui::{
-    app::{App, AppMode, HeaderActionTarget, HeaderHitbox, OnboardingState},
-    approval::ApprovalMode,
+    app::{App, HeaderActionTarget, HeaderHitbox, OnboardingState},
     footer_ui::format_token_count_compact,
     ocean::COMPLETION_BREATH_MS,
     views::ModalKind,
 };
+use codewhale_config::AppMode;
+use codewhale_execpolicy::ApprovalMode;
 
 /// Responsive density tier. It changes how much truth is shown, never the
 /// underlying state grammar.
@@ -2380,9 +2381,10 @@ mod header_tests {
         render_header_with_git_status,
     };
     use crate::palette::ChromeInk;
-    use crate::tui::app::{App, AppMode};
-    use crate::tui::approval::ApprovalMode;
+    use crate::tui::app::App;
     use crate::tui::widgets::workflow_panel::{WorkflowPanel, WorkflowPanelLifecycle};
+    use codewhale_config::AppMode;
+    use codewhale_execpolicy::ApprovalMode;
     use ratatui::{buffer::Buffer, layout::Rect};
 
     fn app() -> App {

@@ -29,6 +29,10 @@ use crate::tui::app::{App, MentionCompletionCache};
 use crate::tui::git_mention::{self, GitMentionCache, GitMentionKind};
 use crate::tui::mention_completion::{MentionDiscoveryBehavior, MentionDiscoveryKey};
 use crate::working_set::Workspace;
+use codewhale_core::{
+    ContextReference, ContextReferenceKind, ContextReferenceSource, MediaAttachmentReference,
+    media_attachment_references,
+};
 
 /// Maximum number of `@`-mentions whose contents are inlined into one user
 /// message. Beyond this we stop appending blocks but the raw `@token` text
@@ -53,12 +57,6 @@ pub struct FileMentionPreview {
     pub included: bool,
     pub removable: bool,
 }
-
-/// Durable, compact metadata for a user-visible context reference.
-pub use codewhale_core::{
-    ContextReference, ContextReferenceKind, ContextReferenceSource, MediaAttachmentReference,
-    media_attachment_references,
-};
 
 // ---------------------------------------------------------------------------
 //  Tab-completion

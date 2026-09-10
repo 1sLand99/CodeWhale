@@ -2476,38 +2476,6 @@ fn workflow_plan_card_edit_plan_and_cancel_keys() {
     }
 }
 
-// ========================================================================
-// ApprovalMode Tests
-// ========================================================================
-
-#[test]
-fn test_approval_mode_labels() {
-    assert_eq!(ApprovalMode::Auto.label(), "AUTO");
-    assert_eq!(ApprovalMode::Suggest.label(), "SUGGEST");
-    assert_eq!(ApprovalMode::Never.label(), "NEVER");
-}
-
-#[test]
-fn test_approval_mode_from_config_value_accepts_aliases() {
-    assert_eq!(
-        ApprovalMode::from_config_value("auto"),
-        Some(ApprovalMode::Auto)
-    );
-    assert_eq!(
-        ApprovalMode::from_config_value("on-request"),
-        Some(ApprovalMode::Suggest)
-    );
-    assert_eq!(
-        ApprovalMode::from_config_value("full_access"),
-        Some(ApprovalMode::Bypass)
-    );
-    assert_eq!(
-        ApprovalMode::from_config_value("deny"),
-        Some(ApprovalMode::Never)
-    );
-    assert_eq!(ApprovalMode::from_config_value("unknown"), None);
-}
-
 #[test]
 fn canonical_bash_keeps_original_name_but_uses_shell_approval_semantics() {
     let request = ApprovalRequest::new_with_intent(

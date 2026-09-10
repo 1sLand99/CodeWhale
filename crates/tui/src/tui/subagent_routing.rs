@@ -9,8 +9,7 @@ use crate::tools::subagent::{
 };
 use crate::tui::app::{
     AgentCurrentActivity, AgentCurrentActivityStatus, AgentProgressMeta, AgentRecentAction, App,
-    AppMode, MAX_AGENT_RECENT_ACTIONS, TaskPanelEntry, TaskPanelEntryKind,
-    bound_agent_activity_text,
+    MAX_AGENT_RECENT_ACTIONS, TaskPanelEntry, TaskPanelEntryKind, bound_agent_activity_text,
 };
 use crate::tui::history::{HistoryCell, SubAgentCell, summarize_tool_output};
 use crate::tui::pager::PagerView;
@@ -19,6 +18,7 @@ use crate::tui::widgets::agent_card::{
     AgentLifecycle, DelegateCard, FanoutCard, apply_to_delegate, apply_to_fanout,
 };
 use crate::tui::workspace_context;
+use codewhale_config::AppMode;
 
 /// Keep settled cards visible briefly, then archive them from the compact
 /// live projection. Their transcript card and persisted agent record remain

@@ -5,10 +5,8 @@
 
 use std::collections::BTreeMap;
 
-#[allow(unused_imports)]
-pub use crate::agent_roster::{
-    AgentRosterRow, RosterState, all_rows_have_usage, build_agent_roster, display_name,
-    format_duration, format_tokens, one_line, roster_totals, wall_millis,
+use crate::agent_roster::{
+    AgentRosterRow, all_rows_have_usage, format_duration, format_tokens, roster_totals,
 };
 
 /// Absent receipts render as `—`. See the truth rule in the module docs.

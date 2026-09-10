@@ -11,7 +11,9 @@ use ratatui::layout::Rect;
 use ratatui::style::Color;
 use serde_json::Value;
 
-use codewhale_config::{ProviderChain, route::RouteLimits};
+use codewhale_config::{AppMode, ProviderChain, route::RouteLimits};
+use codewhale_core::ContextReference;
+use codewhale_execpolicy::ApprovalMode;
 
 use crate::artifacts::ArtifactRecord;
 use crate::client::{CacheWarmupKey, PromptInspection};
@@ -35,9 +37,7 @@ use crate::tools::spec::RuntimeToolServices;
 use crate::tools::subagent::{AgentWorkerStatus, SubAgentResult};
 use crate::tools::todo::{SharedTodoList, TodoList, new_shared_todo_list};
 use crate::tui::active_cell::ActiveCell;
-use crate::tui::approval::ApprovalMode;
 use crate::tui::clipboard::{ClipboardContent, ClipboardHandler};
-use crate::tui::file_mention::ContextReference;
 use crate::tui::history::{HistoryCell, TranscriptActionOwner, TranscriptRenderOptions};
 use crate::tui::hotbar::HotbarActionRegistry;
 use crate::tui::motion::MotionPolicy;
@@ -69,7 +69,7 @@ pub(crate) enum RedactionGateNotice {
     WriteFailure,
 }
 pub use types::{
-    AppAction, AppMode, AppModeUi, AutomationAction, ComposerDensity, ComposerSubmitAction,
+    AppAction, AppModeUi, AutomationAction, ComposerDensity, ComposerSubmitAction,
     ComposerSubmitChord, InitialInput, McpUiAction, QueuedMessage, ScreenMode, SettingSelection,
     ShellJobAction, SubmitDisposition, TaskPanelEntry, TaskPanelEntryKind, ToolCollapseMode,
     ToolDetailRecord, TranscriptSpacing, TuiOptions, VimMode,
@@ -1912,7 +1912,7 @@ pub struct App {
     /// Receipts-only roster of every agent that ran this session (#5479).
     /// Refreshed wholesale on each `AgentList` event; shared by `/agents`,
     /// the Agents register and the Price view.
-    pub agent_roster: Vec<crate::tui::agent_roster::AgentRosterRow>,
+    pub agent_roster: Vec<crate::agent_roster::AgentRosterRow>,
     /// Original conversation owner of the retained snapshot. A process boot
     /// marker or a worker's parent run is not a conversation identity.
     pub agent_roster_session_id: Option<String>,
@@ -2560,7 +2560,7 @@ fn push_enabled_provider_model(
 
 impl App {
     /// A retained roster remains readable only in its owning conversation.
-    pub(crate) fn current_agent_roster(&self) -> &[crate::tui::agent_roster::AgentRosterRow] {
+    pub(crate) fn current_agent_roster(&self) -> &[crate::agent_roster::AgentRosterRow] {
         if self
             .current_session_id
             .as_deref()

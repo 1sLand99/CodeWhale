@@ -510,7 +510,7 @@ impl ComposerState {
     }
 
     pub fn composer_attachment_count(&self) -> usize {
-        crate::tui::file_mention::media_attachment_references(&self.input).len()
+        codewhale_core::media_attachment_references(&self.input).len()
     }
 
     pub fn selected_composer_attachment_index(&self) -> Option<usize> {
@@ -809,7 +809,7 @@ impl App {
     }
 
     pub fn remove_selected_composer_attachment(&mut self) -> bool {
-        let references = crate::tui::file_mention::media_attachment_references(&self.input);
+        let references = codewhale_core::media_attachment_references(&self.input);
         let Some(index) = self
             .selected_composer_attachment_index()
             .filter(|index| *index < references.len())

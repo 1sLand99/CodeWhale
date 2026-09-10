@@ -3,10 +3,13 @@
 //! and the action enums drained by the event loop.
 //!
 //! Everything here is pure data (plus parsing/labeling helpers that need no
-//! `App` state). All items are re-exported from `app.rs` so existing
-//! `crate::tui::app::X` paths are unchanged.
+//! `App` state). The TUI-owned items are re-exported from `app.rs` so existing
+//! `crate::tui::app::X` paths are unchanged; types owned by another crate
+//! (such as [`AppMode`]) are named at their own crate path instead.
 
 use super::*;
+
+use codewhale_config::AppMode;
 
 /// What an interactive setting selection actually did.
 ///
@@ -43,10 +46,6 @@ impl SettingSelection {
         !matches!(self, Self::Refused)
     }
 }
-
-/// The user-facing operating mode. Defined in codewhale-config; re-exported
-/// here so `crate::tui::app::types::AppMode` keeps working.
-pub use codewhale_config::AppMode;
 
 /// Localized, TUI-only presentation of [`AppMode`]. Kept out of
 /// codewhale-config so the mode type does not depend on the locale packs.

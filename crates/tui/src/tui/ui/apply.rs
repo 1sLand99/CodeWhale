@@ -622,7 +622,7 @@ pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot)
         // Operate set it from the prompt (or the model did while operating);
         // the objective is the prompt the user just typed, so the receipt
         // says what Operate will do with it instead of echoing it.
-        let content = if app.mode == crate::tui::app::AppMode::Operate {
+        let content = if app.mode == AppMode::Operate {
             app.tr(crate::localization::MessageId::GoalReceiptSetOperate)
                 .into_owned()
         } else {

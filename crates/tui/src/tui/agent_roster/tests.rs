@@ -1,5 +1,6 @@
 use super::*;
 
+use crate::agent_roster::{RosterState, build_agent_roster};
 use crate::tools::subagent::{
     AgentRunUsage, AgentWorkerEvent, AgentWorkerRecord, AgentWorkerSpec, AgentWorkerStatus,
     AgentWorkerToolProfile, FleetRole,

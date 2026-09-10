@@ -23,12 +23,12 @@ use crate::models::{SystemPrompt, Tool};
 use crate::palette;
 use crate::session_manager::SessionContextReference;
 use crate::tui::app::{App, ToolDetailRecord};
-use crate::tui::file_mention::ContextReferenceSource;
 use crate::tui::menu_style;
 use crate::tui::views::{
     ActionHint, ModalKind, ModalView, ViewAction, ViewEvent, render_modal_footer,
     render_underwater_surface,
 };
+use codewhale_core::ContextReferenceSource;
 
 /// Marker used by per-turn working-set metadata. Replicated here so the
 /// context inspector can distinguish stable prompt blocks from volatile
@@ -1018,10 +1018,8 @@ mod tests {
     use crate::models::{ContentBlock, Message, Tool};
     use crate::session_manager::SessionContextReference;
     use crate::tui::app::TuiOptions;
-    use crate::tui::file_mention::{
-        ContextReference, ContextReferenceKind, ContextReferenceSource,
-    };
     use crate::tui::history::HistoryCell;
+    use codewhale_core::{ContextReference, ContextReferenceKind, ContextReferenceSource};
     use std::path::PathBuf;
 
     use crate::localization::Locale;

@@ -8548,7 +8548,7 @@ async fn model_change_update_syncs_engine_model_before_compaction() {
 #[tokio::test]
 async fn mode_change_update_notifies_engine() {
     let mut app = create_test_app();
-    let _ = app.set_mode(crate::tui::app::AppMode::Plan);
+    let _ = app.set_mode(AppMode::Plan);
     let mut engine = crate::core::engine::mock_engine_handle();
 
     assert!(
@@ -8566,11 +8566,11 @@ async fn mode_change_update_notifies_engine() {
         } => {
             // The deprecated YOLO alias lands in Agent mode with full-access
             // compat policies (M6 shim); the engine sees the remapped mode.
-            assert_eq!(mode, crate::tui::app::AppMode::Agent);
+            assert_eq!(mode, AppMode::Agent);
             assert!(allow_shell);
             assert!(trust_mode);
             assert!(auto_approve);
-            assert_eq!(approval_mode, crate::tui::approval::ApprovalMode::Bypass);
+            assert_eq!(approval_mode, ApprovalMode::Bypass);
             assert_eq!(configured_sandbox_mode, app.configured_sandbox_mode);
         }
         other => panic!("expected ChangeMode, got {other:?}"),
@@ -8582,8 +8582,8 @@ async fn mode_change_update_sends_restored_agent_policy() {
     let mut app = create_test_app();
     app.allow_shell = true;
     app.trust_mode = false;
-    app.approval_mode = crate::tui::approval::ApprovalMode::Never;
-    let _ = app.set_mode(crate::tui::app::AppMode::Plan);
+    app.approval_mode = ApprovalMode::Never;
+    let _ = app.set_mode(AppMode::Plan);
     let mut engine = crate::core::engine::mock_engine_handle();
 
     assert!(
@@ -8591,7 +8591,7 @@ async fn mode_change_update_sends_restored_agent_policy() {
             &mut app,
             &engine.handle,
             &crate::config::Config::default(),
-            crate::tui::app::AppMode::Agent
+            AppMode::Agent
         )
         .await
     );
@@ -8605,11 +8605,11 @@ async fn mode_change_update_sends_restored_agent_policy() {
             approval_mode,
             configured_sandbox_mode,
         } => {
-            assert_eq!(mode, crate::tui::app::AppMode::Agent);
+            assert_eq!(mode, AppMode::Agent);
             assert!(allow_shell);
             assert!(!trust_mode);
             assert!(!auto_approve);
-            assert_eq!(approval_mode, crate::tui::approval::ApprovalMode::Never);
+            assert_eq!(approval_mode, ApprovalMode::Never);
             assert_eq!(configured_sandbox_mode, app.configured_sandbox_mode);
         }
         other => panic!("expected ChangeMode, got {other:?}"),
@@ -8667,13 +8667,7 @@ async fn operate_entry_preserves_live_custom_identity_and_auto_over_startup_rout
         app.set_model_selection(selected.to_string());
         app.last_effective_model = Some("previous-turn-model".to_string());
         let engine = mock_engine_handle();
-        apply_mode_update(
-            &mut app,
-            &engine.handle,
-            &config,
-            crate::tui::app::AppMode::Operate,
-        )
-        .await;
+        apply_mode_update(&mut app, &engine.handle, &config, AppMode::Operate).await;
         let record = automations
             .lock()
             .await
@@ -8743,13 +8737,7 @@ async fn operate_rejected_attach_does_not_reactivate_saved_keepalive() {
     );
     app.set_model_selection("startup-model".into());
     let engine = mock_engine_handle();
-    apply_mode_update(
-        &mut app,
-        &engine.handle,
-        &config,
-        crate::tui::app::AppMode::Operate,
-    )
-    .await;
+    apply_mode_update(&mut app, &engine.handle, &config, AppMode::Operate).await;
     let record = automations
         .lock()
         .await
@@ -8800,7 +8788,7 @@ async fn operate_mode_entry_attaches_to_recorded_operation() {
             &mut app,
             &engine.handle,
             &Config::default(),
-            crate::tui::app::AppMode::Operate
+            AppMode::Operate
         )
         .await
     );
@@ -20124,7 +20112,7 @@ fn auto_route_receipt_survives_session_snapshot_and_restore() {
 #[test]
 fn apply_loaded_session_restores_saved_mode() {
     let mut app = create_test_app();
-    app.set_mode(crate::tui::app::AppMode::Agent);
+    app.set_mode(AppMode::Agent);
     let mut session = saved_session_with_messages(vec![
         text_message("user", "draft a plan"),
         text_message("assistant", "plan response"),
@@ -20132,7 +20120,7 @@ fn apply_loaded_session_restores_saved_mode() {
     session.metadata.mode = Some("plan".to_string());
 
     apply_loaded_session(&mut app, &mut Config::default(), &session).expect("restore session");
-    assert_eq!(app.mode, crate::tui::app::AppMode::Plan);
+    assert_eq!(app.mode, AppMode::Plan);
     assert!(!app.allow_shell);
     assert!(!app.trust_mode);
 }

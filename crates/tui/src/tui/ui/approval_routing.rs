@@ -4,8 +4,8 @@ use crate::audit::log_sensitive_event;
 use crate::core::engine::EngineHandle;
 use crate::localization::MessageId;
 use crate::tui::app::{App, StatusToastLevel};
-use crate::tui::approval::ApprovalMode;
 use crate::tui::history::HistoryCell;
+use codewhale_execpolicy::ApprovalMode;
 
 pub(super) fn is_session_approved_for_tool(
     app: &App,

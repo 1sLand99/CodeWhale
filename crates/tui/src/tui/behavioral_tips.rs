@@ -9,7 +9,8 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crate::localization::{Locale, MessageId, tr};
 use crate::settings::Settings;
-use crate::tui::app::{App, AppMode, StatusToast, StatusToastKind, StatusToastLevel};
+use crate::tui::app::{App, StatusToast, StatusToastKind, StatusToastLevel};
+use codewhale_config::AppMode;
 
 const MAX_TIPS_PER_SESSION: u8 = 1;
 const MAX_LIFETIME_IMPRESSIONS: u8 = 2;

@@ -717,7 +717,7 @@ fn agents_view_rows(app: &mut App) -> Vec<WorkRow> {
             retained.push(agents.remove(index));
             continue;
         }
-        let parked = receipt.state == crate::tui::agent_roster::RosterState::Parked;
+        let parked = receipt.state == crate::agent_roster::RosterState::Parked;
         let status = if parked {
             current_activity_status_label(AgentCurrentActivityStatus::Parked, app.ui_locale)
         } else {
@@ -2924,9 +2924,9 @@ mod tests {
     fn retained_agent_receipt(
         id: &str,
         status: AgentWorkerStatus,
-        state: crate::tui::agent_roster::RosterState,
-    ) -> crate::tui::agent_roster::AgentRosterRow {
-        crate::tui::agent_roster::AgentRosterRow {
+        state: crate::agent_roster::RosterState,
+    ) -> crate::agent_roster::AgentRosterRow {
+        crate::agent_roster::AgentRosterRow {
             worker_id: id.to_string(),
             display_name: format!("retained {id}"),
             model: "test-model".to_string(),
@@ -2945,7 +2945,7 @@ mod tests {
 
     #[test]
     fn agents_register_retains_expired_receipts_alongside_fresh_live_rows() {
-        use crate::tui::agent_roster::RosterState;
+        use crate::agent_roster::RosterState;
         use crate::tui::subagent_routing::reconcile_subagent_activity_state_at;
         use std::time::Duration;
 
@@ -3002,7 +3002,7 @@ mod tests {
 
     #[test]
     fn retained_agents_register_is_bound_to_the_exact_parent_session() {
-        use crate::tui::agent_roster::RosterState;
+        use crate::agent_roster::RosterState;
 
         let mut app = test_app();
         app.agent_roster_session_id = Some("original-session".to_string());
@@ -3039,7 +3039,7 @@ mod tests {
 
     #[test]
     fn retained_agents_register_distinguishes_parked_from_waiting_for_input() {
-        use crate::tui::agent_roster::RosterState;
+        use crate::agent_roster::RosterState;
 
         let mut app = test_app();
         app.current_session_id = Some("roster-owner".to_string());

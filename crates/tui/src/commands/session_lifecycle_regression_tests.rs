@@ -14,8 +14,9 @@ use crate::models::Role;
 use crate::reasoning_preference::ReasoningEffort;
 use crate::session_manager::create_saved_session_with_id_and_mode;
 use crate::test_support::EnvVarGuard;
-use crate::tui::app::{App, AppAction, AppMode, TuiOptions, TurnCacheRecord};
+use crate::tui::app::{App, AppAction, TuiOptions, TurnCacheRecord};
 use crate::tui::history::HistoryCell;
+use codewhale_config::AppMode;
 
 fn dispatch_lifecycle(app: &mut App, name: &str, arg: Option<&str>) -> CommandResult {
     let command = match arg {
@@ -548,9 +549,9 @@ fn test_load_valid_session_defers_state_restore_to_event_loop() {
     app2.session_context_references
         .push(crate::session_manager::SessionContextReference {
             message_index: 0,
-            reference: crate::tui::file_mention::ContextReference {
-                kind: crate::tui::file_mention::ContextReferenceKind::File,
-                source: crate::tui::file_mention::ContextReferenceSource::AtMention,
+            reference: codewhale_core::ContextReference {
+                kind: codewhale_core::ContextReferenceKind::File,
+                source: codewhale_core::ContextReferenceSource::AtMention,
                 badge: "file".to_string(),
                 label: "stale.rs".to_string(),
                 target: tmpdir.path().join("stale.rs").display().to_string(),

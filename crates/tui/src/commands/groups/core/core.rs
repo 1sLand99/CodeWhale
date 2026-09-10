@@ -10,8 +10,9 @@ use crate::config::{
 use crate::localization::{Locale, MessageId, tr};
 #[cfg(test)]
 use crate::reasoning_preference::ReasoningEffort;
-use crate::tui::app::{App, AppAction, AppMode};
+use crate::tui::app::{App, AppAction};
 use crate::tui::views::{HelpView, ModalKind, SubAgentsView, subagent_view_agents};
+use codewhale_config::AppMode;
 
 use super::CommandResult;
 
@@ -754,8 +755,9 @@ mod tests {
     use crate::config::Config;
     use crate::models::Message;
     use crate::models::Role;
-    use crate::tui::app::{App, AppMode, TuiOptions, TurnCacheRecord};
+    use crate::tui::app::{App, TuiOptions, TurnCacheRecord};
     use crate::tui::history::HistoryCell;
+    use codewhale_config::AppMode;
     use std::ffi::OsString;
     use std::path::PathBuf;
     use std::time::Instant;
