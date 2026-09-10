@@ -611,6 +611,12 @@ fn is_google_openai_compat_chat_route(base_url: &str) -> bool {
 /// instead of failing the turn.
 fn google_model_requires_thought_signatures(model: &str) -> bool {
     let model = model.trim().to_ascii_lowercase();
+    // Google names the same model both ways on this endpoint, and a route
+    // configured as `models/gemini-3-pro` matched none of the prefixes below:
+    // the model that most needs a signature looked like one that needs none,
+    // so the fail-closed check waved it through and Google rejected the replay
+    // instead (#6018).
+    let model = model.strip_prefix("models/").unwrap_or(&model);
     if model.starts_with("gemini-3") {
         return true;
     }
@@ -7234,6 +7240,28 @@ mod google_thought_signature_tests {
         )
         .err()
         .expect("missing signature must fail closed before transport");
+        assert!(
+            error.to_string().contains("thought signature"),
+            "error must name the missing signature: {error}"
+        );
+    }
+
+    /// Google names the same model `gemini-3-pro` and `models/gemini-3-pro` on
+    /// this endpoint. The prefixed spelling used to match none of the thinking
+    /// families, so the model that most needs a signature was treated as one
+    /// that needs none and the replay reached Google unsigned (#6018).
+    #[test]
+    fn google_route_fails_closed_for_a_models_prefixed_thinking_id() {
+        let mut request = google_request_with_signed_tool(None);
+        request.model = "models/gemini-3-pro-preview".to_string();
+        let error = build_chat_wire_body(
+            &request,
+            ApiProvider::Google,
+            DEFAULT_GOOGLE_BASE_URL,
+            false,
+        )
+        .err()
+        .expect("a models/-prefixed thinking id must fail closed like its bare spelling");
         assert!(
             error.to_string().contains("thought signature"),
             "error must name the missing signature: {error}"
