@@ -36,6 +36,12 @@ and `/mcp reload` no longer freezes the interface while servers reconnect.
   its registry row is missing — `deepseek-flash` failed resolution against
   the provider that declares it as default — and a test now resolves every
   provider's `DEFAULT_*_MODEL` for its own provider (#6043).
+- A configured `default_text_model` is honored when a new thread's route is
+  resolved. That path consulted only the provider's catalog default, so a
+  config naming one model silently created threads on another, and the
+  unset default disagreed with the shipped one; the active provider's
+  configured default now wins, matching `provider_default_model`, and both
+  unset defaults name `deepseek-flash` (#6043).
 - Markdown `_italic_` requires both delimiters to be flanking per CommonMark,
   so math subscripts no longer italicize the prose between them
   (`[t_, b_p]. Actually — hold on, do we even tile all the way from t_?`

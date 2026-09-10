@@ -30,27 +30,27 @@ export const CHANGELOG: ChangelogRelease[] = [
   },
   {
     "version": "0.9.13",
-    "date": null,
+    "date": "2026-09-10",
     "unreleased": false,
     "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.9.12...HEAD",
     "sections": [
       {
         "heading": "Fixed",
         "items": [
+          "/mcp reload no longer freezes the interface. The reload was awaiting the whole reconnect batch on the TUI event loop; it now joins the same supervised background pass the session boot uses, the status chip counts the batch down live, and the finished receipt arrives as an event. With 23 configured servers (11 live, 10 awaiting auth, 2 failing) the first echoed keystroke after a reload lands in ~5 s instead of ~42 s (#5974).",
+          "The posture bar no longer states the same duration twice on a first turn (#6041).",
+          "Reasoning-capable models whose id carries no version substring (deepseek-flash) keep reasoning_content in the thinking block instead of the answer text; the replay gate consults the model catalog rather than matching a deepseek-v4 version string (#6044).",
+          "codewhale model resolve accepts a provider's declared default even when its registry row is missing — deepseek-flash failed resolution against the provider that declares it as default — and a test now resolves every provider's DEFAULT_*_MODEL for its own provider (#6043).",
+          "Markdown _italic_ requires both delimiters to be flanking per CommonMark, so math subscripts no longer italicize the prose between them ([t_, b_p]. Actually — hold on, do we even tile all the way from t_? rendered 60 characters italic) (#6042).",
+          "An MCP server configured for OAuth that answers 401 before its first login now points at /mcp login <name> in the failure hint instead of a bearer token that does not exist (#6030).",
           "Cancelling a foreground shell wait stops its owned process group even when the tool future is dropped. Explicitly backgrounded jobs retain their ownership. Interrupted tool receipts distinguish work that started from calls skipped before execution, and returned tool failures remain errors in the next model request.",
           "Saved Fleet model identifiers retain exact spelling through selection, role pins, and roster changes, so changing one saved model does not modify another identifier that differs only in letter case.",
           "Chat wrapping reserves its scrollbar gutter consistently, keeping long identifiers readable when the viewport changes.",
           "The Engine keeps large send-message futures off the event loop's stack, preventing stack exhaustion when a restored session starts a provider turn.",
           "New, imported, and live session titles skip runtime handoffs and use the first real user prompt. Explicitly renamed titles retain priority (#6012, thanks @SparkofSpike).",
-          "UI dispatch acceptance now precedes Engine execution, so a delayed acceptance callback cannot overwrite a turn that has already started or completed. Cancelling before acceptance preserves the prompt and leaves the next dispatch usable.",
-          "Bottom-chrome effort is omitted when the route cannot prove an effective tier; /status retains the full explanation. Cost remains visible when known, and cost: unknown remains on metered routes lacking a reading (#5950).",
-          "Pasting multiline text is one paste again. 0.9.12 gated the paste-burst heuristic off whenever bracketed paste was *requested*, but a terminal can accept EnableBracketedPaste and still deliver a paste as individual keystrokes — on those terminals (observed on Windows 11) every pasted line was submitted as its own message. The heuristic is again armed whenever tui.paste_burst_detection is on, and the existing bracketed_paste_seen guard still disarms it for the rest of the…",
-          "serve --acp no longer breaks strict JetBrains clients: the initialize response advertised sessionCapabilities.list as a boolean and carried an undefined nested load capability; it now sends {\"list\": {}} with no load key, per the ACP schema (#5969, reported by @Lujc0523).",
-          "Concurrent Codewhale instances no longer destroy each other's queued, unsent text. The offline input queue was one global file that boot cleared on session-id mismatch, so a second instance deleted the first's parked messages. Queues are now keyed per session (mirroring per-session checkpoints), an existing global file is adopted by its owning session rather than discarded, and the adoption race between two instances of the same session tolerates the loser's cleanup.",
-          "A tool call truncated at the provider's output limit can no longer be repaired into valid JSON and executed: repairs that had to synthesize structure (append or discard closers) are routed to the existing malformed-arguments path so the model is asked to re-issue — including when the stream is cut before the closing content-block event (#5986).",
-          "codewhale metrics reads Codewhale's own receipts again: the deepseek-home fallback resolved $HOME/.deepseek unconditionally, so the rollup reported all zeros from a directory nothing has written since 2024. The Codewhale audit log is primary, with a checked legacy fallback."
+          "UI dispatch acceptance now precedes Engine execution, so a delayed acceptance callback cannot overwrite a turn that has already started or completed. Cancelling before acceptance preserves the prompt and leaves the next dispatch usable."
         ],
-        "itemCount": 31
+        "itemCount": 37
       },
       {
         "heading": "Changed",
@@ -81,6 +81,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Added",
         "items": [
+          "deepseek-flash (DeepSeek V4.1 Flash: text-only, 1M-token context, reasoning and tool calls) joins the catalog as DeepSeek's declared default, and the offline catalog seed matches it; the DeepSeek Pro listing no longer overstates the published price (#6025).",
           "Native plugin authoring guides now cover English and Chinese. The explicit offline converter supports selected portable Skills and static Streamable HTTP MCP declarations from OpenCode and DSH. Unsupported executable hooks, automatic OAuth and policy-bearing configurations are refused; generated bundles still require native installation, review and trust. Legacy SSE fallback is not reproduced (#5827, requested by @giancarlocp).",
           "Signed cloud model facts can refresh provider capabilities and prices while preserving verified cached data when a refresh fails. A dispatched request keeps its selected price snapshot so later catalog updates cannot change its recorded cost (#5752).",
           "Saved sessions preserve exact provider routes. Auxiliary model calls settle their usage once against the route and price snapshot that executed them, including recovery, rather than resolving a new price at completion (#5726, #5848).",
@@ -91,10 +92,9 @@ export const CHANGELOG: ChangelogRelease[] = [
           "Compaction has two standing knobs next to [context] in config.toml: [compaction] summary_instructions (appended to the summarizer prompt on every manual and automatic pass; /compact <focus> still composes after it) and [compaction] retained_user_message_tokens (default 20 000, clamped 2 000..=200 000) for the verbatim user-message budget. Both are absent by default and absent means the pre-existing behavior. The /compact receipt names the effective budget and whether…",
           "[tools] user_input_max_questions (default 6, 1..=10) and [tools] user_input_max_options (default 4, 2..=10) replace the hard-coded request_user_input limits; the validator, the tool schema and its description read one value, spawned children inherit the parent's ceilings, and a rejected payload names the ceiling it hit and the key to raise (#5949).",
           "The slash menu shows a command's usage line and its subcommands as soon as a space is typed after the verb, filtered by what follows, so Tab completes /workspace wor to /workspace worktrees; /help states the focused command's usage in its detail slot (#5952).",
-          "The three /fleet views (roster, live workers, saved teams) are one back-navigable stack: Esc in workers or saved teams returns to the roster with its cursor intact and still closes the window at the root or on direct entry; the Esc footer hint says back or close accordingly (#5954).",
-          "/fleet presents its prioritized core (members, setup, teams, workers, help); every other verb stays dispatchable and is documented under explicit groups in /fleet help. The roster no longer shows the untouched built-in general alias next to worker (#5888)."
+          "The three /fleet views (roster, live workers, saved teams) are one back-navigable stack: Esc in workers or saved teams returns to the roster with its cursor intact and still closes the window at the root or on direct entry; the Esc footer hint says back or close accordingly (#5954)."
         ],
-        "itemCount": 15
+        "itemCount": 16
       },
       {
         "heading": "Contributors",
