@@ -493,6 +493,20 @@ impl HotbarSetupView {
     }
 
     fn header_lines(&self) -> Vec<Line<'static>> {
+        // The header is painted into `content.height.min(5)` rows with
+        // `Wrap { trim: true }`, and the intro wraps to two rows at ordinary
+        // widths — which is the whole budget once the slots, tabs and filter
+        // rows follow. An armed confirmation must never be the line that falls
+        // off the bottom, so it takes the intro's place instead of queueing
+        // behind it. Chrome yields to the question; the question is the content.
+        if self.confirm_disable {
+            return vec![
+                self.status_line(),
+                self.slots_line(),
+                self.source_tabs_line(),
+                self.filter_line(),
+            ];
+        }
         let alt_prefix = crate::tui::widgets::key_hint::alt_prefix();
         vec![
             Line::from(Span::styled(
@@ -1345,6 +1359,40 @@ mod tests {
                 view.handle_key(key(KeyCode::Char('y'))),
                 ViewAction::EmitAndClose(ViewEvent::HotbarDisableRequested)
             ));
+        }
+
+        // The armed confirmation must survive the header's five-row budget at a
+        // real terminal width. `status_text()` returning it is not enough: the
+        // intro wraps to two rows, and the confirmation used to be the sixth
+        // line into a five-line region, so `d` armed a question the user never
+        // saw. Assert the painted buffer, not the string.
+        {
+            use ratatui::{Terminal, backend::TestBackend};
+            let mut view = HotbarSetupView::new(&app, &Config::default());
+            assert!(matches!(
+                view.handle_key(key(KeyCode::Char('d'))),
+                ViewAction::None
+            ));
+            for (w, h) in [(100u16, 32u16), (80, 24), (140, 40)] {
+                let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("terminal");
+                terminal
+                    .draw(|frame| {
+                        let area = frame.area();
+                        view.render(area, frame.buffer_mut());
+                    })
+                    .expect("draw");
+                let painted = terminal
+                    .backend()
+                    .buffer()
+                    .content()
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>();
+                assert!(
+                    painted.contains("(y/n)"),
+                    "{w}x{h}: the armed disable confirmation is not on screen"
+                );
+            }
         }
 
         // Anything other than y dismisses it, and the keystroke is spent on the
