@@ -25855,32 +25855,32 @@ mod work_surface {
             );
         }
 
-        // 20 rows seats the ocean floor exactly: the fully idle shell hides
-        // its metrics row (footer 1 + composer floor 3 + ambient floor 16).
-        // 19 rows
+        // 21 rows seats the ocean floor exactly: the idle shell keeps model
+        // identity visible (model 1 + footer 1 + composer 3 + ambient 16).
+        // 20 rows
         // cannot seat the ocean at any strip height. That is pre-rail
         // behavior and the yield rule must not pretend otherwise.
         let mut app = busy_rail_app(panel);
         assert_eq!(
-            strip_height(&mut app, 80, 20),
+            strip_height(&mut app, 80, 21),
             0,
-            "80x20 seats the ocean floor but has no spare rows for a strip"
+            "80x21 seats the ocean floor but has no spare rows for a strip"
         );
-        let rendered = render_underwater_test_app(&mut app, 80, 20);
+        let rendered = render_underwater_test_app(&mut app, 80, 21);
         assert!(
             idle_ocean_visible(&app),
-            "80x20 is exactly the ocean floor under the idle shell:\n{rendered}"
+            "80x21 is exactly the ocean floor under the idle shell:\n{rendered}"
         );
         let mut app = busy_rail_app(panel);
         assert_eq!(
-            strip_height(&mut app, 80, 19),
+            strip_height(&mut app, 80, 20),
             0,
-            "80x19 has no spare rows for a strip at all"
+            "80x20 has no spare rows for a strip at all"
         );
-        let rendered = render_underwater_test_app(&mut app, 80, 19);
+        let rendered = render_underwater_test_app(&mut app, 80, 20);
         assert!(
             !idle_ocean_visible(&app),
-            "80x19 has no room for the ocean even with no strip at all\n{rendered}"
+            "80x20 has no room for the ocean even with no strip at all\n{rendered}"
         );
     }
 
