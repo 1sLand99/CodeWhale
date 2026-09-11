@@ -189,7 +189,7 @@ impl ToolSpec for FinanceTool {
     }
 
     fn description(&self) -> &'static str {
-        "Fetch a live market quote for a stock, ETF, or crypto ticker using Yahoo Finance-style public endpoints. Network-policy aware: both endpoint hosts are checked against the session network policy before any request, and policy rejections fail closed."
+        "Fetch live stock, ETF or crypto quotes via Yahoo-style endpoints under the session network policy."
     }
 
     fn input_schema(&self) -> Value {

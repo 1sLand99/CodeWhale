@@ -592,7 +592,7 @@ pub fn has_date_snapshot_suffix(model_lower: &str, prefix: &str) -> bool {
 /// The context window a model name's `_Nk` suffix advertises, when the
 /// catalog does not already describe the model (#5441).
 ///
-/// Exposed separately from [`explicit_context_window_hint`] because the
+/// Exposed separately from `explicit_context_window_hint` because the
 /// honesty surfaces need to know *whether the number they are holding came
 /// from the name* — a naming convention the serving engine may ignore is not
 /// a fact about the route, and every surface that shows such a window must
