@@ -28,19 +28,15 @@ notes, and relevant issue/PR comments.
 ## Contributors by time
 
 <details open>
-<summary><strong>Unreleased</strong></summary>
-
-**Reports and reproductions**
-
-- **[Hmbown](https://github.com/Hmbown)** — identified missing recovery guidance when a compatible gateway rejects Gemini tool-call replay without thought signatures ([#6048](https://github.com/Hmbown/Codewhale/issues/6048)).
-
-</details>
-
-<details open>
 <summary><strong>v0.9.13 — paste integrity, dispatch safety, and the Computer Use bundle</strong></summary>
 
 **Merged or adapted contributions**
 
+- **[nightt5879](https://github.com/nightt5879)** — added bounded Gemini signature recovery guidance and streaming/non-streaming gateway transport regressions ([#6081](https://github.com/Hmbown/Codewhale/pull/6081)).
+- **[c020627](https://github.com/c020627)** — repaired translated contributor-guide and Windows screenshot links ([#6080](https://github.com/Hmbown/Codewhale/pull/6080)).
+- **[h3c-hexin](https://github.com/h3c-hexin)** — contributed GLM-5.3 reasoning controls and the model-facing documentation/tool-gating audit ([#6051](https://github.com/Hmbown/Codewhale/pull/6051), [#6052](https://github.com/Hmbown/Codewhale/pull/6052)).
+- **[asto18089](https://github.com/asto18089)** — co-authored GLM-5.3 reasoning controls and tool-gating/documentation fixes ([#6051](https://github.com/Hmbown/Codewhale/pull/6051), [#6052](https://github.com/Hmbown/Codewhale/pull/6052)).
+- **[Hmbown](https://github.com/Hmbown)** — updated JavaScript dependencies across the website, telemetry package and VS Code extension ([#6057](https://github.com/Hmbown/Codewhale/pull/6057)).
 - **[gaord](https://github.com/gaord)** — contributed Fleet schema inspection, role precedence and worker deliverable receipts, and linked the community VS Code frontend ([#5944](https://github.com/Hmbown/Codewhale/pull/5944), [#5945](https://github.com/Hmbown/Codewhale/pull/5945), [#5946](https://github.com/Hmbown/Codewhale/pull/5946), [#5992](https://github.com/Hmbown/Codewhale/pull/5992)).
 - **[goransh-walia](https://github.com/goransh-walia)** — contributed the propose-only commit-planning rework ([#5870](https://github.com/Hmbown/Codewhale/pull/5870)).
 - **[7jrxt42BxFZo4iAnN4CX](https://github.com/7jrxt42BxFZo4iAnN4CX)** — documented turn budgets and goal configuration, and reported gaps in command discovery, Fleet navigation, human waits, state hooks, history and provider routing ([#5996](https://github.com/Hmbown/Codewhale/pull/5996), [#5952](https://github.com/Hmbown/Codewhale/issues/5952), [#5954](https://github.com/Hmbown/Codewhale/issues/5954), [#6003](https://github.com/Hmbown/Codewhale/issues/6003), [#6004](https://github.com/Hmbown/Codewhale/issues/6004), [#6006](https://github.com/Hmbown/Codewhale/issues/6006), [#6007](https://github.com/Hmbown/Codewhale/issues/6007)).
@@ -52,6 +48,7 @@ notes, and relevant issue/PR comments.
 
 **Reports and reproductions**
 
+- **[Hmbown](https://github.com/Hmbown)** — identified missing recovery guidance when a compatible gateway rejects Gemini tool-call replay without thought signatures ([#6048](https://github.com/Hmbown/Codewhale/issues/6048)).
 - **[7jrxt42BxFZo4iAnN4CX](https://github.com/7jrxt42BxFZo4iAnN4CX)** — proposed global usage and tool diagnostics and independent goal verification ([#6011](https://github.com/Hmbown/Codewhale/issues/6011), [#6013](https://github.com/Hmbown/Codewhale/issues/6013)); these broader requests remain open.
 - **[nsfoxer](https://github.com/nsfoxer)** — reported the multiline-paste regression and incomplete provider model lists ([#5981](https://github.com/Hmbown/Codewhale/issues/5981), [#6009](https://github.com/Hmbown/Codewhale/issues/6009)).
 - **[Nefelibata1024](https://github.com/Nefelibata1024)** — confirmed the multiline-paste regression's impact ([#5981](https://github.com/Hmbown/Codewhale/issues/5981)).

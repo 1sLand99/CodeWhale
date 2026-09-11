@@ -37,20 +37,20 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Fixed",
         "items": [
+          "Esc during a worker fanout keeps the parent stopped when cancelled workers finish. Their receipts remain available for the next explicit user turn.",
+          "Undo preserves messages even when older state lacks a timestamp. Session journal entries retain their append-time stamps when saved again.",
+          "Extension actions refresh in place, and inspection output uses the text pager. The empty launch shell hides unused metrics and keeps recovery hints readable when several MCP servers need attention.",
+          "The large-output router defaults to bounded spillover; adaptive routing remains opt-in through CODEWHALE_ADAPTIVE_OUTPUT_ROUTING=1.",
           "Direct composer paste (Ctrl-V) preserves rich clipboard headings, lists, links, tables and code as Markdown, with plain-text fallback. Whole-answer copy preserves authored Markdown without terminal wrapping; settings fields still paste literal text.",
           "The embedded Computer Use bundle includes the marketplace's JPEG capture and bounded-payload fixes, so new built-in installations receive them too.",
-          "A provider's missing-thought_signature HTTP 400 now explains how to recover: use the built-in Google provider and start a new session, or verify the gateway's signature handling. Working gateways are not blocked by a broader preflight check (#6048).",
+          "A provider's missing-thought_signature HTTP 400 now explains how to recover: use the built-in Google provider and start a new session, or verify the gateway's signature handling. Working gateways are not blocked by a broader preflight check (#6048, #6081, thanks @nightt5879).",
+          "Chinese documentation links resolve to the contributor guide and Windows screenshots from their translated paths (#6080, thanks @c020627).",
+          "GLM-5.3 reasoning controls follow the forced-thinking contract on Z.ai and BigModel routes, including low effort when a prior configuration requested thinking off (#6051, thanks @h3c-hexin and @asto18089).",
+          "Finance calls respect the session network policy, and model-facing shell, verifier, notification and Fleet guidance matches executable contracts (#6052, thanks @h3c-hexin and @asto18089).",
           "The sandbox-elevation prompt shows every option, Abort included. The card was a fixed 22 rows centred on the frame; inside its border and padding that left at most 18 usable rows against 20 to 23 rows of content, with no scroll rail and no truncation hint. The safe exit — the one choice that grants nothing — was painted past the bottom edge at every terminal size. The card is measured from its content now and reserves the option rows before the denial detail, which is what…",
-          "d in the Hotbar setup modal asks before it clears every slot. It persisted hotbar = [] on the first keystroke, in a view that takes bare letters as its filter — the destructive key and the search key were the same press. It arms a confirmation that owns every key until answered, and the prompt takes the intro's place in the header so it cannot be the line that falls off a five-row budget.",
-          "Failure red means failure again. The metrics line painted the context reading in the error colour from 80 %, while the posture bar one row above called the identical threshold Attention; the workflow panel painted a Waiting row like a crashed one, though its own is_running counts Waiting as healthy; and the work surface spent error_fg on to-dos that were merely waiting, blocked or stale, and on the routine approach to auto-compaction. WorkTone has a real Failure variant now,…",
-          "The command palette runs the row you highlighted. refilter clamped the selection index but never re-anchored it, and every keystroke re-sorts the list, so refining a query could move the highlight to an unrelated entry that Enter then ran. Long labels also overran their column and pushed the description off the card, because the padding never truncated and the capacity was measured against the popup rather than the content area.",
-          "The work surface's first Down reaches the first row. Nothing is selected when the dock opens, and that resolved to \"row 0 is selected\", so the first press moved to row 1 and row 0 could not be reached by pressing Down at all.",
-          "Auto-compact could not fire mid-turn. The gate read max(last billed prompt, /4 estimate of the whole list), so as soon as the estimator undercounted the full list below the last bill, every tool result appended after that prompt was invisible to it, and a long turn could exhaust the context window with nothing compacted. It now reads live tokens — the billed prompt plus the growth since it, watermarked when the parent usage is recorded — and is still evaluated at the…",
-          "Esc or Ctrl+C during a compaction that is serving an in-flight turn now stops the turn. It previously cancelled only the compaction pass, so the turn resumed against the context that had just failed to shrink. A manual /compact with no request in flight still cancels only the pass.",
-          "The request_user_input dialog is a bottom-anchored sheet instead of a centered 22-row overlay. It leaves the transcript visible above it, grows with its content, and scrolls internally so the highlighted option and the custom response being typed stay on screen at 141x38 and 80x24. Left arrow or h goes back to the previous question; Esc still cancels the whole request. Documented in GUIDE.md and KEYBINDINGS.md (#6045).",
-          "/mcp reload no longer freezes the interface. The reload was awaiting the whole reconnect batch on the TUI event loop; it now joins the same supervised background pass the session boot uses, the status chip counts the batch down live, and the finished receipt arrives as an event. With 23 configured servers (11 live, 10 awaiting auth, 2 failing) the first echoed keystroke after a reload lands in ~5 s instead of ~42 s (#5974)."
+          "d in the Hotbar setup modal asks before it clears every slot. It persisted hotbar = [] on the first keystroke, in a view that takes bare letters as its filter — the destructive key and the search key were the same press. It arms a confirmation that owns every key until answered, and the prompt takes the intro's place in the header so it cannot be the line that falls off a five-row budget."
         ],
-        "itemCount": 49
+        "itemCount": 56
       },
       {
         "heading": "Changed",
@@ -101,6 +101,10 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Contributors",
         "items": [
+          "@nightt5879 — Gemini signature recovery guidance and transport regressions (#6081).",
+          "@c020627 — Chinese documentation link repairs (#6080).",
+          "@h3c-hexin and @asto18089 — GLM-5.3 reasoning controls and tool-gating/documentation fixes (#6051, #6052).",
+          "@Hmbown — dependency updates (#6057) and the Gemini signature recovery report (#6048).",
           "@gaord — contributed Fleet schema inspection, role precedence and worker deliverable receipts, and linked the community VS Code frontend (#5944, #5945, #5946, #5992).",
           "@goransh-walia — contributed the propose-only commit-planning rework (#5870).",
           "@7jrxt42BxFZo4iAnN4CX — documented turn budgets and goal configuration, and reported gaps in command discovery, Fleet navigation, human waits, state hooks, history and provider routing (#5996, #5952, #5954, #6003, #6004, #6006, #6007).",
@@ -108,13 +112,9 @@ export const CHANGELOG: ChangelogRelease[] = [
           "@aboimpinto — moved session lifecycle and session-control commands onto shared command contracts (#5902, #5951).",
           "@EvanProgramming — reported Windows input and CRLF-write defects, and contributed CRLF preservation and an injectable Windows input runner (#5908, #5909, #5910, #5911, #5912).",
           "@wuisabel-gif — added custom-theme discovery, preview and selection in the theme picker (#5907).",
-          "@zhuowp — matched model-visible shell guidance to the interpreter selected for execution (#5900).",
-          "@nsfoxer — reported the multiline-paste regression and incomplete provider model lists (#5981, #6009).",
-          "@Nefelibata1024 — confirmed the multiline-paste regression's impact (#5981).",
-          "@Gabriel-Degret — reported the loss of the allow_insecure_http provider setting (#5991).",
-          "@Lujc0523 — reported the ACP initialize schema violation affecting strict IDE clients (#5969)."
+          "@zhuowp — matched model-visible shell guidance to the interpreter selected for execution (#5900)."
         ],
-        "itemCount": 15
+        "itemCount": 19
       },
       {
         "heading": "Notes",

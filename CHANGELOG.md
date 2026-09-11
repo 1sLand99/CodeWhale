@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.13] - 2026-09-11
 
-Codewhale v0.9.13 source candidate addresses integrity issues in 0.9.12:
+Codewhale v0.9.13 addresses integrity issues in 0.9.12:
 multiline paste is one paste again, truncated tool arguments can no longer execute, strict
 ACP clients connect again, concurrent instances stop destroying each
 other's queued text, and the Computer Use bundle includes plugin 0.2.1
@@ -21,6 +21,15 @@ reconnect.
 
 ### Fixed
 
+- Esc during a worker fanout keeps the parent stopped when cancelled workers
+  finish. Their receipts remain available for the next explicit user turn.
+- Undo preserves messages even when older state lacks a timestamp. Session
+  journal entries retain their append-time stamps when saved again.
+- Extension actions refresh in place, and inspection output uses the text
+  pager. The empty launch shell hides unused metrics and keeps recovery hints
+  readable when several MCP servers need attention.
+- The large-output router defaults to bounded spillover; adaptive routing
+  remains opt-in through `CODEWHALE_ADAPTIVE_OUTPUT_ROUTING=1`.
 - Direct composer paste (`Ctrl-V`) preserves rich clipboard headings, lists,
   links, tables and code as Markdown, with plain-text fallback. Whole-answer
   copy preserves authored Markdown without terminal wrapping; settings fields
@@ -30,7 +39,15 @@ reconnect.
 - A provider's missing-`thought_signature` HTTP 400 now explains how to recover:
   use the built-in Google provider and start a new session, or verify the
   gateway's signature handling. Working gateways are not blocked by a broader
-  preflight check (#6048).
+  preflight check (#6048, #6081, thanks @nightt5879).
+- Chinese documentation links resolve to the contributor guide and Windows
+  screenshots from their translated paths (#6080, thanks @c020627).
+- GLM-5.3 reasoning controls follow the forced-thinking contract on Z.ai and
+  BigModel routes, including low effort when a prior configuration requested
+  thinking off (#6051, thanks @h3c-hexin and @asto18089).
+- Finance calls respect the session network policy, and model-facing shell,
+  verifier, notification and Fleet guidance matches executable contracts
+  (#6052, thanks @h3c-hexin and @asto18089).
 - The sandbox-elevation prompt shows every option, `Abort` included. The card
   was a fixed 22 rows centred on the frame; inside its border and padding that
   left at most 18 usable rows against 20 to 23 rows of content, with no scroll
@@ -490,6 +507,10 @@ reconnect.
 
 ### Contributors
 
+- @nightt5879 — Gemini signature recovery guidance and transport regressions (#6081).
+- @c020627 — Chinese documentation link repairs (#6080).
+- @h3c-hexin and @asto18089 — GLM-5.3 reasoning controls and tool-gating/documentation fixes (#6051, #6052).
+- @Hmbown — dependency updates (#6057) and the Gemini signature recovery report (#6048).
 - **[@gaord](https://github.com/gaord)** — contributed Fleet schema inspection, role precedence and worker deliverable receipts, and linked the community VS Code frontend ([#5944](https://github.com/Hmbown/Codewhale/pull/5944), [#5945](https://github.com/Hmbown/Codewhale/pull/5945), [#5946](https://github.com/Hmbown/Codewhale/pull/5946), [#5992](https://github.com/Hmbown/Codewhale/pull/5992)).
 - **[@goransh-walia](https://github.com/goransh-walia)** — contributed the propose-only commit-planning rework ([#5870](https://github.com/Hmbown/Codewhale/pull/5870)).
 - **[@7jrxt42BxFZo4iAnN4CX](https://github.com/7jrxt42BxFZo4iAnN4CX)** — documented turn budgets and goal configuration, and reported gaps in command discovery, Fleet navigation, human waits, state hooks, history and provider routing ([#5996](https://github.com/Hmbown/Codewhale/pull/5996), [#5952](https://github.com/Hmbown/Codewhale/issues/5952), [#5954](https://github.com/Hmbown/Codewhale/issues/5954), [#6003](https://github.com/Hmbown/Codewhale/issues/6003), [#6004](https://github.com/Hmbown/Codewhale/issues/6004), [#6006](https://github.com/Hmbown/Codewhale/issues/6006), [#6007](https://github.com/Hmbown/Codewhale/issues/6007)).
