@@ -12,7 +12,7 @@
 //! `glyphs::ascii_fallback` flattens braille to `#`, so the wordmark line
 //! stands alone there.
 //!
-//! Three paint tiers share one motion:
+//! The active mark uses braille and kitty graphics:
 //!
 //! - [`render_mark`] paints the braille rows (every terminal).
 //! - On terminals that answer the kitty graphics query
@@ -21,25 +21,17 @@
 //!   terminal replaces with the PNG transmitted once by
 //!   [`transmit_kitty_mark`]. ratatui's buffer still owns the cells, so the
 //!   image survives redraws.
-//! - On terminals that draw sixel but not kitty ([`probe_sixel_graphics`])
-//!   the header reserves the same block with [`render_sixel_reserve`] and
-//!   the event loop emits the same PNG rasterised by [`sixel_mark_sequence`]
-//!   over it, re-emitting only when the block moves. Anything else falls
-//!   back to the braille tier: the default, never an empty block.
-//!
 //! Motion ("surfacing", founder 2026-09-01): over `MARK_SURFACE_MS` the mark
 //! reveals from the bottom of its box upward — the whale rises out of the
 //! field — while its colour lerps from the field to the accent through
 //! [`surface_progress`]'s raised-cosine ease. Then it holds still forever.
 //! Reduced motion passes `progress = 1.0`, which is this same drawing at its
-//! endpoint, so the still frame cannot drift from the animated one. The
-//! sixel tier does not animate: it shows the settled raster at once, which
-//! is that same endpoint.
+//! endpoint, so the still frame cannot drift from the animated one.
 
 use std::io::Write;
 use std::sync::OnceLock;
 
-use ratatui::{layout::Rect, style::Color};
+use ratatui::style::Color;
 
 /// Rungs of the mark's scale ladder, each generated at its own box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,9 +152,8 @@ pub fn surface_progress(elapsed_ms: u128, duration_ms: u128) -> f32 {
 /// indexed colour, which every palette-adaptation stage leaves untouched
 /// (only RGB foregrounds are theme-remapped or contrast-lifted).
 pub const KITTY_MARK_IMAGE_ID: u8 = 31;
-/// The raster block both graphics tiers share: a cell is about 1:2, so 6×3
-/// is square like the founder app-icon PNG. Kitty fills it with placeholder
-/// cells; sixel sizes its pixels to it.
+/// A cell is about 1:2, so this 6×3 Kitty placeholder block is square like
+/// the founder app-icon PNG.
 pub const MARK_IMAGE_COLS: u16 = 6;
 pub const MARK_IMAGE_ROWS: u16 = 3;
 /// Cell heights from here up get the 96 px raster; smaller cells get 48 px.
@@ -303,12 +294,7 @@ pub fn delete_kitty_mark<W: Write>(writer: &mut W) {
 //
 // For terminals that draw sixel (foot, mlterm, contour, sixel-enabled xterm,
 // WezTerm with kitty graphics off) but never answered the kitty query.
-// Sixel has no cell-owned image like kitty placeholders: pixels are drawn at
-// the cursor when the DCS sequence is processed, so the launch header keeps
-// the block blank with [`render_sixel_reserve`] and the event loop emits the
-// positioned bytes from [`sixel_positioned_sequence`] after the frame draws,
-// re-emitting only when the block moves and clearing it when the tier exits.
-// A terminal that draws neither protocol keeps the braille tier.
+// Keep the capability probe for the terminal receipt; launch has no sixel renderer.
 // ---------------------------------------------------------------------------
 
 /// Primary device-attributes request. A sixel terminal answers with its
@@ -320,13 +306,6 @@ pub fn delete_kitty_mark<W: Write>(writer: &mut W) {
 const SIXEL_QUERY: &[u8] = b"\x1b[c";
 /// Same budget as the kitty query: answering terminals reply at once.
 const SIXEL_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(120);
-/// Largest raster the encoder accepts, in pixels per edge. A 6×3-cell block
-/// never approaches this; the bound keeps a corrupt size probe from
-/// allocating a runaway palette.
-const SIXEL_MAX_EDGE_PX: u32 = 1000;
-/// Sixel registers the encoder may address (0..=255).
-const SIXEL_MAX_REGISTERS: usize = 256;
-
 static SIXEL_GRAPHICS: OnceLock<bool> = OnceLock::new();
 
 /// Environments worth asking. Same contract as the kitty gate: only
@@ -380,253 +359,6 @@ pub fn probe_sixel_graphics() -> bool {
                     .as_deref(),
             )
     })
-}
-
-/// Whether the probe said yes. `false` before the probe runs, so a render
-/// that outruns startup paints the braille tier rather than an empty block.
-#[must_use]
-pub fn sixel_graphics_supported() -> bool {
-    #[cfg(test)]
-    if SIXEL_TEST_SUPPORT.load(std::sync::atomic::Ordering::SeqCst) {
-        return true;
-    }
-    SIXEL_GRAPHICS.get().copied().unwrap_or(false)
-}
-
-#[cfg(test)]
-static SIXEL_TEST_SUPPORT: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-/// Test-only support override so the frame reconciler's emit path is
-/// exercisable without a live sixel terminal. Reset to `false` at the end
-/// of the borrowing test. A leaked `true` is still harmless: tier selection
-/// additionally requires a measured cell size, which only the borrowing
-/// test sets.
-#[cfg(test)]
-pub fn set_sixel_supported_for_tests(supported: bool) {
-    SIXEL_TEST_SUPPORT.store(supported, std::sync::atomic::Ordering::SeqCst);
-}
-
-/// The launch field behind the mark as sixel registers need it: the frame
-/// paints the whole stage with this background first, so the raster's
-/// transparent corners composite onto exactly this colour, and clearing the
-/// block repaints exactly these cells. An RGB theme field is used directly;
-/// a transparent (`Reset`) stage shows the terminal's own ground, so the
-/// probed terminal background fills in — but only when the probe named an
-/// RGB colour. Anything else (`Indexed` themes, unprobed terminals) is
-/// `None`: the tier cannot composite exactly and declines, and the header
-/// keeps the braille tier.
-#[must_use]
-pub fn sixel_field_bg(
-    theme: &codewhale_palette::UiTheme,
-    terminal_bg: Option<Color>,
-) -> Option<(u8, u8, u8)> {
-    match theme.surface_bg {
-        Color::Rgb(r, g, b) => Some((r, g, b)),
-        Color::Reset => match terminal_bg {
-            Some(Color::Rgb(r, g, b)) => Some((r, g, b)),
-            _ => None,
-        },
-        // Named and indexed theme surfaces cannot be composited exactly.
-        _ => None,
-    }
-}
-
-/// Pixel size of the sixel raster for a `cols`×`rows` cell block, or `None`
-/// when the cell size is unknown or the raster would be absurd. Callers
-/// treat `None` as "cannot size the raster" and keep the braille tier.
-#[must_use]
-pub fn sixel_pixel_size(cols: u16, rows: u16, cell_px: (u16, u16)) -> Option<(u32, u32)> {
-    let width = u32::from(cols).checked_mul(u32::from(cell_px.0))?;
-    let height = u32::from(rows).checked_mul(u32::from(cell_px.1))?;
-    if width == 0 || height == 0 || width > SIXEL_MAX_EDGE_PX || height > SIXEL_MAX_EDGE_PX {
-        return None;
-    }
-    Some((width, height))
-}
-
-/// Encode `pixels` (row-major `width`×`height` RGB over the field) as one
-/// sixel DCS sequence, or `None` for an empty, absurd, or ragged raster.
-/// Registers go to the most frequent colours first (the founder mark needs
-/// a handful — its flat navy and white dominate), and rarer colours merge
-/// into their nearest kept neighbour, so any input still encodes. Runs of
-/// 4+ identical columns use the repeat introducer.
-#[must_use]
-pub fn sixel_encode(width: u32, height: u32, pixels: &[(u8, u8, u8)]) -> Option<Vec<u8>> {
-    if width == 0
-        || height == 0
-        || width > SIXEL_MAX_EDGE_PX
-        || height > SIXEL_MAX_EDGE_PX
-        || pixels.len() != (width as usize) * (height as usize)
-    {
-        return None;
-    }
-    let width_usize = width as usize;
-    let mut frequency: std::collections::HashMap<(u8, u8, u8), usize> =
-        std::collections::HashMap::new();
-    for pixel in pixels {
-        *frequency.entry(*pixel).or_default() += 1;
-    }
-    let mut by_frequency: Vec<((u8, u8, u8), usize)> = frequency.into_iter().collect();
-    by_frequency.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    by_frequency.truncate(SIXEL_MAX_REGISTERS);
-    let palette: Vec<(u8, u8, u8)> = by_frequency.into_iter().map(|(colour, _)| colour).collect();
-    let register = |pixel: &(u8, u8, u8)| -> usize {
-        palette
-            .iter()
-            .position(|colour| colour == pixel)
-            .unwrap_or_else(|| nearest_register(&palette, pixel))
-    };
-    let registers: Vec<usize> = pixels.iter().map(register).collect();
-
-    let mut out = format!("\x1bPq\"1;1;{width};{height}").into_bytes();
-    for (index, colour) in palette.iter().enumerate() {
-        let (r, g, b) = (
-            u32::from(colour.0) * 100 / 255,
-            u32::from(colour.1) * 100 / 255,
-            u32::from(colour.2) * 100 / 255,
-        );
-        out.extend_from_slice(format!("#{index};2;{r};{g};{b}").as_bytes());
-    }
-    let bands = height.div_ceil(6);
-    for band in 0..bands {
-        let mut used = vec![false; palette.len()];
-        for x in 0..width_usize {
-            for dy in 0..6 {
-                let y = (band * 6 + dy) as usize;
-                if y < height as usize {
-                    used[registers[y * width_usize + x]] = true;
-                }
-            }
-        }
-        for (index, present) in used.iter().enumerate() {
-            if !present {
-                continue;
-            }
-            out.extend_from_slice(format!("#{index}").as_bytes());
-            let mut run_char = 0u8;
-            let mut run_len = 0usize;
-            let flush = |out: &mut Vec<u8>, ch: u8, len: usize| {
-                let mut remaining = len;
-                while remaining >= 4 {
-                    let take = remaining.min(255);
-                    out.extend_from_slice(format!("!{take}{}", ch as char).as_bytes());
-                    remaining -= take;
-                }
-                for _ in 0..remaining {
-                    out.push(ch);
-                }
-            };
-            for x in 0..width_usize {
-                let mut bits = 0u8;
-                for dy in 0..6 {
-                    let y = (band * 6 + dy) as usize;
-                    if y < height as usize && registers[y * width_usize + x] == index {
-                        bits |= 1 << dy;
-                    }
-                }
-                let ch = 0x3F + bits;
-                if run_len > 0 && ch == run_char {
-                    run_len += 1;
-                } else {
-                    if run_len > 0 {
-                        flush(&mut out, run_char, run_len);
-                    }
-                    run_char = ch;
-                    run_len = 1;
-                }
-            }
-            if run_len > 0 {
-                flush(&mut out, run_char, run_len);
-            }
-            out.push(b'$');
-        }
-        out.push(b'-');
-    }
-    out.extend_from_slice(b"\x1b\\");
-    Some(out)
-}
-
-/// Nearest palette register to `pixel` by squared RGB distance. The palette
-/// is never empty (a valid raster has at least one colour), so this always
-/// resolves; ties go to the lowest register.
-fn nearest_register(palette: &[(u8, u8, u8)], pixel: &(u8, u8, u8)) -> usize {
-    let distance = |colour: &&(u8, u8, u8)| -> u32 {
-        let dr = u32::from(colour.0.abs_diff(pixel.0));
-        let dg = u32::from(colour.1.abs_diff(pixel.1));
-        let db = u32::from(colour.2.abs_diff(pixel.2));
-        dr * dr + dg * dg + db * db
-    };
-    palette
-        .iter()
-        .enumerate()
-        .min_by_key(|(_, colour)| distance(colour))
-        .map(|(index, _)| index)
-        .unwrap_or(0)
-}
-
-/// Rasterise the founder app-icon PNG to the mark block's exact pixel size
-/// and encode it for a sixel terminal. `field_bg` is the launch field the
-/// transparent PNG corners composite onto ([`sixel_field_bg`]);
-/// `cell_px` is the terminal's cell size in pixels. `None` when the raster
-/// cannot be sized or decoded — the caller keeps the braille tier.
-#[must_use]
-pub fn sixel_mark_sequence(field_bg: (u8, u8, u8), cell_px: (u16, u16)) -> Option<Vec<u8>> {
-    let (width, height) = sixel_pixel_size(MARK_IMAGE_COLS, MARK_IMAGE_ROWS, cell_px)?;
-    let image = image::load_from_memory(MARK_PNG_96).ok()?;
-    let resized = image.resize_exact(width, height, image::imageops::FilterType::Triangle);
-    let rgba = resized.to_rgba8();
-    let pixels: Vec<(u8, u8, u8)> = rgba
-        .pixels()
-        .map(|pixel| {
-            let [r, g, b, a] = pixel.0;
-            let alpha = u32::from(a);
-            let blend = |fg: u8, bg: u8| {
-                ((u32::from(fg) * alpha + u32::from(bg) * (255 - alpha) + 127) / 255) as u8
-            };
-            (
-                blend(r, field_bg.0),
-                blend(g, field_bg.1),
-                blend(b, field_bg.2),
-            )
-        })
-        .collect();
-    sixel_encode(width, height, &pixels)
-}
-
-/// Position a sixel image over the mark block: save the cursor, jump to the
-/// block's top-left, draw, restore. The image must already be sized to the
-/// block ([`sixel_mark_sequence`]); `origin` is stage coordinates, which
-/// are screen cells in fullscreen (CUP inside is 1-based).
-#[must_use]
-pub fn sixel_positioned_sequence(origin: Rect, sixel: &[u8]) -> Vec<u8> {
-    let mut out = format!("\x1b7\x1b[{};{}H", origin.y + 1, origin.x + 1).into_bytes();
-    out.extend_from_slice(sixel);
-    out.extend_from_slice(b"\x1b8");
-    out
-}
-
-/// Erase a stale sixel image by repainting its block with the field
-/// background: writing text cells is what clears sixel graphics on every
-/// supporting terminal. Cursor is saved and restored around the wipe.
-#[must_use]
-pub fn sixel_clear_sequence(block: Rect, field_bg: (u8, u8, u8)) -> Vec<u8> {
-    let mut out = b"\x1b7".to_vec();
-    let (r, g, b) = field_bg;
-    for row in 0..block.height {
-        out.extend_from_slice(
-            format!(
-                "\x1b[{};{}H\x1b[48;2;{r};{g};{b}m",
-                block.y + row + 1,
-                block.x + 1
-            )
-            .as_bytes(),
-        );
-        out.extend_from_slice(&vec![b' '; block.width as usize]);
-        out.extend_from_slice(b"\x1b[0m");
-    }
-    out.extend_from_slice(b"\x1b8");
-    out
 }
 
 #[cfg(test)]
@@ -823,114 +555,6 @@ mod tests {
     }
 
     #[test]
-    fn sixel_pixel_size_multiplies_cells_and_rejects_nonsense() {
-        assert_eq!(sixel_pixel_size(6, 3, (10, 20)), Some((60, 60)));
-        assert_eq!(sixel_pixel_size(6, 3, (0, 20)), None);
-        assert_eq!(sixel_pixel_size(6, 3, (200, 200)), None);
-        assert_eq!(
-            sixel_pixel_size(u16::MAX, u16::MAX, (u16::MAX, u16::MAX)),
-            None
-        );
-    }
-
-    #[test]
-    fn sixel_encode_paints_a_solid_block_with_one_repeat_per_colour() {
-        // 6x6 solid red: one register, one band, a single `!6` run.
-        // Red 200 scales to 78, 10 scales to 3 (integer division).
-        let red = (200u8, 10u8, 10u8);
-        let pixels = vec![red; 36];
-        let bytes = sixel_encode(6, 6, &pixels).expect("solid block encodes");
-        assert_eq!(
-            String::from_utf8(bytes).expect("ASCII stream"),
-            "\x1bPq\"1;1;6;6#0;2;78;3;3#0!6~$-\x1b\\"
-        );
-    }
-
-    #[test]
-    fn sixel_encode_composes_columns_without_repeats_literally() {
-        // 2x6: a blue column beside a red one. No run reaches 4, so every
-        // column is literal.
-        let blue = (0u8, 0u8, 255u8);
-        let red = (255u8, 0u8, 0u8);
-        let pixels = vec![
-            blue, red, blue, red, blue, red, blue, red, blue, red, blue, red,
-        ];
-        let bytes = sixel_encode(2, 6, &pixels).expect("two columns encode");
-        assert_eq!(
-            String::from_utf8(bytes).expect("ASCII stream"),
-            "\x1bPq\"1;1;2;6#0;2;0;0;100#1;2;100;0;0#0~?$#1?~$-\x1b\\"
-        );
-    }
-
-    #[test]
-    fn sixel_encode_rejects_empty_absurd_and_ragged_rasters() {
-        assert_eq!(sixel_encode(0, 6, &[]), None);
-        assert_eq!(sixel_encode(6, 0, &[]), None);
-        assert_eq!(sixel_encode(1001, 6, &vec![(0u8, 0u8, 0u8); 6006]), None);
-        assert_eq!(sixel_encode(2, 6, &[(0u8, 0u8, 0u8); 11]), None);
-    }
-
-    #[test]
-    fn sixel_encode_merges_colours_past_256_registers() {
-        // 300 distinct greys in 30x10 bands: only 256 registers exist, so
-        // the tail merges into its nearest kept neighbour — and the
-        // sequence still carries all 256 introducers.
-        let pixels: Vec<(u8, u8, u8)> = (0..300u32)
-            .map(|i| {
-                let v = (i % 256) as u8;
-                (v, v, v)
-            })
-            .collect();
-        let bytes = sixel_encode(30, 10, &pixels).expect("over-full palette still encodes");
-        let text = String::from_utf8(bytes).expect("ASCII stream");
-        assert!(text.starts_with("\x1bPq\"1;1;30;10"));
-        assert!(text.ends_with("-\x1b\\"));
-        // Parse the palette definitions (`#N;2;R;G;B` tokens before the
-        // first band): grey values like `2;2;2` contain ";2;" inside the
-        // values, so a substring count would overcount.
-        let mut rest = text
-            .strip_prefix("\x1bPq\"1;1;30;10")
-            .expect("header first");
-        let mut definitions = 0;
-        loop {
-            let digits: String = rest
-                .strip_prefix('#')
-                .unwrap_or("")
-                .chars()
-                .take_while(|c| c.is_ascii_digit())
-                .collect();
-            let after = &rest[1 + digits.len()..];
-            if let Some(values) = after.strip_prefix(";2;") {
-                definitions += 1;
-                rest = &values[values.find('#').expect("band follows")..];
-            } else {
-                break;
-            }
-        }
-        assert_eq!(definitions, 256, "one definition per register");
-    }
-
-    #[test]
-    fn the_positioned_stream_saves_jumps_draws_and_restores() {
-        let sixel = sixel_encode(6, 6, &[(1u8, 2u8, 3u8); 36]).expect("encodes");
-        let bytes = sixel_positioned_sequence(Rect::new(4, 2, 6, 3), &sixel);
-        let text = String::from_utf8(bytes).expect("ASCII stream");
-        assert!(text.starts_with("\x1b7\x1b[3;5H\x1bPq"), "{text:?}");
-        assert!(text.ends_with("\x1b\\\x1b8"), "{text:?}");
-    }
-
-    #[test]
-    fn the_clear_stream_repaints_the_block_with_the_field() {
-        let bytes = sixel_clear_sequence(Rect::new(4, 2, 6, 3), (1, 2, 3));
-        assert_eq!(
-            String::from_utf8(bytes).expect("ASCII stream"),
-            "\x1b7\x1b[3;5H\x1b[48;2;1;2;3m      \x1b[0m\
-             \x1b[4;5H\x1b[48;2;1;2;3m      \x1b[0m\
-             \x1b[5;5H\x1b[48;2;1;2;3m      \x1b[0m\x1b8"
-        );
-    }
-
-    #[test]
     fn the_bundled_app_icon_decodes_square_with_transparent_corners() {
         // The raster-tier PNG is the founder app icon (white whale on the
         // navy rounded square), not a monochrome silhouette: its corners
@@ -955,37 +579,5 @@ mod tests {
         }
         assert!(navy > 1000, "navy field present ({navy})");
         assert!(white > 500, "white whale present ({white})");
-    }
-
-    #[test]
-    fn sixel_field_bg_prefers_theme_rgb_then_probed_reset() {
-        let mut theme = codewhale_palette::ThemeId::Underwater.ui_theme();
-        theme.surface_bg = Color::Rgb(1, 2, 3);
-        assert_eq!(sixel_field_bg(&theme, None), Some((1, 2, 3)));
-        theme.surface_bg = Color::Reset;
-        assert_eq!(
-            sixel_field_bg(&theme, Some(Color::Rgb(4, 5, 6))),
-            Some((4, 5, 6))
-        );
-        assert_eq!(sixel_field_bg(&theme, Some(Color::Indexed(7))), None);
-        assert_eq!(sixel_field_bg(&theme, None), None);
-        theme.surface_bg = Color::Indexed(8);
-        assert_eq!(sixel_field_bg(&theme, Some(Color::Rgb(4, 5, 6))), None);
-    }
-
-    #[test]
-    fn the_bundled_app_icon_encodes_to_a_bounded_sixel_sequence() {
-        // End to end over the real founder derivative: 6x3 cells at
-        // 10x20 px cells rasterise to 60x60 px and stay small enough to
-        // re-emit on moves without a care.
-        let bytes = sixel_mark_sequence((3, 7, 13), (10, 20)).expect("founder icon encodes");
-        let text = String::from_utf8(bytes).expect("ASCII stream");
-        assert!(text.starts_with("\x1bPq\"1;1;60;60"), "{text:.80}?");
-        assert!(text.ends_with("-\x1b\\"));
-        assert!(
-            text.len() < 64 * 1024,
-            "flat logo stays small ({} bytes)",
-            text.len()
-        );
     }
 }
