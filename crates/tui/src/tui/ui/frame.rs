@@ -1326,7 +1326,7 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
     app.view_stack
         .set_focus_texture(app.focus_texture, app.ui_theme);
     app.sidebar_hover = crate::tui::app::SidebarHoverState::default();
-    app.viewport.last_approval_area = None;
+    app.viewport.last_prompt_area = None;
     app.viewport.interaction_targets.clear();
     // Keep the OSC-0 whale title truthful to the current shell phase so
     // alt-tabbed sessions communicate state without a second in-app spinner.
@@ -1832,8 +1832,11 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
         } else if app.view_stack.top_kind() == Some(ModalKind::ContextInspector) {
             refresh_context_inspector_overlay(app);
         }
-        if app.view_stack.top_kind() == Some(ModalKind::Approval) {
-            app.viewport.last_approval_area = app.view_stack.top_occupied_region(size);
+        if matches!(
+            app.view_stack.top_kind(),
+            Some(ModalKind::Approval | ModalKind::UserInput)
+        ) {
+            app.viewport.last_prompt_area = app.view_stack.top_occupied_region(size);
         }
         let buf = f.buffer_mut();
         app.view_stack.render(size, buf);

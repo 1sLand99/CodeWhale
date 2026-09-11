@@ -121,7 +121,11 @@ reconnect.
   with its content, and scrolls internally so the highlighted option and the
   custom response being typed stay on screen at 141x38 and 80x24. Left arrow
   or `h` goes back to the previous question; Esc still cancels the whole
-  request. Documented in GUIDE.md and KEYBINDINGS.md (#6045).
+  request. PageUp/PageDown, Home/End and modified arrows now review the
+  transcript while the sheet stays open; the mouse wheel scrolls the surface
+  under the pointer. Wheel browsing preserves the answer, and option navigation
+  or typing restores the focused content to view. Documented in GUIDE.md and
+  KEYBINDINGS.md (#6045).
 - `/mcp reload` no longer freezes the interface. The reload was awaiting the
   whole reconnect batch on the TUI event loop; it now joins the same
   supervised background pass the session boot uses, the status chip counts

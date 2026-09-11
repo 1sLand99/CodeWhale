@@ -4958,11 +4958,10 @@ pub(crate) async fn run_event_loop(
             // types exactly what it types, and plain typing can never trigger
             // a fleet write by accident.
 
-            // Approval is a decision boundary, not a viewport lock. Keep the
-            // card focused for its ordinary selection keys while letting the
-            // same transcript navigation used by the main shell review the
-            // evidence above it (#4371).
-            if handle_approval_transcript_key(app, &key) {
+            // Decision prompts keep their ordinary option/typing keys while
+            // explicit transcript navigation reviews the evidence above them
+            // (#4371, #6045). Bare arrows still belong to the question sheet.
+            if handle_prompt_transcript_key(app, &key) {
                 continue;
             }
 

@@ -910,7 +910,9 @@ fn spawn_runtime_event_child(
         .env(EVENT_PROCESS_COUNT_ENV, "8")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        // The parent is captured by the test runner. Keep child panics there
+        // so a failed writer reports its cause, not just an opaque exit 101.
+        .stderr(std::process::Stdio::inherit());
     RuntimeEventChildGuard::new(command.spawn().expect("spawn Runtime event child"))
 }
 
@@ -934,7 +936,7 @@ fn spawn_runtime_manager_racer(
         .env(EVENT_PROCESS_RELEASE_ENV, release)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stderr(std::process::Stdio::inherit());
     RuntimeEventChildGuard::new(command.spawn().expect("spawn Runtime manager racer"))
 }
 

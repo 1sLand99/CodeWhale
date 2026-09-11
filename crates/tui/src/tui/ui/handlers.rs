@@ -154,9 +154,12 @@ pub(crate) fn handle_reasoning_effort_key(app: &mut App, key: &event::KeyEvent) 
     true
 }
 
-/// Let the transcript remain reviewable while an approval card owns focus.
-pub(crate) fn handle_approval_transcript_key(app: &mut App, key: &event::KeyEvent) -> bool {
-    if app.view_stack.top_kind() != Some(ModalKind::Approval) {
+/// Let the transcript remain reviewable while a decision prompt owns focus.
+pub(crate) fn handle_prompt_transcript_key(app: &mut App, key: &event::KeyEvent) -> bool {
+    if !matches!(
+        app.view_stack.top_kind(),
+        Some(ModalKind::Approval | ModalKind::UserInput)
+    ) {
         return false;
     }
 

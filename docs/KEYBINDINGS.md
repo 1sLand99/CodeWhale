@@ -261,8 +261,17 @@ reveal content.
 | `Space` | Toggle a multi-select option |
 | `←` / `h` | Previous question — change that answer. Esc is not back; it cancels the whole request. |
 | `Esc` | Cancel the whole question request |
+| `PageUp` / `PageDown` | Scroll the transcript while keeping the sheet open |
+| `Home` / `End` | Go to the start / latest part of the transcript |
+| `Ctrl`, `Alt`, or `Shift` + `↑` / `↓` | Scroll the transcript three lines |
+| Mouse wheel above the sheet | Scroll the transcript; side work surfaces keep their own input |
+| Mouse wheel over the sheet | Browse the question content without changing the answer or highlight |
 
-**Custom response.** The last numbered row is always "Other". Enter it, type,
+After wheel browsing, option navigation or typing brings the highlighted option
+or custom-response text back into view. Transcript scroll keys work in both
+option selection and custom-response typing.
+
+**Custom response.** Every question includes an "Other" row. Enter it, type,
 then `Enter` to submit or `Esc` to return to the options without sending.
 
 ## Approval modal (when a tool requests approval)

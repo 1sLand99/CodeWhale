@@ -1,6 +1,8 @@
 //! Modal for request_user_input tool prompts.
 
-use crossterm::event::{KeyCode, KeyEvent};
+use std::cell::Cell;
+
+use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
 use ratatui::layout::{Alignment, Rect};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Padding, Paragraph, Widget, Wrap};
@@ -81,6 +83,11 @@ pub struct UserInputView {
     /// Indices toggled into the pending multi-select set for the current
     /// question. Only used when `question.multi_select` is true.
     multi_pending: Vec<usize>,
+    /// Wheel browsing uses wrapped rows from the last paint. Option navigation
+    /// or typing returns to following focus so the next edit stays visible.
+    manual_scroll: bool,
+    scroll_offset: Cell<u16>,
+    max_scroll: Cell<u16>,
 }
 
 impl UserInputView {
@@ -94,6 +101,9 @@ impl UserInputView {
             other_input: String::new(),
             answered: Vec::new(),
             multi_pending: Vec::new(),
+            manual_scroll: false,
+            scroll_offset: Cell::new(0),
+            max_scroll: Cell::new(0),
         }
     }
 
@@ -387,10 +397,22 @@ impl ModalView for UserInputView {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> ViewAction {
+        self.manual_scroll = false;
         match self.mode {
             InputMode::Selecting => self.handle_selecting_key(key),
             InputMode::OtherInput => self.handle_other_input_key(key),
         }
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent) -> ViewAction {
+        let scroll = match mouse.kind {
+            MouseEventKind::ScrollUp => self.scroll_offset.get().saturating_sub(3),
+            MouseEventKind::ScrollDown => self.scroll_offset.get().saturating_add(3),
+            _ => return ViewAction::None,
+        };
+        self.manual_scroll = true;
+        self.scroll_offset.set(scroll.min(self.max_scroll.get()));
+        ViewAction::None
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
@@ -567,8 +589,15 @@ impl ModalView for UserInputView {
         } else {
             heights[..start].iter().sum()
         };
-        let scroll =
-            scroll_to_keep_range_visible((focus_start, focus_end), heights.iter().sum(), inner_h);
+        let total_rows = heights.iter().sum::<usize>();
+        let max_scroll = u16::try_from(total_rows.saturating_sub(inner_h)).unwrap_or(u16::MAX);
+        let scroll = if self.manual_scroll {
+            self.scroll_offset.get().min(max_scroll)
+        } else {
+            scroll_to_keep_range_visible((focus_start, focus_end), total_rows, inner_h)
+        };
+        self.scroll_offset.set(scroll);
+        self.max_scroll.set(max_scroll);
         let paragraph = Paragraph::new(lines)
             .alignment(Alignment::Left)
             .wrap(Wrap { trim: true })
@@ -921,6 +950,95 @@ mod tests {
             capped.height
         );
         assert_eq!(capped.bottom(), area.bottom());
+    }
+
+    fn wheel(view: &mut UserInputView, kind: MouseEventKind) {
+        assert!(matches!(
+            view.handle_mouse(MouseEvent {
+                kind,
+                column: 1,
+                row: 1,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            }),
+            ViewAction::None
+        ));
+    }
+
+    #[test]
+    fn user_input_wheel_browses_wrapped_rows_without_changing_answers() {
+        for (width, height) in [(40, 12), (80, 24), (100, 32), (141, 38)] {
+            let mut view = many_option_view();
+            view.request.questions[0].multi_select = true;
+            view.multi_pending.push(0);
+            let before = render_view(&view, width, height);
+            let initial = view.scroll_offset.get();
+            wheel(&mut view, MouseEventKind::ScrollDown);
+            let after = render_view(&view, width, height);
+            assert_eq!(
+                view.scroll_offset.get(),
+                (initial + 3).min(view.max_scroll.get())
+            );
+            if view.max_scroll.get() == 0 {
+                assert_eq!(before, after, "fully visible content must stay still");
+            } else {
+                assert_ne!(
+                    before, after,
+                    "overflowing question content must scroll at {width}x{height}"
+                );
+            }
+            assert_eq!(view.selected, 0);
+            assert_eq!(view.multi_pending, [0]);
+            assert!(view.answered.is_empty());
+
+            for _ in 0..100 {
+                wheel(&mut view, MouseEventKind::ScrollDown);
+            }
+            assert_eq!(view.scroll_offset.get(), view.max_scroll.get());
+            view.handle_key(KeyEvent::from(KeyCode::Down));
+            let focused = render_view(&view, width, height);
+            assert!(focused.contains("▸  2) Option 2"), "{focused}");
+            assert_eq!(view.multi_pending, [0]);
+            for _ in 0..100 {
+                wheel(&mut view, MouseEventKind::ScrollUp);
+            }
+            assert_eq!(view.scroll_offset.get(), 0);
+        }
+    }
+
+    #[test]
+    fn user_input_wheel_resize_and_typing_restore_custom_answer_visibility() {
+        let mut view = many_option_view();
+        view.selected = view.option_count() - 1;
+        view.handle_key(KeyEvent::from(KeyCode::Enter));
+        for ch in "retained custom answer".chars() {
+            view.handle_key(KeyEvent::from(KeyCode::Char(ch)));
+        }
+        render_view(&view, 40, 12);
+        wheel(&mut view, MouseEventKind::ScrollDown);
+        let narrow_offset = view.scroll_offset.get();
+        render_view(&view, 141, 38);
+        assert!(view.max_scroll.get() < narrow_offset);
+        assert_eq!(view.scroll_offset.get(), view.max_scroll.get());
+
+        render_view(&view, 40, 12);
+        for _ in 0..100 {
+            wheel(&mut view, MouseEventKind::ScrollUp);
+        }
+        let browsing = render_view(&view, 40, 12);
+        assert!(!browsing.contains("retained custom answer"));
+        view.handle_key(KeyEvent::from(KeyCode::Char('!')));
+        let editing = render_view(&view, 40, 12);
+        assert!(editing.contains("answer!"), "{editing}");
+        assert_eq!(view.other_input, "retained custom answer!");
+        view.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(view.answered[0][0].value, "retained custom answer!");
+        assert_eq!(view.question_index, 1);
+        view.handle_key(KeyEvent::from(KeyCode::Left));
+        assert_eq!(view.question_index, 0);
+        assert!(
+            view.answered.is_empty(),
+            "back navigation permits correction"
+        );
     }
 
     #[test]

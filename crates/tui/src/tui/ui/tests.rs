@@ -1551,40 +1551,40 @@ fn approval_prompt_keeps_transcript_page_navigation_live() {
         "approval-scroll-key",
     )));
 
-    assert!(handle_approval_transcript_key(
+    assert!(handle_prompt_transcript_key(
         &mut app,
         &KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
     ));
     assert_eq!(app.viewport.pending_scroll_delta, -12);
     assert_eq!(app.view_stack.top_kind(), Some(ModalKind::Approval));
 
-    assert!(handle_approval_transcript_key(
+    assert!(handle_prompt_transcript_key(
         &mut app,
         &KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
     ));
     assert_eq!(app.viewport.pending_scroll_delta, 0);
 
-    assert!(handle_approval_transcript_key(
+    assert!(handle_prompt_transcript_key(
         &mut app,
         &KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL),
     ));
     assert_eq!(app.viewport.pending_scroll_delta, -3);
 
-    assert!(handle_approval_transcript_key(
+    assert!(handle_prompt_transcript_key(
         &mut app,
         &KeyEvent::new(KeyCode::Home, KeyModifiers::NONE),
     ));
     assert!(app.viewport.pending_scroll_delta < -1_000_000);
     assert!(app.user_scrolled_during_stream);
 
-    assert!(handle_approval_transcript_key(
+    assert!(handle_prompt_transcript_key(
         &mut app,
         &KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
     ));
     assert_eq!(app.viewport.pending_scroll_delta, 0);
     assert!(!app.user_scrolled_during_stream);
 
-    assert!(handle_approval_transcript_key(
+    assert!(handle_prompt_transcript_key(
         &mut app,
         &KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT),
     ));
@@ -1592,7 +1592,7 @@ fn approval_prompt_keeps_transcript_page_navigation_live() {
     assert!(app.user_scrolled_during_stream);
 
     assert!(
-        !handle_approval_transcript_key(
+        !handle_prompt_transcript_key(
             &mut app,
             &KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
         ),
@@ -1605,11 +1605,157 @@ fn transcript_navigation_does_not_capture_keys_for_other_modals() {
     let mut app = create_test_app();
     app.view_stack.push(HelpView::new_for_locale(app.ui_locale));
 
-    assert!(!handle_approval_transcript_key(
+    assert!(!handle_prompt_transcript_key(
         &mut app,
         &KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
     ));
     assert_eq!(app.viewport.pending_scroll_delta, 0);
+}
+
+fn scroll_test_question_view() -> UserInputView {
+    use crate::tools::user_input::{UserInputOption, UserInputQuestion, UserInputRequest};
+
+    UserInputView::new(
+        "question-scroll",
+        UserInputRequest {
+            questions: vec![UserInputQuestion {
+                header: "Choose".into(),
+                id: "choice".into(),
+                question: "Review the transcript before choosing a path.".into(),
+                options: (1..=8)
+                    .map(|n| UserInputOption {
+                        label: format!("Option {n}"),
+                        description: "A detailed option description that must stay readable while reviewing the transcript and choosing an answer. ".repeat(2),
+                    })
+                    .collect(),
+                allow_free_text: true,
+                multi_select: false,
+            }],
+        },
+    )
+}
+
+#[test]
+fn user_input_prompt_keeps_transcript_navigation_and_answer_keys_separate() {
+    let mut app = create_test_app();
+    app.viewport.last_transcript_visible = 12;
+    app.view_stack.push(scroll_test_question_view());
+
+    for (code, modifiers, expected) in [
+        (KeyCode::PageUp, KeyModifiers::NONE, -12),
+        (KeyCode::PageDown, KeyModifiers::NONE, 0),
+        (KeyCode::Up, KeyModifiers::CONTROL, -3),
+        (KeyCode::Down, KeyModifiers::ALT, 0),
+        (KeyCode::Up, KeyModifiers::SHIFT, -3),
+    ] {
+        assert!(handle_prompt_transcript_key(
+            &mut app,
+            &KeyEvent::new(code, modifiers),
+        ));
+        assert_eq!(app.viewport.pending_scroll_delta, expected);
+        assert_eq!(app.view_stack.top_kind(), Some(ModalKind::UserInput));
+    }
+    assert!(handle_prompt_transcript_key(
+        &mut app,
+        &KeyEvent::from(KeyCode::Home),
+    ));
+    assert!(app.viewport.pending_scroll_delta < -1_000_000);
+    assert!(handle_prompt_transcript_key(
+        &mut app,
+        &KeyEvent::from(KeyCode::End),
+    ));
+    assert_eq!(app.viewport.pending_scroll_delta, 0);
+
+    for code in [
+        KeyCode::Up,
+        KeyCode::Down,
+        KeyCode::Left,
+        KeyCode::Char('h'),
+    ] {
+        assert!(!handle_prompt_transcript_key(
+            &mut app,
+            &KeyEvent::from(code),
+        ));
+    }
+    app.view_stack.handle_key(KeyEvent::from(KeyCode::Down));
+    let events = app.view_stack.handle_key(KeyEvent::from(KeyCode::Enter));
+    assert!(
+        matches!(events.as_slice(), [ViewEvent::UserInputSubmitted { response, .. }]
+        if response.answers.len() == 1 && response.answers[0].value == "Option 2")
+    );
+
+    app.view_stack.push(scroll_test_question_view());
+    app.view_stack
+        .handle_key(KeyEvent::from(KeyCode::Char('9')));
+    for ch in "custom answer".chars() {
+        let key = KeyEvent::from(KeyCode::Char(ch));
+        assert!(!handle_prompt_transcript_key(&mut app, &key));
+        app.view_stack.handle_key(key);
+    }
+    assert!(handle_prompt_transcript_key(
+        &mut app,
+        &KeyEvent::from(KeyCode::PageUp),
+    ));
+    let events = app.view_stack.handle_key(KeyEvent::from(KeyCode::Enter));
+    assert!(
+        matches!(events.as_slice(), [ViewEvent::UserInputSubmitted { response, .. }]
+        if response.answers.len() == 1 && response.answers[0].value == "custom answer")
+    );
+}
+
+#[test]
+fn user_input_wheel_routes_by_painted_sheet_and_preserves_side_surface_ownership() {
+    for (width, height) in [(40, 12), (80, 24), (100, 32), (141, 38)] {
+        let mut app = create_test_app();
+        app.view_stack.push(scroll_test_question_view());
+        let config = Config::default();
+        let before = render_test_app(&mut app, &config, width, height);
+        let area = Rect::new(0, 0, width, height);
+        let sheet = app
+            .viewport
+            .last_prompt_area
+            .expect("painted question sheet");
+        assert_eq!(Some(sheet), app.view_stack.top_occupied_region(area));
+
+        // The visible sheet outranks any work surface painted beneath it.
+        app.work_surface.last_area = Some(area);
+        let events = handle_mouse_event(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: sheet.x + sheet.width / 2,
+                row: sheet.y + sheet.height / 2,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert!(events.is_empty());
+        assert_eq!(app.viewport.pending_scroll_delta, 0);
+        let after = render_test_app(&mut app, &config, width, height);
+        let sheet_start = usize::from(sheet.y) * usize::from(width);
+        let before_sheet: String = before.chars().skip(sheet_start).collect();
+        let after_sheet: String = after.chars().skip(sheet_start).collect();
+        assert_ne!(
+            before_sheet, after_sheet,
+            "wheel must move sheet content at {width}x{height}"
+        );
+        assert_eq!(app.view_stack.top_kind(), Some(ModalKind::UserInput));
+
+        if sheet.y > 0 {
+            app.work_surface.last_area = Some(Rect::new(0, 0, width / 2, sheet.y));
+            for (column, expected) in [(1, 0), (width - 1, -3)] {
+                handle_mouse_event(
+                    &mut app,
+                    MouseEvent {
+                        kind: MouseEventKind::ScrollUp,
+                        column,
+                        row: 0,
+                        modifiers: KeyModifiers::NONE,
+                    },
+                );
+                assert_eq!(app.viewport.pending_scroll_delta, expected);
+            }
+        }
+    }
 }
 
 #[test]
@@ -1818,7 +1964,7 @@ fn approval_wheel_preserves_work_surface_ownership() {
         "approval-scroll-key",
     )));
     app.work_surface.last_area = Some(Rect::new(0, 0, 30, 20));
-    app.viewport.last_approval_area = Some(Rect::new(0, 12, 80, 8));
+    app.viewport.last_prompt_area = Some(Rect::new(0, 12, 80, 8));
 
     for (column, row) in [(10, 4), (20, 4)] {
         let events = handle_mouse_event(

@@ -940,9 +940,9 @@ pub struct ViewportState {
     /// Last left-click trace over the composer, for double/triple-click
     /// word/line selection (crossterm does not decode click counts).
     pub composer_click_trace: Option<crate::tui::mouse_ui::ComposerClickTrace>,
-    /// Painted band occupied by the active inline approval. Stored so wheel
-    /// routing can prefer the visible card over side surfaces underneath it.
-    pub last_approval_area: Option<Rect>,
+    /// Painted band occupied by the active approval or question sheet. Stored
+    /// so wheel routing can prefer the prompt over side surfaces underneath it.
+    pub last_prompt_area: Option<Rect>,
     /// WorkflowPanel rect above the composer (#4121), for mouse toggle/cancel.
     pub last_workflow_panel_area: Option<Rect>,
     pub last_workflow_cancel_area: Option<Rect>,
@@ -989,7 +989,7 @@ impl Default for ViewportState {
             last_composer_area: None,
             interaction_targets: crate::tui::tideline::InteractionRegistry::default(),
             composer_click_trace: None,
-            last_approval_area: None,
+            last_prompt_area: None,
             last_workflow_panel_area: None,
             last_workflow_cancel_area: None,
             last_infoline_hitboxes: Vec::new(),
@@ -5578,7 +5578,7 @@ impl App {
         self.viewport.transcript_selection.clear();
 
         self.viewport.last_transcript_area = None;
-        self.viewport.last_approval_area = None;
+        self.viewport.last_prompt_area = None;
         self.viewport.last_transcript_top = 0;
         // Seed visible height from the resize event so paging keys use a
         // useful page size immediately, before the next render updates it.
