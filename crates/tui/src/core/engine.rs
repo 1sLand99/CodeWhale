@@ -900,12 +900,6 @@ pub struct Engine {
     /// — when LSP is disabled in config, this is an inert manager that
     /// always returns `None` from `diagnostics_for`.
     lsp_manager: Arc<crate::lsp::LspManager>,
-    /// Session-scoped workshop variable store (#548). Shared across all tool
-    /// calls so `last_tool_result` persists within the session and can be
-    /// promoted to the parent context via `promote_to_context`.
-    workshop_vars: Option<
-        std::sync::Arc<tokio::sync::Mutex<crate::tools::large_output_router::WorkshopVariables>>,
-    >,
     /// External sandbox backend (#516). When `Some`, exec_shell routes commands
     /// through this instead of spawning a local process.
     sandbox_backend: Option<std::sync::Arc<dyn crate::sandbox::backend::SandboxBackend>>,
@@ -1683,17 +1677,6 @@ impl Engine {
             None => crate::lsp::LspManager::disabled(),
         });
 
-        // Workshop variable store (#548). Created unconditionally so the Arc
-        // can be handed to every ToolContext; routing is gated on the router
-        // field being Some rather than on the vars Arc being present.
-        let workshop_vars: Option<
-            std::sync::Arc<
-                tokio::sync::Mutex<crate::tools::large_output_router::WorkshopVariables>,
-            >,
-        > = Some(std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::tools::large_output_router::WorkshopVariables::default(),
-        )));
-
         // External sandbox backend (#516). Logged but non-fatal: if the
         // backend fails to construct, the engine continues with local
         // execution as the fallback.
@@ -1778,7 +1761,6 @@ impl Engine {
             turn_counter: 0,
             lsp_manager,
             pending_lsp_blocks: Vec::new(),
-            workshop_vars,
             sandbox_backend,
             sandbox_enforcement,
             current_mode: AppMode::Agent,
@@ -6400,14 +6382,14 @@ impl Engine {
             ctx = ctx.with_network_policy(decider.clone());
         }
 
-        // Adaptive evidence routing is engine-native and always present.
-        // `[workshop]` only customizes thresholds; it no longer gates storage.
-        if let Some(vars_arc) = self.workshop_vars.as_ref() {
-            let router = crate::tools::large_output_router::LargeOutputRouter::new(
-                self.config.workshop.clone().unwrap_or_default(),
-            );
-            ctx = ctx.with_large_output_router(router, vars_arc.clone());
-        }
+        // Adaptive evidence routing is engine-native and opt-in
+        // (`CODEWHALE_ADAPTIVE_OUTPUT_ROUTING`); `[workshop]` only customizes
+        // thresholds. The router stays attached so an enabled process stamps
+        // routing metadata without rebuilding the context.
+        let router = crate::tools::large_output_router::LargeOutputRouter::new(
+            self.config.workshop.clone().unwrap_or_default(),
+        );
+        ctx = ctx.with_large_output_router(router);
 
         // Wire the external sandbox backend (#516). exec_shell checks this
         // field and routes commands through the backend instead of spawning

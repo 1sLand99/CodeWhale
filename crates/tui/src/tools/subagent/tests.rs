@@ -17551,7 +17551,8 @@ fn subagent_tool_results_spill_to_disk_and_stay_bounded_inline() {
         // `apply_spillover_with_artifact`, so the bytes land in a session
         // artifact that `retrieve_tool_result` resolves — withholding the
         // handle only cost the model the turn it spent rediscovering it.
-        assert!(inline.len() <= 21 * 1024);
+        // Classic lane: 32 KiB head + 8 KiB tail + footer.
+        assert!(inline.len() <= 42 * 1024);
         assert!(!inline.contains(crate::tools::truncate::SPILLOVER_PREVIEW_HINT));
         assert!(inline.contains("of output omitted"));
         assert!(inline.contains("full output at"));
@@ -17587,7 +17588,7 @@ fn subagent_tool_results_spill_to_disk_and_stay_bounded_inline() {
             format!("Error: {raw}"),
         );
         assert!(spilled.is_some());
-        assert!(bounded_err.len() <= 21 * 1024);
+        assert!(bounded_err.len() <= 42 * 1024);
         assert!(bounded_err.contains("of output omitted"));
         assert!(bounded_err.contains(crate::tools::truncate::SPILLOVER_RECOVERY_HINT));
         assert!(!bounded_err.contains("Exact evidence retained"));

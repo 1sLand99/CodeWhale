@@ -10948,7 +10948,7 @@ fn bound_subagent_tool_result(
     } else {
         ToolResult::error(content)
     };
-    let path = crate::tools::truncate::apply_spillover_with_artifact(
+    let path = crate::tools::truncate::apply_spillover_with_artifact_including_errors(
         &mut result,
         &spill_id,
         tool_name,
