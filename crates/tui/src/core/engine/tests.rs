@@ -22114,7 +22114,11 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
     fs::write(
         &config_path,
         serde_json::to_vec(&json!({
-            "timeouts": { "connect_timeout": 10 },
+            // `slow` must still be connecting when the fast build completes,
+            // and `fast` must not be declared dead while a cold Windows runner
+            // spawns Node. Ordering here is proven by the release files below,
+            // never by a timeout, so this bound only has to outlast the test.
+            "timeouts": { "connect_timeout": 120 },
             "servers": {
                 "fast": { "command": node, "args": [server, "fast", tmp.path()] },
                 "slow": { "command": node, "args": [server, "slow", tmp.path()] },
@@ -22145,7 +22149,10 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
     // Separate Windows/CI process startup from the schema-wait assertion.
     // Both children have received initialize, but neither can answer until
     // this test releases its own gate. No fixed delay stands in for readiness.
-    tokio::time::timeout(Duration::from_secs(10), async {
+    // The budget is generous because it covers two cold Node spawns on a
+    // windows-latest runner that has just finished a ~15 min compile; a tight
+    // bound here fails the setup, not the behavior under test.
+    tokio::time::timeout(Duration::from_secs(60), async {
         while !tmp.path().join("started-fast").exists() || !tmp.path().join("started-slow").exists()
         {
             engine.drain_mcp_boot_updates().await;

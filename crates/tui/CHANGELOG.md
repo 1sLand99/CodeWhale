@@ -200,6 +200,13 @@ reconnect.
 
 ### Changed
 
+- How long Codewhale waits for a human is configurable. `[tools]
+  user_input_timeout_seconds` governs the wait for an approval decision or a
+  `request_user_input` answer; it was a hardcoded 300 seconds, which silently
+  cancelled the work of anyone who stepped away mid-task. An explicit `0`
+  waits indefinitely, the value is clamped to 24 hours, and omitting the key
+  keeps the previous 300-second default. Documented in
+  `docs/CONFIGURATION.md` ([#6003](https://github.com/Hmbown/Codewhale/issues/6003)).
 - `docs/PROVIDERS.md` lists every beginner setup template, not the four it
   happened to mention when the page was written. Baseten, Groq, Cerebras and
   Command Code have shipped as supported OpenAI-compatible hosts for a while
