@@ -30,13 +30,16 @@ export const CHANGELOG: ChangelogRelease[] = [
   },
   {
     "version": "0.9.13",
-    "date": "2026-09-10",
+    "date": "2026-09-11",
     "unreleased": false,
     "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.9.12...v0.9.13",
     "sections": [
       {
         "heading": "Fixed",
         "items": [
+          "Direct composer paste (Ctrl-V) preserves rich clipboard headings, lists, links, tables and code as Markdown, with plain-text fallback. Whole-answer copy preserves authored Markdown without terminal wrapping; settings fields still paste literal text.",
+          "The embedded Computer Use bundle includes the marketplace's JPEG capture and bounded-payload fixes, so new built-in installations receive them too.",
+          "A provider's missing-thought_signature HTTP 400 now explains how to recover: use the built-in Google provider and start a new session, or verify the gateway's signature handling. Working gateways are not blocked by a broader preflight check (#6048).",
           "The sandbox-elevation prompt shows every option, Abort included. The card was a fixed 22 rows centred on the frame; inside its border and padding that left at most 18 usable rows against 20 to 23 rows of content, with no scroll rail and no truncation hint. The safe exit — the one choice that grants nothing — was painted past the bottom edge at every terminal size. The card is measured from its content now and reserves the option rows before the denial detail, which is what…",
           "d in the Hotbar setup modal asks before it clears every slot. It persisted hotbar = [] on the first keystroke, in a view that takes bare letters as its filter — the destructive key and the search key were the same press. It arms a confirmation that owns every key until answered, and the prompt takes the intro's place in the header so it cannot be the line that falls off a five-row budget.",
           "Failure red means failure again. The metrics line painted the context reading in the error colour from 80 %, while the posture bar one row above called the identical threshold Attention; the workflow panel painted a Waiting row like a crashed one, though its own is_running counts Waiting as healthy; and the work surface spent error_fg on to-dos that were merely waiting, blocked or stale, and on the routine approach to auto-compaction. WorkTone has a real Failure variant now,…",
@@ -45,12 +48,9 @@ export const CHANGELOG: ChangelogRelease[] = [
           "Auto-compact could not fire mid-turn. The gate read max(last billed prompt, /4 estimate of the whole list), so as soon as the estimator undercounted the full list below the last bill, every tool result appended after that prompt was invisible to it, and a long turn could exhaust the context window with nothing compacted. It now reads live tokens — the billed prompt plus the growth since it, watermarked when the parent usage is recorded — and is still evaluated at the…",
           "Esc or Ctrl+C during a compaction that is serving an in-flight turn now stops the turn. It previously cancelled only the compaction pass, so the turn resumed against the context that had just failed to shrink. A manual /compact with no request in flight still cancels only the pass.",
           "The request_user_input dialog is a bottom-anchored sheet instead of a centered 22-row overlay. It leaves the transcript visible above it, grows with its content, and scrolls internally so the highlighted option and the custom response being typed stay on screen at 141x38 and 80x24. Left arrow or h goes back to the previous question; Esc still cancels the whole request. Documented in GUIDE.md and KEYBINDINGS.md (#6045).",
-          "/mcp reload no longer freezes the interface. The reload was awaiting the whole reconnect batch on the TUI event loop; it now joins the same supervised background pass the session boot uses, the status chip counts the batch down live, and the finished receipt arrives as an event. With 23 configured servers (11 live, 10 awaiting auth, 2 failing) the first echoed keystroke after a reload lands in ~5 s instead of ~42 s (#5974).",
-          "The posture bar no longer states the same duration twice on a first turn (#6041).",
-          "Reasoning-capable models whose id carries no version substring (deepseek-flash) keep reasoning_content in the thinking block instead of the answer text. The gate only ever matched the literal deepseek-v4 version string, so it now consults the model catalog as well; the older literal arms remain for the V4 aliases they were written for (#6044).",
-          "codewhale model resolve accepts a provider's declared default even when its registry row is missing — deepseek-flash failed resolution against the provider that declares it as default — and a test now resolves every provider's DEFAULT_*_MODEL for its own provider (#6043)."
+          "/mcp reload no longer freezes the interface. The reload was awaiting the whole reconnect batch on the TUI event loop; it now joins the same supervised background pass the session boot uses, the status chip counts the batch down live, and the finished receipt arrives as an event. With 23 configured servers (11 live, 10 awaiting auth, 2 failing) the first echoed keystroke after a reload lands in ~5 s instead of ~42 s (#5974)."
         ],
-        "itemCount": 46
+        "itemCount": 49
       },
       {
         "heading": "Changed",
