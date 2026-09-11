@@ -3202,7 +3202,9 @@ impl ConfigToml {
                     .get_or_insert_with(HookSinksToml::default)
                     .unix_socket_path = Some(PathBuf::from(value));
             }
-            _ if key.contains('.') => {
+            // The MCP stdio dispatcher persists this established literal key
+            // as JSON text; it is not a nested TOML setting.
+            _ if key.contains('.') && key != "mcp.server_definitions" => {
                 let (table, field) = key.rsplit_once('.').expect("dotted key");
                 bail!(
                     "`config set` does not support nested key `{key}`; edit `{field}` in the [{table}] table of config.toml instead (use a TOML value of the documented type). No value was changed."
