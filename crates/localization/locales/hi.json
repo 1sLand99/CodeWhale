@@ -168,6 +168,7 @@
   "HotbarSetupDirtyModified": "संशोधित",
   "HotbarSetupDirtyClean": "साफ़",
   "HotbarSetupNoAction": "कोई क्रिया नहीं",
+  "HotbarSetupConfirmDisable": "हॉटबार बंद करें और सभी स्लॉट खाली करें? (y/n)",
   "HotbarSetupStatusLine": "स्लॉट {slot} | {action} | {dirty}",
   "HotbarSetupSlotOutOfRange": "Hotbar स्लॉट {slot} 1-{max} की सीमा से बाहर है",
   "HotbarSetupNoActionSelected": "कोई क्रिया चुनी नहीं गई।",

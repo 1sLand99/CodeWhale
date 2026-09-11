@@ -168,6 +168,7 @@
   "HotbarSetupDirtyModified": "modificat",
   "HotbarSetupDirtyClean": "net",
   "HotbarSetupNoAction": "Cap acció",
+  "HotbarSetupConfirmDisable": "Desactivar la Hotbar i buidar totes les ranures? (y/n)",
   "HotbarSetupStatusLine": "ranura {slot} | {action} | {dirty}",
   "HotbarSetupSlotOutOfRange": "La ranura {slot} de Hotbar és fora de 1-{max}",
   "HotbarSetupNoActionSelected": "No hi ha cap acció seleccionada.",

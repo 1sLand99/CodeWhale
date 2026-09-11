@@ -168,6 +168,7 @@
   "HotbarSetupDirtyModified": "変更あり",
   "HotbarSetupDirtyClean": "未変更",
   "HotbarSetupNoAction": "アクションなし",
+  "HotbarSetupConfirmDisable": "Hotbar を無効にして全スロットを消去しますか? (y/n)",
   "HotbarSetupStatusLine": "スロット {slot} | {action} | {dirty}",
   "HotbarSetupSlotOutOfRange": "Hotbarスロット {slot} は 1-{max} の範囲外です",
   "HotbarSetupNoActionSelected": "アクションが選択されていません。",

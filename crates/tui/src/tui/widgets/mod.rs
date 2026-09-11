@@ -2520,7 +2520,7 @@ fn inline_region_for(area: Rect, body: &[Line<'static>], controls: &[Line<'stati
 /// Terminal rows `lines` occupy under the exact ratatui word-wrap used by the
 /// renderer. Exact measurement keeps localized controls and their mouse
 /// hitboxes aligned without padding the compact approval band.
-fn measure_wrapped_rows(lines: &[Line<'static>], width: u16) -> u16 {
+fn measure_wrapped_rows(lines: &[Line<'_>], width: u16) -> u16 {
     if width == 0 {
         return lines.len() as u16;
     }
@@ -3149,15 +3149,6 @@ impl Renderable for ElevationWidget<'_> {
         use codewhale_localization::tr;
 
         let popup_width = 70.min(area.width.saturating_sub(4));
-        let popup_height = 22.min(area.height.saturating_sub(4));
-        let popup_area = Rect {
-            x: (area.width.saturating_sub(popup_width)) / 2,
-            y: (area.height.saturating_sub(popup_height)) / 2,
-            width: popup_width,
-            height: popup_height,
-        };
-
-        Clear.render(popup_area, buf);
 
         let mut lines = vec![
             Line::from(""),
@@ -3289,6 +3280,74 @@ impl Renderable for ElevationWidget<'_> {
             ]));
         }
 
+        // Reserve the options before the explanation. `Abort` is the last row of
+        // that list, so a card sized to its preamble hides the safe exit with no
+        // scroll rail and no hint that anything is missing. The denial detail is
+        // what gets shortened; the choices never do.
+        //
+        // `Padding::uniform(1)` inside `Borders::ALL` costs two rows and two
+        // columns on each axis.
+        const CHROME: u16 = 4;
+        let inner_width = popup_width.saturating_sub(CHROME);
+        let max_inner_height = area.height.saturating_sub(2).saturating_sub(CHROME);
+
+        let mut option_lines = lines.split_off(option_start);
+        // Each option is a label row followed by a description row. On a terminal
+        // too small for both, the description is chrome and the choice is
+        // content, so the descriptions go first and every option keeps its row.
+        let mut rows_per_option = 2usize;
+        if measure_wrapped_rows(&option_lines, inner_width) > max_inner_height {
+            option_lines = option_lines
+                .into_iter()
+                .enumerate()
+                .filter_map(|(idx, line)| (idx % 2 == 0).then_some(line))
+                .collect();
+            rows_per_option = 1;
+        }
+        let option_rows = measure_wrapped_rows(&option_lines, inner_width);
+        // Trim the denial detail down to the title rather than the option list.
+        let mut truncated = false;
+        while lines.len() > 2
+            && measure_wrapped_rows(&lines, inner_width).saturating_add(option_rows)
+                > max_inner_height
+        {
+            lines.pop();
+            truncated = true;
+        }
+        if truncated {
+            lines.push(Line::from(Span::styled(
+                approval_truncation_hint(self.locale),
+                Style::default().fg(palette::TEXT_MUTED),
+            )));
+        }
+
+        // Row offsets are measured after wrapping, not counted in source lines:
+        // a description that wraps used to push every hitbox below it out of
+        // step with the row the pointer was actually over.
+        let option_row_offsets = {
+            let mut offsets = Vec::with_capacity(self.request.options.len());
+            let mut row = measure_wrapped_rows(&lines, inner_width);
+            for pair in option_lines.chunks(rows_per_option) {
+                let height = measure_wrapped_rows(pair, inner_width);
+                offsets.push((row, height));
+                row = row.saturating_add(height);
+            }
+            offsets
+        };
+        lines.extend(option_lines);
+
+        let popup_height = measure_wrapped_rows(&lines, inner_width)
+            .saturating_add(CHROME)
+            .min(area.height.saturating_sub(2));
+        let popup_area = Rect {
+            x: (area.width.saturating_sub(popup_width)) / 2,
+            y: (area.height.saturating_sub(popup_height)) / 2,
+            width: popup_width,
+            height: popup_height,
+        };
+
+        Clear.render(popup_area, buf);
+
         let title = tr(self.locale, MessageId::ElevationTitleRequired);
         let block = Block::default()
             .title(title)
@@ -3300,11 +3359,10 @@ impl Renderable for ElevationWidget<'_> {
         if let Some(hitboxes) = self.hitboxes {
             hitboxes.borrow_mut().clear();
             let content = block.inner(popup_area);
-            for i in 0..self.request.options.len() {
-                let y = content
-                    .y
-                    .saturating_add(u16::try_from(option_start + i * 2).unwrap_or(u16::MAX));
-                let height = 2u16.min(content.y.saturating_add(content.height).saturating_sub(y));
+            let content_bottom = content.y.saturating_add(content.height);
+            for (offset, rows) in option_row_offsets {
+                let y = content.y.saturating_add(offset);
+                let height = rows.min(content_bottom.saturating_sub(y));
                 if height > 0 {
                     hitboxes
                         .borrow_mut()
