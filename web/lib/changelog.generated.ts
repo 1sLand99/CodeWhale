@@ -55,6 +55,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Changed",
         "items": [
+          "docs/PROVIDERS.md lists every beginner setup template, not the four it happened to mention when the page was written. Baseten, Groq, Cerebras and Command Code have shipped as supported OpenAI-compatible hosts for a while and appeared nowhere in the provider documentation, which reads from outside exactly like not supporting them. The page now carries the full table — host, default model and key env for each — and states the rule it follows: a plain Chat Completions backend…",
           "Reasoning capability for the Kimi coding routes and the qwen3.x Model Studio deep-thinking ids is catalog data now rather than hardcoded match arms, and model_reasoning_capability reports a model nothing knows about as unknown instead of silently not reasoning-capable. model_supports_reasoning keeps its bool shape for existing callers, where unknown still reads as false. The ids that have no cited source yet keep their literal arms (#6032).",
           "The website uses Shannon Sans with versioned local font assets and retained serif, monospace, and language fallbacks. Terminal fonts are unchanged.",
           "codewhale metrics reports recorded model requests and stream recovery separately from provider-reported token usage, with coverage for missing and duplicate receipts. Status messages and cumulative snapshots do not add requests or count tokens again.",
@@ -67,7 +68,7 @@ export const CHANGELOG: ChangelogRelease[] = [
           "codewhale account keys set|remove|list no longer carry a hardcoded eight-provider list. Provider ids come from the control plane's public catalog (GET /api/model-providers), are validated locally against ^[a-z0-9][a-z0-9-]{0,63}$ before they reach a URL path, and list shows every catalog provider with its label and stored-key state. --from-local maps a catalog row onto the local runtime provider through the catalog's own runtimeProvider field, so a newly supported provider…",
           "/mcp lists the servers that need a login first, as their own Needs login group above Needs attention, and opens with the cursor already on the first such row so the Enter the screen advertises runs /mcp login <server> straight away; translated in all 15 packs. A snapshot test pins the footer shape the chip landed with (MCP · N connected · N ◆ auth required · N failed) so an expired login never regresses into the failed count (#5926)."
         ],
-        "itemCount": 11
+        "itemCount": 12
       },
       {
         "heading": "Fixed",

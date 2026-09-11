@@ -200,6 +200,15 @@ reconnect.
 
 ### Changed
 
+- `docs/PROVIDERS.md` lists every beginner setup template, not the four it
+  happened to mention when the page was written. Baseten, Groq, Cerebras and
+  Command Code have shipped as supported OpenAI-compatible hosts for a while
+  and appeared nowhere in the provider documentation, which reads from outside
+  exactly like not supporting them. The page now carries the full table —
+  host, default model and key env for each — and states the rule it follows:
+  a plain Chat Completions backend is a template row, while `ProviderKind` is
+  reserved for distinct wires. A test now fails if a shipped template is
+  missing from that page.
 - Reasoning capability for the Kimi coding routes and the qwen3.x Model Studio
   deep-thinking ids is catalog data now rather than hardcoded match arms, and
   `model_reasoning_capability` reports a model nothing knows about as unknown

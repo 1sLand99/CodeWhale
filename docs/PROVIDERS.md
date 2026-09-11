@@ -18,12 +18,28 @@ routes, generic OpenAI-compatible endpoints, the OpenAI Codex/ChatGPT route,
 native Anthropic, and local runtimes all run the same terminal harness against
 the selected provider/model/base URL.
 
-Beginner setup templates (`crates/config/src/provider_templates.rs`) cover
-OpenCode Zen, OpenCode Go, SenseNova, and Agnes. Zen/Go reuse the first-class
-routes below. SenseNova fills a named OpenAI-compatible table on
-`https://token.sensenova.cn/v1` with default model `deepseek-v4-flash`. Agnes
-has no published URL in this repository, so it is catalogued as unpublished
-and does not invent a host. `/provider` `P` opens the list; `S` still fills
+Beginner setup templates (`crates/config/src/provider_templates.rs`) are the
+supported path for hosted OpenAI-compatible backends. A host reached over plain
+Chat Completions is a template row, not a `ProviderKind`: enum variants are
+reserved for distinct *wires* (Anthropic Messages, Codex Responses, Google
+thought signatures), and a template's offerings come from live
+`GET /v1/models` plus the Codewhale catalog rather than a compiled roster
+(#5350). So a provider being a template is not a lesser form of support — it is
+where every Chat Completions host belongs.
+
+| Template | Apply | Base URL | Default model | API key env |
+| --- | --- | --- | --- | --- |
+| OpenCode Zen | first-class | reuses the Zen route below | — | — |
+| OpenCode Go | first-class | reuses the Go route below | — | — |
+| SenseNova | compatible | `https://token.sensenova.cn/v1` | `deepseek-v4-flash` | `SENSENOVA_API_KEY` |
+| Baseten | compatible | `https://inference.baseten.co/v1` | `deepseek-ai/DeepSeek-V4-Pro` | `BASETEN_API_KEY` |
+| Groq | compatible | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` | `GROQ_API_KEY` |
+| Cerebras | compatible | `https://api.cerebras.ai/v1` | `llama-3.3-70b` | `CEREBRAS_API_KEY` |
+| Command Code | compatible | `https://api.commandcode.ai/provider/v1` | `deepseek/deepseek-v4-flash` | `COMMAND_CODE_API_KEY` |
+| Agnes | unpublished | none in this repository | — | — |
+
+Agnes has no published URL here, so it is catalogued as unpublished rather than
+inventing a host. `/provider` `P` opens the template list; `S` still fills
 SenseNova; `T` probes `/models` and records reachability only (a 2xx is not
 model-ready).
 
