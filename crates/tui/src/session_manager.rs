@@ -2265,6 +2265,11 @@ impl SessionManager {
 
     /// Load a session by partial ID prefix
     pub fn load_session_by_prefix(&self, prefix: &str) -> std::io::Result<SavedSession> {
+        self.load_session(&self.resolve_session_id_prefix(prefix)?)
+    }
+
+    /// Resolve a unique ID without applying resume-time repair to its record.
+    pub(crate) fn resolve_session_id_prefix(&self, prefix: &str) -> std::io::Result<String> {
         let sessions = self.list_sessions()?;
 
         let matches: Vec<_> = sessions
@@ -2277,7 +2282,7 @@ impl SessionManager {
                 std::io::ErrorKind::NotFound,
                 format!("No session found with prefix: {prefix}"),
             )),
-            1 => self.load_session(&matches[0].id),
+            1 => Ok(matches[0].id.clone()),
             _ => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!(

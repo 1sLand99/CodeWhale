@@ -1,4 +1,8 @@
 {
+  "SessionArchiveExported": "Сеанс экспортирован",
+  "SessionArchiveSizes": "записи / размер без сжатия / размер архива",
+  "SessionArchiveNoArtifacts": "Обычные файлы артефактов для этого сеанса не найдены.",
+  "SessionArchiveRestoreHint": "Откройте извлечённую запись командой /load <session.json>; /resume импортирует только разговор. Извлечённые артефакты остаются отдельными файлами.",
   "ExtensionsActionAdd": "добавить",
   "ExtensionsActionEnable": "включить",
   "ExtensionsActionEdit": "Изменить",

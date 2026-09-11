@@ -1,4 +1,8 @@
 {
+  "SessionArchiveExported": "Sesi diekspor",
+  "SessionArchiveSizes": "jumlah entri / ukuran tanpa kompresi / arsip",
+  "SessionArchiveNoArtifacts": "Tidak ditemukan berkas artefak biasa untuk sesi ini.",
+  "SessionArchiveRestoreHint": "Buka catatan yang telah diekstrak dengan /load <session.json>; /resume hanya mengimpor percakapan. Artefak yang diekstrak tetap berupa berkas terpisah.",
   "ExtensionsActionAdd": "tambahkan",
   "ExtensionsActionEnable": "aktifkan",
   "ExtensionsActionEdit": "Ubah",

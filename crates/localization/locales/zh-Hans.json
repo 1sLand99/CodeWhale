@@ -1,4 +1,8 @@
 {
+  "SessionArchiveExported": "会话已导出",
+  "SessionArchiveSizes": "条目数 / 未压缩大小 / 归档大小",
+  "SessionArchiveNoArtifacts": "此会话没有常规产物文件。",
+  "SessionArchiveRestoreHint": "使用 /load <session.json> 打开解压后的记录；/resume 仅导入对话。解压后的产物仍作为独立文件保留。",
   "ExtensionsActionAdd": "添加",
   "ExtensionsActionEnable": "启用",
   "ExtensionsActionEdit": "编辑",

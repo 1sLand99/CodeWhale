@@ -83,6 +83,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Added",
         "items": [
+          "codewhale sessions export <id-or-unique-prefix> saves a .tar.xz archive with the durable record, portable session container, manifest and artifacts. Prefix exports preserve unfinished tool calls; confined reads reject linked artifact roots, and existing outputs require --force. Archives retain unredacted content; /load opens the extracted record without installing extracted artifacts (#6056, thanks @h3c-hexin and @asto18089).",
           "deepseek-flash (DeepSeek V4.1 Flash: text-only, 1M-token context, reasoning and tool calls) joins the catalog as DeepSeek's declared default, and the offline catalog seed matches it; the DeepSeek Pro listing no longer overstates the published price (#6025).",
           "codewhale doctor and the provider capability report now name DeepSeek's V4 Pro retirement while there is still time to act on it: a route on deepseek-v4-pro reports that DeepSeek routes it to deepseek-flash from 2026-09-14 and bills at Flash's price. The id keeps working, so nothing is rewritten for you — the point is that the substitution is the vendor's choice unless you make it yours first. A custom endpoint serving the same model string is untouched: DeepSeek's…",
           "Native plugin authoring guides now cover English and Chinese. The explicit offline converter supports selected portable Skills and static Streamable HTTP MCP declarations from OpenCode and DSH. Unsupported executable hooks, automatic OAuth and policy-bearing configurations are refused; generated bundles still require native installation, review and trust. Legacy SSE fallback is not reproduced (#5827, requested by @giancarlocp).",
@@ -93,10 +94,9 @@ export const CHANGELOG: ChangelogRelease[] = [
           "The rusty-alloc cargo feature on codewhale-tui and codewhale-cli opts the binaries into the rusty_alloc global allocator (the mimalloc v2.4.5 architecture remade in pure Rust — no C compiler or build script on that path) instead of the default mimalloc. It is off by default and the default build is unchanged; build with cargo build -p codewhale-tui --features rusty-alloc (#5872).",
           "The /theme picker now discovers valid user-authored custom:<name> overlays, previews their colors, highlights the active overlay, and preserves it when the picker is opened and committed without navigation (#5901).",
           "Compaction has two standing knobs next to [context] in config.toml: [compaction] summary_instructions (appended to the summarizer prompt on every manual and automatic pass; /compact <focus> still composes after it) and [compaction] retained_user_message_tokens (default 20 000, clamped 2 000..=200 000) for the verbatim user-message budget. Both are absent by default and absent means the pre-existing behavior. The /compact receipt names the effective budget and whether…",
-          "[tools] user_input_max_questions (default 6, 1..=10) and [tools] user_input_max_options (default 4, 2..=10) replace the hard-coded request_user_input limits; the validator, the tool schema and its description read one value, spawned children inherit the parent's ceilings, and a rejected payload names the ceiling it hit and the key to raise (#5949).",
-          "The slash menu shows a command's usage line and its subcommands as soon as a space is typed after the verb, filtered by what follows, so Tab completes /workspace wor to /workspace worktrees; /help states the focused command's usage in its detail slot (#5952)."
+          "[tools] user_input_max_questions (default 6, 1..=10) and [tools] user_input_max_options (default 4, 2..=10) replace the hard-coded request_user_input limits; the validator, the tool schema and its description read one value, spawned children inherit the parent's ceilings, and a rejected payload names the ceiling it hit and the key to raise (#5949)."
         ],
-        "itemCount": 17
+        "itemCount": 18
       },
       {
         "heading": "Contributors",

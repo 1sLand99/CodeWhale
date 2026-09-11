@@ -679,6 +679,29 @@ attached to the project you opened. Press `a` in the picker to show sessions
 from every workspace, or run `codewhale sessions` to list all saved sessions
 with last-updated timestamps before resuming a specific id.
 
+To archive the durable record and its artifacts, run:
+
+```sh
+codewhale sessions export <id-or-unique-prefix> --output session.tar.xz
+```
+
+The archive contains `session.json`, a portable `container.json`, a manifest,
+and regular files under `artifacts/`. Use `--skip-artifacts` for the record
+only, `--compression 0` through `9` to choose the xz preset (default `6`),
+and `--force` to replace an existing output. Store the archive outside the
+session store. Symlinks are skipped; linked artifact roots, hard links,
+nonportable filenames, and trees exceeding 64 directory levels or 100,000
+entries fail the export without replacing the destination.
+
+Unlike the sanitized Markdown `/export`, these archives retain unredacted
+session content, including system prompts, thinking, tool calls and results,
+journal branches, and approval receipts. Extract `session.json` and open it
+with `/load` in the TUI; `/resume` imports the conversation only. Extracted
+artifacts remain separate files and are not installed into the artifact store
+by `/load`. Pause writes before archiving if every artifact must reflect the
+same instant; growing files are bounded to their recorded size and shrinking
+files abort the export.
+
 To continue the exact running session from the web app, type `/rc` or launch
 with `codewhale rc`. Approve the one-time code in the system browser. While the
 lease is active, the browser owns new prompts and approvals and the terminal is

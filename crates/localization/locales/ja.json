@@ -1,4 +1,8 @@
 {
+  "SessionArchiveExported": "セッションをエクスポートしました",
+  "SessionArchiveSizes": "項目数 / 非圧縮サイズ / アーカイブサイズ",
+  "SessionArchiveNoArtifacts": "このセッションに通常のアーティファクトファイルはありません。",
+  "SessionArchiveRestoreHint": "展開した記録は /load <session.json> で開けます。/resume は会話のみを読み込みます。展開したアーティファクトは別ファイルのままです。",
   "ExtensionsActionAdd": "追加",
   "ExtensionsActionEnable": "有効化",
   "ExtensionsActionEdit": "編集",

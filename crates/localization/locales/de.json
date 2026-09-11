@@ -1,4 +1,8 @@
 {
+  "SessionArchiveExported": "Sitzung exportiert",
+  "SessionArchiveSizes": "Einträge / unkomprimierte Größe / Archivgröße",
+  "SessionArchiveNoArtifacts": "Keine regulären Artefaktdateien für diese Sitzung gefunden.",
+  "SessionArchiveRestoreHint": "Öffne den entpackten Datensatz mit /load <session.json>; /resume importiert nur das Gespräch. Entpackte Artefakte bleiben separate Dateien.",
   "ExtensionsActionAdd": "hinzufügen",
   "ExtensionsActionEnable": "aktivieren",
   "ExtensionsActionEdit": "Bearbeiten",

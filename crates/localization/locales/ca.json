@@ -1,4 +1,8 @@
 {
+  "SessionArchiveExported": "Sessió exportada",
+  "SessionArchiveSizes": "elements / mida sense comprimir / arxiu",
+  "SessionArchiveNoArtifacts": "No s’han trobat fitxers d’artefactes regulars en aquesta sessió.",
+  "SessionArchiveRestoreHint": "Obre el registre extret amb /load <session.json>; /resume només importa la conversa. Els artefactes extrets es mantenen com a fitxers separats.",
   "ExtensionsActionAdd": "afegeix",
   "ExtensionsActionEnable": "activa",
   "ExtensionsActionEdit": "Edita",

@@ -21,14 +21,14 @@ fn invalid_path() -> io::Error {
 
 #[cfg(unix)]
 #[derive(Debug)]
-pub(super) struct WorkspaceFile {
+pub(crate) struct WorkspaceFile {
     directory: File,
     filename: std::ffi::CString,
 }
 
 #[cfg(unix)]
 impl WorkspaceFile {
-    pub(super) fn open(workspace: &Path, relative: &Path, create: bool) -> io::Result<Self> {
+    pub(crate) fn open(workspace: &Path, relative: &Path, create: bool) -> io::Result<Self> {
         use std::os::fd::{AsRawFd, FromRawFd};
         use std::os::unix::ffi::OsStrExt;
         if !path_is_confined(relative) {
@@ -108,7 +108,7 @@ impl WorkspaceFile {
         )
     }
 
-    pub(super) fn open_file(&self) -> io::Result<File> {
+    pub(crate) fn open_file(&self) -> io::Result<File> {
         self.open_with_flags(libc::O_RDONLY)
     }
 
@@ -209,7 +209,7 @@ impl WorkspaceFile {
 
 #[cfg(windows)]
 #[derive(Debug)]
-pub(super) struct WorkspaceFile {
+pub(crate) struct WorkspaceFile {
     // Retaining every ancestor without delete/write sharing prevents a path
     // swap or junction replacement while path-based Windows calls are running.
     _ancestors: Vec<File>,
@@ -219,7 +219,7 @@ pub(super) struct WorkspaceFile {
 
 #[cfg(windows)]
 impl WorkspaceFile {
-    pub(super) fn open(workspace: &Path, relative: &Path, create: bool) -> io::Result<Self> {
+    pub(crate) fn open(workspace: &Path, relative: &Path, create: bool) -> io::Result<Self> {
         use std::os::windows::fs::OpenOptionsExt;
         if !path_is_confined(relative) {
             return Err(invalid_path());
@@ -307,7 +307,7 @@ impl WorkspaceFile {
         Ok(file)
     }
 
-    pub(super) fn open_file(&self) -> io::Result<File> {
+    pub(crate) fn open_file(&self) -> io::Result<File> {
         // Existing protected reader rejects reparse points, hard links and
         // non-regular files, and denies concurrent writes/replacement.
         crate::plugins::manifest::open_bundle_file(&self.directory.join(&self.filename))
@@ -499,10 +499,10 @@ mod windows_publication_tests {
 
 #[cfg(all(not(unix), not(windows)))]
 #[derive(Debug)]
-pub(super) struct WorkspaceFile;
+pub(crate) struct WorkspaceFile;
 #[cfg(all(not(unix), not(windows)))]
 impl WorkspaceFile {
-    pub(super) fn open(_: &Path, _: &Path, _: bool) -> io::Result<Self> {
+    pub(crate) fn open(_: &Path, _: &Path, _: bool) -> io::Result<Self> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "Confined Fleet artifact I/O is unavailable on this platform",
@@ -517,7 +517,7 @@ impl WorkspaceFile {
     pub(super) fn replace(&self, _: &[u8]) -> io::Result<()> {
         unreachable!()
     }
-    pub(super) fn open_file(&self) -> io::Result<File> {
+    pub(crate) fn open_file(&self) -> io::Result<File> {
         unreachable!()
     }
     pub(super) fn publish(&self, _: &[u8]) -> io::Result<()> {

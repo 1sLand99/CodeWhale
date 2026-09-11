@@ -1,4 +1,8 @@
 {
+  "SessionArchiveExported": "Exported session",
+  "SessionArchiveSizes": "members / uncompressed / archive",
+  "SessionArchiveNoArtifacts": "No regular artifacts found for this session.",
+  "SessionArchiveRestoreHint": "Open the extracted record with /load <session.json>; /resume imports the conversation only. Extracted artifacts remain separate files.",
   "ExtensionsActionAdd": "add",
   "ExtensionsActionEnable": "enable",
   "ExtensionsActionEdit": "Edit",

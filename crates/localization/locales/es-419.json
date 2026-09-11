@@ -1,4 +1,8 @@
 {
+  "SessionArchiveExported": "Sesión exportada",
+  "SessionArchiveSizes": "elementos / tamaño sin comprimir / archivo",
+  "SessionArchiveNoArtifacts": "No se encontraron archivos de artefactos regulares en esta sesión.",
+  "SessionArchiveRestoreHint": "Abre el registro extraído con /load <session.json>; /resume solo importa la conversación. Los artefactos extraídos permanecen como archivos separados.",
   "ExtensionsActionAdd": "agregar",
   "ExtensionsActionEnable": "habilitar",
   "ExtensionsActionEdit": "Editar",

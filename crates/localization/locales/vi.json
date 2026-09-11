@@ -1,4 +1,8 @@
 {
+  "SessionArchiveExported": "Đã xuất phiên",
+  "SessionArchiveSizes": "số mục / dung lượng chưa nén / tệp lưu trữ",
+  "SessionArchiveNoArtifacts": "Không tìm thấy tệp sản phẩm thông thường trong phiên này.",
+  "SessionArchiveRestoreHint": "Mở bản ghi đã giải nén bằng /load <session.json>; /resume chỉ nhập cuộc hội thoại. Các sản phẩm đã giải nén vẫn là những tệp riêng.",
   "ExtensionsActionAdd": "thêm",
   "ExtensionsActionEnable": "bật",
   "ExtensionsActionEdit": "Sửa",

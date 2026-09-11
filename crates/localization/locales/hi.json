@@ -1,4 +1,8 @@
 {
+  "SessionArchiveExported": "सत्र निर्यात किया गया",
+  "SessionArchiveSizes": "प्रविष्टियाँ / असंपीड़ित आकार / संग्रह का आकार",
+  "SessionArchiveNoArtifacts": "इस सत्र में कोई सामान्य आर्टिफ़ैक्ट फ़ाइल नहीं मिली।",
+  "SessionArchiveRestoreHint": "निकाले गए रिकॉर्ड को /load <session.json> से खोलें; /resume केवल बातचीत आयात करता है। निकाले गए आर्टिफ़ैक्ट अलग फ़ाइलों के रूप में रहते हैं।",
   "ExtensionsActionAdd": "जोड़ें",
   "ExtensionsActionEnable": "सक्षम करें",
   "ExtensionsActionEdit": "संपादित करें",

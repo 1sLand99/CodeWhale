@@ -1,4 +1,8 @@
 {
+  "SessionArchiveExported": "세션을 내보냈습니다",
+  "SessionArchiveSizes": "항목 수 / 압축 전 크기 / 아카이브 크기",
+  "SessionArchiveNoArtifacts": "이 세션에 일반 산출물 파일이 없습니다.",
+  "SessionArchiveRestoreHint": "압축을 푼 기록은 /load <session.json>으로 여세요. /resume은 대화만 가져옵니다. 압축을 푼 산출물은 별도 파일로 남습니다.",
   "ExtensionsActionAdd": "추가",
   "ExtensionsActionEnable": "활성화",
   "ExtensionsActionEdit": "편집",

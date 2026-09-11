@@ -404,6 +404,13 @@ reconnect.
 
 ### Added
 
+- `codewhale sessions export <id-or-unique-prefix>` saves a `.tar.xz` archive
+  with the durable record, portable session container, manifest and artifacts.
+  Prefix exports preserve unfinished tool calls; confined reads reject linked
+  artifact roots, and existing outputs require `--force`. Archives retain
+  unredacted content; `/load` opens the extracted record without installing
+  extracted artifacts (#6056, thanks @h3c-hexin and @asto18089).
+
 - `deepseek-flash` (DeepSeek V4.1 Flash: text-only, 1M-token context,
   reasoning and tool calls) joins the catalog as DeepSeek's declared default,
   and the offline catalog seed matches it; the DeepSeek Pro listing no longer

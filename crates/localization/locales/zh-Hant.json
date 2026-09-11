@@ -1,4 +1,8 @@
 {
+  "SessionArchiveExported": "工作階段已匯出",
+  "SessionArchiveSizes": "項目數 / 未壓縮大小 / 封存大小",
+  "SessionArchiveNoArtifacts": "此工作階段沒有一般產物檔案。",
+  "SessionArchiveRestoreHint": "使用 /load <session.json> 開啟解壓縮後的記錄；/resume 僅匯入對話。解壓縮後的產物仍保留為獨立檔案。",
   "ExtensionsActionAdd": "新增",
   "ExtensionsActionEnable": "啟用",
   "ExtensionsActionEdit": "編輯",

@@ -1,4 +1,8 @@
 {
+  "SessionArchiveExported": "Сеанс експортовано",
+  "SessionArchiveSizes": "записи / розмір без стиснення / розмір архіву",
+  "SessionArchiveNoArtifacts": "Звичайних файлів артефактів для цього сеансу не знайдено.",
+  "SessionArchiveRestoreHint": "Відкрийте видобутий запис командою /load <session.json>; /resume імпортує лише розмову. Видобуті артефакти залишаються окремими файлами.",
   "ExtensionsActionAdd": "додати",
   "ExtensionsActionEnable": "увімкнути",
   "ExtensionsActionEdit": "Змінити",

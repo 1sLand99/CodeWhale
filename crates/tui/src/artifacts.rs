@@ -53,7 +53,7 @@ fn sanitize_id_component(input: &str) -> String {
         .collect()
 }
 
-fn is_valid_session_id(session_id: &str) -> bool {
+pub(crate) fn is_valid_session_id(session_id: &str) -> bool {
     !session_id.is_empty()
         && session_id
             .chars()

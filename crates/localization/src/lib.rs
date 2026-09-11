@@ -120,6 +120,10 @@ impl Locale {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageId {
+    SessionArchiveExported,
+    SessionArchiveSizes,
+    SessionArchiveNoArtifacts,
+    SessionArchiveRestoreHint,
     CostReasonNotMoney,
     CostReasonBillingUnknown,
     CostReasonEndpointUnknown,
@@ -2429,6 +2433,10 @@ pub enum MessageId {
 
 #[allow(dead_code)]
 pub const ALL_MESSAGE_IDS: &[MessageId] = &[
+    MessageId::SessionArchiveExported,
+    MessageId::SessionArchiveSizes,
+    MessageId::SessionArchiveNoArtifacts,
+    MessageId::SessionArchiveRestoreHint,
     MessageId::CostReasonNotMoney,
     MessageId::CostReasonBillingUnknown,
     MessageId::CostReasonEndpointUnknown,
