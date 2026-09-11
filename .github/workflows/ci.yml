@@ -679,7 +679,9 @@ jobs:
     # ubuntu-only, so the required "npm wrapper smoke (ubuntu-latest)"
     # context is unaffected. Heavy pull requests execute the Ubuntu smoke
     # here; their branches may not be mirrored to CNB.
-    timeout-minutes: 30
+    # A cold Windows build can take 29 minutes before the smoke even starts.
+    # Leave room for installation; bound the smoke itself independently below.
+    timeout-minutes: 45
     runs-on: ${{ needs.changes.outputs.heavy == 'true' && matrix.os || 'ubuntu-latest' }}
     strategy:
       matrix:
@@ -733,6 +735,7 @@ jobs:
         run: cargo build --release --locked -p codewhale-cli -p codewhale-tui
       - name: Smoke wrapper install and delegated entrypoints
         if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
+        timeout-minutes: 5
         run: node scripts/release/npm-wrapper-smoke.js
       - name: sccache stats
         if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request') && steps.sccache.outcome == 'success'
