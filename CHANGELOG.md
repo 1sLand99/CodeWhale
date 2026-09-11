@@ -21,6 +21,28 @@ reconnect.
 
 ### Fixed
 
+- Live permission edits reach running engine clones atomically. Deny rules
+  support token wildcards and Windows command spellings while keeping POSIX
+  arguments literal (#6054, thanks @h3c-hexin and @asto18089).
+- Tool-result images use the existing typed inline path and are fully decoded
+  under size and allocation limits before admission or provider projection.
+  Invalid images keep a visible omission receipt alongside the text result
+  (adapted from #6053, thanks @h3c-hexin and @asto18089).
+
+- A lone `y`, `Y`, or `r` remains composer input after selecting transcript
+  text. Clicking the composer releases transcript and dock focus.
+- The Agents register updates from live worker events while the parent is
+  busy, including when the register opened before the workers spawned.
+- Ghostty no longer shows a second graphical whale over the launch mark.
+  The selected model stays visible before the first message; unused session
+  metrics stay quiet. Scheduled counts open `/automation` directly.
+- Marketplace installation accepts compatible Claude plugin bundles and roots
+  their relative sources outside `.claude-plugin`; unsupported components fail
+  explicitly. Native trust and enablement review still applies.
+- Config table and nested reads work consistently and redact credentials.
+  Unsupported dotted writes fail without changing the file, and `config doctor`
+  no longer labels runtime settings as never applied (#6083).
+
 - Esc during a worker fanout keeps the parent stopped when cancelled workers
   finish. Their receipts remain available for the next explicit user turn.
 - Undo preserves messages even when older state lacks a timestamp. Session

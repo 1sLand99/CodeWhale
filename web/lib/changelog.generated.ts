@@ -37,20 +37,20 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Fixed",
         "items": [
+          "Live permission edits reach running engine clones atomically. Deny rules support token wildcards and Windows command spellings while keeping POSIX arguments literal (#6054, thanks @h3c-hexin and @asto18089).",
+          "Tool-result images use the existing typed inline path and are fully decoded under size and allocation limits before admission or provider projection. Invalid images keep a visible omission receipt alongside the text result (adapted from #6053, thanks @h3c-hexin and @asto18089).",
+          "A lone y, Y, or r remains composer input after selecting transcript text. Clicking the composer releases transcript and dock focus.",
+          "The Agents register updates from live worker events while the parent is busy, including when the register opened before the workers spawned.",
+          "Ghostty no longer shows a second graphical whale over the launch mark. The selected model stays visible before the first message; unused session metrics stay quiet. Scheduled counts open /automation directly.",
+          "Marketplace installation accepts compatible Claude plugin bundles and roots their relative sources outside .claude-plugin; unsupported components fail explicitly. Native trust and enablement review still applies.",
+          "Config table and nested reads work consistently and redact credentials. Unsupported dotted writes fail without changing the file, and config doctor no longer labels runtime settings as never applied (#6083).",
           "Esc during a worker fanout keeps the parent stopped when cancelled workers finish. Their receipts remain available for the next explicit user turn.",
           "Undo preserves messages even when older state lacks a timestamp. Session journal entries retain their append-time stamps when saved again.",
           "Extension actions refresh in place, and inspection output uses the text pager. The empty launch shell hides unused metrics and keeps recovery hints readable when several MCP servers need attention.",
           "The large-output router defaults to bounded spillover; adaptive routing remains opt-in through CODEWHALE_ADAPTIVE_OUTPUT_ROUTING=1.",
-          "Direct composer paste (Ctrl-V) preserves rich clipboard headings, lists, links, tables and code as Markdown, with plain-text fallback. Whole-answer copy preserves authored Markdown without terminal wrapping; settings fields still paste literal text.",
-          "The embedded Computer Use bundle includes the marketplace's JPEG capture and bounded-payload fixes, so new built-in installations receive them too.",
-          "A provider's missing-thought_signature HTTP 400 now explains how to recover: use the built-in Google provider and start a new session, or verify the gateway's signature handling. Working gateways are not blocked by a broader preflight check (#6048, #6081, thanks @nightt5879).",
-          "Chinese documentation links resolve to the contributor guide and Windows screenshots from their translated paths (#6080, thanks @c020627).",
-          "GLM-5.3 reasoning controls follow the forced-thinking contract on Z.ai and BigModel routes, including low effort when a prior configuration requested thinking off (#6051, thanks @h3c-hexin and @asto18089).",
-          "Finance calls respect the session network policy, and model-facing shell, verifier, notification and Fleet guidance matches executable contracts (#6052, thanks @h3c-hexin and @asto18089).",
-          "The sandbox-elevation prompt shows every option, Abort included. The card was a fixed 22 rows centred on the frame; inside its border and padding that left at most 18 usable rows against 20 to 23 rows of content, with no scroll rail and no truncation hint. The safe exit — the one choice that grants nothing — was painted past the bottom edge at every terminal size. The card is measured from its content now and reserves the option rows before the denial detail, which is what…",
-          "d in the Hotbar setup modal asks before it clears every slot. It persisted hotbar = [] on the first keystroke, in a view that takes bare letters as its filter — the destructive key and the search key were the same press. It arms a confirmation that owns every key until answered, and the prompt takes the intro's place in the header so it cannot be the line that falls off a five-row budget."
+          "Direct composer paste (Ctrl-V) preserves rich clipboard headings, lists, links, tables and code as Markdown, with plain-text fallback. Whole-answer copy preserves authored Markdown without terminal wrapping; settings fields still paste literal text."
         ],
-        "itemCount": 56
+        "itemCount": 63
       },
       {
         "heading": "Changed",
