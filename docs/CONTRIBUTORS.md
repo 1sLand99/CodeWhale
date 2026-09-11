@@ -28,6 +28,15 @@ notes, and relevant issue/PR comments.
 ## Contributors by time
 
 <details open>
+<summary><strong>Unreleased</strong></summary>
+
+**Reports and reproductions**
+
+- **[Hmbown](https://github.com/Hmbown)** — identified missing recovery guidance when a compatible gateway rejects Gemini tool-call replay without thought signatures ([#6048](https://github.com/Hmbown/Codewhale/issues/6048)).
+
+</details>
+
+<details open>
 <summary><strong>v0.9.13 — paste integrity, dispatch safety, and the Computer Use bundle</strong></summary>
 
 **Merged or adapted contributions**
