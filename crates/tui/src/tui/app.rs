@@ -768,6 +768,14 @@ impl LaunchState {
         self.refresh_recent();
     }
 
+    /// True while the card is still painting — visible and not fully
+    /// dissolved. Hitboxes and clicks follow the paint, so a dissolved card
+    /// owns no rows.
+    #[must_use]
+    pub fn card_paintable(&self, now_ms: u128, motion_allowed: bool) -> bool {
+        self.visible && self.card_dissolve_progress(now_ms, motion_allowed) < 1.0
+    }
+
     /// How far the card has dissolved, `[0.0 intact ..= 1.0 gone]`. Reduced
     /// motion dissolves instantly: the same drawing at its endpoint.
     #[must_use]

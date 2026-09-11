@@ -1578,7 +1578,22 @@ pub fn empty_state_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
     // The opening screen is this screen: the launch card is the idle
     // transcript's own content, not a second surface painted over it.
     if app.launch.visible {
-        return launch_empty_state(app, area).lines;
+        // The first keystroke starts the dissolve clock; the card sinks by
+        // ink, not by position — every span eases toward the water behind it
+        // over `LAUNCH_CARD_DISSOLVE_MS`, and at the end the ambient surface
+        // (wordmark, caption, prompt) is what remains. Reduced motion takes
+        // the endpoint at once.
+        let motion_allowed = app.motion_policy().allows_decorative() && !app.low_motion;
+        let dissolve =
+            app.launch
+                .card_dissolve_progress(app.ambient_clock_ms, motion_allowed);
+        if dissolve < 1.0 {
+            let mut state = launch_empty_state(app, area);
+            if dissolve > 0.0 {
+                fade_lines(&mut state.lines, dissolve, app.ui_theme.surface_bg);
+            }
+            return state.lines;
+        }
     }
     let width = usize::from(area.width);
     let mut lines = vec![Line::from(""); usize::from(area.height / 4)];
@@ -1729,89 +1744,112 @@ fn mcp_launch_lines(app: &App, text_width: usize) -> Vec<Line<'static>> {
         Style::default().fg(theme.text_muted),
     )));
 
-    // Failures first: they are the reason this block exists. Glyph *and*
-    // state word carry the difference, so the distinction survives a
-    // monochrome terminal and a colour-blind reader.
-    let mut detail = |glyph: &str, label: &str, names: &[&str], color: Color| {
-        let text = mcp_detail_row(glyph, label, names, lane);
-        let mut spans = Vec::with_capacity(2);
-        if indent > 0 {
-            spans.push(Span::raw(" ".repeat(indent)));
-        }
-        spans.push(Span::styled(text, Style::default().fg(color)));
-        lines.push(Line::from(spans));
-    };
-    if !failed.is_empty() {
-        detail(
-            crate::tui::glyphs::FAILED,
-            tr(locale, MessageId::McpStateFailed).as_ref(),
-            &failed,
-            theme.error_fg,
-        );
-    }
-    if !needs_login.is_empty() {
-        detail(
-            crate::tui::glyphs::ATTENTION,
-            tr(locale, MessageId::McpStateAuthorizationRequired).as_ref(),
-            &needs_login,
-            theme.warning,
-        );
-    }
-
-    // The remedy, spelled as the command to type rather than as advice. A
-    // hint that does not fit is dropped whole: half a command is a lie.
-    let hint = match (needs_login.first(), failed.is_empty()) {
-        (Some(name), true) => format!("/mcp login {name}"),
-        (Some(name), false) => format!("/mcp{ITEM_SEPARATOR}/mcp login {name}"),
-        (None, false) => "/mcp".to_string(),
-        (None, true) => String::new(),
-    };
-    if !hint.is_empty() {
-        let hint = if text_display_width(&hint) <= lane {
-            Some(hint)
-        } else if lane >= text_display_width("/mcp") {
-            Some("/mcp".to_string())
-        } else {
-            None
+    // One problems row answers *which* and *what to type*: `✕` groups the
+    // failed names, `⚠` switches the group to names that want a login, and
+    // the remedy rides at the tail. Narrow panes shed the hint, then names
+    // from the tail into `+N`, and finally the row itself — never the
+    // summary. Glyph *and* state grouping carry the difference, so it
+    // survives a monochrome terminal and a colour-blind reader.
+    if !failed.is_empty() || !needs_login.is_empty() {
+        let hint = match (needs_login.first(), failed.is_empty()) {
+            (Some(name), true) => format!("/mcp login {name}"),
+            (Some(name), false) => format!("/mcp{ITEM_SEPARATOR}/mcp login {name}"),
+            (None, false) => "/mcp".to_string(),
+            (None, true) => String::new(),
         };
-        if let Some(hint) = hint {
+        let problems = mcp_problems_row(&failed, &needs_login, &hint, lane);
+        if let Some(text) = problems {
             let mut spans = Vec::with_capacity(2);
             if indent > 0 {
                 spans.push(Span::raw(" ".repeat(indent)));
             }
-            spans.push(Span::styled(hint, Style::default().fg(theme.text_hint)));
+            spans.push(Span::styled(
+                text,
+                Style::default().fg(if failed.is_empty() {
+                    theme.warning
+                } else {
+                    theme.error_fg
+                }),
+            ));
             lines.push(Line::from(spans));
         }
     }
     lines
 }
 
-/// One problem row: `✕ connection failed · alpha · beta`.
+/// One problems row: `✕ alibaba-cloud-ops · aws-mcp · ⚠ slack +4 · /mcp`.
 ///
-/// Names shed from the tail into a `+N` remainder and then out entirely, so a
-/// narrow pane loses detail rather than the state it is reporting. The total
-/// is not repeated here — the summary line directly above owns it, and this
-/// row exists to answer *which*.
-fn mcp_detail_row(glyph: &str, label: &str, names: &[&str], lane: usize) -> String {
+/// `✕` opens the failed group, `⚠` opens the needs-login group, and the
+/// remedy sits at the tail. Shedding folds names into `+N` from the tail
+/// while the remedy holds — at each width the named command is tried first,
+/// then bare `/mcp`, then none — and when even `✕ +2 · ⚠ +5` cannot fit
+/// the row is dropped whole: the summary above still says the count.
+fn mcp_problems_row(
+    failed: &[&str],
+    needs_login: &[&str],
+    hint: &str,
+    lane: usize,
+) -> Option<String> {
+    use crate::tui::glyphs::{ATTENTION, FAILED};
     use crate::tui::session_boot::ITEM_SEPARATOR;
-    let head = format!("{glyph} {label}");
-    for shown in (0..=names.len()).rev() {
-        let mut line = head.clone();
+
+    let group = |glyph: &str, names: &[&str], shown: usize, row: &mut String| {
+        if names.is_empty() {
+            return;
+        }
+        if !row.is_empty() {
+            row.push_str(ITEM_SEPARATOR);
+        }
+        row.push_str(glyph);
+        row.push(' ');
         if shown > 0 {
-            line.push_str(ITEM_SEPARATOR);
-            line.push_str(&names[..shown].join(ITEM_SEPARATOR));
+            row.push_str(&names[..shown].join(ITEM_SEPARATOR));
             let extra = names.len() - shown;
             if extra > 0 {
-                line.push_str(ITEM_SEPARATOR);
-                line.push('+');
-                line.push_str(&extra.to_string());
+                row.push_str(ITEM_SEPARATOR);
+                row.push('+');
+                row.push_str(&extra.to_string());
+            }
+        } else {
+            row.push('+');
+            row.push_str(&names.len().to_string());
+        }
+    };
+    let total = failed.len() + needs_login.len();
+    for shown in (0..=total).rev() {
+        let failed_shown = shown.min(failed.len());
+        let login_shown = shown.saturating_sub(failed_shown);
+        let mut body = String::new();
+        group(FAILED, failed, failed_shown, &mut body);
+        group(ATTENTION, needs_login, login_shown, &mut body);
+        for tail in [hint, "/mcp", ""] {
+            if tail.is_empty() && !hint.is_empty() && shown > 0 {
+                continue;
+            }
+            let mut row = body.clone();
+            if !tail.is_empty() {
+                row.push_str(ITEM_SEPARATOR);
+                row.push_str(tail);
+            }
+            if text_display_width(&row) <= lane {
+                return Some(row);
             }
         }
-        if text_display_width(&line) <= lane {
-            return line;
+    }
+    None
+}
+
+/// Ease every painted glyph toward the water behind it. `dissolve` is
+/// `card_dissolve_progress` — 0 is full ink, 1 is gone. Spans without a
+/// foreground (padding, blanks) carry nothing to fade.
+fn fade_lines(lines: &mut [Line<'static>], dissolve: f32, water: Color) {
+    for line in lines.iter_mut() {
+        for span in line.spans.iter_mut() {
+            if let Some(fg) = span.style.fg {
+                span.style.fg = Some(crate::tui::mark::lerp_color(fg, water, dissolve));
+            }
         }
     }
-    semantic_truncate(&head, lane)
 }
 
 /// How much of the card fits the pane. `New session` is never shed: it is the
@@ -2400,7 +2438,8 @@ mod launch_card_tests {
     /// out of twenty-three and reported every other state as a bare count, so
     /// ten servers sitting unauthenticated were invisible. Failed and
     /// needs-login are different problems with different fixes and must never
-    /// collapse into one row.
+    /// collapse into one clause — and the block is two lines at most now:
+    /// the summary owns the counts, one problems row names what broke.
     #[test]
     fn the_mcp_block_names_what_broke_and_separates_it_from_what_needs_a_login() {
         let app = with_mcp(app_with_recent(&["one", "two"], 2));
@@ -2410,39 +2449,28 @@ mod launch_card_tests {
             .iter()
             .find(|line| line.contains("MCP"))
             .expect("the MCP summary");
-        // The two states with a remedy lead the summary, so they are the last
-        // clauses shed when the measure runs out.
         assert!(summary.contains("connection failed (2)"), "{summary:?}");
         assert!(
             summary.contains("authorization required (5)"),
             "ten servers at not-logged-in were invisible before this: {summary:?}",
         );
-        // The rows below answer *which*, and never merge the two problems.
-        let failed = lines
+        // One problems row answers *which*: ✕ groups the failures, ⚠ groups
+        // the logins, and the remedy rides at the tail.
+        let problems: Vec<_> = lines
             .iter()
-            .find(|line| line.contains(crate::tui::glyphs::FAILED))
-            .expect("a failure row");
-        assert!(failed.contains("alibaba-cloud-ops"), "{failed:?}");
-        assert!(failed.contains("aws-mcp"), "{failed:?}");
-        assert!(
-            !failed.contains("slack"),
-            "an expired login is not a failure: {failed:?}",
-        );
-        let login = lines
-            .iter()
-            .find(|line| line.contains(crate::tui::glyphs::ATTENTION))
-            .expect("a needs-login row");
-        assert!(login.contains("authorization required"), "{login:?}");
-        assert!(login.contains("slack"), "{login:?}");
-        assert!(
-            !login.contains("alibaba-cloud-ops"),
-            "a failure is not a missing login: {login:?}",
-        );
-        // The remedy is the command to type, not advice about typing one.
-        assert!(
-            lines.iter().any(|line| line.contains("/mcp login ")),
-            "{lines:#?}",
-        );
+            .filter(|line| {
+                line.contains(crate::tui::glyphs::FAILED)
+                    || line.contains(crate::tui::glyphs::ATTENTION)
+            })
+            .collect();
+        assert_eq!(problems.len(), 1, "one problems row: {lines:#?}");
+        let row = problems[0];
+        assert!(row.contains("alibaba-cloud-ops"), "{row:?}");
+        assert!(row.contains("aws-mcp"), "{row:?}");
+        assert!(row.contains("slack"), "{row:?}");
+        // The remedy is the command to type, not advice about typing one —
+        // the named form sheds to bare `/mcp` before any name does.
+        assert!(row.contains("/mcp"), "{row:?}");
     }
 
     /// While the boot is in flight the block must not read as a finished one.

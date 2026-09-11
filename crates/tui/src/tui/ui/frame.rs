@@ -1372,19 +1372,22 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
     // it to the bottom (SHELL-DESIGN-20260901 §2.0) so scrolling up reads as
     // intentional. `keep_header` still governs it in mini mode — the row it
     // names moved, not the preference.
-    // `tui.metrics_line = "hidden"` gives the row to the transcript (#5950).
-    let info_height = if (mini && !mini_cfg.keep_header)
-        || app.metrics_line == crate::config::ChromeRowPreset::Hidden
-    {
-        0
-    } else {
-        info_row_height_for(size.height)
-    };
     // Evaluate the fully-idle predicate exactly once per frame. It decides
     // how many rows the rail may reserve and whether the idle ocean draws
     // its brand mark (in ChatWidget); calling it twice would let the
     // reservation and the render disagree inside a single frame.
     let idle_empty = crate::tui::widgets::should_render_empty_state(app);
+    // `tui.metrics_line = "hidden"` gives the row to the transcript (#5950).
+    // The fully-idle shell hides it too — `ctx 1%` measures a session that
+    // does not exist yet, which is noise, not information.
+    let info_height = if (mini && !mini_cfg.keep_header)
+        || app.metrics_line == crate::config::ChromeRowPreset::Hidden
+        || idle_empty
+    {
+        0
+    } else {
+        info_row_height_for(size.height)
+    };
     // The merged Tideline footer is the single bottom row (spec §3: slots
     // 6+8 collapsed; §5b `Constraint::Length(1)`): phase·cost·posture on the
     // left, depth·keys on the right. It hides with the rest of the footer
@@ -1622,8 +1625,13 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
         }
         // The launch card's rows are clickable where they painted. The row
         // offsets come from the same builder that produced the lines, so a
-        // hitbox cannot describe a row the transcript did not draw.
-        if app.launch.visible {
+        // hitbox cannot describe a row the transcript did not draw — and a
+        // fully dissolved card painted nothing this frame, so it owns no
+        // rows either.
+        if app
+            .launch
+            .card_paintable(app.ambient_clock_ms, app.motion_policy().allows_decorative())
+        {
             crate::tui::underwater::refresh_launch_row_hitboxes(app, chat_area);
         } else if !app.launch.row_hitboxes.is_empty() {
             app.launch.row_hitboxes.clear();
