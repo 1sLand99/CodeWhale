@@ -42,6 +42,44 @@ use base64::Engine as _;
 use image::{ImageBuffer, Rgba};
 
 const OSC52_MAX_BYTES: usize = 100 * 1024;
+#[cfg(any(
+    test,
+    target_os = "macos",
+    target_os = "windows",
+    all(target_os = "linux", not(target_env = "ohos"))
+))]
+const MAX_CLIPBOARD_HTML_BYTES: usize = 1024 * 1024;
+
+/// Convert rich clipboard content without loading its linked resources. Keep
+/// the plain representation as a lossless fallback for empty/oversized HTML.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    target_os = "windows",
+    all(target_os = "linux", not(target_env = "ohos"))
+))]
+fn clipboard_markdown(html: &str) -> Option<String> {
+    if html.len() > MAX_CLIPBOARD_HTML_BYTES {
+        return None;
+    }
+    let mut markdown = htmd::HtmlToMarkdown::builder()
+        .options(htmd::options::Options {
+            preformatted_code: true,
+            ..Default::default()
+        })
+        .skip_tags(vec!["script", "style", "head", "iframe", "object"])
+        .build()
+        .convert(html)
+        .ok()?;
+    // A standalone H1 must not become the `# note` memory shortcut. Setext
+    // is equivalent Markdown and remains multi-line after composer trimming.
+    if let Some(heading) = markdown.trim().strip_prefix("# ")
+        && !heading.contains('\n')
+    {
+        markdown = format!("{heading}\n===");
+    }
+    (!markdown.trim().is_empty() && markdown.len() <= MAX_CLIPBOARD_HTML_BYTES).then_some(markdown)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClipboardEndpoint {
@@ -373,6 +411,21 @@ impl ClipboardHandler {
     /// `workspace` is used as a fallback location when `~/.codewhale/` cannot
     /// be resolved (e.g. running with a stripped HOME in CI sandboxes).
     pub fn read(&mut self, workspace: &Path) -> Option<ClipboardContent> {
+        self.read_content(workspace, false)
+    }
+
+    /// Composer paste preserves headings, lists, links, tables and code from
+    /// rich applications. Credentials and configuration fields use `read` so
+    /// their literal text is never interpreted as Markdown.
+    pub fn read_markdown(&mut self, workspace: &Path) -> Option<ClipboardContent> {
+        self.read_content(workspace, true)
+    }
+
+    fn read_content(
+        &mut self,
+        workspace: &Path,
+        prefer_markdown: bool,
+    ) -> Option<ClipboardContent> {
         // With no display exported over SSH there is no synchronously readable
         // clipboard endpoint. A forwarded X11/Wayland display is explicit and
         // remains readable, including its image clipboard.
@@ -381,7 +434,7 @@ impl ClipboardHandler {
         }
 
         #[cfg(all(target_os = "linux", not(target_env = "ohos"), not(test)))]
-        if let Ok(text) = read_text_with_wlpaste() {
+        if !prefer_markdown && let Ok(text) = read_text_with_wlpaste() {
             return Some(ClipboardContent::Text(text));
         }
 
@@ -392,19 +445,31 @@ impl ClipboardHandler {
         ))]
         {
             self.ensure_clipboard();
-            let clipboard = self.clipboard.as_mut()?;
-            if let Ok(text) = clipboard.get_text() {
-                return Some(ClipboardContent::Text(text));
-            }
+            if let Some(clipboard) = self.clipboard.as_mut() {
+                if prefer_markdown
+                    && let Ok(html) = clipboard.get().html()
+                    && let Some(markdown) = clipboard_markdown(&html)
+                {
+                    return Some(ClipboardContent::Text(markdown));
+                }
+                if let Ok(text) = clipboard.get_text() {
+                    return Some(ClipboardContent::Text(text));
+                }
 
-            if let Ok(image) = clipboard.get_image()
-                && let Ok(pasted) = save_image_as_png(workspace, &image)
-            {
-                return Some(ClipboardContent::Image(pasted));
+                if let Ok(image) = clipboard.get_image()
+                    && let Ok(pasted) = save_image_as_png(workspace, &image)
+                {
+                    return Some(ClipboardContent::Image(pasted));
+                }
             }
         }
 
-        let _ = workspace;
+        #[cfg(all(target_os = "linux", not(target_env = "ohos"), not(test)))]
+        if prefer_markdown && let Ok(text) = read_text_with_wlpaste() {
+            return Some(ClipboardContent::Text(text));
+        }
+
+        let _ = (workspace, prefer_markdown);
         None
     }
 
@@ -753,6 +818,49 @@ fn save_image_as_png_in(dir: &Path, image: &ImageData) -> Result<PastedImage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clipboard_markdown_preserves_rich_structure_and_code() {
+        let html = r#"<h1>Release plan</h1><p>Keep <strong>authorship</strong> and
+<a href="https://example.com/review">review</a>.</p>
+<ul><li>Run gates</li><li>Dogfood</li></ul>
+<pre><code>fn main() {
+    println!("&lt;ready&gt;");
+}</code></pre>
+<table><tr><th>Gate</th><th>Result</th></tr><tr><td>Tests</td><td>Pass</td></tr></table>"#;
+        let markdown = clipboard_markdown(html).expect("rich text converts");
+        assert!(markdown.contains("# Release plan"), "{markdown}");
+        assert!(markdown.contains("**authorship**"), "{markdown}");
+        assert!(
+            markdown.contains("[review](https://example.com/review)"),
+            "{markdown}"
+        );
+        assert!(markdown.contains("Run gates") && markdown.contains("Dogfood"));
+        assert!(markdown.contains("```"), "{markdown}");
+        assert!(markdown.contains("println!(\"<ready>\");"), "{markdown}");
+        assert!(
+            markdown
+                .lines()
+                .any(|line| line.split('|').map(str::trim).collect::<Vec<_>>()
+                    == ["", "Gate", "Result", ""]),
+            "{markdown}"
+        );
+    }
+
+    #[test]
+    fn clipboard_markdown_omits_executable_markup_and_falls_back_losslessly() {
+        assert_eq!(
+            clipboard_markdown("<script>secret()</script><style>secret</style>"),
+            None
+        );
+        assert_eq!(
+            clipboard_markdown(&"x".repeat(MAX_CLIPBOARD_HTML_BYTES + 1)),
+            None
+        );
+        let markdown = clipboard_markdown("<h1>Release plan</h1>").unwrap();
+        assert_eq!(markdown.trim(), "Release plan\n===");
+        assert!(markdown.trim().contains('\n'), "not a memory quick-add");
+    }
     // ImageData from arboard is only available on these platforms.
     #[cfg(any(
         target_os = "macos",

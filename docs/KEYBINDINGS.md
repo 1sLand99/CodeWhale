@@ -62,7 +62,7 @@ Editing the message you're about to send.
 | `Ctrl-Shift-U`           | Run `/update install` from the keyboard: check for and install the latest Codewhale release without leaving the TUI. Managed installs (Homebrew/npm/cargo) keep their package-manager gate; when already current the updater's "Already up to date." result is shown and nothing changes |
 | Mouse drag                  | Select composer text; click moves the cursor            |
 | `Cmd-V` / `Ctrl-Shift-V`    | Terminal-local paste (arrives as bracketed paste when supported) |
-| `Ctrl-V`                    | Direct clipboard paste in a local or forwarded graphical session |
+| `Ctrl-V`                    | Direct graphical clipboard paste; rich composer content becomes Markdown |
 | `Ctrl-Y`                    | Yank (paste) from kill buffer                           |
 | `↑` / `↓`                   | Cycle composer history (also selects popup/attachment items) |
 | `Shift-↑` / `Shift-↓`       | Browse conversation history                              |
@@ -72,6 +72,13 @@ Editing the message you're about to send.
 | `Tab`                       | Slash-command / `@`-mention completion (popup-aware)    |
 | `Ctrl-Shift-O` / `F4`       | Open the composer draft in `$VISUAL` / `$EDITOR`; F4 works when the terminal cannot distinguish Ctrl-Shift-O from Ctrl-O |
 | `! command`                 | Run a shell command through normal approval, sandbox, and output surfaces |
+
+Direct composer paste preserves headings, lists, links, tables and code from
+HTML clipboard content. Plain text stays literal, and configuration fields
+always paste literal text. SSH without a forwarded graphical display uses the
+terminal's text paste. Copying a whole answer preserves its original Markdown,
+without terminal wrapping or decorative rails; the destination app decides how
+to render it. Empty or oversized HTML falls back to plain text.
 
 Set `composer_multiline_mode = true` to swap the portable `Enter` and
 `Shift-Enter` behaviors: `Enter` inserts a newline and `Shift-Enter` sends.
