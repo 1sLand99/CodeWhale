@@ -653,7 +653,7 @@ pub(crate) fn sanitize_http_error_body(
         if let Some(code) = explicit_quota_code(body) {
             return format!("{message} (provider error code: {code})");
         }
-        return message;
+        return with_thought_signature_recovery(status, message);
     }
 
     if is_probably_html(body) {
@@ -696,7 +696,24 @@ pub(crate) fn sanitize_http_error_body(
         return format!("{provider} API returned an HTML error page (HTTP {status}): {text}");
     }
 
-    truncate_for_error(&collapse_whitespace(body), 2_000)
+    with_thought_signature_recovery(
+        status,
+        truncate_for_error(&collapse_whitespace(body), 2_000),
+    )
+}
+
+/// A gateway may manage signatures itself, so only explain an actual rejection
+/// instead of preemptively blocking every Gemini-compatible route.
+fn with_thought_signature_recovery(status: u16, mut message: String) -> String {
+    let lower = message.to_ascii_lowercase();
+    if status == 400 && lower.contains("missing") && lower.contains("thought_signature") {
+        const HINT: &str = " Use the built-in `google` provider for Gemini and start a new session; \
+                           earlier tool calls cannot recover missing thought signatures. If you use a \
+                           gateway, confirm that it preserves or manages Google thought signatures.";
+        message = truncate_for_error(&message, 2_000 - HINT.len());
+        message.push_str(HINT);
+    }
+    message
 }
 
 fn looks_like_authentication_failure(body: &str) -> bool {

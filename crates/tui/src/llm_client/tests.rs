@@ -150,6 +150,34 @@ fn generic_429_stays_rate_limited_and_retryable() {
     assert!(error.is_retryable());
 }
 
+#[test]
+fn missing_google_signature_400_explains_recovery_without_widening_gateway_preflight() {
+    let message = "Function call is missing a thought_signature in functionCall parts";
+    for body in [
+        message.to_string(),
+        serde_json::json!({"error": {"message": message}}).to_string(),
+        format!("{message} {}", "详情".repeat(2_000)),
+    ] {
+        let safe = sanitize_http_error_body(Some("OpenAI-compatible"), 400, &body);
+        assert!(safe.starts_with(message));
+        assert!(safe.contains("built-in `google` provider"));
+        assert!(safe.contains("start a new session"));
+        assert!(safe.contains("gateway"));
+        assert!(
+            safe.chars().count() <= 2_003,
+            "error bound survives the hint"
+        );
+    }
+    for (status, body) in [
+        (429, message),
+        (200, message),
+        (400, "Invalid thought_signature"),
+        (400, "Missing required parameter: model"),
+    ] {
+        assert_eq!(sanitize_http_error_body(None, status, body), body);
+    }
+}
+
 #[tokio::test]
 async fn retry_loop_stops_after_one_typed_quota_failure() {
     let mut calls = 0;
