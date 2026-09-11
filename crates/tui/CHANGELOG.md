@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.13] - 2026-09-10
+## [0.9.13] - 2026-09-11
 
 Codewhale v0.9.13 source candidate addresses integrity issues in 0.9.12:
 multiline paste is one paste again, truncated tool arguments can no longer execute, strict
@@ -21,6 +21,16 @@ reconnect.
 
 ### Fixed
 
+- Direct composer paste (`Ctrl-V`) preserves rich clipboard headings, lists,
+  links, tables and code as Markdown, with plain-text fallback. Whole-answer
+  copy preserves authored Markdown without terminal wrapping; settings fields
+  still paste literal text.
+- The embedded Computer Use bundle includes the marketplace's JPEG capture
+  and bounded-payload fixes, so new built-in installations receive them too.
+- A provider's missing-`thought_signature` HTTP 400 now explains how to recover:
+  use the built-in Google provider and start a new session, or verify the
+  gateway's signature handling. Working gateways are not blocked by a broader
+  preflight check (#6048).
 - The sandbox-elevation prompt shows every option, `Abort` included. The card
   was a fixed 22 rows centred on the frame; inside its border and padding that
   left at most 18 usable rows against 20 to 23 rows of content, with no scroll
