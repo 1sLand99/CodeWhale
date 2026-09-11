@@ -263,9 +263,13 @@ reveal content.
 | `Esc` | Cancel the whole question request |
 | `PageUp` / `PageDown` | Scroll the transcript while keeping the sheet open |
 | `Home` / `End` | Go to the start / latest part of the transcript |
-| `Ctrl`, `Alt`, or `Shift` + `↑` / `↓` | Scroll the transcript three lines |
+| `Alt+↑` / `Alt+↓` | Scroll the transcript three lines |
 | Mouse wheel above the sheet | Scroll the transcript; side work surfaces keep their own input |
 | Mouse wheel over the sheet | Browse the question content without changing the answer or highlight |
+
+While the question sheet is open, `Ctrl+↑` / `Ctrl+↓` and `Shift+↑` / `Shift+↓`
+also scroll the transcript three lines. Plain arrows continue to move the option
+highlight.
 
 After wheel browsing, option navigation or typing brings the highlighted option
 or custom-response text back into view. Transcript scroll keys work in both
