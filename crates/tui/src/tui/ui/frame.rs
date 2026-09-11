@@ -116,8 +116,12 @@ pub(crate) fn info_segments(app: &App, width: u16) -> Vec<InfoSegment> {
             InfoSegmentId::Context,
             app.tr(MessageId::InfoLineContext).as_ref(),
             format!("{pct}%"),
+            // The posture bar one row above calls this exact threshold
+            // `ChromeInk::Attention` (`phase_strip::at_context_cap`, also >= 80).
+            // One condition, one family: a full context is consequential, not a
+            // failure — the next turn still runs and `/compact` is the remedy.
             if pct >= 80 {
-                ChromeInk::Failure
+                ChromeInk::Attention
             } else {
                 ChromeInk::Info
             },
@@ -2394,7 +2398,7 @@ mod tests {
         for (pct, expected) in [
             (10u8, codewhale_palette::ChromeInk::Info),
             (79, codewhale_palette::ChromeInk::Info),
-            (80, codewhale_palette::ChromeInk::Failure),
+            (80, codewhale_palette::ChromeInk::Attention),
         ] {
             let app = app_with_context_percent(pct);
             let segment = super::info_segments(&app, 160)
