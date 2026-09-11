@@ -116,7 +116,12 @@ pub fn resolve_candidate_install(
     match &candidate.install_plan {
         MarketplaceInstallPlan::Supported { spec, source_kind } => {
             CatalogInstallResolution::Supported {
-                spec: resolve_spec(&entry.source_path, &candidate.source, spec),
+                spec: resolve_spec(
+                    &entry.source_path,
+                    entry.catalog.format,
+                    &candidate.source,
+                    spec,
+                ),
                 source_kind: source_kind.clone(),
             }
         }
@@ -128,11 +133,25 @@ pub fn resolve_candidate_install(
     }
 }
 
-fn resolve_spec(source_path: &str, source: &MarketplaceSourceSpec, spec: &str) -> String {
+fn resolve_spec(
+    source_path: &str,
+    format: MarketplaceFormat,
+    source: &MarketplaceSourceSpec,
+    spec: &str,
+) -> String {
     if let MarketplaceSourceSpec::LocalPath { path } = source
         && path.is_relative()
         && let Some(dir) = Path::new(source_path).parent()
     {
+        // Claude keeps its catalog in a manifest-only metadata directory;
+        // relative sources are rooted at the marketplace repository.
+        let dir = if format == MarketplaceFormat::Claude
+            && dir.file_name().is_some_and(|name| name == ".claude-plugin")
+        {
+            dir.parent().unwrap_or(dir)
+        } else {
+            dir
+        };
         return format!("path:{}", dir.join(path).display());
     }
     spec.to_string()

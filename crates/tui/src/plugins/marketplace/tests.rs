@@ -526,3 +526,26 @@ fn non_object_catalog_fails_closed() {
     assert_eq!(catalog.total_candidates(), 0);
     assert!(catalog.error_count() >= 1);
 }
+
+#[test]
+fn claude_relative_install_source_is_rooted_outside_catalog_metadata() {
+    use super::document::{
+        CatalogInstallResolution, load_catalog_document, resolve_candidate_install,
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let metadata = tmp.path().join(".claude-plugin");
+    std::fs::create_dir_all(&metadata).unwrap();
+    let path = metadata.join("marketplace.json");
+    std::fs::write(&path, r#"{"name":"official","owner":{"name":"Example"},"plugins":[{"name":"linear","source":"./external_plugins/linear"}]}"#).unwrap();
+    let loaded = load_catalog_document("official", tmp.path(), path.to_str().unwrap()).unwrap();
+    let candidate = loaded.entry.catalog.candidate_by_name("linear").unwrap();
+    let CatalogInstallResolution::Supported { spec, .. } =
+        resolve_candidate_install(&loaded.entry, candidate)
+    else {
+        panic!("expected path source")
+    };
+    assert_eq!(
+        std::path::Path::new(spec.strip_prefix("path:").unwrap()),
+        tmp.path().join("external_plugins/linear")
+    );
+}

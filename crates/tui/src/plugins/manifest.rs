@@ -365,12 +365,21 @@ pub struct ValidatedManifest {
 enum ManifestFormat {
     Json,
     KimiJson,
+    ClaudeJson,
     Toml,
 }
 
 impl ManifestFormat {
     fn from_path(path: &Path) -> Result<Self, String> {
         match path.file_name().and_then(|name| name.to_str()) {
+            Some(super::agent_plugin::PLUGIN_JSON_NAME)
+                if path
+                    .parent()
+                    .and_then(Path::file_name)
+                    .is_some_and(|name| name == ".claude-plugin") =>
+            {
+                Ok(Self::ClaudeJson)
+            }
             Some(super::agent_plugin::PLUGIN_JSON_NAME) => Ok(Self::Json),
             Some(super::agent_plugin::KIMI_PLUGIN_JSON_NAME) => Ok(Self::KimiJson),
             Some(super::agent_plugin::PLUGIN_TOML_NAME) => Ok(Self::Toml),
@@ -385,6 +394,7 @@ impl ManifestFormat {
         match self {
             Self::Json => super::agent_plugin::PLUGIN_JSON_NAME,
             Self::KimiJson => super::agent_plugin::KIMI_PLUGIN_JSON_NAME,
+            Self::ClaudeJson => ".claude-plugin/plugin.json",
             Self::Toml => super::agent_plugin::PLUGIN_TOML_NAME,
         }
     }
@@ -407,7 +417,7 @@ fn parse_manifest(
         }
         ManifestFormat::Json => {
             let standard = super::agent_plugin::parse_plugin_json(text)?;
-            let mcp_bytes = read_sibling_mcp_json(root)?;
+            let mcp_bytes = read_sibling_mcp_json(root, super::agent_plugin::MCP_JSON_NAME)?;
             let mcp_servers = match &mcp_bytes {
                 Some(bytes) => {
                     let text = std::str::from_utf8(bytes)
@@ -419,6 +429,12 @@ fn parse_manifest(
             let manifest = super::agent_plugin::standard_to_manifest(standard, mcp_servers, root)?;
             Ok((manifest, mcp_bytes))
         }
+        ManifestFormat::ClaudeJson => {
+            let bytes = read_sibling_mcp_json(root, ".mcp.json")?;
+            let manifest =
+                super::agent_plugin::parse_claude_plugin_json(text, root, bytes.as_deref())?;
+            Ok((manifest, bytes))
+        }
         ManifestFormat::KimiJson => Ok((
             super::agent_plugin::parse_kimi_plugin_json(text, root)?,
             None,
@@ -428,8 +444,8 @@ fn parse_manifest(
 
 /// Read a `plugin.json` bundle's sibling `mcp.json` under the same rules as
 /// the manifest itself: a regular file, never a link, size-bounded.
-fn read_sibling_mcp_json(root: &Path) -> Result<Option<Vec<u8>>, String> {
-    let path = root.join(super::agent_plugin::MCP_JSON_NAME);
+fn read_sibling_mcp_json(root: &Path, name: &str) -> Result<Option<Vec<u8>>, String> {
+    let path = root.join(name);
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -464,8 +480,7 @@ impl PluginManifest {
         let bytes = read_manifest_bytes(path, label)?;
         let content =
             std::str::from_utf8(&bytes).map_err(|_| format!("{label} must be valid UTF-8"))?;
-        let root = path
-            .parent()
+        let root = super::agent_plugin::plugin_root_for_manifest(path)
             .ok_or_else(|| format!("{label} has no parent directory"))?;
         Ok(parse_manifest(format, content, root)?.0)
     }
@@ -480,8 +495,7 @@ impl PluginManifest {
                 "{label} must be a regular file, not a symbolic link"
             ));
         }
-        let root = path
-            .parent()
+        let root = super::agent_plugin::plugin_root_for_manifest(path)
             .ok_or_else(|| format!("{label} has no parent directory"))?;
         let root_metadata = fs::symlink_metadata(root)
             .map_err(|e| format!("failed to inspect plugin root: {e}"))?;
@@ -527,7 +541,14 @@ impl PluginManifest {
                 "{label} changed while it was being validated; retry discovery"
             ));
         }
-        if format == ManifestFormat::Json && read_sibling_mcp_json(&canonical_root)? != mcp_bytes {
+        let mcp_name = match format {
+            ManifestFormat::Json => Some(super::agent_plugin::MCP_JSON_NAME),
+            ManifestFormat::ClaudeJson => Some(".mcp.json"),
+            _ => None,
+        };
+        if let Some(name) = mcp_name
+            && read_sibling_mcp_json(&canonical_root, name)? != mcp_bytes
+        {
             return Err(
                 "mcp.json changed while it was being validated; retry discovery".to_string(),
             );
@@ -554,7 +575,7 @@ impl PluginManifest {
             ));
         }
         match format {
-            ManifestFormat::Json => {
+            ManifestFormat::Json | ManifestFormat::ClaudeJson => {
                 if !super::agent_plugin::is_standard_plugin_name(&self.plugin.name) {
                     return Err(format!(
                         "plugin name `{}` violates the Agent Plugins name rule (1-{MAX_PLUGIN_NAME_CHARS} lowercase ASCII letters, digits, or internal single hyphens or dots; never `--` or `..`)",
@@ -1213,7 +1234,7 @@ fn validate_environment_name(field: &str, value: &str) -> Result<(), String> {
     }
 }
 
-fn exact_environment_placeholder(value: &str) -> Option<&str> {
+pub(super) fn exact_environment_placeholder(value: &str) -> Option<&str> {
     value.strip_prefix("${")?.strip_suffix('}')
 }
 

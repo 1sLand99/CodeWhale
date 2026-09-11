@@ -982,3 +982,181 @@ async fn remote_install_surfaces_policy_gates_without_touching_disk() {
     );
     assert!(!plugins.join("demo").exists());
 }
+
+/// Same manifest/MCP shape as the official Linear and GitHub marketplace
+/// bundles: metadata is nested, components and the flat MCP map are at root.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn install_claude_bundle_keeps_root_components_and_review_hash() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("source");
+    fs::create_dir_all(source.join(".claude-plugin")).unwrap();
+    fs::create_dir_all(source.join("skills/triage")).unwrap();
+    fs::write(
+        source.join(".claude-plugin/plugin.json"),
+        r#"{"name":"linear","description":"Issue tracking","author":{"name":"Linear"},"skills":"./skills/"}"#,
+    )
+    .unwrap();
+    fs::write(
+        source.join(".mcp.json"),
+        r#"{"linear":{"type":"http","url":"https://mcp.linear.app/mcp"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        source.join("skills/triage/SKILL.md"),
+        "---\nname: triage\ndescription: Issue triage\n---\nRead issues.\n",
+    )
+    .unwrap();
+    let plugins = tmp.path().join("plugins");
+    let outcome = install(
+        PluginInstallSource::parse(source.to_str().unwrap()).unwrap(),
+        &plugins,
+        DEFAULT_MAX_SIZE_BYTES,
+        &allow_all(),
+        false,
+        &no_conflict(),
+    )
+    .await
+    .unwrap();
+    let PluginInstallOutcome::Installed(installed) = outcome else {
+        panic!("expected install")
+    };
+    let path = installed.path.join(".claude-plugin/plugin.json");
+    let validated = crate::plugins::manifest::PluginManifest::validate_from_path(&path).unwrap();
+    assert_eq!(
+        validated.canonical_root,
+        installed.path.canonicalize().unwrap()
+    );
+    assert_eq!(validated.inventory.skills, 1);
+    assert_eq!(validated.inventory.mcp_servers, 1);
+    let server = &validated.manifest.mcp_servers.as_ref().unwrap()["linear"];
+    assert_eq!(server.url.as_deref(), Some("https://mcp.linear.app/mcp"));
+    assert!(server.command.is_none());
+    assert!(
+        server.transport.is_none(),
+        "Streamable HTTP is the existing default HTTP transport"
+    );
+    fs::write(
+        installed.path.join(".mcp.json"),
+        r#"{"linear":{"type":"http","url":"https://changed.invalid/mcp"}}"#,
+    )
+    .unwrap();
+    let changed = crate::plugins::manifest::PluginManifest::validate_from_path(&path).unwrap();
+    assert_ne!(validated.content_hash, changed.content_hash);
+    assert_ne!(validated.capability_hash, changed.capability_hash);
+}
+
+#[test]
+fn claude_archive_stages_the_bundle_outside_metadata_directory() {
+    let bytes = tarball(&[
+        ("repo-main/.claude-plugin/plugin.json", br#"{"name":"github"}"#),
+        ("repo-main/.mcp.json", br#"{"mcpServers":{"github":{"type":"http","url":"https://api.githubcopilot.com/mcp/","headers":{"Authorization":"Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}","X-Workspace":"${GITHUB_WORKSPACE}"}}}}"#),
+        ("repo-main/skills/review/SKILL.md", b"---\nname: review\ndescription: Review\n---\nReview code.\n"),
+    ]);
+    let tmp = tempfile::tempdir().unwrap();
+    let staged =
+        stage_tarball(&bytes, &tmp.path().join("plugins"), DEFAULT_MAX_SIZE_BYTES).unwrap();
+    assert_eq!(staged.name, "github");
+    assert!(
+        staged
+            .staged_path
+            .join(".claude-plugin/plugin.json")
+            .is_file()
+    );
+    assert!(staged.staged_path.join(".mcp.json").is_file());
+    assert!(staged.staged_path.join("skills/review/SKILL.md").is_file());
+    let validated = crate::plugins::manifest::PluginManifest::validate_from_path(
+        &staged.staged_path.join(".claude-plugin/plugin.json"),
+    )
+    .unwrap();
+    let server = &validated.manifest.mcp_servers.as_ref().unwrap()["github"];
+    assert!(server.headers.is_empty());
+    assert_eq!(
+        server.bearer_token_env_var.as_deref(),
+        Some("GITHUB_PERSONAL_ACCESS_TOKEN")
+    );
+    assert_eq!(server.env_headers["X-Workspace"], "GITHUB_WORKSPACE");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_import_rejects_unsupported_components_without_partial_install() {
+    for (file, body) in [
+        ("hooks/hooks.json", "{}"),
+        (".lsp.json", "{}"),
+        (
+            ".mcp.json",
+            r#"{"demo":{"command":"node","unknownExecutableField":"run"}}"#,
+        ),
+        (
+            ".mcp.json",
+            r#"{"demo":{"type":"http","url":"https://example.com/mcp","headers":{"Authorization":"Bearer literal-secret"}}}"#,
+        ),
+        (
+            ".mcp.json",
+            r#"{"demo":{"type":"http","url":"https://example.com/mcp","headers":{"Authorization":"Bearer ${TOKEN}-suffix"}}}"#,
+        ),
+        (
+            ".mcp.json",
+            r#"{"demo":{"type":"http","url":"https://example.com/mcp","headers":{"Authorization":"${TOKEN} ${OTHER}"}}}"#,
+        ),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        fs::create_dir_all(source.join(".claude-plugin")).unwrap();
+        fs::write(
+            source.join(".claude-plugin/plugin.json"),
+            r#"{"name":"demo"}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(source.join(file).parent().unwrap()).unwrap();
+        fs::write(source.join(file), body).unwrap();
+        let plugins = tmp.path().join("plugins");
+        assert!(
+            install(
+                PluginInstallSource::parse(source.to_str().unwrap()).unwrap(),
+                &plugins,
+                DEFAULT_MAX_SIZE_BYTES,
+                &allow_all(),
+                false,
+                &no_conflict()
+            )
+            .await
+            .is_err(),
+            "{file}"
+        );
+        assert!(!plugins.join("demo").exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_metadata_and_mcp_links_cannot_escape_bundle_validation() {
+    use std::os::unix::fs::symlink;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("bundle");
+    let outside = tmp.path().join("outside");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("plugin.json"), r#"{"name":"demo"}"#).unwrap();
+    symlink(&outside, root.join(".claude-plugin")).unwrap();
+    assert!(
+        crate::plugins::manifest::PluginManifest::validate_from_path(
+            &root.join(".claude-plugin/plugin.json")
+        )
+        .is_err()
+    );
+    fs::remove_file(root.join(".claude-plugin")).unwrap();
+    fs::create_dir_all(root.join(".claude-plugin")).unwrap();
+    fs::copy(
+        outside.join("plugin.json"),
+        root.join(".claude-plugin/plugin.json"),
+    )
+    .unwrap();
+    fs::write(outside.join("mcp.json"), "{}").unwrap();
+    symlink(outside.join("mcp.json"), root.join(".mcp.json")).unwrap();
+    assert!(
+        crate::plugins::manifest::PluginManifest::validate_from_path(
+            &root.join(".claude-plugin/plugin.json")
+        )
+        .is_err()
+    );
+}

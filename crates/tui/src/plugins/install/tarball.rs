@@ -99,9 +99,8 @@ pub(super) fn scan_tarball(bytes: &[u8], max_size: u64) -> Result<TarballScan> {
     let roots: BTreeSet<String> = manifest_paths
         .iter()
         .map(|manifest| {
-            manifest
-                .rsplit_once('/')
-                .map(|(dir, _)| dir.to_string())
+            crate::plugins::agent_plugin::plugin_root_for_manifest(Path::new(manifest))
+                .map(|root| root.to_string_lossy().into_owned())
                 .unwrap_or_default()
         })
         .collect();
