@@ -1547,12 +1547,31 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
     let footer_slot = 6;
     let info_slot = 7;
 
+    if matches!(
+        app.view_stack.top_kind(),
+        Some(ModalKind::Approval | ModalKind::UserInput)
+    ) {
+        app.viewport.last_prompt_area = app.view_stack.top_occupied_region(size);
+    }
+    // Bottom prompts cover part of the ordinary chat slot. Resolve scrolling
+    // against the rows that remain visible, or End leaves the newest content
+    // underneath the prompt and PageUp counts rows the user cannot see.
+    let mut visible_chat_area = body_chunks[1];
+    if let Some(prompt) = app.viewport.last_prompt_area {
+        visible_chat_area.height = visible_chat_area
+            .height
+            .min(prompt.y.saturating_sub(visible_chat_area.y));
+    }
     let (work_chat_area, side_work_area) = if mini && !mini_cfg.keep_sidebar {
         // Mini mode without the side rail: the transcript takes the whole
         // chat row. split_chat is skipped so the rail never reserves columns.
-        (body_chunks[1], None)
+        (visible_chat_area, None)
     } else {
-        crate::tui::work_surface::split_chat(app, body_chunks[1], rail_min_chat_width(idle_empty))
+        crate::tui::work_surface::split_chat(
+            app,
+            visible_chat_area,
+            rail_min_chat_width(idle_empty),
+        )
     };
 
     if top_work_strip_height > 0 {
@@ -1831,12 +1850,6 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
             refresh_live_transcript_overlay(app);
         } else if app.view_stack.top_kind() == Some(ModalKind::ContextInspector) {
             refresh_context_inspector_overlay(app);
-        }
-        if matches!(
-            app.view_stack.top_kind(),
-            Some(ModalKind::Approval | ModalKind::UserInput)
-        ) {
-            app.viewport.last_prompt_area = app.view_stack.top_occupied_region(size);
         }
         let buf = f.buffer_mut();
         app.view_stack.render(size, buf);

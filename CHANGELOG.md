@@ -124,8 +124,9 @@ reconnect.
   request. PageUp/PageDown, Home/End and modified arrows now review the
   transcript while the sheet stays open; the mouse wheel scrolls the surface
   under the pointer. Wheel browsing preserves the answer, and option navigation
-  or typing restores the focused content to view. Documented in GUIDE.md and
-  KEYBINDINGS.md (#6045).
+  or typing restores the focused content to view. The transcript viewport ends
+  above question and approval prompts, so End keeps the newest rows visible.
+  Documented in GUIDE.md and KEYBINDINGS.md (#6045).
 - `/mcp reload` no longer freezes the interface. The reload was awaiting the
   whole reconnect batch on the TUI event loop; it now joins the same
   supervised background pass the session boot uses, the status chip counts

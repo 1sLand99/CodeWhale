@@ -1704,6 +1704,85 @@ fn user_input_prompt_keeps_transcript_navigation_and_answer_keys_separate() {
 }
 
 #[test]
+fn bottom_prompts_keep_transcript_tail_visible_through_resize_and_navigation() {
+    for kind in [ModalKind::UserInput, ModalKind::Approval] {
+        let mut app = create_test_app();
+        app.history.push(HistoryCell::Assistant {
+            content: format!(
+                "```text\n{}\nTRANSCRIPT_TAIL_VISIBLE\n```",
+                (1..=60)
+                    .map(|row| format!("Transcript row {row}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+            streaming: false,
+        });
+        match kind {
+            ModalKind::UserInput => app.view_stack.push(scroll_test_question_view()),
+            ModalKind::Approval => app.view_stack.push(ApprovalView::new(ApprovalRequest::new(
+                "approval-tail",
+                "exec_shell",
+                "Review command",
+                &serde_json::json!({"command": "git status"}),
+                "approval-tail-key",
+            ))),
+            _ => unreachable!(),
+        }
+        let config = Config::default();
+        for (width, height) in [(141, 38), (80, 24), (40, 12), (80, 24), (141, 38)] {
+            let surface = render_test_app(&mut app, &config, width, height);
+            let prompt = app.viewport.last_prompt_area.expect("painted prompt");
+            let transcript = app
+                .viewport
+                .last_transcript_area
+                .expect("transcript viewport");
+            assert!(
+                transcript.bottom() <= prompt.y,
+                "{kind:?} at {width}x{height}: scroll viewport extends under the prompt"
+            );
+            if transcript.height == 0 {
+                continue;
+            }
+            let above_prompt: String = surface
+                .chars()
+                .take(usize::from(prompt.y) * usize::from(width))
+                .collect();
+            assert!(
+                above_prompt.contains("TRANSCRIPT_TAIL_VISIBLE"),
+                "{kind:?} at {width}x{height}: latest content is covered: {above_prompt}"
+            );
+            let tail_top = app.viewport.last_transcript_top;
+            assert_eq!(
+                tail_top + app.viewport.last_transcript_visible,
+                app.viewport.last_transcript_total
+            );
+            assert!(handle_prompt_transcript_key(
+                &mut app,
+                &KeyEvent::from(KeyCode::PageUp),
+            ));
+            render_test_app(&mut app, &config, width, height);
+            assert!(app.viewport.last_transcript_top < tail_top);
+            assert!(handle_prompt_transcript_key(
+                &mut app,
+                &KeyEvent::from(KeyCode::End),
+            ));
+            let surface = render_test_app(&mut app, &config, width, height);
+            let above_prompt: String = surface
+                .chars()
+                .take(usize::from(prompt.y) * usize::from(width))
+                .collect();
+            assert!(above_prompt.contains("TRANSCRIPT_TAIL_VISIBLE"));
+        }
+        let covered_top = app.viewport.last_prompt_area.unwrap().y;
+        app.view_stack.pop();
+        let surface = render_test_app(&mut app, &config, 141, 38);
+        assert!(app.viewport.last_prompt_area.is_none());
+        assert!(app.viewport.last_transcript_area.unwrap().bottom() > covered_top);
+        assert!(surface.contains("TRANSCRIPT_TAIL_VISIBLE"));
+    }
+}
+
+#[test]
 fn user_input_wheel_routes_by_painted_sheet_and_preserves_side_surface_ownership() {
     for (width, height) in [(40, 12), (80, 24), (100, 32), (141, 38)] {
         let mut app = create_test_app();
