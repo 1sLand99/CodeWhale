@@ -335,6 +335,8 @@
   "ModelPickerAutoLocalHint": "за крок · локальна евристика · без запиту до маршрутизатора",
   "ModelPickerAutoLastRoute": "останній {provider} · {model}",
   "AutoRouteSelectedToast": "Auto: {provider} / {model} через {source} · Ctrl+O: деталі маршруту",
+  "HelpGroupCommonCommands": "Часті команди",
+  "HelpGroupAllCommands": "Усі команди",
   "HelpTitle": "Довідка",
   "HelpFilterPlaceholder": "Вводьте для фільтра",
   "HelpFilterPrefix": "Фільтр: ",

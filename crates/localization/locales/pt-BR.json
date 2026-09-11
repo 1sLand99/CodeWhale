@@ -338,6 +338,8 @@
   "ModelPickerAutoLocalHint": "por turno · heurística local · sem solicitação ao roteador",
   "ModelPickerAutoLastRoute": "última {provider} · {model}",
   "AutoRouteSelectedToast": "Auto: {provider} / {model} via {source} · Ctrl+O: detalhes da rota",
+  "HelpGroupCommonCommands": "Comandos comuns",
+  "HelpGroupAllCommands": "Todos os comandos",
   "HelpTitle": "Ajuda",
   "HelpFilterPlaceholder": "Digite para filtrar",
   "HelpFilterPrefix": "Filtro: ",

@@ -335,6 +335,8 @@
   "ModelPickerAutoLocalHint": "per giliran · heuristik lokal · tanpa permintaan router",
   "ModelPickerAutoLastRoute": "terakhir {provider} · {model}",
   "AutoRouteSelectedToast": "Auto: {provider} / {model} via {source} · Ctrl+O: detail rute",
+  "HelpGroupCommonCommands": "Perintah umum",
+  "HelpGroupAllCommands": "Semua perintah",
   "HelpTitle": "Bantuan",
   "HelpFilterPlaceholder": "Ketik untuk menyaring",
   "HelpFilterPrefix": "Saring: ",

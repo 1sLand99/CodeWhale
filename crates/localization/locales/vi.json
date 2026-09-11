@@ -338,6 +338,8 @@
   "ModelPickerAutoLocalHint": "mỗi lượt · heuristic cục bộ · không gửi yêu cầu định tuyến",
   "ModelPickerAutoLastRoute": "lần trước {provider} · {model}",
   "AutoRouteSelectedToast": "Auto: {provider} / {model} qua {source} · Ctrl+O: chi tiết tuyến",
+  "HelpGroupCommonCommands": "Lệnh thường dùng",
+  "HelpGroupAllCommands": "Tất cả lệnh",
   "HelpTitle": "Trợ giúp",
   "HelpFilterPlaceholder": "Nhập để lọc",
   "HelpFilterPrefix": "Bộ lọc: ",

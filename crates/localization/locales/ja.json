@@ -338,6 +338,8 @@
   "ModelPickerAutoLocalHint": "ターンごと · ローカル判定 · ルーター送信なし",
   "ModelPickerAutoLastRoute": "前回 {provider} · {model}",
   "AutoRouteSelectedToast": "Auto: {provider} / {model}（{source}）· Ctrl+O: ルート詳細",
+  "HelpGroupCommonCommands": "よく使うコマンド",
+  "HelpGroupAllCommands": "すべてのコマンド",
   "HelpTitle": "ヘルプ",
   "HelpFilterPlaceholder": "入力して絞り込み",
   "HelpFilterPrefix": "絞り込み: ",

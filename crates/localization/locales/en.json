@@ -338,6 +338,8 @@
   "ModelPickerAutoLocalHint": "per turn · local heuristic · no router request",
   "ModelPickerAutoLastRoute": "last {provider} · {model}",
   "AutoRouteSelectedToast": "Auto: {provider} / {model} via {source} · Ctrl+O: route details",
+  "HelpGroupCommonCommands": "Common commands",
+  "HelpGroupAllCommands": "All commands",
   "HelpTitle": "Help",
   "HelpFilterPlaceholder": "Type to filter",
   "HelpFilterPrefix": "Filter: ",

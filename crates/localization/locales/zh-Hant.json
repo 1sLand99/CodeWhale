@@ -923,6 +923,8 @@
   "FooterWorkedChip": "已運行{duration}",
   "FooterWorking": "工作中",
   "HeaderAgentsChip": "子代理 {count}",
+  "HelpGroupCommonCommands": "常用指令",
+  "HelpGroupAllCommands": "全部指令",
   "HelpAliasesLabel": "別名：",
   "HelpFilterPlaceholder": "輸入以篩選",
   "HelpFilterPrefix": "篩選: ",

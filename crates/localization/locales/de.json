@@ -335,6 +335,8 @@
   "ModelPickerAutoLocalHint": "pro Zug · lokale Heuristik · keine Router-Anfrage",
   "ModelPickerAutoLastRoute": "zuletzt {provider} · {model}",
   "AutoRouteSelectedToast": "Auto: {provider} / {model} via {source} · Ctrl+O: Routendetails",
+  "HelpGroupCommonCommands": "Häufige Befehle",
+  "HelpGroupAllCommands": "Alle Befehle",
   "HelpTitle": "Hilfe",
   "HelpFilterPlaceholder": "Zum Filtern tippen",
   "HelpFilterPrefix": "Filter: ",

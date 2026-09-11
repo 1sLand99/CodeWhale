@@ -335,6 +335,8 @@
   "ModelPickerAutoLocalHint": "par tour · heuristique locale · pas de requête au routeur",
   "ModelPickerAutoLastRoute": "dernière {provider} · {model}",
   "AutoRouteSelectedToast": "Auto : {provider} / {model} via {source} · Ctrl+O : détails de la route",
+  "HelpGroupCommonCommands": "Commandes courantes",
+  "HelpGroupAllCommands": "Toutes les commandes",
   "HelpTitle": "Aide",
   "HelpFilterPlaceholder": "Taper pour filtrer",
   "HelpFilterPrefix": "Filtre : ",

@@ -335,6 +335,8 @@
   "ModelPickerAutoLocalHint": "प्रति टर्न · लोकल ह्यूरिस्टिक · कोई राउटर अनुरोध नहीं",
   "ModelPickerAutoLastRoute": "अंतिम {provider} · {model}",
   "AutoRouteSelectedToast": "Auto: {provider} / {model} ({source} द्वारा) · Ctrl+O: रूट विवरण",
+  "HelpGroupCommonCommands": "सामान्य कमांड",
+  "HelpGroupAllCommands": "सभी कमांड",
   "HelpTitle": "मदद",
   "HelpFilterPlaceholder": "फ़िल्टर करने के लिए टाइप करें",
   "HelpFilterPrefix": "फ़िल्टर: ",
