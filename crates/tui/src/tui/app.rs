@@ -1486,6 +1486,14 @@ pub struct App {
     /// Monotonic counter used to issue fresh per-cell revisions.
     pub next_history_revision: u64,
     pub api_messages: Vec<Message>,
+    /// When each `api_messages` entry landed, index-aligned. The persisted
+    /// journal's `created_at` reads from these stamps, so a save rewrites
+    /// neither an entry's content nor its time — appends during a turn stay
+    /// spread across the session's real timeline instead of collapsing to
+    /// the save instant. Maintained by the `*_api_messages` helpers; a
+    /// length-mismatched site degrades to save-time stamps, never to a
+    /// dropped message.
+    pub api_message_stamps: Vec<DateTime<Utc>>,
     /// User-visible assistant text that crossed typed completion boundaries.
     /// Receipts are aligned to transcript cells because provider context can
     /// be compacted or purged without changing what remains visible.
@@ -4798,6 +4806,77 @@ impl App {
         self.folded_thinking.retain(|idx| *idx < len);
         self.expanded_tool_runs.retain(|idx| *idx < len);
         self.collapsed_cell_map.clear();
+    }
+
+    /// Append a message and stamp when it landed — the persisted journal's
+    /// `created_at` reads this stamp, so an entry's time is append time, not
+    /// save time.
+    pub fn push_api_message(&mut self, message: Message) {
+        self.api_messages.push(message);
+        self.api_message_stamps.push(Utc::now());
+    }
+
+    /// Mirror an engine `SessionUpdated` projection into `api_messages`. The
+    /// unchanged prefix keeps the stamps it already earned — the engine
+    /// mirrors the same messages back in the same order — and only entries
+    /// that are new or were rewritten (compaction) are stamped now, which
+    /// lands within a turn-event of the real append.
+    pub fn set_api_messages(&mut self, messages: Vec<Message>) {
+        let keep = self
+            .api_messages
+            .iter()
+            .zip(messages.iter())
+            .take_while(|(old, new)| old == new)
+            .count()
+            .min(self.api_message_stamps.len());
+        self.api_message_stamps.truncate(keep);
+        self.api_message_stamps
+            .resize_with(messages.len(), Utc::now);
+        self.api_messages = messages;
+    }
+
+    /// Install a resumed conversation, reusing the persisted journal's
+    /// per-entry `created_at` as the stamps so a next save does not rewrite
+    /// history to resume time. Entries without a matching stamp fall back to
+    /// now.
+    pub fn restore_api_messages(&mut self, messages: Vec<Message>, stamps: &[DateTime<Utc>]) {
+        self.api_message_stamps.clear();
+        self.api_message_stamps.extend_from_slice(stamps);
+        self.api_message_stamps
+            .resize_with(messages.len(), Utc::now);
+        self.api_messages = messages;
+    }
+
+    /// Append a message with the stamp it earned earlier — used when an
+    /// undo prune re-inserts preserved tool results that were already in the
+    /// log.
+    pub fn push_api_message_stamped(&mut self, message: Message, stamp: DateTime<Utc>) {
+        self.api_messages.push(message);
+        self.api_message_stamps.push(stamp);
+    }
+
+    pub fn pop_api_message(&mut self) -> Option<Message> {
+        self.api_message_stamps.pop();
+        self.api_messages.pop()
+    }
+
+    /// `created_at` of each `api_messages` entry, paired positionally.
+    /// Callers pruning by content (undo's preserved tool results) zip the
+    /// two vecs so a kept message keeps its stamp.
+    pub fn api_messages_stamped(&self) -> impl Iterator<Item = (&Message, DateTime<Utc>)> {
+        self.api_messages
+            .iter()
+            .zip(self.api_message_stamps.iter().copied())
+    }
+
+    pub fn truncate_api_messages(&mut self, new_len: usize) {
+        self.api_messages.truncate(new_len);
+        self.api_message_stamps.truncate(new_len);
+    }
+
+    pub fn clear_api_messages(&mut self) {
+        self.api_messages.clear();
+        self.api_message_stamps.clear();
     }
 
     #[must_use]

@@ -148,7 +148,7 @@ pub(crate) fn push_assistant_message(
         )
     });
     if has_sendable_content {
-        app.api_messages.push(Message {
+        app.push_api_message(Message {
             role: Role::Assistant,
             content: blocks,
         });
@@ -644,7 +644,7 @@ pub(crate) fn prepare_user_dispatch(
     // the async dispatch completion (which can lag by a route plan). The
     // failure path restores the pre-send timestamp from the snapshot.
     app.last_send_at = Some(Instant::now());
-    app.api_messages.push(Message {
+    app.push_api_message(Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
             text: content.clone(),
@@ -1020,7 +1020,7 @@ pub(crate) fn build_dispatch_error_closure(
             app.history_revisions
                 .truncate(prepare.snapshot.history_revisions_len);
             app.history_version = prepare.snapshot.history_version;
-            app.api_messages.truncate(prepare.snapshot.api_messages_len);
+            app.truncate_api_messages(prepare.snapshot.api_messages_len);
             app.last_send_at = prepare.snapshot.last_send_at;
             app.needs_redraw = true;
 
@@ -1193,7 +1193,7 @@ pub(crate) async fn steer_user_message(
     // steer form instead of painting a second bubble.
     let history_cell = paint_user_turn_cell(app, &message, format!("+ {}", message.display));
     app.record_context_references(history_cell, message_index, references);
-    app.api_messages.push(Message {
+    app.push_api_message(Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
             text: content.clone(),

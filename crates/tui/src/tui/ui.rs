@@ -67,9 +67,10 @@ use crate::hooks::{HookEvent, HookExecutor, TurnEndPayloadInput, TurnEndTotals};
 use crate::llm_client::LlmClient;
 use crate::prompts;
 use crate::route_runtime::{resolve_runtime_route, resolve_runtime_route_for_identity};
+#[cfg(test)]
+use crate::session_manager::create_saved_session_with_id_and_mode;
 use crate::session_manager::{
     OfflineQueueState, QueuedSessionMessage, SavedSession, SessionManager,
-    create_saved_session_with_id_and_mode, create_saved_session_with_mode,
 };
 use crate::settings::Settings;
 use crate::task_manager::{

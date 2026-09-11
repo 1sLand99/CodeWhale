@@ -347,7 +347,10 @@ impl CommandSessionLifecycleContext for SessionLifecycleAdapter<'_> {
                 if let Err(e) = manager.save_session(&session) {
                     return Err(format!("branch saved but persist failed: {e}"));
                 }
-                app.api_messages = session.messages.clone();
+                app.restore_api_messages(
+                    session.messages.clone(),
+                    &session.journal_message_stamps(),
+                );
                 let leaf_display = session
                     .leaf_id
                     .clone()
@@ -1453,7 +1456,10 @@ fn import_session_container(
     crate::tui::ui::install_offline_queue_transition(app, queue_transition);
     app.current_session_id = Some(new_id.clone());
     app.current_session_metadata = Some(imported.metadata.clone());
-    app.api_messages = imported.messages.clone();
+    app.restore_api_messages(
+        imported.messages.clone(),
+        &imported.journal_message_stamps(),
+    );
     let picker = crate::tui::session_picker::SessionPickerView::new_selecting(
         &app.workspace,
         app.ui_locale,
@@ -1486,7 +1492,7 @@ impl CommandSessionContext for SessionAdapter<'_> {
     }
 
     fn add_message(&mut self, message: Message) {
-        self.host.app.borrow_mut().api_messages.push(message);
+        self.host.app.borrow_mut().push_api_message(message);
     }
 
     fn queued_message_count(&self) -> usize {

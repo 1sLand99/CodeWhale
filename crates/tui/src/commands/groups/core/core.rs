@@ -212,7 +212,7 @@ pub(crate) fn reset_conversation_state(app: &mut App) -> bool {
     let _settled_old_cost_scope = crate::cost_status::close_current_scope();
     app.clear_history();
     app.mark_history_updated();
-    app.api_messages.clear();
+    app.clear_api_messages();
     app.system_prompt = None;
     app.viewport.transcript_selection.clear();
     app.queued_messages.clear();

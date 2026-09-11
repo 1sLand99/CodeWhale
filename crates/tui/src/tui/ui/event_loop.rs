@@ -60,7 +60,7 @@ pub(super) fn apply_engine_session_projection(
         surface_goal_persistence_failure(app, &error);
     }
     app.context_token_cache.borrow_mut().clear();
-    app.api_messages = messages;
+    app.set_api_messages(messages);
     app.system_prompt = system_prompt;
     if app.auto_model {
         app.last_effective_model = Some(model);
@@ -2242,7 +2242,7 @@ pub(crate) async fn run_event_loop(
                                 ),
                                 Err(err) => sanitize_stream_chunk(&format!("Error: {err}")),
                             };
-                            app.api_messages.push(Message {
+                            app.push_api_message(Message {
                                 role: Role::User,
                                 content: vec![ContentBlock::ToolResult {
                                     tool_use_id: id.clone(),

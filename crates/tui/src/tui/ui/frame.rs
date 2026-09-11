@@ -969,9 +969,10 @@ pub(crate) fn build_session_snapshot(
         })?,
     };
     let mut session = if let Some(existing_id) = app.current_session_id.as_ref() {
-        create_saved_session_with_id_and_mode(
+        crate::session_manager::create_saved_session_with_id_mode_and_stamps(
             existing_id.clone(),
             &app.api_messages,
+            &app.api_message_stamps,
             &model,
             &app.workspace,
             u64::from(app.session.total_tokens),
@@ -979,8 +980,10 @@ pub(crate) fn build_session_snapshot(
             Some(app.mode.as_setting()),
         )
     } else {
-        create_saved_session_with_mode(
+        crate::session_manager::create_saved_session_with_id_mode_and_stamps(
+            uuid::Uuid::new_v4().to_string(),
             &app.api_messages,
+            &app.api_message_stamps,
             &model,
             &app.workspace,
             u64::from(app.session.total_tokens),

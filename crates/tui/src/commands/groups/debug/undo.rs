@@ -41,10 +41,10 @@ pub fn undo_conversation(app: &mut App) -> CommandResult {
     // Remove from API messages
     while let Some(last) = app.api_messages.last() {
         if last.role == "user" {
-            app.api_messages.pop();
+            app.pop_api_message();
             break;
         }
-        app.api_messages.pop();
+        app.pop_api_message();
     }
 
     if removed_count > 0 {
@@ -91,14 +91,15 @@ pub(crate) fn prune_undone_tool_context(app: &mut App, tool_id: &str) {
         .collect();
 
     if kept_blocks.is_empty() {
-        app.api_messages.truncate(msg_idx);
+        app.truncate_api_messages(msg_idx);
         return;
     }
+    // Re-inserted tool results keep the stamp they earned, so the journal's
+    // timeline survives the prune.
     let preserved_tool_results: Vec<_> =
-        app.api_messages
-            .iter()
+        app.api_messages_stamped()
             .skip(msg_idx + 1)
-            .take_while(|msg| {
+            .take_while(|(msg, _)| {
                 msg.role == "user"
                     && !msg.content.is_empty()
                     && msg
@@ -106,18 +107,20 @@ pub(crate) fn prune_undone_tool_context(app: &mut App, tool_id: &str) {
                         .iter()
                         .all(|block| tool_result_id(block).is_some())
             })
-            .filter(|msg| {
+            .filter(|(msg, _)| {
                 msg.role == "user"
                     && !msg.content.is_empty()
                     && msg.content.iter().all(|block| {
                         tool_result_id(block).is_some_and(|id| kept_tool_ids.contains(id))
                     })
             })
-            .cloned()
+            .map(|(msg, stamp)| (msg.clone(), stamp))
             .collect();
-    app.api_messages.truncate(msg_idx + 1);
+    app.truncate_api_messages(msg_idx + 1);
     app.api_messages[msg_idx].content = kept_blocks;
-    app.api_messages.extend(preserved_tool_results);
+    for (message, stamp) in preserved_tool_results {
+        app.push_api_message_stamped(message, stamp);
+    }
 }
 
 fn prune_undone_turn_context(app: &mut App) {
@@ -130,7 +133,7 @@ fn prune_undone_turn_context(app: &mut App) {
     }
 
     if let Some(api_idx) = app.api_messages.iter().rposition(|msg| msg.role == "user") {
-        app.api_messages.truncate(api_idx);
+        app.truncate_api_messages(api_idx);
     }
 }
 

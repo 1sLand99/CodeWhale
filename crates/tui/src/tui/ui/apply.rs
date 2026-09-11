@@ -2973,7 +2973,7 @@ pub(crate) fn apply_backtrack(app: &mut App, depth: usize) {
     // rejects. Count only messages that actually yield a User cell, the same
     // predicate `apply_loaded_session` uses.
     if let Some(idx) = backtrack_api_cut_index(&app.api_messages, depth) {
-        app.api_messages.truncate(idx);
+        app.truncate_api_messages(idx);
     }
 
     // Hand the dropped text back to the user so they can edit + resend.
@@ -3585,7 +3585,10 @@ pub(crate) fn apply_loaded_session_with_goal(
     let _settled_old_cost_scope = crate::cost_status::close_current_scope();
     *config = *restored_route.config;
     app.refresh_notification_settings(config);
-    app.api_messages = crate::runtime_handoff::project_messages_for_restore(&session.messages);
+    app.restore_api_messages(
+        crate::runtime_handoff::project_messages_for_restore(&session.messages),
+        &session.journal_message_stamps(),
+    );
     app.clear_history();
     app.tool_cells.clear();
     app.tool_details_by_cell.clear();

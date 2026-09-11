@@ -755,6 +755,7 @@ impl App {
             tool_run_cache: ToolRunCache::default(),
             next_history_revision: 1,
             api_messages: Vec::new(),
+            api_message_stamps: Vec::new(),
             completed_assistant_outputs: Vec::new(),
             context_token_cache: std::cell::RefCell::new(Default::default()),
             remote_control: crate::remote_control::RemoteControlController::default(),

@@ -1006,6 +1006,28 @@ impl SavedSession {
             .map(|j| j.root_to_leaf().into_iter().cloned().collect())
             .unwrap_or_default()
     }
+    /// `created_at` of the active branch's message entries, in order — the
+    /// stamps a resumed session hands back to the live message log so the
+    /// next save preserves append times instead of rewriting them to resume
+    /// time.
+    pub fn journal_message_stamps(&self) -> Vec<DateTime<Utc>> {
+        self.journal
+            .as_ref()
+            .map(|journal| {
+                journal
+                    .root_to_leaf()
+                    .iter()
+                    .filter(|entry| {
+                        matches!(
+                            entry.kind,
+                            crate::session_tree::SessionEntryKind::Message { .. }
+                        )
+                    })
+                    .map(|entry| entry.created_at)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
     pub fn export_container(&self, source: &str) -> SessionImportContainer {
         let journal = self.journal.clone().unwrap_or_else(|| {
             SessionJournal::from_messages(self.messages.clone(), self.metadata.spawn_depth)
@@ -2882,6 +2904,32 @@ pub fn create_saved_session_with_id_and_mode(
     system_prompt: Option<&SystemPrompt>,
     mode: Option<&str>,
 ) -> SavedSession {
+    create_saved_session_with_id_mode_and_stamps(
+        id,
+        messages,
+        &[],
+        model,
+        workspace,
+        total_tokens,
+        system_prompt,
+        mode,
+    )
+}
+
+/// Create a new `SavedSession` whose journal entries keep the time each
+/// message actually landed. `message_stamps[i]` is the append time of
+/// `messages[i]`; a missing stamp falls back to now. Callers without a
+/// live stamp log pass `&[]` and get the historical save-time behavior.
+pub fn create_saved_session_with_id_mode_and_stamps(
+    id: String,
+    messages: &[Message],
+    message_stamps: &[DateTime<Utc>],
+    model: &str,
+    workspace: &Path,
+    total_tokens: u64,
+    system_prompt: Option<&SystemPrompt>,
+    mode: Option<&str>,
+) -> SavedSession {
     let now = Utc::now();
 
     // Generate title from the first real user message (runtime-owned control
@@ -2890,7 +2938,7 @@ pub fn create_saved_session_with_id_and_mode(
     let title =
         conversation_derived_title(messages).unwrap_or_else(|| DEFAULT_SESSION_TITLE.to_string());
 
-    let journal = SessionJournal::from_messages(messages.to_vec(), 0);
+    let journal = SessionJournal::from_messages_stamped(messages.to_vec(), message_stamps, 0);
     let leaf_id = journal.leaf_id.clone();
     SavedSession {
         schema_version: CURRENT_SESSION_SCHEMA_VERSION,
@@ -3374,6 +3422,59 @@ mod tests {
                 cache_control: None,
             }],
         }
+    }
+
+    /// The journal is the session's timeline: an entry's `created_at` is when
+    /// the message landed, not when a save ran. A rebuilt journal must not
+    /// collapse 90 minutes of appends into the save instant — an inspector
+    /// reading the file needs "this loop is 12 seconds" to be true.
+    #[test]
+    fn journal_entries_keep_append_stamps_across_saves() {
+        let tmp = tempdir().expect("tempdir");
+        let messages = vec![
+            make_test_message("user", "first"),
+            make_test_message("assistant", "answer"),
+        ];
+        let t0 = Utc::now() - chrono::Duration::minutes(90);
+        let t1 = t0 + chrono::Duration::seconds(12);
+        let session = create_saved_session_with_id_mode_and_stamps(
+            "stamped".to_string(),
+            &messages,
+            &[t0, t1],
+            "deepseek-v4-flash",
+            tmp.path(),
+            0,
+            None,
+            None,
+        );
+        let journal = session.journal.as_ref().expect("journal");
+        assert_eq!(journal.entries[0].created_at, t0);
+        assert_eq!(journal.entries[1].created_at, t1);
+        assert_ne!(
+            journal.entries[0].created_at, session.metadata.updated_at,
+            "an append 90 minutes before save must not read as save time"
+        );
+        // Resume hands the same stamps back to the live log.
+        assert_eq!(session.journal_message_stamps(), vec![t0, t1]);
+        // A save with no stamps keeps the old behavior: entries collapse to
+        // save time rather than inventing times.
+        let unstamped = create_saved_session_with_id_and_mode(
+            "unstamped".to_string(),
+            &messages,
+            "deepseek-v4-flash",
+            tmp.path(),
+            0,
+            None,
+            None,
+        );
+        let journal = unstamped.journal.as_ref().expect("journal");
+        assert!(
+            journal
+                .entries
+                .iter()
+                .all(|entry| entry.created_at >= unstamped.metadata.created_at),
+            "without stamps, entries stamp at save as before"
+        );
     }
 
     fn save_late_usage_test_session(manager: &SessionManager, id: &str) -> SavedSession {
