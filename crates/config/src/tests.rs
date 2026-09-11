@@ -9717,3 +9717,59 @@ fn notifications_malformed_parent_and_unknown_root_cannot_erase_config() {
     );
     assert_eq!(toml::to_string(&config).unwrap(), before);
 }
+
+#[test]
+fn config_table_and_nested_reads_share_redacted_document() {
+    let config: ConfigToml = toml::from_str(
+        r#"
+[tools]
+user_input_timeout_seconds = 7
+[hooks]
+enabled = true
+[credentials.service]
+value = "fixture-secret-never-display"
+[providers.openai]
+api_key = "fixture-provider-secret"
+"#,
+    )
+    .unwrap();
+    assert!(
+        config
+            .get_value("tools")
+            .unwrap()
+            .contains("user_input_timeout_seconds = 7")
+    );
+    assert_eq!(
+        config
+            .get_value("tools.user_input_timeout_seconds")
+            .as_deref(),
+        Some("7")
+    );
+    assert_eq!(
+        config.get_display_value("hooks.enabled").as_deref(),
+        Some("true")
+    );
+    for key in [
+        "credentials",
+        "credentials.service",
+        "credentials.service.value",
+        "providers",
+    ] {
+        let shown = config.get_display_value(key).expect(key);
+        assert!(!shown.contains("fixture-secret-never-display"), "{key}");
+        assert!(!shown.contains("fixture-provider-secret"), "{key}");
+    }
+}
+
+#[test]
+fn unsupported_nested_config_write_fails_without_mutation() {
+    let mut config: ConfigToml =
+        toml::from_str("[tools]\nuser_input_timeout_seconds = 7\n").unwrap();
+    let before = toml::to_string(&config).unwrap();
+    let err = config
+        .set_value("tools.user_input_timeout_seconds", "0")
+        .unwrap_err();
+    assert!(err.to_string().contains("[tools]"));
+    assert!(err.to_string().contains("user_input_timeout_seconds"));
+    assert_eq!(toml::to_string(&config).unwrap(), before);
+}

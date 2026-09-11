@@ -1753,6 +1753,10 @@ pub struct ToolsToml {
     /// Native tool names to keep loaded outside the default core catalog.
     #[serde(default)]
     pub always_load: Vec<String>,
+    /// Runtime-owned tool settings must survive dispatcher reads and saves.
+    /// Their validation belongs to the runtime's ToolsConfig, not this facade.
+    #[serde(flatten)]
+    pub extras: BTreeMap<String, toml::Value>,
 }
 
 /// On-disk schema for the `[snapshots]` table (#137). See
@@ -3034,7 +3038,14 @@ impl ConfigToml {
                 .as_ref()
                 .and_then(|sinks| sinks.unix_socket_path.as_ref())
                 .map(|path| path.display().to_string()),
-            _ => self.extras.get(key).map(toml::Value::to_string),
+            _ => self
+                .extras
+                .get(key)
+                .map(toml::Value::to_string)
+                .or_else(|| {
+                    let document = toml::Value::try_from(self).ok()?;
+                    config_value_at_path(&document, key).map(toml::Value::to_string)
+                }),
         }
     }
 
@@ -3085,6 +3096,22 @@ impl ConfigToml {
 
         if let Some(value) = self.extras.get(key) {
             return Some(redact_toml_value_for_display(key, value));
+        }
+
+        // Table and nested lookups use the same recursively redacted tree as
+        // `config dump`; a parent such as `credentials` must keep its children
+        // secret even when the requested leaf itself has an innocuous name.
+        let document = self.redacted_toml_value();
+        if let Some(value) = config_value_at_path(&document, key)
+            && (value.is_table() || value.is_array() || key.contains('.'))
+            && !matches!(key, "tui.stream_chunk_timeout_secs")
+        {
+            return Some(
+                value
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| value.to_string()),
+            );
         }
 
         self.get_value(key).map(|value| {
@@ -3174,6 +3201,12 @@ impl ConfigToml {
                 self.hook_sinks
                     .get_or_insert_with(HookSinksToml::default)
                     .unix_socket_path = Some(PathBuf::from(value));
+            }
+            _ if key.contains('.') => {
+                let (table, field) = key.rsplit_once('.').expect("dotted key");
+                bail!(
+                    "`config set` does not support nested key `{key}`; edit `{field}` in the [{table}] table of config.toml instead (use a TOML value of the documented type). No value was changed."
+                );
             }
             _ => {
                 self.extras
@@ -6934,6 +6967,12 @@ pub fn is_sensitive_config_key(key: &str) -> bool {
         || normalized.ends_with("_password")
         || normalized.ends_with("_secret")
         || normalized.ends_with("_token")
+}
+
+/// Resolve dotted paths without treating a dotted key as a top-level literal.
+fn config_value_at_path<'a>(value: &'a toml::Value, key: &str) -> Option<&'a toml::Value> {
+    key.split('.')
+        .try_fold(value, |value, part| value.get(part))
 }
 
 fn redact_toml_value_for_display(key: &str, value: &toml::Value) -> String {

@@ -15,6 +15,26 @@ explicit control-plane settings. `.env` is read from a stable regular-file
 handle, is capped at 1 MiB, and symbolic links, reparse points, and multiply
 linked files are rejected.
 
+## Reading and checking configuration from the CLI
+
+`codewhale config get <key>` reads scalar keys, whole tables such as `tools`,
+and nested paths such as `tools.user_input_timeout_seconds`. Displayed tables
+and nested values apply the same recursive credential redaction as `config dump`.
+
+`config set` supports its named scalar keys and the provider, route, and
+notification commands. Other dotted writes fail before modifying the file and
+name the TOML table to edit. For example, set a tools timeout in the file as:
+
+```toml
+[tools]
+user_input_timeout_seconds = 0
+```
+
+`codewhale config doctor` checks credential presence and endpoint shape. Settings
+preserved for other runtime readers are not classified as unsupported merely
+because the CLI dispatcher does not own them. A clean result from this command
+does not validate every runtime setting (#6083).
+
 ## Constitution, project instructions, and repo authority
 
 Codewhale has several instruction surfaces. They are deliberately separate so a
