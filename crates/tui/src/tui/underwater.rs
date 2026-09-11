@@ -1566,6 +1566,8 @@ const LAUNCH_ROW_MIN_TITLE: usize = 24;
 const LAUNCH_LIST_INDENT: usize = 2;
 /// Blank rows the card spends on rhythm when the pane is tall enough.
 const LAUNCH_SEPARATORS: usize = 3;
+/// Blank rows per separator when the pane can afford them.
+const LAUNCH_GAP_ROOMY: usize = 2;
 /// Below this width the block gives up its left indent.
 const LAUNCH_INDENT_MIN_WIDTH: usize = 12;
 
@@ -1827,6 +1829,12 @@ struct LaunchFit {
     /// always costs one separator row on top of these, so it never reads as
     /// another session in the list above it.
     mcp: usize,
+    /// Blank rows per separator. A pane with height to spare spends it on
+    /// breathing room before it spends it on more content: one blank line
+    /// between blocks packs the card into the top-left corner of a tall
+    /// terminal and reads as clutter even when every row is earning its place.
+    /// This is the first thing shed, so a short pane is unaffected.
+    gap: usize,
 }
 
 impl LaunchFit {
@@ -1834,13 +1842,13 @@ impl LaunchFit {
         (self.brand as usize)
             + (self.help as usize)
             + (self.notice as usize)
-            + self.blanks
+            + self.blanks * self.gap
             + 1
             + (self.heading as usize)
             + self.shown
             + (self.see_all as usize)
             + self.mcp
-            + (self.mcp > 0) as usize
+            + (self.mcp > 0) as usize * self.gap
     }
 }
 
@@ -1862,29 +1870,32 @@ fn launch_fit(height: usize, recent: usize, has_more: bool, notice: bool, mcp: u
         shown: recent,
         see_all: has_more,
         mcp,
+        gap: LAUNCH_GAP_ROOMY,
     };
     let mut step = 0u8;
     while fit.rows() > height {
         match step {
-            0 => fit.blanks = 1,
-            1 => fit.blanks = 0,
-            2 => fit.notice = false,
-            3 => {
+            // Breathing room is the first luxury to go, before any content.
+            0 => fit.gap = 1,
+            1 => fit.blanks = 1,
+            2 => fit.blanks = 0,
+            3 => fit.notice = false,
+            4 => {
                 while fit.mcp > 1 && fit.rows() > height {
                     fit.mcp -= 1;
                 }
             }
-            4 => {
+            5 => {
                 while fit.shown > 0 && fit.rows() > height {
                     fit.shown -= 1;
                     fit.see_all = true;
                 }
             }
-            5 => fit.help = false,
-            6 => fit.heading = false,
-            7 => fit.brand = false,
-            8 => fit.mcp = 0,
-            9 => fit.see_all = false,
+            6 => fit.help = false,
+            7 => fit.heading = false,
+            8 => fit.brand = false,
+            9 => fit.mcp = 0,
+            10 => fit.see_all = false,
             _ => break,
         }
         step += 1;
@@ -2006,7 +2017,9 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
         ))));
     }
     if fit.blanks >= 1 {
-        text.push(None);
+        for _ in 0..fit.gap {
+            text.push(None);
+        }
     }
 
     for row in &card_rows {
@@ -2021,7 +2034,9 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
             _ => LAUNCH_LIST_INDENT.min(text_width.saturating_sub(1)),
         };
         if matches!(row.id, crate::tui::app::LaunchRowId::SeeAll) && spacious {
-            text.push(None);
+            for _ in 0..fit.gap {
+                text.push(None);
+            }
         }
         let lane = text_width.saturating_sub(indent);
         let detail_width = text_display_width(&row.detail);
@@ -2069,7 +2084,9 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
                 MessageId::LaunchNoRecentSessions
             };
             if spacious {
-                text.push(None);
+                for _ in 0..fit.gap {
+                    text.push(None);
+                }
             }
             text.push(Some(Line::from(Span::styled(
                 semantic_truncate(&tr(locale, heading), text_width),
@@ -2082,7 +2099,9 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
     // (2026-09-09): the footer chip could name one server out of 23 and hid
     // every failure behind a count.
     if fit.mcp > 0 {
-        text.push(None);
+        for _ in 0..fit.gap {
+            text.push(None);
+        }
         text.extend(mcp_lines.into_iter().take(fit.mcp).map(Some));
     }
 
