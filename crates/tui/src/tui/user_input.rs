@@ -438,7 +438,7 @@ impl ModalView for UserInputView {
             );
         }
 
-        // The free-text "Other" row is now conditional on allow_free_text.
+        // A custom response stays available alongside the suggested options.
         if self.offers_other() {
             let other_index = question.options.len();
             let other_number = other_index + 1;
@@ -547,7 +547,28 @@ impl ModalView for UserInputView {
 
         let popup_area = sheet_rect(area, self.content_line_count());
         let inner_h = popup_area.height.saturating_sub(4) as usize;
-        let scroll = scroll_to_keep_range_visible(self.focused_line_range(), lines.len(), inner_h);
+        // Paragraph scroll offsets count wrapped rows, not the source Lines.
+        // Use the same wrapper for focus measurement and painting so long
+        // questions/descriptions cannot hide the highlighted choice (#6045).
+        let width = modal_block(&header).inner(popup_area).width.max(1);
+        let heights: Vec<usize> = lines
+            .iter()
+            .map(|line| {
+                Paragraph::new(line.clone())
+                    .wrap(Wrap { trim: true })
+                    .line_count(width)
+            })
+            .collect();
+        let (start, end) = self.focused_line_range();
+        let focus_end = heights[..=end].iter().sum::<usize>().saturating_sub(1);
+        let focus_start = if self.mode == InputMode::OtherInput {
+            // Keep the typing end visible when a custom answer wraps.
+            focus_end
+        } else {
+            heights[..start].iter().sum()
+        };
+        let scroll =
+            scroll_to_keep_range_visible((focus_start, focus_end), heights.iter().sum(), inner_h);
         let paragraph = Paragraph::new(lines)
             .alignment(Alignment::Left)
             .wrap(Wrap { trim: true })
@@ -914,6 +935,49 @@ mod tests {
         let popup = sheet_rect(Rect::new(0, 0, 80, 24), view.content_line_count());
         assert_eq!(popup.bottom(), 24);
         assert!(popup.height <= 24);
+    }
+
+    #[test]
+    fn wrapped_questions_keep_choices_and_custom_typing_visible() {
+        let mut view = sample_view();
+        let question = &mut view.request.questions[0];
+        question.question = "Choose a synthetic option to verify the question sheet, its scrolling, and visible selection when both the question and option descriptions wrap across several terminal rows.".into();
+        question.options = (1..=4)
+            .map(|n| UserInputOption {
+                label: format!("Option {n}"),
+                description: "This synthetic option has a long description that wraps across several rows; choosing it writes no external state and triggers no provider charge.".into(),
+            })
+            .collect();
+        question.multi_select = true;
+
+        for (width, height) in [(40, 12), (60, 16), (80, 24), (100, 32), (140, 40)] {
+            view.mode = InputMode::Selecting;
+            for selected in 0..view.option_count() {
+                view.selected = selected;
+                let label = match selected {
+                    4 => "Other".to_string(),
+                    5 => "Confirm selection".to_string(),
+                    _ => format!("Option {}", selected + 1),
+                };
+                let focused = format!(
+                    "{}  {}) {label}",
+                    crate::tui::glyphs::selection_marker(true),
+                    selected + 1
+                );
+                let rendered = render_view(&view, width, height);
+                assert!(
+                    rendered.contains(&focused),
+                    "highlighted choice must remain visible at {width}x{height}:\n{rendered}"
+                );
+            }
+            view.mode = InputMode::OtherInput;
+            view.other_input = format!("{}TAIL_SENTINEL", "輸入 text ".repeat(40));
+            let rendered = render_view(&view, width, height);
+            assert!(
+                rendered.contains("TAIL_SENTINEL"),
+                "custom-response typing end must remain visible at {width}x{height}:\n{rendered}"
+            );
+        }
     }
 
     #[test]
