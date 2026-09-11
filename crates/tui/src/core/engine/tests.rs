@@ -4417,6 +4417,75 @@ async fn host_managed_engine_does_not_self_dispatch_goal_continuation() {
 }
 
 #[tokio::test]
+async fn cancelled_parent_defers_child_receipts_until_an_explicit_turn() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    for reason in [CancelReason::User, CancelReason::External] {
+        let workspace = tempdir().unwrap();
+        let config = Config::default();
+        let mock = Arc::new(MockLlmClient::new(vec![canned::simple_text_turn(
+            "Explicit continuation completed.",
+        )]));
+        let (mut engine, handle) = Engine::new_with_model_client(
+            deterministic_engine_config(workspace.path()),
+            &config,
+            mock.clone(),
+        );
+        handle.cancel_with_reason(reason);
+        // Exercise a completion selected just before cancellation arrived.
+        engine
+            .handle_idle_subagent_completion(SubAgentCompletion {
+                owner_session_id: engine.session.id.clone(),
+                agent_id: "cancelled-worker".into(),
+                payload: "parked-child-evidence".into(),
+            })
+            .await;
+        assert_eq!(
+            mock.call_count(),
+            0,
+            "cancellation must forbid a model wake"
+        );
+        assert!(engine.delivered_subagent_completion_ids.is_empty());
+        assert_eq!(engine.rx_subagent_completion.len(), 1);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), engine.next_run_input(false))
+                .await
+                .is_err(),
+            "the idle loop must leave the receipt queued without spinning"
+        );
+
+        let run = tokio::spawn(engine.run());
+        handle
+            .send(external_user_message_op(
+                "Continue explicitly",
+                AppMode::Agent,
+                &config,
+            ))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = handle.rx_event.write().await.recv().await {
+                if matches!(event, Event::TurnComplete { .. }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("explicit turn completes");
+        assert_eq!(mock.call_count(), 1);
+        let snapshot = handle.get_session_snapshot().await.unwrap();
+        assert!(
+            serde_json::to_string(&snapshot.messages)
+                .unwrap()
+                .contains("parked-child-evidence"),
+            "the next explicit turn must retain the completion receipt"
+        );
+        handle.send(Op::Shutdown).await.unwrap();
+        run.await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn host_managed_engine_defers_idle_subagent_completion_to_explicit_turn() {
     use crate::llm_client::mock::{MockLlmClient, canned};
     use crate::tools::subagent::SubAgentCompletion;

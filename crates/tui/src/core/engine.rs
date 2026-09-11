@@ -2398,13 +2398,14 @@ impl Engine {
                     .await
                     .map(|op| EngineRunInput::Operation(Box::new(op)));
             } else {
+                let subagent_wake_armed = !host_managed_turns && !self.cancel_token.is_cancelled();
                 let shell_wake_armed = !host_managed_turns && self.idle_shell_wake_armed();
                 let mcp_boot_armed = self.mcp_boot_rx.is_some();
                 tokio::select! {
                     op = self.rx_op.recv() => {
                         return op.map(|op| EngineRunInput::Operation(Box::new(op)));
                     }
-                    completion = self.rx_subagent_completion.recv(), if !host_managed_turns => {
+                    completion = self.rx_subagent_completion.recv(), if subagent_wake_armed => {
                         return completion.map(EngineRunInput::SubAgentCompletion);
                     }
                     // A background child may be waiting on a person's answer
@@ -3890,6 +3891,13 @@ impl Engine {
     }
 
     async fn handle_idle_subagent_completion(&mut self, first: SubAgentCompletion) {
+        // Cancellation can race the idle receive, just as it can race a
+        // background-shell wake. Keep the receipt queued for the next explicit
+        // turn; canceled workers must not restart their interrupted parent.
+        if self.cancel_token.is_cancelled() {
+            let _ = self.tx_subagent_completion.send(first);
+            return;
+        }
         let mut completions = Vec::new();
         if let Some(completion) = claim_subagent_completion_for_session(
             &mut self.delivered_subagent_completion_ids,
