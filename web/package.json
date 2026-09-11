@@ -9,6 +9,7 @@
     "build": "next build",
     "start": "next start",
     "test": "vitest run",
+    "check": "npm run check:facts && npm run check:latest-release && npm run prebuild && npm run check:docs && npm run check:tokens && npm run lint && tsc --noEmit && npm run build",
     "check:facts": "node scripts/check-facts.mjs && node scripts/check-cloud-facts.mjs",
     "sync:latest-release": "node scripts/sync-latest-release.mjs",
     "check:latest-release": "node scripts/sync-latest-release.mjs --check",

@@ -1,6 +1,10 @@
 {
   "name": "codewhale",
   "private": true,
+  "scripts": {
+    "test": "npm test --workspaces --if-present && npm --prefix web test",
+    "check:web": "npm --prefix web run check"
+  },
   "workspaces": [
     "npm/codewhale",
     "npm/deepseek-tui",
