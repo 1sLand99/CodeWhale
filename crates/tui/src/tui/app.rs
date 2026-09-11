@@ -4814,6 +4814,8 @@ impl App {
     /// `created_at` reads this stamp, so an entry's time is append time, not
     /// save time.
     pub fn push_api_message(&mut self, message: Message) {
+        self.api_message_stamps
+            .resize_with(self.api_messages.len(), Utc::now);
         self.api_messages.push(message);
         self.api_message_stamps.push(Utc::now());
     }
@@ -4853,27 +4855,35 @@ impl App {
     /// undo prune re-inserts preserved tool results that were already in the
     /// log.
     pub fn push_api_message_stamped(&mut self, message: Message, stamp: DateTime<Utc>) {
+        self.api_message_stamps
+            .resize_with(self.api_messages.len(), Utc::now);
         self.api_messages.push(message);
         self.api_message_stamps.push(stamp);
     }
 
     pub fn pop_api_message(&mut self) -> Option<Message> {
+        self.api_message_stamps
+            .resize_with(self.api_messages.len(), Utc::now);
         self.api_message_stamps.pop();
         self.api_messages.pop()
     }
 
     /// `created_at` of each `api_messages` entry, paired positionally.
-    /// Callers pruning by content (undo's preserved tool results) zip the
-    /// two vecs so a kept message keeps its stamp.
+    /// Preserve messages even if older state lacks a stamp; missing times
+    /// fall back to observation time, as they do when restoring a session.
     pub fn api_messages_stamped(&self) -> impl Iterator<Item = (&Message, DateTime<Utc>)> {
-        self.api_messages
-            .iter()
-            .zip(self.api_message_stamps.iter().copied())
+        self.api_messages.iter().zip(
+            self.api_message_stamps
+                .iter()
+                .copied()
+                .chain(std::iter::repeat_with(Utc::now)),
+        )
     }
 
     pub fn truncate_api_messages(&mut self, new_len: usize) {
         self.api_messages.truncate(new_len);
-        self.api_message_stamps.truncate(new_len);
+        self.api_message_stamps
+            .resize_with(self.api_messages.len(), Utc::now);
     }
 
     pub fn clear_api_messages(&mut self) {

@@ -227,7 +227,8 @@ fn frame_cursor_is_hidden_during_diff_then_positioned_before_reveal() {
 #[test]
 fn composer_rows_stay_pinned_across_turn_state_transitions() {
     // The Tideline shell: the stage, one merged footer row, and the info line
-    // footer row (slots 6+8 collapsed, spec §3). Sending a prompt must not
+    // footer row (slots 6+8 collapsed, spec §3). In an established session,
+    // sending a prompt must not
     // displace the composer, relocate the route into the footer, or drop
     // the phase verb from the footer's left half.
     fn frame_app() -> App {
@@ -239,6 +240,11 @@ fn composer_rows_stay_pinned_across_turn_state_transitions() {
         app.onboarding = crate::tui::app::OnboardingState::None;
         app.launch.visible = false;
         app.ui_locale = codewhale_localization::Locale::En;
+        // The empty launch shell intentionally hides session metrics. This
+        // fixture covers stable geometry once a conversation exists.
+        app.history.push(HistoryCell::User {
+            content: "Established conversation".to_string(),
+        });
         app
     }
 
@@ -25791,32 +25797,32 @@ mod work_surface {
             );
         }
 
-        // 21 rows now seats the ocean floor exactly — the merged footer
-        // returned the activity band's row to the stage (info line 1 + footer 1
-        // + composer floor 3 + the 16-row ambient floor = 21). 20 rows
+        // 20 rows seats the ocean floor exactly: the fully idle shell hides
+        // its metrics row (footer 1 + composer floor 3 + ambient floor 16).
+        // 19 rows
         // cannot seat the ocean at any strip height. That is pre-rail
         // behavior and the yield rule must not pretend otherwise.
         let mut app = busy_rail_app(panel);
         assert_eq!(
-            strip_height(&mut app, 80, 21),
-            0,
-            "80x21 seats the ocean floor but has no spare rows for a strip"
-        );
-        let rendered = render_underwater_test_app(&mut app, 80, 21);
-        assert!(
-            idle_ocean_visible(&app),
-            "80x21 is exactly the ocean floor under the Tideline shell:\n{rendered}"
-        );
-        let mut app = busy_rail_app(panel);
-        assert_eq!(
             strip_height(&mut app, 80, 20),
             0,
-            "80x20 has no spare rows for a strip at all"
+            "80x20 seats the ocean floor but has no spare rows for a strip"
         );
         let rendered = render_underwater_test_app(&mut app, 80, 20);
         assert!(
+            idle_ocean_visible(&app),
+            "80x20 is exactly the ocean floor under the idle shell:\n{rendered}"
+        );
+        let mut app = busy_rail_app(panel);
+        assert_eq!(
+            strip_height(&mut app, 80, 19),
+            0,
+            "80x19 has no spare rows for a strip at all"
+        );
+        let rendered = render_underwater_test_app(&mut app, 80, 19);
+        assert!(
             !idle_ocean_visible(&app),
-            "80x20 has no room for the ocean even with no strip at all\n{rendered}"
+            "80x19 has no room for the ocean even with no strip at all\n{rendered}"
         );
     }
 
