@@ -414,23 +414,6 @@ pub(super) fn handle_plain_key_before_composer(
     crate::tui::paste::handle_paste_burst_key(app, key, now)
 }
 
-/// Handle transcript actions after the paste-burst ambiguity window has
-/// resolved a typed character. The real transcript selection is required;
-/// `detail_target_cell_index` alone falls back to the latest cell and would
-/// arm these shortcuts while the composer is simply being typed into.
-fn handle_focused_transcript_action_char(app: &mut App, ch: char) -> bool {
-    if !app.input.is_empty() || !app.viewport.transcript_selection.is_active() {
-        return false;
-    }
-    match ch {
-        'y' => copy_focused_cell(app),
-        'Y' => copy_focused_cell_metadata(app),
-        'r' => detail_target_cell_index(app)
-            .is_some_and(|index| open_details_pager_for_cell(app, index)),
-        _ => false,
-    }
-}
-
 /// Flush a raw-paste ambiguity window without losing a leading Space.
 ///
 /// `FlushResult::Paste` is always composer payload. A lone typed Space is a
@@ -446,11 +429,6 @@ pub(super) fn flush_paste_burst_before_composer(app: &mut App, now: Instant) -> 
     match app.take_paste_burst_flush_if_enabled(now) {
         crate::tui::paste_burst::FlushResult::Paste(text) => {
             app.insert_str(&text);
-            true
-        }
-        crate::tui::paste_burst::FlushResult::Typed(ch)
-            if handle_focused_transcript_action_char(app, ch) =>
-        {
             true
         }
         crate::tui::paste_burst::FlushResult::Typed(' ')
@@ -472,15 +450,6 @@ pub(super) fn flush_paste_burst_before_composer(app: &mut App, now: Instant) -> 
 /// Every seam below calls this instead of re-deriving focus from
 /// `view_stack`, `launch.visible`, or — the bug this replaces — whether the
 /// composer happens to hold text.
-pub(crate) fn tasks_panel_owns_bare_yank(app: &App) -> bool {
-    app.view_stack.is_empty()
-        && app.work_surface.panel == crate::tui::work_surface::RailPanel::Tasks
-        && app.work_surface.last_area.is_some()
-        && app.work_surface.focused
-        && app.input.is_empty()
-        && !app.runtime_turn_id.as_deref().unwrap_or("").is_empty()
-}
-
 pub(crate) fn shell_binding_for_key(app: &App, key: &KeyEvent) -> Option<ShellBindingId> {
     crate::tui::shell_key_routing::route(app.focus(), key)
 }
@@ -775,8 +744,7 @@ pub async fn run_tui(
     // on stdin, so it is asked before the input pump exists.
     let kitty_graphics = crate::tui::mark::probe_kitty_graphics();
     // Same window again: the sixel probe is a primary-DA query whose reply
-    // also arrives on stdin. Asked only after kitty — a kitty "yes" means
-    // the launch header never needs the sixel tier.
+    // also arrives on stdin. Keep both capability receipts before input starts.
     let sixel_graphics = crate::tui::mark::probe_sixel_graphics();
     let palette_mode = background.mode();
     tracing::debug!(
@@ -803,13 +771,6 @@ pub async fn run_tui(
     let sync_output_at_init = !crate::settings::detected_ptyxis_terminal()
         && !crate::settings::detected_legacy_windows_console_host();
     reset_terminal_viewport(&mut terminal, sync_output_at_init)?;
-    // The launch mark's image tier: transmit the PNG once; the launch header
-    // then places it through ordinary placeholder cells (`tui::mark`).
-    let cell_height_px = ratatui::backend::Backend::window_size(terminal.backend_mut())
-        .ok()
-        .filter(|size| size.columns_rows.height > 0 && size.pixels.height > 0)
-        .map(|size| size.pixels.height / size.columns_rows.height);
-    crate::tui::mark::transmit_kitty_mark(terminal.backend_mut(), cell_height_px);
     let event_broker = EventBroker::new();
 
     // Local mutable copy so runtime config flips (e.g. `/provider` switch)
@@ -1188,7 +1149,6 @@ pub async fn run_tui(
 
     cleanup_guard.defused = true;
     crate::tui::cursor_accent::restore_cursor_accent();
-    crate::tui::mark::delete_kitty_mark(terminal.backend_mut());
     pop_keyboard_enhancement_flags(terminal.backend_mut());
     disable_alternate_scroll_mode(terminal.backend_mut());
     execute!(terminal.backend_mut(), DisableFocusChange)?;
@@ -4110,6 +4070,13 @@ pub(crate) async fn run_event_loop(
             app.mark_history_updated();
         }
         if received_engine_event {
+            // ListSubAgents can wait behind the parent's active turn. The
+            // open register must also reflect the already-received, session-
+            // scoped lifecycle events, using the same projection as opening it.
+            if app.view_stack.contains_kind(ModalKind::SubAgents) {
+                let agents = subagent_view_agents(app, &app.subagent_cache);
+                app.view_stack.update_subagents(&agents);
+            }
             app.needs_redraw = true;
         }
         if subagent_list_refresh_requested {
@@ -5500,35 +5467,6 @@ pub(crate) async fn run_event_loop(
                     ),
                 ));
                 continue;
-            }
-
-            // y / Y in the rail's Tasks panel: yank the current turn id (y)
-            // or copy full task detail (Y) to the system clipboard.
-            // Only when the work surface owns keyboard focus, so an ambiently
-            // visible Tasks panel cannot swallow the first keystroke of typed
-            // input (an empty composer used to be enough to steal "y").
-            if tasks_panel_owns_bare_yank(app) {
-                if key.code == KeyCode::Char('y') && key.modifiers == KeyModifiers::NONE {
-                    if let Some(turn_id) = app.runtime_turn_id.as_ref()
-                        && app.clipboard.write_text(turn_id).is_ok()
-                    {
-                        app.status_message = Some(format!("Copied turn id {turn_id}"));
-                    }
-                    continue;
-                }
-                if key.code == KeyCode::Char('Y') && key.modifiers == KeyModifiers::NONE {
-                    let mut detail = String::new();
-                    if let Some(turn_id) = app.runtime_turn_id.as_ref() {
-                        let _ = write!(detail, "turn {turn_id}");
-                    }
-                    if let Some(status) = app.runtime_turn_status.as_deref() {
-                        let _ = write!(detail, "  status={status}");
-                    }
-                    if !detail.is_empty() && app.clipboard.write_text(&detail).is_ok() {
-                        app.status_message = Some(format!("Copied {detail}"));
-                    }
-                    continue;
-                }
             }
 
             // Shifted shortcuts toggle the file-tree pane. Keep plain Ctrl+E

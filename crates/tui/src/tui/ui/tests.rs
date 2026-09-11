@@ -5563,6 +5563,85 @@ fn active_raw_paste_keeps_space_as_payload_over_reasoning_action() {
 }
 
 #[test]
+fn empty_shell_keeps_model_identity_without_session_metrics() {
+    for (width, height) in [(40, 12), (60, 16), (100, 32), (140, 40)] {
+        let mut app = create_test_app();
+        app.model = "gpt-4.1".into();
+        app.history.clear();
+        app.resync_history_revisions();
+        assert!(crate::tui::widgets::should_render_empty_state(&app));
+        let body = render_underwater_test_app(&mut app, width, height);
+        assert!(body.contains("gpt-4.1"), "{width}x{height}: {body}");
+        assert!(
+            !body.contains("ctx 0%"),
+            "empty metrics must stay quiet: {body}"
+        );
+        assert!(
+            app.viewport
+                .last_infoline_hitboxes
+                .iter()
+                .any(|hitbox| hitbox.id == crate::tui::infoline::InfoSegmentId::Model)
+        );
+    }
+}
+
+#[test]
+fn lone_letters_remain_composer_input_after_transcript_selection() {
+    for ch in ['y', 'Y', 'r'] {
+        let mut app = create_test_app();
+        app.use_paste_burst_detection = true;
+        app.bracketed_paste_seen = false;
+        app.history = vec![HistoryCell::Assistant {
+            content: "previous answer".to_string(),
+            streaming: false,
+        }];
+        app.resync_history_revisions();
+        let _ = render_underwater_test_app(&mut app, 60, 16);
+        select_original_cell(&mut app, 0);
+        assert!(app.viewport.transcript_selection.is_active());
+        let now = Instant::now();
+        assert!(handle_plain_key_before_composer(
+            &mut app,
+            &KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+            now,
+        ));
+        assert!(flush_paste_burst_before_composer(
+            &mut app,
+            now + Duration::from_millis(500)
+        ));
+        assert_eq!(app.input, ch.to_string());
+        assert!(app.view_stack.is_empty());
+        assert!(app.composer_enter_would_submit());
+    }
+}
+
+#[test]
+fn clicking_composer_releases_transcript_and_work_surface_focus() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let mut app = create_test_app();
+    app.history = vec![HistoryCell::Assistant {
+        content: "previous answer".into(),
+        streaming: false,
+    }];
+    app.resync_history_revisions();
+    let _ = render_underwater_test_app(&mut app, 60, 16);
+    select_original_cell(&mut app, 0);
+    app.work_surface.focused = true;
+    let composer = app.viewport.last_composer_area.unwrap();
+    assert!(crate::tui::mouse_ui::handle_composer_mouse(
+        &mut app,
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: composer.x + 3,
+            row: composer.y + 1,
+            modifiers: KeyModifiers::NONE,
+        }
+    ));
+    assert!(!app.viewport.transcript_selection.is_active());
+    assert!(!app.work_surface.focused);
+}
+
+#[test]
 fn typed_command_burst_keeps_r_and_y_out_of_transcript_actions() {
     let mut app = create_test_app();
     app.use_paste_burst_detection = true;
@@ -16862,26 +16941,6 @@ fn steer_reuses_queued_echo_cell_instead_of_doubling() {
         "steer must rewrite the queued cell, not paint a second bubble"
     );
     assert_eq!(idx, 0, "the rewritten cell keeps the queue-time index");
-}
-
-#[test]
-fn bare_y_yank_requires_work_surface_focus() {
-    let mut app = create_test_app();
-    app.runtime_turn_id = Some("turn_123".to_string());
-    app.work_surface.panel = crate::tui::work_surface::RailPanel::Tasks;
-    app.work_surface.last_area = Some(Rect::new(0, 0, 80, 24));
-    app.input.clear();
-
-    assert!(
-        !super::event_loop::tasks_panel_owns_bare_yank(&app),
-        "an ambient Tasks panel must not swallow the first typed character"
-    );
-
-    app.work_surface.focused = true;
-    assert!(
-        super::event_loop::tasks_panel_owns_bare_yank(&app),
-        "a focused Tasks panel owns the bare-y yank"
-    );
 }
 
 #[test]

@@ -341,12 +341,20 @@ fn split_route_hitbox(
 /// recorded for hover (this frame's highlight resolves against the previous
 /// frame's rects, the standard one-frame-lag registry pattern) and for typed
 /// click routing.
-fn render_info_row(f: &mut Frame, app: &mut App, area: Rect) -> InfoLineInteractionHitboxes {
+fn render_info_row(
+    f: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    identity_only: bool,
+) -> InfoLineInteractionHitboxes {
     if area.height == 0 {
         app.viewport.last_infoline_hitboxes.clear();
         return InfoLineInteractionHitboxes::default();
     }
-    let segments = info_segments(app, area.width);
+    let mut segments = info_segments(app, area.width);
+    if identity_only {
+        segments.retain(|segment| segment.id == InfoSegmentId::Model);
+    }
     let hovered = app.last_mouse_pos.and_then(|(mx, my)| {
         app.viewport
             .last_infoline_hitboxes
@@ -551,6 +559,9 @@ fn register_info_interaction_targets(app: &mut App, hitboxes: InfoLineInteractio
             Some(crate::tui::tideline::InteractionAction::ShowDockPanel(panel)) => {
                 panel.title().to_string()
             }
+            Some(crate::tui::tideline::InteractionAction::OpenAutomations) => {
+                "/automation".to_string()
+            }
             Some(crate::tui::tideline::InteractionAction::DismissDock) => {
                 codewhale_localization::tr(
                     app.ui_locale,
@@ -571,18 +582,17 @@ fn register_info_interaction_targets(app: &mut App, hitboxes: InfoLineInteractio
 
 /// The posture bar's live counts are the bottom-of-screen way into the
 /// dock: each one opens the view it counts (agents → AGENTS, shells / tasks
-/// / automations → BACKGROUND, the idle `todo` word → TODO). Same
-/// `ShowDockPanel` action the strip's own tabs use.
+/// → BACKGROUND, automations → their own view, the idle `todo` word → TODO).
+/// Dock destinations use the same `ShowDockPanel` action as the strip's tabs.
 fn register_footer_count_targets(
     app: &mut App,
     facts: &crate::tui::phase_strip::TidelineFooterFacts,
     count_rects: &[(usize, Rect)],
 ) {
     for (index, area) in count_rects {
-        let Some(panel) = facts.count_panels.get(*index).copied() else {
+        let Some(action) = facts.count_actions.get(*index).copied() else {
             continue;
         };
-        let action = crate::tui::tideline::InteractionAction::ShowDockPanel(panel);
         app.viewport
             .interaction_targets
             .register(crate::tui::tideline::InteractionTarget {
@@ -1373,11 +1383,10 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
     // reservation and the render disagree inside a single frame.
     let idle_empty = crate::tui::widgets::should_render_empty_state(app);
     // `tui.metrics_line = "hidden"` gives the row to the transcript (#5950).
-    // The fully-idle shell hides it too — `ctx 1%` measures a session that
-    // does not exist yet, which is noise, not information.
+    // The empty shell keeps route identity visible; render_info_row omits
+    // session readings until a conversation exists.
     let info_height = if (mini && !mini_cfg.keep_header)
         || app.metrics_line == crate::config::ChromeRowPreset::Hidden
-        || idle_empty
     {
         0
     } else {
@@ -1757,7 +1766,7 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
     // cost · ttft · tok/s · ↓ tokens, with the help hint pinned right.
     let mut info_interactions = InfoLineInteractionHitboxes::default();
     if info_height > 0 {
-        info_interactions = render_info_row(f, app, body_chunks[info_slot]);
+        info_interactions = render_info_row(f, app, body_chunks[info_slot], idle_empty);
     } else {
         app.viewport.last_infoline_hitboxes.clear();
     }
@@ -2161,7 +2170,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                let hitboxes = render_info_row(frame, &mut app, area);
+                let hitboxes = render_info_row(frame, &mut app, area, false);
                 register_info_interaction_targets(&mut app, hitboxes);
             })
             .expect("info line should render");

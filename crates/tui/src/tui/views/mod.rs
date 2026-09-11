@@ -1261,10 +1261,11 @@ impl ViewStack {
     }
 
     pub fn update_subagents(&mut self, agents: &[SubAgentResult]) -> bool {
-        self.views
-            .last_mut()
-            .map(|view| view.update_subagents(agents))
-            .unwrap_or(false)
+        let mut updated = false;
+        for view in &mut self.views {
+            updated |= view.update_subagents(agents);
+        }
+        updated
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Vec<ViewEvent> {
@@ -5760,10 +5761,17 @@ impl ModalView for SubAgentsView {
     }
 
     fn update_subagents(&mut self, agents: &[SubAgentResult]) -> bool {
+        let selected_id = self.ordered_agent_ids().get(self.selected).cloned();
         self.agents = agents.to_vec();
         let last = self.agents.len().saturating_sub(1);
         self.scroll = self.scroll.min(last);
-        self.selected = self.selected.min(last);
+        self.selected = selected_id
+            .and_then(|id| {
+                self.ordered_agent_ids()
+                    .iter()
+                    .position(|candidate| candidate == &id)
+            })
+            .unwrap_or_else(|| self.selected.min(last));
         true
     }
 
@@ -7008,6 +7016,21 @@ mod tests {
             started_at: None,
             from_prior_session: false,
         }
+    }
+
+    #[test]
+    fn worker_register_update_preserves_selected_agent_across_new_spawns() {
+        let mut view = SubAgentsView::new(vec![manager_agent("b", SubAgentStatus::Running)]);
+        view.update_subagents(&[
+            manager_agent("a", SubAgentStatus::Running),
+            manager_agent("b", SubAgentStatus::Running),
+        ]);
+        assert_eq!(view.ordered_agent_ids()[view.selected], "b");
+        view.update_subagents(&[
+            manager_agent("a", SubAgentStatus::Running),
+            manager_agent("b", SubAgentStatus::Completed),
+        ]);
+        assert_eq!(view.ordered_agent_ids()[view.selected], "b");
     }
 
     #[test]

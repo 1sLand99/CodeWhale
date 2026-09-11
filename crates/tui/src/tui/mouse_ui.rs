@@ -446,6 +446,8 @@ pub(crate) fn handle_composer_mouse(app: &mut App, mouse: MouseEvent) -> bool {
             COMPOSER_MOUSE_SCROLL_LINES as isize,
         ),
         MouseEventKind::Down(MouseButton::Left) => {
+            clear_transcript_selection(app);
+            crate::tui::work_surface::release_focus(app);
             if let Some(submit) = crate::tui::widgets::active_composer_submit_rect(app, area)
                 && mouse_hits_rect(mouse, Some(submit))
             {
@@ -571,6 +573,10 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
                 InteractionAction::OpenProviderPicker => {
                     vec![ViewEvent::TopbarRoutePickerRequested]
                 }
+                InteractionAction::OpenAutomations => apply_sidebar_row_action(
+                    app,
+                    SidebarRowAction::Command("/automation".to_string()),
+                ),
                 InteractionAction::OpenModelPicker => {
                     vec![ViewEvent::TopbarModelPickerRequested]
                 }

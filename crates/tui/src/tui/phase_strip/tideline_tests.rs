@@ -673,3 +673,15 @@ fn narrow_widths_shed_the_clocks_before_the_hint_and_counts() {
         );
     }
 }
+
+#[test]
+fn scheduled_count_opens_automations_directly() {
+    let mut app =
+        crate::test_support::test_app_with_options(crate::test_support::test_tui_options("."));
+    app.automation_panel.active_automations = 2;
+    let facts = super::tideline_footer_from_app(&mut app, 140);
+    assert_eq!(
+        facts.count_actions.last(),
+        Some(&crate::tui::tideline::InteractionAction::OpenAutomations)
+    );
+}

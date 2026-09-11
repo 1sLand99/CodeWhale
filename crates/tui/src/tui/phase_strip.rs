@@ -1036,9 +1036,9 @@ pub(crate) struct TidelineFooterFacts {
     pub turn_clock: ClockReading,
     pub counts: Vec<(String, ChromeInk)>,
     pub session_clock: ClockReading,
-    /// The dock view each entry of `counts` opens when clicked — same
+    /// The action each entry of `counts` runs when clicked — same
     /// length, same order.
-    pub count_panels: Vec<crate::tui::work_surface::RailPanel>,
+    pub count_actions: Vec<crate::tui::tideline::InteractionAction>,
     pub hint: Option<(String, codewhale_palette::ChromeInk)>,
     pub context_percent: u8,
     pub right: Option<(String, codewhale_palette::ChromeInk)>,
@@ -1159,9 +1159,10 @@ fn live_counts(
     tier: ShellTier,
 ) -> (
     Vec<(String, ChromeInk)>,
-    Vec<crate::tui::work_surface::RailPanel>,
+    Vec<crate::tui::tideline::InteractionAction>,
 ) {
     use crate::tui::background_indicator::{PendingItemKind, pending_work_from_app};
+    use crate::tui::tideline::InteractionAction;
     use crate::tui::work_surface::RailPanel;
     let mut counts = Vec::new();
     let mut panels = Vec::new();
@@ -1173,14 +1174,14 @@ fn live_counts(
                 tr(app.ui_locale, MessageId::FooterAgentSingular).into_owned(),
                 ChromeInk::Active,
             ));
-            panels.push(RailPanel::Agents);
+            panels.push(InteractionAction::ShowDockPanel(RailPanel::Agents));
         }
         n => {
             counts.push((
                 tr(app.ui_locale, MessageId::FooterAgentsPlural).replace("{count}", &n.to_string()),
                 ChromeInk::Active,
             ));
-            panels.push(RailPanel::Agents);
+            panels.push(InteractionAction::ShowDockPanel(RailPanel::Agents));
         }
     }
     let shells = app
@@ -1193,7 +1194,7 @@ fn live_counts(
             format!("{shells} {}", PendingItemKind::Shell.plural_noun(shells)),
             ChromeInk::Active,
         ));
-        panels.push(RailPanel::Background);
+        panels.push(InteractionAction::ShowDockPanel(RailPanel::Background));
     }
     let tasks = pending_work_from_app(app).count(PendingItemKind::Task);
     if tasks > 0 {
@@ -1201,7 +1202,7 @@ fn live_counts(
             format!("{tasks} {}", PendingItemKind::Task.plural_noun(tasks)),
             ChromeInk::Active,
         ));
-        panels.push(RailPanel::Background);
+        panels.push(InteractionAction::ShowDockPanel(RailPanel::Background));
     }
     // Scheduled automation: the `AutomationPanelState` projection stays the
     // single owner; Compact keeps the abbreviated count (chrome sheds
@@ -1213,7 +1214,7 @@ fn live_counts(
     };
     if let Some(automation) = automation {
         counts.push((automation, app.automation_panel.activity_ink()));
-        panels.push(RailPanel::Background);
+        panels.push(InteractionAction::OpenAutomations);
     }
     // With nothing live there is still one bottom affordance that opens the
     // dock (founder, 2026-09-03: the bar opens when used, or when you click
@@ -1244,7 +1245,7 @@ fn live_counts(
             format!("{label} ({chord})")
         };
         counts.push((label, ChromeInk::MetadataValue));
-        panels.push(RailPanel::Tasks);
+        panels.push(InteractionAction::ShowDockPanel(RailPanel::Tasks));
     }
     (counts, panels)
 }
@@ -1339,7 +1340,7 @@ pub(crate) fn tideline_footer_from_app(app: &mut App, width: u16) -> TidelineFoo
         });
 
     let (turn_clock, session_clock) = working_clock(app, phase, &phase_label);
-    let (counts, count_panels) = live_counts(app, tier);
+    let (counts, count_actions) = live_counts(app, tier);
     TidelineFooterFacts {
         permission_chip,
         permission_key: live_chord(ShellBindingId::PermissionCycle).filter(|_| {
@@ -1358,7 +1359,7 @@ pub(crate) fn tideline_footer_from_app(app: &mut App, width: u16) -> TidelineFoo
         turn_clock,
         counts,
         session_clock,
-        count_panels,
+        count_actions,
         hint,
         context_percent: context_percent_from_app(app),
         right,

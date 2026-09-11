@@ -128,6 +128,15 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<Option<SidebarRowActio
         }
     }
 
+    if matches!(key.code, KeyCode::Char(_))
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+    {
+        release_focus(app);
+        return None;
+    }
+
     // Keyboard and mouse share one row source per panel: Enter on the
     // selected row must open the same world a click would. An explicitly
     // opened empty view still owns Esc (close) so cycling into "no files
@@ -143,15 +152,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<Option<SidebarRowActio
             app.needs_redraw = true;
             return Some(None);
         }
-        return None;
-    }
-
-    if matches!(key.code, KeyCode::Char(_))
-        && !key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
-    {
-        release_focus(app);
         return None;
     }
 

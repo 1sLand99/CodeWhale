@@ -12,15 +12,9 @@
 //! `glyphs::ascii_fallback` flattens braille to `#`, so the wordmark line
 //! stands alone there.
 //!
-//! The active mark uses braille and kitty graphics:
-//!
-//! - [`render_mark`] paints the braille rows (every terminal).
-//! - On terminals that answer the kitty graphics query
-//!   ([`probe_kitty_graphics`]) the launch header paints
-//!   [`render_kitty_placeholders`] instead: Unicode placeholder cells the
-//!   terminal replaces with the PNG transmitted once by
-//!   [`transmit_kitty_mark`]. ratatui's buffer still owns the cells, so the
-//!   image survives redraws.
+//! The launch renderer owns the braille mark as ordinary terminal cells.
+//! Graphics probes below are diagnostics only; startup never paints a second
+//! image outside the frame.
 //!
 //! Motion ("surfacing", founder 2026-09-01): over `MARK_SURFACE_MS` the mark
 //! reveals from the bottom of its box upward — the whale rises out of the
@@ -29,7 +23,6 @@
 //! Reduced motion passes `progress = 1.0`, which is this same drawing at its
 //! endpoint, so the still frame cannot drift from the animated one.
 
-use std::io::Write;
 use std::sync::OnceLock;
 
 use ratatui::style::Color;
@@ -138,38 +131,14 @@ pub fn surface_progress(elapsed_ms: u128, duration_ms: u128) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
-// Kitty graphics tier.
-//
-// Protocol: https://sw.kovidgoyal.net/kitty/graphics-protocol/ — the image is
-// transmitted once as base64 PNG chunks (`a=T,f=100`), given a *virtual*
-// placement (`a=p,U=1`) sized in cells, and then shown wherever the screen
-// holds placeholder cells: U+10EEEE with the image id in the foreground
-// colour and the row/column encoded as combining diacritics. Those are
-// ordinary cells to ratatui, so the diff, the alternate screen and redraws
-// all keep the image where the buffer says it is.
+// Kitty graphics capability receipt. No launch image is transmitted.
 // ---------------------------------------------------------------------------
-
-/// Image id of the mark. Kept ≤ 255 so the placeholder foreground is an
-/// indexed colour, which every palette-adaptation stage leaves untouched
-/// (only RGB foregrounds are theme-remapped or contrast-lifted).
-pub const KITTY_MARK_IMAGE_ID: u8 = 31;
-/// A cell is about 1:2, so this 6×3 Kitty placeholder block is square like
-/// the founder app-icon PNG.
-pub const MARK_IMAGE_COLS: u16 = 6;
-pub const MARK_IMAGE_ROWS: u16 = 3;
-/// Cell heights from here up get the 96 px raster; smaller cells get 48 px.
-const KITTY_LARGE_CELL_PX: u16 = 24;
-
-const MARK_PNG_96: &[u8] = include_bytes!("../../assets/mark-96.png");
-const MARK_PNG_48: &[u8] = include_bytes!("../../assets/mark-48.png");
 
 /// Capability query: a 1×1 RGB image sent with `a=q` is validated but never
 /// stored; a supporting terminal answers `ESC _ G i=31;OK ESC \`.
 const KITTY_QUERY: &[u8] = b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\";
 /// A terminal that supports the protocol answers within a millisecond.
 const KITTY_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(120);
-/// Base64 payload per chunk (the protocol's maximum is 4096).
-const KITTY_CHUNK: usize = 4096;
 
 static KITTY_GRAPHICS: OnceLock<bool> = OnceLock::new();
 
@@ -216,78 +185,10 @@ pub fn probe_kitty_graphics() -> bool {
     })
 }
 
-/// Whether the probe said yes. `false` before the probe runs, so a render
-/// that outruns startup paints the braille tier rather than empty cells.
+/// Whether the terminal reported graphics support; false before the probe runs.
 #[must_use]
 pub fn kitty_graphics_supported() -> bool {
     KITTY_GRAPHICS.get().copied().unwrap_or(false)
-}
-
-/// The byte stream that transmits `png` as image `id` and gives it a virtual
-/// placement `cols`×`rows` cells. `q=2` silences the terminal's replies so
-/// nothing lands in the input stream.
-#[must_use]
-pub fn kitty_transmit_sequence(png: &[u8], id: u8, cols: u16, rows: u16) -> Vec<u8> {
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
-    let encoded = STANDARD.encode(png);
-    let chunks: Vec<&[u8]> = encoded.as_bytes().chunks(KITTY_CHUNK).collect();
-    let mut out = Vec::with_capacity(encoded.len() + 64 * chunks.len());
-    for (index, chunk) in chunks.iter().enumerate() {
-        let more = u8::from(index + 1 < chunks.len());
-        if index == 0 {
-            out.extend_from_slice(format!("\x1b_Ga=T,f=100,q=2,i={id},m={more};").as_bytes());
-        } else {
-            out.extend_from_slice(format!("\x1b_Gm={more};").as_bytes());
-        }
-        out.extend_from_slice(chunk);
-        out.extend_from_slice(b"\x1b\\");
-    }
-    out.extend_from_slice(format!("\x1b_Ga=p,U=1,q=2,i={id},c={cols},r={rows}\x1b\\").as_bytes());
-    out
-}
-
-/// The byte stream that deletes image `id` and frees its data (`d=I`).
-#[must_use]
-pub fn kitty_delete_sequence(id: u8) -> Vec<u8> {
-    format!("\x1b_Ga=d,d=I,q=2,i={id}\x1b\\").into_bytes()
-}
-
-/// Pick the raster for the terminal's cell height (`None` → the large one).
-fn kitty_mark_png(cell_height_px: Option<u16>) -> &'static [u8] {
-    match cell_height_px {
-        Some(px) if px < KITTY_LARGE_CELL_PX => MARK_PNG_48,
-        _ => MARK_PNG_96,
-    }
-}
-
-/// Transmit the mark once, if the probe said the terminal draws it. Cheap
-/// no-op otherwise. Write errors are logged, never fatal: a mark that fails
-/// to upload simply leaves the placeholder cells blank until the next paint
-/// falls back to braille.
-pub fn transmit_kitty_mark<W: Write>(writer: &mut W, cell_height_px: Option<u16>) {
-    if !kitty_graphics_supported() {
-        return;
-    }
-    let bytes = kitty_transmit_sequence(
-        kitty_mark_png(cell_height_px),
-        KITTY_MARK_IMAGE_ID,
-        MARK_IMAGE_COLS,
-        MARK_IMAGE_ROWS,
-    );
-    if let Err(err) = writer.write_all(&bytes).and_then(|()| writer.flush()) {
-        tracing::debug!(target: "kitty_graphics", ?err, "mark transmission failed");
-    }
-}
-
-/// Delete the transmitted mark on the way out so the terminal frees it.
-pub fn delete_kitty_mark<W: Write>(writer: &mut W) {
-    if !kitty_graphics_supported() {
-        return;
-    }
-    let bytes = kitty_delete_sequence(KITTY_MARK_IMAGE_ID);
-    if let Err(err) = writer.write_all(&bytes).and_then(|()| writer.flush()) {
-        tracing::debug!(target: "kitty_graphics", ?err, "mark deletion failed");
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -348,9 +249,8 @@ fn da_reports_sixel(reply: Option<&[u8]>) -> bool {
 
 /// Ask the terminal once whether it draws sixel, and cache the answer for
 /// the process. Call after [`probe_kitty_graphics`] in the same pre-loop
-/// window (raw mode on, event loop not yet reading stdin): kitty answers
-/// its own query, so reaching here means the terminal speaks another
-/// protocol, and the launch header prefers kitty wherever both answer.
+/// window (raw mode on, event loop not yet reading stdin). A positive kitty
+/// result skips this fallback diagnostic probe; neither probe paints an image.
 pub fn probe_sixel_graphics() -> bool {
     *SIXEL_GRAPHICS.get_or_init(|| {
         !kitty_graphics_supported()
@@ -462,58 +362,6 @@ mod tests {
     }
 
     #[test]
-    fn the_transmit_stream_is_chunked_png_then_a_virtual_placement() {
-        let bytes = kitty_transmit_sequence(MARK_PNG_96, 31, 6, 3);
-        let text = String::from_utf8(bytes).expect("ASCII stream");
-        let commands: Vec<&str> = text.split("\x1b\\").filter(|s| !s.is_empty()).collect();
-        assert!(commands.len() >= 3, "{} commands", commands.len());
-        assert!(commands[0].starts_with("\x1b_Ga=T,f=100,q=2,i=31,m=1;"));
-        for chunk in &commands[..commands.len() - 1] {
-            let payload = chunk.split_once(';').map(|(_, p)| p).unwrap_or("");
-            assert!(
-                payload.len() <= KITTY_CHUNK,
-                "chunk over 4096: {}",
-                payload.len()
-            );
-            assert!(
-                payload
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'='),
-                "chunk is not base64"
-            );
-        }
-        let last_chunk = commands[commands.len() - 2];
-        assert!(
-            last_chunk.starts_with("\x1b_Gm=0;"),
-            "final chunk ends the upload"
-        );
-        assert_eq!(
-            commands[commands.len() - 1],
-            "\x1b_Ga=p,U=1,q=2,i=31,c=6,r=3"
-        );
-        // The PNG really is one: decode the payload back.
-        use base64::{Engine as _, engine::general_purpose::STANDARD};
-        let payload: String = commands[..commands.len() - 1]
-            .iter()
-            .map(|chunk| chunk.split_once(';').map(|(_, p)| p).unwrap_or(""))
-            .collect();
-        let decoded = STANDARD.decode(payload).expect("base64 round-trips");
-        assert_eq!(decoded, MARK_PNG_96);
-        assert!(decoded.starts_with(b"\x89PNG"));
-        assert_eq!(kitty_delete_sequence(31), b"\x1b_Ga=d,d=I,q=2,i=31\x1b\\");
-    }
-
-    #[test]
-    fn the_bundled_rasters_decode_to_their_declared_sizes() {
-        for (png, edge) in [(MARK_PNG_96, 96u32), (MARK_PNG_48, 48u32)] {
-            let image = image::load_from_memory(png).expect("bundled mark decodes");
-            assert_eq!((image.width(), image.height()), (edge, edge));
-        }
-        assert_eq!(kitty_mark_png(None), MARK_PNG_96);
-        assert_eq!(kitty_mark_png(Some(16)), MARK_PNG_48);
-        assert_eq!(kitty_mark_png(Some(32)), MARK_PNG_96);
-    }
-    #[test]
     fn sixel_candidates_are_the_terminals_that_answer_da_and_never_tmux() {
         let env = |vars: &[(&str, &str)]| {
             let vars: Vec<(String, String)> = vars
@@ -553,32 +401,5 @@ mod tests {
         // A kitty reply is not a DA reply.
         assert!(!da_reports_sixel(Some(b"\x1b_Gi=31;OK\x1b\\")));
         assert!(!da_reports_sixel(None));
-    }
-
-    #[test]
-    fn the_bundled_app_icon_decodes_square_with_transparent_corners() {
-        // The raster-tier PNG is the founder app icon (white whale on the
-        // navy rounded square), not a monochrome silhouette: its corners
-        // are transparent and its body is navy with a white whale.
-        let image = image::load_from_memory(MARK_PNG_96).expect("bundled mark decodes");
-        let rgba = image.to_rgba8();
-        assert_eq!((rgba.width(), rgba.height()), (96, 96));
-        assert_eq!(rgba.get_pixel(0, 0)[3], 0, "corner is transparent");
-        let mut navy = 0usize;
-        let mut white = 0usize;
-        for pixel in rgba.pixels() {
-            let [r, g, b, a] = pixel.0;
-            if a < 128 {
-                continue;
-            }
-            if b > 60 && u16::from(b) > u16::from(r) + 25 {
-                navy += 1;
-            }
-            if r > 200 && g > 200 && b > 200 {
-                white += 1;
-            }
-        }
-        assert!(navy > 1000, "navy field present ({navy})");
-        assert!(white > 500, "white whale present ({white})");
     }
 }

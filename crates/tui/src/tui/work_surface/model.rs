@@ -61,7 +61,7 @@ pub enum RailPanel {
     /// The to-do list: plan-step rows from the work graph.
     #[default]
     Tasks,
-    /// Background shells, durable tasks, and scheduled automations.
+    /// Background shells and durable tasks. Scheduled work has its own manager.
     Background,
     /// Files edited this session (`+/−`) and files read into context.
     Files,
@@ -864,7 +864,7 @@ fn view_has_work(app: &mut App, panel: RailPanel) -> bool {
         // Scheduled automations that are not running are a fact about the
         // account, not work in this session: they must not open the dock
         // before the first prompt (0.9.12 defect #10). Live shells, durable
-        // tasks, and a running automation are work.
+        // tasks are work. Scheduled automation configuration belongs in /automation.
         RailPanel::Background => background_has_live_work(app),
         RailPanel::Files
         | RailPanel::Notepad
@@ -895,22 +895,17 @@ pub(super) fn live_agent_row_count(app: &mut App) -> usize {
 }
 
 /// Whether the background view holds anything actually running: a live
-/// shell, a durable task, or an automation run in flight.
+/// shell or a durable task.
 pub(super) fn background_has_live_work(app: &mut App) -> bool {
-    app.automation_panel.live_runs > 0
-        || !shell_work_rows(app).is_empty()
-        || !durable_task_rows(app).is_empty()
+    !shell_work_rows(app).is_empty() || !durable_task_rows(app).is_empty()
 }
 
-/// The background view: live shells, other durable background tasks, and
-/// scheduled automations — whatever the shell already tracks off the turn.
+/// The background view: live shells and durable background tasks.
+/// The scheduled count opens the existing automations manager directly.
 fn background_view_rows(app: &mut App) -> Vec<WorkRow> {
     let mut out = Vec::new();
     push_shell_group(&mut out, shell_work_rows(app));
     out.extend(durable_task_rows(app));
-    if let Some(row) = automation_row(app) {
-        out.push(row);
-    }
     app.work_surface.latest_rows = out.clone();
     out
 }
@@ -940,30 +935,6 @@ fn durable_task_rows(app: &App) -> Vec<WorkRow> {
             }
         })
         .collect()
-}
-
-fn automation_row(app: &App) -> Option<WorkRow> {
-    let state = &app.automation_panel;
-    if state.active_automations == 0 && state.live_runs == 0 {
-        return None;
-    }
-    Some(WorkRow {
-        id: WorkRowId("automations".to_string()),
-        mark: if state.live_runs > 0 { "●" } else { "○" },
-        label: format!(
-            "automations · {} active · {} running",
-            state.active_automations, state.live_runs
-        ),
-        detail: "Scheduled work the host runs off the turn".to_string(),
-        tone: if state.live_runs > 0 {
-            WorkTone::Live
-        } else {
-            WorkTone::Muted
-        },
-        selectable: true,
-        primary_action: Some(SidebarRowAction::Command("/automation".to_string())),
-        agent: None,
-    })
 }
 
 /// Row ids of the plan-step (to-do) nodes in the cached graph.
