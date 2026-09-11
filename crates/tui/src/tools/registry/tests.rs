@@ -139,7 +139,7 @@ fn mcp_iserror_result_maps_to_tool_error_preserving_text() {
 
 #[test]
 fn mcp_image_result_uses_typed_block_without_base64_in_text() {
-    let image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQotsAAAAABJRU5ErkJggg==";
+    let image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
     let payload = json!({
         "content": [
             {"type": "text", "text": "screenshot captured"},
@@ -192,7 +192,7 @@ fn mcp_invalid_image_is_removed_with_a_visible_receipt() {
 
 #[test]
 fn mcp_malformed_images_are_removed_with_a_visible_receipt() {
-    let image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQotsAAAAABJRU5ErkJggg==";
+    let image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
     let payload = json!({
         "content": [
             {"type": "image", "data": image_data},
@@ -214,7 +214,7 @@ fn mcp_malformed_images_are_removed_with_a_visible_receipt() {
 
 #[test]
 fn mcp_image_limits_keep_one_valid_block_and_report_the_rest() {
-    let image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQotsAAAAABJRU5ErkJggg==";
+    let image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
     let oversized = "A".repeat(crate::image_attach::MAX_IMAGE_BYTES.div_ceil(3) * 4 + 4);
     let payload = json!({
         "content": [
@@ -243,7 +243,7 @@ fn mcp_image_limits_keep_one_valid_block_and_report_the_rest() {
 
 #[test]
 fn mcp_error_text_and_typed_image_are_both_preserved() {
-    let image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQotsAAAAABJRU5ErkJggg==";
+    let image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
     let payload = json!({
         "content": [
             {"type": "text", "text": "capture failed after partial screenshot"},

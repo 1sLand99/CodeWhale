@@ -6597,7 +6597,7 @@ mod image_block_wire_tests {
                     content_blocks: Some(vec![serde_json::json!({
                         "type": "image",
                         "mime_type": "image/png",
-                        "data": "QUJD",
+                        "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==",
                     })]),
                 }],
             },
@@ -6622,7 +6622,10 @@ mod image_block_wire_tests {
         assert_eq!(image_message["role"], "user");
         let parts = image_message["content"].as_array().expect("image parts");
         assert_eq!(parts[1]["type"], "image_url");
-        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,QUJD");
+        assert_eq!(
+            parts[1]["image_url"]["url"],
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
+        );
         assert!(
             parts[0]["text"]
                 .as_str()
@@ -6662,7 +6665,7 @@ mod image_block_wire_tests {
                     content_blocks: Some(vec![serde_json::json!({
                         "type": "image",
                         "mime_type": "image/png",
-                        "data": "QUJD",
+                        "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==",
                     })]),
                 }],
             },
@@ -6675,7 +6678,7 @@ mod image_block_wire_tests {
                     content_blocks: Some(vec![serde_json::json!({
                         "type": "image",
                         "mime_type": "image/png",
-                        "data": "REVG",
+                        "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYPj/HwADAgH/5ncLrgAAAABJRU5ErkJggg==",
                     })]),
                 }],
             },
@@ -6701,11 +6704,11 @@ mod image_block_wire_tests {
         assert_eq!(image_parts.len(), 4);
         assert_eq!(
             image_parts[1]["image_url"]["url"],
-            "data:image/png;base64,QUJD"
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
         );
         assert_eq!(
             image_parts[3]["image_url"]["url"],
-            "data:image/png;base64,REVG"
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYPj/HwADAgH/5ncLrgAAAABJRU5ErkJggg=="
         );
     }
 
@@ -6786,7 +6789,7 @@ mod image_block_wire_tests {
                     content_blocks: Some(vec![serde_json::json!({
                         "type": "image",
                         "mime_type": "image/png",
-                        "data": "QUJD",
+                        "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==",
                     })]),
                 }],
             },
@@ -6804,7 +6807,7 @@ mod image_block_wire_tests {
                         content_blocks: Some(vec![serde_json::json!({
                             "type": "image",
                             "mime_type": "image/png",
-                            "data": "REVG",
+                            "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==",
                         })]),
                     },
                 ],
@@ -6867,7 +6870,7 @@ mod image_block_wire_tests {
                     content_blocks: Some(vec![serde_json::json!({
                         "type": "image",
                         "mime_type": "image/png",
-                        "data": "QUJD",
+                        "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==",
                     })]),
                 }],
             },
