@@ -168,6 +168,7 @@
   "HotbarSetupDirtyModified": "змінено",
   "HotbarSetupDirtyClean": "чисто",
   "HotbarSetupNoAction": "Немає дії",
+  "HotbarSetupConfirmDisable": "Вимкнути Hotbar і очистити всі слоти? (y/n)",
   "HotbarSetupStatusLine": "слот {slot} | {action} | {dirty}",
   "HotbarSetupSlotOutOfRange": "Слот Hotbar {slot} поза межами 1-{max}",
   "HotbarSetupNoActionSelected": "Дію не вибрано.",

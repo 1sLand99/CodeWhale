@@ -168,6 +168,7 @@
   "HotbarSetupDirtyModified": "已修改",
   "HotbarSetupDirtyClean": "未修改",
   "HotbarSetupNoAction": "无操作",
+  "HotbarSetupConfirmDisable": "禁用 Hotbar 并清空所有槽位？(y/n)",
   "HotbarSetupStatusLine": "槽位 {slot} | {action} | {dirty}",
   "HotbarSetupSlotOutOfRange": "Hotbar 槽位 {slot} 超出 1-{max}",
   "HotbarSetupNoActionSelected": "未选择操作。",

@@ -1033,6 +1033,7 @@
   "HotbarSetupEmptySlot": "空",
   "HotbarSetupHelp": "Tab/Shift+Tab 來源  Up/Down 操作  1-8 槽位  Enter 分配  Space 切換  Delete 清除  s 儲存  Esc 取消",
   "HotbarSetupNoAction": "無操作",
+  "HotbarSetupConfirmDisable": "停用 Hotbar 並清空所有插槽？(y/n)",
   "HotbarSetupNoActionSelected": "未選擇操作。",
   "HotbarSetupNoActions": "沒有可用的 Hotbar 操作。",
   "HotbarSetupRecommended": "薦",

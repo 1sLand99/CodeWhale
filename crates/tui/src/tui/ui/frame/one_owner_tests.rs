@@ -858,13 +858,15 @@ fn statusline_full_frame_context_reading_updates_below_and_at_warning() {
                 .find(|target| target.id == InteractionTargetId::HEADER_CONTEXT)
                 .expect("the visible reading stays inspectable");
             assert_eq!(context.area.y, height - 1, "{evidence}");
+            // Attention, not Failure: the posture bar calls this same >= 80
+            // threshold Attention, and the two must not disagree one row apart.
             let value_ink = if pct >= 80 {
-                ChromeInk::Failure
+                ChromeInk::Attention
             } else {
                 ChromeInk::Info
             };
             let label_ink = if pct >= 80 {
-                ChromeInk::Failure
+                ChromeInk::Attention
             } else {
                 ChromeInk::Metadata
             };

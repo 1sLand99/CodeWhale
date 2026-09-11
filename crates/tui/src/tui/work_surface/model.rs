@@ -201,7 +201,11 @@ pub struct WorkRowId(pub String);
 pub(super) enum WorkTone {
     Heading,
     Live,
+    /// Consequential and waiting on someone — Cognition, not Failure. A to-do
+    /// blocked on your answer has not failed.
     Attention,
+    /// Something actually failed. The only tone that spends Failure red.
+    Failure,
     Success,
     Muted,
 }
@@ -549,7 +553,9 @@ impl WorkSurfaceState {
         if !established_selection {
             let preferred = selectable
                 .iter()
-                .find(|row| row.tone == WorkTone::Attention)
+                // Both halves of the old `Attention` tone: splitting Failure out
+                // of it changed what red means, not what deserves focus first.
+                .find(|row| matches!(row.tone, WorkTone::Attention | WorkTone::Failure))
                 .or_else(|| selectable.iter().find(|row| row.tone == WorkTone::Live))
                 .copied()
                 .unwrap_or(selectable[0]);
@@ -1638,6 +1644,17 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
                 .map(|activity| current_activity_status_bucket(activity.status))
                 .or_else(|| agent.worker_status.map(worker_status_bucket))
                 .unwrap_or_else(|| subagent_status_bucket(&agent.status));
+            // Read failure from the same source the bucket came from, so the
+            // tone can never disagree with the row it is painting.
+            let failed = current_activity.map_or_else(
+                || {
+                    agent.worker_status.map_or_else(
+                        || matches!(agent.status, SubAgentStatus::Failed(_)),
+                        |status| matches!(status, AgentWorkerStatus::Failed),
+                    )
+                },
+                |activity| matches!(activity.status, AgentCurrentActivityStatus::Failed),
+            );
             let resolved_profile = agent
                 .child_route
                 .as_ref()
@@ -1710,7 +1727,7 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
                         // depth (and therefore the indent) is known.
                         label: String::new(),
                         detail: facts.join(" · "),
-                        tone: bucket_tone(bucket),
+                        tone: agent_tone(bucket, failed),
                         selectable: true,
                         // One agent, one destination (v0.9.7): activation
                         // opens the agent's transcript directly; Agent
@@ -1755,6 +1772,8 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
                 let bucket = current_activity
                     .map(|activity| current_activity_status_bucket(activity.status))
                     .unwrap_or(WorkBucket::Active);
+                let failed = current_activity
+                    .is_some_and(|a| matches!(a.status, AgentCurrentActivityStatus::Failed));
                 let name = app.agent_label_map.get(id).cloned();
                 let mut facts = vec![status.to_string()];
                 if let Some(detail) =
@@ -1792,7 +1811,7 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
                             mark: agent_mark(bucket),
                             label: String::new(),
                             detail: facts.join(" · "),
-                            tone: bucket_tone(bucket),
+                            tone: agent_tone(bucket, failed),
                             selectable: true,
                             // Same destination as the cached-seed rows above.
                             primary_action: Some(SidebarRowAction::OpenAgentTranscript {
@@ -2014,6 +2033,16 @@ fn subagent_status_label(status: &SubAgentStatus) -> &'static str {
         SubAgentStatus::Failed(_) => "failed",
         SubAgentStatus::Cancelled => "cancelled",
         SubAgentStatus::BudgetExhausted => "budget exhausted",
+    }
+}
+
+/// `WorkBucket::Attention` deliberately groups a wait with a failure so they
+/// sort together — both need you. Tone must not follow it that far: only an
+/// actual failure spends Failure red.
+const fn agent_tone(bucket: WorkBucket, failed: bool) -> WorkTone {
+    match bucket {
+        WorkBucket::Attention if failed => WorkTone::Failure,
+        other => bucket_tone(other),
     }
 }
 
@@ -2470,7 +2499,7 @@ fn graph_node_row(snapshot: &WorkGraphSnapshot, node: &WorkNode) -> WorkRow {
         NodeState::Verified => (status_mark(StatusKind::Done).glyph, WorkTone::Success),
         NodeState::Stale => ("?", WorkTone::Attention),
         NodeState::Superseded | NodeState::Cancelled => ("−", WorkTone::Muted),
-        NodeState::Failed => (crate::tui::glyphs::FAILED, WorkTone::Attention),
+        NodeState::Failed => (crate::tui::glyphs::FAILED, WorkTone::Failure),
     };
     let state = state_label(node);
     let kind = kind_label(node.kind);

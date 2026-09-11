@@ -168,6 +168,7 @@
   "HotbarSetupDirtyModified": "수정됨",
   "HotbarSetupDirtyClean": "변경 없음",
   "HotbarSetupNoAction": "동작 없음",
+  "HotbarSetupConfirmDisable": "Hotbar를 비활성화하고 모든 슬롯을 비울까요? (y/n)",
   "HotbarSetupStatusLine": "슬롯 {slot} | {action} | {dirty}",
   "HotbarSetupSlotOutOfRange": "핫바 슬롯 {slot}은(는) 1-{max} 범위를 벗어났습니다",
   "HotbarSetupNoActionSelected": "선택된 동작이 없습니다.",

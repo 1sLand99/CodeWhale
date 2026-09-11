@@ -168,6 +168,7 @@
   "HotbarSetupDirtyModified": "diubah",
   "HotbarSetupDirtyClean": "bersih",
   "HotbarSetupNoAction": "Tidak ada aksi",
+  "HotbarSetupConfirmDisable": "Nonaktifkan Hotbar dan kosongkan semua slot? (y/n)",
   "HotbarSetupStatusLine": "slot {slot} | {action} | {dirty}",
   "HotbarSetupSlotOutOfRange": "Slot Hotbar {slot} di luar 1-{max}",
   "HotbarSetupNoActionSelected": "Belum ada aksi yang dipilih.",

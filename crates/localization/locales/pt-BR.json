@@ -168,6 +168,7 @@
   "HotbarSetupDirtyModified": "modificado",
   "HotbarSetupDirtyClean": "sem alterações",
   "HotbarSetupNoAction": "Nenhuma ação",
+  "HotbarSetupConfirmDisable": "Desativar a Hotbar e limpar todos os slots? (y/n)",
   "HotbarSetupStatusLine": "slot {slot} | {action} | {dirty}",
   "HotbarSetupSlotOutOfRange": "Slot {slot} da Hotbar está fora de 1-{max}",
   "HotbarSetupNoActionSelected": "Nenhuma ação selecionada.",

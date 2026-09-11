@@ -168,6 +168,7 @@
   "HotbarSetupDirtyModified": "modificado",
   "HotbarSetupDirtyClean": "sin cambios",
   "HotbarSetupNoAction": "Sin acción",
+  "HotbarSetupConfirmDisable": "¿Desactivar la Hotbar y vaciar todas las ranuras? (y/n)",
   "HotbarSetupStatusLine": "ranura {slot} | {action} | {dirty}",
   "HotbarSetupSlotOutOfRange": "La ranura {slot} de Hotbar está fuera de 1-{max}",
   "HotbarSetupNoActionSelected": "No hay ninguna acción seleccionada.",
