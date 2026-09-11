@@ -423,6 +423,7 @@
   "CmdLoadDescription": "Завантажити сеанс з файлу",
   "CmdLogoutDescription": "Очистити ключ API та повернутися до налаштування",
   "CmdMcpDescription": "Відкрити або керувати серверами MCP — підкоманда init додає сервер а doctor його перевіряє",
+  "McpReloadAlreadyRunning": "Перезавантаження MCP уже триває; рядок стану показує поступ.",
   "McpRecommendedUnknownId": "Невідомий ідентифікатор рекомендованого MCP. Виконайте {recommendations_command}, щоб переглянути відібраний список.",
   "McpRecommendationsHeading": "Рекомендовані плагіни Codewhale (компоненти MCP; автоматичного встановлення немає)",
   "McpRecommendationsSafety": "Перегляд списку нічого не додає й не вмикає. Явне додавання лише записує конфігурацію; перевірте її до підключення сервера командою {restart_command}.",

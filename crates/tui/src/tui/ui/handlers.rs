@@ -636,6 +636,16 @@ pub(crate) async fn handle_mcp_ui_action(
     let mut changed = false;
     let mut message = None;
     let is_reload = matches!(&action, crate::tui::app::McpUiAction::Reload);
+    // A reload already running owns the live surface, and starting a second
+    // pass restarts every server the first one is still connecting. `Extensions`
+    // rows read `[connecting]` while that happens and answer no key, so a user
+    // who presses Enter again gets another full reconnect and another receipt —
+    // four presses became four overlapping 12-server reloads and a wall of
+    // duplicate notes. The flag was already tracked; nothing ever read it.
+    if is_reload && app.mcp_reload_in_flight {
+        add_mcp_message(app, app.tr(MessageId::McpReloadAlreadyRunning).into_owned());
+        return;
+    }
     let retry_name = match &action {
         crate::tui::app::McpUiAction::Retry { name } => Some(name.clone()),
         _ => None,

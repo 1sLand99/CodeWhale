@@ -426,6 +426,7 @@
   "CmdLoadDescription": "从文件加载会话",
   "CmdLogoutDescription": "清除 API 密钥并返回设置",
   "CmdMcpDescription": "打开或管理 MCP 服务器 — init 子命令添加服务器 doctor 子命令检查服务器",
+  "McpReloadAlreadyRunning": "MCP 重新加载正在进行中，状态栏会显示进度。",
   "McpRecommendedUnknownId": "未知的推荐 MCP ID。运行 {recommendations_command} 查看精选列表。",
   "McpRecommendationsHeading": "Codewhale 推荐插件（MCP 组件；不会自动安装）",
   "McpRecommendationsSafety": "查看此列表不会添加或启用任何内容。显式添加只会写入配置；请在 {restart_command} 连接服务器前检查配置。",

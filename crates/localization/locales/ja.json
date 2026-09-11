@@ -426,6 +426,7 @@
   "CmdLoadDescription": "ファイルからセッションを読み込み",
   "CmdLogoutDescription": "API キーを消去してセットアップに戻る",
   "CmdMcpDescription": "MCP サーバを開く・管理する — init サブコマンドでサーバを追加し doctor で点検する",
+  "McpReloadAlreadyRunning": "MCP の再読み込みは実行中です。ステータスバーが進行状況を示します。",
   "McpRecommendedUnknownId": "推奨 MCP ID が不明です。{recommendations_command} で精選リストを確認してください。",
   "McpRecommendationsHeading": "Codewhale の推奨プラグイン（MCP コンポーネント。自動インストールなし）",
   "McpRecommendationsSafety": "この一覧を見ても、何も追加・有効化されません。明示的な追加は設定を書き込むだけです。{restart_command} がサーバーへ接続する前に確認してください。",

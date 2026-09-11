@@ -426,6 +426,7 @@
   "CmdLoadDescription": "Tải phiên làm việc từ tệp",
   "CmdLogoutDescription": "Xóa khóa API và quay lại bước thiết lập",
   "CmdMcpDescription": "Mở hoặc quản lý các máy chủ MCP — lệnh con init thêm máy chủ và doctor kiểm tra nó",
+  "McpReloadAlreadyRunning": "MCP đang tải lại; thanh trạng thái theo dõi tiến trình.",
   "McpRecommendedUnknownId": "ID MCP được đề xuất không xác định. Chạy {recommendations_command} để xem danh sách tuyển chọn.",
   "McpRecommendationsHeading": "Plugin Codewhale được đề xuất (thành phần MCP; không tự động cài đặt)",
   "McpRecommendationsSafety": "Xem danh sách này không thêm hoặc bật gì cả. Thao tác thêm rõ ràng chỉ ghi cấu hình; hãy kiểm tra trước khi {restart_command} kết nối máy chủ.",

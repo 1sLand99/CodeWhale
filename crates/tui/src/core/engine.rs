@@ -2058,9 +2058,15 @@ impl Engine {
         let _ = self
             .tx_event
             .send(Event::status(format!(
-                "Runtime policy changed to: {} / {}",
-                mode.description(),
+                // Payload first, and short enough for the posture bar's right
+                // slot. "Runtime policy changed to: X / Y" sheds at the colon —
+                // the bar's notice shedder cuts at clause joints and keeps the
+                // head — so the user read "Runtime policy changed to" with the
+                // policy itself gone, which is the one word the notice exists
+                // to carry.
+                "Policy: {} / {}",
                 effective_approval.permission_chip_label(),
+                mode.label(),
             )))
             .await;
     }

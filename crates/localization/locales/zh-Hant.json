@@ -318,6 +318,7 @@
   "CmdLogoutDescription": "清除 API 金鑰並返回設定",
   "CmdLspDescription": "切換 LSP 診斷的開啟或關閉",
   "CmdMcpDescription": "開啟或管理 MCP 伺服器 — init 子命令新增伺服器 doctor 子命令檢查伺服器",
+  "McpReloadAlreadyRunning": "MCP 重新載入正在進行中，狀態列會顯示進度。",
   "McpRecommendedUnknownId": "未知的建議 MCP ID。執行 {recommendations_command} 查看精選清單。",
   "McpRecommendationsHeading": "Codewhale 建議外掛（MCP 元件；不會自動安裝）",
   "McpRecommendationsSafety": "查看此清單不會新增或啟用任何內容。明確新增只會寫入設定；請在 {restart_command} 連線伺服器前檢查設定。",

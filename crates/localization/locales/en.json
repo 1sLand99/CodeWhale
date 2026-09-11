@@ -426,6 +426,7 @@
   "CmdLoadDescription": "Load a session from file",
   "CmdLogoutDescription": "Sign out and return to setup",
   "CmdMcpDescription": "Open or manage MCP servers — the init subcommand adds a server and doctor checks it",
+  "McpReloadAlreadyRunning": "MCP reload is already running; the status bar tracks it.",
   "McpRecommendedUnknownId": "Unknown MCP suggestion. Run {recommendations_command} to see the list.",
   "McpRecommendationsHeading": "Suggested Codewhale plugins (MCP components; nothing installs automatically)",
   "McpRecommendationsSafety": "Looking adds nothing. Adding writes config only — review it before {restart_command} connects anything.",

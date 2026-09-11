@@ -423,6 +423,7 @@
   "CmdLoadDescription": "Sitzung aus Datei laden",
   "CmdLogoutDescription": "API-Schlüssel löschen und zum Setup zurückkehren",
   "CmdMcpDescription": "MCP-Server öffnen oder verwalten — der Unterbefehl init fügt einen Server hinzu und doctor prüft ihn",
+  "McpReloadAlreadyRunning": "Ein MCP-Neuladen läuft bereits; die Statusleiste verfolgt es.",
   "McpRecommendedUnknownId": "Unbekannte empfohlene MCP-ID. Mit {recommendations_command} kann die kuratierte Liste geprüft werden.",
   "McpRecommendationsHeading": "Vorgeschlagene Codewhale-Plugins (MCP-Komponenten; nichts wird automatisch installiert)",
   "McpRecommendationsSafety": "Diese Liste fügt nichts hinzu und aktiviert nichts. Explizites Hinzufügen schreibt nur die Konfiguration; prüfe sie, bevor {restart_command} den Server verbindet.",

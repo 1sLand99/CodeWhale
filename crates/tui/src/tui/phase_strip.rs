@@ -943,7 +943,10 @@ pub fn render_tideline_footer(
     let floor = left_run_width(&mark, &posture_items(footer, MAX_SHED));
     let right = footer.right.map(|(text, ink)| {
         let budget = width.saturating_sub(floor + 1);
-        (truncate_owned(&footer.sym(text), budget), ink)
+        (
+            crate::tui::ui_text::truncate_line_to_width(&footer.sym(text), budget),
+            ink,
+        )
     });
     let right_width = right
         .as_ref()
@@ -958,7 +961,10 @@ pub fn render_tideline_footer(
     let permission_ink = footer.permission_chip.1;
     let mut x = usize::from(area.x);
     let clip = |x: usize, text: &str| -> String {
-        truncate_owned(text, (usize::from(area.x) + left_budget).saturating_sub(x))
+        crate::tui::ui_text::truncate_line_to_width(
+            text,
+            (usize::from(area.x) + left_budget).saturating_sub(x),
+        )
     };
     tput(
         buf,
@@ -1008,20 +1014,6 @@ pub fn render_tideline_footer(
         tput(buf, sx as u16, area.y, &text, tchrome(theme, ink));
     }
     count_rects
-}
-
-fn truncate_owned(text: &str, width: usize) -> String {
-    let mut out = String::new();
-    let mut used = 0;
-    for ch in text.chars() {
-        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + w > width {
-            break;
-        }
-        out.push(ch);
-        used += w;
-    }
-    out
 }
 
 /// Owned posture facts, built from real `App` state at render time and lent

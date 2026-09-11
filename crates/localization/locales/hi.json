@@ -423,6 +423,7 @@
   "CmdLoadDescription": "फ़ाइल से सत्र लोड करें",
   "CmdLogoutDescription": "API कुंजी साफ़ करें और सेटअप पर लौटें",
   "CmdMcpDescription": "MCP सर्वर खोलें या प्रबंधित करें — init उपकमांड सर्वर जोड़ता है और doctor उसकी जाँच करता है",
+  "McpReloadAlreadyRunning": "MCP पुनः लोड पहले से चल रहा है; स्थिति पट्टी इसे ट्रैक करती है।",
   "McpRecommendedUnknownId": "अज्ञात सुझाई गई MCP ID। चुनी हुई सूची देखने के लिए {recommendations_command} चलाएँ।",
   "McpRecommendationsHeading": "सुझाए गए Codewhale प्लगइन (MCP घटक; कुछ भी अपने आप इंस्टॉल नहीं होता)",
   "McpRecommendationsSafety": "इस सूची को देखने से कुछ भी जुड़ता या चालू नहीं होता। स्पष्ट रूप से जोड़ने पर केवल कॉन्फ़िगरेशन लिखा जाता है; {restart_command} से सर्वर जुड़ने से पहले इसकी जाँच करें।",

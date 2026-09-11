@@ -6336,8 +6336,20 @@ fn mcp_recovery_kind_names_real_login_and_reload_commands() {
         McpRecoveryKind::Reauth.slash_command("github"),
         "/mcp login github"
     );
+    // One row, one server. A `[reconnect] github` row that reloads every
+    // configured server is not the action it named.
     assert_eq!(
         McpRecoveryKind::Connect.slash_command("github"),
+        "/mcp retry github"
+    );
+    assert_eq!(
+        McpRecoveryKind::Reconnect.slash_command("github"),
+        "/mcp retry github"
+    );
+    // A name the command line cannot carry safely falls back to the blunt
+    // reload rather than emitting an argument that would not survive parsing.
+    assert_eq!(
+        McpRecoveryKind::Reconnect.slash_command("name with spaces"),
         "/mcp reload"
     );
     assert_eq!(

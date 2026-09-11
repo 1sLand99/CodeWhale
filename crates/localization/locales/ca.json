@@ -423,6 +423,7 @@
   "CmdLoadDescription": "Carrega una sessió des d'un fitxer",
   "CmdLogoutDescription": "Esborra la clau d'API i torna a la configuració",
   "CmdMcpDescription": "Obre o gestiona servidors MCP — el subcomandament init afegeix un servidor i doctor el comprova",
+  "McpReloadAlreadyRunning": "La recàrrega MCP ja s'està executant; la barra d'estat en fa el seguiment.",
   "McpRecommendedUnknownId": "ID MCP recomanat desconegut. Executa {recommendations_command} per revisar la llista seleccionada.",
   "McpRecommendationsHeading": "Plugins suggerits de Codewhale (components MCP; no s’instal·la res automàticament)",
   "McpRecommendationsSafety": "Veure aquesta llista no afegeix ni activa res. Un afegit explícit només escriu la configuració; revisa-la abans que {restart_command} connecti el servidor.",

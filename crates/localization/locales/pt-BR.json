@@ -426,6 +426,7 @@
   "CmdLoadDescription": "Carregar a sessão de um arquivo",
   "CmdLogoutDescription": "Limpar a chave de API e voltar à configuração",
   "CmdMcpDescription": "Abrir ou gerenciar servidores MCP — o subcomando init adiciona um servidor e doctor o verifica",
+  "McpReloadAlreadyRunning": "A recarga do MCP já está em andamento; a barra de status a acompanha.",
   "McpRecommendedUnknownId": "ID de MCP recomendado desconhecido. Execute {recommendations_command} para conferir a lista selecionada.",
   "McpRecommendationsHeading": "Plugins sugeridos do Codewhale (componentes MCP; nada é instalado automaticamente)",
   "McpRecommendationsSafety": "Ver esta lista não adiciona nem ativa nada. Uma adição explícita só grava a configuração; revise-a antes que {restart_command} conecte o servidor.",

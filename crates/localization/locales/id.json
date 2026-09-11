@@ -423,6 +423,7 @@
   "CmdLoadDescription": "Muat sesi dari file",
   "CmdLogoutDescription": "Hapus kunci API dan kembali ke penyiapan",
   "CmdMcpDescription": "Buka atau kelola server MCP — subperintah init menambah server dan doctor memeriksanya",
+  "McpReloadAlreadyRunning": "Pemuatan ulang MCP sedang berjalan; bilah status melacaknya.",
   "McpRecommendedUnknownId": "ID MCP rekomendasi tidak dikenal. Jalankan {recommendations_command} untuk memeriksa daftar pilihan.",
   "McpRecommendationsHeading": "Plugin Codewhale yang disarankan (komponen MCP; tidak ada pemasangan otomatis)",
   "McpRecommendationsSafety": "Melihat daftar ini tidak menambah atau mengaktifkan apa pun. Penambahan eksplisit hanya menulis konfigurasi; periksa sebelum {restart_command} menghubungkan server.",

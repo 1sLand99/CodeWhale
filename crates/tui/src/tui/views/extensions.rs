@@ -1794,23 +1794,33 @@ impl ModalView for ExtensionsView {
             super::ActionHint::new("/", tr(self.locale, MessageId::SessionsActionSearch)),
             super::ActionHint::new("Esc", tr(self.locale, MessageId::SessionsActionClose)),
         ];
+        // Only advertise Enter when Enter does something. A `Status` action is
+        // a state, not a verb: a row mid-connect labelled `connecting` produced
+        // the hint "Enter connecting", and pressing it did nothing — which is
+        // what makes a user press it again.
         let enter_label = match entries.get(selected).copied() {
             Some(VisibleEntry::Item(_, item)) => item
                 .action
                 .as_ref()
-                .map(|action| action.label().to_string())
-                .unwrap_or_else(|| {
-                    tr(self.locale, MessageId::AutomationActionInspect).into_owned()
-                }),
-            _ => tr(self.locale, MessageId::ExtensionsActionFold).into_owned(),
+                .filter(|action| action.command().is_some())
+                .map(|action| action.label().to_string()),
+            _ => Some(tr(self.locale, MessageId::ExtensionsActionFold).into_owned()),
         };
-        let full_hints = [
+        let mut full_hints = vec![
             super::ActionHint::new("Tab", tr(self.locale, MessageId::ExtensionsActionTabs)),
             super::ActionHint::new("↑↓", tr(self.locale, MessageId::LaunchHintMove)),
-            super::ActionHint::new("Enter", enter_label),
-            super::ActionHint::new("/", tr(self.locale, MessageId::SessionsActionSearch)),
-            super::ActionHint::new("Esc", tr(self.locale, MessageId::SessionsActionClose)),
         ];
+        if let Some(label) = enter_label {
+            full_hints.push(super::ActionHint::new("Enter", label));
+        }
+        full_hints.push(super::ActionHint::new(
+            "/",
+            tr(self.locale, MessageId::SessionsActionSearch),
+        ));
+        full_hints.push(super::ActionHint::new(
+            "Esc",
+            tr(self.locale, MessageId::SessionsActionClose),
+        ));
         render_modal_footer(
             rows[4],
             buf,
@@ -1859,7 +1869,13 @@ mod tests {
         let recovery = crate::mcp::mcp_recovery_kind(true, true, false, None, false)
             .expect("a disconnected server needs recovery");
         assert_eq!(recovery, McpRecoveryKind::Reconnect);
-        assert_eq!(recovery.slash_command("playwright"), "/mcp reload");
+        // The row names one server, so the command it runs must name it too:
+        // reloading all of them leaves the row the user aimed at still pending
+        // when the list returns, which reads as the key doing nothing.
+        assert_eq!(
+            recovery.slash_command("playwright"),
+            "/mcp retry playwright"
+        );
         assert_eq!(tr(Locale::En, recovery.label_key()).as_ref(), "reconnect");
     }
 
