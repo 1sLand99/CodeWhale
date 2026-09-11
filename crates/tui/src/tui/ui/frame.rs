@@ -1628,10 +1628,10 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
         // hitbox cannot describe a row the transcript did not draw — and a
         // fully dissolved card painted nothing this frame, so it owns no
         // rows either.
-        if app
-            .launch
-            .card_paintable(app.ambient_clock_ms, app.motion_policy().allows_decorative())
-        {
+        if app.launch.card_paintable(
+            app.ambient_clock_ms,
+            app.motion_policy().allows_decorative(),
+        ) {
             crate::tui::underwater::refresh_launch_row_hitboxes(app, chat_area);
         } else if !app.launch.row_hitboxes.is_empty() {
             app.launch.row_hitboxes.clear();

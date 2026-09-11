@@ -140,6 +140,16 @@ fn notice_clauses<'a>(text: &'a str, marks: &[char]) -> Vec<&'a str> {
         if !breaks {
             continue;
         }
+        // `1.` opening a numbered step is a list ordinal, not a sentence
+        // stop — breaking there leaves the toast ending on a bare `1.`
+        // (the send-blocked clip: `…not found. 1.`). Only the pure
+        // number-and-stop shape is exempt; `Version 1.` still ends a clause.
+        if ch == '.'
+            && text[start..idx].trim().bytes().all(|b| b.is_ascii_digit())
+            && !text[start..idx].trim().is_empty()
+        {
+            continue;
+        }
         let end = idx + ch.len_utf8();
         let clause = text[start..end].trim();
         if !clause.is_empty() {

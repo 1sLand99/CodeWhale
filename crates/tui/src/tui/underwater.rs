@@ -157,7 +157,11 @@ fn launch_recent_entries(app: &App) -> (Vec<LaunchRecentEntry>, bool) {
             }
         })
         .collect::<Vec<_>>();
-    let has_more = app.launch.total_workspace_sessions > recent.len();
+    // More sessions than the inline cap, or sessions the card's filter
+    // dropped that `/resume` still lists (empty auto-created shells):
+    // either way the see-all row is how the truth stays reachable.
+    let has_more = app.launch.total_workspace_sessions > recent.len()
+        || (recent.is_empty() && app.launch.has_scoped_sessions);
     (recent, has_more)
 }
 
@@ -1584,9 +1588,9 @@ pub fn empty_state_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
         // (wordmark, caption, prompt) is what remains. Reduced motion takes
         // the endpoint at once.
         let motion_allowed = app.motion_policy().allows_decorative() && !app.low_motion;
-        let dissolve =
-            app.launch
-                .card_dissolve_progress(app.ambient_clock_ms, motion_allowed);
+        let dissolve = app
+            .launch
+            .card_dissolve_progress(app.ambient_clock_ms, motion_allowed);
         if dissolve < 1.0 {
             let mut state = launch_empty_state(app, area);
             if dissolve > 0.0 {
@@ -2114,9 +2118,12 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
         rows.push((row.id.clone(), text.len()));
         text.push(Some(Line::from(spans)));
         if matches!(row.id, crate::tui::app::LaunchRowId::NewSession) && fit.heading {
-            // With no recent work at all the heading says so, rather than
-            // leaving a gap that reads as a failure to load.
-            let heading = if had_recent {
+            // With no resumable work the heading says so — but only when the
+            // workspace genuinely has none. Sessions the card's filter drops
+            // (empty auto-created shells) still exist in `/resume`, so their
+            // presence earns the honest "Recent" + a see-all row, not a
+            // "no recent sessions" the picker would immediately disprove.
+            let heading = if had_recent || app.launch.has_scoped_sessions {
                 MessageId::LaunchRecentHeading
             } else {
                 MessageId::LaunchNoRecentSessions

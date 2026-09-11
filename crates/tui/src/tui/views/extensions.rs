@@ -2186,11 +2186,8 @@ mod tests {
             }],
             problem: None,
         };
-        let mut view = ExtensionsView::from_snapshot_with_locale(
-            snapshot,
-            ExtensionsTab::Plugins,
-            Locale::En,
-        );
+        let mut view =
+            ExtensionsView::from_snapshot_with_locale(snapshot, ExtensionsTab::Plugins, Locale::En);
         // Land on the item, not its group heading.
         view.selected[ExtensionsTab::Plugins.index()] = 1;
         view
@@ -2292,10 +2289,7 @@ mod tests {
         let entries = view.visible_entries();
         match entries[view.selected[ExtensionsTab::Plugins.index()]] {
             VisibleEntry::Item(_, item) => {
-                assert!(matches!(
-                    item.action,
-                    Some(ExtensionAction::Status { .. })
-                ));
+                assert!(matches!(item.action, Some(ExtensionAction::Status { .. })));
             }
             other => panic!("expected the refreshed item, got {other:?}"),
         }

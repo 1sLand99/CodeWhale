@@ -615,6 +615,11 @@ pub struct LaunchState {
     /// All workspace sessions behind the inline list; when this exceeds
     /// `recent.len()` the card paints the see-all overflow row.
     pub total_workspace_sessions: usize,
+    /// Whether this workspace has any sessions at all — including the
+    /// empty auto-created shells `recent` deliberately drops. The card
+    /// must not say "no recent sessions yet" while `/resume` lists them;
+    /// when they exist it shows the see-all row instead of the lie.
+    pub has_scoped_sessions: bool,
     /// Whether launch keys type into the pre-session composer. The composer
     /// is the launch screen's one focus owner, so this is `true` from first
     /// paint. The composer itself is the session `App`'s own
@@ -664,13 +669,19 @@ pub(crate) const LAUNCH_CARD_DISSOLVE_MS: u128 = 240;
 
 /// Load the startup card's recent-work list: the workspace's own sessions,
 /// most recent first (`list_sessions` already sorts that way), skipping
-/// archived sessions and empty auto-created ones exactly like the resume
-/// picker and `--continue` do. Returns the inline-capped list plus the
-/// total behind it for the see-all overflow.
-fn load_launch_recent(workspace: &std::path::Path) -> (Vec<LaunchRecentSession>, usize) {
+/// archived sessions and — unlike the resume picker, which lists them —
+/// empty auto-created shells. Returns the inline-capped list, the total
+/// behind it for the see-all overflow, and whether any scoped sessions
+/// exist at all so the card never claims "no recent sessions" while
+/// `/resume` has some.
+fn load_launch_recent(workspace: &std::path::Path) -> (Vec<LaunchRecentSession>, usize, bool) {
     let sessions = crate::session_manager::SessionManager::default_location()
         .and_then(|manager| manager.list_sessions())
         .unwrap_or_default();
+    let any_scoped = sessions.iter().any(|session| {
+        !session.archived
+            && crate::session_manager::workspace_scope_matches(&session.workspace, workspace)
+    });
     let mut scoped: Vec<LaunchRecentSession> = sessions
         .into_iter()
         .filter(|session| {
@@ -687,13 +698,13 @@ fn load_launch_recent(workspace: &std::path::Path) -> (Vec<LaunchRecentSession>,
         .collect();
     let total = scoped.len();
     scoped.truncate(LAUNCH_RECENT_INLINE_LIMIT);
-    (scoped, total)
+    (scoped, total, any_scoped)
 }
 
 impl LaunchState {
     #[must_use]
     pub fn new(visible: bool, workspace: &std::path::Path) -> Self {
-        let (recent, total_workspace_sessions) = load_launch_recent(workspace);
+        let (recent, total_workspace_sessions, has_scoped_sessions) = load_launch_recent(workspace);
         // The migration notice answers a question you have exactly once:
         // "I have Claude Code, what comes over?". It used to key on
         // `~/.claude/projects` alone, so anyone who keeps Claude Code
@@ -725,6 +736,7 @@ impl LaunchState {
             workspace: workspace.to_path_buf(),
             recent,
             total_workspace_sessions,
+            has_scoped_sessions,
             composer_focus: true,
             row_hitboxes: Vec::new(),
             hovered_row: None,
@@ -742,9 +754,10 @@ impl LaunchState {
     /// construction). Called when the card is restored after a picker
     /// closes so a session created or renamed behind the picker shows up.
     pub fn refresh_recent(&mut self) {
-        let (recent, total) = load_launch_recent(&self.workspace.clone());
+        let (recent, total, any_scoped) = load_launch_recent(&self.workspace.clone());
         self.recent = recent;
         self.total_workspace_sessions = total;
+        self.has_scoped_sessions = any_scoped;
     }
 
     /// Begin the card dissolve once (idempotent). The first keystroke or a
