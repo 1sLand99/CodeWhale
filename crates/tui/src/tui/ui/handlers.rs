@@ -1202,6 +1202,48 @@ pub(crate) async fn handle_view_events(
                     open_text_pager(app, title, content);
                 }
             },
+            ViewEvent::ExecutePanelCommand {
+                command,
+                pager_title,
+            } => {
+                // The Extensions panel stays open for this command. Inspect
+                // rows divert their text output into a pager stacked on the
+                // panel instead of a transcript dump; mutations keep their
+                // transcript receipt either way.
+                let mut result = crate::commands::execute(&command, app);
+                if let Some(title) = pager_title
+                    && let Some(text) = result.message.take()
+                {
+                    open_text_pager(app, title, text);
+                }
+                if apply_command_result(terminal, app, engine_handle, task_manager, config, result)
+                    .await?
+                {
+                    return Ok(true);
+                }
+                // The row the user just changed re-reads live state, and so
+                // does every sibling — a plugin enable, an MCP retry, or an
+                // install lands on the still-open list instead of leaving it
+                // stale until reopen.
+                let snapshot = crate::tui::views::extensions::ExtensionsSnapshot::from_app(app);
+                app.view_stack.refresh_extensions(snapshot);
+            }
+            ViewEvent::RefreshExtensions {
+                mcp_generation,
+                mcp_initializing,
+            } => {
+                // Bounded poll from the open panel: rebuild only when the
+                // MCP generation or the initializing flag moved past what
+                // the panel's snapshot last saw.
+                if app.view_stack.extensions_is_top()
+                    && (mcp_generation != app.mcp_snapshot_generation
+                        || app.mcp_snapshot_generation_invalidated
+                        || mcp_initializing != app.mcp_initializing)
+                {
+                    let snapshot = crate::tui::views::extensions::ExtensionsSnapshot::from_app(app);
+                    app.view_stack.refresh_extensions(snapshot);
+                }
+            }
             ViewEvent::OpenTextPager { title, content } => {
                 open_text_pager(app, title, content);
             }

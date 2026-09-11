@@ -1067,6 +1067,22 @@ pub enum ViewEvent {
     LaunchResumeConfirmed {
         session_id: String,
     },
+    /// A slash command an Extensions row activated in place: the panel stays
+    /// open, the host runs the command through the normal command path, then
+    /// hands the panel a fresh snapshot so every row re-reads live state.
+    /// When `pager_title` is set, the command's text output renders in a
+    /// pager stacked on the panel rather than landing in the transcript.
+    ExecutePanelCommand {
+        command: String,
+        pager_title: Option<String>,
+    },
+    /// The open Extensions panel's bounded poll: the host rebuilds the read
+    /// model only when the MCP snapshot generation or the initializing flag
+    /// moved past what the panel's snapshot last saw.
+    RefreshExtensions {
+        mcp_generation: u64,
+        mcp_initializing: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1305,6 +1321,27 @@ impl ViewStack {
             }
         }
         events
+    }
+
+    /// Whether the Extensions panel is the top view.
+    pub fn extensions_is_top(&self) -> bool {
+        self.views
+            .last()
+            .is_some_and(|view| view.kind() == ModalKind::Extensions)
+    }
+
+    /// Hand a freshly-built read model to the open Extensions panel, when it
+    /// is on top. A pager or another modal stacked above it means the user is
+    /// looking at something else — the rebuild is skipped and the next poll
+    /// retries.
+    pub fn refresh_extensions(&mut self, snapshot: extensions::ExtensionsSnapshot) {
+        if let Some(view) = self.views.last_mut()
+            && let Some(panel) = view
+                .as_any_mut()
+                .downcast_mut::<extensions::ExtensionsView>()
+        {
+            panel.refresh_snapshot(snapshot);
+        }
     }
 }
 

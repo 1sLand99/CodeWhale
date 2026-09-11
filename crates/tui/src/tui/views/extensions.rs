@@ -213,12 +213,39 @@ pub struct ExtensionItem {
     pub action: Option<ExtensionAction>,
 }
 
+/// Where a row's command lands when the user activates it.
+///
+/// Every row used to close the panel and drop a slash command into the
+/// transcript — inspecting a plugin closed the list and pasted its detail
+/// into chat, and a mutation left every other row reading open-time state.
+/// Only the row knows which its command is, so the disposition lives on the
+/// action: mutations and inspects act in place, and flows that own a
+/// different surface (an editor, OAuth login, a composer-bound trust token)
+/// still yield the panel to them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowActionDisposition {
+    /// Run the command with the panel open; the host refreshes the snapshot
+    /// afterwards so every row re-reads live state.
+    InPlace,
+    /// In place, and the command's text output renders in a pager stacked on
+    /// the panel — the inspect path that keeps detail out of the transcript.
+    InPlacePager,
+    /// The command owns a different surface; the panel yields to it.
+    LeavePanel,
+}
+
 /// A row affordance. Executable actions route back through the existing slash
 /// command controller; status-only actions explain why Enter will not mutate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExtensionAction {
-    Command { label: String, command: String },
-    Status { label: String },
+    Command {
+        label: String,
+        command: String,
+        disposition: RowActionDisposition,
+    },
+    Status {
+        label: String,
+    },
 }
 
 impl ExtensionAction {
@@ -254,12 +281,21 @@ pub struct ExtensionsTabModel {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExtensionsSnapshot {
     tabs: [ExtensionsTabModel; 5],
+    /// MCP manager generation and initializing flag at capture time. The
+    /// open panel reports these on its bounded poll so the host rebuilds the
+    /// model only when live state actually moved.
+    pub mcp_generation: u64,
+    pub mcp_initializing: bool,
 }
 
 impl ExtensionsSnapshot {
     #[must_use]
     pub fn from_app(app: &App) -> Self {
-        let mut snapshot = Self::default();
+        let mut snapshot = Self {
+            mcp_generation: app.mcp_snapshot_generation,
+            mcp_initializing: app.mcp_initializing,
+            ..Self::default()
+        };
         snapshot.tabs[ExtensionsTab::Hooks.index()] = hooks_model(app, app.ui_locale);
         snapshot.tabs[ExtensionsTab::Plugins.index()] = plugins_model(app, app.ui_locale);
         snapshot.tabs[ExtensionsTab::Marketplace.index()] = marketplace_model(app, app.ui_locale);
@@ -351,6 +387,7 @@ impl ExtensionsSnapshot {
                         item.action = Some(ExtensionAction::Command {
                             label: tr(app.ui_locale, MessageId::ExtensionsActionAdd).into_owned(),
                             command: format!("/mcp add recommended {recommendation_id}"),
+                            disposition: RowActionDisposition::InPlace,
                         });
                     }
                     Some(server) if !server.is_enabled() => {
@@ -360,6 +397,7 @@ impl ExtensionsSnapshot {
                             label: tr(app.ui_locale, MessageId::ExtensionsActionEnable)
                                 .into_owned(),
                             command: format!("/mcp enable {server_name}"),
+                            disposition: RowActionDisposition::InPlace,
                         });
                     }
                     Some(_) => {
@@ -538,6 +576,7 @@ fn hooks_model(app: &App, locale: Locale) -> ExtensionsTabModel {
             action: Some(ExtensionAction::Command {
                 label: tr(locale, MessageId::ExtensionsActionEdit).into_owned(),
                 command: "/hooks edit".into(),
+                disposition: RowActionDisposition::LeavePanel,
             }),
         })
         .collect::<Vec<_>>();
@@ -566,6 +605,7 @@ fn hooks_model(app: &App, locale: Locale) -> ExtensionsTabModel {
             action: Some(ExtensionAction::Command {
                 label: tr(locale, MessageId::ExtensionsActionEdit).into_owned(),
                 command: "/hooks edit".into(),
+                disposition: RowActionDisposition::LeavePanel,
             }),
         })
         .collect::<Vec<_>>();
@@ -601,6 +641,7 @@ fn hooks_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                 action: Some(ExtensionAction::Command {
                     label: tr(locale, MessageId::ExtensionsActionEdit).into_owned(),
                     command: "/hooks edit".into(),
+                    disposition: RowActionDisposition::LeavePanel,
                 }),
             }],
         });
@@ -766,21 +807,28 @@ fn plugin_row_action(
         ExtensionAction::Command {
             label: tr(locale, MessageId::ExtensionsActionDiagnose).into_owned(),
             command: format!("/plugin validate {}", plugin.name()),
+            disposition: RowActionDisposition::InPlacePager,
         }
     } else if plugin.active() {
         ExtensionAction::Command {
             label: tr(locale, MessageId::LaunchHintOpen).into_owned(),
             command: format!("/plugin show {}", plugin.name()),
+            disposition: RowActionDisposition::InPlacePager,
         }
     } else if plugin.trusted() && !plugin.enabled {
         ExtensionAction::Command {
             label: tr(locale, MessageId::ExtensionsActionEnable).into_owned(),
             command: format!("/plugin enable {}", plugin.name()),
+            disposition: RowActionDisposition::InPlace,
         }
     } else {
+        // Trust is a deliberate confirmation — `/plugin trust <name>` prints
+        // the review and the token the person then types into the composer,
+        // so the panel yields.
         ExtensionAction::Command {
             label: tr(locale, MessageId::AutomationActionInspect).into_owned(),
             command: format!("/plugin trust {}", plugin.name()),
+            disposition: RowActionDisposition::LeavePanel,
         }
     }
 }
@@ -892,6 +940,7 @@ fn plugins_model(app: &App, locale: Locale) -> ExtensionsTabModel {
             action: Some(ExtensionAction::Command {
                 label: tr(locale, MessageId::ExtensionsActionDiagnose).into_owned(),
                 command: "/plugin validate".into(),
+                disposition: RowActionDisposition::InPlacePager,
             }),
         })
         .collect::<Vec<_>>();
@@ -993,6 +1042,7 @@ fn marketplace_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                                     catalog.id.as_str(),
                                     candidate.name
                                 ),
+                                disposition: RowActionDisposition::InPlace,
                             })
                         } else {
                             Some(ExtensionAction::Status {
@@ -1050,6 +1100,7 @@ fn skills_model(app: &App, locale: Locale) -> ExtensionsTabModel {
             action: Some(ExtensionAction::Command {
                 label: tr(locale, MessageId::ExtensionsActionManage).into_owned(),
                 command: "/skills".into(),
+                disposition: RowActionDisposition::LeavePanel,
             }),
         };
         if let Some(position) = position {
@@ -1147,11 +1198,19 @@ fn mcp_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                     ExtensionAction::Command {
                         label: tr(locale, recovery.label_key()).into_owned(),
                         command: recovery.slash_command(&name),
+                        // Re-auth hands off to the OAuth login flow; every
+                        // other recovery runs against live state the panel
+                        // re-reads when it lands.
+                        disposition: match recovery {
+                            crate::mcp::McpRecoveryKind::Reauth => RowActionDisposition::LeavePanel,
+                            _ => RowActionDisposition::InPlace,
+                        },
                     }
                 }
                 (false, Some(_)) => ExtensionAction::Command {
                     label: tr(locale, MessageId::ExtensionsActionDiagnose).into_owned(),
                     command: "/mcp validate".into(),
+                    disposition: RowActionDisposition::InPlace,
                 },
             };
             ExtensionItem {
@@ -1297,6 +1356,9 @@ pub struct ExtensionsView {
     /// grammar the rest of the chrome uses instead of raw palette constants.
     theme: codewhale_palette::UiTheme,
     hits: RefCell<HitAreas>,
+    /// Last time `tick` asked the host for a fresh snapshot. Bounds the poll
+    /// so a per-frame tick cannot turn into a rebuild every frame.
+    last_poll: std::time::Instant,
 }
 
 impl ExtensionsView {
@@ -1324,6 +1386,7 @@ impl ExtensionsView {
             folded_groups: BTreeSet::new(),
             theme: codewhale_palette::UI_THEME,
             hits: RefCell::new(HitAreas::default()),
+            last_poll: std::time::Instant::now(),
         };
         // `/mcp` opens on the first server that needs a login, not on that
         // group's heading, so the one key the screen advertises — Enter —
@@ -1410,19 +1473,45 @@ impl ExtensionsView {
                 self.clamp_selection();
                 ViewAction::None
             }
-            Some(VisibleEntry::Item(_, item)) => item
-                .action
-                .as_ref()
-                .and_then(ExtensionAction::command)
-                .map_or(ViewAction::None, |command| {
-                    ViewAction::EmitAndClose(ViewEvent::CommandPaletteSelected {
-                        action: CommandPaletteAction::ExecuteCommand {
-                            command: command.to_string(),
-                        },
-                    })
-                }),
+            Some(VisibleEntry::Item(_, item)) => match item.action.as_ref() {
+                Some(ExtensionAction::Command {
+                    command,
+                    disposition,
+                    ..
+                }) => match disposition {
+                    RowActionDisposition::LeavePanel => {
+                        ViewAction::EmitAndClose(ViewEvent::CommandPaletteSelected {
+                            action: CommandPaletteAction::ExecuteCommand {
+                                command: command.clone(),
+                            },
+                        })
+                    }
+                    RowActionDisposition::InPlace => {
+                        ViewAction::Emit(ViewEvent::ExecutePanelCommand {
+                            command: command.clone(),
+                            pager_title: None,
+                        })
+                    }
+                    RowActionDisposition::InPlacePager => {
+                        ViewAction::Emit(ViewEvent::ExecutePanelCommand {
+                            command: command.clone(),
+                            pager_title: Some(item.label.clone()),
+                        })
+                    }
+                },
+                _ => ViewAction::None,
+            },
             _ => ViewAction::None,
         }
+    }
+
+    /// Swap in a fresh read model while keeping everything the user is doing:
+    /// active tab, focus, search query, selection, scroll, and folded groups
+    /// all survive; the selection only moves when the refreshed list no
+    /// longer reaches it.
+    pub fn refresh_snapshot(&mut self, snapshot: ExtensionsSnapshot) {
+        self.snapshot = snapshot;
+        self.clamp_selection();
     }
 
     fn set_tab(&mut self, tab: ExtensionsTab) {
@@ -1833,6 +1922,22 @@ impl ModalView for ExtensionsView {
         *self.hits.borrow_mut() = hits;
     }
 
+    fn tick(&mut self) -> ViewAction {
+        // MCP rows go live while the panel is open — a retry lands, a login
+        // finishes, a diagnosis resolves — and the open-time capture would
+        // read stale until reopen. Ask the host for a fresh model at a
+        // bounded cadence; it rebuilds only when the generation or the
+        // initializing flag actually moved.
+        if self.last_poll.elapsed() < std::time::Duration::from_millis(750) {
+            return ViewAction::None;
+        }
+        self.last_poll = std::time::Instant::now();
+        ViewAction::Emit(ViewEvent::RefreshExtensions {
+            mcp_generation: self.snapshot.mcp_generation,
+            mcp_initializing: self.snapshot.mcp_initializing,
+        })
+    }
+
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
@@ -1957,6 +2062,7 @@ mod tests {
             ExtensionAction::Command {
                 label: "re-auth".into(),
                 command: McpRecoveryKind::Reauth.slash_command(name),
+                disposition: RowActionDisposition::LeavePanel,
             },
         )
     }
@@ -1983,6 +2089,7 @@ mod tests {
                 ExtensionAction::Command {
                     label: "diagnose".into(),
                     command: McpRecoveryKind::Diagnose.slash_command("supabase"),
+                    disposition: RowActionDisposition::InPlace,
                 },
             ),
             login_row("slack"),
@@ -2055,5 +2162,142 @@ mod tests {
             Locale::En,
         );
         assert_eq!(plain.selected[ExtensionsTab::Mcp.index()], 0);
+    }
+
+    fn item_with_action(action: ExtensionAction) -> ExtensionItem {
+        ExtensionItem {
+            id: "row".into(),
+            label: "row".into(),
+            description: String::new(),
+            state: "state".into(),
+            tone: ExtensionTone::Idle,
+            detail: "detail".into(),
+            action: Some(action),
+        }
+    }
+
+    fn view_on_item(action: ExtensionAction) -> ExtensionsView {
+        let mut snapshot = ExtensionsSnapshot::default();
+        snapshot.tabs[ExtensionsTab::Plugins.index()] = ExtensionsTabModel {
+            groups: vec![ExtensionGroup {
+                id: "g".into(),
+                label: "g".into(),
+                items: vec![item_with_action(action)],
+            }],
+            problem: None,
+        };
+        let mut view = ExtensionsView::from_snapshot_with_locale(
+            snapshot,
+            ExtensionsTab::Plugins,
+            Locale::En,
+        );
+        // Land on the item, not its group heading.
+        view.selected[ExtensionsTab::Plugins.index()] = 1;
+        view
+    }
+
+    /// The defect: every row closed the panel and dropped its command into
+    /// the transcript. A mutation runs in place — the event carries the
+    /// command, and `Emit` (not `EmitAndClose`) is what keeps the panel.
+    #[test]
+    fn in_place_row_action_emits_without_closing() {
+        let mut view = view_on_item(ExtensionAction::Command {
+            label: "enable".into(),
+            command: "/plugin enable demo".into(),
+            disposition: RowActionDisposition::InPlace,
+        });
+        match view.activate_selected() {
+            ViewAction::Emit(ViewEvent::ExecutePanelCommand {
+                command,
+                pager_title,
+            }) => {
+                assert_eq!(command, "/plugin enable demo");
+                assert_eq!(pager_title, None);
+            }
+            other => panic!("expected an in-place command, got {other:?}"),
+        }
+    }
+
+    /// An inspect row keeps the panel open and asks for its text output in a
+    /// pager stacked on the panel — the detail belongs to the row, not to a
+    /// transcript dump behind the modal.
+    #[test]
+    fn inspect_row_action_pages_its_output_in_place() {
+        let mut view = view_on_item(ExtensionAction::Command {
+            label: "open".into(),
+            command: "/plugin show demo".into(),
+            disposition: RowActionDisposition::InPlacePager,
+        });
+        match view.activate_selected() {
+            ViewAction::Emit(ViewEvent::ExecutePanelCommand {
+                command,
+                pager_title,
+            }) => {
+                assert_eq!(command, "/plugin show demo");
+                assert_eq!(pager_title.as_deref(), Some("row"));
+            }
+            other => panic!("expected a paged inspect, got {other:?}"),
+        }
+    }
+
+    /// A flow that owns another surface — a login, an editor, the composer's
+    /// trust token — still yields the panel.
+    #[test]
+    fn leave_panel_row_action_still_closes() {
+        let mut view = view_on_item(ExtensionAction::Command {
+            label: "re-auth".into(),
+            command: "/mcp login github".into(),
+            disposition: RowActionDisposition::LeavePanel,
+        });
+        match view.activate_selected() {
+            ViewAction::EmitAndClose(ViewEvent::CommandPaletteSelected {
+                action: CommandPaletteAction::ExecuteCommand { command },
+            }) => assert_eq!(command, "/mcp login github"),
+            other => panic!("expected the panel to yield, got {other:?}"),
+        }
+    }
+
+    /// A refresh swaps the read model without disturbing the session: tab,
+    /// query, selection, and folds all survive, and the new MCP generation
+    /// the poll compares against rides along.
+    #[test]
+    fn refresh_preserves_view_state_and_tracks_generation() {
+        let mut view = view_on_item(ExtensionAction::Command {
+            label: "enable".into(),
+            command: "/plugin enable demo".into(),
+            disposition: RowActionDisposition::InPlace,
+        });
+        view.query = "de".into();
+        let mut fresh = ExtensionsSnapshot {
+            mcp_generation: 7,
+            mcp_initializing: true,
+            ..ExtensionsSnapshot::default()
+        };
+        fresh.tabs[ExtensionsTab::Plugins.index()] = ExtensionsTabModel {
+            groups: vec![ExtensionGroup {
+                id: "g".into(),
+                label: "g".into(),
+                items: vec![item_with_action(ExtensionAction::Status {
+                    label: "enabled".into(),
+                })],
+            }],
+            problem: None,
+        };
+        view.refresh_snapshot(fresh);
+        assert_eq!(view.active_tab, ExtensionsTab::Plugins);
+        assert_eq!(view.query, "de");
+        assert_eq!(view.snapshot.mcp_generation, 7);
+        assert!(view.snapshot.mcp_initializing);
+        // The refreshed row's action is the new model's, not the stale one.
+        let entries = view.visible_entries();
+        match entries[view.selected[ExtensionsTab::Plugins.index()]] {
+            VisibleEntry::Item(_, item) => {
+                assert!(matches!(
+                    item.action,
+                    Some(ExtensionAction::Status { .. })
+                ));
+            }
+            other => panic!("expected the refreshed item, got {other:?}"),
+        }
     }
 }
