@@ -21,6 +21,7 @@
 //!   terminal replaces with the PNG transmitted once by
 //!   [`transmit_kitty_mark`]. ratatui's buffer still owns the cells, so the
 //!   image survives redraws.
+//!
 //! Motion ("surfacing", founder 2026-09-01): over `MARK_SURFACE_MS` the mark
 //! reveals from the bottom of its box upward — the whale rises out of the
 //! field — while its colour lerps from the field to the accent through
