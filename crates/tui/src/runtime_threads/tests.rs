@@ -900,7 +900,7 @@ fn spawn_runtime_event_child(
     );
     command
         .arg(EVENT_PROCESS_HELPER)
-        .args(["--exact", "--ignored", "--test-threads", "1"])
+        .args(["--exact", "--ignored", "--nocapture", "--test-threads", "1"])
         .env(EVENT_PROCESS_ROLE_ENV, role)
         .env(EVENT_PROCESS_ROOT_ENV, root)
         .env(EVENT_PROCESS_THREAD_ENV, thread_id)
@@ -910,8 +910,8 @@ fn spawn_runtime_event_child(
         .env(EVENT_PROCESS_COUNT_ENV, "8")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        // The parent is captured by the test runner. Keep child panics there
-        // so a failed writer reports its cause, not just an opaque exit 101.
+        // Disable the child's libtest capture and inherit stderr into the
+        // parent's capture so a failed writer reports its cause, not just 101.
         .stderr(std::process::Stdio::inherit());
     RuntimeEventChildGuard::new(command.spawn().expect("spawn Runtime event child"))
 }
@@ -927,7 +927,7 @@ fn spawn_runtime_manager_racer(
     );
     command
         .arg(EVENT_PROCESS_HELPER)
-        .args(["--exact", "--ignored", "--test-threads", "1"])
+        .args(["--exact", "--ignored", "--nocapture", "--test-threads", "1"])
         .env(EVENT_PROCESS_ROLE_ENV, "manager-racer")
         .env(EVENT_PROCESS_ROOT_ENV, root)
         .env(EVENT_PROCESS_THREAD_ENV, "thr_unused")
