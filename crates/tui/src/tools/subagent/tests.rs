@@ -21214,6 +21214,7 @@ mod child_permission_gate {
     use super::*;
     use crate::approval_log::{ApprovalOutcome, ApprovalReceipt, ApprovalReceiptStore};
     use crate::core::events::{Event, ToolGate, ToolGateVerdict};
+    use codewhale_execpolicy::{ExecPolicyEngine, PermissionAction, Ruleset, ToolAskRule};
 
     /// A Worker registry with `bash` available, the given posture installed,
     /// and an event channel so gate receipts and prompts can be observed.
@@ -21401,6 +21402,213 @@ mod child_permission_gate {
             ..crate::config::Config::default()
         };
         DeepSeekClient::new(&config).expect("unreachable client")
+    }
+
+    fn typed_deny_rules(rules: Vec<ToolAskRule>) -> Ruleset {
+        Ruleset::user(vec![], vec![]).with_ask_rules(
+            rules
+                .into_iter()
+                .map(|mut rule| {
+                    rule.action = PermissionAction::Deny;
+                    rule
+                })
+                .collect(),
+        )
+    }
+
+    #[tokio::test]
+    async fn typed_shell_denies_hold_for_every_child_posture_and_alias() {
+        for mode in [
+            ApprovalMode::Bypass,
+            ApprovalMode::Suggest,
+            ApprovalMode::Auto,
+            ApprovalMode::Never,
+        ] {
+            let (mut registry, mut rx, _) = worker_registry(
+                mode,
+                mode == ApprovalMode::Bypass,
+                false,
+                Some(unreachable_client()),
+            );
+            Arc::make_mut(registry.gate_runtime.api_config.as_mut().unwrap()).exec_policy_engine =
+                ExecPolicyEngine::with_rulesets(vec![typed_deny_rules(vec![
+                    ToolAskRule::exec_shell("touch"),
+                ])]);
+            for name in ["bash", "Bash", "exec_shell"] {
+                let err = registry
+                    .execute(
+                        "agent_gate",
+                        name,
+                        json!({"action": "run", "command": "touch policy-sentinel"}),
+                    )
+                    .await
+                    .expect_err("typed deny must stop child execution before ordinary approval");
+                assert!(
+                    err.to_string().contains("explicitly denies"),
+                    "{mode:?} {name}: {err}"
+                );
+                assert!(
+                    !registry
+                        .gate_runtime
+                        .context
+                        .workspace
+                        .join("policy-sentinel")
+                        .exists()
+                );
+            }
+            assert!(
+                rx.try_recv().is_err(),
+                "a typed deny must not ask a human or guardian"
+            );
+            if mode == ApprovalMode::Bypass {
+                let output = registry
+                    .execute(
+                        "agent_gate",
+                        "bash",
+                        json!({"command": "echo allowed-control"}),
+                    )
+                    .await
+                    .expect("a nonmatching command still runs in Full Access");
+                assert!(output.contains("allowed-control"), "{output}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn typed_file_denies_stop_aliases_and_whole_patches_before_side_effects() {
+        for mode in [
+            ApprovalMode::Bypass,
+            ApprovalMode::Suggest,
+            ApprovalMode::Auto,
+            ApprovalMode::Never,
+        ] {
+            let (base, _rx, _) = worker_registry(
+                mode,
+                mode == ApprovalMode::Bypass,
+                false,
+                Some(unreachable_client()),
+            );
+            // Delegated file edits also have to honor operator denies.
+            let mut runtime = base.gate_runtime;
+            runtime.accept_edits = true;
+            runtime.agent_tool_surface_options.apply_patch_enabled = true;
+            Arc::make_mut(runtime.api_config.as_mut().unwrap()).exec_policy_engine =
+                ExecPolicyEngine::with_rulesets(vec![typed_deny_rules(
+                    ["read_file", "write_file", "edit_file", "apply_patch"]
+                        .into_iter()
+                        .map(|tool| ToolAskRule::file_path(tool, "protected.txt"))
+                        .collect(),
+                )]);
+            let registry = SubAgentToolRegistry::new(
+                runtime,
+                FleetRole::Worker,
+                None,
+                Arc::new(Mutex::new(TodoList::new())),
+                Arc::new(Mutex::new(PlanState::default())),
+            );
+            let workspace = &registry.gate_runtime.context.workspace;
+            std::fs::write(workspace.join("protected.txt"), "original").unwrap();
+            for (name, action) in [
+                ("read", "read"),
+                ("read_file", "read"),
+                ("File", "read"),
+                ("write", "write"),
+                ("write_file", "write"),
+                ("File", "write"),
+                ("edit", "edit"),
+                ("edit_file", "edit"),
+                ("File", "edit"),
+            ] {
+                let err = registry
+                    .execute(
+                        "agent_gate",
+                        name,
+                        json!({
+                            "action": action, "path": "protected.txt", "content": "changed",
+                            "old_string": "original", "new_string": "changed"
+                        }),
+                    )
+                    .await
+                    .expect_err("typed path deny applies to every file alias");
+                assert!(
+                    err.to_string().contains("explicitly denies"),
+                    "{mode:?} {name} {action}: {err}"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(workspace.join("protected.txt")).unwrap(),
+                    "original"
+                );
+            }
+            for name in ["apply_patch", "File"] {
+                let err = registry.execute("agent_gate", name, json!({
+                    "action": "patch",
+                    "patch": "--- /dev/null\n+++ b/allowed.txt\n@@ -0,0 +1 @@\n+allowed\n--- a/protected.txt\n+++ b/protected.txt\n@@ -1 +1 @@\n-original\n+changed\n"
+                })).await.expect_err("one denied target blocks the entire patch");
+                assert!(
+                    err.to_string().contains("explicitly denies"),
+                    "{mode:?} {name}: {err}"
+                );
+                assert!(!workspace.join("allowed.txt").exists());
+                assert_eq!(
+                    std::fs::read_to_string(workspace.join("protected.txt")).unwrap(),
+                    "original"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn typed_denies_updated_after_spawn_reach_children_grandchildren_and_background() {
+        let (mut root, _rx, _) = worker_registry(
+            ApprovalMode::Bypass,
+            true,
+            false,
+            Some(unreachable_client()),
+        );
+        let mut parent_policy = ExecPolicyEngine::with_rulesets(vec![]);
+        Arc::make_mut(root.gate_runtime.api_config.as_mut().unwrap()).exec_policy_engine =
+            parent_policy.clone();
+        let child_runtime = root.gate_runtime.child_runtime();
+        let registries = [
+            child_runtime.child_runtime(),
+            root.gate_runtime.background_runtime(),
+            child_runtime,
+        ]
+        .map(|runtime| {
+            SubAgentToolRegistry::new(
+                runtime,
+                FleetRole::Worker,
+                None,
+                Arc::new(Mutex::new(TodoList::new())),
+                Arc::new(Mutex::new(PlanState::default())),
+            )
+        });
+        for registry in &registries {
+            let output = registry
+                .execute("agent_gate", "bash", json!({"command": "echo live-policy"}))
+                .await
+                .expect("the command starts allowed");
+            assert!(output.contains("live-policy"), "{output}");
+        }
+        parent_policy.set_ruleset(typed_deny_rules(vec![ToolAskRule::exec_shell(
+            "echo live-policy",
+        )]));
+        for registry in &registries {
+            let err = registry
+                .execute("agent_gate", "bash", json!({"command": "echo live-policy"}))
+                .await
+                .expect_err("already-created descendants observe the updated parent policy");
+            assert!(err.to_string().contains("explicitly denies"), "{err}");
+            let output = registry
+                .execute(
+                    "agent_gate",
+                    "bash",
+                    json!({"command": "echo still-allowed"}),
+                )
+                .await
+                .expect("updating one deny does not block a nonmatching command");
+            assert!(output.contains("still-allowed"), "{output}");
+        }
     }
 
     #[tokio::test]

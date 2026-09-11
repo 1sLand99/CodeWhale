@@ -21,6 +21,8 @@ reconnect.
 
 ### Fixed
 
+- Sub-agents enforce the session's typed shell and file deny rules, including
+  Full Access, delegated edits, and policy updates after a child starts (#6097).
 - Live permission edits reach running engine clones atomically. Deny rules
   support token wildcards and Windows command spellings while keeping POSIX
   arguments literal (#6054, thanks @h3c-hexin and @asto18089).

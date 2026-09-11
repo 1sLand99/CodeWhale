@@ -2479,7 +2479,7 @@ impl Drop for ForegroundChildRegistration {
 pub struct SubAgentRuntime {
     pub client: DeepSeekClient,
     /// Session `Config` snapshot, used for role-model defaults,
-    /// provider-identity receipts, and model routing at spawn time. The engine
+    /// provider-identity receipts, model routing, and inherited typed deny rules. The engine
     /// threads it in via [`SubAgentRuntime::with_api_config`];
     /// `child_runtime`/`background_runtime` clone the `Arc` so every
     /// descendant resolves the same session route.
@@ -15258,6 +15258,30 @@ impl SubAgentToolRegistry {
             self.gate_runtime.approval_mode
         };
         let workspace = self.gate_runtime.context.workspace.clone();
+        // Operator deny rules constrain every descendant, including Full
+        // Access and role-delegated reads/writes. The Config clone retains the
+        // parent's shared live policy; do not reload or copy its rules here.
+        if let Some(config) = self.gate_runtime.api_config.as_deref()
+            && let Some(crate::core::engine::ToolAskRuleDecision::Block(reason)) =
+                crate::core::engine::exec_shell_ask_rule_decision_for_policy(
+                    &config.exec_policy_engine,
+                    name,
+                    input,
+                    &workspace,
+                    approval_mode,
+                )
+                .or_else(|| {
+                    crate::core::engine::file_tool_ask_rule_decision_for_policy(
+                        &config.exec_policy_engine,
+                        name,
+                        input,
+                        &workspace,
+                        approval_mode,
+                    )
+                })
+        {
+            return ChildGateVerdict::Deny(reason);
+        }
         let workspace_trusted = crate::config::is_workspace_trusted(&workspace);
         // Children are background workers: destructive detached work holds
         // in every posture, exactly as it does for a detached parent start.
