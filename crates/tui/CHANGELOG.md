@@ -21,6 +21,40 @@ reconnect.
 
 ### Fixed
 
+- The sandbox-elevation prompt shows every option, `Abort` included. The card
+  was a fixed 22 rows centred on the frame; inside its border and padding that
+  left at most 18 usable rows against 20 to 23 rows of content, with no scroll
+  rail and no truncation hint. The safe exit — the one choice that grants
+  nothing — was painted past the bottom edge at every terminal size. The card
+  is measured from its content now and reserves the option rows before the
+  denial detail, which is what shortens; below roughly 60x24 the per-option
+  descriptions shed and every choice keeps its row. Option hitboxes were also
+  counted in unwrapped source lines, so a description that wrapped put every
+  hitbox below it out of step and a click committed a different choice than the
+  one under the pointer.
+- `d` in the Hotbar setup modal asks before it clears every slot. It persisted
+  `hotbar = []` on the first keystroke, in a view that takes bare letters as its
+  filter — the destructive key and the search key were the same press. It arms a
+  confirmation that owns every key until answered, and the prompt takes the
+  intro's place in the header so it cannot be the line that falls off a
+  five-row budget.
+- Failure red means failure again. The metrics line painted the context reading
+  in the error colour from 80 %, while the posture bar one row above called the
+  identical threshold Attention; the workflow panel painted a `Waiting` row like
+  a crashed one, though its own `is_running` counts Waiting as healthy; and the
+  work surface spent `error_fg` on to-dos that were merely waiting, blocked or
+  stale, and on the routine approach to auto-compaction. `WorkTone` has a real
+  `Failure` variant now, and a guard test holds the reservation across every
+  selectable theme rather than the default alone.
+- The command palette runs the row you highlighted. `refilter` clamped the
+  selection index but never re-anchored it, and every keystroke re-sorts the
+  list, so refining a query could move the highlight to an unrelated entry that
+  Enter then ran. Long labels also overran their column and pushed the
+  description off the card, because the padding never truncated and the capacity
+  was measured against the popup rather than the content area.
+- The work surface's first `Down` reaches the first row. Nothing is selected
+  when the dock opens, and that resolved to "row 0 is selected", so the first
+  press moved to row 1 and row 0 could not be reached by pressing Down at all.
 - Auto-compact could not fire mid-turn. The gate read `max(last billed
   prompt, /4 estimate of the whole list)`, so as soon as the estimator
   undercounted the full list below the last bill, every tool result appended
