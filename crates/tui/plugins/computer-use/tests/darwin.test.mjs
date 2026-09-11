@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
+import zlib from 'node:zlib';
+import crypto from 'node:crypto';
 import { create } from '../src/backends/darwin.mjs';
 import { withSignal, currentSignal, runInputLease } from '../src/exec.mjs';
 
@@ -543,4 +545,187 @@ test('macOS type passes the native verification receipt through untouched', asyn
   const { backend } = stubBackend(t, (r) => (r.tool === 'type' ? nativeReceipt : null));
   await backend.open_application({ name: 'TextEdit' });
   assert.deepEqual(await backend.type({ text: 'hello' }), nativeReceipt);
+});
+
+// A 1x1 PNG is enough: screenshot reads its IHDR for the pixel ground truth.
+const PNG_1X1 = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+);
+
+// list_displays reports `index` and `id` separately (a lone main display is
+// commonly index 1 / id 3). Passing the id where the index belongs must be a
+// clean refusal, never a capture labelled with another display's geometry:
+// those points/scale feed every later coordinate target.
+function displayBackend(t, { displays }) {
+  const bundle = fs.mkdtempSync(path.join(os.tmpdir(), 'cu-display-test-'));
+  const old = process.env.CODEWHALE_CU_APP_BUNDLE;
+  t.after(() => { if (old === undefined) delete process.env.CODEWHALE_CU_APP_BUNDLE; else process.env.CODEWHALE_CU_APP_BUNDLE = old; fs.rmSync(bundle, { recursive: true, force: true }); });
+  fs.mkdirSync(path.join(bundle, 'Contents', 'MacOS'), { recursive: true });
+  fs.writeFileSync(path.join(bundle, 'Contents', 'MacOS', 'accessibility'), '');
+  process.env.CODEWHALE_CU_APP_BUNDLE = bundle;
+  const captures = [];
+  const backend = create({ exec: leaseExecutor(async (cmd, args) => {
+    if (cmd === 'screencapture') {
+      captures.push(args);
+      fs.writeFileSync(args.at(-1), PNG_1X1);
+      return { code: 0, stdout: '', stderr: '' };
+    }
+    const request = JSON.parse(args[0]);
+    return { code: 0, stderr: '', stdout: JSON.stringify(request.tool === 'displays' ? displays : { action_sent: true }) };
+  }) });
+  return { backend, captures };
+}
+
+test('macOS screenshot rejects a display id used as an index instead of mislabelling the raster', async (t) => {
+  const displays = [{ index: 1, id: 3, main: true, points: { x: 0, y: 0, w: 2880, h: 1620 }, scale: 2 }];
+  const { backend, captures } = displayBackend(t, { displays });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cu-display-shot-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  await assert.rejects(
+    backend.screenshot({ display: 3, path: path.join(dir, 'a.png') }),
+    (err) => /no display 3/.test(err.message) && /index/.test(err.message),
+  );
+  assert.equal(captures.length, 0, 'a rejected display must not reach screencapture');
+
+  const ok = await backend.screenshot({ display: 1, path: path.join(dir, 'b.png') });
+  assert.equal(ok.display, 1);
+  assert.deepEqual(ok.points, displays[0].points);
+  assert.deepEqual(captures.at(-1).slice(0, 5), ['-x', '-t', 'png', '-D', '1']);
+});
+
+// A 5K display captures to ~22MB of PNG, which is ~29MB of base64 — past the
+// 16MB a stdio host will accept in one message. That once dropped the whole
+// transport and every other tool with it. The raster is shrunk to fit instead,
+// and the geometry must follow it: `pixels` is the PNG's, `points` stays in
+// screen points, and `scale` is derived from the two, so raster-to-point
+// conversion stays exact at the smaller size.
+// A real PNG of `w`x`h` random pixels — incompressible, like a busy screen.
+function noisePng(w, h) {
+  const chunk = (type, body) => {
+    const len = Buffer.alloc(4); len.writeUInt32BE(body.length);
+    const tag = Buffer.concat([Buffer.from(type, 'ascii'), body]);
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(zlib.crc32 ? zlib.crc32(tag) : crc32(tag));
+    return Buffer.concat([len, tag, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4);
+  ihdr[8] = 8; ihdr[9] = 2; // 8-bit RGB
+  const rows = Buffer.alloc(h * (1 + w * 3));
+  crypto.randomFillSync(rows);
+  for (let y = 0; y < h; y += 1) rows[y * (1 + w * 3)] = 0; // filter: none
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(rows)), chunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+function crc32(buf) {
+  let c = ~0;
+  for (const b of buf) { c ^= b; for (let k = 0; k < 8; k += 1) c = (c >>> 1) ^ (0xedb88320 & -(c & 1)); }
+  return (~c) >>> 0;
+}
+
+// A 5K display captures to ~22MB of PNG, which is ~29MB of base64 — past the
+// 16MB a stdio host will accept in one message. That once dropped the whole
+// transport and every other tool with it. The raster is shrunk to fit instead,
+// and the geometry must follow it: `pixels` is the PNG's, `points` stays in
+// screen points, and `scale` is derived from the two, so raster-to-point
+// conversion stays exact at the smaller size.
+test('macOS screenshot shrinks an over-budget raster and keeps its geometry exact', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cu-budget-shot-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const big = path.join(dir, 'big.png');
+  fs.writeFileSync(big, noisePng(1600, 900));
+
+  const oldBudget = process.env.CODEWHALE_CU_MAX_IMAGE_BYTES;
+  process.env.CODEWHALE_CU_MAX_IMAGE_BYTES = '1500000';
+  t.after(() => { if (oldBudget === undefined) delete process.env.CODEWHALE_CU_MAX_IMAGE_BYTES; else process.env.CODEWHALE_CU_MAX_IMAGE_BYTES = oldBudget; });
+  assert.ok(Math.ceil(fs.statSync(big).size / 3) * 4 > 1_500_000, 'fixture must start over budget');
+
+  const displays = [{ index: 1, id: 3, main: true, points: { x: 0, y: 0, w: 800, h: 450 }, scale: 2 }];
+  const bundle = fs.mkdtempSync(path.join(os.tmpdir(), 'cu-budget-bundle-'));
+  const oldBundle = process.env.CODEWHALE_CU_APP_BUNDLE;
+  t.after(() => { if (oldBundle === undefined) delete process.env.CODEWHALE_CU_APP_BUNDLE; else process.env.CODEWHALE_CU_APP_BUNDLE = oldBundle; fs.rmSync(bundle, { recursive: true, force: true }); });
+  fs.mkdirSync(path.join(bundle, 'Contents', 'MacOS'), { recursive: true });
+  fs.writeFileSync(path.join(bundle, 'Contents', 'MacOS', 'accessibility'), '');
+  process.env.CODEWHALE_CU_APP_BUNDLE = bundle;
+
+  const backend = create({ exec: leaseExecutor(async (cmd, args) => {
+    if (cmd === 'screencapture') {
+      fs.copyFileSync(big, args.at(-1));
+      return { code: 0, stdout: '', stderr: '' };
+    }
+    const request = JSON.parse(args[0]);
+    return { code: 0, stderr: '', stdout: JSON.stringify(request.tool === 'displays' ? displays : { action_sent: true }) };
+  }) });
+
+  const out = path.join(dir, 'shot.png');
+  const shot = await backend.screenshot({ display: 1, path: out });
+
+  assert.ok(Math.ceil(fs.statSync(out).size / 3) * 4 <= 1_500_000, 'raster still over budget');
+  assert.ok(shot.pixels.w < 1600, 'an over-budget raster must actually shrink');
+
+  // The invariant that matters: the raster centre still resolves to the centre
+  // of the display in screen points.
+  assert.equal(shot.points.w, 800, 'points stay in screen points');
+  const centreX = Math.round((shot.pixels.w / 2) / shot.scale) + (shot.points.x ?? 0);
+  assert.ok(Math.abs(centreX - 400) <= 2, `raster centre maps to ${centreX}, expected ~400`);
+});
+
+// A screen is photographic content, and lossless compression of it is enormous:
+// the same 5760x3240 frame measures 21.8MB as PNG and 2.1MB as JPEG at full
+// resolution. The PNG default is what made a single screenshot exceed the
+// 16MB a stdio host accepts in one message and drop the whole session.
+test('macOS screenshot captures JPEG by default and honours an explicit .png path', async (t) => {
+  const displays = [{ index: 1, id: 3, main: true, points: { x: 0, y: 0, w: 2880, h: 1620 }, scale: 2 }];
+  const { backend, captures } = displayBackend(t, { displays });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cu-format-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  const dflt = await backend.screenshot({ display: 1 });
+  assert.deepEqual(captures.at(-1).slice(0, 3), ['-x', '-t', 'jpg'], 'the default capture is JPEG');
+  assert.match(dflt.path, /\.jpg$/);
+
+  await backend.screenshot({ display: 1, path: path.join(dir, 'exact.png') });
+  assert.deepEqual(captures.at(-1).slice(0, 3), ['-x', '-t', 'png'], 'an explicit .png path stays lossless');
+
+  await backend.screenshot({ display: 1, path: path.join(dir, 'shot.jpeg') });
+  assert.deepEqual(captures.at(-1).slice(0, 3), ['-x', '-t', 'jpg']);
+
+  await assert.rejects(
+    backend.screenshot({ display: 1, path: path.join(dir, 'shot.gif') }),
+    /must end in \.png, \.jpg or \.jpeg/,
+  );
+});
+
+// Dimensions come from the raster's own header. A JPEG carries them in a frame
+// marker rather than at a fixed offset, and reading the wrong bytes would
+// mis-scale every coordinate target derived from the capture.
+test('macOS raster dimensions are read from both PNG and JPEG headers', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cu-dims-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const png = path.join(dir, 'a.png');
+  fs.writeFileSync(png, noisePng(321, 123));
+  const jpg = path.join(dir, 'a.jpg');
+  spawnSync('sips', ['-s', 'format', 'jpeg', png, '--out', jpg], { stdio: 'ignore' });
+  if (!fs.existsSync(jpg)) { t.skip('sips unavailable'); return; }
+
+  const displays = [{ index: 1, id: 3, main: true, points: { x: 0, y: 0, w: 321, h: 123 }, scale: 1 }];
+  for (const [fixture, name] of [[png, 'shot.png'], [jpg, 'shot.jpg']]) {
+    const bundle = fs.mkdtempSync(path.join(os.tmpdir(), 'cu-dims-bundle-'));
+    const old = process.env.CODEWHALE_CU_APP_BUNDLE;
+    fs.mkdirSync(path.join(bundle, 'Contents', 'MacOS'), { recursive: true });
+    fs.writeFileSync(path.join(bundle, 'Contents', 'MacOS', 'accessibility'), '');
+    process.env.CODEWHALE_CU_APP_BUNDLE = bundle;
+    const backend = create({ exec: leaseExecutor(async (cmd, args) => {
+      if (cmd === 'screencapture') { fs.copyFileSync(fixture, args.at(-1)); return { code: 0, stdout: '', stderr: '' }; }
+      const request = JSON.parse(args[0]);
+      return { code: 0, stderr: '', stdout: JSON.stringify(request.tool === 'displays' ? displays : { action_sent: true }) };
+    }) });
+    const shot = await backend.screenshot({ display: 1, path: path.join(dir, name) });
+    assert.deepEqual(shot.pixels, { w: 321, h: 123 }, `${name} dimensions`);
+    if (old === undefined) delete process.env.CODEWHALE_CU_APP_BUNDLE; else process.env.CODEWHALE_CU_APP_BUNDLE = old;
+    fs.rmSync(bundle, { recursive: true, force: true });
+  }
 });
