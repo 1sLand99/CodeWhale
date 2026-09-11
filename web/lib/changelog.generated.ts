@@ -37,6 +37,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Fixed",
         "items": [
+          "Sub-agents enforce the session's typed shell and file deny rules, including Full Access, delegated edits, and policy updates after a child starts (#6097).",
           "Live permission edits reach running engine clones atomically. Deny rules support token wildcards and Windows command spellings while keeping POSIX arguments literal (#6054, thanks @h3c-hexin and @asto18089).",
           "Tool-result images use the existing typed inline path and are fully decoded under size and allocation limits before admission or provider projection. Invalid images keep a visible omission receipt alongside the text result (adapted from #6053, thanks @h3c-hexin and @asto18089).",
           "A lone y, Y, or r remains composer input after selecting transcript text. Clicking the composer releases transcript and dock focus.",
@@ -47,10 +48,9 @@ export const CHANGELOG: ChangelogRelease[] = [
           "Esc during a worker fanout keeps the parent stopped when cancelled workers finish. Their receipts remain available for the next explicit user turn.",
           "Undo preserves messages even when older state lacks a timestamp. Session journal entries retain their append-time stamps when saved again.",
           "Extension actions refresh in place, and inspection output uses the text pager. The empty launch shell hides unused metrics and keeps recovery hints readable when several MCP servers need attention.",
-          "The large-output router defaults to bounded spillover; adaptive routing remains opt-in through CODEWHALE_ADAPTIVE_OUTPUT_ROUTING=1.",
-          "Direct composer paste (Ctrl-V) preserves rich clipboard headings, lists, links, tables and code as Markdown, with plain-text fallback. Whole-answer copy preserves authored Markdown without terminal wrapping; settings fields still paste literal text."
+          "The large-output router defaults to bounded spillover; adaptive routing remains opt-in through CODEWHALE_ADAPTIVE_OUTPUT_ROUTING=1."
         ],
-        "itemCount": 63
+        "itemCount": 64
       },
       {
         "heading": "Changed",
