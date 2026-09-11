@@ -320,7 +320,9 @@ pub enum Op {
         config: CompactionPolicy,
     },
 
-    /// Replace the live user permission rules (`Ruleset` serialized).
+    /// Legacy serialized permission-update operation, retained for wire
+    /// compatibility. The in-process runtime now publishes directly through
+    /// its shared policy store instead of queuing a second replacement.
     SetPermissionRuleset {
         ruleset: Value,
     },

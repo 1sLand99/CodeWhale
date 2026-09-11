@@ -1097,9 +1097,6 @@ pub fn op_to_protocol(op: &Op) -> wire_op::Op {
         Op::SetCompaction { config } => wire_op::Op::SetCompaction {
             config: compaction_to_wire(config),
         },
-        Op::SetPermissionRuleset { ruleset } => wire_op::Op::SetPermissionRuleset {
-            ruleset: to_value(ruleset),
-        },
         Op::SetStreamChunkTimeout { timeout_secs } => wire_op::Op::SetStreamChunkTimeout {
             timeout_secs: *timeout_secs,
         },

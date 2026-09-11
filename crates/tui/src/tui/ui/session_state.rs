@@ -797,7 +797,9 @@ pub(crate) fn persist_rules_from_approval(
             None => 0,
         };
         let permissions_path = store.permissions_path();
-        config.exec_policy_engine = store.exec_policy_engine();
+        config
+            .exec_policy_engine
+            .set_ruleset(store.permissions().ruleset());
         Ok((added, permissions_path))
     }) {
         Ok((added, path)) if added > 0 => {

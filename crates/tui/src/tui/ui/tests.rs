@@ -22466,6 +22466,7 @@ async fn approval_decision_persists_ask_rules_to_permissions_file() {
     let mut app = create_test_app();
     app.config_path = Some(config_path.clone());
     let mut config = Config::default();
+    let running_policy = config.exec_policy_engine.clone();
     let mut engine = mock_engine_handle();
     let rule = codewhale_config::ToolAskRule::exec_shell("cargo test");
 
@@ -22499,8 +22500,7 @@ async fn approval_decision_persists_ask_rules_to_permissions_file() {
             .is_some_and(|message| message.contains("Saved 1 ask permission rule"))
     );
 
-    let decision = config
-        .exec_policy_engine
+    let decision = running_policy
         .check(codewhale_execpolicy::ExecPolicyContext {
             command: "cargo test --workspace",
             cwd: tmp.path().to_string_lossy().as_ref(),
@@ -22521,6 +22521,7 @@ async fn approval_decision_persists_exact_workspace_allow_rule() {
     app.workspace = tmp.path().to_path_buf();
     app.config_path = Some(config_path.clone());
     let mut config = Config::default();
+    let running_policy = config.exec_policy_engine.clone();
     let mut engine = mock_engine_handle();
     let rule = codewhale_config::ToolAskRule::exec_shell("cargo test")
         .into_exact_workspace_allow(tmp.path().to_string_lossy());
@@ -22555,8 +22556,7 @@ async fn approval_decision_persists_exact_workspace_allow_rule() {
             .is_some_and(|message| message.contains("Saved 1 allow permission rule"))
     );
 
-    let exact = config
-        .exec_policy_engine
+    let exact = running_policy
         .check(codewhale_execpolicy::ExecPolicyContext {
             command: "cargo test",
             cwd: tmp.path().to_string_lossy().as_ref(),
@@ -22572,8 +22572,7 @@ async fn approval_decision_persists_exact_workspace_allow_rule() {
     );
     assert!(!exact.requires_approval);
 
-    let expanded = config
-        .exec_policy_engine
+    let expanded = running_policy
         .check(codewhale_execpolicy::ExecPolicyContext {
             command: "cargo test --workspace",
             cwd: tmp.path().to_string_lossy().as_ref(),

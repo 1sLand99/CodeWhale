@@ -1493,16 +1493,10 @@ pub(crate) async fn apply_command_result(
                 match codewhale_config::load_permissions_snapshot(app.config_path.clone()) {
                     Ok(snapshot) => {
                         let ruleset = snapshot.permissions().ruleset();
-                        config.exec_policy_engine.set_ruleset(ruleset.clone());
-                        if let Err(error) = engine_handle
-                            .send(Op::SetPermissionRuleset { ruleset })
-                            .await
-                        {
-                            app.status_message = Some(
-                                tr(app.ui_locale, MessageId::PermissionsOperationFailed)
-                                    .replace("{error}", &error.to_string()),
-                            );
-                        }
+                        // Config and every running EngineConfig share this
+                        // policy store. Publish once: replaying an older Op
+                        // after a later edit would roll the live policy back.
+                        config.exec_policy_engine.set_ruleset(ruleset);
                     }
                     Err(error) => {
                         app.status_message = Some(
