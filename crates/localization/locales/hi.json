@@ -2162,6 +2162,7 @@
   "McpStateConnecting": "कनेक्ट हो रहा है",
   "McpStateFailed": "कनेक्शन विफल",
   "McpStateDisconnected": "कनेक्ट नहीं है",
+  "RuntimeStoreRecovered": "बातचीत नए रनटाइम स्टोर में पुनर्प्राप्त की गई। पिछले रनटाइम कार्य, स्वीकृतियाँ और स्वचालन बहाल नहीं किए गए।",
   "ResumeExactSessionHint": "यह सत्र फिर शुरू करने के लिए {command} चलाएँ",
   "ResumeSavedSessionHint": "सहेजा गया सत्र चुनने के लिए {command} चलाएँ",
   "GoalProgressLabel": "लक्ष्य",

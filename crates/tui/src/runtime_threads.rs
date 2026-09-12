@@ -2886,7 +2886,36 @@ pub struct RuntimeStoreBinding {
 }
 
 impl RuntimeStoreBinding {
-    fn validate_existing_store(&self) -> Result<()> {
+    /// Only a missing, confined session store can recover from its transcript.
+    /// Existing stores with a wrong owner, symlinks and external paths fail closed.
+    pub(crate) fn is_missing_session_store(&self) -> Result<bool> {
+        let sessions = codewhale_config::resolve_state_dir("sessions")?;
+        let Some(session_dir) = self.data_dir.parent() else {
+            return Ok(false);
+        };
+        let Some(store_name) = self.data_dir.file_name().and_then(|name| name.to_str()) else {
+            return Ok(false);
+        };
+        if session_dir.parent() != Some(sessions.as_path())
+            || !(store_name == "runtime" || store_name.starts_with("runtime-recovered-"))
+            || !session_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(crate::artifacts::is_valid_session_id)
+        {
+            return Ok(false);
+        }
+        for path in [&sessions, session_dir, &self.data_dir] {
+            reject_symlinked_store_dir(path)?;
+        }
+        match fs::symlink_metadata(&self.data_dir) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            Err(err) => Err(err.into()),
+            Ok(_) => Ok(false),
+        }
+    }
+
+    pub(crate) fn validate_existing_store(&self) -> Result<()> {
         anyhow::ensure!(
             self.data_dir.is_absolute(),
             "Saved Runtime store path must be absolute"
@@ -4607,7 +4636,20 @@ impl RuntimeThreadManager {
                     "Runtime directory override conflicts with the saved session's Runtime store"
                 );
             }
-            // A missing bound store is an error, never a request to mint a new owner.
+            if binding.is_missing_session_store()? {
+                // Never claim the missing owner's scope. A fresh store cannot
+                // execute its queued tasks, approvals, mail or automations.
+                manager_cfg.data_dir = manager_cfg
+                    .data_dir
+                    .with_file_name(format!("runtime-recovered-{}", uuid::Uuid::new_v4()));
+                return Self::open_inner(
+                    config,
+                    workspace,
+                    manager_cfg,
+                    Some(plugin_registry),
+                    None,
+                );
+            }
             binding.validate_existing_store()?;
             manager_cfg.data_dir.clone_from(&binding.data_dir);
         }

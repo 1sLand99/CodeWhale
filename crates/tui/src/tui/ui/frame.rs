@@ -1034,7 +1034,9 @@ pub(crate) fn build_session_snapshot(
             .metadata
             .runtime_store
             .as_ref()
-            .is_some_and(|saved| saved != &binding)
+            .is_some_and(|saved| {
+                saved != &binding && !saved.is_missing_session_store().unwrap_or(false)
+            })
         {
             return Err(
                 "session snapshot refused to replace its saved Runtime store ownership".into(),

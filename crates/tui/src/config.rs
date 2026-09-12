@@ -637,18 +637,6 @@ pub const DEEPSEEK_ALIAS_RETIREMENT_DATE: &str = "2026-07-24";
 pub const DEEPSEEK_ALIAS_RETIREMENT_UTC: &str = "2026-07-24T15:59:00Z";
 pub const DEEPSEEK_ALIAS_REPLACEMENT: &str = "deepseek-v4-flash";
 
-/// 12:00 Beijing on 2026-09-14, when DeepSeek stops serving V4 Pro.
-///
-/// The vendor's 2026-09-10 notice (#6025): "all requests to the Pro model will
-/// be routed to V4.1 Flash and billed at Flash's price." The id keeps working,
-/// so this is not a compatibility alias CodeWhale rewrites — it is a vendor
-/// substitution the operator should get to decide about first. `pricing.rs`
-/// reads the same instant to stop quoting Pro's rates for a Flash bill; one
-/// date, two consumers.
-pub const DEEPSEEK_V4_PRO_SUNSET_DATE: &str = "2026-09-14";
-pub const DEEPSEEK_V4_PRO_SUNSET_UTC: &str = "2026-09-14T04:00:00Z";
-pub const DEEPSEEK_V4_PRO_REPLACEMENT: &str = "deepseek-flash";
-
 /// Upstream retirement metadata for a model alias that remains compatible.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ModelAliasDeprecation {
@@ -920,19 +908,6 @@ fn deepseek_alias_deprecation(model_lower: &str) -> Option<ModelAliasDeprecation
             retirement_utc: DEEPSEEK_ALIAS_RETIREMENT_UTC.to_string(),
             notice: format!(
                 "{model_lower} is a compatibility alias for {DEEPSEEK_ALIAS_REPLACEMENT} and is scheduled to retire on {DEEPSEEK_ALIAS_RETIREMENT_DATE}."
-            ),
-        }),
-        // Not an alias CodeWhale rewrites: DeepSeek keeps accepting the id and
-        // serves V4.1 Flash behind it from the sunset instant, billing Flash's
-        // price. Say so while the operator can still pick the replacement
-        // themselves instead of learning it from a changed bill.
-        "deepseek-v4-pro" => Some(ModelAliasDeprecation {
-            alias: model_lower.to_string(),
-            replacement: DEEPSEEK_V4_PRO_REPLACEMENT.to_string(),
-            retirement_date: DEEPSEEK_V4_PRO_SUNSET_DATE.to_string(),
-            retirement_utc: DEEPSEEK_V4_PRO_SUNSET_UTC.to_string(),
-            notice: format!(
-                "DeepSeek retires the V4 Pro service on {DEEPSEEK_V4_PRO_SUNSET_DATE}; from then it routes {model_lower} to {DEEPSEEK_V4_PRO_REPLACEMENT} and bills at Flash's price."
             ),
         }),
         _ => None,

@@ -70,12 +70,17 @@ pub struct CompactionConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedCompactionEnvelope {
     pub config: CompactionConfig,
+    /// Durable handoff owner; set by the engine, never added to the stable prefix.
+    pub session_id: Option<String>,
 }
 
 impl PreparedCompactionEnvelope {
     #[must_use]
     pub fn new(config: CompactionConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            session_id: None,
+        }
     }
 }
 
@@ -1075,6 +1080,22 @@ pub async fn compact_messages_safe(
     const MAX_RETRIES: u32 = 3;
     const BASE_DELAY_MS: u64 = 1000;
 
+    // Persist the complete pre-compaction history before any pruning or provider
+    // call. Failure leaves the original context intact. The model-authored
+    // handoff is saved separately before replacement is returned to the engine.
+    let checkpoint_id = uuid::Uuid::new_v4().to_string();
+    if let Some(session_id) = prepared.session_id.as_deref() {
+        let bytes = serde_json::to_vec(&codewhale_config::persistence::redact_json_secrets(
+            &serde_json::to_value(messages)?,
+        ))?;
+        crate::artifacts::write_session_relative_immutable(
+            session_id,
+            &std::path::PathBuf::from("artifacts")
+                .join(format!("context-transfer-{checkpoint_id}.json")),
+            &bytes,
+        )?;
+    }
+
     let config = &prepared.config;
     let was_over_threshold = compaction_pressure_reached(messages, system_prompt, config);
     let mut pruned_messages = messages.to_vec();
@@ -1156,6 +1177,20 @@ pub async fn compact_messages_safe(
                 coverage.last_round_messages = keep.last_round_messages;
                 coverage.last_round_tool_results = keep.last_round_tool_results;
                 coverage.last_round_assistant = keep.last_round_assistant;
+                if let (Some(session_id), Some(summary)) =
+                    (prepared.session_id.as_deref(), prompt.as_ref())
+                {
+                    let text = summary_prompt_text(summary);
+                    let redacted = codewhale_config::persistence::redact_json_secrets(
+                        &serde_json::Value::String(text),
+                    );
+                    crate::artifacts::write_session_relative_immutable(
+                        session_id,
+                        &std::path::PathBuf::from("artifacts")
+                            .join(format!("context-transfer-{checkpoint_id}.md")),
+                        redacted.as_str().unwrap_or_default().as_bytes(),
+                    )?;
+                }
                 return Ok(CompactionResult {
                     messages: kept,
                     summary_prompt: prompt,
@@ -2060,6 +2095,62 @@ mod tests {
         async fn health_check(&self) -> anyhow::Result<bool> {
             Ok(true)
         }
+    }
+
+    #[tokio::test]
+    async fn compaction_persists_original_and_model_handoff_before_returning_replacement() {
+        let _environment = crate::test_support::lock_test_env();
+        let root = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path());
+        let original = (0..12)
+            .map(|i| {
+                msg(
+                    if i % 2 == 0 { "user" } else { "assistant" },
+                    &format!("Work item {i}"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut envelope = prepared(&CompactionConfig::default());
+        envelope.session_id = Some("handoff-test".into());
+        let client = FixedSummaryClient::default();
+        let mut usage = Usage::default();
+        let result = compact_messages_safe(&client, &original, None, &envelope, &mut usage)
+            .await
+            .unwrap();
+        assert!(result.summary_prompt.is_some());
+        let files = std::fs::read_dir(root.path().join("sessions/handoff-test/artifacts"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        let json = files
+            .iter()
+            .find(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .unwrap();
+        let restored: Vec<Message> = serde_json::from_slice(&std::fs::read(json).unwrap()).unwrap();
+        assert_eq!(restored, original);
+        let markdown = files
+            .iter()
+            .find(|path| path.extension().is_some_and(|ext| ext == "md"))
+            .unwrap();
+        assert!(
+            std::fs::read_to_string(markdown)
+                .unwrap()
+                .contains("migrate the session store")
+        );
+        // An unwritable artifact destination must abort before a provider call.
+        envelope.session_id = Some("blocked-handoff".into());
+        std::fs::write(
+            root.path().join("sessions/blocked-handoff"),
+            b"not a directory",
+        )
+        .unwrap();
+        let blocked = FixedSummaryClient::default();
+        assert!(
+            compact_messages_safe(&blocked, &original, None, &envelope, &mut usage)
+                .await
+                .is_err()
+        );
+        assert!(blocked.request.lock().unwrap().is_none());
     }
 
     #[tokio::test]

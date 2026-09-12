@@ -3483,12 +3483,8 @@ impl Engine {
         }
     }
 
-    /// One-line context-pressure signal, emitted **only** while the input
-    /// estimate sits at or above the warning/critical thresholds. No token
-    /// counts, percentages, or headroom figures: the model only learns that
-    /// the pressure band it is in has crossed a threshold. Between crossings
-    /// the line is byte-stable, so ordinary turns do not bust the prefix
-    /// cache.
+    /// Pressure and effective trigger in append-only turn metadata. Numeric
+    /// estimates never modify the session-pinned system/tool prefix.
     fn context_pressure_line(
         &self,
         current_text: &str,
@@ -3502,7 +3498,10 @@ impl Engine {
             prompt_context.route_limits,
             input_tokens,
         )?;
-        context_pressure_message(budget.usage_percent()).map(str::to_string)
+        context_pressure_message(budget.usage_percent()).map(|warning| format!(
+            "{warning}. Estimated input: {input_tokens} tokens ({:.1}% of route budget); auto-compaction: {}, trigger: {} tokens. Before replacing context, compaction saves the conversation and its model-written handoff in this session's artifacts/context-transfer-* files. At the next natural stopping point, follow this project's save-session instructions and write a durable, model-authored context-transfer file covering decisions, current work, and next steps before recommending /compact to the user. Surface this warning and the saved file, keep output concise, and do not wait for an assumed 95% cutoff.",
+            budget.usage_percent(), self.config.compaction.enabled, self.config.compaction.token_threshold,
+        ))
     }
 
     /// Goal pacing for the model: the budget figure only, and only while a
@@ -5621,7 +5620,9 @@ impl Engine {
         config
             .workspace
             .get_or_insert_with(|| self.config.workspace.clone());
-        PreparedCompactionEnvelope::new(config)
+        let mut prepared = PreparedCompactionEnvelope::new(config);
+        prepared.session_id = Some(self.session.id.clone());
+        prepared
     }
 
     async fn handle_manual_compaction_op(

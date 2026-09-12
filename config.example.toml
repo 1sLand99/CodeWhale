@@ -260,12 +260,13 @@ memory_path = "~/.codewhale/memory.md"
 # user_input_timeout_seconds = 300
 
 # ─────────────────────────────────────────────────────────────────────────────────
-# Product telemetry — opt-in, off by default
+# Product telemetry — optional, enabled by default with a startup disclosure
 # ─────────────────────────────────────────────────────────────────────────────────
-# Nothing is collected unless BOTH of these are true: `telemetry = true` here,
-# and the first-run notice has been answered with "Enable" on this machine. A
-# `telemetry = true` written before 0.9.4 is therefore inert — the key existed
-# and did nothing for a long time, and setting it was never consent.
+# Anonymous usage analytics are enabled when this key is omitted, unless an
+# existing opt-out or a run-scoped kill switch disables them. No first-run
+# affirmative opt-in is required. See docs/TELEMETRY.md for the complete schema.
+# Local session history and usage diagnostics work with telemetry disabled;
+# they require no account or hosted analytics service.
 #
 # Setting it to `false` here is an answer, not just a flag: it deletes the
 # random install id, truncates every buffered event, and leaves a tombstone

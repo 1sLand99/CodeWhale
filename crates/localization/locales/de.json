@@ -2162,6 +2162,7 @@
   "McpStateConnecting": "verbindet",
   "McpStateFailed": "Verbindung fehlgeschlagen",
   "McpStateDisconnected": "nicht verbunden",
+  "RuntimeStoreRecovered": "Die Unterhaltung wurde in einem neuen Laufzeitspeicher wiederhergestellt. Frühere Aufgaben, Freigaben und Automatisierungen wurden nicht wiederhergestellt.",
   "ResumeExactSessionHint": "Um diese Sitzung fortzusetzen, führe {command} aus",
   "ResumeSavedSessionHint": "Um eine gespeicherte Sitzung auszuwählen, führe {command} aus",
   "GoalProgressLabel": "Ziel",

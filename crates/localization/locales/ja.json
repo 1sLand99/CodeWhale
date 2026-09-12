@@ -2162,6 +2162,7 @@
   "McpStateConnecting": "接続中",
   "McpStateFailed": "接続失敗",
   "McpStateDisconnected": "未接続",
+  "RuntimeStoreRecovered": "会話を新しいランタイムストアに復元しました。以前のランタイムのタスク、承認、自動化は復元されていません。",
   "ResumeExactSessionHint": "このセッションを再開するには {command} を実行してください",
   "ResumeSavedSessionHint": "保存済みセッションを選ぶには {command} を実行してください",
   "GoalProgressLabel": "ゴール",

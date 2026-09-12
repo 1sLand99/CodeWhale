@@ -372,3 +372,49 @@ fn runtime_store_binding_rejects_foreign_missing_or_overridden_store() -> anyhow
     );
     Ok(())
 }
+
+#[test]
+fn missing_runtime_store_recovers_without_reusing_authority_or_resurrecting_stale_binding()
+-> anyhow::Result<()> {
+    let _environment = crate::test_support::lock_test_env();
+    let root = tempfile::tempdir()?;
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path());
+    let _runtime = crate::test_support::EnvVarGuard::remove("CODEWHALE_RUNTIME_DIR");
+    let _legacy = crate::test_support::EnvVarGuard::remove("DEEPSEEK_RUNTIME_DIR");
+    let sessions = SessionManager::default_location()?;
+    let mut saved = crate::session_manager::create_saved_session_with_id_and_mode(
+        "interrupted".into(),
+        &[text_message("user", "retain my work")],
+        "deepseek-v4-pro",
+        root.path(),
+        0,
+        None,
+        None,
+    );
+    let missing = crate::runtime_threads::RuntimeStoreBinding {
+        data_dir: root.path().join("sessions/previous/runtime"),
+        execution_scope: "0".repeat(64),
+    };
+    saved.metadata.runtime_store = Some(missing.clone());
+    sessions.save_session(&saved)?;
+    let stale = saved.clone();
+    let manager = RuntimeThreadManager::open_for_session(
+        fixture_config(),
+        root.path().into(),
+        RuntimeThreadManagerConfig::for_session(root.path().join("tasks"), "interrupted"),
+        Arc::new(crate::plugins::PluginRegistry::empty(root.path())),
+        Some(&missing),
+    )?;
+    let recovered = manager.session_store_binding();
+    assert_ne!(recovered.execution_scope, missing.execution_scope);
+    assert_ne!(recovered.data_dir, missing.data_dir);
+    assert!(!missing.data_dir.exists());
+    saved.metadata.runtime_store = Some(recovered.clone());
+    sessions.save_session(&saved)?;
+    sessions.save_session(&stale)?;
+    sessions.save_checkpoint(&stale)?;
+    let durable = sessions.load_session("interrupted")?;
+    assert_eq!(durable.metadata.runtime_store, Some(recovered));
+    assert_eq!(durable.messages, stale.messages);
+    Ok(())
+}

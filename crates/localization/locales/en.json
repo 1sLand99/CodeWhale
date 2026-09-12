@@ -2162,6 +2162,7 @@
   "McpStateConnecting": "connecting",
   "McpStateFailed": "connection failed",
   "McpStateDisconnected": "not connected",
+  "RuntimeStoreRecovered": "Conversation recovered into a new runtime store. Previous runtime tasks, approvals and automations were not restored.",
   "ResumeExactSessionHint": "To resume this session, run {command}",
   "ResumeSavedSessionHint": "To choose a saved session, run {command}",
   "GoalProgressLabel": "Goal",

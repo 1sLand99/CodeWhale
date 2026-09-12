@@ -2162,6 +2162,7 @@
   "McpStateConnecting": "연결 중",
   "McpStateFailed": "연결 실패",
   "McpStateDisconnected": "연결되지 않음",
+  "RuntimeStoreRecovered": "대화를 새 런타임 저장소로 복구했습니다. 이전 런타임의 작업, 승인 및 자동화는 복원되지 않았습니다.",
   "ResumeExactSessionHint": "이 세션을 재개하려면 {command} 실행",
   "ResumeSavedSessionHint": "저장된 세션을 선택하려면 {command} 실행",
   "GoalProgressLabel": "목표",

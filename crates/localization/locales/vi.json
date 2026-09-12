@@ -2162,6 +2162,7 @@
   "McpStateConnecting": "đang kết nối",
   "McpStateFailed": "kết nối thất bại",
   "McpStateDisconnected": "chưa kết nối",
+  "RuntimeStoreRecovered": "Đã khôi phục cuộc trò chuyện vào kho thời gian chạy mới. Các tác vụ, phê duyệt và tự động hóa trước đó chưa được khôi phục.",
   "ResumeExactSessionHint": "Để tiếp tục phiên này, chạy {command}",
   "ResumeSavedSessionHint": "Để chọn một phiên đã lưu, chạy {command}",
   "GoalProgressLabel": "Mục tiêu",

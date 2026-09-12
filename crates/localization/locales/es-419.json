@@ -2162,6 +2162,7 @@
   "McpStateConnecting": "conectando",
   "McpStateFailed": "falló la conexión",
   "McpStateDisconnected": "sin conexión",
+  "RuntimeStoreRecovered": "La conversación se recuperó en un nuevo almacén de ejecución. No se restauraron las tareas, aprobaciones ni automatizaciones anteriores.",
   "ResumeExactSessionHint": "Para reanudar esta sesión, ejecuta {command}",
   "ResumeSavedSessionHint": "Para elegir una sesión guardada, ejecuta {command}",
   "GoalProgressLabel": "Meta",

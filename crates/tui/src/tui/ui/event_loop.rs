@@ -883,6 +883,21 @@ pub async fn run_tui(
             .and_then(|metadata| metadata.runtime_store.as_ref()),
     )
     .await?;
+    if let Some(saved) = app
+        .current_session_metadata
+        .as_ref()
+        .and_then(|meta| meta.runtime_store.as_ref())
+        && task_manager
+            .session_store_binding()
+            .as_ref()
+            .is_some_and(|current| current != saved)
+    {
+        app.push_status_toast(
+            app.tr(MessageId::RuntimeStoreRecovered).into_owned(),
+            StatusToastLevel::Warning,
+            None,
+        );
+    }
     let _task_shutdown = task_manager.shutdown_guard();
     let mut automation_service = AutomationManager::default_location()?;
     automation_service.bind_task_manager(&task_manager)?;

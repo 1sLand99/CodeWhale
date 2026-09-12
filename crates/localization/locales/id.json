@@ -2162,6 +2162,7 @@
   "McpStateConnecting": "menghubungkan",
   "McpStateFailed": "koneksi gagal",
   "McpStateDisconnected": "belum terhubung",
+  "RuntimeStoreRecovered": "Percakapan dipulihkan ke penyimpanan runtime baru. Tugas, persetujuan, dan otomatisasi runtime sebelumnya tidak dipulihkan.",
   "ResumeExactSessionHint": "Untuk melanjutkan sesi ini, jalankan {command}",
   "ResumeSavedSessionHint": "Untuk memilih sesi tersimpan, jalankan {command}",
   "GoalProgressLabel": "Sasaran",

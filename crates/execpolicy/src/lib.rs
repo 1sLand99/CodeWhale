@@ -723,22 +723,10 @@ impl ExecPolicyEngine {
 /// new quoting form is a new bypass — so `shell_expand` word-splits the command
 /// the way a shell would and hands back the real command lines.
 ///
-/// The naive [`command_segments`] split is unioned in rather than replaced: it
-/// over-splits (it ignores quoting), and for deny matching over-splitting is
-/// the safe direction, so keeping it costs nothing and cannot regress a rule
-/// that used to fire.
+/// Heredoc data is excluded by the shared expander, while substitutions and
+/// shell stdin remain executable policy targets.
 fn deny_scan_targets(command: &str) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut targets = Vec::new();
-    for target in std::iter::once(command.trim().to_string())
-        .chain(command_segments(command))
-        .chain(shell_expand::expanded_commands(command))
-    {
-        if !target.is_empty() && seen.insert(target.clone()) {
-            targets.push(target);
-        }
-    }
-    targets
+    shell_expand::expanded_commands(command)
 }
 
 /// Split a shell command into its top-level segments on the chaining/pipe
@@ -3398,6 +3386,43 @@ mod tests {
     }
 
     // ── helpers ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn heredoc_data_is_not_a_command_but_executable_payloads_are_denied() {
+        for command in [
+            "cat <<'EOF'\ngit switch -f\nEOF",
+            "cat <<\"EOF\"\n$(git switch -f)\nEOF",
+            "cat <<-E'OF'\n\tgit switch -f\n\tEOF",
+            "cat <<EOF\ngit switch -f\nEOF",
+            "cat <<'A' <<'B'\ngit switch -f\nA\ngit switch -f\nB",
+        ] {
+            assert!(
+                !deny_scan_targets(command)
+                    .iter()
+                    .any(|target| denied_prefix_matches("git switch -f", target)),
+                "literal heredoc: {command}"
+            );
+        }
+        for command in [
+            "cat <<EOF\n$(git switch -f)\nEOF",
+            "cat <<EOF\n`git switch -f`\nEOF",
+            "cat <<'EOF'\nexample\nEOF\ngit switch -f",
+            "cat <<'EOF' | bash\ngit switch -f\nEOF",
+            "bash <<'EOF'\ngit switch -f\nEOF",
+            "# cat <<EOF\ngit switch -f",
+            "cat <<EOF\nE\\\nOF\ngit switch -f",
+            "cat <<$'EOF'\nexample\nEOF\ngit switch -f",
+            "cat <<EOF\r\nexample\r\nEOF\r\ngit switch -f",
+            "bash -c \"cat <<'EOF'\nexample\nEOF\ngit switch -f\"",
+        ] {
+            assert!(
+                deny_scan_targets(command)
+                    .iter()
+                    .any(|target| denied_prefix_matches("git switch -f", target)),
+                "executable heredoc: {command}"
+            );
+        }
+    }
 
     fn engine_with_ask_rule(rule: ToolAskRule) -> ExecPolicyEngine {
         engine_with_ask_rules(vec![rule])

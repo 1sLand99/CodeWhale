@@ -21,6 +21,17 @@ reconnect.
 
 ### Fixed
 
+- Interrupted conversations whose saved runtime store is missing recover into a
+  fresh scope without restoring old tasks or approvals. Stale session saves
+  cannot resurrect the broken binding (#6102).
+- Permission checks distinguish literal heredoc data from executable commands,
+  including substitutions and shell stdin (#6098).
+- Compaction durably saves original history and the model-written handoff before
+  replacing context; pressure metadata shows estimated tokens and the actual
+  configured trigger (#5620). Session artifact publication uses confined handles.
+- The config example agrees with the telemetry disclosure: usage analytics are
+  optional and enabled by default; local diagnostics do not require telemetry (#6011).
+
 - Sub-agents enforce the session's typed shell and file deny rules, including
   Full Access, delegated edits, and policy updates after a child starts (#6097).
 - Live permission edits reach running engine clones atomically. Deny rules
@@ -440,20 +451,13 @@ reconnect.
   unredacted content; `/load` opens the extracted record without installing
   extracted artifacts (#6056, thanks @h3c-hexin and @asto18089).
 
-- `deepseek-flash` (DeepSeek V4.1 Flash: text-only, 1M-token context,
+- `deepseek-flash` (DeepSeek V4.1 Flash: 1M-token context,
   reasoning and tool calls) joins the catalog as DeepSeek's declared default,
   and the offline catalog seed matches it; the DeepSeek Pro listing no longer
   overstates the published price (#6025).
-- `codewhale doctor` and the provider capability report now name DeepSeek's
-  V4 Pro retirement while there is still time to act on it: a route on
-  `deepseek-v4-pro` reports that DeepSeek routes it to `deepseek-flash` from
-  2026-09-14 and bills at Flash's price. The id keeps working, so nothing is
-  rewritten for you — the point is that the substitution is the vendor's
-  choice unless you make it yours first. A custom endpoint serving the same
-  model string is untouched: DeepSeek's retirement is not a claim CodeWhale
-  makes about someone else's host. Cost reporting already switched to Flash's
-  rates at that instant, and both now read the same date from one constant
-  (#6025).
+- DeepSeek's September 11 reversal is reflected in provider notices and cost
+  estimates: V4 Pro remains available after September 14 at Pro rates. Explicit
+  Pro selections remain unchanged; Flash remains the default (#6025, thanks @ronohara).
 - Native plugin authoring guides now cover English and Chinese. The explicit
   offline converter supports selected portable Skills and static Streamable
   HTTP MCP declarations from OpenCode and DSH. Unsupported executable hooks,
@@ -565,14 +569,9 @@ reconnect.
 
 ### Notes
 
-- **DeepSeek retires the V4 Pro route on 2026-09-14.** DeepSeek's notice,
-  surfaced in #6025 by @ronohara, states that at 12:00 Beijing time that day
-  every request to the Pro model is routed to V4.1 Flash and billed at
-  Flash's price. That is why `deepseek-flash` is the shipped default here.
-  An explicitly configured `default_text_model` is still honored, so a config
-  that names `deepseek-v4-pro` on purpose keeps naming it and will be routed
-  by DeepSeek rather than by Codewhale — change it if you would rather pick
-  the replacement than have the vendor pick it for you.
+- **DeepSeek V4 Pro continues after September 14.** The vendor reversed its
+  earlier retirement notice. Codewhale preserves Pro selections and Pro pricing;
+  `deepseek-flash` remains the default for new direct DeepSeek configurations.
 - Upgrading from 0.9.12 with Computer Use trusted and enabled: the
   bundle's content hash changes with the 0.2.1 refresh, so the plugin
   deactivates and asks for a fresh review — that is the designed
@@ -788,9 +787,8 @@ Reports and reproductions that shaped this release:
   budget collapsing to 1,024 tokens on 32K local models (#5820).
 - **[@ronohara](https://github.com/ronohara)** — reported the engine stopping
   after recoverable network errors, with the reproduction that pinned the
-  discarded approval (#5769), and surfaced DeepSeek's notice that the V4 Pro
-  route is retired on 2026-09-14 — the report that set this release's default
-  model (#6025).
+  discarded approval (#5769), and surfaced DeepSeek's model-service notices and the subsequent reversal
+  retaining V4 Pro (#6025).
 - **[@Lujc0523](https://github.com/Lujc0523)** — asked for ACP session
   configuration of mode and model (#5863).
 - **[@senka9h](https://github.com/senka9h)** — reported that `serve --acp`

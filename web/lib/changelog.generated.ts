@@ -37,6 +37,10 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Fixed",
         "items": [
+          "Interrupted conversations whose saved runtime store is missing recover into a fresh scope without restoring old tasks or approvals. Stale session saves cannot resurrect the broken binding (#6102).",
+          "Permission checks distinguish literal heredoc data from executable commands, including substitutions and shell stdin (#6098).",
+          "Compaction durably saves original history and the model-written handoff before replacing context; pressure metadata shows estimated tokens and the actual configured trigger (#5620). Session artifact publication uses confined handles.",
+          "The config example agrees with the telemetry disclosure: usage analytics are optional and enabled by default; local diagnostics do not require telemetry (#6011).",
           "Sub-agents enforce the session's typed shell and file deny rules, including Full Access, delegated edits, and policy updates after a child starts (#6097).",
           "Live permission edits reach running engine clones atomically. Deny rules support token wildcards and Windows command spellings while keeping POSIX arguments literal (#6054, thanks @h3c-hexin and @asto18089).",
           "Tool-result images use the existing typed inline path and are fully decoded under size and allocation limits before admission or provider projection. Invalid images keep a visible omission receipt alongside the text result (adapted from #6053, thanks @h3c-hexin and @asto18089).",
@@ -44,13 +48,9 @@ export const CHANGELOG: ChangelogRelease[] = [
           "The Agents register updates from live worker events while the parent is busy, including when the register opened before the workers spawned.",
           "Ghostty no longer shows a second graphical whale over the launch mark. The selected model stays visible before the first message; unused session metrics stay quiet. Scheduled counts open /automation directly.",
           "Marketplace installation accepts compatible Claude plugin bundles and roots their relative sources outside .claude-plugin; unsupported components fail explicitly. Native trust and enablement review still applies.",
-          "Config table and nested reads work consistently and redact credentials. Unsupported dotted writes fail without changing the file, and config doctor no longer labels runtime settings as never applied (#6083).",
-          "Esc during a worker fanout keeps the parent stopped when cancelled workers finish. Their receipts remain available for the next explicit user turn.",
-          "Undo preserves messages even when older state lacks a timestamp. Session journal entries retain their append-time stamps when saved again.",
-          "Extension actions refresh in place, and inspection output uses the text pager. The empty launch shell hides unused metrics and keeps recovery hints readable when several MCP servers need attention.",
-          "The large-output router defaults to bounded spillover; adaptive routing remains opt-in through CODEWHALE_ADAPTIVE_OUTPUT_ROUTING=1."
+          "Config table and nested reads work consistently and redact credentials. Unsupported dotted writes fail without changing the file, and config doctor no longer labels runtime settings as never applied (#6083)."
         ],
-        "itemCount": 64
+        "itemCount": 68
       },
       {
         "heading": "Changed",
@@ -84,8 +84,8 @@ export const CHANGELOG: ChangelogRelease[] = [
         "heading": "Added",
         "items": [
           "codewhale sessions export <id-or-unique-prefix> saves a .tar.xz archive with the durable record, portable session container, manifest and artifacts. Prefix exports preserve unfinished tool calls; confined reads reject linked artifact roots, and existing outputs require --force. Archives retain unredacted content; /load opens the extracted record without installing extracted artifacts (#6056, thanks @h3c-hexin and @asto18089).",
-          "deepseek-flash (DeepSeek V4.1 Flash: text-only, 1M-token context, reasoning and tool calls) joins the catalog as DeepSeek's declared default, and the offline catalog seed matches it; the DeepSeek Pro listing no longer overstates the published price (#6025).",
-          "codewhale doctor and the provider capability report now name DeepSeek's V4 Pro retirement while there is still time to act on it: a route on deepseek-v4-pro reports that DeepSeek routes it to deepseek-flash from 2026-09-14 and bills at Flash's price. The id keeps working, so nothing is rewritten for you — the point is that the substitution is the vendor's choice unless you make it yours first. A custom endpoint serving the same model string is untouched: DeepSeek's…",
+          "deepseek-flash (DeepSeek V4.1 Flash: 1M-token context, reasoning and tool calls) joins the catalog as DeepSeek's declared default, and the offline catalog seed matches it; the DeepSeek Pro listing no longer overstates the published price (#6025).",
+          "DeepSeek's September 11 reversal is reflected in provider notices and cost estimates: V4 Pro remains available after September 14 at Pro rates. Explicit Pro selections remain unchanged; Flash remains the default (#6025, thanks @ronohara).",
           "Native plugin authoring guides now cover English and Chinese. The explicit offline converter supports selected portable Skills and static Streamable HTTP MCP declarations from OpenCode and DSH. Unsupported executable hooks, automatic OAuth and policy-bearing configurations are refused; generated bundles still require native installation, review and trust. Legacy SSE fallback is not reproduced (#5827, requested by @giancarlocp).",
           "Signed cloud model facts can refresh provider capabilities and prices while preserving verified cached data when a refresh fails. A dispatched request keeps its selected price snapshot so later catalog updates cannot change its recorded cost (#5752).",
           "Saved sessions preserve exact provider routes. Auxiliary model calls settle their usage once against the route and price snapshot that executed them, including recovery, rather than resolving a new price at completion (#5726, #5848).",
@@ -119,7 +119,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Notes",
         "items": [
-          "DeepSeek retires the V4 Pro route on 2026-09-14. DeepSeek's notice, surfaced in #6025 by @ronohara, states that at 12:00 Beijing time that day every request to the Pro model is routed to V4.1 Flash and billed at Flash's price. That is why deepseek-flash is the shipped default here. An explicitly configured default_text_model is still honored, so a config that names deepseek-v4-pro on purpose keeps naming it and will be routed by DeepSeek rather than by Codewhale — change it…",
+          "DeepSeek V4 Pro continues after September 14. The vendor reversed its earlier retirement notice. Codewhale preserves Pro selections and Pro pricing; deepseek-flash remains the default for new direct DeepSeek configurations.",
           "Upgrading from 0.9.12 with Computer Use trusted and enabled: the bundle's content hash changes with the 0.2.1 refresh, so the plugin deactivates and asks for a fresh review — that is the designed fail-closed path for a desktop-driving plugin. Re-trust it from the Plugins page.",
           "The multiline-paste fix restores v9.11 behavior on terminals that accept EnableBracketedPaste but deliver pastes as keystrokes (reported on Windows 11 / PowerShell). Verified at the input-contract level and in CI; a manual paste check on a real Windows terminal is still welcome — please comment on #5981 with your terminal if anything still misbehaves."
         ],

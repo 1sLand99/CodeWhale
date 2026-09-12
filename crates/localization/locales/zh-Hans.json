@@ -2162,6 +2162,7 @@
   "McpStateConnecting": "连接中",
   "McpStateFailed": "连接失败",
   "McpStateDisconnected": "未连接",
+  "RuntimeStoreRecovered": "对话已恢复到新的运行时存储。之前的运行时任务、审批和自动化未恢复。",
   "ResumeExactSessionHint": "要继续此会话，请运行 {command}",
   "ResumeSavedSessionHint": "要选择已保存的会话，请运行 {command}",
   "GoalProgressLabel": "目标",

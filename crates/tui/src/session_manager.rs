@@ -1708,6 +1708,23 @@ impl SessionManager {
         Ok(Some(goal))
     }
 
+    fn hydrate_recovered_runtime_binding(&self, session: &mut SavedSession) -> std::io::Result<()> {
+        // A stale process must not resurrect a missing binding after recovery.
+        if session
+            .metadata
+            .runtime_store
+            .as_ref()
+            .is_some_and(|binding| binding.is_missing_session_store().unwrap_or(false))
+            && let Ok(persisted) =
+                Self::load_session_metadata(&self.validated_session_path(&session.metadata.id)?)
+            && let Some(binding) = persisted.runtime_store
+            && binding.validate_existing_store().is_ok()
+        {
+            session.metadata.runtime_store = Some(binding);
+        }
+        Ok(())
+    }
+
     /// Save a session to disk using atomic write (temp file + fsync + rename).
     pub fn save_session(&self, session: &SavedSession) -> std::io::Result<PathBuf> {
         let path = self.validated_session_path(&session.metadata.id)?;
@@ -1720,6 +1737,7 @@ impl SessionManager {
             self.archive_before_first_graph_write(session, &path)?;
 
             let mut durable_session = session.clone();
+            self.hydrate_recovered_runtime_binding(&mut durable_session)?;
             self.hydrate_approval_receipts(&mut durable_session)?;
             let content = serialize_saved_session(&durable_session)?;
 
@@ -1749,6 +1767,7 @@ impl SessionManager {
             fs::create_dir_all(self.checkpoints_dir())?;
             let already_persisted = path.exists() || session_path.exists();
             let mut durable_session = session.clone();
+            self.hydrate_recovered_runtime_binding(&mut durable_session)?;
             self.hydrate_approval_receipts(&mut durable_session)?;
             let content = serialize_saved_session(&durable_session)?;
             write_atomic(&path, content.as_bytes())?;

@@ -2162,6 +2162,7 @@
   "McpStateConnecting": "connexion en cours",
   "McpStateFailed": "échec de connexion",
   "McpStateDisconnected": "non connecté",
+  "RuntimeStoreRecovered": "La conversation a été récupérée dans un nouveau stockage d’exécution. Les tâches, autorisations et automatisations précédentes n’ont pas été restaurées.",
   "ResumeExactSessionHint": "Pour reprendre cette session, exécutez {command}",
   "ResumeSavedSessionHint": "Pour choisir une session enregistrée, exécutez {command}",
   "GoalProgressLabel": "Objectif",

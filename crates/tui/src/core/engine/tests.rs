@@ -17854,12 +17854,9 @@ Current local date:"
 }
 
 #[test]
-fn turn_metadata_is_byte_identical_across_identical_consecutive_turns() {
-    // Diet acceptance (captains-log #18/#21/#22): two identical consecutive
-    // turns must produce byte-identical `<turn_meta>` blocks. Pre-diet the
-    // block carried session totals, context-pressure counts, and goal usage
-    // rates that drifted between turns even with unchanged inputs; today the
-    // block carries only facts that are stable across ordinary turns.
+fn turn_metadata_keeps_stable_fields_while_pressure_reports_live_estimates() {
+    // Live estimates belong in appended turn metadata, never in the pinned
+    // system prefix. Unrelated metadata remains stable as the transcript grows.
     let tmp = tempdir().expect("tempdir");
     let config = EngineConfig {
         model: "deepseek-v4-flash".to_string(),
@@ -17925,16 +17922,22 @@ fn turn_metadata_is_byte_identical_across_identical_consecutive_turns() {
         "fixture must exercise the pressure line: {first_meta}"
     );
 
-    // Turn 2 builds with the first message already in the session, exactly as
-    // a real turn sequence would; the block must not change.
     engine.session.add_message(first);
     let second = message_for(&engine);
     let second_meta = meta_of(&second);
-
+    let without_pressure = |metadata: &str| {
+        metadata
+            .lines()
+            .filter(|line| !line.contains("Context pressure:"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     assert_eq!(
-        first_meta, second_meta,
-        "turn_meta must be byte-identical across identical consecutive turns"
+        without_pressure(&first_meta),
+        without_pressure(&second_meta)
     );
+    assert!(second_meta.contains("Estimated input:"));
+    assert!(second_meta.contains("trigger:"));
 }
 
 #[tokio::test]

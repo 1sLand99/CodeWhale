@@ -926,6 +926,15 @@ window it cannot justify — it falls back to a conservative value, labels it
   default instead of activating a stale legacy setting. There is no
   `max_output_tokens` key in `config.toml`.
 
+Before compaction replaces conversation history, Codewhale durably saves the
+original messages to the session's `artifacts/context-transfer-<id>.json` and,
+when a model summary is produced, its handoff to the matching `.md` file.
+These use the existing session artifact store and persistence redaction.
+A failed write aborts compaction without replacing context. Pruning-only passes
+save the original messages without making an extra model call. Pressure metadata
+shows estimated input tokens and the configured trigger; it is an estimate, not
+an exact promise about a provider's remaining context.
+
 See [Settings File](#settings-file-persistent-ui-preferences) for the
 compaction settings and [Token Quantities and
 Drivers](#token-quantities-and-drivers) for what each displayed token number

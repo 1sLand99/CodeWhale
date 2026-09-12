@@ -2162,6 +2162,7 @@
   "McpStateConnecting": "連線中",
   "McpStateFailed": "連線失敗",
   "McpStateDisconnected": "未連線",
+  "RuntimeStoreRecovered": "對話已復原至新的執行階段儲存空間。先前的執行階段工作、核准及自動化未復原。",
   "ResumeExactSessionHint": "要繼續此工作階段，請執行 {command}",
   "ResumeSavedSessionHint": "要選擇已儲存的工作階段，請執行 {command}",
   "GoalProgressLabel": "目標",

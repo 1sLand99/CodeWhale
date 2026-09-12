@@ -2162,6 +2162,7 @@
   "McpStateConnecting": "подключение",
   "McpStateFailed": "ошибка подключения",
   "McpStateDisconnected": "не подключён",
+  "RuntimeStoreRecovered": "Разговор восстановлен в новом хранилище среды выполнения. Прежние задачи, разрешения и автоматизации не восстановлены.",
   "ResumeExactSessionHint": "Чтобы продолжить этот сеанс, выполните {command}",
   "ResumeSavedSessionHint": "Чтобы выбрать сохранённый сеанс, выполните {command}",
   "GoalProgressLabel": "Цель",

@@ -139,7 +139,7 @@ impl WorkspaceFile {
         Ok(file)
     }
 
-    pub(super) fn publish(&self, bytes: &[u8]) -> io::Result<()> {
+    pub(crate) fn publish(&self, bytes: &[u8]) -> io::Result<()> {
         self.atomic_write(bytes, false)
     }
 
@@ -313,7 +313,7 @@ impl WorkspaceFile {
         crate::plugins::manifest::open_bundle_file(&self.directory.join(&self.filename))
     }
 
-    pub(super) fn publish(&self, bytes: &[u8]) -> io::Result<()> {
+    pub(crate) fn publish(&self, bytes: &[u8]) -> io::Result<()> {
         self.atomic_write(bytes, false)
     }
 
@@ -520,7 +520,7 @@ impl WorkspaceFile {
     pub(crate) fn open_file(&self) -> io::Result<File> {
         unreachable!()
     }
-    pub(super) fn publish(&self, _: &[u8]) -> io::Result<()> {
+    pub(crate) fn publish(&self, _: &[u8]) -> io::Result<()> {
         unreachable!()
     }
 }

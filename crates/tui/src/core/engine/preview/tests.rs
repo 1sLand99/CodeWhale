@@ -292,15 +292,12 @@ fn turn_metadata_uses_planned_cross_route_limits_not_installed_limits() {
         false,
         None,
     );
-    assert_eq!(
-        engine
-            .context_pressure_line("cross-route budget", &installed_context, None)
-            .as_deref(),
-        Some(
-            "Context pressure: critical — CRITICAL: stop expanding scope; run /compact immediately or finish the current task"
-        ),
-        "control fixture must be critical under the installed 4K limits"
-    );
+    let pressure = engine
+        .context_pressure_line("cross-route budget", &installed_context, None)
+        .unwrap();
+    assert!(pressure.contains("Context pressure: critical"));
+    assert!(pressure.contains("Estimated input:"));
+    assert!(pressure.contains("trigger:"));
     let message = engine.user_text_message_from_snapshot(
         "cross-route budget".to_string(),
         &prompt_context.model,
