@@ -21,6 +21,9 @@ reconnect.
 
 ### Fixed
 
+- Interactive startup no longer mistakes worker scheduling delays for an
+  unresponsive terminal. Terminal ownership checks and shutdown cleanup remain
+  enforced (#5929).
 - Interrupted conversations whose saved runtime store is missing recover into a
   fresh scope without restoring old tasks or approvals. Stale session saves
   cannot resurrect the broken binding (#6102).

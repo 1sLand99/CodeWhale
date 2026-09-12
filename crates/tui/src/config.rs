@@ -1786,8 +1786,8 @@ where
 pub struct TuiConfig {
     pub alternate_screen: Option<String>,
     pub mouse_capture: Option<bool>,
-    /// Timeout for startup terminal mode/probe calls in milliseconds.
-    /// Defaults to 500ms when omitted.
+    /// Legacy setting retained for config compatibility. Raw mode is set
+    /// directly on the terminal-owning thread; this value has no effect.
     pub terminal_probe_timeout_ms: Option<u64>,
     /// Per-SSE-chunk idle timeout in seconds. Defaults to 900 seconds when
     /// omitted. `0` maps to the default; values clamp to `1..=3600`.

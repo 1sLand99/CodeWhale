@@ -627,48 +627,10 @@ pub async fn run_tui(
     require_interactive_terminal(io::stdin().is_terminal(), io::stdout().is_terminal())?;
     require_foreground_terminal_owner()?;
 
-    // Terminal probe with timeout to prevent hanging on unresponsive terminals.
-    //
-    // The blocking task cannot be cancelled once the timeout fires, so a slow
-    // `enable_raw_mode` may still succeed *after* we've bailed out, leaking
-    // raw mode. Both sides run `raw_mode_probe_handshake`; whichever observes
-    // the other's flag disables raw mode again.
-    let probe_timeout = terminal_probe_timeout(config);
-    let probe_abandoned = Arc::new(AtomicBool::new(false));
-    let probe_enabled = Arc::new(AtomicBool::new(false));
-    let task_abandoned = Arc::clone(&probe_abandoned);
-    let task_enabled = Arc::clone(&probe_enabled);
-    let enable_raw = tokio::task::spawn_blocking(move || {
-        let result =
-            enable_raw_mode().map_err(|e| anyhow::anyhow!("Failed to enable raw mode: {e}"));
-        if result.is_ok() && raw_mode_probe_handshake(&task_enabled, &task_abandoned) {
-            // The probe timed out while we were blocked; the caller already
-            // gave up, so undo the late enable instead of leaking raw mode.
-            let _ = disable_raw_mode();
-        }
-        result
-    });
-
-    match tokio::time::timeout(probe_timeout, enable_raw).await {
-        Ok(inner_result) => {
-            inner_result??; // propagate both join and raw-mode errors
-        }
-        Err(_) => {
-            if raw_mode_probe_handshake(&probe_abandoned, &probe_enabled) {
-                // The blocking task finished enabling raw mode right as the
-                // timeout fired and may have missed the abandoned flag.
-                let _ = disable_raw_mode();
-            }
-            tracing::warn!(
-                "Terminal probe timed out after {}ms - terminal may be unresponsive",
-                probe_timeout.as_millis()
-            );
-            return Err(anyhow::anyhow!(
-                "Terminal probe timed out after {}ms",
-                probe_timeout.as_millis()
-            ));
-        }
-    }
+    // This sets local terminal attributes; it is not a terminal-response probe.
+    // Do it on the owning thread, as on resume, so blocking-pool scheduling
+    // cannot abort startup or leave a detached worker enabling raw mode later.
+    enable_raw_mode().context("Failed to enable raw mode")?;
 
     #[cfg(target_os = "windows")]
     enable_windows_ime_console_mode();

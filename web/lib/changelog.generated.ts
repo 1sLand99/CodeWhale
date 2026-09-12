@@ -37,6 +37,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Fixed",
         "items": [
+          "Interactive startup no longer mistakes worker scheduling delays for an unresponsive terminal. Terminal ownership checks and shutdown cleanup remain enforced (#5929).",
           "Interrupted conversations whose saved runtime store is missing recover into a fresh scope without restoring old tasks or approvals. Stale session saves cannot resurrect the broken binding (#6102).",
           "Permission checks distinguish literal heredoc data from executable commands, including substitutions and shell stdin (#6098).",
           "Automatic compaction runs quietly from live context pressure, preserving the current task and recent tool exchanges while keeping the system/tool prefix stable. Original history and the handoff are saved before context replacement; failed or canceled compaction retains the conversation (#5620, #6047).",
@@ -47,10 +48,9 @@ export const CHANGELOG: ChangelogRelease[] = [
           "Gemini setup uses the official endpoint's supported reasoning-effort field, avoiding the rejected top-level Google thinking object. Gemini 2.5 and 3 keep their supported effort ranges; signed tool history still survives reasoning changes and restart (#6018, thanks @vmakarov-uk).",
           "Missed automation occurrences coalesce without overlapping a running job; restart reconciles durable receipts without replaying accepted work. Damaged neighboring records are isolated while preserving their original bytes.",
           "The bundled first-party marketplace lists the actual plugin bundles and uses the existing install, review, trust and update paths. A read-only connection check verifies catalog and skill mirrors on changes and weekly. Already present bundles lead to their local review and management controls; catalog installs refuse name collisions before downloading, without overwriting or granting trust.",
-          "Windows deny checks preserve native path separators while retaining the conservative POSIX scan for shell wrappers and substitutions.",
-          "The config example agrees with the telemetry disclosure: usage analytics are optional and enabled by default; local diagnostics do not require telemetry (#6011)."
+          "Windows deny checks preserve native path separators while retaining the conservative POSIX scan for shell wrappers and substitutions."
         ],
-        "itemCount": 76
+        "itemCount": 77
       },
       {
         "heading": "Changed",

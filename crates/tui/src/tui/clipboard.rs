@@ -1204,6 +1204,10 @@ exit 42
     fn tmux_load_buffer_w_reaches_attached_client_with_default_passthrough_disabled() {
         use std::io::Read as _;
 
+        // Every subprocess must inherit the same terminal environment, not
+        // another fixture's transient PATH/TERM/multiplexer overrides.
+        let _env = crate::test_support::lock_test_env();
+
         let version = match Command::new("tmux").arg("-V").output() {
             Ok(output) if output.status.success() => output,
             _ => return,
@@ -1314,6 +1318,12 @@ exit 42
             );
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
+        // A listed client can precede its terminal startup. tmux discards
+        // clipboard requests before TTY_STARTED; actual PTY output establishes
+        // that startup reached the terminal before the one request we verify.
+        output_rx
+            .recv_timeout(attach_deadline.saturating_duration_since(std::time::Instant::now()))
+            .expect("attached tmux client should produce terminal startup output");
         while output_rx.try_recv().is_ok() {}
 
         let copied_text = "copy through default tmux";

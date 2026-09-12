@@ -2244,20 +2244,18 @@ mod tests {
             )
         };
 
-        let flip = Arc::clone(&manager);
-        let done_id = done.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            settle(&flip, &done_id, SubAgentStatus::Completed).await;
-        });
+        let request = json!({ "until": "all", "timeout_secs": 1 });
+        let context = ToolContext::new(tmp.path());
+        let wait = dispatch_wait(&request, Arc::clone(&manager), &context);
+        tokio::pin!(wait);
+        // Capture both running children before completing one. The timeout
+        // receipt must not depend on a background task winning a 50ms race.
+        assert!(futures_util::poll!(wait.as_mut()).is_pending());
+        settle(&manager, &done, SubAgentStatus::Completed).await;
 
-        let result = dispatch_wait(
-            &json!({ "until": "all", "timeout_secs": 1 }),
-            Arc::clone(&manager),
-            &ToolContext::new(tmp.path()),
-        )
-        .await
-        .expect("a timeout is a partial receipt, not an error");
+        let result = wait
+            .await
+            .expect("a timeout is a partial receipt, not an error");
         let body: Value = serde_json::from_str(&result.content).unwrap();
         assert_eq!(body["timed_out"], json!(true), "{body}");
         assert_eq!(body["all_settled"], json!(false), "{body}");

@@ -154,30 +154,6 @@ pub(crate) fn validate_foreground_process_group(
     ))
 }
 
-/// One side of the raw-mode probe abandonment handshake between the startup
-/// probe timeout and the blocking `enable_raw_mode` task finishing late.
-///
-/// Each side publishes its own flag (`publish`), then checks whether the
-/// other side's flag (`check`) is already up; a `true` return means this
-/// side must disable raw mode again. `SeqCst` ordering guarantees that when
-/// both sides run, at least one observes the other's flag, so a raw-mode
-/// enable landing after the probe timeout is always undone. Both sides
-/// observing each other is fine — a duplicate `disable_raw_mode` is a no-op.
-pub(crate) fn raw_mode_probe_handshake(publish: &AtomicBool, check: &AtomicBool) -> bool {
-    publish.store(true, Ordering::SeqCst);
-    check.load(Ordering::SeqCst)
-}
-
-pub(crate) fn terminal_probe_timeout(config: &Config) -> Duration {
-    let timeout_ms = config
-        .tui
-        .as_ref()
-        .and_then(|tui| tui.terminal_probe_timeout_ms)
-        .unwrap_or(DEFAULT_TERMINAL_PROBE_TIMEOUT_MS)
-        .clamp(100, 5_000);
-    Duration::from_millis(timeout_ms)
-}
-
 pub(crate) fn subagent_terminal_projection_from_mailbox(
     message: &MailboxMessage,
 ) -> Option<(&str, SubAgentStatus, Option<String>)> {

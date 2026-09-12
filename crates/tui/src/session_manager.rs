@@ -1120,6 +1120,33 @@ impl OfflineQueueLease {
     }
 }
 
+impl Drop for OfflineQueueLease {
+    fn drop(&mut self) {
+        // A forked child can briefly retain the same open-file description.
+        // Release the editor's lock now, rather than waiting for every inherited
+        // descriptor to close, as RuntimeProcessOwnerLock does on shutdown.
+        #[cfg(all(unix, not(target_os = "solaris")))]
+        {
+            use std::os::fd::AsRawFd as _;
+            // SAFETY: the lease still owns this descriptor throughout Drop.
+            unsafe {
+                libc::flock(self._file.as_raw_fd(), libc::LOCK_UN);
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle as _;
+            use windows_sys::Win32::Storage::FileSystem::UnlockFile;
+            // SAFETY: the lease owns the handle; fd-lock locks byte 0 only.
+            unsafe {
+                UnlockFile(self._file.as_raw_handle() as _, 0, 0, 1, 0);
+            }
+        }
+        // fd-lock uses process-associated fcntl locks on Solaris. They are not
+        // inherited by fork and closing this descriptor releases the lock.
+    }
+}
+
 /// Origin of a crash-recovery checkpoint file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckpointSource {
@@ -2087,8 +2114,8 @@ impl SessionManager {
         })?;
         // fd-lock's guard borrows its owner. Retain the underlying descriptor
         // instead so this lease can travel with asynchronous writes. Forgetting
-        // this non-owning guard keeps the OS lock held; closing the final Arc's
-        // file releases it on both Unix and Windows, including process crashes.
+        // this non-owning guard keeps the OS lock held; the final Arc explicitly
+        // unlocks in Drop. The OS also releases it when the process crashes.
         std::mem::forget(guard);
         Ok(std::sync::Arc::new(OfflineQueueLease {
             session_id,
@@ -7083,6 +7110,48 @@ mod tests {
         );
         assert!(legacy.exists(), "unreadable legacy queue is left in place");
     }
+    #[cfg(all(unix, not(target_os = "solaris")))]
+    #[test]
+    fn offline_queue_lease_releases_while_an_inherited_descriptor_remains_open() {
+        let directory = tempfile::tempdir().expect("queue fixture");
+        let manager = SessionManager::new(directory.path().join("sessions")).expect("manager");
+        let editor = manager
+            .acquire_offline_queue_lease("shared-session")
+            .expect("first editor");
+        // dup and fork share the same open-file description. Keep it alive
+        // without a timing race or forking the multithreaded test process.
+        let inherited = editor._file.try_clone().expect("inherited descriptor");
+        let pending_write = std::sync::Arc::clone(&editor);
+        drop(editor);
+        assert_eq!(
+            manager
+                .acquire_offline_queue_lease("shared-session")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock,
+            "pending writes retain the exclusive editor lease"
+        );
+        drop(pending_write);
+        let next_editor = manager
+            .acquire_offline_queue_lease("shared-session")
+            .expect("completed editor releases even while a child retains its descriptor");
+        drop(inherited);
+        assert_eq!(
+            manager
+                .acquire_offline_queue_lease("shared-session")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock,
+            "closing the old descriptor must not release the next editor's lock"
+        );
+        drop(next_editor);
+        assert!(
+            manager
+                .acquire_offline_queue_lease("shared-session")
+                .is_ok()
+        );
+    }
+
     #[test]
     fn offline_queue_lease_excludes_another_process_and_releases() {
         const PROBE: &str = "CODEWHALE_QUEUE_LEASE_PROBE_DIR";

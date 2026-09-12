@@ -2103,10 +2103,16 @@ mod tests {
         exec.start_worker("ambiguous-tail-worker", command, None)
             .unwrap();
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        let terminal = exec
-            .poll_terminal_with_status("ambiguous-tail-worker")
-            .expect("terminal worker");
+        // Keep all output for the terminal drain, but wait for real worker
+        // exit instead of assuming the shell finishes within one timer tick.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let terminal = loop {
+            if let Some(terminal) = exec.poll_terminal_with_status("ambiguous-tail-worker") {
+                break terminal;
+            }
+            assert!(std::time::Instant::now() < deadline, "terminal worker");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
         assert!(
             terminal.reported_route.is_none(),
             "malformed trailing terminal evidence must invalidate the prior valid route"

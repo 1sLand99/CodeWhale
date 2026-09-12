@@ -8659,56 +8659,6 @@ fn shell_live_output_update_skips_finalized_exec_cell() {
 }
 
 #[test]
-fn terminal_probe_timeout_defaults_to_500ms() {
-    let config = Config::default();
-
-    assert_eq!(terminal_probe_timeout(&config), Duration::from_millis(500));
-}
-
-#[test]
-fn terminal_probe_timeout_uses_tui_config_and_clamps() {
-    let mut config = Config {
-        tui: Some(crate::config::TuiConfig {
-            alternate_screen: None,
-            mouse_capture: None,
-            terminal_probe_timeout_ms: Some(750),
-            stream_chunk_timeout_secs: None,
-            max_model_steps: None,
-            turn_wall_clock_secs: None,
-            stream_max_content_mb: None,
-            stream_max_duration_secs: None,
-            status_items: None,
-            posture_bar: None,
-            metrics_line: None,
-            header_items: None,
-            osc8_links: None,
-            notification_condition: None,
-            composer_arrows_scroll: None,
-        }),
-        ..Config::default()
-    };
-
-    assert_eq!(terminal_probe_timeout(&config), Duration::from_millis(750));
-
-    config
-        .tui
-        .as_mut()
-        .expect("tui config")
-        .terminal_probe_timeout_ms = Some(0);
-    assert_eq!(terminal_probe_timeout(&config), Duration::from_millis(100));
-
-    config
-        .tui
-        .as_mut()
-        .expect("tui config")
-        .terminal_probe_timeout_ms = Some(60_000);
-    assert_eq!(
-        terminal_probe_timeout(&config),
-        Duration::from_millis(5_000)
-    );
-}
-
-#[test]
 fn file_mentions_add_local_text_context_to_model_payload() {
     let tmpdir = TempDir::new().expect("tempdir");
     std::fs::write(
@@ -25770,53 +25720,6 @@ fn input_pump_restart_detaches_wedged_thread_and_installs_fresh_parts() {
     );
 
     drop(block_tx); // release the wedged stand-in thread
-}
-
-#[test]
-fn raw_mode_probe_handshake_elects_exactly_one_side_sequentially() {
-    // Task enables raw mode first, probe timeout fires second: the timeout
-    // side sees `enabled` and takes responsibility for disabling.
-    let enabled = std::sync::atomic::AtomicBool::new(false);
-    let abandoned = std::sync::atomic::AtomicBool::new(false);
-    let task_disables = raw_mode_probe_handshake(&enabled, &abandoned);
-    let caller_disables = raw_mode_probe_handshake(&abandoned, &enabled);
-    assert!(!task_disables, "task ran first, so it must not disable");
-    assert!(
-        caller_disables,
-        "timed-out caller must undo the late enable"
-    );
-
-    // Probe timeout fires first, task finishes enabling second: the task
-    // side sees `abandoned` and disables its own late enable.
-    let enabled = std::sync::atomic::AtomicBool::new(false);
-    let abandoned = std::sync::atomic::AtomicBool::new(false);
-    let caller_disables = raw_mode_probe_handshake(&abandoned, &enabled);
-    let task_disables = raw_mode_probe_handshake(&enabled, &abandoned);
-    assert!(!caller_disables, "caller ran first, so it must not disable");
-    assert!(
-        task_disables,
-        "late-finishing task must undo its own enable"
-    );
-}
-
-#[test]
-fn raw_mode_probe_handshake_never_leaks_under_concurrent_race() {
-    // Race both sides on real threads: no interleaving may leave raw mode
-    // leaked, i.e. at least one side must observe the other's flag.
-    for _ in 0..200 {
-        let enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let abandoned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let task_enabled = std::sync::Arc::clone(&enabled);
-        let task_abandoned = std::sync::Arc::clone(&abandoned);
-        let task =
-            std::thread::spawn(move || raw_mode_probe_handshake(&task_enabled, &task_abandoned));
-        let caller_disables = raw_mode_probe_handshake(&abandoned, &enabled);
-        let task_disables = task.join().expect("handshake task side");
-        assert!(
-            task_disables || caller_disables,
-            "at least one side must take responsibility for disabling raw mode"
-        );
-    }
 }
 
 #[test]

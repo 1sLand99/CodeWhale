@@ -230,7 +230,6 @@ pub(crate) const UI_GHOSTTY_UNDERWATER_ANIMATION_MS: u64 = 34;
 // transcript under 40 columns. (Named for the file tree — the legacy sidebar
 // this constant once described no longer gates on it.)
 pub(crate) const FILE_TREE_MIN_HOST_WIDTH: u16 = 60;
-const DEFAULT_TERMINAL_PROBE_TIMEOUT_MS: u64 = 500;
 const SESSION_TITLE_MAX_CHARS: usize = 32;
 const VERSION_HINT_TOAST_TTL_MS: u64 = 12_000;
 

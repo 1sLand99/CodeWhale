@@ -3782,7 +3782,7 @@ async fn turn_operation_lookup_is_authenticated_read_only_and_survives_restart()
             base_url: None,
         })
         .await?;
-    tokio::time::timeout(ci_scaled(Duration::from_secs(2)), async {
+    tokio::time::timeout(ci_scaled(Duration::from_secs(10)), async {
         loop {
             if manager.test_store().load_turn(&turn_id)?.status == RuntimeTurnStatus::Completed {
                 return Ok::<_, anyhow::Error>(());
@@ -3793,7 +3793,7 @@ async fn turn_operation_lookup_is_authenticated_read_only_and_survives_restart()
     .await
     .context("mock turn did not settle before restart")??;
     tokio::time::timeout(
-        ci_scaled(Duration::from_secs(2)),
+        ci_scaled(Duration::from_secs(10)),
         manager.shutdown_and_wait(),
     )
     .await??;
@@ -3803,7 +3803,7 @@ async fn turn_operation_lookup_is_authenticated_read_only_and_survives_restart()
     let _ = server.await;
     drop(manager);
     drop(engine);
-    tokio::time::timeout(ci_scaled(Duration::from_secs(2)), async {
+    tokio::time::timeout(ci_scaled(Duration::from_secs(10)), async {
         while released.upgrade().is_some() {
             sleep(Duration::from_millis(10)).await;
         }

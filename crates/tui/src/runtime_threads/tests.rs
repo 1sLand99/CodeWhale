@@ -341,7 +341,7 @@ mod recovery {
                 .await?;
         }
         release.send(()).unwrap();
-        let terminal = wait_for_terminal_turn(&manager, &first.id, Duration::from_secs(10)).await?;
+        let terminal = wait_for_terminal_turn(&manager, &first.id).await?;
         if interrupt {
             assert_eq!(terminal.status, RuntimeTurnStatus::Interrupted);
             assert_eq!(
@@ -389,9 +389,7 @@ mod recovery {
                 )
                 .await?;
             assert_eq!(
-                wait_for_terminal_turn(&manager, &second.id, Duration::from_secs(10))
-                    .await?
-                    .status,
+                wait_for_terminal_turn(&manager, &second.id).await?.status,
                 RuntimeTurnStatus::Completed
             );
             assert_eq!(mock.call_count(), 1);
@@ -467,7 +465,7 @@ mod recovery {
             ..Default::default()
         };
         let first = manager.start_turn(&thread.id, request.clone()).await?;
-        let first = wait_for_terminal_turn(&manager, &first.id, Duration::from_secs(10)).await?;
+        let first = wait_for_terminal_turn(&manager, &first.id).await?;
         assert_eq!(
             first.status,
             RuntimeTurnStatus::Completed,
@@ -512,7 +510,7 @@ mod recovery {
                 },
             )
             .await?;
-        let second = wait_for_terminal_turn(&manager, &second.id, Duration::from_secs(10)).await?;
+        let second = wait_for_terminal_turn(&manager, &second.id).await?;
         assert_eq!(second.status, RuntimeTurnStatus::Completed);
         assert_eq!(second.max_output_tokens, None);
         assert_eq!(second.schema_version, CURRENT_RUNTIME_SCHEMA_VERSION);
@@ -570,7 +568,7 @@ mod recovery {
                 },
             )
             .await?;
-        let retry = wait_for_terminal_turn(&manager, &retry.id, Duration::from_secs(10)).await?;
+        let retry = wait_for_terminal_turn(&manager, &retry.id).await?;
         assert_eq!(retry.status, RuntimeTurnStatus::Completed);
         assert_eq!(retry_mock.last_request().unwrap().max_tokens, 1500);
         handle.send(Op::Shutdown).await?;
@@ -833,6 +831,10 @@ fn runtime_event_process_child_helper() {
                 .expect("hold torn Runtime event transaction");
         }
         "phantom" => {
+            let release = PathBuf::from(
+                std::env::var_os(EVENT_PROCESS_START_ENV)
+                    .expect("phantom writer needs a rollback barrier"),
+            );
             store
                 .with_event_transaction(Duration::from_secs(5), || {
                     let path = store.events_path(&thread_id)?;
@@ -868,7 +870,7 @@ fn runtime_event_process_child_helper() {
                     append.write_all(b"\n")?;
                     append.flush()?;
                     std::fs::write(&signal, b"visible").expect("announce rollback candidate");
-                    std::thread::sleep(Duration::from_millis(300));
+                    wait_for_runtime_event_test_file(&release, "phantom rollback barrier");
                     rollback_failed_event_append_handle(&rollback, original_len)
                 })
                 .expect("roll back phantom Runtime event");
@@ -2200,8 +2202,7 @@ async fn caller_cancellation_after_engine_acceptance_keeps_owned_turn_lifecycle(
             base_url: None,
         })
         .await?;
-    let terminal =
-        wait_for_terminal_turn(&manager, &turn_id, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
+    let terminal = wait_for_terminal_turn(&manager, &turn_id).await?;
     assert_eq!(terminal.status, RuntimeTurnStatus::Completed);
     assert_eq!(manager.active_turn_flags(&thread.id, &turn_id).await, None);
 
@@ -2315,8 +2316,7 @@ async fn operation_key_replays_torn_response_survives_restart_and_rejects_mismat
             base_url: None,
         })
         .await?;
-    let terminal =
-        wait_for_terminal_turn(&manager, &original.id, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
+    let terminal = wait_for_terminal_turn(&manager, &original.id).await?;
     assert_eq!(terminal.status, RuntimeTurnStatus::Completed);
     assert_eq!(manager.store.list_turns_for_thread(&thread.id)?.len(), 1);
 
@@ -2826,8 +2826,7 @@ async fn thread_updates_while_start_waits_for_capacity_survive_latest_turn_write
             base_url: None,
         })
         .await?;
-    let terminal =
-        wait_for_terminal_turn(&manager, &turn.id, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
+    let terminal = wait_for_terminal_turn(&manager, &turn.id).await?;
     assert_eq!(terminal.status, RuntimeTurnStatus::Completed);
     assert_eq!(turn.item_ids.len(), 1);
     assert!(
@@ -2990,8 +2989,7 @@ async fn compact_lifecycle_outlives_caller_and_preserves_concurrent_thread_updat
             base_url: None,
         })
         .await?;
-    let terminal =
-        wait_for_terminal_turn(&manager, &turn_id, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
+    let terminal = wait_for_terminal_turn(&manager, &turn_id).await?;
     assert_eq!(terminal.status, RuntimeTurnStatus::Completed);
     assert_eq!(manager.active_turn_flags(&thread.id, &turn_id).await, None);
     let updated = manager.get_thread(&thread.id).await?;
@@ -5113,10 +5111,12 @@ async fn wait_for_sender_strong_count<T>(
 async fn wait_for_terminal_turn(
     manager: &RuntimeThreadManager,
     turn_id: &str,
-    timeout: Duration,
 ) -> Result<TurnRecord> {
     let mut event_rx = manager.subscribe_events();
-    let deadline = Instant::now() + timeout;
+    // Every caller waits for the same durable monitor boundary. Keep its
+    // deadlock watchdog here so individual fixtures cannot turn scheduler or
+    // filesystem contention into an accidental two-second performance gate.
+    let deadline = Instant::now() + TURN_SETTLEMENT_DEADLOCK_TIMEOUT;
     loop {
         let turn = manager.store.load_turn(turn_id)?;
         let terminal = matches!(
@@ -5643,12 +5643,17 @@ fn event_reader_never_observes_cross_process_rollback_candidate() -> Result<()> 
     let child = spawn_runtime_event_child("phantom", &dir, thread_id, &signal);
     wait_for_runtime_event_test_file(&signal, "visible rollback candidate");
 
-    let started = Instant::now();
-    assert!(store.events_since(thread_id, None)?.is_empty());
+    // Keep the candidate present until the real reader has attempted the
+    // transaction. A relative sleep in the writer can expire before a loaded
+    // parent is scheduled and never exercise a contended read at all.
+    let error = store
+        .events_since(thread_id, None)
+        .expect_err("reader must not expose a candidate while its writer holds the lock");
     assert!(
-        started.elapsed() >= Duration::from_millis(200),
-        "reader did not wait for rollback disposition"
+        error.downcast_ref::<RuntimeEventLockTimeout>().is_some(),
+        "reader failed for an unexpected reason: {error:#}"
     );
+    std::fs::write(dir.join("process-writers.start"), b"rollback")?;
     child.wait_success("phantom rollback child");
     assert!(store.events_since(thread_id, None)?.is_empty());
 
@@ -6728,7 +6733,7 @@ async fn thread_lifecycle_persists_across_restart() -> Result<()> {
             },
         )
         .await?;
-    let completed = wait_for_terminal_turn(&manager, &turn.id, Duration::from_secs(2)).await?;
+    let completed = wait_for_terminal_turn(&manager, &turn.id).await?;
     assert_eq!(completed.status, RuntimeTurnStatus::Completed);
 
     drop(manager);
@@ -6867,7 +6872,7 @@ async fn initial_classifier_usage_is_persisted_before_terminal_and_merged_exactl
         })
         .await?;
 
-    let completed = wait_for_terminal_turn(&manager, &turn.id, Duration::from_secs(2)).await?;
+    let completed = wait_for_terminal_turn(&manager, &turn.id).await?;
     assert_eq!(completed.routed_usage.len(), 1);
     assert_eq!(completed.routed_usage_drop_records.len(), 1);
     assert_eq!(completed.routed_usage_source_ids.len(), 2);
@@ -7349,8 +7354,7 @@ async fn terminal_settlement_preserves_late_sink_receipts_during_pending_request
     );
     drop(emit_guard);
 
-    let completed =
-        wait_for_terminal_turn(&manager, &turn.id, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
+    let completed = wait_for_terminal_turn(&manager, &turn.id).await?;
     assert_eq!(completed.status, RuntimeTurnStatus::Failed);
     assert_eq!(
         completed.routed_usage,
@@ -7446,8 +7450,7 @@ async fn monitor_deduplicates_sink_and_metadata_and_persists_metadata_only_missi
             base_url: None,
         })
         .await?;
-    let completed =
-        wait_for_terminal_turn(&manager, &turn.id, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
+    let completed = wait_for_terminal_turn(&manager, &turn.id).await?;
     assert_eq!(
         completed.routed_usage.len(),
         1,
@@ -7615,8 +7618,7 @@ async fn monitor_separates_lifecycle_start_from_billing_dispatch_and_child_usage
         })
         .await?;
 
-    let completed =
-        wait_for_terminal_turn(&manager, &turn.id, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
+    let completed = wait_for_terminal_turn(&manager, &turn.id).await?;
     assert_eq!(completed.effective_provider.as_deref(), Some("stepfun"));
     assert_eq!(
         completed.effective_provider_id.as_deref(),
@@ -7716,7 +7718,7 @@ async fn monitor_separates_lifecycle_start_from_billing_dispatch_and_child_usage
             base_url: None,
         })
         .await?;
-    let second = wait_for_terminal_turn(&manager, &second.id, Duration::from_secs(2)).await?;
+    let second = wait_for_terminal_turn(&manager, &second.id).await?;
     assert_eq!(second.routed_usage.len(), 1);
     assert_eq!(second.routed_usage[0].usage.input_tokens, 5);
     Ok(())
@@ -7822,8 +7824,7 @@ async fn monitor_persists_only_terminal_request_diagnostics_per_turn() -> Result
         })
         .await?;
 
-    let completed =
-        wait_for_terminal_turn(&manager, &first.id, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
+    let completed = wait_for_terminal_turn(&manager, &first.id).await?;
     assert_eq!(
         completed.model_request_diagnostics,
         Some(RuntimeTurnRequestDiagnostics {
@@ -7914,8 +7915,7 @@ async fn monitor_persists_only_terminal_request_diagnostics_per_turn() -> Result
             base_url: None,
         })
         .await?;
-    let second =
-        wait_for_terminal_turn(&manager, &second.id, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
+    let second = wait_for_terminal_turn(&manager, &second.id).await?;
     assert!(
         second.model_request_diagnostics.is_none(),
         "a pre-request snapshot must not look like a delivered model call or inherit the prior turn"
@@ -7998,7 +7998,7 @@ async fn completed_turn_without_engine_output_fails() -> Result<()> {
         )
         .await?;
 
-    let failed = wait_for_terminal_turn(&manager, &turn.id, Duration::from_secs(2)).await?;
+    let failed = wait_for_terminal_turn(&manager, &turn.id).await?;
     assert_eq!(failed.status, RuntimeTurnStatus::Failed);
     assert_eq!(failed.error.as_deref(), Some(EMPTY_TURN_REASON));
 
@@ -8125,7 +8125,7 @@ async fn worker_lifecycle_receipts_preserve_owner_outcome_and_durable_replay() -
             },
         )
         .await?;
-    let _ = wait_for_terminal_turn(&manager, &turn.id, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
+    let _ = wait_for_terminal_turn(&manager, &turn.id).await?;
     let events = manager.events_since(&thread.id, None)?;
     let workers: Vec<_> = events
         .iter()
@@ -8246,7 +8246,7 @@ async fn preturn_control_status_does_not_make_empty_turn_succeed() -> Result<()>
             },
         )
         .await?;
-    let terminal = wait_for_terminal_turn(&manager, &turn.id, Duration::from_secs(2)).await?;
+    let terminal = wait_for_terminal_turn(&manager, &turn.id).await?;
     assert_eq!(terminal.status, RuntimeTurnStatus::Failed);
     assert_eq!(terminal.error.as_deref(), Some(EMPTY_TURN_REASON));
     assert!(
@@ -8308,7 +8308,7 @@ async fn engine_error_remains_failed_after_nominal_turn_complete() -> Result<()>
             },
         )
         .await?;
-    let terminal = wait_for_terminal_turn(&manager, &turn.id, Duration::from_secs(2)).await?;
+    let terminal = wait_for_terminal_turn(&manager, &turn.id).await?;
     assert_eq!(terminal.status, RuntimeTurnStatus::Failed);
     assert_eq!(terminal.error.as_deref(), Some("provider exploded"));
     Ok(())
@@ -8802,7 +8802,7 @@ async fn compact_interrupt_persists_canceled_item_for_the_exact_request() -> Res
         })
         .await?;
 
-    let terminal = wait_for_terminal_turn(&manager, &turn.id, Duration::from_secs(2)).await?;
+    let terminal = wait_for_terminal_turn(&manager, &turn.id).await?;
     assert_eq!(terminal.status, RuntimeTurnStatus::Interrupted);
     let items = manager.store.list_items_for_turn(&turn.id)?;
     assert!(items.iter().any(|item| {
@@ -8948,7 +8948,7 @@ async fn compact_thread_with_real_engine_reaches_terminal_status() -> Result<()>
     let turn = manager
         .compact_thread(&thread.id, CompactThreadRequest::default())
         .await?;
-    let terminal = wait_for_terminal_turn(&manager, &turn.id, Duration::from_secs(2)).await?;
+    let terminal = wait_for_terminal_turn(&manager, &turn.id).await?;
 
     assert!(matches!(
         terminal.status,
@@ -9065,8 +9065,7 @@ async fn multi_turn_continuity_same_thread() -> Result<()> {
             },
         )
         .await?;
-    let turn_1 =
-        wait_for_terminal_turn(&manager, &turn_1.id, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
+    let turn_1 = wait_for_terminal_turn(&manager, &turn_1.id).await?;
     assert_eq!(turn_1.status, RuntimeTurnStatus::Completed);
 
     let turn_2 = manager
@@ -9084,8 +9083,7 @@ async fn multi_turn_continuity_same_thread() -> Result<()> {
             },
         )
         .await?;
-    let turn_2 =
-        wait_for_terminal_turn(&manager, &turn_2.id, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
+    let turn_2 = wait_for_terminal_turn(&manager, &turn_2.id).await?;
     assert_eq!(turn_2.status, RuntimeTurnStatus::Completed);
 
     let detail = manager.get_thread_detail(&thread.id).await?;
@@ -9694,7 +9692,7 @@ async fn model_created_goal_persists_through_adopted_revision() -> Result<()> {
             },
         )
         .await?;
-    wait_for_terminal_turn(&manager, &turn.id, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
+    wait_for_terminal_turn(&manager, &turn.id).await?;
     let deadline = Instant::now() + TURN_SETTLEMENT_DEADLOCK_TIMEOUT;
     let goal = loop {
         match manager.store.load_goal(&thread.id)? {
@@ -9777,7 +9775,7 @@ async fn model_created_goal_never_overwrites_concurrent_explicit_goal() -> Resul
             },
         )
         .await?;
-    wait_for_terminal_turn(&manager, &turn.id, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
+    wait_for_terminal_turn(&manager, &turn.id).await?;
     sleep(Duration::from_millis(200)).await;
     let goal = manager
         .store
@@ -10011,7 +10009,7 @@ async fn interrupt_turn_marks_interrupted_after_cleanup() -> Result<()> {
     let interrupt_result = manager.interrupt_turn(&thread.id, &turn.id).await?;
     assert_eq!(interrupt_result.status, RuntimeTurnStatus::InProgress);
 
-    let final_turn = wait_for_terminal_turn(&manager, &turn.id, Duration::from_secs(3)).await?;
+    let final_turn = wait_for_terminal_turn(&manager, &turn.id).await?;
     assert_eq!(final_turn.status, RuntimeTurnStatus::Interrupted);
     assert!(
         interrupted_at.elapsed() >= cleanup_delay,
@@ -10126,7 +10124,7 @@ async fn approval_required_with_stale_active_turn_is_denied() -> Result<()> {
         })
         .await?;
 
-    let terminal = wait_for_terminal_turn(&manager, &turn.id, Duration::from_secs(2)).await?;
+    let terminal = wait_for_terminal_turn(&manager, &turn.id).await?;
     assert_eq!(terminal.status, RuntimeTurnStatus::Completed);
     Ok(())
 }
@@ -10968,7 +10966,7 @@ async fn thread_detail_materializes_stream_prefixes_before_their_delta_cursor() 
         })
         .await?;
 
-    let deltas = tokio::time::timeout(Duration::from_secs(2), async {
+    let deltas = tokio::time::timeout(TURN_SETTLEMENT_DEADLOCK_TIMEOUT, async {
         loop {
             let deltas = manager
                 .events_since(&thread.id, None)?
@@ -12889,7 +12887,7 @@ async fn auto_review_force_prompt_is_denied_without_opening_a_modal() -> Result<
             base_url: None,
         })
         .await?;
-    let terminal = wait_for_terminal_turn(&manager, &turn.id, Duration::from_secs(2)).await?;
+    let terminal = wait_for_terminal_turn(&manager, &turn.id).await?;
     assert_eq!(terminal.status, RuntimeTurnStatus::Completed);
     Ok(())
 }
@@ -13000,7 +12998,7 @@ async fn approval_timeout_denies_clears_ui_and_next_turn_can_start() -> Result<(
             base_url: None,
         })
         .await?;
-    let terminal = wait_for_terminal_turn(&manager, &turn.id, Duration::from_secs(2)).await?;
+    let terminal = wait_for_terminal_turn(&manager, &turn.id).await?;
     assert_eq!(terminal.status, RuntimeTurnStatus::Completed);
 
     let _next = manager
@@ -13319,7 +13317,7 @@ async fn elevation_required_with_stale_active_turn_is_denied() -> Result<()> {
         })
         .await?;
 
-    let terminal = wait_for_terminal_turn(&manager, &turn.id, Duration::from_secs(2)).await?;
+    let terminal = wait_for_terminal_turn(&manager, &turn.id).await?;
     assert_eq!(terminal.status, RuntimeTurnStatus::Completed);
     Ok(())
 }
@@ -13425,7 +13423,7 @@ async fn steer_turn_on_active_turn_records_item_and_event() -> Result<()> {
         .context("driver did not receive steer")?;
     assert_eq!(observed_steer, steer_text);
 
-    let final_turn = wait_for_terminal_turn(&manager, &turn.id, Duration::from_secs(2)).await?;
+    let final_turn = wait_for_terminal_turn(&manager, &turn.id).await?;
     assert_eq!(final_turn.status, RuntimeTurnStatus::Completed);
     assert_eq!(final_turn.steer_count, 1);
 
@@ -13551,8 +13549,7 @@ async fn steer_receipts_outlive_caller_cancellation_after_engine_acceptance() ->
             base_url: None,
         })
         .await?;
-    let terminal =
-        wait_for_terminal_turn(&manager, &turn.id, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
+    let terminal = wait_for_terminal_turn(&manager, &turn.id).await?;
     assert_eq!(terminal.status, RuntimeTurnStatus::Completed);
     Ok(())
 }
@@ -13640,8 +13637,7 @@ async fn steer_rejects_a_terminal_durable_turn_without_dispatch_or_item() -> Res
             base_url: None,
         })
         .await?;
-    let terminal =
-        wait_for_terminal_turn(&manager, &turn.id, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
+    let terminal = wait_for_terminal_turn(&manager, &turn.id).await?;
     assert_eq!(terminal.status, RuntimeTurnStatus::Completed);
     Ok(())
 }
@@ -13721,8 +13717,7 @@ async fn closed_engine_event_stream_fails_turn_items_and_evicts_engine() -> Resu
     assert!(matches!(rx_op.recv().await, Some(Op::SendMessage { .. })));
     drop(tx_event);
 
-    let terminal =
-        wait_for_terminal_turn(&manager, &turn.id, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
+    let terminal = wait_for_terminal_turn(&manager, &turn.id).await?;
     assert_eq!(terminal.status, RuntimeTurnStatus::Failed);
     let terminal_error = terminal.error.as_deref().unwrap_or_default();
     assert!(
@@ -13823,7 +13818,7 @@ async fn failed_turn_cancels_pending_user_input_and_clears_snapshot() -> Result<
     .expect("failure-path user-input cancellation timed out");
     assert_eq!(canceled.as_deref(), Some("input_failed_turn"));
 
-    let terminal = wait_for_terminal_turn(&manager, &turn.id, Duration::from_secs(2)).await?;
+    let terminal = wait_for_terminal_turn(&manager, &turn.id).await?;
     assert_eq!(terminal.status, RuntimeTurnStatus::Failed);
 
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -13986,7 +13981,7 @@ async fn compaction_lifecycle_emits_item_events_with_compaction_counts() -> Resu
             },
         )
         .await?;
-    let auto_turn = wait_for_terminal_turn(&manager, &auto_turn.id, Duration::from_secs(2)).await?;
+    let auto_turn = wait_for_terminal_turn(&manager, &auto_turn.id).await?;
     assert_eq!(auto_turn.status, RuntimeTurnStatus::Completed);
 
     let manual_turn = manager
@@ -13997,8 +13992,7 @@ async fn compaction_lifecycle_emits_item_events_with_compaction_counts() -> Resu
             },
         )
         .await?;
-    let manual_turn =
-        wait_for_terminal_turn(&manager, &manual_turn.id, Duration::from_secs(2)).await?;
+    let manual_turn = wait_for_terminal_turn(&manager, &manual_turn.id).await?;
     assert_eq!(manual_turn.status, RuntimeTurnStatus::Completed);
 
     let events = manager.events_since(&thread.id, None)?;
@@ -14860,12 +14854,7 @@ async fn agent_mail_release_acceptance_two_task_matrix() -> Result<()> {
             base_url: None,
         })
         .await?;
-    let explicit_terminal = wait_for_terminal_turn(
-        &manager,
-        &explicit_turn.id,
-        TURN_SETTLEMENT_DEADLOCK_TIMEOUT,
-    )
-    .await?;
+    let explicit_terminal = wait_for_terminal_turn(&manager, &explicit_turn.id).await?;
     assert_eq!(explicit_terminal.status, RuntimeTurnStatus::Completed);
 
     let deadline = StdInstant::now() + Duration::from_secs(10);
@@ -15659,9 +15648,7 @@ mod runtime_image_inputs {
         };
         let turn = manager.start_turn(&thread.id, request.clone()).await?;
         assert_eq!(
-            wait_for_terminal_turn(&manager, &turn.id, Duration::from_secs(10))
-                .await?
-                .status,
+            wait_for_terminal_turn(&manager, &turn.id).await?.status,
             RuntimeTurnStatus::Completed
         );
         assert_eq!(turn.max_output_tokens, max_output_tokens);
@@ -15801,7 +15788,7 @@ mod runtime_image_inputs {
             )
             .await?;
         assert_eq!(
-            wait_for_terminal_turn(&reopened, &followup.id, Duration::from_secs(10))
+            wait_for_terminal_turn(&reopened, &followup.id)
                 .await?
                 .status,
             RuntimeTurnStatus::Completed
