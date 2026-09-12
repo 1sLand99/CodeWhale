@@ -508,6 +508,29 @@ fn unknown_fields_warn_instead_of_being_reinterpreted() {
 }
 
 #[test]
+fn archive_url_catalog_detection_preserves_native_and_kimi_identity() {
+    for url in [
+        "https://example.invalid/plugins.tar.gz#path=plugins/tools",
+        "http://127.0.0.1:9000/plugins.tar.gz#path=plugins/tools",
+    ] {
+        let native = serde_json::json!({"plugins": [{"name": "tools", "source": url}]});
+        let catalog = parse_auto("native", &native.to_string());
+        assert_eq!(catalog.format, MarketplaceFormat::Codewhale);
+        assert_eq!(catalog.error_count(), 0);
+        assert!(matches!(
+            &catalog.candidate_by_name("tools").unwrap().install_plan,
+            MarketplaceInstallPlan::Supported { spec, .. } if spec == url
+        ));
+
+        let kimi = serde_json::json!({"plugins": [{"id": "tools", "source": url}]});
+        assert_eq!(
+            parse_auto("kimi", &kimi.to_string()).format,
+            MarketplaceFormat::Kimi
+        );
+    }
+}
+
+#[test]
 fn auto_detection_reports_ambiguity_instead_of_guessing() {
     let body = r#"{"plugins": [{"name": "p", "source": "./p"}]}"#;
     let catalog = parse_auto("t", body);

@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           path: core
           persist-credentials: false
@@ -44,15 +44,16 @@ jobs:
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write(f'revision={revision}\n')
           PY
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           repository: Hmbown/codewhale-plugin-marketplace
           ref: ${{ steps.source.outputs.revision }}
           path: marketplace
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
+          package-manager-cache: false
       - name: Check catalog and real bundle manifests
         run: node marketplace/scripts/check-marketplace.mjs
       - name: Check bundled catalog snapshot

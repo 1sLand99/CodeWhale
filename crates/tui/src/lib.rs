@@ -79,7 +79,6 @@ mod network_policy;
 mod oauth;
 mod operate;
 mod plugins;
-mod prefix_cache;
 mod pricing;
 mod project_context;
 mod project_context_cache;

@@ -1,4 +1,4 @@
-//! One owner per fact: the default shell paints each session fact in exactly
+//! One owner per fact: the full metrics preset paints each session fact in exactly
 //! one chrome row (SHELL-DESIGN-20260901 §2.0 item 3, §2.2, §2.3, §2.3b).
 //!
 //! Under the composer: row 1 is the posture bar (permission, mode, live
@@ -33,6 +33,7 @@ fn frame_app() -> App {
     app.onboarding = crate::tui::app::OnboardingState::None;
     app.launch.visible = false;
     app.ui_locale = codewhale_localization::Locale::En;
+    app.metrics_line = crate::config::ChromeRowPreset::Full;
     // The posture bar's permission chip carries the filesystem-scope notice
     // (`files: workspace (unenforced)`) whenever no sandbox backend can
     // actually enforce the policy — true on default Linux and all Windows,

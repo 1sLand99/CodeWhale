@@ -176,7 +176,7 @@ JSON 把凭据的 `source`（来源）与字面的 `availability`（可用性）
 
 `status`、`agents`、`reasoning_replay`、`prefix_stability`、`git_branch`、`last_tool_elapsed` 和 `rate_limit` 这些键在 0.9.13 中已退役：它们不驱动任何东西。旧的配置文件仍可加载——已退役的键会被忽略并在日志中给出警告。
 
-`status_items` 负责组合这两行；另有两个尺寸预设决定每行绘制多少。`[tui].posture_bar` 和 `[tui].metrics_line` 各接受 `full`（默认）、`compact` 或 `hidden`，也可以在运行时用 `/config posture_bar compact` 设置。TOML 中的值必须使用小写；`/config` 命令不区分大小写。`compact` 是该行走完最初几级舍弃阶梯后的样子：姿态栏保留权限与模式片区——以及属于建议而非装饰的容量警示——并舍弃时钟、计数和提示；指标行保留路由、上下文读数、成本和余额，并舍弃遥测与帮助提示。`hidden` 把该行交还给转录区。狭小的 tmux 面板可以隐藏两行而不动 `/statusline` 的组合。
+`status_items` 负责组合这两行；另有两个尺寸预设决定每行绘制多少。`[tui].posture_bar` 和 `[tui].metrics_line` 各接受 `full`、`compact` 或 `hidden`。姿态栏默认使用 `full` 以保留操作提示；指标行默认使用 `compact`，减少常驻遥测信息，也可以在运行时用 `/config posture_bar compact` 设置。TOML 中的值必须使用小写；`/config` 命令不区分大小写。`compact` 是该行走完最初几级舍弃阶梯后的样子：姿态栏保留权限与模式片区——以及属于建议而非装饰的容量警示——并舍弃时钟、计数和提示；指标行保留路由、上下文读数、成本和余额，并舍弃遥测与帮助提示。`hidden` 把该行交还给转录区。狭小的 tmux 面板可以隐藏两行而不动 `/statusline` 的组合。
 
 `session_metrics`（默认开启）在指标行上显示 `ttft 1.5s`（到首个流式 token 的平均时间）和 `120 平均 tok/s`（本次会话中提供商报告的输出 token 总数，除以同一批调用的实测请求总秒数）。速率包含连接建立、首 token 等待以及响应过程中的停顿，不包含工具执行和调用之间的空闲时间；它衡量请求的实际吞吐量，而非模型解码速度。流式和非流式调用使用相同规则；没有独立请求计时的回执，其 token 和时间都不计入。新请求进行时保留上次实测平均值。两项读数与 `/status` 共用累加器，缺少证据时省略而不估算。在窄行上，这一对会先于成本和上下文读数被舍弃。
 

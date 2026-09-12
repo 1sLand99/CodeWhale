@@ -250,8 +250,10 @@ they drove nothing. Old configuration files still load — the retired keys are
 ignored with a warning in the log.
 
 `status_items` composes the rows; two size presets decide how much of each
-row paints. `[tui].posture_bar` and `[tui].metrics_line` each take `full`
-(the default), `compact`, or `hidden`, also settable at runtime with
+row paints. `[tui].posture_bar` and `[tui].metrics_line` each take `full`,
+`compact`, or `hidden`. The posture bar defaults to `full` so active controls
+stay visible; the metrics line defaults to `compact` to keep routine telemetry
+out of the working surface. These are also settable at runtime with
 `/config posture_bar compact`. TOML values must be lowercase; `/config`
 accepts either case. `compact` is the row after its first shed
 rungs: the posture bar keeps its permission and mode chips — and the cap
@@ -261,7 +263,7 @@ the balance, and drops the telemetry and the help hint. `hidden` gives the
 row back to the transcript. A small tmux pane can hide both rows without
 touching what `/statusline` composes.
 
-`session_metrics` (on by default) paints the latency pair on the metrics
+With `metrics_line = "full"`, `session_metrics` (on by default) paints the latency pair on the metrics
 line: `ttft 1.5s` — the mean time to first streamed token — and `120 avg tok/s`,
 the session's provider-reported output tokens divided by the measured request
 seconds for those same calls. The rate includes connection setup, time to first

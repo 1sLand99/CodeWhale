@@ -8696,6 +8696,13 @@ mod tests {
 
     #[test]
     fn openai_codex_key_entry_is_oauth_only() {
+        let _environment = crate::test_support::lock_test_env();
+        // This is a disclosure fixture, independent of the developer's home
+        // path length or actual Codex credentials. No file is read here.
+        let _path = crate::test_support::EnvVarGuard::set(
+            "OPENAI_CODEX_AUTH_FILE",
+            "/fixture/codex-auth.json",
+        );
         let config = Config::default();
         let mut picker = ProviderPickerView::new_for_missing_auth(
             ApiProvider::Deepseek,

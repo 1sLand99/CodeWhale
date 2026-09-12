@@ -986,7 +986,7 @@ impl App {
                 .tui
                 .as_ref()
                 .and_then(|tui| tui.metrics_line)
-                .unwrap_or_default(),
+                .unwrap_or(crate::config::ChromeRowPreset::Compact),
             // Prose wrap cap (`[transcript] prose_measure`, #5436). Resolved
             // once here so every render pass — main cache and full-screen
             // overlay — shares one effective width; `None` = full width.

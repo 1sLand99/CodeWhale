@@ -1157,7 +1157,7 @@ osc8_links = true            # emit OSC 8 escapes around URLs (Cmd+click in iTer
 #                               # compact keeps the posture chips (and the cap
 #                               # warning) and drops the clocks, counts and hint;
 #                               # hidden gives the row to the transcript.
-# metrics_line = "full"         # full | compact | hidden (default full)
+# metrics_line = "compact"      # full | compact | hidden (default compact)
 #                               # compact keeps the route, context reading, cost
 #                               # and balance and drops the telemetry and the
 #                               # help hint; hidden gives the row to the transcript.

@@ -324,8 +324,8 @@ pub(crate) fn estimate_tokens_for_message(message: &Message, include_thinking: b
         .iter()
         .map(|c| match c {
             ContentBlock::Text { text, .. } => text.len() / 4,
-            // Historical reasoning blocks are UI/session metadata for DeepSeek.
-            // Only current-turn tool-call reasoning is sent back to the API.
+            // Replay-capable routes retain reasoning even on text-only
+            // assistant messages and across later user turns.
             ContentBlock::Thinking { thinking, .. } if include_thinking => thinking.len() / 4,
             ContentBlock::Thinking { .. } => 0,
             ContentBlock::ToolUse { input, .. } => serde_json::to_string(input)
@@ -352,9 +352,11 @@ pub(crate) fn estimate_tokens_for_message(message: &Message, include_thinking: b
             // tiles are typically ~1k tokens); erring high compacts slightly
             // early rather than overflowing.
             ContentBlock::ImageUrl { .. } => IMAGE_TOKEN_ESTIMATE,
-            ContentBlock::ServerToolUse { .. }
-            | ContentBlock::ToolSearchToolResult { .. }
-            | ContentBlock::CodeExecutionToolResult { .. } => 0,
+            ContentBlock::ServerToolUse { input, .. } => input.to_string().len() / 4,
+            ContentBlock::ToolSearchToolResult { content, .. }
+            | ContentBlock::CodeExecutionToolResult { content, .. } => {
+                content.to_string().len() / 4
+            }
         })
         .sum::<usize>()
 }
@@ -366,12 +368,12 @@ pub(crate) fn estimate_tokens_for_message(message: &Message, include_thinking: b
 const IMAGE_TOKEN_ESTIMATE: usize = 1000;
 
 pub fn estimate_tokens(messages: &[Message]) -> usize {
-    // Rough estimate: ~4 chars per token. DeepSeek thinking-mode rule: any
-    // assistant message with tool_calls keeps its reasoning_content forever
-    // (replayed in all subsequent requests). Final text-only answers drop it.
+    // Rough estimate: ~4 bytes per token. Count every retained reasoning
+    // block: DeepSeek/Kimi replay text-only assistant reasoning too. This
+    // route-neutral estimate cannot assume a transport will omit it.
     messages
         .iter()
-        .map(|message| estimate_tokens_for_message(message, message_has_tool_use(message)))
+        .map(|message| estimate_tokens_for_message(message, true))
         .sum()
 }
 
@@ -1659,15 +1661,8 @@ fn is_context_window_error(e: &anyhow::Error) -> bool {
         || lower.contains("maximum")
 }
 
-/// Cache-hit percentage for a compaction summary call.
-///
-/// Denominator is `input_tokens` (the total prompt size), not
-/// `cache_hit + cache_miss`. Some providers populate
-/// `prompt_cache_hit_tokens` but not `prompt_cache_miss_tokens` — using
-/// the sum as the denominator there reports an inflated 100% even when
-/// most of the prompt was uncached. Anchoring on `input_tokens` matches
-/// how the rest of the codebase (cost reporting, `/cache`) infers
-/// missing miss counts. (#584)
+/// Collect text from a user message without treating tool-result payloads
+/// as new user instructions.
 fn user_text_of(msg: &Message) -> Option<String> {
     if msg.role != "user" {
         return None;
@@ -2842,6 +2837,35 @@ mod tests {
         }];
         let tokens = estimate_tokens(&messages);
         assert!(tokens > 0 && tokens < 10);
+    }
+
+    #[test]
+    fn pressure_counts_text_only_reasoning_and_server_tool_payloads() {
+        let payload = "retained evidence ".repeat(1000);
+        let blocks = vec![
+            ContentBlock::thinking(payload.clone()),
+            ContentBlock::ServerToolUse {
+                id: "server-call".into(),
+                name: "code_execution".into(),
+                input: json!({"code": payload}),
+            },
+            ContentBlock::CodeExecutionToolResult {
+                tool_use_id: "server-call".into(),
+                content: json!({"stdout": payload}),
+            },
+            ContentBlock::ToolSearchToolResult {
+                tool_use_id: "search-call".into(),
+                content: json!({"description": payload}),
+            },
+        ];
+        for block in blocks {
+            let messages = vec![Message {
+                role: Role::Assistant,
+                content: vec![block],
+            }];
+            assert!(estimate_tokens(&messages) >= payload.len() / 4);
+            assert!(estimate_input_tokens_for_pressure(&messages, None) >= payload.len() / 4);
+        }
     }
 
     #[test]

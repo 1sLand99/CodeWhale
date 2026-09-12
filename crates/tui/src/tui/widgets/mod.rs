@@ -6336,7 +6336,7 @@ mod tests {
     #[test]
     fn composer_height_prefers_panel_shape_when_space_allows() {
         let height = composer_height("", 40, 8, 0, ComposerDensity::Comfortable, true);
-        assert_eq!(height, 3);
+        assert_eq!(height, 4);
     }
 
     #[test]
@@ -6349,7 +6349,7 @@ mod tests {
         let widget = ComposerWidget::new(&app, 8, &slash_menu_entries, &mention_menu_entries);
 
         for (width, expected_panel, expected_height) in
-            [(11, false, 2), (12, true, 3), (13, true, 3), (14, true, 3)]
+            [(11, false, 3), (12, true, 4), (13, true, 4), (14, true, 4)]
         {
             let height = widget.desired_height(width);
             let area = Rect::new(0, 0, width, height);
@@ -6358,8 +6358,8 @@ mod tests {
             assert_eq!(widget.has_panel(area), expected_panel, "width={width}");
             assert_eq!(
                 widget.inner_area(area).height,
-                1,
-                "width={width} auto-fit composer reserves one input row plus \
+                2,
+                "width={width} comfortable composer reserves two input rows plus \
                  every rendered border row"
             );
 
@@ -6374,7 +6374,7 @@ mod tests {
                 let shell = crate::tui::composer_chrome::tideline_composer_geometry(area);
                 assert_eq!(
                     widget.inner_area(area),
-                    Rect::new(1, 1, shell.content.right().saturating_sub(1), 1,),
+                    Rect::new(1, 1, shell.content.right().saturating_sub(1), 2,),
                     "width={width} panel input area must reserve the send control and breathing cell"
                 );
                 assert_eq!(buf[(area.left(), area.top())].symbol(), "\u{256d}");
@@ -6405,7 +6405,7 @@ mod tests {
             } else {
                 assert_eq!(
                     widget.inner_area(area),
-                    Rect::new(area.x, area.y.saturating_add(1), area.width, 1),
+                    Rect::new(area.x, area.y.saturating_add(1), area.width, 2),
                     "width={width} compact fallback must keep its full input width"
                 );
                 assert_ne!(buf[(area.left(), area.top())].symbol(), "\u{256d}");
@@ -6439,8 +6439,8 @@ mod tests {
         let expanded = height_for("one\ntwo\nthree\nfour\nfive\nsix");
         let collapsed_again = height_for("short");
 
-        // Auto-fit: one input row + top/bottom panel borders.
-        assert_eq!(collapsed, 3);
+        // Comfortable: two input rows + top/bottom panel borders.
+        assert_eq!(collapsed, 4);
         // Six content rows + two borders, still under the Comfortable cap of 9.
         assert_eq!(expanded, 8);
         assert!(expanded > collapsed);
@@ -6451,7 +6451,7 @@ mod tests {
     /// real widget path — typed input, `submit_input`, `clear_input` — not just
     /// through the pure height helper.
     #[test]
-    fn composer_auto_fits_typed_lines_and_returns_to_one_row_on_submit_or_clear() {
+    fn composer_auto_fits_typed_lines_and_returns_to_density_floor_on_submit_or_clear() {
         const WIDTH: u16 = 40;
         const AVAILABLE: u16 = 24;
 
@@ -6469,11 +6469,11 @@ mod tests {
         app.composer_border = true;
         app.composer_density = ComposerDensity::Comfortable;
 
-        // Empty composer: one input row inside the panel borders.
-        assert_eq!(measure(&app), (3, 1), "empty composer");
+        // Empty composer: one input row and one quiet row inside the borders.
+        assert_eq!(measure(&app), (4, 2), "empty composer");
 
         app.insert_str("one line");
-        assert_eq!(measure(&app), (3, 1), "single-line composer");
+        assert_eq!(measure(&app), (4, 2), "single-line composer");
 
         // Typing N lines grows the composer to N input rows while N is under
         // the Comfortable cap of 9 total rows (7 input rows + 2 borders).
@@ -6493,15 +6493,15 @@ mod tests {
         let cap = composer_max_height(ComposerDensity::Comfortable);
         assert_eq!(measure(&app), (cap, cap - 2), "content beyond the cap");
 
-        // Submitting returns the composer to a single input row.
+        // Submitting returns the composer to its stable density floor.
         assert!(app.submit_input().is_some());
-        assert_eq!(measure(&app), (3, 1), "after submit");
+        assert_eq!(measure(&app), (4, 2), "after submit");
 
         // So does clearing a fresh multi-line draft.
         app.insert_str("a\nb\nc\nd");
         assert_eq!(measure(&app), (6, 4), "four-line draft");
         app.clear_input();
-        assert_eq!(measure(&app), (3, 1), "after clear");
+        assert_eq!(measure(&app), (4, 2), "after clear");
     }
 
     #[test]
@@ -6509,10 +6509,10 @@ mod tests {
         let with_border = composer_height("", 40, 8, 0, ComposerDensity::Comfortable, true);
         let without_border = composer_height("", 40, 8, 0, ComposerDensity::Comfortable, false);
 
-        // Quiet composer keeps a single top rule over the one auto-fit
-        // input row; the panel shape adds its bottom border.
-        assert_eq!(with_border, 3);
-        assert_eq!(without_border, 2);
+        // Quiet composer keeps a single top rule over the comfortable
+        // input floor; the panel shape adds its bottom border.
+        assert_eq!(with_border, 4);
+        assert_eq!(without_border, 3);
         assert!(without_border < with_border);
     }
 
@@ -7126,7 +7126,7 @@ mod tests {
             height: 3,
         };
 
-        assert_eq!(widget.cursor_pos(area), Some((2, 2)));
+        assert_eq!(widget.cursor_pos(area), Some((2, 1)));
     }
 
     #[test]

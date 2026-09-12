@@ -2990,7 +2990,8 @@ async fn compact_lifecycle_outlives_caller_and_preserves_concurrent_thread_updat
             base_url: None,
         })
         .await?;
-    let terminal = wait_for_terminal_turn(&manager, &turn_id, Duration::from_secs(2)).await?;
+    let terminal =
+        wait_for_terminal_turn(&manager, &turn_id, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
     assert_eq!(terminal.status, RuntimeTurnStatus::Completed);
     assert_eq!(manager.active_turn_flags(&thread.id, &turn_id).await, None);
     let updated = manager.get_thread(&thread.id).await?;

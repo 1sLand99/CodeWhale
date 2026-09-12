@@ -3526,11 +3526,20 @@ pub(crate) fn apply_loaded_session_with_goal(
     session: &SavedSession,
     goal: Option<&crate::session_manager::SessionGoalState>,
 ) -> Result<(), String> {
+    let mut recovered_binding = None;
     if let Some(binding) = session.metadata.runtime_store.as_ref()
         && let Some(tasks) = app.runtime_services.task_manager.as_ref()
         && tasks.session_store_binding().as_ref() != Some(binding)
     {
-        return Err("This session belongs to another Runtime host. Resume it in a new Codewhale process to reopen its saved store.".into());
+        if binding
+            .is_missing_session_store()
+            .map_err(|error| error.to_string())?
+        {
+            recovered_binding = tasks.session_store_binding();
+        }
+        if recovered_binding.is_none() {
+            return Err("This session belongs to another Runtime host. Resume it in a new Codewhale process to reopen its saved store.".into());
+        }
     }
     if app.session_transition_blocked() {
         return Err(
@@ -3560,6 +3569,18 @@ pub(crate) fn apply_loaded_session_with_goal(
     // workspace fields. A failed session switch must leave the current session
     // wholly intact.
     let queue_transition = prepare_offline_queue_transition(app, &session.metadata.id)?;
+    if let Some(binding) = recovered_binding.as_ref() {
+        // Only the conversation is recovered into this idle host. Its missing
+        // runtime's tasks and approvals are never imported or re-admitted.
+        // Repair its binding before changing live Work state. If Work restore
+        // is contended, the current conversation stays intact and a retry can
+        // use this durably repaired binding to the same host.
+        let mut recovered = session.clone();
+        recovered.metadata.runtime_store = Some(binding.clone());
+        SessionManager::default_location()
+            .and_then(|manager| manager.save_session(&recovered))
+            .map_err(|error| format!("Session recovery could not be saved: {error}"))?;
+    }
     app.restore_work_state(
         &session.metadata.id,
         &session.metadata.workspace,
@@ -3748,6 +3769,16 @@ pub(crate) fn apply_loaded_session_with_goal(
         std::time::Duration::from_secs(session.metadata.cumulative_turn_secs);
     app.current_session_id = Some(session.metadata.id.clone());
     app.current_session_metadata = Some(session.metadata.clone());
+    if let Some(binding) = recovered_binding {
+        if let Some(metadata) = app.current_session_metadata.as_mut() {
+            metadata.runtime_store = Some(binding);
+        }
+        app.push_status_toast(
+            app.tr(MessageId::RuntimeStoreRecovered).into_owned(),
+            StatusToastLevel::Warning,
+            None,
+        );
+    }
     app.session_artifacts = session.artifacts.clone();
     app.session_title = Some(session.metadata.title.clone());
     app.window_title = session.window_title.clone();

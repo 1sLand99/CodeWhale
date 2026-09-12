@@ -1827,7 +1827,7 @@ pub struct TuiConfig {
     #[serde(default)]
     pub posture_bar: Option<ChromeRowPreset>,
     /// The same three settings for the metrics line under the posture bar.
-    /// `compact` keeps the route, the context reading, the cost and the
+    /// `compact` is the default: it keeps the route, the context reading, the cost and the
     /// balance and drops the telemetry and the help hint (#5950).
     #[serde(default)]
     pub metrics_line: Option<ChromeRowPreset>,

@@ -4639,9 +4639,12 @@ impl RuntimeThreadManager {
             if binding.is_missing_session_store()? {
                 // Never claim the missing owner's scope. A fresh store cannot
                 // execute its queued tasks, approvals, mail or automations.
+                // All recovery attempts for this conversation contend on the
+                // same host lock. Random paths would let two processes mint
+                // competing owners before either saves the repaired binding.
                 manager_cfg.data_dir = manager_cfg
                     .data_dir
-                    .with_file_name(format!("runtime-recovered-{}", uuid::Uuid::new_v4()));
+                    .with_file_name("runtime-recovered-session");
                 return Self::open_inner(
                     config,
                     workspace,

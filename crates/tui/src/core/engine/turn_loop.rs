@@ -1269,7 +1269,12 @@ impl Engine {
                     }
 
                     if self
-                        .recover_context_overflow(client.as_ref(), "preflight token budget", turn)
+                        .recover_context_overflow(
+                            client.as_ref(),
+                            active_tools.as_deref(),
+                            "preflight token budget",
+                            turn,
+                        )
                         .await
                     {
                         context_recovery_attempts = context_recovery_attempts.saturating_add(1);
@@ -1314,8 +1319,9 @@ impl Engine {
             // its own counter for the stable-checks tally.
             let declared_change = self.session.pending_prefix_change_reason.take();
             if let Some(pm) = self.session.prefix_stability.as_mut() {
-                let system_text =
-                    crate::prefix_cache::system_prompt_text(self.session.system_prompt.as_ref());
+                let system_text = codewhale_core::prefix_cache::system_prompt_text(
+                    self.session.system_prompt.as_ref(),
+                );
                 let tools_ref: Option<&[codewhale_models::Tool]> = active_tools.as_deref();
                 let outcome = pm.check(&system_text, tools_ref, declared_change.as_deref());
                 // C5: request N's prefix may only diverge from N-1 across a
@@ -1327,8 +1333,9 @@ impl Engine {
                 #[cfg(debug_assertions)]
                 if pm.check_count() > 1
                     && declared_change.is_none()
-                    && let crate::prefix_cache::PrefixCheck::Drift { change }
-                    | crate::prefix_cache::PrefixCheck::Repinned { change, .. } = &outcome
+                    && let codewhale_core::prefix_cache::PrefixCheck::Drift { change }
+                    | codewhale_core::prefix_cache::PrefixCheck::Repinned { change, .. } =
+                        &outcome
                 {
                     debug_assert!(
                         false,
@@ -1345,7 +1352,7 @@ impl Engine {
                 let last_miss_reason = pm.last_miss_reason().unwrap_or_default().to_string();
                 let context_updates = pm.context_update_count();
                 let event = match outcome {
-                    crate::prefix_cache::PrefixCheck::Stable => Event::PrefixCacheChange {
+                    codewhale_core::prefix_cache::PrefixCheck::Stable => Event::PrefixCacheChange {
                         description: String::new(),
                         system_prompt_changed: false,
                         tools_changed: false,
@@ -1356,7 +1363,7 @@ impl Engine {
                         last_miss_reason,
                         context_updates,
                     },
-                    crate::prefix_cache::PrefixCheck::Repinned { reason, change } => {
+                    codewhale_core::prefix_cache::PrefixCheck::Repinned { reason, change } => {
                         // A declared header change re-pins under a logged
                         // reason: the miss is expected and attributable.
                         tracing::debug!(
@@ -1377,7 +1384,7 @@ impl Engine {
                             context_updates,
                         }
                     }
-                    crate::prefix_cache::PrefixCheck::Drift { change } => {
+                    codewhale_core::prefix_cache::PrefixCheck::Drift { change } => {
                         // Undeclared drift: the pin is kept so the same prefix
                         // keeps counting as a miss until an explicit op moves
                         // it. This should not happen after the mid-loop
@@ -1409,8 +1416,9 @@ impl Engine {
             // Phase 3: emit a one-shot 'frozen' event on first turn.
             // Drift is logged (tracing::debug!) but not re-emitted —
             // PrefixStabilityManager already reports the change above.
-            let system_text =
-                crate::prefix_cache::system_prompt_text(self.session.system_prompt.as_ref());
+            let system_text = codewhale_core::prefix_cache::system_prompt_text(
+                self.session.system_prompt.as_ref(),
+            );
             let current_tools: &[codewhale_models::Tool] =
                 active_tools.as_deref().unwrap_or_default();
 
@@ -1600,6 +1608,7 @@ impl Engine {
                         && self
                             .recover_context_overflow(
                                 client.as_ref(),
+                                stream_request.tools.as_deref(),
                                 "provider context-length rejection",
                                 turn,
                             )

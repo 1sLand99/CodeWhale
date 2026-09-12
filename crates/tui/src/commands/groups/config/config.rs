@@ -5208,7 +5208,7 @@ context_window = 262144
         let mut app = create_test_app();
         app.config_path = Some(config_path.clone());
         assert_eq!(app.posture_bar, ChromeRowPreset::Full);
-        assert_eq!(app.metrics_line, ChromeRowPreset::Full);
+        assert_eq!(app.metrics_line, ChromeRowPreset::Compact);
 
         let live = config_command(&mut app, Some("posture_bar compact"));
         assert!(!live.is_error, "{live:?}");

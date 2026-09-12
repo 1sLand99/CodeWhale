@@ -1709,18 +1709,24 @@ impl SessionManager {
     }
 
     fn hydrate_recovered_runtime_binding(&self, session: &mut SavedSession) -> std::io::Result<()> {
-        // A stale process must not resurrect a missing binding after recovery.
-        if session
-            .metadata
-            .runtime_store
-            .as_ref()
-            .is_some_and(|binding| binding.is_missing_session_store().unwrap_or(false))
+        // Compare under the session write lock. A stale process may neither
+        // resurrect a missing binding nor replace a different recovered owner.
+        if let Some(incoming) = session.metadata.runtime_store.as_ref()
             && let Ok(persisted) =
                 Self::load_session_metadata(&self.validated_session_path(&session.metadata.id)?)
             && let Some(binding) = persisted.runtime_store
-            && binding.validate_existing_store().is_ok()
+            && incoming != &binding
         {
-            session.metadata.runtime_store = Some(binding);
+            if incoming.is_missing_session_store().unwrap_or(false)
+                && binding.validate_existing_store().is_ok()
+            {
+                session.metadata.runtime_store = Some(binding);
+            } else if !binding.is_missing_session_store().unwrap_or(false) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "Session Runtime ownership changed; reopen the session before saving",
+                ));
+            }
         }
         Ok(())
     }
