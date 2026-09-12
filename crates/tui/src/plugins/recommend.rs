@@ -131,8 +131,8 @@ impl PluginKeywordMatch {
     }
 }
 
-/// Load marketplace catalogs the user added locally. Never invents a remote
-/// official marketplace URL.
+/// Load the bundled first-party catalog and user-added catalogs from the
+/// shared store. Browsing never fetches or installs plugin content.
 #[must_use]
 pub fn load_marketplace_candidates(
     state_path: Option<&std::path::Path>,

@@ -2840,8 +2840,8 @@ impl CommandSkillGroupContext for SkillGroupAdapter<'_> {
 /// Owns every concrete plugin service the live `/plugin` branch closure
 /// consumes: registry reads/mutations, the async mutation/network-policy
 /// bridge (D11), export, legacy executable-tool scan, Kimi managed import,
-/// and the marketplace store. Current main has no invented remote or built-in
-/// `official` catalog; an optional host catalog remains representable.
+/// and the marketplace store. That store projects the bundled first-party
+/// catalog alongside locally added catalogs for every host surface.
 /// Every method borrows `App` only for the duration of one call and converts
 /// host values to portable contract values before returning. Handlers receive
 /// only the portable facet and never name `PluginRegistry`, `LoadedPlugin`,

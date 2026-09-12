@@ -2073,10 +2073,14 @@ mod tests {
         // Deliberately do not call the ordinary event drain. Poll only after
         // exit, reproducing the scheduler gap where the previous poll saw EOF
         // just before the worker wrote its terminal tail.
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        let terminal = exec
-            .poll_terminal_with_status("tail-worker")
-            .expect("terminal worker");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let terminal = loop {
+            if let Some(terminal) = exec.poll_terminal_with_status("tail-worker") {
+                break terminal;
+            }
+            assert!(std::time::Instant::now() < deadline, "terminal worker");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
         let route = terminal.reported_route.expect("final-drained route");
         assert_eq!(route.provider, "custom");
         assert_eq!(route.provider_exact_id.as_deref(), Some("remote-x"));

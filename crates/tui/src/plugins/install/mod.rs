@@ -113,6 +113,7 @@ impl PluginInstallSource {
             let source = InstallSource::parse(trimmed)?;
             return match source {
                 InstallSource::GitHubRepo(_) | InstallSource::DirectUrl(_) => {
+                    remote_bundle_path(&source)?;
                     Ok(Self::Remote(source))
                 }
                 InstallSource::Registry(_) => {
@@ -130,6 +131,34 @@ impl PluginInstallSource {
         }
         Ok(Self::LocalPath(PathBuf::from(trimmed)))
     }
+}
+
+/// Select one manifest-rooted bundle from a repository archive. The fragment
+/// is local extraction metadata, never a path sent to or executed by a server.
+fn remote_bundle_path(source: &InstallSource) -> Result<Option<String>> {
+    let InstallSource::DirectUrl(raw) = source else {
+        return Ok(None);
+    };
+    let url = reqwest::Url::parse(raw).context("invalid plugin archive URL")?;
+    let Some(fragment) = url.fragment() else {
+        return Ok(None);
+    };
+    let path = fragment
+        .strip_prefix("path=")
+        .context("plugin archive fragment must be #path=<bundle-directory>")?;
+    if path.is_empty()
+        || !path.split('/').all(|part| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && part
+                    .bytes()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, b'-' | b'_' | b'.'))
+        })
+    {
+        bail!("plugin archive bundle path must contain only safe relative directory names");
+    }
+    Ok(Some(path.to_string()))
 }
 
 /// Serialize a source for the `.installed-from` marker. Must round-trip
@@ -360,7 +389,8 @@ fn install_remote_bytes(
     expected_content_hash: Option<&str>,
 ) -> Result<PluginInstallOutcome> {
     let checksum = sha256_hex(bytes);
-    let staged = stage_tarball(bytes, user_plugins_dir, max_size)?;
+    let bundle_path = remote_bundle_path(remote)?;
+    let staged = stage_tarball(bytes, user_plugins_dir, max_size, bundle_path.as_deref())?;
     verify_expected_content_hash(&staged, expected_content_hash)?;
     if let Some(conflict) = name_conflict(&staged.name) {
         let _ = fs::remove_dir_all(&staged.staged_path);
@@ -428,7 +458,13 @@ pub async fn update(
         user_plugins_dir,
         max_size,
         true,
-        &|_| None,
+        &|actual| {
+            (actual != name).then(|| {
+                format!(
+                    "updated plugin changed name from {name} to {actual}; original plugin preserved"
+                )
+            })
+        },
         None,
     )?;
     match outcome {

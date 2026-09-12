@@ -724,6 +724,10 @@ impl Engine {
         // that owes work never finishes silently.
         let mut final_report_sent = false;
         let mut context_recovery_attempts = 0u8;
+        // A failed/cancelled pass, or a pass that leaves pressure high, must
+        // not become a paid summarization loop at every tool boundary.
+        // The bounded hard-limit recovery below remains available.
+        let mut auto_compaction_suppressed = false;
         let mut image_rejection_recovered = false;
         let mut tool_policy = tool_policy;
         let mut mode = tool_policy.mode;
@@ -992,6 +996,8 @@ impl Engine {
                     .await;
             }
 
+            let active_tools =
+                active_tools_for_request(&tool_catalog, &active_tool_names, strict_tool_mode);
             let auto_compaction_config = self.config.compaction.clone();
             // Billing usage accumulates every parent step and child-model
             // call. Only the most recent parent-route request describes the
@@ -1001,13 +1007,16 @@ impl Engine {
                 self.session.system_prompt.as_ref(),
                 self.session.latest_parent_input_tokens,
             );
-            let prepared = if crate::compaction::compaction_pressure_reached_with_billed(
-                &self.session.messages,
-                self.session.system_prompt.as_ref(),
-                &auto_compaction_config,
-                billed_input_tokens,
-            ) {
-                Some(self.prepare_compaction_envelope(auto_compaction_config))
+            let prepared = if !auto_compaction_suppressed
+                && crate::compaction::compaction_pressure_reached_with_billed(
+                    &self.session.messages,
+                    self.session.system_prompt.as_ref(),
+                    &auto_compaction_config,
+                    billed_input_tokens,
+                ) {
+                let mut prepared = self.prepare_compaction_envelope(auto_compaction_config);
+                prepared.tools = active_tools.clone();
+                Some(prepared)
             } else {
                 None
             };
@@ -1094,6 +1103,7 @@ impl Engine {
                 self.emit_compaction_usage(&compaction_usage, started.elapsed())
                     .await;
                 let Some(compaction_result) = compaction_result else {
+                    auto_compaction_suppressed = true;
                     self.finish_compaction(&compaction_id);
                     let message = if turn_was_canceled {
                         "Auto-compaction canceled with the active turn; conversation context was not changed"
@@ -1117,6 +1127,7 @@ impl Engine {
                                 .await;
                             let turn_was_canceled = turn_cancel.is_cancelled();
                             if turn_was_canceled || compaction_cancel.is_cancelled() {
+                                auto_compaction_suppressed = true;
                                 self.finish_compaction(&compaction_id);
                                 let message = if turn_was_canceled {
                                     "Auto-compaction canceled with the active turn; conversation context was not changed"
@@ -1140,6 +1151,12 @@ impl Engine {
                                 pm.note_history_reset("compaction");
                             }
                             self.commit_compaction_checkpoint(result.summary_prompt);
+                            auto_compaction_suppressed =
+                                crate::compaction::compaction_pressure_reached(
+                                    &self.session.messages,
+                                    self.session.system_prompt.as_ref(),
+                                    &self.config.compaction,
+                                );
                             self.emit_session_updated().await;
                             let removed = auto_messages_before.saturating_sub(auto_messages_after);
                             let auto_tokens_after = self.estimated_input_tokens();
@@ -1160,8 +1177,8 @@ impl Engine {
                                 Some(auto_messages_after),
                             )
                             .await;
-                            let _ = self.tx_event.send(Event::status(status)).await;
                         } else {
+                            auto_compaction_suppressed = true;
                             let message = "Auto-compaction skipped: empty result".to_string();
                             self.emit_compaction_failed(
                                 compaction_id.clone(),
@@ -1173,6 +1190,7 @@ impl Engine {
                         }
                     }
                     Err(err) => {
+                        auto_compaction_suppressed = true;
                         // Log error but continue with original messages (never corrupt)
                         let message = crate::compaction::report_compaction_failure(
                             "Auto-compaction failed",
@@ -1257,6 +1275,17 @@ impl Engine {
                         context_recovery_attempts = context_recovery_attempts.saturating_add(1);
                         continue;
                     }
+                    if self.cancel_token.is_cancelled() {
+                        return (TurnOutcomeStatus::Interrupted, None);
+                    }
+                    let message = "The request still exceeds this model's context budget and automatic recovery did not complete. The conversation is saved; retry or choose a larger context route.".to_string();
+                    let _ = self
+                        .tx_event
+                        .send(Event::error(ErrorEnvelope::context_overflow(
+                            message.clone(),
+                        )))
+                        .await;
+                    return (TurnOutcomeStatus::Failed, Some(message));
                 }
             }
 
@@ -1269,9 +1298,6 @@ impl Engine {
             // helper that seeded this turn and that `/preview-request`
             // reports, so a deferred tool activated mid-turn is reflected
             // identically in both places.
-            let active_tools =
-                active_tools_for_request(&tool_catalog, &active_tool_names, strict_tool_mode);
-
             // Resolve `auto` reasoning_effort to a concrete tier (#663).
             let effective_reasoning_effort = resolve_auto_effort(
                 self.session.reasoning_effort.as_deref(),
@@ -1781,17 +1807,17 @@ impl Engine {
             {
                 turn.stop_diagnostics.stream_resumes =
                     turn.stop_diagnostics.stream_resumes.saturating_add(1);
+                // A quick recovery needs no user action. If it persists,
+                // show one calm progress notice; diagnostics retain every
+                // attempt and an exhausted budget still fails visibly.
+                if attempt == 2 {
+                    let _ = self.tx_event.send(Event::status("Reconnecting…")).await;
+                }
                 match resume {
                     StreamResume::AfterSleep => {
                         crate::logging::warn(format!(
                             "Resuming after system sleep (attempt {attempt}/{MAX_STREAM_RETRIES}); discarding partial output and retrying request"
                         ));
-                        let _ = self
-                            .tx_event
-                            .send(Event::status(format!(
-                                "System sleep detected; connection lost — retrying request ({attempt}/{MAX_STREAM_RETRIES})"
-                            )))
-                            .await;
                         // Finalize any partially-rendered assistant cell so
                         // the retried stream renders fresh instead of
                         // appending to the pre-sleep fragment.
@@ -1804,12 +1830,6 @@ impl Engine {
                         crate::logging::warn(format!(
                             "Resuming headless turn after mid-stream network drop (attempt {attempt}/{MAX_STREAM_RETRIES}); discarding partial output and retrying request"
                         ));
-                        let _ = self
-                            .tx_event
-                            .send(Event::status(format!(
-                                "Connection interrupted; retrying ({attempt}/{MAX_STREAM_RETRIES})"
-                            )))
-                            .await;
                     }
                     StreamResume::InteractiveNetworkDrop => {
                         // Commit the partial assistant message so the retried
@@ -1863,22 +1883,10 @@ impl Engine {
                             crate::logging::warn(format!(
                                 "Resuming interactive turn after mid-stream network drop (attempt {attempt}/{MAX_STREAM_RETRIES}); only hidden reasoning streamed — no partial reply to preserve, retrying request"
                             ));
-                            let _ = self
-                                .tx_event
-                                .send(Event::status(format!(
-                                    "Connection interrupted; retrying ({attempt}/{MAX_STREAM_RETRIES})"
-                                )))
-                                .await;
                         } else {
                             crate::logging::warn(format!(
                                 "Resuming interactive turn after mid-stream network drop (attempt {attempt}/{MAX_STREAM_RETRIES}); preserving partial reply and retrying request"
                             ));
-                            let _ = self
-                                .tx_event
-                                .send(Event::status(format!(
-                                    "Connection interrupted; preserving partial reply and retrying ({attempt}/{MAX_STREAM_RETRIES})"
-                                )))
-                                .await;
                             // Finalize the partial text cell so the UI stops
                             // streaming and the retried content lands in a
                             // fresh cell instead of appending to an
@@ -1905,12 +1913,6 @@ impl Engine {
                         crate::logging::warn(format!(
                             "Stream died with no content (attempt {attempt}/{MAX_STREAM_RETRIES}); retrying request"
                         ));
-                        let _ = self
-                            .tx_event
-                            .send(Event::status(format!(
-                                "Connection interrupted; retrying ({attempt}/{MAX_STREAM_RETRIES})"
-                            )))
-                            .await;
                     }
                 }
                 // Don't preserve the per-stream `turn_error` — we're

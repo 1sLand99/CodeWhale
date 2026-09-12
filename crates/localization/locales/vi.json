@@ -1819,6 +1819,7 @@
   "StatusMcpConfigured": "đã cấu hình {count}",
   "StatusContextUsage": "đã dùng {percent}% ({used} / {max} token)",
   "StatusContextSourceConfigured": "đã cấu hình",
+  "StatusContextSourceConfiguredModel": "đã cấu hình (theo mô hình)",
   "StatusContextSourceProviderReported": "nhà cung cấp báo cáo",
   "StatusContextSourceKimiSafeFloor": "ngưỡng an toàn tĩnh của Kimi Code",
   "StatusContextSourceCatalog": "danh mục",

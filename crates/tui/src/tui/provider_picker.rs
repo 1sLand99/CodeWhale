@@ -715,6 +715,7 @@ impl ProviderDashboardRow {
                 model,
                 &route_base,
                 config.context_window_for_provider_config(provider),
+                config.model_context_windows_for(provider),
                 config.custom_models.as_deref().unwrap_or_default(),
             )
         } else {
@@ -730,6 +731,7 @@ impl ProviderDashboardRow {
                     .then(|| configured_base_url.clone())
                     .flatten(),
                 config.context_window_for_provider_config(provider),
+                config.model_context_windows_for(provider),
                 None,
             )
         };

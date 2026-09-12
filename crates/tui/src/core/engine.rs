@@ -3491,6 +3491,12 @@ impl Engine {
         prompt_context: &NextTurnPromptContext,
         system_prompt: Option<&SystemPrompt>,
     ) -> Option<String> {
+        // The engine owns automatic compaction. Asking the model to warn the
+        // user here created a competing save/compact ceremony before the
+        // automatic request-boundary guard could do its work (#5620).
+        if self.config.compaction.enabled {
+            return None;
+        }
         let input_tokens = self.active_input_tokens_with_current_text(current_text, system_prompt);
         let budget = route_context_budget_for_route(
             prompt_context.provider,
@@ -3499,8 +3505,8 @@ impl Engine {
             input_tokens,
         )?;
         context_pressure_message(budget.usage_percent()).map(|warning| format!(
-            "{warning}. Estimated input: {input_tokens} tokens ({:.1}% of route budget); auto-compaction: {}, trigger: {} tokens. Before replacing context, compaction saves the conversation and its model-written handoff in this session's artifacts/context-transfer-* files. At the next natural stopping point, follow this project's save-session instructions and write a durable, model-authored context-transfer file covering decisions, current work, and next steps before recommending /compact to the user. Surface this warning and the saved file, keep output concise, and do not wait for an assumed 95% cutoff.",
-            budget.usage_percent(), self.config.compaction.enabled, self.config.compaction.token_threshold,
+            "{warning}. Estimated input: {input_tokens} tokens ({:.1}% of route budget). Automatic compaction is explicitly disabled for this session. A manual /compact saves the original conversation and its model-written handoff before replacing context.",
+            budget.usage_percent(),
         ))
     }
 
@@ -6001,18 +6007,6 @@ impl Engine {
         )
     }
 
-    fn trim_oldest_messages_to_budget(&mut self, target_input_budget: usize) -> usize {
-        let mut removed = 0usize;
-        while self.session.messages.len() > MIN_RECENT_MESSAGES_TO_KEEP
-            && self.estimated_input_tokens() > target_input_budget
-        {
-            self.session.messages.trim_front(1);
-            self.session.bump_messages_revision();
-            removed = removed.saturating_add(1);
-        }
-        removed
-    }
-
     async fn recover_context_overflow(
         &mut self,
         client: &dyn crate::core::model_client::ModelClient,
@@ -6051,10 +6045,6 @@ impl Engine {
         let before_tokens = self.estimated_input_tokens();
         let before_count = self.session.messages.len();
 
-        let mut retries_used = 0u32;
-        let mut summary_prompt = None;
-        let mut compacted_messages: Vec<Message> = self.session.messages.clone().into();
-
         let mut forced_config = self.config.compaction.clone();
         forced_config.enabled = true;
         forced_config.token_threshold = forced_config
@@ -6092,21 +6082,19 @@ impl Engine {
             return false;
         };
 
-        match compaction_result {
-            Ok(result) => {
-                retries_used = result.retries_used;
-                compacted_messages = result.messages;
-                summary_prompt = result.summary_prompt;
-            }
+        let result = match compaction_result {
+            Ok(result) => result,
             Err(err) => {
-                let _ = self
-                    .tx_event
-                    .send(Event::status(format!(
-                        "Emergency compaction API pass failed: {err}. Falling back to local trim."
-                    )))
-                    .await;
+                let message =
+                    format!("Context recovery failed: {err}. Original conversation was preserved.");
+                self.emit_compaction_failed(id.clone(), true, message).await;
+                self.finish_compaction(&id);
+                return false;
             }
-        }
+        };
+        let retries_used = result.retries_used;
+        let summary_prompt = result.summary_prompt;
+        let mut compacted_messages = result.messages;
 
         let turn_was_canceled = turn_cancel.is_cancelled();
         if turn_was_canceled || compaction_cancel.is_cancelled() {
@@ -6136,30 +6124,31 @@ impl Engine {
                 self.emit_compaction_cancelled(id, true, message).await;
                 return false;
             }
-            self.session.replace_messages(compacted_messages);
         }
-        self.commit_compaction_checkpoint(summary_prompt);
-
-        // Trim with hysteresis: landing exactly on the input budget leaves the
-        // session a few hundred tokens under the preflight line, so the next
-        // step's output re-crosses it and recovery runs again.
-        let trimmed = self.trim_oldest_messages_to_budget(emergency_trim_budget(target_budget));
-        self.emit_session_updated().await;
-        let after_tokens = self.estimated_input_tokens();
-        let after_count = self.session.messages.len();
-        let recovered = after_tokens <= target_budget
-            && (after_tokens < before_tokens || after_count < before_count || trimmed > 0);
+        // Validate the complete candidate before the only history swap. Bare
+        // front-trimming after a failed summary silently lost user state and
+        // could leave orphan tool results in an apparently recovered session.
+        let after_tokens = crate::compaction::estimate_input_tokens_for_pressure(
+            &compacted_messages,
+            self.session.system_prompt.as_ref(),
+        );
+        let after_count = compacted_messages.len();
+        let recovered = after_tokens <= target_budget && after_tokens < before_tokens;
 
         if recovered {
+            self.session.replace_messages(compacted_messages);
+            turn.clear_parent_input_tokens();
+            if let Some(pm) = self.session.prefix_stability.as_mut() {
+                pm.note_history_reset("compaction");
+            }
+            self.commit_compaction_checkpoint(summary_prompt);
+            self.emit_session_updated().await;
             let removed = before_count.saturating_sub(after_count);
             let mut details = format!(
                 "Emergency compaction complete: {before_count} → {after_count} messages ({removed} removed), ~{before_tokens} → ~{after_tokens} tokens"
             );
             if retries_used > 0 {
                 details.push_str(&format!(" ({retries_used} retries)"));
-            }
-            if trimmed > 0 {
-                details.push_str(&format!(", trimmed {trimmed} oldest"));
             }
             self.emit_compaction_completed(
                 id.clone(),
@@ -6183,13 +6172,13 @@ impl Engine {
         let message = if after_tokens > target_budget {
             format!(
                 "Emergency context compaction failed to reduce request below model limit \
-                 (estimate ~{after_tokens} tokens, budget ~{target_budget})."
+                 (estimate ~{after_tokens} tokens, budget ~{target_budget}). Original conversation was preserved."
             )
         } else {
             format!(
                 "Emergency context compaction made no progress (estimate ~{after_tokens} tokens \
                  is already within the ~{target_budget} budget; the provider may count the \
-                 request differently). Run /compact or /clear."
+                 request differently). Original conversation was preserved."
             )
         };
         self.emit_compaction_failed(id.clone(), true, message.clone())
@@ -8201,8 +8190,7 @@ pub use context::context_input_budget_for_route;
 #[cfg(test)]
 use context::route_context_budget_for_provider;
 use context::{
-    MAX_CONTEXT_RECOVERY_ATTEMPTS, MIN_RECENT_MESSAGES_TO_KEEP,
-    effective_max_output_tokens_for_route, emergency_trim_budget,
+    MAX_CONTEXT_RECOVERY_ATTEMPTS, effective_max_output_tokens_for_route,
     extract_compaction_summary_prompt, is_context_length_error_message,
     is_image_input_rejection_message, route_context_budget_for_route, summarize_text,
 };

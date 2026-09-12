@@ -193,6 +193,16 @@ pub struct ProviderConfigToml {
         alias = "contextLength"
     )]
     pub context_window: Option<u32>,
+    /// Per-model context-window overrides keyed by exact wire model id
+    /// (`[providers.<id>.model_context_windows]`, #6108). A matching entry
+    /// wins over this provider's `context_window` for that model only, so one
+    /// gateway can front models with heterogeneous windows.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        alias = "modelContextWindows"
+    )]
+    pub model_context_windows: BTreeMap<String, u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
     /// Wire dialect preference for dual-protocol vendors (DeepSeek, MiniMax,
@@ -249,6 +259,7 @@ impl ProviderConfigToml {
             && blank(self.base_url.as_ref())
             && blank(self.model.as_ref())
             && self.context_window.is_none()
+            && self.model_context_windows.is_empty()
             && blank(self.mode.as_ref())
             && blank(self.wire.as_ref())
             && blank(self.auth_mode.as_ref())
@@ -1066,6 +1077,21 @@ fn is_builtin_provider_config_id(provider_id: &str) -> bool {
     provider::all_providers()
         .iter()
         .any(|p| p.provider_config_key() == provider_id)
+}
+
+fn builtin_provider_kind_for_config_id(provider_id: &str) -> Option<ProviderKind> {
+    provider::all_providers()
+        .iter()
+        .map(|p| p.kind())
+        .find(|kind| kind.provider().provider_config_key() == provider_id)
+}
+
+/// Split `providers.<id>.model_context_windows.<model>` (#6108). The model leg
+/// is the whole remainder, so dotted wire ids like `qwen3.5` stay intact.
+fn parse_model_context_window_key(key: &str) -> Option<(&str, &str)> {
+    let (provider_id, field_key) = parse_custom_provider_config_key(key)?;
+    let model = field_key.strip_prefix("model_context_windows.")?;
+    (!model.is_empty()).then_some((provider_id, model))
 }
 
 /// Field legs a `[providers.<id>]` custom table accepts through
@@ -2914,6 +2940,84 @@ impl ConfigToml {
         table.remove(leg);
     }
 
+    /// Write one `[providers.<id>.model_context_windows]` entry (#6108),
+    /// whether `<id>` is a built-in provider key or a named custom table.
+    fn set_model_context_window(
+        &mut self,
+        provider_id: &str,
+        model: &str,
+        value: &str,
+    ) -> Result<()> {
+        if model.eq_ignore_ascii_case("auto")
+            || model.chars().any(|c| c.is_whitespace() || c.is_control())
+        {
+            bail!("invalid model id for `model_context_windows`");
+        }
+        let window = parse_context_window(value)?;
+        if let Some(kind) = builtin_provider_kind_for_config_id(provider_id) {
+            self.providers
+                .for_provider_mut(kind)
+                .model_context_windows
+                .insert(model.to_string(), window);
+            return Ok(());
+        }
+        let table = self.custom_provider_table_mut(provider_id)?;
+        let windows = table
+            .entry("model_context_windows".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+        windows
+            .as_table_mut()
+            .with_context(|| {
+                format!("providers.{provider_id}.model_context_windows must be a table")
+            })?
+            .insert(model.to_string(), toml::Value::Integer(i64::from(window)));
+        Ok(())
+    }
+
+    fn model_context_window_value(&self, provider_id: &str, model: &str) -> Option<String> {
+        if let Some(kind) = builtin_provider_kind_for_config_id(provider_id) {
+            return self
+                .providers
+                .for_provider(kind)
+                .model_context_windows
+                .get(model)
+                .map(u32::to_string);
+        }
+        self.providers
+            .extras
+            .get(provider_id)?
+            .as_table()?
+            .get("model_context_windows")?
+            .as_table()?
+            .get(model)?
+            .as_integer()
+            .map(|value| value.to_string())
+    }
+
+    fn unset_model_context_window(&mut self, provider_id: &str, model: &str) {
+        if let Some(kind) = builtin_provider_kind_for_config_id(provider_id) {
+            self.providers
+                .for_provider_mut(kind)
+                .model_context_windows
+                .remove(model);
+            return;
+        }
+        if let Some(table) = self
+            .providers
+            .extras
+            .get_mut(provider_id)
+            .and_then(toml::Value::as_table_mut)
+            && let Some(windows) = table
+                .get_mut("model_context_windows")
+                .and_then(toml::Value::as_table_mut)
+        {
+            windows.remove(model);
+            if windows.is_empty() {
+                table.remove("model_context_windows");
+            }
+        }
+    }
+
     /// Bind the raw selector after deserializing a document. Exact custom
     /// tables take precedence over built-in aliases, and regional spellings
     /// survive later typed saves. This does not apply environment overrides.
@@ -3003,6 +3107,9 @@ impl ConfigToml {
                     .display(setting),
             );
         }
+        if let Some((provider_id, model)) = parse_model_context_window_key(key) {
+            return self.model_context_window_value(provider_id, model);
+        }
         if let Some((provider, field)) = parse_provider_config_key(key) {
             return get_provider_config_value(self.providers.for_provider(provider), field);
         }
@@ -3066,6 +3173,9 @@ impl ConfigToml {
     pub fn get_display_value(&self, key: &str) -> Option<String> {
         if notifications::in_namespace(key) {
             return self.get_value(key);
+        }
+        if let Some((provider_id, model)) = parse_model_context_window_key(key) {
+            return self.model_context_window_value(provider_id, model);
         }
         if let Some((provider, field)) = parse_provider_config_key(key) {
             return get_provider_config_display_value(self.providers.for_provider(provider), field);
@@ -3160,6 +3270,9 @@ impl ConfigToml {
         }) {
             bail!(LEGACY_ANTIGRAVITY_TOMBSTONE_MESSAGE);
         }
+        if let Some((provider_id, model)) = parse_model_context_window_key(key) {
+            return self.set_model_context_window(provider_id, model, value);
+        }
         if let Some((provider, field)) = parse_provider_config_key(key) {
             return set_provider_config_value(self, provider, field, value);
         }
@@ -3222,6 +3335,10 @@ impl ConfigToml {
         if notifications::in_namespace(key) {
             let setting = notifications::NotificationSetting::required(key)?;
             return notifications::edit_extras(&mut self.extras, setting, None);
+        }
+        if let Some((provider_id, model)) = parse_model_context_window_key(key) {
+            self.unset_model_context_window(provider_id, model);
+            return Ok(());
         }
         if let Some((provider, field)) = parse_provider_config_key(key) {
             unset_provider_config_value(self, provider, field);

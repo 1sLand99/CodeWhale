@@ -12591,7 +12591,13 @@ async fn marketplace_catalog_lifecycle_over_http_lists_installs_and_removes() ->
         .error_for_status()?
         .json()
         .await?;
-    let candidate = &list["marketplaces"][0]["candidates"][0];
+    let team = list["marketplaces"]
+        .as_array()
+        .expect("marketplace list")
+        .iter()
+        .find(|catalog| catalog["name"] == "team")
+        .expect("added team catalog");
+    let candidate = &team["candidates"][0];
     assert_eq!(candidate["name"], "demo");
     assert_eq!(candidate["install"]["installable"], true);
     assert!(

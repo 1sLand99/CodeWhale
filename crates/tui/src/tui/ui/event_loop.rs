@@ -4507,15 +4507,7 @@ pub(crate) async fn run_event_loop(
                 );
                 match terminal_input.restart_detached() {
                     Ok(()) => {
-                        app.push_status_toast(
-                            if cfg!(target_os = "windows") {
-                                "Recovered terminal input after a stalled Windows console poll."
-                            } else {
-                                "Recovered terminal input after a stalled terminal read."
-                            },
-                            StatusToastLevel::Warning,
-                            None,
-                        );
+                        tracing::info!("terminal input pump recovered");
                     }
                     Err(err) => {
                         tracing::warn!(error = %err, "failed to restart terminal input pump");

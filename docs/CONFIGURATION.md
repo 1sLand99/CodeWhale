@@ -846,27 +846,54 @@ Use the table for the provider you are actually on (`providers.openai`,
 `providers.deepseek`, `providers.moonshot`, …); `/status` names it for you. The
 value is a positive token count for the route's *total* window.
 
+When one gateway fronts models with heterogeneous windows, scope the override
+to an exact wire model id with `[providers.<name>.model_context_windows]`:
+
+```toml
+[providers.command_code]
+context_window = 204800
+
+[providers.command_code.model_context_windows]
+"MiniMaxAI/MiniMax-M2.5" = 204800
+"google/gemini-3.1-flash-lite" = 1000000
+```
+
+Keys are the exact wire model ids the route sends (dotted and `org/model`
+spellings both work as TOML keys when quoted); each value must be a positive
+token count. A matching entry beats the provider-level `context_window` for
+that model only — every other model on the provider still resolves against
+`context_window` and the rungs below. From the CLI:
+
+```bash
+codewhale config set 'providers.command_code.model_context_windows."MiniMaxAI/MiniMax-M2.5"' 204800
+codewhale config unset 'providers.command_code.model_context_windows."MiniMaxAI/MiniMax-M2.5"'
+```
+
 ### How the effective window is resolved
 
 First match wins, and the source label each surface prints is exactly this
 rung:
 
-1. `configured` — `[providers.<name>] context_window` in `config.toml`. A hard
-   override: nothing below it can raise or lower the result. Read-time aliases:
+1. `configured (per-model)` — a `[providers.<name>.model_context_windows]`
+   entry keyed by the route's exact wire model id. A hard override for that
+   model only; it never rewrites another model's window.
+2. `configured` — `[providers.<name>] context_window` in `config.toml`. A hard
+   override for every model on the provider: nothing below it can raise or
+   lower the result. Read-time aliases:
    `contextWindow`, `context_window_tokens`, `contextWindowTokens`,
    `context_length`, `contextLength`.
-2. `provider-reported` — route-scoped 1M metadata a provider actually reported
+3. `provider-reported` — route-scoped 1M metadata a provider actually reported
    for the Kimi Code `k3` route, when it was observed within the last 24 hours.
-3. `static Kimi Code safe floor` — 262,144 tokens for Kimi Code memberships,
+4. `static Kimi Code safe floor` — 262,144 tokens for Kimi Code memberships,
    because 1M access is plan-gated (Allegretto and above).
-4. `catalog` — the bundled route catalog (hand-curated offerings first, then
+5. `catalog` — the bundled route catalog (hand-curated offerings first, then
    the bundled Models.dev rows). For `openai-codex`, a fresh (under 24 hours)
    `$CODEX_HOME` model roster corrects this rung.
-5. `model-name hint` — an `_Nk` suffix parsed from the model name itself
+6. `model-name hint` — an `_Nk` suffix parsed from the model name itself
    (`qwen3-32b-256k` → 256,000), vendor-agnostic. A naming convention the
    serving engine may not honor is not a fact about the route, so this rung
    sits *below* the catalog: any catalog row for the same id beats it (#5441).
-6. `fallback` — the static per-provider capability table: 200,000 for
+7. `fallback` — the static per-provider capability table: 200,000 for
    Anthropic-wire routes, 128,000 for `openai-codex`, 8,192 for Ollama,
    otherwise Codewhale's static per-model metadata, and finally 128,000 when
    the model is unknown.
@@ -879,9 +906,10 @@ number — but they are guesses, not capabilities anyone checked. Every surface
 that renders one of these windows appends `(unverified)` to its source label
 (the status line, the context-pressure message, `/status`, `/config`, and the
 model picker chip), so a window you did not configure and no provider reported
-can never read as a verified limit (#5239, #5441). The `context_window`
-provider-table key above is the fix: a configured window is a hard override
-and renders as `configured` with no marker.
+can never read as a verified limit (#5239, #5441). The `context_window` and
+`model_context_windows` provider-table keys above are the fix: a configured
+window is a hard override and renders as `configured` (or
+`configured (per-model)`) with no marker.
 
 Output ceilings follow the same rule (#5440): an Anthropic-family model the
 catalog does not describe keeps the 64K Messages floor as its clamp, and the
@@ -890,12 +918,14 @@ pickers label those numbers `unverified` (or an "assumed floor") instead of
 `documented`. Clamping to a defensible floor is a product choice; presenting
 it as a documented fact is not.
 
-There is no environment variable for the context window, and no per-model
-override key. The per-provider `context_window` is the only user knob, which is
-also why it is the right one to set when a gateway or self-hosted runtime
-serves a window Codewhale's catalog does not model. Codewhale will not invent a
-window it cannot justify — it falls back to a conservative value, labels it
-`fallback`, and marks it `(unverified)` at every surface that shows it.
+There is no environment variable for the context window; the provider-table
+`context_window` and per-model `model_context_windows` keys are the user
+knobs. They are the right ones to set when a gateway or self-hosted runtime
+serves a window Codewhale's catalog does not model — per-model when only some
+of a provider's routes differ, provider-wide when they all do. Codewhale will
+not invent a window it cannot justify — it falls back to a conservative value,
+labels it `fallback`, and marks it `(unverified)` at every surface that shows
+it.
 
 ### Adjacent knobs
 

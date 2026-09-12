@@ -343,6 +343,7 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
                 &model_id,
                 &app.active_route_base_url,
                 app.active_context_window_override,
+                app.active_model_context_windows.as_ref(),
                 &app.configured_models,
             ) {
                 Ok(resolution) => Some(resolution),
@@ -371,6 +372,7 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
                 None,
                 route_base_url,
                 app.active_context_window_override,
+                app.active_model_context_windows.as_ref(),
                 None,
             ) {
                 Ok(resolution) => Some(resolution),
@@ -388,11 +390,10 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
             );
         } else {
             app.active_route_limits = app.context_window_override_limits();
-            app.active_context_window_source = if app.active_context_window_override.is_some() {
-                crate::route_runtime::ContextWindowSource::Configured
-            } else {
-                crate::route_runtime::ContextWindowSource::Fallback
-            };
+            app.active_context_window_source = app
+                .configured_context_window_for(&app.model)
+                .map(|resolution| resolution.source)
+                .unwrap_or(crate::route_runtime::ContextWindowSource::Fallback);
         }
         app.update_model_compaction_budget();
         if model_changed {

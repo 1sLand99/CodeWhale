@@ -11012,15 +11012,12 @@ fn closed_engine_mailbox_reports_manual_compaction_unavailable() {
 }
 
 #[test]
-fn compaction_lifecycle_keeps_truthful_auto_label_until_matching_completion() {
+fn automatic_compaction_stays_quiet_until_a_real_failure() {
     let mut app = create_test_app();
 
     apply_compaction_started(&mut app, "compact-new".to_string(), true);
     assert!(app.is_compacting);
-    assert_eq!(
-        app.status_message.as_deref(),
-        Some("Auto-compacting context…")
-    );
+    assert!(app.status_message.is_none());
     assert_eq!(
         app.active_compaction
             .as_ref()
@@ -11038,10 +11035,7 @@ fn compaction_lifecycle_keeps_truthful_auto_label_until_matching_completion() {
         None,
     );
     assert!(app.is_compacting, "stale id must not clear newer activity");
-    assert_eq!(
-        app.status_message.as_deref(),
-        Some("Auto-compacting context…")
-    );
+    assert!(app.status_message.is_none());
 
     apply_compaction_completed(
         &mut app,
@@ -11054,9 +11048,21 @@ fn compaction_lifecycle_keeps_truthful_auto_label_until_matching_completion() {
     );
     assert!(!app.is_compacting);
     assert!(app.active_compaction.is_none());
-    assert!(app.status_toasts.back().is_some_and(|toast| {
-        toast.level == StatusToastLevel::Success
-            && toast.text.starts_with("Auto-compaction complete")
+    assert!(app.status_toasts.is_empty());
+    assert!(app.status_message.is_none());
+    assert!(
+        app.last_compaction
+            .as_ref()
+            .is_some_and(|receipt| receipt.auto)
+    );
+    apply_compaction_failed(
+        &mut app,
+        "compact-failure",
+        true,
+        "Summary failed; conversation preserved".into(),
+    );
+    assert!(app.sticky_status.as_ref().is_some_and(|toast| {
+        toast.level == StatusToastLevel::Error && toast.text.contains("conversation preserved")
     }));
 }
 
@@ -11179,6 +11185,7 @@ fn compaction_trigger_meter_and_ladder_share_the_resolved_window() {
         "qwen3-32b-256k",
         None,
         None,
+        None,
     );
     assert_eq!(ladder.tokens, 256_000);
     assert_eq!(
@@ -11201,7 +11208,7 @@ fn compaction_trigger_meter_and_ladder_share_the_resolved_window() {
     app.api_messages = vec![Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
-            text: "context ".repeat(2_000),
+            text: "context ".repeat(100_000),
             cache_control: None,
         }],
     }];
@@ -11209,7 +11216,7 @@ fn compaction_trigger_meter_and_ladder_share_the_resolved_window() {
     assert_eq!(meter_window, ladder.tokens);
 
     // The unverified rung must also reach the pressure message the user sees.
-    app.auto_compact = true;
+    app.auto_compact = false;
     app.compact_threshold = usize::try_from(used).expect("non-negative context estimate");
     maybe_warn_context_pressure(&mut app);
     let pressure = app.status_message.as_deref().expect("pressure message");
@@ -15124,7 +15131,7 @@ fn should_auto_compact_before_send_uses_shared_token_threshold() {
 }
 
 #[test]
-fn context_pressure_warning_reflects_auto_compact_threshold_state() {
+fn automatic_compaction_does_not_warn_at_its_threshold() {
     let mut app = create_test_app();
     app.api_messages = vec![Message {
         role: Role::User,
@@ -15144,17 +15151,8 @@ fn context_pressure_warning_reflects_auto_compact_threshold_state() {
 
     maybe_warn_context_pressure(&mut app);
 
-    let status = app.status_message.as_deref().expect("context warning");
-    assert!(
-        status.contains("Auto-compaction will run before the next send."),
-        "unexpected status: {status}"
-    );
-    assert!(
-        app.sticky_status
-            .as_ref()
-            .is_some_and(|toast| toast.text == status),
-        "context pressure must remain visible in sticky status: {status}"
-    );
+    assert!(app.status_message.is_none());
+    assert!(app.sticky_status.is_none());
 }
 
 #[test]
@@ -15167,7 +15165,7 @@ fn context_pressure_warning_survives_later_status_and_can_be_dismissed() {
             cache_control: None,
         }],
     }];
-    app.auto_compact = true;
+    app.auto_compact = false;
     app.auto_compact_threshold_percent = 100.0;
     let (used, _, _) = context_usage_snapshot(&app).expect("context snapshot");
     app.compact_threshold = usize::try_from(used).expect("non-negative context estimate");
@@ -15209,7 +15207,7 @@ fn context_pressure_warning_clears_when_compaction_starts() {
             cache_control: None,
         }],
     }];
-    app.auto_compact = true;
+    app.auto_compact = false;
     app.auto_compact_threshold_percent = 100.0;
     let (used, _, _) = context_usage_snapshot(&app).expect("context snapshot");
     app.compact_threshold = usize::try_from(used).expect("non-negative context estimate");

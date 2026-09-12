@@ -1640,6 +1640,10 @@ pub struct App {
     pub active_context_window_source: crate::route_runtime::ContextWindowSource,
     /// User-configured provider context-window override for the active route.
     pub active_context_window_override: Option<u32>,
+    /// `[providers.<id>.model_context_windows]` for the active provider
+    /// identity, keyed by exact wire model id (#6108). A hit wins over
+    /// `active_context_window_override` for that model only.
+    pub active_model_context_windows: Option<std::collections::BTreeMap<String, u32>>,
     /// Pending provider transition for transactional rollback when the next
     /// auth failure indicates the new provider cannot be used.
     pub pending_provider_switch: Option<PendingProviderSwitch>,
@@ -6042,21 +6046,52 @@ impl App {
         self.active_context_window_source = context_window_source;
     }
 
-    pub fn set_active_context_window_override(&mut self, context_window: Option<u32>) {
-        self.active_context_window_override = context_window;
-        if context_window.is_some() {
-            self.active_context_window_source =
-                crate::route_runtime::ContextWindowSource::Configured;
+    /// Refresh the operator-configured windows for the active provider
+    /// identity: the provider-level default plus its per-model table (#6108).
+    pub fn set_active_context_window_override(
+        &mut self,
+        config: &crate::config::Config,
+        provider: ApiProvider,
+    ) {
+        self.active_context_window_override = config.context_window_for_provider_config(provider);
+        self.active_model_context_windows = config.model_context_windows_for(provider).cloned();
+        if let Some(resolution) = self.configured_context_window_for(&self.model.clone()) {
+            self.active_context_window_source = resolution.source;
         }
         if self.active_route_limits.is_none() {
             self.active_route_limits = self.context_window_override_limits();
         }
     }
 
+    /// Effective operator-configured window for an exact wire model id on the
+    /// active provider: a `model_context_windows` hit wins over the provider
+    /// default (#6108). `None` when the operator configured neither rung.
+    pub(crate) fn configured_context_window_for(
+        &self,
+        model: &str,
+    ) -> Option<crate::route_runtime::ContextWindowResolution> {
+        self.active_model_context_windows
+            .as_ref()
+            .and_then(|table| table.get(model).copied())
+            .filter(|window| *window > 0)
+            .map(|tokens| crate::route_runtime::ContextWindowResolution {
+                tokens,
+                source: crate::route_runtime::ContextWindowSource::ConfiguredModel,
+            })
+            .or_else(|| {
+                self.active_context_window_override
+                    .filter(|window| *window > 0)
+                    .map(|tokens| crate::route_runtime::ContextWindowResolution {
+                        tokens,
+                        source: crate::route_runtime::ContextWindowSource::Configured,
+                    })
+            })
+    }
+
     pub fn context_window_override_limits(&self) -> Option<RouteLimits> {
-        self.active_context_window_override
-            .map(|window| RouteLimits {
-                context_tokens: Some(u64::from(window)),
+        self.configured_context_window_for(&self.model)
+            .map(|resolution| RouteLimits {
+                context_tokens: Some(u64::from(resolution.tokens)),
                 ..RouteLimits::default()
             })
     }

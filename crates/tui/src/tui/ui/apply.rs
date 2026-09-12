@@ -933,9 +933,7 @@ pub(crate) async fn apply_model_picker_choice(
                 resolved_model = resolution.candidate.wire_model_id().as_str().to_string();
                 route_base_url = resolution.candidate.endpoint().base_url.clone();
                 if model_changed {
-                    app.set_active_context_window_override(
-                        config.context_window_for_provider_config(app.api_provider),
-                    );
+                    app.set_active_context_window_override(config, app.api_provider);
                     app.set_active_route_resolution(
                         route_base_url.clone(),
                         resolution.candidate.limits(),
@@ -950,16 +948,13 @@ pub(crate) async fn apply_model_picker_choice(
             }
         }
     } else if model_changed {
-        app.set_active_context_window_override(
-            config.context_window_for_provider_config(app.api_provider),
-        );
+        app.set_active_context_window_override(config, app.api_provider);
         app.active_route_limits = app.context_window_override_limits();
         app.active_route_base_url = route_base_url.clone();
-        app.active_context_window_source = if app.active_context_window_override.is_some() {
-            crate::route_runtime::ContextWindowSource::Configured
-        } else {
-            crate::route_runtime::ContextWindowSource::Fallback
-        };
+        app.active_context_window_source = app
+            .configured_context_window_for(&app.model)
+            .map(|resolution| resolution.source)
+            .unwrap_or(crate::route_runtime::ContextWindowSource::Fallback);
     }
 
     let effective_effort = if model_is_auto {
@@ -1188,7 +1183,7 @@ pub(crate) async fn apply_provider_fallback_switch(
     app.model_ids_passthrough = config.model_ids_pass_through();
     app.set_model_selection(new_model.clone());
     app.apply_provider_switch_reasoning_effort(target, &new_base_url, None);
-    app.set_active_context_window_override(config.context_window_for_provider_config(target));
+    app.set_active_context_window_override(config, target);
     app.set_active_route_resolution(
         new_base_url.clone(),
         resolved_route.candidate.limits(),
@@ -2512,9 +2507,7 @@ fn apply_validated_profile_config(
     app.set_provider_identity_record(route.identity.clone());
     app.billing_presentation = crate::route_billing::for_route(config, app.api_provider);
     app.set_model_selection(route.model.clone());
-    app.set_active_context_window_override(
-        config.context_window_for_provider_config(app.api_provider),
-    );
+    app.set_active_context_window_override(config, app.api_provider);
     app.set_active_route_resolution(
         route.candidate.endpoint().base_url.clone(),
         route.candidate.limits(),

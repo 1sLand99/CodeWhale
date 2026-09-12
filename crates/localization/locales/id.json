@@ -1819,6 +1819,7 @@
   "StatusMcpConfigured": "{count} dikonfigurasi",
   "StatusContextUsage": "{percent}% terpakai ({used} / {max} token)",
   "StatusContextSourceConfigured": "dikonfigurasi",
+  "StatusContextSourceConfiguredModel": "dikonfigurasi (per model)",
   "StatusContextSourceProviderReported": "dilaporkan penyedia",
   "StatusContextSourceKimiSafeFloor": "batas aman statis Kimi Code",
   "StatusContextSourceCatalog": "katalog",

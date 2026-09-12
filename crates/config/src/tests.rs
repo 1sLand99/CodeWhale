@@ -2715,6 +2715,154 @@ fn custom_provider_set_rejects_unknown_field_with_corrective_error() {
 }
 
 #[test]
+fn model_context_windows_set_get_unset_round_trip() -> Result<()> {
+    let mut config = ConfigToml::default();
+
+    // Built-in provider, bare wire id — plus slash and dotted spellings,
+    // which stay intact because the model leg is the whole remainder.
+    config.set_value("providers.moonshot.model_context_windows.k3", "262144")?;
+    config.set_value(
+        "providers.moonshot.model_context_windows.MiniMaxAI/MiniMax-M2.5",
+        "204800",
+    )?;
+    config.set_value(
+        "providers.openrouter.model_context_windows.qwen3.5-flash",
+        "131072",
+    )?;
+
+    assert_eq!(
+        config
+            .get_value("providers.moonshot.model_context_windows.k3")
+            .as_deref(),
+        Some("262144")
+    );
+    assert_eq!(
+        config
+            .get_value("providers.moonshot.model_context_windows.MiniMaxAI/MiniMax-M2.5")
+            .as_deref(),
+        Some("204800")
+    );
+    assert_eq!(
+        config
+            .get_value("providers.openrouter.model_context_windows.qwen3.5-flash")
+            .as_deref(),
+        Some("131072")
+    );
+
+    // Per-provider isolation: another provider's table never answers.
+    assert_eq!(
+        config.get_value("providers.openai.model_context_windows.k3"),
+        None
+    );
+
+    // The typed field round-trips through TOML as a real subtable.
+    let serialized = toml::to_string(&config)?;
+    assert!(
+        serialized.contains("model_context_windows"),
+        "per-model windows must serialize as a providers subtable, got:\n{serialized}"
+    );
+    let reparsed: ConfigToml = toml::from_str(&serialized)?;
+    assert_eq!(
+        reparsed
+            .get_value("providers.moonshot.model_context_windows.k3")
+            .as_deref(),
+        Some("262144")
+    );
+
+    config.unset_value("providers.moonshot.model_context_windows.k3")?;
+    assert_eq!(
+        config.get_value("providers.moonshot.model_context_windows.k3"),
+        None
+    );
+    assert_eq!(
+        config
+            .get_value("providers.moonshot.model_context_windows.MiniMaxAI/MiniMax-M2.5")
+            .as_deref(),
+        Some("204800")
+    );
+    Ok(())
+}
+
+#[test]
+fn model_context_windows_custom_gateway_round_trip() -> Result<()> {
+    let mut config = ConfigToml::default();
+
+    config.set_value("providers.command_code.kind", "openai-compatible")?;
+    config.set_value(
+        "providers.command_code.base_url",
+        "https://gateway.example/v1",
+    )?;
+    config.set_value(
+        "providers.command_code.model_context_windows.google/gemini-3.1-flash-lite",
+        "1000000",
+    )?;
+
+    assert_eq!(
+        config
+            .get_value("providers.command_code.model_context_windows.google/gemini-3.1-flash-lite")
+            .as_deref(),
+        Some("1000000")
+    );
+
+    let serialized = toml::to_string(&config)?;
+    assert!(
+        serialized.contains("[providers.command_code.model_context_windows]")
+            || serialized.contains("model_context_windows"),
+        "custom provider windows must serialize under the providers table, got:\n{serialized}"
+    );
+
+    config
+        .unset_value("providers.command_code.model_context_windows.google/gemini-3.1-flash-lite")?;
+    assert_eq!(
+        config
+            .get_value("providers.command_code.model_context_windows.google/gemini-3.1-flash-lite"),
+        None
+    );
+    Ok(())
+}
+
+#[test]
+fn model_context_windows_rejects_zero_and_bad_model_ids() {
+    let mut config = ConfigToml::default();
+
+    let err = config
+        .set_value("providers.moonshot.model_context_windows.k3", "0")
+        .expect_err("zero per-model window must be rejected");
+    assert!(
+        format!("{err:#}").contains("greater than 0"),
+        "unexpected error: {err:#}"
+    );
+
+    let err = config
+        .set_value("providers.moonshot.model_context_windows.auto", "204800")
+        .expect_err("`auto` is a selector, not a wire model id");
+    assert!(
+        format!("{err:#}").contains("model_context_windows"),
+        "unexpected error: {err:#}"
+    );
+
+    let err = config
+        .set_value(
+            "providers.moonshot.model_context_windows.bad model",
+            "204800",
+        )
+        .expect_err("whitespace model ids must be rejected");
+    assert!(
+        format!("{err:#}").contains("model_context_windows"),
+        "unexpected error: {err:#}"
+    );
+
+    // Rejected writes leave no residue on the typed field.
+    assert!(
+        config
+            .providers
+            .for_provider(ProviderKind::Moonshot)
+            .model_context_windows
+            .is_empty()
+    );
+}
+
+#[test]
 fn builtin_provider_set_rejects_unknown_field_with_corrective_error() {
     let mut config = ConfigToml::default();
 

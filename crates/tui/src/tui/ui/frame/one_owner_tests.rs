@@ -136,9 +136,12 @@ fn count_rows_containing(rows: &[String], needle: &str) -> usize {
 /// frame: the context reading, the mode and permission chips, the model,
 /// the cost, the agent count, and the help hint.
 ///
-/// 160 columns joins the blocker sizes so the working clock's two halves
-/// are asserted at a width that holds both; at 80 and 120 they shed by
-/// design (#5914) and the row is asserted for what it does keep.
+/// 160 columns joins the blocker sizes so both working-clock halves can
+/// paint together when the session half is present; at 80 and 120 the
+/// clocks shed by design (#5914) against the pinned scope notice. The
+/// #6084 shed-order fix (sole turn clock uses the session rung) is pinned
+/// in `phase_strip::tideline_tests`, where the narrower permission chip
+/// exposes the width band the one-owner fixture's notice collapses.
 #[test]
 fn composed_frame_paints_each_fact_in_exactly_one_row() {
     for (width, height) in [(80u16, 24u16), (120, 32), (160, 40)] {
@@ -207,14 +210,18 @@ fn composed_frame_paints_each_fact_in_exactly_one_row() {
         // The bar carries the working clock (#5914) — how long the current
         // turn has been doing what it is doing, and how long the session has
         // worked. Both halves shed before the hint and the counts, so a
-        // narrow row keeps the affordances and drops the stopwatch: the
-        // session half needs 120 columns here, the turn half 160. Each
-        // paints in exactly one row wherever it paints. The metrics line
-        // carries no repository, branch or provider.
+        // narrow row keeps the affordances and drops the stopwatch. When
+        // both would paint, the session half needs ~120 columns here and
+        // the turn half ~160; each paints in exactly one row wherever it
+        // paints. The metrics line carries no repository, branch or provider.
         // First turn: the turn half names the phase and stays; the session
         // reading is the identical duration, so it is suppressed rather than
-        // stated twice (#6041) — the turn half is the one that needs 160
-        // columns, so a narrower row keeps the affordances and no stopwatch.
+        // stated twice (#6041). With no session half to paint, the turn
+        // clock sheds at the session rung (#6084) rather than first — but
+        // against this fixture's pinned scope notice, turn+counts+hint is
+        // still just over a 120-column budget, so the hint wins here and
+        // the turn half needs ~160. The shed-order contract itself lives
+        // in tideline_tests.
         let turn_needle = "sub-agents underway 1m 15s";
         if width >= 160 {
             assert!(rows[posture].contains(turn_needle), "{}", rows[posture]);

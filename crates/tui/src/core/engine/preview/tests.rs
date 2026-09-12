@@ -240,6 +240,9 @@ async fn terminal_undelivered_child_fails_closed_without_claiming_delivery() {
 fn turn_metadata_uses_planned_cross_route_limits_not_installed_limits() {
     let config = deepseek_config();
     let (mut engine, _handle, _tmp) = preview_engine(&config);
+    // Pressure advice is only surfaced when the user opts out of automatic
+    // maintenance. The route-budget assertion still applies in that mode.
+    engine.config.compaction.enabled = false;
     engine.api_provider = ApiProvider::Deepseek;
     let installed_limits = codewhale_config::route::RouteLimits {
         context_tokens: Some(4_096),
@@ -297,7 +300,7 @@ fn turn_metadata_uses_planned_cross_route_limits_not_installed_limits() {
         .unwrap();
     assert!(pressure.contains("Context pressure: critical"));
     assert!(pressure.contains("Estimated input:"));
-    assert!(pressure.contains("trigger:"));
+    assert!(pressure.contains("Automatic compaction is explicitly disabled"));
     let message = engine.user_text_message_from_snapshot(
         "cross-route budget".to_string(),
         &prompt_context.model,

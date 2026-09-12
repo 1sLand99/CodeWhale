@@ -713,7 +713,8 @@ pub(crate) fn resolve_fleet_route_with_config(
         if provider == ApiProvider::Custom {
             return None;
         }
-        let candidate = resolve_route_candidate(provider, model_selector, None, None, None).ok()?;
+        let candidate =
+            resolve_route_candidate(provider, model_selector, None, None, None, None).ok()?;
         let provider_id = candidate.provider_id().as_str().to_string();
         (candidate, provider_id, None, "resolver")
     };
@@ -3163,6 +3164,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("openrouter should resolve the pinned model directly");
         assert_eq!(
@@ -3234,6 +3236,7 @@ mod tests {
         let openrouter_candidate = resolve_route_candidate(
             ApiProvider::Openrouter,
             Some("deepseek-v4-flash"),
+            None,
             None,
             None,
             None,

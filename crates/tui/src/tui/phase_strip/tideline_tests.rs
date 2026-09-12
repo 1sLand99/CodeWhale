@@ -640,6 +640,29 @@ fn a_session_that_has_not_worked_states_no_clock() {
     );
 }
 
+/// #6084: when the session half will not paint, the shed ladder must not
+/// drop the turn clock at the turn-only rung — that would leave no clock
+/// at all. Find a width where both-clocks already sheds the turn half while
+/// keeping the session half; with only the turn clock, that width must keep
+/// it (shed at the session-clock rung instead).
+#[test]
+fn absent_session_clock_keeps_turn_past_the_turn_only_rung() {
+    let mut first_turn = working();
+    first_turn.session_clock = None;
+    let both = working();
+    let width = (8..=160u16)
+        .find(|&w| {
+            let text = draw(w, 3, &both.widget(&UI_THEME));
+            text.contains("worked 41m 12s") && !text.contains("working 1m 15s")
+        })
+        .expect("both-clocks fixture must shed turn before session at some width");
+    let text = draw(width, 3, &first_turn.widget(&UI_THEME));
+    assert!(
+        text.contains("working 1m 15s"),
+        "{width}: with no session half, the turn clock must survive the turn-only shed rung (#6084): {text}"
+    );
+}
+
 /// Narrow terminals shed both clock halves before the hint and the counts,
 /// the turn half before the session half, and neither reading is ever
 /// painted half-truncated.

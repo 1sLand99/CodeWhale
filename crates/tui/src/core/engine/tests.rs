@@ -386,6 +386,49 @@ struct BlockingEmergencyCompactionModelClient {
 }
 
 #[tokio::test]
+async fn failed_emergency_compaction_preserves_history_instead_of_trimming() {
+    use crate::llm_client::mock::MockLlmClient;
+    let workspace = tempdir().unwrap();
+    let (mut engine, _handle) = Engine::new(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+    );
+    engine.session.messages = (0..12)
+        .map(|i| Message {
+            role: if i % 2 == 0 {
+                Role::User
+            } else {
+                Role::Assistant
+            },
+            content: vec![ContentBlock::Text {
+                text: format!(
+                    "must preserve instruction and evidence {i}: {}",
+                    "x".repeat(20_000)
+                ),
+                cache_control: None,
+            }],
+        })
+        .collect::<Vec<_>>()
+        .into();
+    let before = engine.session.messages.clone();
+    let summary = engine.session.compaction_summary_prompt.clone();
+    let client = MockLlmClient::new(Vec::new());
+    let mut turn = TurnContext::new(1);
+    assert!(
+        !engine
+            .recover_context_overflow(&client, "provider rejection fixture", &mut turn)
+            .await
+    );
+    assert_eq!(engine.session.messages.as_slice(), before.as_slice());
+    assert_eq!(engine.session.compaction_summary_prompt, summary);
+    assert_eq!(
+        client.call_count(),
+        1,
+        "a deterministic summary failure is not retried unchanged"
+    );
+}
+
+#[tokio::test]
 async fn manual_compaction_accounts_accepted_and_rejected_responses_once() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -7052,6 +7095,144 @@ fn deterministic_engine_config(workspace: &Path) -> EngineConfig {
         snapshots_enabled: false,
         subagents_enabled: false,
         ..EngineConfig::default()
+    }
+}
+
+#[tokio::test]
+async fn automatic_compaction_continues_one_task_and_suppresses_failed_passes() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+    for fail_summary in [false, true] {
+        let workspace = tempdir().unwrap();
+        fs::write(
+            workspace.path().join("README.md"),
+            "verified fixture evidence",
+        )
+        .unwrap();
+        let mock = std::sync::Arc::new(MockLlmClient::new(Vec::new()));
+        for step in 0..16 {
+            mock.push_turn(vec![
+                canned::message_start(&format!("response-{step}")),
+                canned::text_block_start(0),
+                canned::text_delta(0, &format!("Step {step}: {}", "x".repeat(32_000))),
+                canned::block_stop(0),
+                canned::tool_use_block_start(1, &format!("read-{step}"), "File"),
+                canned::tool_input_delta(1, r#"{"action":"read","path":"README.md"}"#),
+                canned::block_stop(1),
+                canned::message_delta("tool_use", None),
+                canned::message_stop(),
+            ]);
+        }
+        mock.push_turn(canned::simple_text_turn(
+            "All sixteen reads verified; task complete.",
+        ));
+        for checkpoint in 0..8 {
+            let content = if fail_summary {
+                json!([{"type":"tool_use","id":"unexpected","name":"File","input":{}}])
+            } else {
+                json!([{"type":"text","text":format!("Current objective: complete all sixteen reads. Checkpoint {checkpoint}: earlier reads verified. Preserve the user's no-publication constraint. Continue the remaining File reads, then report the observed evidence.")}])
+            };
+            mock.push_message_response(serde_json::from_value(json!({
+                "id":format!("summary-{checkpoint}"), "type":"message", "role":"assistant",
+                "content":content, "model":"mock-model", "usage":{"input_tokens":0,"output_tokens":0}
+            })).unwrap());
+        }
+        let config = Config::default();
+        let (engine, handle) = Engine::new_with_model_client(
+            deterministic_engine_config(workspace.path()),
+            &config,
+            mock.clone(),
+        );
+        let task = tokio::spawn(engine.run());
+        let mut op = external_user_message_op(
+            "Complete all sixteen reads; do not publish.",
+            AppMode::Agent,
+            &config,
+        );
+        if let Op::SendMessage {
+            compaction,
+            auto_approve,
+            ..
+        } = &mut op
+        {
+            compaction.token_threshold = 40_000;
+            *auto_approve = true;
+        }
+        handle.send(op).await.unwrap();
+        let mut completed = 0;
+        let mut failed = 0;
+        {
+            let mut rx = handle.rx_event.write().await;
+            loop {
+                match tokio::time::timeout(Duration::from_secs(30), rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                {
+                    Event::CompactionCompleted { auto: true, .. } => completed += 1,
+                    Event::CompactionFailed { auto: true, .. } => failed += 1,
+                    Event::TurnComplete { status, error, .. } => {
+                        assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let requests = mock.captured_requests();
+        let streaming = requests
+            .iter()
+            .filter(|r| r.stream == Some(true))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            streaming.len(),
+            17,
+            "one user request must continue through all tool steps"
+        );
+        if fail_summary {
+            assert_eq!(
+                (completed, failed),
+                (0, 1),
+                "failed compaction must not loop at every tool boundary"
+            );
+        } else {
+            assert!(
+                (2..=6).contains(&completed),
+                "expected repeated useful compaction: {completed}"
+            );
+            assert_eq!(failed, 0);
+        }
+        for request in &requests {
+            assert_eq!(
+                request.system, streaming[0].system,
+                "the stable system prefix must survive every pass"
+            );
+            assert_eq!(
+                request.tools, streaming[0].tools,
+                "summarizing must reuse the tool prefix"
+            );
+            if request.stream == Some(false) {
+                assert_eq!(request.tool_choice, Some(json!("none")));
+            }
+            let mut calls = HashSet::new();
+            for message in &request.messages {
+                for block in &message.content {
+                    match block {
+                        ContentBlock::ToolUse { id, .. } => {
+                            calls.insert(id);
+                        }
+                        ContentBlock::ToolResult { tool_use_id, .. } => assert!(
+                            calls.contains(tool_use_id),
+                            "orphan tool result after compaction"
+                        ),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let snapshot = handle.get_session_snapshot().await.unwrap();
+        assert!(snapshot.messages.iter().any(|m| m.content.iter().any(|b| matches!(b, ContentBlock::Text {text,..} if text.contains("All sixteen reads verified")))));
+        handle.send(Op::Shutdown).await.unwrap();
+        task.await.unwrap();
     }
 }
 
@@ -17918,6 +18099,14 @@ fn turn_metadata_keeps_stable_fields_while_pressure_reports_live_estimates() {
     let first = message_for(&engine);
     let first_meta = meta_of(&first);
     assert!(
+        !first_meta.contains("Context pressure:"),
+        "automatic continuity must not ask the user to manage context: {first_meta}"
+    );
+    assert!(!first_meta.contains("/compact"));
+    engine.config.compaction.enabled = false;
+    let first = message_for(&engine);
+    let first_meta = meta_of(&first);
+    assert!(
         first_meta.contains("Context pressure: critical"),
         "fixture must exercise the pressure line: {first_meta}"
     );
@@ -17937,7 +18126,7 @@ fn turn_metadata_keeps_stable_fields_while_pressure_reports_live_estimates() {
         without_pressure(&second_meta)
     );
     assert!(second_meta.contains("Estimated input:"));
-    assert!(second_meta.contains("trigger:"));
+    assert!(second_meta.contains("Automatic compaction is explicitly disabled"));
 }
 
 #[tokio::test]
@@ -20481,11 +20670,11 @@ async fn headless_turn_retries_mid_stream_network_drop_and_recovers() {
     );
     assert!(error.is_none(), "recovered turn must not report an error");
     assert!(
-        events.iter().any(|event| matches!(
+        !events.iter().any(|event| matches!(
             event,
-            Event::Status { message } if message.contains("Connection interrupted; retrying (1/")
+            Event::Status { message } if message.contains("Reconnecting") || message.contains("Connection interrupted")
         )),
-        "the retry must be announced on the status channel: {events:?}"
+        "a successful first retry should remain quiet: {events:?}"
     );
     assert!(
         !events
@@ -20650,7 +20839,7 @@ async fn terminal_output_limit_followed_by_stream_error_is_charged_and_not_retri
     );
     assert!(!events.iter().any(|event| matches!(
         event,
-        Event::Status { message } if message.contains("Connection interrupted; retrying")
+        Event::Status { message } if message.contains("Reconnecting")
     )));
 
     handle.send(Op::Shutdown).await.expect("shutdown engine");
@@ -21009,11 +21198,11 @@ async fn interactive_turn_preserves_partial_reply_and_recovers_after_network_dro
     );
     assert!(error.is_none(), "recovered turn must not report an error");
     assert!(
-        events.iter().any(|event| matches!(
+        !events.iter().any(|event| matches!(
             event,
-            Event::Status { message } if message.contains("preserving partial reply and retrying (1/")
+            Event::Status { message } if message.contains("Reconnecting") || message.contains("Connection interrupted")
         )),
-        "the interactive retry must be announced on the status channel: {events:?}"
+        "a successful first retry should remain quiet: {events:?}"
     );
     assert!(
         !events
@@ -21229,30 +21418,10 @@ async fn interactive_thinking_only_drop_preserves_nothing_and_never_claims_it_di
         .expect("terminal TurnComplete");
     assert_eq!(status, TurnOutcomeStatus::Completed);
 
-    // Only hidden reasoning streamed, so the recovery copy must say "retrying"
-    // and must never claim a partial reply was preserved.
-    let retry_statuses = events
-        .iter()
-        .filter_map(|event| match event {
-            Event::Status { message } if message.contains("Connection interrupted") => {
-                Some(message.clone())
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        retry_statuses.len(),
-        1,
-        "exactly one bounded retry per drop: {events:?}"
-    );
-    assert!(
-        retry_statuses[0].contains("retrying (1/"),
-        "the retry status must be announced: {retry_statuses:?}"
-    );
-    assert!(
-        !retry_statuses[0].contains("preserving partial reply"),
-        "a thinking-only drop has no visible text to preserve: {retry_statuses:?}"
-    );
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        Event::Status { message } if message.contains("Reconnecting") || message.contains("Connection interrupted")
+    )), "a thinking-only first retry must remain quiet");
 
     // The persisted conversation keeps the operator's turn and exactly one
     // authoritative assistant answer — no synthetic `[runtime]` user message,
@@ -21687,6 +21856,16 @@ async fn headless_turn_fails_with_real_error_after_network_drop_budget_exhausted
     assert_eq!(
         error_events, 1,
         "only the final, budget-exhausted attempt may emit an error event: {events:?}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event,
+                Event::Status { message } if message == "Reconnecting…"
+            ))
+            .count(),
+        1,
+        "a persistent retry gets one progress notice, not one per attempt"
     );
 }
 

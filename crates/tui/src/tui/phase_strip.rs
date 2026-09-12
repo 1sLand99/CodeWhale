@@ -804,11 +804,16 @@ struct PostureItem {
 /// can open, the hint names a chord you can press right now (`Esc to
 /// interrupt`, `Enter again to send now`). An 80-column row carrying the
 /// filesystem-scope notice cannot hold all of it, and losing the affordance
-/// to keep the stopwatch is the wrong trade. The turn half goes before the
-/// session half: the transcript's active row and the spinner also show the
-/// turn is alive, while the session total is stated nowhere else. Above
-/// them the context-cap warning, which is not a hint but the reason the
-/// next turn will not start at all.
+/// to keep the stopwatch is the wrong trade. When both halves would paint,
+/// the turn half goes before the session half: the transcript's active row
+/// and the spinner also show the turn is alive, while the session total is
+/// stated nowhere else. When the session half is suppressed (#6041) or
+/// otherwise absent, the turn half sheds at the session-clock rung instead
+/// so the ladder does not abandon the only clock at the turn-only rung
+/// while a both-clocks row would still be stating a stopwatch (#6084).
+/// The hint and counts still outrank it (#5914). Above them the
+/// context-cap warning, which is not a hint but the reason the next turn
+/// will not start at all.
 const SHED_TURN_CLOCK: u8 = 1;
 const SHED_SESSION_CLOCK: u8 = 2;
 const SHED_HINT: u8 = 3;
@@ -854,7 +859,17 @@ fn posture_items(footer: &TidelineFooter<'_>, shed: u8) -> Vec<PostureItem> {
             count_index: None,
         });
     }
-    if let Some((clock, ink)) = footer.turn_clock.filter(|_| shed < SHED_TURN_CLOCK) {
+    // When no session half will paint, shed the turn clock at the session
+    // rung so a width that would keep the session half (and drop the turn)
+    // still keeps the only informative clock (#6084). Hint and counts still
+    // outrank it (#5914). With both halves present the turn half still goes
+    // first.
+    let turn_shed = if footer.session_clock.is_none() {
+        SHED_SESSION_CLOCK
+    } else {
+        SHED_TURN_CLOCK
+    };
+    if let Some((clock, ink)) = footer.turn_clock.filter(|_| shed < turn_shed) {
         items.push(PostureItem {
             text: footer.sym(clock),
             ink,

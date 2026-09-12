@@ -775,6 +775,69 @@ fn provider_context_scenario() -> Result<()> {
 }
 
 #[test]
+fn model_context_windows_load_isolate_and_validate() -> Result<()> {
+    // A gateway fronting heterogeneous models: slash and dotted wire ids both
+    // land as exact keys of the provider's own table (#6108).
+    let config: Config = toml::from_str(
+        r#"
+provider = "command_code"
+
+[providers.command_code]
+kind = "openai-compatible"
+base_url = "https://gateway.example/v1"
+model = "qwen3.5-flash"
+context_window = 204800
+
+[providers.command_code.model_context_windows]
+"qwen3.5-flash" = 131072
+"MiniMaxAI/MiniMax-M2.5" = 1000000
+
+[providers.openai.model_context_windows]
+"qwen3.5-flash" = 64000
+"#,
+    )?;
+
+    config.validate()?;
+
+    let custom = config
+        .model_context_windows_for(ApiProvider::Custom)
+        .expect("custom provider table resolves by selected provider name");
+    assert_eq!(custom.get("qwen3.5-flash"), Some(&131_072));
+    assert_eq!(custom.get("MiniMaxAI/MiniMax-M2.5"), Some(&1_000_000));
+
+    // Per-provider isolation: the same wire id under another provider is a
+    // different override, and untouched providers have no table at all.
+    assert_eq!(
+        config
+            .model_context_windows_for(ApiProvider::Openai)
+            .and_then(|table| table.get("qwen3.5-flash").copied()),
+        Some(64_000)
+    );
+    assert!(
+        config
+            .model_context_windows_for(ApiProvider::Moonshot)
+            .is_none()
+    );
+
+    // A zero entry fails validation with the full key path in the error.
+    let zeroed: Config = toml::from_str(
+        r#"
+[providers.openai.model_context_windows]
+"qwen3.5-flash" = 0
+"#,
+    )
+    .expect("zero is syntactically valid TOML");
+    let err = zeroed
+        .validate()
+        .expect_err("zero per-model context window must be rejected");
+    assert!(
+        err.to_string().contains("model_context_windows"),
+        "unexpected error: {err}"
+    );
+    Ok(())
+}
+
+#[test]
 fn opencode_go_context_window_zero_is_invalid() {
     let config: Config = toml::from_str(
         r#"

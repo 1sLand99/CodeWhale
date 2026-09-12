@@ -174,7 +174,10 @@ fn marketplace_add_list_show_remove_roundtrip() {
     let empty = plugins_with_kimi_home_override(&mut app, Some("marketplace list"), None)
         .message
         .unwrap();
-    assert!(empty.contains("No marketplace catalogs"), "{empty}");
+    assert!(
+        empty.contains("codewhale") && empty.contains("whalewiki"),
+        "{empty}"
+    );
 }
 
 #[test]
@@ -261,7 +264,7 @@ fn marketplace_add_rejects_symlinks_and_bad_documents() {
         plugins_with_kimi_home_override(&mut app, Some("marketplace list"), None)
             .message
             .unwrap()
-            .contains("No marketplace catalogs")
+            .contains("codewhale")
     );
 
     // corrupt stored state fails closed and is never rewritten

@@ -1819,6 +1819,7 @@
   "StatusMcpConfigured": "{count} configurats",
   "StatusContextUsage": "{percent}% utilitzat ({used} / {max} tokens)",
   "StatusContextSourceConfigured": "configurada",
+  "StatusContextSourceConfiguredModel": "configurada (per model)",
   "StatusContextSourceProviderReported": "informada pel proveïdor",
   "StatusContextSourceKimiSafeFloor": "mínim segur estàtic de Kimi Code",
   "StatusContextSourceCatalog": "catàleg",

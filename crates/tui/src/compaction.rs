@@ -10,7 +10,7 @@ use crate::core::model_client::ModelClient;
 use crate::logging;
 use codewhale_models::Role;
 use codewhale_models::{
-    CacheControl, ContentBlock, Message, MessageRequest, SystemBlock, SystemPrompt, Usage,
+    CacheControl, ContentBlock, Message, MessageRequest, SystemBlock, SystemPrompt, Tool, Usage,
 };
 
 #[path = "compaction/last_round.rs"]
@@ -72,6 +72,9 @@ pub struct PreparedCompactionEnvelope {
     pub config: CompactionConfig,
     /// Durable handoff owner; set by the engine, never added to the stable prefix.
     pub session_id: Option<String>,
+    /// Exact tool prefix of the interrupted request. Tool execution remains
+    /// disabled on the summary call; retaining schemas preserves cache reuse.
+    pub tools: Option<Vec<Tool>>,
 }
 
 impl PreparedCompactionEnvelope {
@@ -80,6 +83,7 @@ impl PreparedCompactionEnvelope {
         Self {
             config,
             session_id: None,
+            tools: None,
         }
     }
 }
@@ -98,9 +102,7 @@ impl Default for CompactionConfig {
             // unconfigured caller toward "compact almost immediately on large-context routes."
             // Bumped to 800K (80% of a 1M window) so the fallback
             // default matches the hard automatic compaction guardrail. This
-            // is intentionally later than the model-visible 60% "suggest
-            // /compact during sustained work" guidance so automatic
-            // replacement compaction stays a late continuity guardrail.
+            // keeps replacement compaction a late continuity guardrail.
             // Real call sites override this via
             // `compaction_threshold_for_model_and_effort`.
             token_threshold: 800_000,
@@ -150,7 +152,6 @@ const MIN_SUMMARIZE_MESSAGES: usize = 6;
 const SUMMARY_TOOL_RESULT_SNIPPET_CHARS: usize = 240;
 const TOOL_PRUNE_STOP_CHECK_BYTES: usize = 16 * 1024;
 const RETAINED_TOOL_RESULT_MAX_CHARS: usize = 64 * 1024;
-const RETAINED_THINKING_MAX_CHARS: usize = 16 * 1024;
 /// Token budget for the recent user messages retained verbatim in the
 /// replacement history (Codex parity: COMPACT_USER_MESSAGE_MAX_TOKENS).
 ///
@@ -166,6 +167,8 @@ handoff summary for another LLM that will resume the task.\n\nInclude:\n\
 - Current progress and key decisions made\n\
 - Important context, constraints, or user preferences\n\
 - What remains to be done (clear next steps)\n\
+- The user's current objective, latest corrections, and already-granted permissions or explicit prohibitions\n\
+- Active commands, task and session handles, changed files, and the exact verification still needed\n\
 - Any critical data, examples, or references needed to continue (exact file paths, commands, and error text)\n\n\
 Be concise, structured, and focused on helping the next LLM seamlessly continue the work. Do not call tools.\n\
 Summarize the task, not the checkpoint machinery: do not mention compaction, checkpoints, or \
@@ -436,7 +439,7 @@ fn estimate_retained_floor_conservative(
     prepared: &PreparedCompactionEnvelope,
 ) -> usize {
     let config = &prepared.config;
-    let retained = retained_user_messages(messages, config.retained_user_message_tokens);
+    let retained = last_round::replacement_messages(messages, config.retained_user_message_tokens);
     let retained_tokens = estimate_tokens(&retained).saturating_mul(3).div_ceil(2);
     let framing = retained.len().saturating_mul(12).saturating_add(48);
     let anchors = user_anchors_section(config.workspace.as_deref());
@@ -600,7 +603,7 @@ pub fn compaction_decision_with_billed(
         };
         let reclaimed_tokens: usize = prune_plan.iter().map(PlannedPrune::tokens_reclaimed).sum();
         let projected = estimate.saturating_sub(reclaimed_tokens);
-        if projected < config.token_threshold {
+        if projected < config.token_threshold.saturating_mul(4) / 5 {
             return CompactionDecision::Compact;
         }
     }
@@ -894,41 +897,19 @@ fn truncate_retained_block(label: &str, content: &mut String, max_chars: usize) 
     true
 }
 
-// A match guard cannot mutably borrow `content`; keeping the mutation inside
-// the arm updates both retained representations together without indirection.
-#[allow(clippy::collapsible_match)]
+// Retained reasoning is replay protocol even without a signature (DeepSeek
+// tool turns). Summarize older exchanges as units; do not rewrite their peers.
 fn sanitize_retained_messages(mut messages: Vec<Message>) -> Vec<Message> {
     for message in &mut messages {
         for block in &mut message.content {
-            match block {
-                ContentBlock::ToolResult {
-                    content,
-                    content_blocks,
-                    ..
-                } => {
-                    if truncate_retained_block(
-                        "tool result",
-                        content,
-                        RETAINED_TOOL_RESULT_MAX_CHARS,
-                    ) {
-                        *content_blocks = None;
-                    }
-                }
-                // Signed thinking must stay byte-for-byte valid for providers that
-                // verify replay signatures. Unsigned thinking is local memory pressure
-                // and can be capped once compaction has summarized the old turn.
-                ContentBlock::Thinking {
-                    thinking,
-                    signature,
-                    ..
-                } if signature.is_none() => {
-                    truncate_retained_block(
-                        "thinking block",
-                        thinking,
-                        RETAINED_THINKING_MAX_CHARS,
-                    );
-                }
-                _ => {}
+            if let ContentBlock::ToolResult {
+                content,
+                content_blocks,
+                ..
+            } = block
+                && truncate_retained_block("tool result", content, RETAINED_TOOL_RESULT_MAX_CHARS)
+            {
+                *content_blocks = None;
             }
         }
     }
@@ -1098,6 +1079,9 @@ pub async fn compact_messages_safe(
 
     let config = &prepared.config;
     let was_over_threshold = compaction_pressure_reached(messages, system_prompt, config);
+    // Leave room for useful work after a local prune. Clearing the trigger
+    // by a few tokens caused another prefix rewrite on the next tool result.
+    let prune_target = config.token_threshold.saturating_mul(4) / 5;
     let mut pruned_messages = messages.to_vec();
     let mut now_under_threshold = false;
     let mut next_stop_check_bytes = 0usize;
@@ -1109,22 +1093,24 @@ pub async fn compact_messages_safe(
                 return false;
             }
 
-            // Stop at the first suffix-side prune check that clears the threshold.
+            // Stop at the first suffix-side prune check that clears the target.
             // The check itself is a full compaction-plan pass, so bound it by saved
             // bytes instead of running it after every candidate in huge sessions.
             next_stop_check_bytes = bytes_saved.saturating_add(TOOL_PRUNE_STOP_CHECK_BYTES);
             now_under_threshold =
-                !compaction_pressure_reached(candidate_messages, system_prompt, config);
+                estimate_input_tokens_for_pressure(candidate_messages, system_prompt)
+                    < prune_target;
             now_under_threshold
         },
     );
     if was_over_threshold && pruned_bytes > 0 && !now_under_threshold {
         // The throttled in-loop check may skip the exact candidate that clears the
         // budget. Do one final pass so a successful local prune still avoids LLM compaction.
-        now_under_threshold = !compaction_pressure_reached(&pruned_messages, system_prompt, config);
+        now_under_threshold =
+            estimate_input_tokens_for_pressure(&pruned_messages, system_prompt) < prune_target;
     }
 
-    let compaction_input: &[Message] = if pruned_bytes > 0 {
+    if pruned_bytes > 0 {
         logging::info(format!(
             "Local tool-result prune saved {pruned_bytes} bytes before LLM compaction"
         ));
@@ -1146,10 +1132,7 @@ pub async fn compact_messages_safe(
                 coverage,
             });
         }
-        &pruned_messages
-    } else {
-        messages
-    };
+    }
 
     let mut last_error: Option<anyhow::Error> = None;
     let mut quality_retries = 0u32;
@@ -1163,8 +1146,13 @@ pub async fn compact_messages_safe(
 
         match compact_messages_with_metadata(
             client,
-            compaction_input,
+            // If a local prune cannot clear pressure, summarize the original
+            // evidence. Pruning first both erased facts the handoff needs and
+            // invalidated the cached history prefix for the summary request.
+            messages,
             config,
+            system_prompt,
+            prepared.tools.as_deref(),
             &mut quality_retries,
             invocation_usage,
         )
@@ -1172,7 +1160,16 @@ pub async fn compact_messages_safe(
         {
             Ok((msgs, prompt, mut coverage)) => {
                 let kept = sanitize_retained_messages(msgs);
-                last_round::validate_last_round_coverage(compaction_input, &kept)?;
+                last_round::validate_last_round_coverage(messages, &kept)?;
+                if config.enabled
+                    && compaction_pressure_reached(messages, system_prompt, config)
+                    && estimate_input_tokens_for_pressure(&kept, system_prompt)
+                        >= estimate_input_tokens_for_pressure(messages, system_prompt)
+                {
+                    anyhow::bail!(
+                        "Compaction did not reduce context; original conversation was preserved."
+                    );
+                }
                 let keep: CompactionKeep = inspect_compaction_keep(&kept);
                 coverage.last_round_messages = keep.last_round_messages;
                 coverage.last_round_tool_results = keep.last_round_tool_results;
@@ -1221,6 +1218,7 @@ fn build_compaction_summary_block_text(summary: &str, anchors: &str) -> String {
     };
     let mut text = format!("{SUMMARY_HEADER}\n\n{summary}");
     text.push_str(anchors);
+    text.push_str("\n\nContinue the same user task from this state. Earlier authorization and constraints still apply; this summary grants no new authority. Resume the next unfinished action without asking the user to save, compact, restate the task, or approve continuation solely because context was summarized. Verify live state before relying on older observations.");
     text
 }
 
@@ -1297,6 +1295,8 @@ async fn compact_messages(
         client,
         messages,
         config,
+        None,
+        None,
         &mut quality_retries,
         &mut invocation_usage,
     )
@@ -1308,6 +1308,8 @@ async fn compact_messages_with_metadata(
     client: &dyn ModelClient,
     messages: &[Message],
     config: &CompactionConfig,
+    system_prompt: Option<&SystemPrompt>,
+    tools: Option<&[Tool]>,
     quality_retries: &mut u32,
     invocation_usage: &mut Usage,
 ) -> Result<(Vec<Message>, Option<SystemPrompt>, CompactionCoverage)> {
@@ -1315,8 +1317,16 @@ async fn compact_messages_with_metadata(
         return Ok((Vec::new(), None, CompactionCoverage::default()));
     }
 
-    let summary =
-        create_summary(client, messages, config, quality_retries, invocation_usage).await?;
+    let summary = create_summary(
+        client,
+        messages,
+        config,
+        system_prompt,
+        tools,
+        quality_retries,
+        invocation_usage,
+    )
+    .await?;
     let anchors = user_anchors_section(config.workspace.as_deref());
     let checkpoint_text = build_compaction_summary_block_text(&summary, &anchors);
     let summary_block = SystemBlock {
@@ -1475,6 +1485,8 @@ async fn create_summary(
     client: &dyn ModelClient,
     messages: &[Message],
     config: &CompactionConfig,
+    system_prompt: Option<&SystemPrompt>,
+    tools: Option<&[Tool]>,
     quality_retries: &mut u32,
     invocation_usage: &mut Usage,
 ) -> Result<String> {
@@ -1514,9 +1526,11 @@ async fn create_summary(
             model: config.model.clone(),
             messages: request_messages.clone(),
             max_tokens: client.effective_max_output_tokens(&cost_route.model),
-            system: None,
-            tools: None,
-            tool_choice: None,
+            system: system_prompt.cloned(),
+            tools: tools.map(<[Tool]>::to_vec),
+            tool_choice: tools
+                .filter(|tools| !tools.is_empty())
+                .map(|_| serde_json::json!("none")),
             metadata: None,
             thinking: None,
             reasoning_effort: None,
@@ -1575,6 +1589,15 @@ async fn create_summary(
             anyhow::bail!(
                 "Compaction summary response incomplete: provider stop reason `{}`; the partial summary was not accepted.",
                 codewhale_models::stop_reason_detail(response.stop_reason.as_deref())
+            );
+        }
+        if response
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
+        {
+            anyhow::bail!(
+                "Compaction returned a tool call instead of a completed handoff; original conversation was preserved."
             );
         }
 
@@ -2246,6 +2269,90 @@ mod tests {
         );
         last_round::validate_last_round_coverage(&messages, &retained[..retained.len() - 1])
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn uninterrupted_task_compacts_repeatedly_with_original_prefix_and_recent_tool_pairs() {
+        let system = SystemPrompt::Text("stable project instructions and permissions".into());
+        let mut prepared = PreparedCompactionEnvelope::new(CompactionConfig {
+            token_threshold: 40_000,
+            model: "test-model".into(),
+            ..Default::default()
+        });
+        prepared.tools = Some(vec![
+            serde_json::from_value(json!({
+                "name": "File", "description": "Read a file", "input_schema": {"type": "object"}
+            }))
+            .unwrap(),
+        ]);
+        let client = FixedSummaryClient::default();
+        let mut messages = vec![msg(
+            "user",
+            "Finish the migration. Preserve logins; do not publish.",
+        )];
+        for epoch in 0..3 {
+            for step in 0..20 {
+                let id = format!("{epoch}-{step}");
+                let mut call = tool_use(&id, "File", json!({"path":"session.rs"}));
+                call.content.insert(
+                    0,
+                    ContentBlock::Text {
+                        text: format!("Evidence {id}: {}", "x".repeat(12_000)),
+                        cache_control: None,
+                    },
+                );
+                if step == 19 {
+                    call.content.insert(
+                        0,
+                        ContentBlock::Thinking {
+                            thinking: "retained reasoning ".repeat(2000),
+                            signature: None,
+                            state: None,
+                        },
+                    );
+                }
+                messages.push(call);
+                messages.push(tool_result(
+                    &id,
+                    &format!("Observed {id}: {}", "e".repeat(1000)),
+                ));
+            }
+            let original = messages.clone();
+            let mut usage = Usage::default();
+            let result =
+                compact_messages_safe(&client, &messages, Some(&system), &prepared, &mut usage)
+                    .await
+                    .unwrap();
+            let request = client.request.lock().unwrap().clone().unwrap();
+            assert_eq!(request.system.as_ref(), Some(&system));
+            assert_eq!(request.tools, prepared.tools);
+            assert_eq!(request.tool_choice, Some(json!("none")));
+            assert_eq!(
+                &request.messages[..original.len()],
+                original.as_slice(),
+                "summary must see the original evidence and reusable history prefix"
+            );
+            assert!(estimate_tokens(&result.messages) < estimate_tokens(&original) / 2);
+            assert_eq!(
+                result
+                    .messages
+                    .iter()
+                    .filter(|m| is_compaction_checkpoint_message(m))
+                    .count(),
+                1
+            );
+            for step in [18, 19] {
+                let id = format!("{epoch}-{step}");
+                let expected = original.iter().find(|m| m.content.iter().any(|b| matches!(b, ContentBlock::ToolUse { id: found, .. } if found == &id))).unwrap();
+                assert!(
+                    result.messages.contains(expected),
+                    "retained assistant text, calls and reasoning must survive unchanged"
+                );
+                assert!(result.messages.iter().any(|m| m.content.iter().any(|b| matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == &id))));
+            }
+            assert_eq!(result.messages[0], original[0]);
+            messages = result.messages;
+        }
     }
 
     #[test]

@@ -3712,6 +3712,12 @@ pub struct ProviderConfig {
         alias = "contextLength"
     )]
     pub context_window: Option<u32>,
+    /// Per-model context-window overrides keyed by exact wire model id
+    /// (`[providers.<name>.model_context_windows]`, #6108). A matching entry
+    /// wins over this provider's `context_window` for that model only, so one
+    /// gateway can front models with heterogeneous windows.
+    #[serde(default, alias = "modelContextWindows")]
+    pub model_context_windows: Option<std::collections::BTreeMap<String, u32>>,
     pub mode: Option<String>,
     /// Dual-wire dialect toggle: `openai` (default) or `anthropic`.
     /// Not a separate catalog provider — config only (DeepSeek / MiniMax /
@@ -4039,9 +4045,12 @@ impl ProvidersConfig {
         ];
         for (name, config) in builtins {
             validate_provider_context_window(name, config.context_window)?;
+            validate_model_context_windows(name, config.model_context_windows.as_ref())?;
         }
         for (name, config) in &self.custom {
-            validate_provider_context_window(&format!("providers.{name}"), config.context_window)?;
+            let name = format!("providers.{name}");
+            validate_provider_context_window(&name, config.context_window)?;
+            validate_model_context_windows(&name, config.model_context_windows.as_ref())?;
         }
         Ok(())
     }
@@ -4050,6 +4059,20 @@ impl ProvidersConfig {
 fn validate_provider_context_window(name: &str, value: Option<u32>) -> Result<()> {
     if value == Some(0) {
         anyhow::bail!("{name}.context_window must be greater than 0");
+    }
+    Ok(())
+}
+
+fn validate_model_context_windows(
+    name: &str,
+    table: Option<&std::collections::BTreeMap<String, u32>>,
+) -> Result<()> {
+    if let Some(table) = table {
+        for (model, window) in table {
+            if *window == 0 {
+                anyhow::bail!("{name}.model_context_windows.{model} must be greater than 0");
+            }
+        }
     }
     Ok(())
 }
@@ -6115,6 +6138,30 @@ impl Config {
                 .provider_config_for(ApiProvider::Siliconflow)
                 .and_then(|entry| entry.context_window)
                 .filter(|window| *window > 0);
+        }
+        None
+    }
+
+    /// `[providers.<id>.model_context_windows]` for this provider, keyed by
+    /// exact wire model id (#6108). Follows the same SiliconFlow CN sibling
+    /// fallback as [`Self::context_window_for_provider_config`].
+    #[must_use]
+    pub(crate) fn model_context_windows_for(
+        &self,
+        provider: ApiProvider,
+    ) -> Option<&std::collections::BTreeMap<String, u32>> {
+        let table = self
+            .provider_config_for(provider)
+            .and_then(|entry| entry.model_context_windows.as_ref())
+            .filter(|table| !table.is_empty());
+        if table.is_some() {
+            return table;
+        }
+        if provider == ApiProvider::SiliconflowCn {
+            return self
+                .provider_config_for(ApiProvider::Siliconflow)
+                .and_then(|entry| entry.model_context_windows.as_ref())
+                .filter(|table| !table.is_empty());
         }
         None
     }
@@ -11165,6 +11212,9 @@ fn merge_provider_config(base: ProviderConfig, override_cfg: ProviderConfig) -> 
         base_url: override_cfg.base_url.or(base.base_url),
         model: override_cfg.model.or(base.model),
         context_window: override_cfg.context_window.or(base.context_window),
+        model_context_windows: override_cfg
+            .model_context_windows
+            .or(base.model_context_windows),
         mode: override_cfg.mode.or(base.mode),
         wire: override_cfg.wire.or(base.wire),
         auth_mode: override_cfg.auth_mode.or(base.auth_mode),
@@ -12177,6 +12227,10 @@ fn provider_config_is_explicit(entry: &ProviderConfig) -> bool {
             .as_ref()
             .is_some_and(|auth| auth.validate().is_ok())
         || entry.context_window.is_some()
+        || entry
+            .model_context_windows
+            .as_ref()
+            .is_some_and(|table| !table.is_empty())
         || non_empty(entry.mode.as_ref())
         || entry.max_concurrency.is_some()
         || entry.http_headers.as_ref().is_some_and(|headers| {
