@@ -56,18 +56,32 @@ const SHELL_NAMES: &[&str] = &[
 ///
 /// Results contain word-split commands, substitutions and wrapper payloads.
 /// Literal data, including quoted heredoc bodies, is not treated as code.
+/// Windows scans retain native path separators as well as POSIX candidates.
 pub fn expanded_commands(command: &str) -> Vec<String> {
+    expanded_commands_for_platform(command, cfg!(windows))
+}
+
+fn expanded_commands_for_platform(command: &str, windows: bool) -> Vec<String> {
     let mut expander = Expander {
         out: Vec::new(),
         seen: HashSet::new(),
+        literal_backslashes: windows,
     };
+    // Native Windows shells preserve path separators. Also retain the POSIX
+    // interpretation for Bash/WSL commands. Both passes use the same bounded,
+    // heredoc-aware parser and only contribute deny targets, never grants.
     expander.expand(command, 0);
+    if windows {
+        expander.literal_backslashes = false;
+        expander.expand(command, 0);
+    }
     expander.out
 }
 
 struct Expander {
     out: Vec<String>,
     seen: HashSet<String>,
+    literal_backslashes: bool,
 }
 
 impl Expander {
@@ -126,6 +140,11 @@ impl Expander {
                 // A backslash outside quotes escapes exactly one character,
                 // including an operator: `echo a\;b` is one word, not two
                 // commands. A backslash-newline is a line continuation.
+                '\\' if self.literal_backslashes => {
+                    word.push('\\');
+                    started = true;
+                    i += 1;
+                }
                 '\\' => {
                     if i + 1 < n {
                         if chars[i + 1] != '\n' {
@@ -156,6 +175,10 @@ impl Expander {
                     i += 1;
                     while i < n && chars[i] != '"' {
                         match chars[i] {
+                            '\\' if self.literal_backslashes => {
+                                word.push('\\');
+                                i += 1;
+                            }
                             '\\' if i + 1 < n => {
                                 word.push(chars[i + 1]);
                                 i += 2;
@@ -705,7 +728,46 @@ mod tests {
     use super::*;
 
     fn expand(command: &str) -> Vec<String> {
-        expanded_commands(command)
+        // Exercise the POSIX grammar consistently on every test host.
+        expanded_commands_for_platform(command, false)
+    }
+
+    #[test]
+    fn windows_scan_retains_native_paths_and_posix_deny_candidates() {
+        for (command, expected) in [
+            (
+                r"C:\Windows\System32\cat.exe ~/.ssh/id_rsa",
+                r"C:\Windows\System32\cat.exe ~/.ssh/id_rsa",
+            ),
+            (r"del /f c:\users\x\file", r"del /f c:\users\x\file"),
+            (
+                r"echo safe & xcopy /e /y c:\src d:\dst",
+                r"xcopy /e /y c:\src d:\dst",
+            ),
+            (
+                r#""C:\Program Files\cat.exe" "c:\path with spaces\file""#,
+                r"C:\Program Files\cat.exe c:\path with spaces\file",
+            ),
+            (r"del relative\file", r"del relative\file"),
+            (
+                r"\\server\share\cat.exe file",
+                r"\\server\share\cat.exe file",
+            ),
+            (r"bash -c 'rm -rf \/'", "rm -rf /"),
+        ] {
+            let targets = expanded_commands_for_platform(command, true);
+            assert!(
+                targets.iter().any(|target| target == expected),
+                "missing {expected:?} from {targets:?}"
+            );
+            assert!(targets.len() <= MAX_COMMANDS);
+        }
+        let targets =
+            expanded_commands_for_platform("cat <<'EOF'\ndel c:\\users\\x\\file\nEOF", true);
+        assert!(
+            !targets.iter().any(|target| target.starts_with("del ")),
+            "literal heredoc data must stay inert: {targets:?}"
+        );
     }
 
     fn contains(command: &str, expected: &str) -> bool {

@@ -784,7 +784,7 @@ impl App {
             context_pressure_warning_dismissed: None,
             plugin_reload_nudge_stamp: None,
             last_plugin_catalog_poll: None,
-            plugin_cta: crate::tui::plugin_suggestions::PluginCtaState::default(),
+            plugin_cta: crate::tui::plugin_suggestions::PluginCtaState::from_settings(&settings),
             model,
             provider_models,
             enabled_provider_models,

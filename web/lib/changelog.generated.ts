@@ -30,7 +30,7 @@ export const CHANGELOG: ChangelogRelease[] = [
   },
   {
     "version": "0.9.13",
-    "date": "2026-09-11",
+    "date": "2026-09-12",
     "unreleased": false,
     "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.9.12...v0.9.13",
     "sections": [
@@ -39,18 +39,18 @@ export const CHANGELOG: ChangelogRelease[] = [
         "items": [
           "Interrupted conversations whose saved runtime store is missing recover into a fresh scope without restoring old tasks or approvals. Stale session saves cannot resurrect the broken binding (#6102).",
           "Permission checks distinguish literal heredoc data from executable commands, including substitutions and shell stdin (#6098).",
-          "Compaction durably saves original history and the model-written handoff before replacing context; pressure metadata shows estimated tokens and the actual configured trigger (#5620). Session artifact publication uses confined handles.",
+          "Automatic compaction runs quietly from live context pressure, preserving the current task and recent tool exchanges while keeping the system/tool prefix stable. Original history and the handoff are saved before context replacement; failed or canceled compaction retains the conversation (#5620, #6047).",
+          "Custom and gateway providers can override context limits for each exact model, so switching models also switches the meter and compaction budget (#6108).",
+          "Plugin suggestions explain their matching term and remember explicit dismissals across restarts. Generic words and repository-host domains no longer trigger unrelated installation prompts (#6031).",
+          "Plugin trust and automation deletion have keyboard and mouse confirmation controls bound to the exact reviewed content; users can still copy the command and changed content requires a fresh review (#6039).",
+          "The model-facing MCP start tool can reconnect an existing configured name after login without changing its credential key or restarting healthy siblings (#6030).",
+          "Missed automation occurrences coalesce without overlapping a running job; restart reconciles durable receipts without replaying accepted work. Damaged neighboring records are isolated while preserving their original bytes.",
+          "The bundled first-party marketplace lists the actual plugin bundles and uses the existing install, review, trust and update paths. A read-only connection check verifies catalog and skill mirrors on changes and weekly.",
+          "Windows deny checks preserve native path separators while retaining the conservative POSIX scan for shell wrappers and substitutions.",
           "The config example agrees with the telemetry disclosure: usage analytics are optional and enabled by default; local diagnostics do not require telemetry (#6011).",
-          "Sub-agents enforce the session's typed shell and file deny rules, including Full Access, delegated edits, and policy updates after a child starts (#6097).",
-          "Live permission edits reach running engine clones atomically. Deny rules support token wildcards and Windows command spellings while keeping POSIX arguments literal (#6054, thanks @h3c-hexin and @asto18089).",
-          "Tool-result images use the existing typed inline path and are fully decoded under size and allocation limits before admission or provider projection. Invalid images keep a visible omission receipt alongside the text result (adapted from #6053, thanks @h3c-hexin and @asto18089).",
-          "A lone y, Y, or r remains composer input after selecting transcript text. Clicking the composer releases transcript and dock focus.",
-          "The Agents register updates from live worker events while the parent is busy, including when the register opened before the workers spawned.",
-          "Ghostty no longer shows a second graphical whale over the launch mark. The selected model stays visible before the first message; unused session metrics stay quiet. Scheduled counts open /automation directly.",
-          "Marketplace installation accepts compatible Claude plugin bundles and roots their relative sources outside .claude-plugin; unsupported components fail explicitly. Native trust and enablement review still applies.",
-          "Config table and nested reads work consistently and redact credentials. Unsupported dotted writes fail without changing the file, and config doctor no longer labels runtime settings as never applied (#6083)."
+          "Sub-agents enforce the session's typed shell and file deny rules, including Full Access, delegated edits, and policy updates after a child starts (#6097)."
         ],
-        "itemCount": 68
+        "itemCount": 75
       },
       {
         "heading": "Changed",

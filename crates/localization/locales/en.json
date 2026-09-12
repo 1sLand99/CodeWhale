@@ -487,6 +487,8 @@
   "PluginCtaInstallPrompt": "Install {name} plugin?",
   "PluginCtaReview": "Review",
   "PluginCtaDismiss": "Dismiss",
+  "PluginCtaDismissSaveFailed": "Hidden for this session; could not save the plugin preference.",
+  "PluginSuggestionReason": "Matched “{trigger}”",
   "CmdPluginBundleDetail": "{name}\n========================================\nID: {id}\nVersion: {version}\nSource: {origin} ({scope})\nState: {state}\nTrust: {trust}\nComponents: {inventory}\nRequested permissions: {permissions}\nMCP servers: {mcp}\nUnsupported/inactive: {unsupported}\nContent hash: {content_hash}\nCapability hash: {capability_hash}\nPath: {path}",
   "CmdPluginBundleDiagnosticsHeader": "Plugin diagnostics ({count}):",
   "CmdPluginBundleMutationSuccess": "Plugin bundle '{name}': {action}.",
@@ -2211,5 +2213,6 @@
   "ApprovalNeverPostureBlocked": "Blocked '{tool}': this session does not allow tools that require approval.",
   "NotificationWebApproved": "Approved on the web.",
   "NotificationWebDenied": "Denied on the web.",
-  "NotificationInputSubmitFailed": "Could not submit your answer: {error}. Try again."
+  "NotificationInputSubmitFailed": "Could not submit your answer: {error}. Try again.",
+  "PagerActionConfirm": "Confirm"
 }

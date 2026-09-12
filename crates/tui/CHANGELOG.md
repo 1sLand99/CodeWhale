@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.13] - 2026-09-11
+## [0.9.13] - 2026-09-12
 
 Codewhale v0.9.13 addresses integrity issues in 0.9.12:
 multiline paste is one paste again, truncated tool arguments can no longer execute, strict
@@ -26,9 +26,28 @@ reconnect.
   cannot resurrect the broken binding (#6102).
 - Permission checks distinguish literal heredoc data from executable commands,
   including substitutions and shell stdin (#6098).
-- Compaction durably saves original history and the model-written handoff before
-  replacing context; pressure metadata shows estimated tokens and the actual
-  configured trigger (#5620). Session artifact publication uses confined handles.
+- Automatic compaction runs quietly from live context pressure, preserving the
+  current task and recent tool exchanges while keeping the system/tool prefix
+  stable. Original history and the handoff are saved before context replacement;
+  failed or canceled compaction retains the conversation (#5620, #6047).
+- Custom and gateway providers can override context limits for each exact model,
+  so switching models also switches the meter and compaction budget (#6108).
+- Plugin suggestions explain their matching term and remember explicit dismissals
+  across restarts. Generic words and repository-host domains no longer trigger
+  unrelated installation prompts (#6031).
+- Plugin trust and automation deletion have keyboard and mouse confirmation
+  controls bound to the exact reviewed content; users can still copy the command
+  and changed content requires a fresh review (#6039).
+- The model-facing MCP start tool can reconnect an existing configured name after
+  login without changing its credential key or restarting healthy siblings (#6030).
+- Missed automation occurrences coalesce without overlapping a running job;
+  restart reconciles durable receipts without replaying accepted work. Damaged
+  neighboring records are isolated while preserving their original bytes.
+- The bundled first-party marketplace lists the actual plugin bundles and uses
+  the existing install, review, trust and update paths. A read-only connection
+  check verifies catalog and skill mirrors on changes and weekly.
+- Windows deny checks preserve native path separators while retaining the
+  conservative POSIX scan for shell wrappers and substitutions.
 - The config example agrees with the telemetry disclosure: usage analytics are
   optional and enabled by default; local diagnostics do not require telemetry (#6011).
 

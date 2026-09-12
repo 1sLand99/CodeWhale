@@ -487,6 +487,8 @@
   "PluginCtaInstallPrompt": "安装 {name} 插件？",
   "PluginCtaReview": "审查",
   "PluginCtaDismiss": "关闭",
+  "PluginCtaDismissSaveFailed": "已在本次会话中隐藏，但无法保存插件偏好设置。",
+  "PluginSuggestionReason": "匹配“{trigger}”",
   "CmdPluginBundleDetail": "{name}\n========================================\nID：{id}\n版本：{version}\n来源：{origin}（{scope}）\n状态：{state}\n信任：{trust}\n组件：{inventory}\n请求的权限：{permissions}\nMCP 服务器：{mcp}\n不支持/未启用：{unsupported}\n内容哈希：{content_hash}\n能力哈希：{capability_hash}\n路径：{path}",
   "CmdPluginBundleDiagnosticsHeader": "插件诊断（{count}）：",
   "CmdPluginBundleMutationSuccess": "插件包“{name}”：{action}。",
@@ -2211,5 +2213,6 @@
   "ApprovalNeverPostureBlocked": "已阻止“{tool}”：此会话不允许使用需要批准的工具。",
   "NotificationWebApproved": "已在网页上批准。",
   "NotificationWebDenied": "已在网页上拒绝。",
-  "NotificationInputSubmitFailed": "无法提交你的回答：{error}。请重试。"
+  "NotificationInputSubmitFailed": "无法提交你的回答：{error}。请重试。",
+  "PagerActionConfirm": "确认"
 }

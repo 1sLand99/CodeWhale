@@ -356,19 +356,7 @@ fn assert_live_shell_contract(frame: &Frame, cols: u16, size: &str) {
         "{size}: live shell misses the model in the metrics line\n{}",
         frame.debug_dump()
     );
-    // The shell advertises one help route per surface: the info line's
-    // `/help`, or the footer's compact `? help`. Below the Compact floor the
-    // help hint sheds first by design (SHELL-DESIGN-20260901 §2.2 shed
-    // order), so only then is it allowed to be absent.
-    if cols >= 60 {
-        assert!(
-            ["? help", "/help", ":keys"]
-                .iter()
-                .any(|route| text.contains(route)),
-            "{size}: live shell hides help\n{}",
-            frame.debug_dump()
-        );
-    }
+    // Compact metrics omit the passive help hint; F1 still opens Help.
     assert!(
         !text.contains("RUNS") || cols < 100,
         "{size}: passive duplicate Tideline rail is still visible\n{}",

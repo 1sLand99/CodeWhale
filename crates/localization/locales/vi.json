@@ -487,6 +487,8 @@
   "PluginCtaInstallPrompt": "Cài plugin {name}?",
   "PluginCtaReview": "Xem lại",
   "PluginCtaDismiss": "Bỏ",
+  "PluginCtaDismissSaveFailed": "Đã ẩn trong phiên này; không thể lưu tùy chọn plugin.",
+  "PluginSuggestionReason": "Khớp với “{trigger}”",
   "CmdPluginBundleDetail": "{name}\n========================================\nID: {id}\nPhiên bản: {version}\nNguồn: {origin} ({scope})\nTrạng thái: {state}\nTin cậy: {trust}\nThành phần: {inventory}\nQuyền được yêu cầu: {permissions}\nMáy chủ MCP: {mcp}\nKhông hỗ trợ/chưa hoạt động: {unsupported}\nMã băm nội dung: {content_hash}\nMã băm khả năng: {capability_hash}\nĐường dẫn: {path}",
   "CmdPluginBundleDiagnosticsHeader": "Chẩn đoán plugin ({count}):",
   "CmdPluginBundleMutationSuccess": "Gói plugin '{name}': {action}.",
@@ -2211,5 +2213,6 @@
   "ApprovalNeverPostureBlocked": "Đã chặn '{tool}': phiên này không cho phép các công cụ cần được chấp thuận.",
   "NotificationWebApproved": "Đã chấp thuận trên web.",
   "NotificationWebDenied": "Đã từ chối trên web.",
-  "NotificationInputSubmitFailed": "Không thể gửi câu trả lời của bạn: {error}. Hãy thử lại."
+  "NotificationInputSubmitFailed": "Không thể gửi câu trả lời của bạn: {error}. Hãy thử lại.",
+  "PagerActionConfirm": "Xác nhận"
 }

@@ -484,6 +484,8 @@
   "PluginCtaInstallPrompt": "Instal·lar el connector {name}?",
   "PluginCtaReview": "Revisa",
   "PluginCtaDismiss": "Descarta",
+  "PluginCtaDismissSaveFailed": "Ocult durant aquesta sessió; no s'ha pogut desar la preferència del connector.",
+  "PluginSuggestionReason": "Coincideix amb «{trigger}»",
   "CmdPluginBundleDetail": "{name}\n========================================\nID: {id}\nVersió: {version}\nFont: {origin} ({scope})\nEstat: {state}\nConfiança: {trust}\nComponents: {inventory}\nPermisos sol·licitats: {permissions}\nServidors MCP: {mcp}\nNo compatible/inactiu: {unsupported}\nHash de contingut: {content_hash}\nHash de capacitats: {capability_hash}\nRuta: {path}",
   "CmdPluginBundleDiagnosticsHeader": "Diagnòstics de plugins ({count}):",
   "CmdPluginBundleMutationSuccess": "Paquet de plugins '{name}': {action}.",
@@ -2211,5 +2213,6 @@
   "ApprovalNeverPostureBlocked": "S'ha bloquejat '{tool}': aquesta sessió no permet eines que requereixen aprovació.",
   "NotificationWebApproved": "Aprovat al web.",
   "NotificationWebDenied": "Denegat al web.",
-  "NotificationInputSubmitFailed": "No s'ha pogut enviar la resposta: {error}. Torna-ho a provar."
+  "NotificationInputSubmitFailed": "No s'ha pogut enviar la resposta: {error}. Torna-ho a provar.",
+  "PagerActionConfirm": "Confirma"
 }

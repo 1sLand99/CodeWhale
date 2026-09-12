@@ -4503,7 +4503,8 @@ impl McpPool {
         if self.config.servers.contains_key(&name) {
             return Err(format!(
                 "MCP server '{}' already exists in the config file. \
-                 Remove it from the config first, or choose a different name.",
+                 Reconnect with start_mcp_server using only its exact name (omit server), \
+                 or run /mcp retry with that name. This preserves its stored credentials.",
                 name
             ));
         }
@@ -4511,7 +4512,7 @@ impl McpPool {
         if dynamic.contains_key(&name) {
             return Err(format!(
                 "MCP server '{}' was already started earlier in this session. \
-                 Choose a different name.",
+                 Reconnect with start_mcp_server using only its exact name (omit server).",
                 name
             ));
         }

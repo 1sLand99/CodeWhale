@@ -6629,6 +6629,101 @@ fn millis_from_now(offset_ms: u64) -> u64 {
 }
 
 #[tokio::test]
+async fn model_reconnect_reuses_configured_credentials_without_restarting_siblings() {
+    use crate::tools::runtime_mcp::StartRuntimeMcpServer;
+    use crate::tools::spec::{ToolContext, ToolSpec};
+
+    let _env = crate::test_support::lock_test_env();
+    let dir = tempfile::tempdir().unwrap();
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+    let _backend = crate::test_support::EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+    let _loopback = lock_mcp_loopback_tests().await;
+    let mock = OAuthMcpMock::spawn().await;
+    let name = "existing_server";
+    let mut config = McpConfig::default();
+    config
+        .servers
+        .insert(name.into(), mock_oauth_server_config(mock.addr));
+    config
+        .servers
+        .insert("healthy".into(), mock_oauth_server_config(mock.addr));
+    seed_oauth_tokens(
+        "healthy",
+        &mock.url(),
+        "cw-test-access",
+        "rt-fresh",
+        Some(millis_from_now(3_600_000)),
+    );
+    let mut pool = McpPool::new(config);
+    pool.get_or_connect("healthy").await.unwrap();
+    let sibling_cancel = pool.connections["healthy"].cancel_token.clone();
+    assert!(
+        pool.get_or_connect(name).await.is_err(),
+        "boot before login must require auth"
+    );
+    let pool = Arc::new(tokio::sync::Mutex::new(pool));
+    let tool = StartRuntimeMcpServer::new(Arc::clone(&pool));
+    let mut context = ToolContext::new(dir.path());
+
+    // Credentials arrive from the separate login process under the original key.
+    seed_oauth_tokens(
+        name,
+        &mock.url(),
+        "cw-test-access",
+        "rt-fresh",
+        Some(millis_from_now(3_600_000)),
+    );
+    context.disallowed_tools = vec![format!("mcp_{name}_*")];
+    assert!(
+        tool.execute(serde_json::json!({"name": name}), &context)
+            .await
+            .is_err()
+    );
+    assert!(!pool.lock().await.connected_servers().contains(&name));
+    context.disallowed_tools.clear();
+    let result = tool
+        .execute(serde_json::json!({"name": name}), &context)
+        .await
+        .unwrap();
+    assert_eq!(
+        result.metadata,
+        Some(serde_json::json!({"mcp_catalog_changed": true}))
+    );
+    let mut lock = pool.lock().await;
+    assert!(lock.connected_servers().contains(&name));
+    assert!(
+        lock.all_tools()
+            .iter()
+            .any(|(tool, _)| tool == "mcp_existing_server_wiki_lookup")
+    );
+    assert!(
+        lock.dynamic_servers.read().is_empty(),
+        "reconnect cannot add an alias"
+    );
+    assert!(
+        !sibling_cancel.is_cancelled(),
+        "healthy sibling was restarted"
+    );
+    lock.call_tool("mcp_existing_server_wiki_lookup", serde_json::json!({}))
+        .await
+        .unwrap();
+    drop(lock);
+    assert!(
+        tool.execute(serde_json::json!({"name": "absent"}), &context)
+            .await
+            .is_err()
+    );
+    assert!(pool.lock().await.dynamic_servers.read().is_empty());
+    assert!(
+        oauth::load_oauth_tokens("existing-server", &mock.url())
+            .unwrap()
+            .is_none(),
+        "name must not be sanitized into another credential key"
+    );
+    mock.task.abort();
+}
+
+#[tokio::test]
 async fn needs_auth_server_advertises_synthetic_authenticate_tool() {
     let _env = crate::test_support::lock_test_env();
     let dir = tempfile::tempdir().unwrap();

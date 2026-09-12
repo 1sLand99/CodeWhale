@@ -487,6 +487,8 @@
   "PluginCtaInstallPrompt": "{name} プラグインをインストールしますか？",
   "PluginCtaReview": "確認",
   "PluginCtaDismiss": "閉じる",
+  "PluginCtaDismissSaveFailed": "このセッションでは非表示にしました。プラグインの設定を保存できませんでした。",
+  "PluginSuggestionReason": "「{trigger}」に一致",
   "CmdPluginBundleDetail": "{name}\n========================================\nID: {id}\nバージョン: {version}\n出所: {origin} ({scope})\n状態: {state}\n信頼: {trust}\nコンポーネント: {inventory}\n要求権限: {permissions}\nMCP サーバー: {mcp}\n未対応/無効: {unsupported}\nコンテンツハッシュ: {content_hash}\n権限ハッシュ: {capability_hash}\nパス: {path}",
   "CmdPluginBundleDiagnosticsHeader": "プラグイン診断 ({count}):",
   "CmdPluginBundleMutationSuccess": "プラグインバンドル '{name}': {action}。",
@@ -2211,5 +2213,6 @@
   "ApprovalNeverPostureBlocked": "「{tool}」をブロックしました。このセッションでは承認が必要なツールは許可されていません。",
   "NotificationWebApproved": "ウェブで承認されました。",
   "NotificationWebDenied": "ウェブで拒否されました。",
-  "NotificationInputSubmitFailed": "回答を送信できませんでした：{error}。もう一度お試しください。"
+  "NotificationInputSubmitFailed": "回答を送信できませんでした：{error}。もう一度お試しください。",
+  "PagerActionConfirm": "確認"
 }

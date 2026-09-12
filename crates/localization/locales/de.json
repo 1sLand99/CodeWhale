@@ -484,6 +484,8 @@
   "PluginCtaInstallPrompt": "{name}-Plugin installieren?",
   "PluginCtaReview": "Prüfen",
   "PluginCtaDismiss": "Verwerfen",
+  "PluginCtaDismissSaveFailed": "Für diese Sitzung ausgeblendet; die Plugin-Einstellung konnte nicht gespeichert werden.",
+  "PluginSuggestionReason": "Treffer für „{trigger}“",
   "CmdPluginBundleDetail": "{name}\n========================================\nID: {id}\nVersion: {version}\nQuelle: {origin} ({scope})\nStatus: {state}\nVertrauen: {trust}\nKomponenten: {inventory}\nAngeforderte Berechtigungen: {permissions}\nMCP-Server: {mcp}\nNicht unterstützt/inaktiv: {unsupported}\nInhalts-Hash: {content_hash}\nFähigkeits-Hash: {capability_hash}\nPfad: {path}",
   "CmdPluginBundleDiagnosticsHeader": "Plugin-Diagnose ({count}):",
   "CmdPluginBundleMutationSuccess": "Plugin-Bundle '{name}': {action}.",
@@ -2211,5 +2213,6 @@
   "ApprovalNeverPostureBlocked": "'{tool}' wurde blockiert: Diese Sitzung erlaubt keine Tools, die eine Genehmigung erfordern.",
   "NotificationWebApproved": "Im Web genehmigt.",
   "NotificationWebDenied": "Im Web abgelehnt.",
-  "NotificationInputSubmitFailed": "Deine Antwort konnte nicht gesendet werden: {error}. Versuche es erneut."
+  "NotificationInputSubmitFailed": "Deine Antwort konnte nicht gesendet werden: {error}. Versuche es erneut.",
+  "PagerActionConfirm": "Bestätigen"
 }

@@ -305,8 +305,7 @@ impl AutomationsView {
         }
     }
 
-    /// Delete starts the two-step confirmation the command already owns: the
-    /// preview names the exact confirm command.
+    /// Delete opens the shared review control with the exact snapshot token.
     fn delete(&self) -> ViewAction {
         match self.selected() {
             Some(row) => Self::command(format!("/automation delete {}", row.record.id)),

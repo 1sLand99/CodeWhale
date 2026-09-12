@@ -822,9 +822,8 @@ fn plugin_row_action(
             disposition: RowActionDisposition::InPlace,
         }
     } else {
-        // Trust is a deliberate confirmation — `/plugin trust <name>` prints
-        // the review and the token the person then types into the composer,
-        // so the panel yields.
+        // The command opens the exact-content review with its confirmation
+        // control, so this panel yields to that review.
         ExtensionAction::Command {
             label: tr(locale, MessageId::AutomationActionInspect).into_owned(),
             command: format!("/plugin trust {}", plugin.name()),

@@ -484,6 +484,8 @@
   "PluginCtaInstallPrompt": "Pasang plugin {name}?",
   "PluginCtaReview": "Tinjau",
   "PluginCtaDismiss": "Tutup",
+  "PluginCtaDismissSaveFailed": "Disembunyikan untuk sesi ini; preferensi plugin tidak dapat disimpan.",
+  "PluginSuggestionReason": "Cocok dengan “{trigger}”",
   "CmdPluginBundleDetail": "{name}\n========================================\nID: {id}\nVersi: {version}\nSumber: {origin} ({scope})\nStatus: {state}\nKepercayaan: {trust}\nKomponen: {inventory}\nIzin yang diminta: {permissions}\nServer MCP: {mcp}\nTidak didukung/nonaktif: {unsupported}\nHash konten: {content_hash}\nHash kapabilitas: {capability_hash}\nJalur: {path}",
   "CmdPluginBundleDiagnosticsHeader": "Diagnostik plugin ({count}):",
   "CmdPluginBundleMutationSuccess": "Bundel plugin '{name}': {action}.",
@@ -2211,5 +2213,6 @@
   "ApprovalNeverPostureBlocked": "'{tool}' diblokir: sesi ini tidak mengizinkan alat yang memerlukan persetujuan.",
   "NotificationWebApproved": "Disetujui di web.",
   "NotificationWebDenied": "Ditolak di web.",
-  "NotificationInputSubmitFailed": "Jawaban Anda tidak dapat dikirim: {error}. Coba lagi."
+  "NotificationInputSubmitFailed": "Jawaban Anda tidak dapat dikirim: {error}. Coba lagi.",
+  "PagerActionConfirm": "Konfirmasi"
 }

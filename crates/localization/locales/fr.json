@@ -484,6 +484,8 @@
   "PluginCtaInstallPrompt": "Installer le plugin {name} ?",
   "PluginCtaReview": "Examiner",
   "PluginCtaDismiss": "Ignorer",
+  "PluginCtaDismissSaveFailed": "Masqué pour cette session ; impossible d’enregistrer la préférence du plugin.",
+  "PluginSuggestionReason": "Correspond à « {trigger} »",
   "CmdPluginBundleDetail": "{name}\n========================================\nID : {id}\nVersion : {version}\nSource : {origin} ({scope})\nÉtat : {state}\nConfiance : {trust}\nComposants : {inventory}\nPermissions demandées : {permissions}\nServeurs MCP : {mcp}\nNon pris en charge/inactif : {unsupported}\nHash du contenu : {content_hash}\nHash des capacités : {capability_hash}\nChemin : {path}",
   "CmdPluginBundleDiagnosticsHeader": "Diagnostics des plugins ({count}) :",
   "CmdPluginBundleMutationSuccess": "Bundle de plugins '{name}' : {action}.",
@@ -2211,5 +2213,6 @@
   "ApprovalNeverPostureBlocked": "« {tool} » a été bloqué : cette session n'autorise pas les outils qui nécessitent une approbation.",
   "NotificationWebApproved": "Approuvé sur le Web.",
   "NotificationWebDenied": "Refusé sur le Web.",
-  "NotificationInputSubmitFailed": "Impossible d'envoyer votre réponse : {error}. Réessayez."
+  "NotificationInputSubmitFailed": "Impossible d'envoyer votre réponse : {error}. Réessayez.",
+  "PagerActionConfirm": "Confirmer"
 }

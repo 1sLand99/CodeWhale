@@ -1297,7 +1297,9 @@ pub(crate) async fn apply_command_result(
     if reject_inline_inference_while_runtime_chat_owns_run(app, &result) {
         return Ok(false);
     }
-    if let Some(msg) = result.message {
+    if let Some(msg) = result.message
+        && !matches!(result.action, Some(AppAction::OpenCommandReview { .. }))
+    {
         app.add_message(HistoryCell::System { content: msg });
     }
 
@@ -1590,6 +1592,25 @@ pub(crate) async fn apply_command_result(
             }
             AppAction::OpenTextPager { title, content } => {
                 open_text_pager(app, title, content);
+            }
+            AppAction::OpenCommandReview {
+                title,
+                content,
+                command,
+            } => {
+                let width = app
+                    .viewport
+                    .last_transcript_area
+                    .map_or(80, |area| area.width);
+                app.view_stack
+                    .push(crate::tui::pager::PagerView::command_review(
+                        title,
+                        &content,
+                        width.saturating_sub(2),
+                        command,
+                        app.ui_locale,
+                    ));
+                app.needs_redraw = true;
             }
             AppAction::VoiceCapture => {
                 use commands::voice::VoiceCaptureOutcome;

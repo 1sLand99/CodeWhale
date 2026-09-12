@@ -38,10 +38,6 @@ const DEFAULT_AUTOMATION_DELIVERY_MODE: AutomationDeliveryMode = AutomationDeliv
 pub const AUTOMATION_WATCHER_NO_REPORT_SENTINEL: &str = "NOTHING_TO_REPORT";
 const MAX_HOURLY_SEARCH_STEPS: usize = 24 * 21;
 const MAX_CRON_SEARCH_MINUTES: usize = 60 * 24 * 366 * 5;
-/// Backlog-coalescing bound for the unanchored HOURLY grid walk. Each hop
-/// advances at least one interval hour, so this covers a ~11-year outage at
-/// the smallest legal interval before giving up with a diagnostic.
-
 const fn default_automation_schema_version() -> u32 {
     CURRENT_AUTOMATION_SCHEMA_VERSION
 }
@@ -2561,10 +2557,10 @@ async fn reconcile_run_statuses_shared(
                 check_dispatch_store(dispatch, task_manager)?;
             }
             let task = task_manager.read_bound_task(&task_id)?;
-            if let Some(task) = &task {
-                if let Some(dispatch) = &run.dispatch {
-                    crate::task_manager::validate_bound_task_request(task, &dispatch.request)?;
-                }
+            if let Some(task) = &task
+                && let Some(dispatch) = &run.dispatch
+            {
+                crate::task_manager::validate_bound_task_request(task, &dispatch.request)?;
             }
             Ok::<_, anyhow::Error>(task)
         })();

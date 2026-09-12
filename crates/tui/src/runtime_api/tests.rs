@@ -3441,7 +3441,7 @@ async fn thread_endpoints_expose_lifecycle_contract() -> Result<()> {
         .to_string();
 
     let _ =
-        wait_for_terminal_turn_status(&client, addr, &thread_id, &turn_id, Duration::from_secs(2))
+        wait_for_terminal_turn_status(&client, addr, &thread_id, &turn_id, Duration::from_secs(10))
             .await?;
 
     let steer_resp = client

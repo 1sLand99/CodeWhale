@@ -484,6 +484,8 @@
   "PluginCtaInstallPrompt": "Встановити плагін {name}?",
   "PluginCtaReview": "Перевірити",
   "PluginCtaDismiss": "Сховати",
+  "PluginCtaDismissSaveFailed": "Приховано на час сеансу; не вдалося зберегти налаштування плагіна.",
+  "PluginSuggestionReason": "Збіг із «{trigger}»",
   "CmdPluginBundleDetail": "{name}\n========================================\nID: {id}\nВерсія: {version}\nДжерело: {origin} ({scope})\nСтан: {state}\nДовіра: {trust}\nКомпоненти: {inventory}\nЗапитувані дозволи: {permissions}\nСервери MCP: {mcp}\nНепідтримувані/неактивні: {unsupported}\nХеш вмісту: {content_hash}\nХеш можливостей: {capability_hash}\nШлях: {path}",
   "CmdPluginBundleDiagnosticsHeader": "Діагностика плагінів ({count}):",
   "CmdPluginBundleMutationSuccess": "Набір плагінів '{name}': {action}.",
@@ -2211,5 +2213,6 @@
   "ApprovalNeverPostureBlocked": "'{tool}' заблоковано: у цьому сеансі заборонені інструменти, що потребують схвалення.",
   "NotificationWebApproved": "Схвалено у вебінтерфейсі.",
   "NotificationWebDenied": "Відхилено у вебінтерфейсі.",
-  "NotificationInputSubmitFailed": "Не вдалося надіслати відповідь: {error}. Спробуйте ще раз."
+  "NotificationInputSubmitFailed": "Не вдалося надіслати відповідь: {error}. Спробуйте ще раз.",
+  "PagerActionConfirm": "Підтвердити"
 }

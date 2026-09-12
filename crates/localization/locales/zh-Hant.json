@@ -396,6 +396,8 @@
   "PluginCtaInstallPrompt": "安裝 {name} 插件？",
   "PluginCtaReview": "審查",
   "PluginCtaDismiss": "關閉",
+  "PluginCtaDismissSaveFailed": "已在本次工作階段中隱藏，但無法儲存外掛偏好設定。",
+  "PluginSuggestionReason": "符合「{trigger}」",
   "CmdPluginBundleUsage": "用法：/plugin [list|show <name>|validate [name]|install <spec>|update <name>|uninstall <name>|trust <name> [review-token]|enable <name>|disable <name>|revoke <name>|reload|tools [name]]",
   "CmdPluginDescription": "檢查和管理受信任的外掛包；舊版可執行工具保持独立",
   "CmdPluginDetailApproval": "審批：{approval}",
@@ -2211,5 +2213,6 @@
   "ApprovalNeverPostureBlocked": "已封鎖「{tool}」：此工作階段不允許使用需要核准的工具。",
   "NotificationWebApproved": "已在網頁上核准。",
   "NotificationWebDenied": "已在網頁上拒絕。",
-  "NotificationInputSubmitFailed": "無法提交你的回答：{error}。請再試一次。"
+  "NotificationInputSubmitFailed": "無法提交你的回答：{error}。請再試一次。",
+  "PagerActionConfirm": "確認"
 }

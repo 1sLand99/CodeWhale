@@ -484,6 +484,8 @@
   "PluginCtaInstallPrompt": "Установить плагин {name}?",
   "PluginCtaReview": "Проверить",
   "PluginCtaDismiss": "Скрыть",
+  "PluginCtaDismissSaveFailed": "Скрыто на время сеанса; не удалось сохранить настройку плагина.",
+  "PluginSuggestionReason": "Совпадение с «{trigger}»",
   "CmdPluginBundleDetail": "{name}\n========================================\nID: {id}\nВерсия: {version}\nИсточник: {origin} ({scope})\nСостояние: {state}\nДоверие: {trust}\nКомпоненты: {inventory}\nЗапрошенные разрешения: {permissions}\nСерверы MCP: {mcp}\nНеподдерживаемые/неактивные: {unsupported}\nХэш содержимого: {content_hash}\nХэш возможностей: {capability_hash}\nПуть: {path}",
   "CmdPluginBundleDiagnosticsHeader": "Диагностика плагинов ({count}):",
   "CmdPluginBundleMutationSuccess": "Пакет плагина '{name}': {action}.",
@@ -2211,5 +2213,6 @@
   "ApprovalNeverPostureBlocked": "'{tool}' заблокирован: в этом сеансе запрещены инструменты, требующие одобрения.",
   "NotificationWebApproved": "Одобрено в веб-интерфейсе.",
   "NotificationWebDenied": "Отклонено в веб-интерфейсе.",
-  "NotificationInputSubmitFailed": "Не удалось отправить ответ: {error}. Попробуйте ещё раз."
+  "NotificationInputSubmitFailed": "Не удалось отправить ответ: {error}. Попробуйте ещё раз.",
+  "PagerActionConfirm": "Подтвердить"
 }
