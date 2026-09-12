@@ -594,7 +594,7 @@ pub(super) fn apply_route_reasoning_controls(
     apply_kimi_code_k3_reasoning_effort(body, provider, base_url, model, effort);
     apply_zai_route_reasoning_controls(body, provider, base_url, model, effort);
     apply_mistral_route_reasoning_controls(body, provider, base_url, model, effort);
-    apply_google_thinking_level(body, provider, base_url, model, effort);
+    apply_google_reasoning_effort(body, base_url, model, effort);
 }
 
 /// Mistral's polymorphic reasoning-content contract is only proven on its
@@ -663,29 +663,37 @@ fn google_model_requires_thought_signatures(model: &str) -> bool {
     model.starts_with("gemini-2.5-flash") && !model.starts_with("gemini-2.5-flash-lite")
 }
 
-/// Thinking level for the OpenAI-compat route rides the documented
-/// `google.thinking_config.thinking_level` body field (low/high; Gemini 3
-/// cannot disable thinking).
-fn apply_google_thinking_level(
+/// Google's compatibility endpoint accepts the ordinary `reasoning_effort`
+/// field across Gemini 2.5 and 3. A top-level `google` object is rejected;
+/// native thinking controls would require `extra_body.google` instead.
+/// Use one control, since the endpoint rejects overlapping effort and native
+/// thinking settings. https://ai.google.dev/gemini-api/docs/openai#thinking
+fn apply_google_reasoning_effort(
     body: &mut serde_json::Value,
-    _provider: ApiProvider,
     base_url: &str,
-    _model: &str,
+    model: &str,
     effort: Option<&str>,
 ) {
-    if !is_google_openai_compat_chat_route(base_url) || effort.is_none() {
+    if !is_google_openai_compat_chat_route(base_url) {
         return;
     }
-    let level = match effort
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "off" | "disabled" | "none" | "false" | "" | "low" | "minimal" | "medium" | "mid" => "low",
-        _ => "high",
+    let Some(effort) = effort else {
+        return;
     };
-    body["google"]["thinking_config"]["thinking_level"] = json!(level);
+    let model = model.trim().to_ascii_lowercase();
+    let model = model.strip_prefix("models/").unwrap_or(&model);
+    let can_disable = model.starts_with("gemini-2.5-") && !model.starts_with("gemini-2.5-pro");
+    let effort = match effort.trim().to_ascii_lowercase().as_str() {
+        "off" | "disabled" | "none" | "false" if can_disable => "none",
+        // Gemini 3 and 2.5 Pro cannot disable thinking. The compatibility
+        // layer maps minimal to the selected model's lowest supported level.
+        "off" | "disabled" | "none" | "false" | "minimal" => "minimal",
+        "low" => "low",
+        "medium" | "mid" | "" => "medium",
+        "high" | "xhigh" | "max" | "highest" | "ultra" | "ultracode" => "high",
+        _ => return,
+    };
+    body["reasoning_effort"] = json!(effort);
 }
 
 /// Fail closed before transport when Google's OpenAI-compat route would
@@ -7711,33 +7719,57 @@ mod google_thought_signature_tests {
     }
 
     #[test]
-    fn google_thinking_level_maps_effort_onto_documented_body_field() {
-        let mut request = google_request_with_signed_tool(Some("SIG"));
-        request.reasoning_effort = Some("high".to_string());
-        let body = build_chat_wire_body(
-            &request,
-            ApiProvider::Google,
-            DEFAULT_GOOGLE_BASE_URL,
-            false,
-        )
-        .expect("valid google body");
-        assert_eq!(
-            body.body
-                .pointer("/google/thinking_config/thinking_level")
-                .and_then(serde_json::Value::as_str),
-            Some("high")
-        );
+    fn google_reasoning_uses_compatible_effort_without_rejected_native_fields() {
+        // Wire examples and model limits from Google's compatibility docs.
+        // Cover the actual request builder, both transport modes and both
+        // ways a fresh install can configure the official endpoint (#6018).
+        for (model, effort, expected) in [
+            ("gemini-3.1-pro-preview", Some("low"), Some("low")),
+            ("gemini-3.1-pro-preview", Some("medium"), Some("medium")),
+            ("gemini-3.1-pro-preview", Some("high"), Some("high")),
+            ("gemini-3.1-pro-preview", Some("max"), Some("high")),
+            ("gemini-3.5-flash-lite", Some("off"), Some("minimal")),
+            ("gemini-2.5-flash", Some("off"), Some("none")),
+            ("models/gemini-2.5-flash-lite", Some("off"), Some("none")),
+            ("gemini-2.5-pro", Some("off"), Some("minimal")),
+            ("gemini-3.1-pro-preview", None, None),
+        ] {
+            for provider in [ApiProvider::Google, ApiProvider::Custom] {
+                for streaming in [false, true] {
+                    let mut request = google_request_with_signed_tool(Some("SIG"));
+                    request.model = model.to_string();
+                    request.reasoning_effort = effort.map(str::to_string);
+                    let wire = build_chat_wire_body(
+                        &request,
+                        provider,
+                        DEFAULT_GOOGLE_BASE_URL,
+                        streaming,
+                    )
+                    .expect("valid signed Google request");
+                    assert_eq!(
+                        wire.body.get("reasoning_effort").and_then(Value::as_str),
+                        expected,
+                        "{model}: {effort:?}, {provider:?}, streaming={streaming}"
+                    );
+                    assert!(wire.body.get("google").is_none());
+                    assert!(wire.body.get("extra_body").is_none());
+                    assert!(wire.body.get("thinking").is_none());
+                }
+            }
+        }
+    }
 
-        let mut low = google_request_with_signed_tool(Some("SIG"));
-        low.reasoning_effort = Some("low".to_string());
-        let body = build_chat_wire_body(&low, ApiProvider::Google, DEFAULT_GOOGLE_BASE_URL, false)
-            .expect("valid google body");
-        assert_eq!(
-            body.body
-                .pointer("/google/thinking_config/thinking_level")
-                .and_then(serde_json::Value::as_str),
-            Some("low")
-        );
+    #[test]
+    fn google_reasoning_control_does_not_rewrite_other_endpoints() {
+        for provider in [ApiProvider::Google, ApiProvider::Custom] {
+            let request = google_request_with_signed_tool(Some("SIG"));
+            let wire =
+                build_chat_wire_body(&request, provider, "https://gateway.example.com/v1", false)
+                    .expect("valid gateway request");
+            assert!(wire.body.get("reasoning_effort").is_none());
+            assert!(wire.body.get("google").is_none());
+            assert!(wire.body.get("extra_body").is_none());
+        }
     }
 
     #[test]

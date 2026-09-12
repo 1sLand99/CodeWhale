@@ -86,6 +86,7 @@ fn marketplace_builtin_candidate_routes_to_existing_bundle_review() {
     let _lock = crate::test_support::lock_test_env();
     let root = TempDir::new().unwrap();
     let codewhale_home = root.path().join("home");
+    fs::create_dir_all(&codewhale_home).unwrap();
     let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
     let (mut app, _temp) = create_test_app(root.path());
     let original = app
@@ -98,11 +99,14 @@ fn marketplace_builtin_candidate_routes_to_existing_bundle_review() {
     assert!(!result.is_error);
     let text = result.message.unwrap();
     assert!(
-        !text.contains("/plugin marketplace install codewhale computer-use"),
+        !text.contains(r"/plugin marketplace install codewhale computer\-use"),
         "{text}"
     );
     assert!(
-        text.contains(&format!("/plugin show {}", original.id.as_str())),
+        text.contains(&format!(
+            "/plugin show {}",
+            escape_review_text(original.id.as_str())
+        )),
         "{text}"
     );
     assert!(

@@ -44,13 +44,13 @@ export const CHANGELOG: ChangelogRelease[] = [
           "Plugin suggestions explain their matching term and remember explicit dismissals across restarts. Generic words and repository-host domains no longer trigger unrelated installation prompts (#6031).",
           "Plugin trust and automation deletion have keyboard and mouse confirmation controls bound to the exact reviewed content; users can still copy the command and changed content requires a fresh review (#6039).",
           "The model-facing MCP start tool can reconnect an existing configured name after login without changing its credential key or restarting healthy siblings (#6030). A decreasing token-expiry countdown no longer makes a revoked credential look like a new login from another session.",
+          "Gemini setup uses the official endpoint's supported reasoning-effort field, avoiding the rejected top-level Google thinking object. Gemini 2.5 and 3 keep their supported effort ranges; signed tool history still survives reasoning changes and restart (#6018, thanks @vmakarov-uk).",
           "Missed automation occurrences coalesce without overlapping a running job; restart reconciles durable receipts without replaying accepted work. Damaged neighboring records are isolated while preserving their original bytes.",
           "The bundled first-party marketplace lists the actual plugin bundles and uses the existing install, review, trust and update paths. A read-only connection check verifies catalog and skill mirrors on changes and weekly. Already present bundles lead to their local review and management controls; catalog installs refuse name collisions before downloading, without overwriting or granting trust.",
           "Windows deny checks preserve native path separators while retaining the conservative POSIX scan for shell wrappers and substitutions.",
-          "The config example agrees with the telemetry disclosure: usage analytics are optional and enabled by default; local diagnostics do not require telemetry (#6011).",
-          "Sub-agents enforce the session's typed shell and file deny rules, including Full Access, delegated edits, and policy updates after a child starts (#6097)."
+          "The config example agrees with the telemetry disclosure: usage analytics are optional and enabled by default; local diagnostics do not require telemetry (#6011)."
         ],
-        "itemCount": 75
+        "itemCount": 76
       },
       {
         "heading": "Changed",

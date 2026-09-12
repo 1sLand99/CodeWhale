@@ -42,6 +42,10 @@ reconnect.
   login without changing its credential key or restarting healthy siblings (#6030).
   A decreasing token-expiry countdown no longer makes a revoked credential look
   like a new login from another session.
+- Gemini setup uses the official endpoint's supported reasoning-effort field,
+  avoiding the rejected top-level Google thinking object. Gemini 2.5 and 3 keep
+  their supported effort ranges; signed tool history still survives reasoning
+  changes and restart (#6018, thanks @vmakarov-uk).
 - Missed automation occurrences coalesce without overlapping a running job;
   restart reconciles durable receipts without replaying accepted work. Damaged
   neighboring records are isolated while preserving their original bytes.

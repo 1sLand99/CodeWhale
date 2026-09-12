@@ -1173,7 +1173,14 @@ async fn build_test_server(
     let runtime_threads: SharedRuntimeThreadManager = Arc::new(RuntimeThreadManager::open(
         config.clone(),
         workspace.clone(),
-        RuntimeThreadManagerConfig::from_task_data_dir(root.join("runtime")),
+        // A neighboring libtest may temporarily set CODEWHALE_RUNTIME_DIR.
+        // This fixture owns an explicit root and must never borrow that
+        // other test's live store or contend for its process-owner lock.
+        RuntimeThreadManagerConfig {
+            data_dir: root.join("runtime/runtime"),
+            task_data_dir: root.join("runtime"),
+            max_active_threads: 8,
+        },
     )?);
     runtime_threads.attach_task_manager(manager.clone());
     let automations = Arc::new(Mutex::new(AutomationManager::open_for_test(
@@ -1569,6 +1576,7 @@ async fn health_and_tasks_endpoints_work() -> Result<()> {
 
 #[tokio::test]
 async fn omitted_runtime_models_use_the_active_provider_default() -> Result<()> {
+    let _env = lock_test_env();
     for (label, config, expected) in provider_default_model_cases() {
         let temp = tempfile::tempdir()?;
         let root = temp.path().join(label);
@@ -3641,9 +3649,8 @@ async fn turn_operation_lookup_is_authenticated_read_only_and_survives_restart()
     let home = dir.path().join("home");
     fs::create_dir_all(&home)?;
     let _home = EnvVarGuard::set("CODEWHALE_HOME", &home);
-    let store_root = dir.path().join("store");
-    let _runtime_dir = EnvVarGuard::set("CODEWHALE_RUNTIME_DIR", &store_root);
     let root = dir.path().join("server");
+    let store_root = root.join("runtime/runtime");
     let sessions = dir.path().join("sessions");
     let workspace = dir.path().join("workspace");
     let token = "turn-lookup-local-fixture";
@@ -12714,7 +12721,7 @@ async fn marketplace_builtin_name_is_reviewable_without_install_or_network_acces
             workspace_plugins_dir: crate::plugins::discovery::default_workspace_plugins_dir(
                 &workspace,
             ),
-            builtin_plugin_dirs: vec![bundle.clone()],
+            builtin_plugin_dirs: vec![bundle.parent().unwrap().to_path_buf()],
             state_path: root.join("plugins/state.json"),
         },
         crate::plugins::HostEnvironment::from_entries(Vec::new()),
@@ -13397,7 +13404,6 @@ async fn native_notification_replay_rechecks_requests_settled_during_the_read() 
     let _env = lock_test_env();
     let temp = tempfile::tempdir()?;
     let _home = EnvVarGuard::set("CODEWHALE_HOME", temp.path().join("home"));
-    let _runtime = EnvVarGuard::set("CODEWHALE_RUNTIME_DIR", temp.path().join("runtime-store"));
     let _backend = EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
     let _proxy = EnvVarGuard::set("NO_PROXY", "*");
     let path = temp.path().join("config.toml");
