@@ -4939,7 +4939,7 @@ async fn stdio_transport_drop_allows_child_cleanup() {
     let config: McpServerConfig = serde_json::from_value(serde_json::json!({
         "args": [
             "-c",
-            "trap 'sleep 0.1; printf cleaned > \"$1\"; exit 0' TERM; printf 'ready\\n'; while :; do sleep 0.05; done",
+            "trap 'sleep 0.1; printf cleaned > \"$1.tmp\"; mv \"$1.tmp\" \"$1\"; exit 0' TERM; printf 'ready\\n'; while :; do sleep 0.05; done",
             "cleanup-test",
             receipt.display().to_string(),
         ],
@@ -7338,6 +7338,9 @@ async fn mid_session_revocation_lands_in_the_same_auth_required_state() {
     // reactive refresh is rejected with invalid_grant, and the failure must
     // land in the same typed state a failed connect produces — not a dead
     // transport error on a connection the pool still calls "ready".
+    // Cross a whole second: reloading the same durable credential now has a
+    // smaller derived expires_in, which must not look like a peer rotation.
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
     mock.revoke_all_grants();
     let err = pool
         .call_tool("mcp_wikiserver_wiki_lookup", serde_json::json!({}))
@@ -7351,7 +7354,9 @@ async fn mid_session_revocation_lands_in_the_same_auth_required_state() {
         oauth::load_oauth_tokens("wikiserver", &url)
             .unwrap()
             .is_none(),
-        "the definitively rejected credential is invalidated"
+        "the definitively rejected credential is invalidated; refresh requests: {}; failure: {text}",
+        mock.token_requests
+            .load(std::sync::atomic::Ordering::SeqCst)
     );
     let catalog = pool.to_api_tools();
     assert!(

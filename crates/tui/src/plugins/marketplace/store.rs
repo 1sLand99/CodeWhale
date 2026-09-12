@@ -232,11 +232,12 @@ mod tests {
         assert_eq!(catalog.catalog.error_count(), 0);
         assert_eq!(catalog.catalog.warning_count(), 0);
         assert!(!catalog.catalog.provenance.grants_trust());
+        let registry = crate::plugins::PluginRegistry::empty(root.path());
         for candidate in &catalog.catalog.candidates {
             assert!(candidate.install_plan.is_supported());
             assert!(!candidate.provenance.grants_trust());
             let super::super::document::CatalogInstallResolution::Supported { spec, .. } =
-                super::super::document::resolve_candidate_install(catalog, candidate)
+                super::super::document::resolve_candidate_install(catalog, candidate, &registry)
             else {
                 panic!("uninstallable candidate")
             };

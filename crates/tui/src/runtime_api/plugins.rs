@@ -386,7 +386,16 @@ async fn run_plugin_mutation(
     let mut registry = (*registry_for_state(state)).clone();
     let receipt = crate::plugins::mutation::execute(request, &ctx, &mut registry)
         .await
-        .map_err(|error| ApiError::internal(format!("plugin mutation failed: {error:#}")))?;
+        .map_err(|error| {
+            if error
+                .downcast_ref::<crate::plugins::install::PluginNameConflict>()
+                .is_some()
+            {
+                ApiError::conflict(format!("plugin mutation failed: {error:#}"))
+            } else {
+                ApiError::internal(format!("plugin mutation failed: {error:#}"))
+            }
+        })?;
 
     // Policy outcomes are not server errors: report the blocked host with
     // the same wording the skill lifecycle API uses.
@@ -564,6 +573,8 @@ pub(super) struct MarketplaceCandidateEntry {
     pub(super) tier: String,
     pub(super) compatibility: Option<&'static str>,
     pub(super) install: MarketplaceInstallPlanEntry,
+    /// Name occupancy, not an assertion that the catalog and local bytes match.
+    pub(super) existing_plugin: Option<PluginSummaryEntry>,
     pub(super) diagnostics: Vec<PluginDiagnosticEntry>,
 }
 
@@ -599,14 +610,25 @@ pub(super) struct MarketplaceActionResponse {
 fn marketplace_candidate_entry(
     entry: &crate::plugins::marketplace::store::StoredMarketplaceCatalog,
     candidate: &crate::plugins::marketplace::types::MarketplaceCandidate,
+    registry: &crate::plugins::PluginRegistry,
 ) -> MarketplaceCandidateEntry {
-    let install = match resolve_candidate_install(entry, candidate) {
+    let mut existing_plugin = None;
+    let install = match resolve_candidate_install(entry, candidate, registry) {
         CatalogInstallResolution::Supported { spec, source_kind } => MarketplaceInstallPlanEntry {
             installable: true,
             spec: Some(spec),
             source_kind: Some(source_kind),
             reason: None,
         },
+        CatalogInstallResolution::AlreadyPresent { plugin, reason } => {
+            existing_plugin = Some(plugin_summary(plugin));
+            MarketplaceInstallPlanEntry {
+                installable: false,
+                spec: None,
+                source_kind: None,
+                reason: Some(reason),
+            }
+        }
         CatalogInstallResolution::Unsupported { reason } => MarketplaceInstallPlanEntry {
             installable: false,
             spec: None,
@@ -634,6 +656,7 @@ fn marketplace_candidate_entry(
         tier: candidate.provenance.tier.to_string(),
         compatibility: candidate.compatibility.as_ref().map(|c| c.as_str()),
         install,
+        existing_plugin,
         diagnostics: candidate
             .diagnostics
             .iter()
@@ -653,6 +676,7 @@ fn marketplace_candidate_entry(
 fn marketplace_catalog_entry(
     name: &str,
     entry: &crate::plugins::marketplace::store::StoredMarketplaceCatalog,
+    registry: &crate::plugins::PluginRegistry,
 ) -> MarketplaceCatalogEntry {
     MarketplaceCatalogEntry {
         name: name.to_string(),
@@ -683,7 +707,7 @@ fn marketplace_catalog_entry(
             .catalog
             .candidates
             .iter()
-            .map(|candidate| marketplace_candidate_entry(entry, candidate))
+            .map(|candidate| marketplace_candidate_entry(entry, candidate, registry))
             .collect(),
     }
 }
@@ -831,11 +855,12 @@ pub(super) async fn list_marketplaces(
 ) -> Result<Json<MarketplacesResponse>, ApiError> {
     let store = open_marketplace_store(&state)?;
     let marketplace_state = load_marketplace_state(&store)?;
+    let registry = registry_for_state(&state);
     Ok(Json(MarketplacesResponse {
         marketplaces: marketplace_state
             .catalogs()
             .iter()
-            .map(|(name, entry)| marketplace_catalog_entry(name, entry))
+            .map(|(name, entry)| marketplace_catalog_entry(name, entry, &registry))
             .collect(),
     }))
 }
@@ -850,7 +875,11 @@ pub(super) async fn get_marketplace(
     let entry = marketplace_state
         .get(&name)
         .ok_or_else(|| ApiError::not_found(format!("marketplace '{name}' not found")))?;
-    Ok(Json(marketplace_catalog_entry(&name, entry)))
+    Ok(Json(marketplace_catalog_entry(
+        &name,
+        entry,
+        &registry_for_state(&state),
+    )))
 }
 
 /// `POST /v1/apps/marketplaces`
@@ -921,7 +950,8 @@ pub(super) async fn install_marketplace_candidate_api(
                 req.candidate
             ))
         })?;
-    match resolve_candidate_install(entry, candidate) {
+    let registry = registry_for_state(&state);
+    match resolve_candidate_install(entry, candidate, &registry) {
         CatalogInstallResolution::Supported { spec, .. } => {
             let response = run_plugin_mutation(
                 &state,
@@ -938,6 +968,7 @@ pub(super) async fn install_marketplace_candidate_api(
             .await?;
             Ok((StatusCode::CREATED, Json(response)))
         }
+        CatalogInstallResolution::AlreadyPresent { reason, .. } => Err(ApiError::conflict(reason)),
         CatalogInstallResolution::Unsupported { reason } => Err(ApiError::conflict(format!(
             "candidate '{}' cannot be installed by Codewhale: {reason}",
             req.candidate

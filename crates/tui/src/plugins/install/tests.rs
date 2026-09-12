@@ -702,6 +702,7 @@ async fn install_enforces_the_name_conflict_hook() {
     .await
     .unwrap_err();
     assert!(format!("{err:#}").contains("shadowed by a builtin bundle"));
+    assert!(err.downcast_ref::<PluginNameConflict>().is_some());
     assert!(!plugins.join("demo").exists());
     // The staging dir must be cleaned up on the conflict path.
     assert!(

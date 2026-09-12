@@ -40,12 +40,16 @@ reconnect.
   and changed content requires a fresh review (#6039).
 - The model-facing MCP start tool can reconnect an existing configured name after
   login without changing its credential key or restarting healthy siblings (#6030).
+  A decreasing token-expiry countdown no longer makes a revoked credential look
+  like a new login from another session.
 - Missed automation occurrences coalesce without overlapping a running job;
   restart reconciles durable receipts without replaying accepted work. Damaged
   neighboring records are isolated while preserving their original bytes.
 - The bundled first-party marketplace lists the actual plugin bundles and uses
   the existing install, review, trust and update paths. A read-only connection
-  check verifies catalog and skill mirrors on changes and weekly.
+  check verifies catalog and skill mirrors on changes and weekly. Already present
+  bundles lead to their local review and management controls; catalog installs
+  refuse name collisions before downloading, without overwriting or granting trust.
 - Windows deny checks preserve native path separators while retaining the
   conservative POSIX scan for shell wrappers and substitutions.
 - The config example agrees with the telemetry disclosure: usage analytics are

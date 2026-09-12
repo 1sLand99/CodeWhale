@@ -562,8 +562,9 @@ fn claude_relative_install_source_is_rooted_outside_catalog_metadata() {
     std::fs::write(&path, r#"{"name":"official","owner":{"name":"Example"},"plugins":[{"name":"linear","source":"./external_plugins/linear"}]}"#).unwrap();
     let loaded = load_catalog_document("official", tmp.path(), path.to_str().unwrap()).unwrap();
     let candidate = loaded.entry.catalog.candidate_by_name("linear").unwrap();
+    let registry = crate::plugins::PluginRegistry::empty(tmp.path());
     let CatalogInstallResolution::Supported { spec, .. } =
-        resolve_candidate_install(&loaded.entry, candidate)
+        resolve_candidate_install(&loaded.entry, candidate, &registry)
     else {
         panic!("expected path source")
     };

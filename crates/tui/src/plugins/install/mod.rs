@@ -51,6 +51,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use thiserror::Error;
 
+/// A validated manifest name is already occupied by another loaded bundle.
+/// Keep this typed so API clients receive a conflict, not a server failure.
+#[derive(Debug, Error)]
+#[error("{0}")]
+pub struct PluginNameConflict(pub String);
+
 use crate::network_policy::NetworkPolicy;
 use crate::skills::install::{
     self as skill_install, FetchOutcome, InstallSource, InstalledFromMarker, fetch_tarball,
@@ -319,7 +325,7 @@ async fn install_inner(
             verify_expected_content_hash(&staged, expected_content_hash)?;
             if let Some(conflict) = name_conflict(&staged.name) {
                 let _ = fs::remove_dir_all(&staged.staged_path);
-                bail!(conflict);
+                return Err(PluginNameConflict(conflict).into());
             }
             let canonical = path
                 .canonicalize()
@@ -394,7 +400,7 @@ fn install_remote_bytes(
     verify_expected_content_hash(&staged, expected_content_hash)?;
     if let Some(conflict) = name_conflict(&staged.name) {
         let _ = fs::remove_dir_all(&staged.staged_path);
-        bail!(conflict);
+        return Err(PluginNameConflict(conflict).into());
     }
     finalize_install(
         staged,

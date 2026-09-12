@@ -12621,6 +12621,37 @@ async fn marketplace_catalog_lifecycle_over_http_lists_installs_and_removes() ->
     assert_eq!(install["outcome"], "installed");
     assert_eq!(install["plugin"]["trust_status"], "not-reviewed");
 
+    // An installed name routes to its actual local bundle. Catalog metadata
+    // cannot authorize a replacement or certify matching publisher/bytes.
+    let after: serde_json::Value = client
+        .get(format!("{base}/team"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(after["candidates"][0]["install"]["installable"], false);
+    assert_eq!(
+        after["candidates"][0]["existing_plugin"]["content_hash"],
+        install["plugin"]["content_hash"]
+    );
+    assert_eq!(
+        after["candidates"][0]["existing_plugin"]["trust_status"],
+        "not-reviewed"
+    );
+    let again = client
+        .post(format!("{base}/team/install"))
+        .json(&serde_json::json!({"candidate":"demo"}))
+        .send()
+        .await?;
+    assert_eq!(again.status(), StatusCode::CONFLICT);
+    let direct = client
+        .post(format!("http://{addr}/v1/apps/plugins/install"))
+        .json(&serde_json::json!({"source":catalog_dir.join("demo").display().to_string()}))
+        .send()
+        .await?;
+    assert_eq!(direct.status(), StatusCode::CONFLICT);
+
     // Unknown candidate and unknown catalog are honest 404s.
     let missing = client
         .post(format!("{base}/team/install"))
@@ -12665,6 +12696,92 @@ async fn marketplace_catalog_lifecycle_over_http_lists_installs_and_removes() ->
             .is_some_and(|p| p.iter().any(|entry| entry["name"] == "demo"))
     );
 
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn marketplace_builtin_name_is_reviewable_without_install_or_network_access() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("runtime");
+    let workspace = tmp.path().join("ws");
+    fs::create_dir_all(&root)?;
+    let bundle = write_plugin_source_bundle(&tmp.path().join("builtin"), "computer-use")?;
+    let discovery = crate::plugins::PluginDiscoveryContext::from_config_and_environment(
+        &crate::plugins::discovery::DiscoveryConfig {
+            workspace: workspace.clone(),
+            user_plugins_dir: root.join("plugins"),
+            workspace_plugins_dir: crate::plugins::discovery::default_workspace_plugins_dir(
+                &workspace,
+            ),
+            builtin_plugin_dirs: vec![bundle.clone()],
+            state_path: root.join("plugins/state.json"),
+        },
+        crate::plugins::HostEnvironment::from_entries(Vec::new()),
+    );
+    let Some((addr, _, handle)) = spawn_test_server_with_root_token_mobile_workspace_and_overrides(
+        root.clone(),
+        root.join("sessions"),
+        None,
+        false,
+        workspace,
+        TestServerOverrides {
+            plugin_discovery: Some(discovery),
+            ..TestServerOverrides::default()
+        },
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+    let base = format!("http://{addr}/v1/apps");
+    let catalog: serde_json::Value = client
+        .get(format!("{base}/marketplaces/codewhale"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let candidates = catalog["candidates"].as_array().unwrap();
+    let candidate = candidates
+        .iter()
+        .find(|p| p["name"] == "computer-use")
+        .unwrap();
+    assert_eq!(candidate["install"]["installable"], false);
+    assert_eq!(candidate["existing_plugin"]["scope"], "builtin");
+    assert_eq!(candidate["existing_plugin"]["version"], "1.0.0");
+    assert_eq!(candidate["existing_plugin"]["trust_status"], "not-reviewed");
+    assert!(
+        candidates
+            .iter()
+            .filter(|p| p["name"] != "computer-use")
+            .all(|p| p["install"]["installable"] == true)
+    );
+    // No host is approved: getting 409 rather than network-policy 403 proves
+    // the occupied-name preflight ran before any download was admitted.
+    let response = client
+        .post(format!("{base}/marketplaces/codewhale/install"))
+        .json(&serde_json::json!({"candidate":"computer-use"}))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(!root.join("plugins/computer-use").exists());
+    let detail: serde_json::Value = client
+        .get(format!("{base}/plugins/computer-use"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(
+        detail["content_hash"],
+        candidate["existing_plugin"]["content_hash"]
+    );
+    assert_eq!(detail["trust_status"], "not-reviewed");
+    assert_eq!(detail["enabled"], false);
+    assert!(!detail["review"]["token"].as_str().unwrap().is_empty());
+    assert!(bundle.join("plugin.toml").is_file());
     handle.abort();
     Ok(())
 }

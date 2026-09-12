@@ -95,22 +95,46 @@ pub fn load_catalog_document(
 
 /// What installing a stored candidate would do, resolved once for every
 /// caller. `Supported.spec` is exactly what the reviewed installer accepts.
-pub enum CatalogInstallResolution {
-    Supported { spec: String, source_kind: String },
-    Unsupported { reason: String },
-    HasErrors { diagnostics: String },
+pub enum CatalogInstallResolution<'a> {
+    Supported {
+        spec: String,
+        source_kind: String,
+    },
+    /// A matching name is occupied; catalog metadata does not prove identity.
+    AlreadyPresent {
+        plugin: &'a crate::plugins::types::LoadedPlugin,
+        reason: String,
+    },
+    Unsupported {
+        reason: String,
+    },
+    HasErrors {
+        diagnostics: String,
+    },
 }
 
 /// Resolve a stored catalog candidate to its install spec. Relative local
 /// paths resolve against the catalog document's own directory, not the
 /// caller's working directory.
-pub fn resolve_candidate_install(
+pub fn resolve_candidate_install<'a>(
     entry: &StoredMarketplaceCatalog,
     candidate: &MarketplaceCandidate,
-) -> CatalogInstallResolution {
+    registry: &'a crate::plugins::PluginRegistry,
+) -> CatalogInstallResolution<'a> {
     if candidate.has_errors() {
         return CatalogInstallResolution::HasErrors {
             diagnostics: render_diagnostics_inline(&candidate.diagnostics),
+        };
+    }
+    if let Some(plugin) = registry.get(&candidate.name) {
+        return CatalogInstallResolution::AlreadyPresent {
+            plugin,
+            reason: format!(
+                "A {} plugin named '{}' already exists. Review the existing bundle with /plugin show {}. Catalog metadata does not establish that it is the same bundle.",
+                plugin.scope.as_str(),
+                plugin.name(),
+                plugin.id.as_str()
+            ),
         };
     }
     match &candidate.install_plan {

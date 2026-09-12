@@ -957,6 +957,9 @@ fn plugins_model(app: &App, locale: Locale) -> ExtensionsTabModel {
 }
 
 fn marketplace_model(app: &App, locale: Locale) -> ExtensionsTabModel {
+    use crate::plugins::marketplace::document::{
+        CatalogInstallResolution, resolve_candidate_install,
+    };
     let Some(store) = crate::plugins::marketplace::store::MarketplaceStore::open(
         app.plugin_registry.state_path(),
     ) else {
@@ -988,66 +991,94 @@ fn marketplace_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                 items: catalog
                     .candidates
                     .iter()
-                    .map(|candidate| ExtensionItem {
-                        id: candidate.id.as_str().to_string(),
-                        tone: ExtensionTone::Attention,
-                        label: candidate
-                            .display_name
-                            .clone()
-                            .unwrap_or_else(|| candidate.name.clone()),
-                        description: candidate.description.clone().unwrap_or_default(),
-                        state: if candidate.has_errors() {
-                            tr(locale, MessageId::ExtensionsStateInvalid)
-                        } else if candidate.install_plan.is_supported() {
-                            tr(locale, MessageId::ExtensionsStateAvailable)
-                        } else {
-                            tr(locale, MessageId::AutomationActionInspect)
-                        }
-                        .into_owned(),
-                        detail: {
-                            let unknown = tr(locale, MessageId::CmdCostUnknownValue);
-                            localize(
-                                locale,
-                                MessageId::ExtensionsMarketplaceDetail,
-                                &[
-                                    (
-                                        "publisher",
-                                        candidate
-                                            .provenance
-                                            .publisher
-                                            .as_deref()
-                                            .unwrap_or(unknown.as_ref()),
-                                    ),
-                                    (
-                                        "tier",
-                                        &localized_tier(locale, candidate.provenance.tier.as_str()),
-                                    ),
-                                    (
-                                        "installable",
-                                        &localized_bool(
-                                            locale,
-                                            candidate.install_plan.is_supported(),
-                                        ),
-                                    ),
-                                ],
-                            )
-                        },
-                        action: if !candidate.has_errors() && candidate.install_plan.is_supported()
+                    .map(|candidate| {
+                        let resolution =
+                            resolve_candidate_install(stored, candidate, &app.plugin_registry);
+                        if let CatalogInstallResolution::AlreadyPresent { plugin, .. } = &resolution
                         {
-                            Some(ExtensionAction::Command {
-                                label: tr(locale, MessageId::ExtensionsActionAdd).into_owned(),
-                                command: format!(
-                                    "/plugin marketplace install {} {}",
-                                    catalog.id.as_str(),
-                                    candidate.name
-                                ),
-                                disposition: RowActionDisposition::InPlace,
-                            })
-                        } else {
-                            Some(ExtensionAction::Status {
-                                label: tr(locale, MessageId::PickerActionUnavailable).into_owned(),
-                            })
-                        },
+                            // A catalog name match is only occupancy. Show and
+                            // review the actual local bundle, not catalog claims.
+                            return ExtensionItem {
+                                id: candidate.id.as_str().to_string(),
+                                tone: plugin_row_tone(plugin),
+                                label: plugin.name().to_string(),
+                                description: plugin
+                                    .manifest
+                                    .plugin
+                                    .description
+                                    .clone()
+                                    .unwrap_or_default(),
+                                state: if plugin.scope
+                                    == crate::plugins::types::PluginScope::Builtin
+                                {
+                                    tr(locale, MessageId::ExtensionsStateFirstParty).into_owned()
+                                } else {
+                                    localized_plugin_state(locale, plugin.state_label())
+                                },
+                                detail: plugin.canonical_root.display().to_string(),
+                                action: Some(plugin_row_action(locale, plugin)),
+                            };
+                        }
+                        let installable =
+                            matches!(resolution, CatalogInstallResolution::Supported { .. });
+                        ExtensionItem {
+                            id: candidate.id.as_str().to_string(),
+                            tone: ExtensionTone::Attention,
+                            label: candidate
+                                .display_name
+                                .clone()
+                                .unwrap_or_else(|| candidate.name.clone()),
+                            description: candidate.description.clone().unwrap_or_default(),
+                            state: if candidate.has_errors() {
+                                tr(locale, MessageId::ExtensionsStateInvalid)
+                            } else if installable {
+                                tr(locale, MessageId::ExtensionsStateAvailable)
+                            } else {
+                                tr(locale, MessageId::AutomationActionInspect)
+                            }
+                            .into_owned(),
+                            detail: {
+                                let unknown = tr(locale, MessageId::CmdCostUnknownValue);
+                                localize(
+                                    locale,
+                                    MessageId::ExtensionsMarketplaceDetail,
+                                    &[
+                                        (
+                                            "publisher",
+                                            candidate
+                                                .provenance
+                                                .publisher
+                                                .as_deref()
+                                                .unwrap_or(unknown.as_ref()),
+                                        ),
+                                        (
+                                            "tier",
+                                            &localized_tier(
+                                                locale,
+                                                candidate.provenance.tier.as_str(),
+                                            ),
+                                        ),
+                                        ("installable", &localized_bool(locale, installable)),
+                                    ],
+                                )
+                            },
+                            action: if installable {
+                                Some(ExtensionAction::Command {
+                                    label: tr(locale, MessageId::ExtensionsActionAdd).into_owned(),
+                                    command: format!(
+                                        "/plugin marketplace install {} {}",
+                                        catalog.id.as_str(),
+                                        candidate.name
+                                    ),
+                                    disposition: RowActionDisposition::InPlace,
+                                })
+                            } else {
+                                Some(ExtensionAction::Status {
+                                    label: tr(locale, MessageId::PickerActionUnavailable)
+                                        .into_owned(),
+                                })
+                            },
+                        }
                     })
                     .collect(),
             }
@@ -1946,6 +1977,51 @@ impl ModalView for ExtensionsView {
 mod tests {
     use super::*;
     use crate::mcp::McpRecoveryKind;
+
+    #[test]
+    fn marketplace_shipped_bundle_uses_local_metadata_and_review_action() {
+        let _env = crate::test_support::lock_test_env();
+        let root = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path());
+        let registry = crate::plugins::PluginDiscoveryContext::capture_pre_dotenv()
+            .registry_for_workspace(root.path());
+        let app = App::new_with_plugin_registry(
+            crate::test_support::test_tui_options(root.path()),
+            &crate::config::Config::default(),
+            registry,
+        );
+        let model = marketplace_model(&app, Locale::En);
+        let group = model
+            .groups
+            .iter()
+            .find(|group| group.id == "codewhale")
+            .unwrap();
+        let row = group
+            .items
+            .iter()
+            .find(|row| row.label == "computer-use")
+            .unwrap();
+        let builtin = app.plugin_registry.get("computer-use").unwrap();
+        assert_eq!(
+            row.description,
+            builtin
+                .manifest
+                .plugin
+                .description
+                .clone()
+                .unwrap_or_default()
+        );
+        assert_eq!(
+            row.state,
+            tr(Locale::En, MessageId::ExtensionsStateFirstParty)
+        );
+        assert!(
+            matches!(&row.action, Some(ExtensionAction::Command { command, disposition: RowActionDisposition::LeavePanel, .. }) if command == "/plugin trust computer-use")
+        );
+        assert!(!builtin.trusted());
+        assert!(!builtin.enabled);
+        assert_eq!(group.items.iter().filter(|row| matches!(&row.action, Some(ExtensionAction::Command { command, .. }) if command.starts_with("/plugin marketplace install "))).count(), 3);
+    }
 
     #[test]
     fn mcp_item_action_for_stale_oauth_is_login() {

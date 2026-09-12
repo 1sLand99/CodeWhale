@@ -452,7 +452,7 @@ pub fn tui_reauth_refresh_failed_hint() -> &'static str {
     "Re-authorize this server (/mcp login <name>) or configure a fresh bearer token."
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredMcpOAuthTokens {
     pub server_name: String,
     pub url: String,
@@ -460,6 +460,30 @@ pub struct StoredMcpOAuthTokens {
     pub token_response: WrappedOAuthTokenResponse,
     #[serde(default)]
     pub expires_at: Option<u64>,
+}
+
+impl PartialEq for StoredMcpOAuthTokens {
+    fn eq(&self, other: &Self) -> bool {
+        if self.server_name != other.server_name
+            || self.url != other.url
+            || self.client_id != other.client_id
+            || self.expires_at != other.expires_at
+        {
+            return false;
+        }
+        if self.expires_at.is_none() {
+            return self.token_response == other.token_response;
+        }
+        // Loading a credential derives a decreasing expires_in from the
+        // durable expires_at. That countdown is not a peer token rotation:
+        // comparing it would adopt the same rejected grant after one second
+        // instead of invalidating it. Preserve every other response field.
+        let mut left = self.token_response.clone();
+        let mut right = other.token_response.clone();
+        left.0.set_expires_in(None);
+        right.0.set_expires_in(None);
+        left == right
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2063,6 +2087,62 @@ mod tests {
 
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn stored_credential_identity_ignores_only_a_derived_expiry_countdown() {
+        let original = serde_json::json!({
+            "server_name": "fixture", "url": "https://example.invalid/mcp",
+            "client_id": "fixture-client", "expires_at": 9_999_999_999_999_u64,
+            "token_response": {
+                "access_token": "fixture-access", "refresh_token": "fixture-refresh",
+                "token_type": "Bearer", "expires_in": 3600, "scope": "read"
+            }
+        });
+        let held: StoredMcpOAuthTokens = serde_json::from_value(original.clone()).unwrap();
+        let mut aged = original.clone();
+        aged["token_response"]["expires_in"] = serde_json::json!(3598);
+        let loaded: StoredMcpOAuthTokens = serde_json::from_value(aged.clone()).unwrap();
+        assert!(
+            held == loaded,
+            "elapsed time alone is not credential rotation"
+        );
+        for (field, value) in [
+            ("access_token", "new-access"),
+            ("refresh_token", "new-refresh"),
+            ("scope", "read write"),
+            ("token_type", "Mac"),
+        ] {
+            let mut rotated = aged.clone();
+            rotated["token_response"][field] = serde_json::json!(value);
+            let rotated: StoredMcpOAuthTokens = serde_json::from_value(rotated).unwrap();
+            assert!(
+                held != rotated,
+                "a changed {field} remains a distinct credential"
+            );
+        }
+        for (field, value) in [
+            ("server_name", serde_json::json!("other")),
+            ("client_id", serde_json::json!("other-client")),
+            ("url", serde_json::json!("https://other.invalid/mcp")),
+            ("expires_at", serde_json::json!(9_999_999_999_998_u64)),
+        ] {
+            let mut rotated = aged.clone();
+            rotated[field] = value;
+            let rotated: StoredMcpOAuthTokens = serde_json::from_value(rotated).unwrap();
+            assert!(
+                held != rotated,
+                "a changed {field} remains a distinct credential"
+            );
+        }
+        let mut legacy = held.clone();
+        legacy.expires_at = None;
+        let mut legacy_aged = loaded;
+        legacy_aged.expires_at = None;
+        assert!(
+            legacy != legacy_aged,
+            "without a durable deadline the stored lifetime is meaningful"
+        );
+    }
 
     #[test]
     fn resolve_oauth_scopes_prefers_explicit() {
