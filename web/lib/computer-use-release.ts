@@ -19,7 +19,7 @@ export type ComputerUseRelease = {
   sha256: string;
   size: number;
   /** Which independent evidence confirmed the archive: GitHub's asset digest via the API, or the packager's receipt via the release web endpoint. */
-  verification?: "github-digest" | "receipt";
+  verification: "github-digest" | "receipt";
 } | { status: "pending" | "unavailable" };
 
 function releaseAssets(value: unknown) {
@@ -89,9 +89,11 @@ const WEB_HEADERS = { "User-Agent": "codewhale-web" };
 async function fetchReleaseWeb(url: string): Promise<Response> {
   for (let hops = 0; ; hops++) {
     const response = await fetch(url, { redirect: "manual", headers: WEB_HEADERS, signal: AbortSignal.timeout(5000) });
-    if (response.status !== 302) return response;
+    if (![301, 302, 307, 308].includes(response.status)) return response;
     await response.body?.cancel();
-    const target = new URL(response.headers.get("location") ?? "", url);
+    const location = response.headers.get("location");
+    if (!location) throw new Error("Release redirect without a location");
+    const target = new URL(location, url);
     if (hops >= 3 || target.protocol !== "https:" || !RELEASE_HOSTS.has(target.hostname)) {
       throw new Error(`Release redirect refused: ${target.hostname}`);
     }

@@ -56,7 +56,7 @@ describe("Computer Use download qualification", () => {
     expect(fetcher.mock.calls.map(c => c[0])).toEqual([API_LATEST, `${COMPUTER_USE_REPO}/releases/download/v0.3.0/release.json`]);
   });
   it("sends the server-held token to the API exactly when one is passed, and never elsewhere", async () => {
-    const fetcher = stub(status(404), status(404));
+    const fetcher = stub(status(404), status(404), status(404));
     await getComputerUseRelease("ghp_secret");
     await getComputerUseRelease();
     const headers = (call: number) => fetcher.mock.calls[call][1].headers as Record<string, string>;
@@ -76,10 +76,12 @@ describe("Computer Use download qualification", () => {
     expect((await getComputerUseRelease()).status).toBe("pending");
     expect(error).toHaveBeenCalledWith("computer-use release check", 403);
     stub(status(503), new Error("offline"));
-    expect((await getComputerUseRelease()).status).toBe("unavailable");
+    expect((await getComputerUseRelease("ghp_secret")).status).toBe("unavailable");
     stub(new Error("offline"), status(404));
-    expect((await getComputerUseRelease()).status).toBe("pending");
+    expect((await getComputerUseRelease("ghp_secret")).status).toBe("pending");
     expect(error).toHaveBeenCalledWith("computer-use release check failed", "offline");
+    stub(status(403), status(500));
+    expect((await getComputerUseRelease("ghp_secret")).status).toBe("unavailable");
     expect(error.mock.calls.flat().join(" ")).not.toContain("ghp_");
   });
   it("qualifies the download from the receipt when the API is unreachable", async () => {
@@ -97,8 +99,14 @@ describe("Computer Use download qualification", () => {
     ]);
     expect(fetcher.mock.calls.every(c => !("Authorization" in (c[1].headers ?? {})))).toBe(true);
   });
+  it("accepts a directly served archive and a permanent redirect for the receipt", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    stub(status(403), new Response(null, { status: 301, headers: { location: OBJECT_URL } }), Response.json(receipt()), status(200));
+    expect(await getComputerUseRelease()).toMatchObject({ status: "ready", verification: "receipt" });
+  });
   it.each([
     ["a disallowed host", redirect("https://example.com/release.json")],
+    ["a redirect without a location", new Response(null, { status: 302 })],
     ["plain http", redirect("http://objects.githubusercontent.com/release.json")],
   ])("refuses a receipt redirect onto %s", async (_label, hop) => {
     vi.spyOn(console, "error").mockImplementation(() => {});
@@ -112,8 +120,9 @@ describe("Computer Use download qualification", () => {
     expect((await getComputerUseRelease()).status).toBe("unavailable");
     stub(status(403), redirect(OBJECT_URL), Response.json(receipt()), status(404));
     expect((await getComputerUseRelease()).status).toBe("unavailable");
-    stub(status(403), redirect(OBJECT_URL), redirect(OBJECT_URL), redirect(OBJECT_URL), redirect(OBJECT_URL), redirect(OBJECT_URL));
+    const fetcher = stub(status(403), redirect(OBJECT_URL), redirect(OBJECT_URL), redirect(OBJECT_URL), redirect(OBJECT_URL), redirect(OBJECT_URL));
     expect((await getComputerUseRelease()).status).toBe("unavailable");
+    expect(fetcher).toHaveBeenCalledTimes(5);
   });
   it("bounds malformed or oversized responses and does not fetch an unqualified receipt", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
