@@ -4,6 +4,7 @@ import type { LocalizedText } from "@/lib/content/vocabulary";
 import { pickText } from "@/lib/i18n/dictionaries";
 import { buildPageMetadata } from "@/lib/page-meta";
 import { COMPUTER_USE_REPO, getComputerUseRelease } from "@/lib/computer-use-release";
+import { getEnv } from "@/lib/kv";
 
 export const revalidate = 300;
 
@@ -16,7 +17,7 @@ export async function generateMetadata({ params }: { params: Promise<{ locale: s
 export default async function ComputerUsePage({ params }: { params: Promise<{ locale: string }> }) {
   const { locale } = await params;
   const t = (copy: LocalizedText) => pickText(copy, locale);
-  const release = await getComputerUseRelease();
+  const release = await getComputerUseRelease((await getEnv()).GITHUB_TOKEN);
   return (
     <div>
       <section className="hero">
