@@ -33,6 +33,30 @@ pub(crate) fn session_cost_label(app: &App) -> String {
     .unwrap_or_default()
 }
 
+/// The clock-dependent billing tier of the active route, when the route has
+/// one: DeepSeek's V4 Pro/Flash and Flash halve their rates off-peak. `None`
+/// for flat-priced routes, for other vendors, and while auto routing has not
+/// pinned a concrete model.
+pub(crate) fn billing_tier_label(app: &App, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+    use crate::config::ApiProvider;
+    use codewhale_localization::{MessageId, tr};
+    if app.auto_model
+        || !matches!(
+            app.api_provider.catalog_identity(),
+            ApiProvider::Deepseek | ApiProvider::DeepseekCN
+        )
+    {
+        return None;
+    }
+    let peak = crate::pricing::deepseek_time_tier(&app.model, now)?;
+    let id = if peak {
+        MessageId::InfoLinePeak
+    } else {
+        MessageId::InfoLineOffPeak
+    };
+    Some(tr(app.ui_locale, id).into_owned())
+}
+
 /// Output tokens for the metrics line: the live stream's running estimate,
 /// else the last turn's provider receipt. Request throughput is independently
 /// sourced from SessionMetrics, so a long tool call cannot lower that rate.
@@ -65,6 +89,49 @@ pub(crate) fn info_segments(app: &App, width: u16) -> Vec<InfoSegment> {
     let mut segments = Vec::new();
     let tier = crate::tui::underwater::ShellTier::for_chrome_width(width);
     let shows = |item: StatusItem| app.status_items.contains(&item);
+
+    // Where this session writes (#6112): the workspace leaf and the branch
+    // the next commit lands on. Both read cached state only — the branch
+    // comes from `app.workspace_context`, refreshed off the render path on
+    // the workspace-context TTL, so neither chip costs IO per frame. They
+    // lead the row: identity of place before identity of route. The branch
+    // chip degrades to absent outside a repository rather than printing a
+    // permanent dash.
+    if shows(StatusItem::Workspace) {
+        let name = crate::tui::workspace_context::status_workspace_name(
+            &app.workspace,
+            app.workspace_is_linked_worktree,
+        );
+        segments.push(InfoSegment::new(
+            InfoSegmentId::Workspace,
+            "",
+            crate::tui::workspace_context::truncate_left(
+                &name,
+                crate::tui::workspace_context::STATUS_CHIP_MAX_WIDTH,
+            ),
+            ChromeInk::MetadataValue,
+        ));
+    }
+    if shows(StatusItem::GitBranch)
+        && let Some(branch) = app
+            .workspace_context
+            .as_deref()
+            .and_then(crate::tui::workspace_context::branch_from_context)
+    {
+        segments.push(InfoSegment::new(
+            InfoSegmentId::GitBranch,
+            "",
+            crate::tui::workspace_context::truncate_left(
+                &if app.workspace_is_linked_worktree {
+                    format!("{branch} (wt)")
+                } else {
+                    branch.to_string()
+                },
+                crate::tui::workspace_context::STATUS_CHIP_MAX_WIDTH,
+            ),
+            ChromeInk::MetadataValue,
+        ));
+    }
 
     // Route identity — the old identity band's fact, same shed discipline:
     // provider first, then effort, whole names or none. When no model is
@@ -164,6 +231,21 @@ pub(crate) fn info_segments(app: &App, width: u16) -> Vec<InfoSegment> {
             InfoSegmentId::Cost,
             "",
             cost,
+            ChromeInk::MetadataValue,
+        ));
+    }
+
+    // DeepSeek bills by the clock: the same flag that halves the rates
+    // off-peak is painted beside the cost, so the operator can see which tier
+    // the next turn buys without opening /cost. Gated on the cost item, whose
+    // owner asked for price readings by name.
+    if shows(StatusItem::Cost)
+        && let Some(tier) = billing_tier_label(app, chrono::Utc::now())
+    {
+        segments.push(InfoSegment::new(
+            InfoSegmentId::BillingTier,
+            "",
+            tier,
             ChromeInk::MetadataValue,
         ));
     }
@@ -353,7 +435,12 @@ fn render_info_row(
     }
     let mut segments = info_segments(app, area.width);
     if identity_only {
-        segments.retain(|segment| segment.id == InfoSegmentId::Model);
+        segments.retain(|segment| {
+            matches!(
+                segment.id,
+                InfoSegmentId::Model | InfoSegmentId::Workspace | InfoSegmentId::GitBranch
+            )
+        });
     }
     let hovered = app.last_mouse_pos.and_then(|(mx, my)| {
         app.viewport
@@ -2483,6 +2570,56 @@ mod tests {
         );
     }
 
+    /// DeepSeek's clock-tiered routes show which tier the next turn buys,
+    /// beside the cost; flat routes and other vendors show nothing.
+    #[test]
+    fn deepseek_tiered_routes_paint_the_billing_tier_beside_the_cost() {
+        use crate::config::ApiProvider;
+        use chrono::TimeZone as _;
+        let mut app = app_with_context_percent(10);
+        app.auto_model = false;
+        app.api_provider = ApiProvider::Deepseek;
+        app.model = "deepseek-v4-flash".to_string();
+        // Wednesday 2026-09-16: 02:00Z is inside the 01:00-04:00 peak
+        // window, 12:00Z outside every window.
+        let peak = chrono::Utc.with_ymd_and_hms(2026, 9, 16, 2, 0, 0).unwrap();
+        let off = chrono::Utc.with_ymd_and_hms(2026, 9, 16, 12, 0, 0).unwrap();
+        assert_eq!(
+            super::billing_tier_label(&app, peak).as_deref(),
+            Some("peak")
+        );
+        assert_eq!(
+            super::billing_tier_label(&app, off).as_deref(),
+            Some("off-peak")
+        );
+        let ids: Vec<InfoSegmentId> = super::info_segments(&app, 200)
+            .iter()
+            .map(|segment| segment.id)
+            .collect();
+        assert!(ids.contains(&InfoSegmentId::BillingTier), "{ids:?}");
+        let row = metrics_row(&app, 200);
+        assert!(row.contains("peak"), "the tier reads in the row: {row:?}");
+
+        // A flat-priced DeepSeek model has no tier to show.
+        app.model = "deepseek-chat".to_string();
+        assert_eq!(super::billing_tier_label(&app, peak), None);
+        let ids: Vec<InfoSegmentId> = super::info_segments(&app, 200)
+            .iter()
+            .map(|segment| segment.id)
+            .collect();
+        assert!(!ids.contains(&InfoSegmentId::BillingTier), "{ids:?}");
+
+        // Another vendor serving a DeepSeek id is priced on its own terms.
+        app.model = "deepseek-v4-flash".to_string();
+        app.api_provider = ApiProvider::Openai;
+        assert_eq!(super::billing_tier_label(&app, peak), None);
+
+        // Auto routing has not pinned a model, so there is nothing to claim.
+        app.api_provider = ApiProvider::Deepseek;
+        app.auto_model = true;
+        assert_eq!(super::billing_tier_label(&app, peak), None);
+    }
+
     /// A provider switch must not hide missing historical coverage.
     #[test]
     fn cost_unknown_preserves_saved_coverage_across_route_changes() {
@@ -2597,6 +2734,7 @@ mod tests {
             granted_balance: String::new(),
         });
         app.status_items = StatusItem::all().to_vec();
+        app.workspace_context = Some("main | clean".to_string());
 
         let ids: Vec<InfoSegmentId> = super::info_segments(&app, 200)
             .iter()
@@ -2609,6 +2747,8 @@ mod tests {
             InfoSegmentId::Ttft,
             InfoSegmentId::Rate,
             InfoSegmentId::OutputTokens,
+            InfoSegmentId::Workspace,
+            InfoSegmentId::GitBranch,
         ] {
             assert!(ids.contains(&expected), "{expected:?} missing from {ids:?}");
         }
@@ -2618,6 +2758,78 @@ mod tests {
             super::info_segments(&app, 200).is_empty(),
             "an empty status list leaves the metrics line empty"
         );
+    }
+
+    #[test]
+    fn empty_session_keeps_opted_in_workspace_identity_visible() {
+        let mut app = app_with_context_percent(0);
+        app.workspace = std::path::PathBuf::from("/fixture/checkout");
+        app.workspace_context = Some("feature-6112 | clean".to_string());
+        app.status_items = vec![StatusItem::Workspace, StatusItem::GitBranch];
+        app.metrics_line = crate::config::ChromeRowPreset::Compact;
+        let backend = ratatui::backend::TestBackend::new(100, 1);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                super::render_info_row(frame, &mut app, area, true);
+            })
+            .unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(rendered.contains("checkout"), "{rendered}");
+        assert!(rendered.contains("feature-6112"), "{rendered}");
+    }
+
+    /// #6112: the opt-in workspace and branch chips read cached state only —
+    /// the workspace path and the TTL-refreshed `workspace_context` string —
+    /// so neither costs IO per frame. Outside a repository the branch chip
+    /// degrades to absent rather than pinning a placeholder dash.
+    #[test]
+    fn workspace_and_git_branch_chips_follow_cached_workspace_context() {
+        let mut app = app_with_context_percent(60);
+        app.status_items = vec![StatusItem::Workspace, StatusItem::GitBranch];
+
+        let segments = super::info_segments(&app, 200);
+        let workspace = segments
+            .iter()
+            .find(|segment| segment.id == InfoSegmentId::Workspace)
+            .expect("workspace chip renders from the workspace path alone");
+        assert_eq!(
+            workspace.value,
+            crate::tui::workspace_context::workspace_basename(&app.workspace)
+        );
+        assert!(
+            segments
+                .iter()
+                .all(|segment| segment.id != InfoSegmentId::GitBranch),
+            "outside a repository the branch chip is absent"
+        );
+
+        // A detached HEAD reads in its recorded short-SHA form.
+        app.workspace_context = Some("detached:abc1234 | clean".to_string());
+        let branch = super::info_segments(&app, 200)
+            .into_iter()
+            .find(|segment| segment.id == InfoSegmentId::GitBranch)
+            .expect("branch chip renders from cached context");
+        assert_eq!(branch.value, "detached:abc1234");
+        app.workspace_is_linked_worktree = true;
+        let linked = super::info_segments(&app, 200)
+            .into_iter()
+            .find(|segment| segment.id == InfoSegmentId::GitBranch)
+            .unwrap();
+        assert_eq!(linked.value, "detached:abc1234 (wt)");
+        assert!(!StatusItem::default_footer().contains(&StatusItem::Workspace));
+        assert!(!StatusItem::default_footer().contains(&StatusItem::GitBranch));
+
+        // Off means off.
+        app.status_items = Vec::new();
+        assert!(super::info_segments(&app, 200).is_empty());
     }
 }
 

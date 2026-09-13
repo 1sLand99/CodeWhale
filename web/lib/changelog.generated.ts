@@ -30,27 +30,27 @@ export const CHANGELOG: ChangelogRelease[] = [
   },
   {
     "version": "0.9.13",
-    "date": "2026-09-12",
+    "date": "2026-09-13",
     "unreleased": false,
     "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.9.12...v0.9.13",
     "sections": [
       {
         "heading": "Fixed",
         "items": [
-          "Interrupted conversations whose saved runtime store is missing recover into a fresh scope without restoring old tasks or approvals. Stale session saves cannot resurrect the broken binding (#6102).",
-          "Permission checks distinguish literal heredoc data from executable commands, including substitutions and shell stdin (#6098).",
-          "Automatic compaction runs quietly from live context pressure, preserving the current task and recent tool exchanges while keeping the system/tool prefix stable. Original history and the handoff are saved before context replacement; failed or canceled compaction retains the conversation (#5620, #6047).",
-          "Custom and gateway providers can override context limits for each exact model, so switching models also switches the meter and compaction budget (#6108).",
-          "Plugin suggestions explain their matching term and remember explicit dismissals across restarts. Generic words and repository-host domains no longer trigger unrelated installation prompts (#6031).",
-          "Plugin trust and automation deletion have keyboard and mouse confirmation controls bound to the exact reviewed content; users can still copy the command and changed content requires a fresh review (#6039).",
-          "The model-facing MCP start tool can reconnect an existing configured name after login without changing its credential key or restarting healthy siblings (#6030). A decreasing token-expiry countdown no longer makes a revoked credential look like a new login from another session.",
-          "Gemini setup uses the official endpoint's supported reasoning-effort field, avoiding the rejected top-level Google thinking object. Gemini 2.5 and 3 keep their supported effort ranges; signed tool history still survives reasoning changes and restart (#6018, thanks @vmakarov-uk).",
-          "Missed automation occurrences coalesce without overlapping a running job; restart reconciles durable receipts without replaying accepted work. Damaged neighboring records are isolated while preserving their original bytes.",
-          "The bundled first-party marketplace lists the actual plugin bundles and uses the existing install, review, trust and update paths. A read-only connection check verifies catalog and skill mirrors on changes and weekly. Already present bundles lead to their local review and management controls; catalog installs refuse name collisions before downloading, without overwriting or granting trust.",
-          "Windows deny checks preserve native path separators while retaining the conservative POSIX scan for shell wrappers and substitutions.",
-          "The config example agrees with the telemetry disclosure: usage analytics are optional and enabled by default; local diagnostics do not require telemetry (#6011)."
+          "Operate can run structured workflows directly, with named phases, model assignments from Fleet, prerequisite results and shared budgets. Independent steps run together; dependent work waits for its required results and gates. Detached runs return their outcome to the owning conversation, and headless sessions stay alive between phases until the final handback is consumed.",
+          "Computer Use 0.3.1: mouse actions no longer steal focus or reclaim the foreground when the user switches apps mid-action; background typing, scrolling and selection use semantic input, and screenshots stay scoped to the targeted app. The bundled plugin and the first-party marketplace pin carry the same 0.3.1 sources. A registered macOS helper stays in charge of input through its Pause and Stop controls; an unavailable registered helper produces an error instead of silently…",
+          "The Fleet editor uses the standard model picker to manage sub-agent model and thinking assignments. Enter edits the selected row without changing the running session's model. Unconfigured providers are refused, failed saves retain the previous assignment, and a changed or removed team file must be reopened before a pick can overwrite it.",
+          "The provider catalog includes Baseten and the other compatible-provider templates as selectable rows, opening their existing prefilled setup forms. DeepSeek routes with clock-based pricing show the current peak or off-peak tier beside session cost, with translated labels.",
+          "Extensions, teams, workflows and automations support mouse-wheel scrolling. Plugin and MCP rows have keyboard enable/disable controls and two-step removal; MCP OAuth can retry with narrower scopes after a scope rejection.",
+          "Healthy sub-agents continue after an ordinary parent reply. Headless runs keep the existing Engine alive for child results within the run deadline. Explicit cancellation remains authoritative when result queues are full or a completion starts a followup turn.",
+          "Sub-agent followup supports multiple targets and all parked children, keeps old IDs connected to their current continuation, and saves continuation identity before starting work. Repeated followup does not fork duplicates.",
+          "Sub-agents validate declared output files and distinguish real edit claims from file citations and unrelated workspace changes. Disjoint file claims can run together; overlapping writers receive the actual conflict and remedies. Explicit read-only shell analysis requires an enforcing native sandbox and refuses execution when that protection is unavailable.",
+          "Delegation depth stays absolute through saved profiles, nested workers and continuations. Per-call token, step and time limits narrow inherited limits; continuation retains ancestor usage and deadlines. Workers reserve room for one tools-disabled partial report inside those limits, then run the declared- output checks. Missing usage or unavailable reporting room produces an explicit fallback; partial work is never marked complete.",
+          "Agent rosters and detail pages have bounded output, visible continuation and descendant relationships, and usable handles for full diagnostic evidence. Completion receipts include measured worker and descendant token usage, count each continuation once, and distinguish unreported usage from zero.",
+          "Localization and native helper builds resolve the active checkout when the build script runs, so a shared Cargo target keeps working after a worktree moves or is removed.",
+          "Selecting a saved agent profile that is malformed, unreadable or duplicated now fails before any child request, including when its name matches a built-in role; the parent's default route is never substituted silently. agent(action: \"roster\") lists affected profile identities and paths, Fleet run creation performs the same check, and docs/SUBAGENTS.md documents the valid personal profile format with [permissions] (#6117, thanks @Gabriel-Degret)."
         ],
-        "itemCount": 76
+        "itemCount": 89
       },
       {
         "heading": "Changed",
@@ -83,6 +83,10 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Added",
         "items": [
+          "POST /v1/threads/{id}/file-revert restores exactly one file from the exact tool:/pre-turn: snapshot the client selected, checking the reviewed file hash before and after the mandatory safety snapshot. Literal file names, regular files only, thread trust and active-turn admission are enforced, and patch-undo no longer forks a conversation whose file rollback failed (#6111, thanks @gaord; engine half of HengQuWorld/CodeWhale-VSCode#3).",
+          "Authenticated Runtime API workspace file suggestions reuse TUI @file matching and discovery, with bounded queries/results and workspace-contained relative paths only (GET /v1/workspace/files/search, #6095, #6120, thanks @wuisabel-gif; reported by @LmeSzinc). Shared discovery now honors disabled symlink following for AI-tool directory scan roots too.",
+          "Serply is available as an opt-in [search] provider for the Web tool (provider = \"serply\", key from [search] api_key or SERPLY_API_KEY). Preflight fails closed without a key; Firecrawl remains the default and existing configurations are unchanged (#6100, thanks @googio).",
+          "Linux terminals: finishing a transcript or composer mouse selection copies the text to the PRIMARY selection without touching the regular clipboard, and middle-click inside the composer pastes PRIMARY at the pointer without submitting. Native X11 and Wayland data control are used through one bounded background worker; SSH sessions without a forwarded display keep their terminal's own selection behavior (#6116, thanks @dmt4).",
           "codewhale sessions export <id-or-unique-prefix> saves a .tar.xz archive with the durable record, portable session container, manifest and artifacts. Prefix exports preserve unfinished tool calls; confined reads reject linked artifact roots, and existing outputs require --force. Archives retain unredacted content; /load opens the extracted record without installing extracted artifacts (#6056, thanks @h3c-hexin and @asto18089).",
           "deepseek-flash (DeepSeek V4.1 Flash: 1M-token context, reasoning and tool calls) joins the catalog as DeepSeek's declared default, and the offline catalog seed matches it; the DeepSeek Pro listing no longer overstates the published price (#6025).",
           "DeepSeek's September 11 reversal is reflected in provider notices and cost estimates: V4 Pro remains available after September 14 at Pro rates. Explicit Pro selections remain unchanged; Flash remains the default (#6025, thanks @ronohara).",
@@ -90,31 +94,27 @@ export const CHANGELOG: ChangelogRelease[] = [
           "Signed cloud model facts can refresh provider capabilities and prices while preserving verified cached data when a refresh fails. A dispatched request keeps its selected price snapshot so later catalog updates cannot change its recorded cost (#5752).",
           "Saved sessions preserve exact provider routes. Auxiliary model calls settle their usage once against the route and price snapshot that executed them, including recovery, rather than resolving a new price at completion (#5726, #5848).",
           "[tui].posture_bar and [tui].metrics_line accept full, compact, or hidden, also available through /config. Compact preserves the existing rows' essential fields; hidden returns their space to the transcript (#5973).",
-          "Optional model-bound tool-output redaction opt-out, with two explicit startup confirmations and a receipt bound to the readable config contents and modification time. Unconfirmed requests keep masking enabled; routing and stored goal summaries remain redacted (#5982, thanks @SparkofSpike).",
-          "The rusty-alloc cargo feature on codewhale-tui and codewhale-cli opts the binaries into the rusty_alloc global allocator (the mimalloc v2.4.5 architecture remade in pure Rust — no C compiler or build script on that path) instead of the default mimalloc. It is off by default and the default build is unchanged; build with cargo build -p codewhale-tui --features rusty-alloc (#5872).",
-          "The /theme picker now discovers valid user-authored custom:<name> overlays, previews their colors, highlights the active overlay, and preserves it when the picker is opened and committed without navigation (#5901).",
-          "Compaction has two standing knobs next to [context] in config.toml: [compaction] summary_instructions (appended to the summarizer prompt on every manual and automatic pass; /compact <focus> still composes after it) and [compaction] retained_user_message_tokens (default 20 000, clamped 2 000..=200 000) for the verbatim user-message budget. Both are absent by default and absent means the pre-existing behavior. The /compact receipt names the effective budget and whether…",
-          "[tools] user_input_max_questions (default 6, 1..=10) and [tools] user_input_max_options (default 4, 2..=10) replace the hard-coded request_user_input limits; the validator, the tool schema and its description read one value, spawned children inherit the parent's ceilings, and a rejected payload names the ceiling it hit and the key to raise (#5949)."
+          "Optional model-bound tool-output redaction opt-out, with two explicit startup confirmations and a receipt bound to the readable config contents and modification time. Unconfirmed requests keep masking enabled; routing and stored goal summaries remain redacted (#5982, thanks @SparkofSpike)."
         ],
-        "itemCount": 18
+        "itemCount": 22
       },
       {
         "heading": "Contributors",
         "items": [
+          "@LmeSzinc — requested Runtime API access to the TUI's fuzzy file search (#6095).",
+          "@googio — added the Serply web-search provider (#6100).",
+          "@dmt4 — requested Linux copy-on-select and middle-click paste (#6116).",
+          "@Gabriel-Degret — reported that saved agent profiles were silently ignored when spawning sub-agents (#6117).",
           "@nightt5879 — Gemini signature recovery guidance and transport regressions (#6081).",
           "@c020627 — Chinese documentation link repairs (#6080).",
           "@h3c-hexin and @asto18089 — GLM-5.3 reasoning controls and tool-gating/documentation fixes (#6051, #6052).",
           "@Hmbown — dependency updates (#6057) and the Gemini signature recovery report (#6048).",
-          "@gaord — contributed Fleet schema inspection, role precedence and worker deliverable receipts, and linked the community VS Code frontend (#5944, #5945, #5946, #5992).",
+          "@gaord — contributed the file-scoped restore endpoint and the trust-gated whole-tree rollback (#6111), Fleet schema inspection, role precedence and worker deliverable receipts, and linked the community VS Code frontend (#5944, #5945, #5946, #5992).",
           "@goransh-walia — contributed the propose-only commit-planning rework (#5870).",
           "@7jrxt42BxFZo4iAnN4CX — documented turn budgets and goal configuration, and reported gaps in command discovery, Fleet navigation, human waits, state hooks, history and provider routing (#5996, #5952, #5954, #6003, #6004, #6006, #6007).",
-          "@SparkofSpike — contributed two-stage consent for opting out of model-bound credential redaction (#5982).",
-          "@aboimpinto — moved session lifecycle and session-control commands onto shared command contracts (#5902, #5951).",
-          "@EvanProgramming — reported Windows input and CRLF-write defects, and contributed CRLF preservation and an injectable Windows input runner (#5908, #5909, #5910, #5911, #5912).",
-          "@wuisabel-gif — added custom-theme discovery, preview and selection in the theme picker (#5907).",
-          "@zhuowp — matched model-visible shell guidance to the interpreter selected for execution (#5900)."
+          "@SparkofSpike — contributed two-stage consent for opting out of model-bound credential redaction (#5982)."
         ],
-        "itemCount": 19
+        "itemCount": 23
       },
       {
         "heading": "Notes",

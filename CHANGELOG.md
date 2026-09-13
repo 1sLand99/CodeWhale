@@ -7,13 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.13] - 2026-09-12
+## [0.9.13] - 2026-09-13
 
 Codewhale v0.9.13 addresses integrity issues in 0.9.12:
 multiline paste is one paste again, truncated tool arguments can no longer execute, strict
 ACP clients connect again, concurrent instances stop destroying each
-other's queued text, and the Computer Use bundle includes plugin 0.2.1
-with an accessibility-first pointer. DeepSeek V4.1 Flash
+other's queued text, and the Computer Use bundle includes plugin 0.3.1
+with an accessibility-first pointer that no longer steals focus. DeepSeek V4.1 Flash
 (`deepseek-flash`) is the default DeepSeek model, reasoning-capable routes
 keep reasoning out of the answer even when a model id carries no version
 number, and `/mcp reload` no longer freezes the interface while servers
@@ -21,6 +21,65 @@ reconnect.
 
 ### Fixed
 
+- Operate can run structured workflows directly, with named phases, model
+  assignments from Fleet, prerequisite results and shared budgets. Independent
+  steps run together; dependent work waits for its required results and gates.
+  Detached runs return their outcome to the owning conversation, and headless
+  sessions stay alive between phases until the final handback is consumed.
+- Computer Use 0.3.1: mouse actions no longer steal focus or reclaim the
+  foreground when the user switches apps mid-action; background typing,
+  scrolling and selection use semantic input, and screenshots stay scoped to
+  the targeted app. The bundled plugin and the first-party marketplace pin
+  carry the same 0.3.1 sources. A registered macOS helper stays in charge of
+  input through its Pause and Stop controls; an unavailable registered helper
+  produces an error instead of silently bypassing those controls.
+- The Fleet editor uses the standard model picker to manage sub-agent model
+  and thinking assignments. Enter edits the selected row without changing the
+  running session's model. Unconfigured providers are refused, failed saves
+  retain the previous assignment, and a changed or removed team file must be
+  reopened before a pick can overwrite it.
+- The provider catalog includes Baseten and the other compatible-provider
+  templates as selectable rows, opening their existing prefilled setup forms.
+  DeepSeek routes with clock-based pricing show the current peak or off-peak
+  tier beside session cost, with translated labels.
+- Extensions, teams, workflows and automations support mouse-wheel scrolling.
+  Plugin and MCP rows have keyboard enable/disable controls and two-step
+  removal; MCP OAuth can retry with narrower scopes after a scope rejection.
+- Healthy sub-agents continue after an ordinary parent reply. Headless runs
+  keep the existing Engine alive for child results within the run deadline.
+  Explicit cancellation remains authoritative when result queues are full or
+  a completion starts a followup turn.
+- Sub-agent followup supports multiple targets and all parked children, keeps
+  old IDs connected to their current continuation, and saves continuation
+  identity before starting work. Repeated followup does not fork duplicates.
+- Sub-agents validate declared output files and distinguish real edit claims
+  from file citations and unrelated workspace changes. Disjoint file claims
+  can run together; overlapping writers receive the actual conflict and remedies.
+  Explicit read-only shell analysis requires an enforcing native sandbox and
+  refuses execution when that protection is unavailable.
+- Delegation depth stays absolute through saved profiles, nested workers and
+  continuations. Per-call token, step and time limits narrow inherited limits;
+  continuation retains ancestor usage and deadlines. Workers reserve room for
+  one tools-disabled partial report inside those limits, then run the declared-
+  output checks. Missing usage or unavailable reporting room produces an
+  explicit fallback; partial work is never marked complete.
+- Agent rosters and detail pages have bounded output, visible continuation and
+  descendant relationships, and usable handles for full diagnostic evidence.
+  Completion receipts include measured worker and descendant token usage,
+  count each continuation once, and distinguish unreported usage from zero.
+- Localization and native helper builds resolve the active checkout when the
+  build script runs, so a shared Cargo target keeps working after a worktree
+  moves or is removed.
+- Selecting a saved agent profile that is malformed, unreadable or duplicated
+  now fails before any child request, including when its name matches a
+  built-in role; the parent's default route is never substituted silently.
+  `agent(action: "roster")` lists affected profile identities and paths, Fleet
+  run creation performs the same check, and `docs/SUBAGENTS.md` documents the
+  valid personal profile format with `[permissions]` (#6117, thanks
+  @Gabriel-Degret).
+- Interactive startup no longer mistakes worker scheduling delays for an
+  unresponsive terminal. Terminal ownership checks and shutdown cleanup remain
+  enforced (#5929).
 - Interrupted conversations whose saved runtime store is missing recover into a
   fresh scope without restoring old tasks or approvals. Stale session saves
   cannot resurrect the broken binding (#6102).
@@ -471,6 +530,27 @@ reconnect.
 
 ### Added
 
+- `POST /v1/threads/{id}/file-revert` restores exactly one file from the
+  exact `tool:`/`pre-turn:` snapshot the client selected, checking the
+  reviewed file hash before and after the mandatory safety snapshot. Literal
+  file names, regular files only, thread trust and active-turn admission are
+  enforced, and `patch-undo` no longer forks a conversation whose file
+  rollback failed (#6111, thanks @gaord; engine half of
+  HengQuWorld/CodeWhale-VSCode#3).
+- Authenticated Runtime API workspace file suggestions reuse TUI `@file`
+  matching and discovery, with bounded queries/results and workspace-contained
+  relative paths only (`GET /v1/workspace/files/search`, #6095, #6120, thanks @wuisabel-gif; reported by @LmeSzinc). Shared discovery
+  now honors disabled symlink following for AI-tool directory scan roots too.
+- Serply is available as an opt-in `[search]` provider for the Web tool
+  (`provider = "serply"`, key from `[search] api_key` or `SERPLY_API_KEY`).
+  Preflight fails closed without a key; Firecrawl remains the default and
+  existing configurations are unchanged (#6100, thanks @googio).
+- Linux terminals: finishing a transcript or composer mouse selection copies
+  the text to the PRIMARY selection without touching the regular clipboard, and
+  middle-click inside the composer pastes PRIMARY at the pointer without
+  submitting. Native X11 and Wayland data control are used through one bounded
+  background worker; SSH sessions without a forwarded display keep their
+  terminal's own selection behavior (#6116, thanks @dmt4).
 - `codewhale sessions export <id-or-unique-prefix>` saves a `.tar.xz` archive
   with the durable record, portable session container, manifest and artifacts.
   Prefix exports preserve unfinished tool calls; confined reads reject linked
@@ -574,17 +654,21 @@ reconnect.
 
 ### Contributors
 
+- **[@LmeSzinc](https://github.com/LmeSzinc)** — requested Runtime API access to the TUI's fuzzy file search ([#6095](https://github.com/Hmbown/Codewhale/issues/6095)).
+- **[@googio](https://github.com/googio)** — added the Serply web-search provider ([#6100](https://github.com/Hmbown/Codewhale/pull/6100)).
+- **[@dmt4](https://github.com/dmt4)** — requested Linux copy-on-select and middle-click paste ([#6116](https://github.com/Hmbown/Codewhale/issues/6116)).
+- **[@Gabriel-Degret](https://github.com/Gabriel-Degret)** — reported that saved agent profiles were silently ignored when spawning sub-agents ([#6117](https://github.com/Hmbown/Codewhale/issues/6117)).
 - @nightt5879 — Gemini signature recovery guidance and transport regressions (#6081).
 - @c020627 — Chinese documentation link repairs (#6080).
 - @h3c-hexin and @asto18089 — GLM-5.3 reasoning controls and tool-gating/documentation fixes (#6051, #6052).
 - @Hmbown — dependency updates (#6057) and the Gemini signature recovery report (#6048).
-- **[@gaord](https://github.com/gaord)** — contributed Fleet schema inspection, role precedence and worker deliverable receipts, and linked the community VS Code frontend ([#5944](https://github.com/Hmbown/Codewhale/pull/5944), [#5945](https://github.com/Hmbown/Codewhale/pull/5945), [#5946](https://github.com/Hmbown/Codewhale/pull/5946), [#5992](https://github.com/Hmbown/Codewhale/pull/5992)).
+- **[@gaord](https://github.com/gaord)** — contributed the file-scoped restore endpoint and the trust-gated whole-tree rollback ([#6111](https://github.com/Hmbown/Codewhale/pull/6111)), Fleet schema inspection, role precedence and worker deliverable receipts, and linked the community VS Code frontend ([#5944](https://github.com/Hmbown/Codewhale/pull/5944), [#5945](https://github.com/Hmbown/Codewhale/pull/5945), [#5946](https://github.com/Hmbown/Codewhale/pull/5946), [#5992](https://github.com/Hmbown/Codewhale/pull/5992)).
 - **[@goransh-walia](https://github.com/goransh-walia)** — contributed the propose-only commit-planning rework ([#5870](https://github.com/Hmbown/Codewhale/pull/5870)).
 - **[@7jrxt42BxFZo4iAnN4CX](https://github.com/7jrxt42BxFZo4iAnN4CX)** — documented turn budgets and goal configuration, and reported gaps in command discovery, Fleet navigation, human waits, state hooks, history and provider routing ([#5996](https://github.com/Hmbown/Codewhale/pull/5996), [#5952](https://github.com/Hmbown/Codewhale/issues/5952), [#5954](https://github.com/Hmbown/Codewhale/issues/5954), [#6003](https://github.com/Hmbown/Codewhale/issues/6003), [#6004](https://github.com/Hmbown/Codewhale/issues/6004), [#6006](https://github.com/Hmbown/Codewhale/issues/6006), [#6007](https://github.com/Hmbown/Codewhale/issues/6007)).
 - **[@SparkofSpike](https://github.com/SparkofSpike)** — contributed two-stage consent for opting out of model-bound credential redaction ([#5982](https://github.com/Hmbown/Codewhale/pull/5982)).
 - **[@aboimpinto](https://github.com/aboimpinto)** — moved session lifecycle and session-control commands onto shared command contracts ([#5902](https://github.com/Hmbown/Codewhale/pull/5902), [#5951](https://github.com/Hmbown/Codewhale/pull/5951)).
 - **[@EvanProgramming](https://github.com/EvanProgramming)** — reported Windows input and CRLF-write defects, and contributed CRLF preservation and an injectable Windows input runner ([#5908](https://github.com/Hmbown/Codewhale/issues/5908), [#5909](https://github.com/Hmbown/Codewhale/issues/5909), [#5910](https://github.com/Hmbown/Codewhale/pull/5910), [#5911](https://github.com/Hmbown/Codewhale/pull/5911), [#5912](https://github.com/Hmbown/Codewhale/pull/5912)).
-- **[@wuisabel-gif](https://github.com/wuisabel-gif)** — added custom-theme discovery, preview and selection in the theme picker ([#5907](https://github.com/Hmbown/Codewhale/pull/5907)).
+- **[@wuisabel-gif](https://github.com/wuisabel-gif)** — exposed workspace file suggestions through the Runtime API ([#6120](https://github.com/Hmbown/Codewhale/pull/6120)) and added custom-theme discovery, preview and selection in the theme picker ([#5907](https://github.com/Hmbown/Codewhale/pull/5907)).
 - **[@zhuowp](https://github.com/zhuowp)** — matched model-visible shell guidance to the interpreter selected for execution ([#5900](https://github.com/Hmbown/Codewhale/pull/5900)).
 - **[@nsfoxer](https://github.com/nsfoxer)** — reported the multiline-paste regression and incomplete provider model lists ([#5981](https://github.com/Hmbown/Codewhale/issues/5981), [#6009](https://github.com/Hmbown/Codewhale/issues/6009)).
 - **[@Nefelibata1024](https://github.com/Nefelibata1024)** — confirmed the multiline-paste regression's impact ([#5981](https://github.com/Hmbown/Codewhale/issues/5981)).

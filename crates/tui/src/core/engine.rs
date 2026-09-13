@@ -1211,14 +1211,31 @@ impl Engine {
     }
 
     fn begin_turn_control(&mut self) -> handle::TurnControlGuard {
+        self.begin_turn_control_for_provenance(UserInputProvenance::ExternalUser)
+    }
+
+    fn begin_turn_control_for_provenance(
+        &mut self,
+        provenance: UserInputProvenance,
+    ) -> handle::TurnControlGuard {
         let mut controls = self
             .turn_controls
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let control = self
-            .admitted_turn_control
-            .take()
-            .unwrap_or_else(|| controls.fresh());
+        let control = self.admitted_turn_control.take().unwrap_or_else(|| {
+            let mut control = controls.fresh();
+            if !provenance.can_authorize_work() {
+                // Idle handoffs are continuations of the existing user
+                // request. Retain cancellation while holding the same
+                // activation lock used by cancel_with_reason, so a cancel
+                // during an earlier status send cannot be reset here.
+                // Reuse the scope itself so cancelling the handoff also
+                // stops siblings launched before the ordinary parent reply.
+                control.cancel = self.cancel_token.clone();
+                control.reason = Arc::clone(&self.cancel_reason);
+            }
+            control
+        });
         self.cancel_token = control.cancel.clone();
         self.cancel_reason = Arc::clone(&control.reason);
         *self
@@ -2797,6 +2814,16 @@ impl Engine {
                             );
                         }
                     }
+                    Op::GetSubAgentSettlement { tx } => {
+                        let snapshot = self.subagent_settlement_snapshot().await;
+                        if let Some(tx) = tx
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .take()
+                        {
+                            let _ = tx.send(snapshot);
+                        }
+                    }
                     Op::CancelSubAgent { agent_id } => {
                         let active_session_id = self.session.id.clone();
                         let result = {
@@ -3276,6 +3303,12 @@ impl Engine {
         // coalesced away, so a graceful shutdown keeps the latest progress.
         {
             let mut manager = self.subagent_manager.write().await;
+            let children = manager.list_for_session(&self.session.id);
+            for child in children {
+                if child.status == SubAgentStatus::Running {
+                    let _ = manager.cancel_agent_for_session(&self.session.id, &child.agent_id);
+                }
+            }
             manager.flush_pending_persist();
         }
 
@@ -3292,6 +3325,24 @@ impl Engine {
 
     fn host_managed_turns(&self) -> bool {
         self.config.runtime_services.active_thread_id.is_some()
+    }
+
+    async fn subagent_settlement_snapshot(&self) -> crate::core::ops::SubAgentSettlement {
+        // Terminal delivery enqueues the completion while holding this write
+        // lock, before changing Running to terminal. Keep the read guard until
+        // both observations are captured so no completion can fall in the gap.
+        let manager = self.subagent_manager.read().await;
+        crate::core::ops::SubAgentSettlement {
+            running_children: manager.live_count_for_session(&self.session.id),
+            // Workflow terminal delivery queues its receipt before removing
+            // the controller. Observe controllers before the inbox so a gap
+            // between phases cannot look like a settled parent.
+            running_workflows: crate::tools::workflow::live_workflow_count(
+                &self.session.workspace,
+                &self.session.id,
+            ),
+            pending_completions: self.rx_subagent_completion.len(),
+        }
     }
 
     async fn emit_session_updated(&self) {
@@ -3889,6 +3940,13 @@ impl Engine {
         if !outcome.started() {
             for agent_id in claimed_ids {
                 self.delivered_subagent_completion_ids.remove(&agent_id);
+            }
+            if self.cancel_token.is_cancelled() {
+                // Admission lost to cancellation before the transcript took
+                // ownership. Leave these receipts for the next explicit turn.
+                for completion in completions {
+                    let _ = self.tx_subagent_completion.send(completion);
+                }
             }
         }
     }
@@ -4689,7 +4747,11 @@ impl Engine {
                 };
             }
         };
-        let turn_control = self.begin_turn_control();
+        let autonomous = self.admitted_turn_control.is_none() && !provenance.can_authorize_work();
+        let turn_control = self.begin_turn_control_for_provenance(provenance);
+        if autonomous && self.cancel_token.is_cancelled() {
+            return SendMessageOutcome::NotStarted { error: None };
+        }
         let mut goal_objective = goal_objective;
         let mut goal_token_budget = goal_token_budget;
         let mut goal_status = goal_status;
@@ -5155,7 +5217,7 @@ impl Engine {
                 .session
                 .messages
                 .iter()
-                .any(crate::runtime_handoff::is_operate_contract_message)
+                .any(crate::runtime_handoff::is_current_operate_contract_message)
         {
             self.session
                 .add_message(crate::runtime_handoff::operate_contract_runtime_message());
@@ -5296,7 +5358,7 @@ impl Engine {
         // performs its own final check, but an Esc/interrupt can arrive while
         // its clean-exit receipts are being appended. Recheck at this seam so
         // that pre-settlement cancellation remains terminal Cancelled child
-        // work rather than being relabelled as a normal resumable park.
+        // work rather than continuing after a normal answer.
         let status_at_settlement =
             terminal_turn_status_at_settlement(status, self.cancel_token.is_cancelled());
         if status_at_settlement != status {
@@ -5315,8 +5377,8 @@ impl Engine {
         // the following turn (or lost by a runtime monitor that already
         // settled the record).
         if let Some(barrier) = mailbox_for_runtime.take() {
-            if status == TurnOutcomeStatus::Completed {
-                barrier.park_and_flush().await;
+            if status == TurnOutcomeStatus::Completed && !turn.budget_exhausted_final_report {
+                barrier.continue_and_flush().await;
             } else {
                 barrier.cancel_and_flush().await;
             }
@@ -7433,11 +7495,11 @@ impl TurnMailboxBarrier {
         self.flush().await;
     }
 
-    /// A normally completed parent turn parks any still-running owned work as
-    /// resumable before closing the mailbox. Failed or interrupted turns use
-    /// [`Self::cancel_and_flush`] and retain explicit cancellation semantics.
-    pub(crate) async fn park_and_flush(self) {
-        self.foreground_children.park_and_wait().await;
+    /// A normal answer closes this turn's UI mailbox without cancelling
+    /// healthy children. Their manager registration, transcript, immutable
+    /// usage owner and completion inbox survive this turn. Explicit stop,
+    /// failed turns and budget stops still use `cancel_and_flush`.
+    pub(crate) async fn continue_and_flush(self) {
         self.flush().await;
     }
 

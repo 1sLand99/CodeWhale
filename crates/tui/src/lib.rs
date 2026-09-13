@@ -63,6 +63,7 @@ mod integrations;
 mod lane_control;
 mod llm_client;
 mod llm_response_cache;
+mod local_ollama;
 mod logging;
 mod lsp;
 mod mcp;
@@ -2850,6 +2851,7 @@ fn is_workspace_dotenv_credential_key(key: &str) -> bool {
             key,
             "DEEPSEEK_SEARCH_API_KEY"
                 | "SOFYA_API_KEY"
+                | "SERPLY_API_KEY"
                 | "METASO_API_KEY"
                 | "BAIDU_SEARCH_API_KEY"
                 | "DEEPSEEK_SANDBOX_API_KEY"

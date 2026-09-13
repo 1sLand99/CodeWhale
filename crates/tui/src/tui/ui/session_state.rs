@@ -730,6 +730,30 @@ pub(crate) async fn switch_workspace(
     app.status_message = Some(format!("Workspace: {}", workspace.display()));
 }
 
+/// Auth / missing-key failures: keep the transcript user bubble and clear the
+/// composer (the turn was submitted). Surface the error without "restored to
+/// composer" — the echo already owns the text.
+pub(crate) fn keep_failed_immediate_submit_echo(
+    app: &mut App,
+    message: QueuedMessage,
+    error: &str,
+) {
+    tracing::warn!(
+        error = %error,
+        "immediate user message dispatch failed auth; keeping transcript echo"
+    );
+    // Composer stays empty — HistoryCell::User already holds the turn.
+    let _ = message;
+    let status = format!("Message not sent ({error})");
+    app.status_message = Some(status.clone());
+    app.set_sticky_status(
+        status,
+        StatusToastLevel::Error,
+        Some(App::STICKY_ERROR_TTL_MS),
+    );
+    app.needs_redraw = true;
+}
+
 pub(crate) fn restore_failed_immediate_submit(
     app: &mut App,
     message: QueuedMessage,

@@ -627,48 +627,10 @@ pub async fn run_tui(
     require_interactive_terminal(io::stdin().is_terminal(), io::stdout().is_terminal())?;
     require_foreground_terminal_owner()?;
 
-    // Terminal probe with timeout to prevent hanging on unresponsive terminals.
-    //
-    // The blocking task cannot be cancelled once the timeout fires, so a slow
-    // `enable_raw_mode` may still succeed *after* we've bailed out, leaking
-    // raw mode. Both sides run `raw_mode_probe_handshake`; whichever observes
-    // the other's flag disables raw mode again.
-    let probe_timeout = terminal_probe_timeout(config);
-    let probe_abandoned = Arc::new(AtomicBool::new(false));
-    let probe_enabled = Arc::new(AtomicBool::new(false));
-    let task_abandoned = Arc::clone(&probe_abandoned);
-    let task_enabled = Arc::clone(&probe_enabled);
-    let enable_raw = tokio::task::spawn_blocking(move || {
-        let result =
-            enable_raw_mode().map_err(|e| anyhow::anyhow!("Failed to enable raw mode: {e}"));
-        if result.is_ok() && raw_mode_probe_handshake(&task_enabled, &task_abandoned) {
-            // The probe timed out while we were blocked; the caller already
-            // gave up, so undo the late enable instead of leaking raw mode.
-            let _ = disable_raw_mode();
-        }
-        result
-    });
-
-    match tokio::time::timeout(probe_timeout, enable_raw).await {
-        Ok(inner_result) => {
-            inner_result??; // propagate both join and raw-mode errors
-        }
-        Err(_) => {
-            if raw_mode_probe_handshake(&probe_abandoned, &probe_enabled) {
-                // The blocking task finished enabling raw mode right as the
-                // timeout fired and may have missed the abandoned flag.
-                let _ = disable_raw_mode();
-            }
-            tracing::warn!(
-                "Terminal probe timed out after {}ms - terminal may be unresponsive",
-                probe_timeout.as_millis()
-            );
-            return Err(anyhow::anyhow!(
-                "Terminal probe timed out after {}ms",
-                probe_timeout.as_millis()
-            ));
-        }
-    }
+    // This sets local terminal attributes; it is not a terminal-response probe.
+    // Do it on the owning thread, as on resume, so blocking-pool scheduling
+    // cannot abort startup or leave a detached worker enabling raw mode later.
+    enable_raw_mode().context("Failed to enable raw mode")?;
 
     #[cfg(target_os = "windows")]
     enable_windows_ime_console_mode();
@@ -1495,6 +1457,14 @@ pub(crate) async fn run_event_loop(
     // without replacing the user's configured footer/status-line chips.
     let mut version_check: Option<tokio::task::JoinHandle<Option<UpdateNotice>>> =
         spawn_startup_version_check(config.update_config());
+    // First-run / missing-key: if a live local Ollama catalog answers, adopt a
+    // real /api/tags model into chrome instead of leaving the DeepSeek costume.
+    let mut local_ollama_probe: Option<
+        tokio::task::JoinHandle<Option<crate::local_ollama::LiveLocalOllamaCatalog>>,
+    > = crate::local_ollama::spawn_local_ollama_adoption_probe(
+        config,
+        crate::local_ollama::should_adopt_live_local_ollama(app),
+    );
 
     // Startup version-change hint: once per version, never on first run.
     // `record_launch` owns the semantics (strict semver forward move, corrupt
@@ -1610,6 +1580,18 @@ pub(crate) async fn run_event_loop(
             app.add_message(HistoryCell::System {
                 content: notice.notice_block(install),
             });
+        }
+
+        // Adopt a live local Ollama tag into first-run / missing-key chrome.
+        let mut local_done = false;
+        if let Some(ref handle) = local_ollama_probe {
+            local_done = handle.is_finished();
+        }
+        if local_done
+            && let Ok(Some(catalog)) = local_ollama_probe.take().unwrap().await
+            && crate::local_ollama::should_adopt_live_local_ollama(app)
+        {
+            adopt_live_local_ollama_catalog(app, &mut engine_handle, config, catalog).await;
         }
 
         // Non-blocking startup-default writes (mode / thinking) report their
@@ -6810,6 +6792,34 @@ pub(crate) async fn run_cache_warmup(app: &App, config: &Config) -> Result<Cache
         base_url,
         inspection,
     })
+}
+
+/// Switch a first-run / missing-key session onto a live local Ollama tag.
+async fn adopt_live_local_ollama_catalog(
+    app: &mut App,
+    engine_handle: &mut EngineHandle,
+    config: &mut Config,
+    catalog: crate::local_ollama::LiveLocalOllamaCatalog,
+) {
+    let Some(tag) = catalog.preferred_tag().map(str::to_string) else {
+        return;
+    };
+    // switch_provider resolves against the lake we just refreshed.
+    let switched = switch_provider(
+        app,
+        engine_handle,
+        config,
+        ApiProvider::Ollama,
+        Some(tag.clone()),
+    )
+    .await;
+    if !switched {
+        return;
+    }
+    app.onboarding_needs_api_key = false;
+    app.onboarding_missing_key_recovery = false;
+    app.status_message = Some(format!("Local Ollama ready · {tag} (from GET /api/tags)"));
+    app.needs_redraw = true;
 }
 
 pub(crate) async fn run_prepared_dispatch(

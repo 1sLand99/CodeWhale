@@ -8205,7 +8205,11 @@ async fn apply_loaded_session_resets_workspace_runtime_state() {
     let old_context_cell = app.workspace_context_cell.clone();
     app.workspace_context = Some("old workspace context".to_string());
     if let Ok(mut cell) = old_context_cell.lock() {
-        *cell = Some("old workspace context".to_string());
+        *cell = Some(crate::tui::workspace_context::WorkspaceContextSnapshot {
+            workspace: app.workspace.clone(),
+            context: Some("old workspace context".to_string()),
+            is_linked_worktree: false,
+        });
     }
     app.workspace_context_refreshed_at = Some(Instant::now());
     app.file_tree = Some(crate::tui::file_tree::FileTreeState::new(
@@ -8688,56 +8692,6 @@ fn shell_live_output_update_skips_finalized_exec_cell() {
     );
 
     assert!(shell_exec_live_update(&app, 0, &jobs).is_none());
-}
-
-#[test]
-fn terminal_probe_timeout_defaults_to_500ms() {
-    let config = Config::default();
-
-    assert_eq!(terminal_probe_timeout(&config), Duration::from_millis(500));
-}
-
-#[test]
-fn terminal_probe_timeout_uses_tui_config_and_clamps() {
-    let mut config = Config {
-        tui: Some(crate::config::TuiConfig {
-            alternate_screen: None,
-            mouse_capture: None,
-            terminal_probe_timeout_ms: Some(750),
-            stream_chunk_timeout_secs: None,
-            max_model_steps: None,
-            turn_wall_clock_secs: None,
-            stream_max_content_mb: None,
-            stream_max_duration_secs: None,
-            status_items: None,
-            posture_bar: None,
-            metrics_line: None,
-            header_items: None,
-            osc8_links: None,
-            notification_condition: None,
-            composer_arrows_scroll: None,
-        }),
-        ..Config::default()
-    };
-
-    assert_eq!(terminal_probe_timeout(&config), Duration::from_millis(750));
-
-    config
-        .tui
-        .as_mut()
-        .expect("tui config")
-        .terminal_probe_timeout_ms = Some(0);
-    assert_eq!(terminal_probe_timeout(&config), Duration::from_millis(100));
-
-    config
-        .tui
-        .as_mut()
-        .expect("tui config")
-        .terminal_probe_timeout_ms = Some(60_000);
-    assert_eq!(
-        terminal_probe_timeout(&config),
-        Duration::from_millis(5_000)
-    );
 }
 
 #[test]
@@ -10580,20 +10534,38 @@ async fn immediate_submit_custom_provider_missing_key_preflight_shows_auth_next_
     .await
     .expect("provider preflight failures must remain inside the TUI");
 
-    assert_eq!(app.input, "preserve 用户 input");
-    assert_eq!(app.cursor_position, app.input.chars().count());
+    // Echo first: missing-key must paint HistoryCell::User, not restore the
+    // composer as the only place the turn exists.
+    assert!(
+        app.input.is_empty(),
+        "auth failure must not restore the composer when the echo landed: {:?}",
+        app.input
+    );
     assert!(app.api_messages.is_empty());
-    assert!(app.history.is_empty());
+    assert_eq!(
+        app.history
+            .iter()
+            .filter(|cell| matches!(cell, HistoryCell::User { content } if content == "preserve 用户 input"))
+            .count(),
+        1,
+        "missing-key submit must keep exactly one user echo: {:?}",
+        app.history
+    );
     assert!(app.last_submitted_prompt.is_none());
     let status = app
         .status_message
         .as_deref()
         .expect("missing-key preflight should set status");
+    assert!(status.contains("Message not sent"));
     assert!(status.contains("Failed to configure provider route lm-studio / local-model."));
     assert!(
         status.contains(
             "Next step: Run /auth or /provider setup lm-studio to configure credentials."
         )
+    );
+    assert!(
+        !status.contains("restored to composer"),
+        "auth keep-echo must not claim composer restore: {status}"
     );
 }
 
@@ -11325,7 +11297,10 @@ printf '%s\n' '{"text":"off-loop replacement"}'
     assert!(app.dispatch_in_flight);
     assert!(app.api_messages.is_empty(), "gate has not answered yet");
 
-    let apply_hook = tokio::time::timeout(std::time::Duration::from_secs(3), completion_rx.recv())
+    // Hook itself sleeps 1s; give macOS CI runners headroom under load. The
+    // invariant under test is that terminal dispatch returned in <250ms above,
+    // not that the off-loop hook finishes within a tight 3s budget.
+    let apply_hook = tokio::time::timeout(std::time::Duration::from_secs(15), completion_rx.recv())
         .await
         .expect("hook result timed out")
         .expect("hook result channel closed");
@@ -11336,7 +11311,7 @@ printf '%s\n' '{"text":"off-loop replacement"}'
     ));
 
     let apply_dispatch =
-        tokio::time::timeout(std::time::Duration::from_secs(3), completion_rx.recv())
+        tokio::time::timeout(std::time::Duration::from_secs(15), completion_rx.recv())
             .await
             .expect("dispatch result timed out")
             .expect("dispatch result channel closed");
@@ -13802,6 +13777,7 @@ fn make_subagent(
     status: crate::tools::subagent::SubAgentStatus,
 ) -> crate::tools::subagent::SubAgentResult {
     crate::tools::subagent::SubAgentResult {
+        usage: None,
         name: id.to_string(),
         agent_id: id.to_string(),
         context_mode: "fresh".to_string(),
@@ -16620,6 +16596,37 @@ fn completed_subagent_shell_tool_refreshes_workspace_context_before_ttl() {
 }
 
 #[test]
+fn workspace_context_discards_old_workspace_results_and_clears_missing_git() {
+    let mut app = create_test_app();
+    app.workspace_context = Some("feature/current | clean".into());
+    app.workspace_is_linked_worktree = true;
+    app.workspace_context_refreshed_at = Some(Instant::now());
+    *app.workspace_context_cell.lock().unwrap() =
+        Some(crate::tui::workspace_context::WorkspaceContextSnapshot {
+            workspace: app.workspace.join("old-workspace"),
+            context: Some("stale | clean".into()),
+            is_linked_worktree: false,
+        });
+    crate::tui::workspace_context::refresh_if_needed(&mut app, Instant::now(), false);
+    assert_eq!(
+        app.workspace_context.as_deref(),
+        Some("feature/current | clean")
+    );
+    assert!(app.workspace_is_linked_worktree);
+    app.needs_redraw = false;
+    *app.workspace_context_cell.lock().unwrap() =
+        Some(crate::tui::workspace_context::WorkspaceContextSnapshot {
+            workspace: app.workspace.clone(),
+            context: None,
+            is_linked_worktree: false,
+        });
+    crate::tui::workspace_context::refresh_if_needed(&mut app, Instant::now(), false);
+    assert!(app.workspace_context.is_none());
+    assert!(!app.workspace_is_linked_worktree);
+    assert!(app.needs_redraw);
+}
+
+#[test]
 fn workspace_context_drain_requests_redraw_when_context_changes() {
     let mut app = create_test_app();
     app.workspace_context = Some("feature/old | clean".to_string());
@@ -16627,7 +16634,11 @@ fn workspace_context_drain_requests_redraw_when_context_changes() {
     app.needs_redraw = false;
     {
         let mut cell = app.workspace_context_cell.lock().expect("context cell");
-        *cell = Some("feature/new | clean".to_string());
+        *cell = Some(crate::tui::workspace_context::WorkspaceContextSnapshot {
+            workspace: app.workspace.clone(),
+            context: Some("feature/new | clean".to_string()),
+            is_linked_worktree: false,
+        });
     }
 
     crate::tui::workspace_context::refresh_if_needed(&mut app, Instant::now(), false);
@@ -25802,53 +25813,6 @@ fn input_pump_restart_detaches_wedged_thread_and_installs_fresh_parts() {
     );
 
     drop(block_tx); // release the wedged stand-in thread
-}
-
-#[test]
-fn raw_mode_probe_handshake_elects_exactly_one_side_sequentially() {
-    // Task enables raw mode first, probe timeout fires second: the timeout
-    // side sees `enabled` and takes responsibility for disabling.
-    let enabled = std::sync::atomic::AtomicBool::new(false);
-    let abandoned = std::sync::atomic::AtomicBool::new(false);
-    let task_disables = raw_mode_probe_handshake(&enabled, &abandoned);
-    let caller_disables = raw_mode_probe_handshake(&abandoned, &enabled);
-    assert!(!task_disables, "task ran first, so it must not disable");
-    assert!(
-        caller_disables,
-        "timed-out caller must undo the late enable"
-    );
-
-    // Probe timeout fires first, task finishes enabling second: the task
-    // side sees `abandoned` and disables its own late enable.
-    let enabled = std::sync::atomic::AtomicBool::new(false);
-    let abandoned = std::sync::atomic::AtomicBool::new(false);
-    let caller_disables = raw_mode_probe_handshake(&abandoned, &enabled);
-    let task_disables = raw_mode_probe_handshake(&enabled, &abandoned);
-    assert!(!caller_disables, "caller ran first, so it must not disable");
-    assert!(
-        task_disables,
-        "late-finishing task must undo its own enable"
-    );
-}
-
-#[test]
-fn raw_mode_probe_handshake_never_leaks_under_concurrent_race() {
-    // Race both sides on real threads: no interleaving may leave raw mode
-    // leaked, i.e. at least one side must observe the other's flag.
-    for _ in 0..200 {
-        let enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let abandoned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let task_enabled = std::sync::Arc::clone(&enabled);
-        let task_abandoned = std::sync::Arc::clone(&abandoned);
-        let task =
-            std::thread::spawn(move || raw_mode_probe_handshake(&task_enabled, &task_abandoned));
-        let caller_disables = raw_mode_probe_handshake(&abandoned, &enabled);
-        let task_disables = task.join().expect("handshake task side");
-        assert!(
-            task_disables || caller_disables,
-            "at least one side must take responsibility for disabling raw mode"
-        );
-    }
 }
 
 #[test]

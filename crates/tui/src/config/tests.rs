@@ -2072,6 +2072,35 @@ fn sofya_search_provider_parses_and_round_trips() {
 }
 
 #[test]
+fn explicit_serply_search_provider_is_preserved() {
+    let config: Config = toml::from_str(
+        r#"
+        [search]
+        provider = "serply"
+        "#,
+    )
+    .expect("serply search config");
+
+    assert_eq!(
+        config.search.and_then(|search| search.provider),
+        Some(SearchProvider::Serply)
+    );
+}
+
+#[test]
+fn serply_search_provider_parses_and_round_trips() {
+    assert_eq!(
+        SearchProvider::parse("serply"),
+        Some(SearchProvider::Serply)
+    );
+    assert_eq!(
+        SearchProvider::parse("Serply"),
+        Some(SearchProvider::Serply)
+    );
+    assert_eq!(SearchProvider::Serply.as_str(), "serply");
+}
+
+#[test]
 fn live_search_provider_update_preserves_environment_precedence() {
     let _guard = lock_test_env();
     let previous_codewhale = env::var_os("CODEWHALE_SEARCH_PROVIDER");
@@ -7746,7 +7775,7 @@ fn normalize_model_name_for_zai_canonicalizes_current_glm_models() {
 }
 
 #[test]
-fn opencode_go_config_uses_only_current_chat_completions_models() -> Result<()> {
+fn opencode_go_config_uses_documented_model_protocols() -> Result<()> {
     let _lock = lock_test_env();
     let _api_key = EnvVarGuard::remove("OPENCODE_GO_API_KEY");
     let _base_url = EnvVarGuard::remove("OPENCODE_GO_BASE_URL");
@@ -7772,26 +7801,19 @@ model = "opencode-go/glm-5.2"
     );
     assert_eq!(
         model_completion_names_for_provider(ApiProvider::OpencodeGo),
-        OPENCODE_GO_CHAT_MODELS.to_vec()
+        opencode_go_models()
     );
-    for chat_model in OPENCODE_GO_CHAT_MODELS {
+    for chat_model in opencode_go_models() {
         assert_eq!(
             canonical_model_id_for_provider(ApiProvider::OpencodeGo, chat_model).as_deref(),
-            Some(*chat_model)
+            Some(chat_model)
         );
         assert!(validate_route(ApiProvider::OpencodeGo, chat_model).is_ok());
     }
-    for messages_only in [
-        "minimax-m3",
-        "minimax-m2.7",
-        "minimax-m2.5",
-        "qwen3.7-max",
-        "qwen3.7-plus",
-        "qwen3.6-plus",
-    ] {
+    for messages_only in ["claude-unproven", "gpt-unlisted"] {
         assert!(
             !model_completion_names_for_provider(ApiProvider::OpencodeGo).contains(&messages_only),
-            "{messages_only} uses the Messages endpoint and must not be advertised"
+            "{messages_only} has no documented Go protocol and must not be advertised"
         );
         assert!(
             canonical_model_id_for_provider(ApiProvider::OpencodeGo, messages_only).is_none(),
@@ -7804,7 +7826,7 @@ model = "opencode-go/glm-5.2"
         assert!(validate_route(ApiProvider::OpencodeGo, messages_only).is_err());
         // Never substitute a different model. Keep the caller's spelling so
         // validate_route / the route resolver can reject by name. A base URL
-        // override still cannot promote a Messages-only id onto Chat Completions.
+        // override still cannot grant an unknown ID a protocol.
         assert_eq!(
             wire_model_for_provider(ApiProvider::OpencodeGo, messages_only),
             messages_only,
@@ -12163,7 +12185,7 @@ fn status_items_scenario() {
     // the retired keys are skipped, the live ones survive in order.
     {
         let toml_str = r#"
-            status_items = ["mode", "status", "model", "git_branch", "rate_limit", "tokens"]
+            status_items = ["mode", "status", "model", "agents", "rate_limit", "tokens"]
         "#;
         let tui: TuiConfig = toml::from_str(toml_str).expect("legacy items should parse");
         let items = tui.status_items.expect("status_items should be Some");
@@ -12172,6 +12194,18 @@ fn status_items_scenario() {
             vec![StatusItem::Mode, StatusItem::Model, StatusItem::Tokens],
             "retired keys should drop out without failing the whole file"
         );
+    }
+    // #6112 revived `git_branch` and added `workspace`: both parse again and
+    // round-trip through their canonical keys.
+    {
+        let toml_str = r#"
+            status_items = ["workspace", "git_branch"]
+        "#;
+        let tui: TuiConfig = toml::from_str(toml_str).expect("revived items should parse");
+        let items = tui.status_items.expect("status_items should be Some");
+        assert_eq!(items, vec![StatusItem::Workspace, StatusItem::GitBranch]);
+        assert_eq!(StatusItem::Workspace.key(), "workspace");
+        assert_eq!(StatusItem::GitBranch.key(), "git_branch");
     }
     // from status_items_deser_allows_missing_field
     {

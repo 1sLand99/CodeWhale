@@ -2949,6 +2949,7 @@ mod tests {
 
     fn running_agent(agent_id: &str) -> SubAgentResult {
         SubAgentResult {
+            usage: None,
             name: agent_id.to_string(),
             agent_id: agent_id.to_string(),
             context_mode: "fresh".to_string(),

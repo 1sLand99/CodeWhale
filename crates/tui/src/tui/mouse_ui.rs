@@ -406,6 +406,20 @@ fn handle_slash_autocomplete_mouse(app: &mut App, mouse: MouseEvent) -> bool {
 /// Handle mouse events within the composer area.
 /// Returns true if the event was consumed.
 pub(crate) fn handle_composer_mouse(app: &mut App, mouse: MouseEvent) -> bool {
+    if !app.view_stack.is_empty() {
+        return false;
+    }
+    // A transcript selection or scrollbar drag that ends over the composer
+    // belongs to the surface that started it: the transcript handler must
+    // still see the release to clear its drag state and publish the text.
+    if matches!(
+        mouse.kind,
+        MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+    ) && (app.viewport.transcript_selection.dragging
+        || app.viewport.transcript_scrollbar_dragging)
+    {
+        return false;
+    }
     // Use outer area for hit-testing (includes border).
     let Some(area) = app.viewport.last_composer_area else {
         return false;
@@ -505,6 +519,24 @@ pub(crate) fn handle_composer_mouse(app: &mut App, mouse: MouseEvent) -> bool {
             }
             true
         }
+        MouseEventKind::Down(MouseButton::Middle) if app.clipboard.uses_primary_selection() => {
+            if let Some(text) = app.clipboard.read_primary_text() {
+                // Flush already-typed bytes at their original caret first.
+                app.insert_paste_text("");
+                let Some(position) =
+                    mouse_pos_to_char_index(app, mouse.column, mouse.row, text_area)
+                else {
+                    return true;
+                };
+                // PRIMARY often contains this very selection. Insert at the
+                // pointer, preserving the selected original rather than cutting it.
+                app.selection_anchor = None;
+                app.cursor_position = position;
+                crate::tui::work_surface::release_focus(app);
+                app.insert_paste_text(&text);
+            }
+            true
+        }
         _ => false,
     }
 }
@@ -549,6 +581,19 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
     if !app.view_stack.is_empty() {
         app.needs_redraw = true;
         return app.view_stack.handle_mouse(mouse);
+    }
+
+    // A drag can finish outside the composer/transcript that started it.
+    // Publish once before other visible surfaces consume the release event.
+    if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
+        && app.clipboard.uses_primary_selection()
+    {
+        let text = if app.viewport.transcript_selection.dragging {
+            selection_to_text(app).unwrap_or_default()
+        } else {
+            app.selected_text()
+        };
+        let _ = app.clipboard.write_primary_text(&text);
     }
 
     // Topbar facts are typed controls, not decorative text. Route this before
@@ -815,7 +860,7 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
         MouseEventKind::Up(MouseButton::Left) if app.viewport.transcript_selection.dragging => {
             app.viewport.transcript_selection.dragging = false;
             app.viewport.selection_autoscroll = None;
-            if selection_has_content(app) {
+            if selection_has_content(app) && !app.clipboard.uses_primary_selection() {
                 copy_active_selection(app);
             }
         }
@@ -1887,7 +1932,7 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::tempdir;
 
-    fn create_test_app() -> App {
+    pub(super) fn create_test_app() -> App {
         let options = TuiOptions {
             ..crate::test_support::test_tui_options(PathBuf::from("."))
         };
@@ -2640,3 +2685,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod primary_tests;
