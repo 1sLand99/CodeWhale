@@ -988,7 +988,6 @@ pub(crate) fn build_dispatch_success_closure(
     )
 }
 
-
 /// Missing-credential / auth preflight failures must keep the transcript echo.
 /// The user already submitted; rolling the HistoryCell::User back and restoring
 /// the composer hides the turn and makes first-run feel broken.

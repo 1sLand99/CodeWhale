@@ -730,7 +730,6 @@ pub(crate) async fn switch_workspace(
     app.status_message = Some(format!("Workspace: {}", workspace.display()));
 }
 
-
 /// Auth / missing-key failures: keep the transcript user bubble and clear the
 /// composer (the turn was submitted). Surface the error without "restored to
 /// composer" — the echo already owns the text.

@@ -140,7 +140,10 @@ fn record_ollama_tags_into_lake(endpoint_v1: &str, tags: &[String]) {
 }
 
 async fn fetch_text(url: &str) -> anyhow::Result<String> {
-    let client = reqwest::Client::builder()
+    // The first-run probe can run before any provider client has installed
+    // the rustls crypto provider; the shared builder installs it (the bare
+    // `reqwest::Client::builder()` panics under `rustls-no-provider`).
+    let client = crate::tls::reqwest_client_builder()
         .timeout(TAGS_PROBE_TIMEOUT)
         .build()?;
     let response = client.get(url).send().await?;
@@ -186,15 +189,10 @@ pub(crate) async fn probe_live_local_ollama_catalog(
 
     let tags = if tags.is_empty() {
         // Fallback: OpenAI-compat roster (same tags, different shape).
-        let models_url = format!(
-            "{}/models",
-            endpoint_v1.trim_end_matches('/')
-        );
+        let models_url = format!("{}/models", endpoint_v1.trim_end_matches('/'));
         match fetch_text(&models_url).await {
             Ok(body) => match crate::client::parse_models_response(&body) {
-                Ok(models) if !models.is_empty() => {
-                    models.into_iter().map(|m| m.id).collect()
-                }
+                Ok(models) if !models.is_empty() => models.into_iter().map(|m| m.id).collect(),
                 _ => return None,
             },
             Err(_) => return None,
@@ -218,7 +216,7 @@ pub(crate) fn spawn_local_ollama_adoption_probe(
     #[cfg(test)]
     {
         let _ = config;
-        return None;
+        None
     }
     #[cfg(not(test))]
     {
@@ -249,10 +247,7 @@ mod tests {
             {"name":"alpha:tag"}
         ]}"#;
         let tags = parse_ollama_tags_response(body).expect("parse");
-        assert_eq!(
-            tags,
-            vec!["alpha:tag".to_string(), "zeta:tag".to_string()]
-        );
+        assert_eq!(tags, vec!["alpha:tag".to_string(), "zeta:tag".to_string()]);
     }
 
     #[test]

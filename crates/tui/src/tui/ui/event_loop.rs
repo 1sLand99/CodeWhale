@@ -6757,7 +6757,6 @@ pub(crate) async fn run_cache_warmup(app: &App, config: &Config) -> Result<Cache
     })
 }
 
-
 /// Switch a first-run / missing-key session onto a live local Ollama tag.
 async fn adopt_live_local_ollama_catalog(
     app: &mut App,
@@ -6782,9 +6781,7 @@ async fn adopt_live_local_ollama_catalog(
     }
     app.onboarding_needs_api_key = false;
     app.onboarding_missing_key_recovery = false;
-    app.status_message = Some(format!(
-        "Local Ollama ready · {tag} (from GET /api/tags)"
-    ));
+    app.status_message = Some(format!("Local Ollama ready · {tag} (from GET /api/tags)"));
     app.needs_redraw = true;
 }
 
