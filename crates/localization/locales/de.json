@@ -1,4 +1,8 @@
 {
+  "PetHabitatWorkMode": "Vollbildarbeit → fertige Antwort (Esc zurück)",
+  "PetHabitatTitle": "CODEWHALE / WHALESONG · Ein gemeinsamer Lebensraum",
+  "PetHabitatHints": "{back} zurück · {focus} Fokus · {pulse} Impuls · {sound} Ton · {still} Ruhe · {browser} Browser · {window} Fenster",
+  "PetHabitatQueued": "An den gemeinsamen Lebensraum gesendet. /workbar watch fullscreen öffnet die Vollansicht.",
   "PetWatchSoundOn": "Ton an",
   "PetWatchSoundOff": "Ton aus",
   "PetWatchSoundPaused": "Ton pausiert",

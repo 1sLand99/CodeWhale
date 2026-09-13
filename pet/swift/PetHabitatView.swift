@@ -6,7 +6,9 @@ public struct PetHabitatView: View {
     public init(host: PetHost) { self.host = host }
     public var body: some View {
         VStack(spacing: 12) {
-            if let core = host.core {
+            if host.source == .live {
+                PetSharedHabitat(host: host.shared, still: host.still || reducedMotion)
+            } else if let core = host.core {
                 ZStack {
                     LinearGradient(colors: [Color(red: 0.06, green: 0.15, blue: 0.20), Color(red: 0.03, green: 0.07, blue: 0.10)], startPoint: .top, endPoint: .bottom)
                     Canvas { ctx, size in
@@ -33,12 +35,14 @@ public struct PetHabitatView: View {
                 Text("\(core.frame.behaviour)\(core.frame.needs == "none" ? "" : " · awaiting input")")
                     .font(.caption.monospaced()).foregroundStyle(.secondary)
             } else { Text("Habitat unavailable").frame(maxWidth: .infinity, maxHeight: .infinity) }
+            if host.source != .live {
             Text(host.message).font(.caption).foregroundStyle(.secondary)
             if !host.persistenceMessage.isEmpty { Text(host.persistenceMessage).font(.caption).foregroundStyle(.secondary) }
             HStack {
                 Button("Focus") { host.interact(food: false) }
                 Button("Pulse") { host.interact(food: true) }
                 Toggle("Sound", isOn: $host.sound)
+            }
             }
         }
         .onAppear { host.systemReducedMotion = reducedMotion }

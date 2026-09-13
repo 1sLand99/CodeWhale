@@ -20,6 +20,7 @@ class PetNative {
     engineTick = 0;
     segment;
     liveTape = new pet_telemetry_js_1.PetLiveTape();
+    stillProjection;
     constructor(pointsJSON, tapeJSONL = '', interactionsJSON = '[]', live = false, expressionVersion = 2) {
         const points = JSON.parse(pointsJSON);
         if (!Array.isArray(points) || points.length !== 980 || points.some(p => !Array.isArray(p) || p.length !== 2 || !p.every(n => Number.isFinite(n) && Math.abs(n) <= 1)))
@@ -28,6 +29,25 @@ class PetNative {
     }
     step(dt, motion) { this.world.step(dt, { motion, sensitivity: 1 }); return this.snapshot(); }
     snapshot() { return JSON.stringify({ ...this.world.frame, voices: this.world.voices, digest: (0, pet_sim_js_1.digest)(this.world.sim) }); }
+    /** View-only projection. Display cadence and accessibility preferences never
+     * advance the owner, consume randomness, or change its score/checkpoint. */
+    presentation() {
+        const { sim, frame } = this.world;
+        const state = { ...frame.state, roamX: 0, roamY: 0, flip: 1, lit: frame.behaviour === 'doze' ? .18 : 1 };
+        const key = JSON.stringify([state, frame.pod]);
+        if (this.stillProjection?.key !== key) {
+            const still = new pet_sim_js_1.PetSim(sim.p.map(p => [p.hx, p.hy]), 0xC0FFEE, sim.expressionVersion);
+            const peers = frame.pod.filter(p => p.present);
+            still.step(1 / 30, state, { motion: false, sensitivity: 1,
+                podSlots: peers.length >= 3 ? peers.map(p => [[0, 2, 4, 1, 3, 5][p.slot], p.phase]) : undefined });
+            this.stillProjection = { key, points: still.p.map(p => [p.x, p.y]), style: still.frame };
+        }
+        return JSON.stringify({ ...frame, digest: (0, pet_sim_js_1.digest)(sim), style: sim.frame, activity: this.engine.activity(frame.timeMs),
+            points: sim.p.map(p => [p.x, p.y]),
+            still: { points: this.stillProjection.points, style: this.stillProjection.style, state } });
+    }
+    /** Losing a producer invalidates outstanding coverage, never the creature. */
+    disconnectEngine() { this.engine = new pet_engine_js_1.PetEngineTelemetry(); this.world.voices = []; }
     interact(kind, x, y) { this.world.interact(kind, x, y); }
     interactions() { return JSON.stringify(this.world.interactions); }
     accept(packet) { this.world.acceptTelemetry(JSON.parse(packet)); }
@@ -71,6 +91,15 @@ class PetNative {
         return this.world.frame.timeMs;
     }
     observeEngine(metadataJSON, timeMs) { this.engine.observe(JSON.parse(metadataJSON), timeMs); }
+    observeEngineBatch(metadataJSON, timeMs) {
+        const events = JSON.parse(metadataJSON);
+        if (!Array.isArray(events) || events.length > 64)
+            throw new Error('Invalid Engine batch.');
+        const next = this.engine.clone();
+        for (const event of events)
+            next.observe(event, timeMs);
+        this.engine = next;
+    }
     advanceEngine(timeMs, motion, waiting) {
         const target = Math.floor(timeMs * 30 / 1000 + 1e-8);
         if (!Number.isFinite(timeMs) || target < this.engineTick || target - this.engineTick > 300)
@@ -1638,6 +1667,28 @@ class PetEngineTelemetry {
     waiting;
     sequence = 0;
     lastTime = 0;
+    /** Ephemeral receipts. Replay tapes retain measured categories, not tool
+     * names. Restoring/disconnecting clears these captions. Never mutates world. */
+    activity(at) {
+        const fresh = (e) => at >= e.startTime && at - e.endTime <= pet_telemetry_js_1.PET_BIN_MS * 2;
+        const spans = [...this.active].filter(([, e]) => fresh(e));
+        const parallel = spans.filter(([key]) => key.startsWith('agent:')).length;
+        const cue = ([key, e]) => ({
+            ...(key.startsWith('tool:') ? (0, codewhale_js_1.toolActivity)(e.name) : key.startsWith('thinking:')
+                ? { kind: 'thinking', label: 'Thinking' } : key.startsWith('agent:')
+                ? { kind: 'delegating', label: 'Coordinating agents' } : { kind: 'responding', label: 'Writing the response' }),
+            tool: key.startsWith('tool:') ? e.name.replace(/[^a-zA-Z0-9_.:-]/g, '').slice(0, 96) : null,
+            sinceMs: e.startTime,
+        });
+        const active = spans.filter(([key]) => !key.startsWith('agent:')).slice(-4).reverse().map(cue);
+        const error = [...this.events].reverse().find(e => e.category === 'error' && fresh(e));
+        const primary = this.waiting && fresh(this.waiting)
+            ? { kind: 'waiting', label: 'Waiting for you', tool: null, sinceMs: this.waiting.startTime }
+            : error ? { kind: 'error', label: 'An operation failed', tool: null, sinceMs: error.startTime }
+                : active[0] ?? (parallel ? cue(spans.find(([key]) => key.startsWith('agent:')))
+                    : { kind: 'unknown', label: 'Activity unobserved', tool: null, sinceMs: at });
+        return { ...primary, observed: primary.kind !== 'unknown', parallel, active };
+    }
     add(name, category, at, agentId = 'parent', continuation = false) {
         if (this.events.length >= 8192)
             throw new Error('Pet Engine observation window is full.');
@@ -1657,6 +1708,21 @@ class PetEngineTelemetry {
         }
         else
             e.endTime = at;
+    }
+    /** Transactional batch copy; failed validation cannot accept half a packet. */
+    clone() {
+        const next = new PetEngineTelemetry();
+        const copy = (value) => JSON.parse(JSON.stringify(value));
+        next.events = copy(this.events);
+        const spans = new Map(next.events.map(event => [event.id, event]));
+        // Active and waiting spans must still reference their journal entry so a
+        // later heartbeat extends the coverage consumed by bucket().
+        const span = (event) => spans.get(event.id) ?? copy(event);
+        next.active = new Map(Array.from(this.active, ([key, event]) => [key, span(event)]));
+        next.waiting = this.waiting ? span(this.waiting) : undefined;
+        next.sequence = this.sequence;
+        next.lastTime = this.lastTime;
+        return next;
     }
     observe(value, at) {
         if (!Number.isFinite(at) || at < this.lastTime || at > pet_sim_js_1.PET_MAX_SECONDS * 1000)
@@ -1787,6 +1853,7 @@ exports.CodewhaleRuntimeTrace = void 0;
 exports.isCodewhaleSession = isCodewhaleSession;
 exports.isCodewhaleRuntimeRecord = isCodewhaleRuntimeRecord;
 exports.isCodewhaleRuntimeDocument = isCodewhaleRuntimeDocument;
+exports.toolActivity = toolActivity;
 exports.toolCategory = toolCategory;
 exports.fromCodewhaleSession = fromCodewhaleSession;
 exports.fromCodewhaleRuntime = fromCodewhaleRuntime;
@@ -1885,6 +1952,29 @@ function classify(name) {
     if (/tool/.test(n))
         return 'tool';
     return model_js_1.CATEGORIES.includes(n) ? n : 'other';
+}
+/** Presentation vocabulary beside the canonical category classifier. Only the
+ * witnessed tool name is used; command contents are never inferred. */
+function toolActivity(name) {
+    const n = name.toLowerCase().replace(/-/g, '_');
+    if (/search|grep|glob|find_file/.test(n))
+        return { kind: 'searching', label: 'Searching' };
+    if (/read_file|list_dir|read_text|open_file/.test(n))
+        return { kind: 'reading', label: 'Reading files' };
+    if (/apply_patch|write_file|edit_file|replace_text/.test(n))
+        return { kind: 'editing', label: 'Editing files' };
+    if (/run_test|pytest|test_suite/.test(n))
+        return { kind: 'testing', label: 'Running tests' };
+    const category = toolCategory(name);
+    return { browser: { kind: 'browsing', label: 'Using the browser' },
+        filesystem: { kind: 'files', label: 'Working with files' },
+        code: { kind: 'executing', label: 'Running a command' },
+        network: { kind: 'network', label: 'Calling a service' },
+        agent: { kind: 'delegating', label: 'Coordinating agents' },
+        memory: { kind: 'memory', label: 'Retrieving context' },
+        reasoning: { kind: 'thinking', label: 'Thinking' },
+        communication: { kind: 'communicating', label: 'Communicating' },
+    }[category] ?? { kind: 'tool', label: 'Using a tool' };
 }
 function toolCategory(name) {
     const category = classify(name);

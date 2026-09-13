@@ -1,5 +1,11 @@
 # Codewhale: a whale living in code
 
+The current live experience is [one durable pet with attached views](SHARED.md):
+Ratatui Watch/full habitat, browser, native companion and mobile Shared modes.
+That guide contains build/run commands, source selection and the ownership
+contract. The standalone demos and file studies described below stay isolated.
+
+
 The dots are Codewhale's material. The whale is its recognizable home form;
 real activity can reorganize that material into a living expression of the work.
 This is an evolving audiovisual instrument, not a mascot that asks for attention.
@@ -160,7 +166,7 @@ old saved habitats replayable while letting new worlds change their visual form.
 The older TSV is a particle conformance tape and cannot preserve audio onsets.
 
 macOS watches `~/.codewhale/pet-state`. iOS watches `pet-state` in Documents.
-Android uses More → Follow local tape to select a seekable device document.
+Android uses More → Follow file study to select a seekable device document.
 The browser's Follow local tape uses a user-granted File System Access handle.
 All three file readers use the same shared live cursor: the first complete packet
 establishes a baseline, and only an advancing sequence becomes an observation.
@@ -182,9 +188,9 @@ does not establish current compatibility.
 
 ## Persistence and current limits
 
-The browser commits checkpoint and recording together with an optimistic
+The standalone browser commits checkpoint and recording together with an optimistic
 IndexedDB revision. A saved live source reopens as Replay until explicitly
-reattached. TUI Watch saves under the owning session's `artifacts/pet/habitat.json`;
+reattached. Legacy TUI `artifacts/pet/habitat.json` files remain recoverable; current Watch attaches to the companion.
 Apple hosts keep source-specific files in Application Support/CodewhalePet.
 Android keeps separate wild/demo/recording/live habitats in private app storage.
 Native writes are private and atomic, use a writer lock and content revision,

@@ -18,11 +18,17 @@ targets:
       - path: ../swift/PetHabitatStore.swift
       - path: ../swift/PetAudioOutput.swift
       - path: ../swift/PetHost.swift
+      - path: ../swift/PetShared.swift
       - path: ../swift/CodewhalePetView.swift
       - path: ../swift/PetHabitatView.swift
       - path: ../macos/WhalePoints.swift
       - path: Resources
         buildPhase: resources
+    info:
+      path: build/GeneratedInfo.plist
+      properties:
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.shannonlabs.CodewhalePet.mobile

@@ -3,11 +3,12 @@ set -eu
 cd "$(dirname "$0")/.."
 pet_dir=$(pwd)
 node "$pet_dir/scripts/build-pet.mjs" --apple
-app_dir="macos/CodewhalePet.app"
+app_dir="${PET_MACOS_APP_DIR:-macos/CodewhalePet.app}"
 mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
-swiftc -O -target "${PET_MACOS_ARCH:-$(uname -m)}-apple-macos14.0" -parse-as-library swift/PetSim.swift swift/PetNativeCore.swift swift/PetHabitatStore.swift swift/PetAudioOutput.swift swift/PetHost.swift swift/CodewhalePetView.swift swift/PetHabitatView.swift macos/WhalePoints.swift macos/CodewhalePetApp.swift -o "$app_dir/Contents/MacOS/CodewhalePet"
+swiftc -O -target "${PET_MACOS_ARCH:-$(uname -m)}-apple-macos14.0" -parse-as-library swift/PetSim.swift swift/PetNativeCore.swift swift/PetHabitatStore.swift swift/PetAudioOutput.swift swift/PetHost.swift swift/PetShared.swift swift/CodewhalePetView.swift swift/PetHabitatView.swift macos/WhalePoints.swift macos/CodewhalePetApp.swift -o "$app_dir/Contents/MacOS/CodewhalePet"
 cp "$pet_dir/dist/pet-native.js" "$app_dir/Contents/Resources/pet-native.js"
 cp ios/Resources/demo.jsonl "$app_dir/Contents/Resources/demo.jsonl"
+if [ -n "${PET_OWNER_BINARY:-}" ]; then cp "$PET_OWNER_BINARY" "$app_dir/Contents/MacOS/codewhale-pet-owner"; fi
 cp public/whale.png "$app_dir/Contents/Resources/whale.png"
 python3 - "$app_dir/Contents/Info.plist" <<'PY'
 import plistlib,sys

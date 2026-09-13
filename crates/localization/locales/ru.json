@@ -1,4 +1,8 @@
 {
+  "PetHabitatWorkMode": "Работа на весь экран → готовый ответ (Esc назад)",
+  "PetHabitatTitle": "CODEWHALE / WHALESONG · Общая среда обитания",
+  "PetHabitatHints": "{back} назад · {focus} фокус · {pulse} импульс · {sound} звук · {still} покой · {browser} браузер · {window} окно",
+  "PetHabitatQueued": "Отправлено в общую среду обитания. /workbar watch fullscreen открывает полный вид.",
   "PetWatchSoundOn": "Звук включён",
   "PetWatchSoundOff": "Звук выключен",
   "PetWatchSoundPaused": "Звук приостановлен",

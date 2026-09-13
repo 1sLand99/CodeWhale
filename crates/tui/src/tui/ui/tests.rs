@@ -738,6 +738,18 @@ fn bracketed_paste_returns_watch_focus_to_the_visible_composer() {
 /// One representative terminal encoding per shell binding.
 fn shell_binding_probe(id: ShellBindingId) -> KeyEvent {
     match id {
+        ShellBindingId::PetResultUp => KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+        ShellBindingId::PetResultDown => KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        ShellBindingId::PetResultPageUp => KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+        ShellBindingId::PetResultPageDown => KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+        ShellBindingId::PetBack => KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        ShellBindingId::PetFocus => KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE),
+        ShellBindingId::PetPulse => KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE),
+        ShellBindingId::PetSound => KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE),
+        ShellBindingId::PetStill => KeyEvent::new(KeyCode::F(7), KeyModifiers::NONE),
+        ShellBindingId::PetBrowser => KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE),
+        ShellBindingId::PetWindow => KeyEvent::new(KeyCode::F(9), KeyModifiers::NONE),
+
         ShellBindingId::RedactionGateConfirm => {
             KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)
         }
@@ -797,8 +809,14 @@ fn no_shell_binding_changes_meaning_once_the_composer_has_text() {
             "{:?} changed meaning because the composer has text",
             binding.id
         );
-        if binding.focus == crate::tui::shell_key_routing::FocusScope::RedactionGate {
-            assert_eq!(on_typed, None, "consent keys must not act on a draft");
+        if !binding
+            .focus
+            .admits(crate::tui::shell_key_routing::Focus::Composer)
+        {
+            assert_eq!(
+                on_typed, None,
+                "exclusive view keys must not act on a draft"
+            );
             continue;
         }
         assert_eq!(

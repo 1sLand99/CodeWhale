@@ -44,6 +44,7 @@ pub mod workflows_manager;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModalKind {
+    PetHabitat,
     Approval,
     Elevation,
     UserInput,

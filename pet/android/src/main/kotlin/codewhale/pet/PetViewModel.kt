@@ -28,13 +28,14 @@ enum class PetMode(val key: String, val label: String, val detail: String) {
     WILD("wild", "Wild", "Simulated creature · no session attached"),
     DEMO("demo", "Event demo", "Synthetic telemetry"),
     RECORDING("recording", "Recording", "Saved telemetry · replay"),
-    LIVE("live", "Live", "Following a local telemetry file"),
+    LIVE("live", "File study", "Isolated local telemetry study"),
+    SHARED("shared", "Shared", "One pet owned by your local companion"),
 }
 data class PetUiState(val scene: PetScene? = null, val mode: PetMode = PetMode.WILD,
     val paused: Boolean = false, val sound: Boolean = false, val still: Boolean = false,
     val systemStill: Boolean = false, val message: String? = null, val savedAtMs: Double? = null,
     val archives: List<String> = emptyList(), val canExportRecovery: Boolean = false, val running: Boolean = false,
-    val canFollowLive: Boolean = false)
+    val canFollowLive: Boolean = false, val identity: String = "")
 
 /** A single actor owns core, audio cursor and save revision. Compose receives
  * immutable projections and never reads a particle while it is being stepped. */
@@ -44,6 +45,7 @@ class PetViewModel(application: Application) : AndroidViewModel(application) {
         data class Interact(val food: Boolean) : Command
         data class Import(val uri: Uri) : Command
         data class Follow(val uri: Uri) : Command
+        data class Join(val uri: Uri) : Command
         data class Export(val uri: Uri) : Command
         data class ExportRecovery(val uri: Uri) : Command
         data class ExportArchive(val uri: Uri, val name: String) : Command
@@ -52,7 +54,7 @@ class PetViewModel(application: Application) : AndroidViewModel(application) {
     }
     private val prefs = application.getSharedPreferences("pet", 0)
     private var liveUri = prefs.getString("live-uri", null)?.let(Uri::parse)?.takeIf { it.scheme == "content" }
-    private val initialMode = PetMode.entries.firstOrNull { it.key == prefs.getString("mode", "wild") } ?: PetMode.WILD
+    private val initialMode = PetMode.entries.firstOrNull { it.key == prefs.getString("mode", "shared") } ?: PetMode.SHARED
     private val mutable = MutableStateFlow(PetUiState(mode = initialMode, still = prefs.getBoolean("still", false), canFollowLive = liveUri != null))
     val ui = mutable.asStateFlow()
     private val commands = Channel<Command>(64)
@@ -62,6 +64,8 @@ class PetViewModel(application: Application) : AndroidViewModel(application) {
     @Volatile private var sound = false
     @Volatile private var still = prefs.getBoolean("still", false)
     @Volatile private var systemStill = false
+    private val connectionFile = File(application.filesDir, "pet-connection.json")
+    private val shared = PetSharedClient(connectionFile)
     private var core: PetNativeCore? = null
     private var store: PetHabitatStore? = null
     private var saveBlocked = false
@@ -98,12 +102,21 @@ class PetViewModel(application: Application) : AndroidViewModel(application) {
                             val frameSystemStill = systemStill
                             val playing = active && !framePaused
                             if (!playing) {
-                                stopAudio(); stopLive()
+                                stopAudio(); stopLive(); shared.detach()
                                 if (wasPlaying) save()
                                 // Acknowledge Pause only after the in-flight frame,
                                 // output and save have settled on their owning worker.
                                 mutable.update { it.copy(paused = framePaused, running = false,
                                     still = frameStill, systemStill = frameSystemStill) }
+                            } else if (mode == PetMode.SHARED) {
+                                stopAudio(); stopLive()
+                                try {
+                                    val scene = shared.poll(frameStill || frameSystemStill, sound)
+                                    mutable.update { it.copy(scene = scene, paused = false, running = true, still = frameStill, systemStill = frameSystemStill,
+                                        identity = shared.identity, message = shared.message, sound = shared.granted) }
+                                } catch (e: Exception) {
+                                    shared.detach(); mutable.update { it.copy(scene = null, running = false, message = e.message, sound = false) }
+                                }
                             } else {
                                 val pet = checkNotNull(core)
                                 if (mode == PetMode.LIVE) { startLive(); acceptLive(pet, began) }
@@ -138,7 +151,7 @@ class PetViewModel(application: Application) : AndroidViewModel(application) {
             catch (e: Exception) { message(e) }
             finally {
                 withContext(NonCancellable + worker) {
-                    stopAudio(); stopLive(); runCatching { save() }; core?.close(); core = null
+                    stopAudio(); stopLive(); shared.detach(); runCatching { save() }; core?.close(); core = null
                 }
                 commands.close(); worker.close()
             }
@@ -153,6 +166,7 @@ class PetViewModel(application: Application) : AndroidViewModel(application) {
     fun mode(value: PetMode) = enqueue(Command.Mode(value))
     fun interact(food: Boolean) = enqueue(Command.Interact(food))
     fun importRecording(uri: Uri) = enqueue(Command.Import(uri))
+    fun joinShared(uri: Uri) = enqueue(Command.Join(uri))
     fun followLocalTape(uri: Uri) = enqueue(Command.Follow(uri))
     fun exportRecording(uri: Uri) = enqueue(Command.Export(uri))
     fun exportRecovery(uri: Uri) = enqueue(Command.ExportRecovery(uri))
@@ -223,6 +237,13 @@ class PetViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
     private fun open(nextMode: PetMode) {
+        shared.detach()
+        if (nextMode == PetMode.SHARED) {
+            stopAudio(); stopLive(); core?.close(); core = null; store = null; mode = nextMode; saveBlocked = false
+            prefs.edit().putString("mode", nextMode.key).apply()
+            mutable.update { it.copy(scene = null, mode = nextMode, savedAtMs = null, archives = emptyList(), canExportRecovery = false, message = "Connecting to the shared pet…") }
+            return
+        }
         val nextStore = PetHabitatStore(getApplication<Application>().filesDir, nextMode.key)
         var blocked = false
         val saved = try { nextStore.read() } catch (e: Exception) { blocked = true; message(e); null }
@@ -244,6 +265,14 @@ class PetViewModel(application: Application) : AndroidViewModel(application) {
                 check(save()) { "This world could not be saved. Export it or reopen the saved habitat before switching." }
                 open(command.mode)
             }
+            is Command.Join -> {
+                val data = getApplication<Application>().contentResolver.openInputStream(command.uri)?.use { it.readPetBytes(4097) } ?: error("Could not read connection.")
+                require(data.size <= 4096); PetSharedClient.validateConnection(JSONObject(String(data, Charsets.UTF_8)))
+                check(save()) { "Export this world before leaving it." }
+                val file = android.util.AtomicFile(connectionFile); val out = file.startWrite()
+                try { out.write(data); file.finishWrite(out) } catch (e: Exception) { file.failWrite(out); throw e }
+                open(PetMode.SHARED); setPaused(false)
+            }
             is Command.Follow -> {
                 require(command.uri.scheme == "content") { "Choose a local document through the file picker." }
                 check(save()) { "This world could not be saved. Export it before changing sources." }
@@ -253,9 +282,10 @@ class PetViewModel(application: Application) : AndroidViewModel(application) {
                 prefs.edit().putString("live-uri", command.uri.toString()).apply()
                 mutable.update { it.copy(canFollowLive = true, message = "Waiting for fresh local telemetry. Existing file contents are not replayed as live work.") }
             }
-            is Command.Interact -> core?.interact(command.food)
+            is Command.Interact -> if (mode == PetMode.SHARED) shared.interact(command.food) else core?.interact(command.food)
             is Command.Reload -> { open(mode); setPaused(false) }
             is Command.Restart -> {
+                check(mode != PetMode.SHARED) { "A view cannot reset the shared pet. Close or reopen this view." }
                 save()
                 val replay = if (mode == PetMode.RECORDING) core?.recording()?.let { JSONObject(it).apply { remove("checkpoint") }.toString() } else null
                 val next = PetNativeCore(bundle, points, tape(mode), replay, live = mode == PetMode.LIVE)
@@ -287,7 +317,7 @@ class PetViewModel(application: Application) : AndroidViewModel(application) {
                 val app = getApplication<Application>()
                 val staged = File.createTempFile("pet-export-", ".json", app.cacheDir)
                 try {
-                    val bytes = staged.outputStream().buffered().use { checkNotNull(core).exportRecording(it) }
+                    val bytes = staged.outputStream().buffered().use { out -> if (mode == PetMode.SHARED) { val data = shared.export(); out.write(data); data.size.toLong() } else checkNotNull(core).exportRecording(out) }
                     // Finish and validate the snapshot before opening the user's
                     // destination. A core/size failure cannot truncate that file.
                     val out = app.contentResolver.openOutputStream(command.uri, "wt") ?: error("Could not open the selected export file.")

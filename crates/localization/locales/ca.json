@@ -1,4 +1,8 @@
 {
+  "PetHabitatWorkMode": "Treball a pantalla completa → resposta acabada (Esc torna)",
+  "PetHabitatTitle": "CODEWHALE / WHALESONG · Un hàbitat compartit",
+  "PetHabitatHints": "{back} enrere · {focus} focus · {pulse} pols · {sound} so · {still} quietud · {browser} navegador · {window} finestra",
+  "PetHabitatQueued": "Enviat a l’hàbitat compartit. /workbar watch fullscreen obre la vista completa.",
   "PetWatchSoundOn": "So activat",
   "PetWatchSoundOff": "So desactivat",
   "PetWatchSoundPaused": "So en pausa",

@@ -1723,6 +1723,23 @@ fn run_with_args(args: Vec<String>) -> Result<()> {
     let startup_sandbox_mode = resolve_startup_sandbox_mode_for_hardening();
     crate::sandbox::process_hardening::apply_process_hardening(startup_sandbox_mode.as_deref());
 
+    if args.get(1).is_some_and(|arg| arg == "pet") {
+        let root = crate::tui::pet_watch::owner::directory()?;
+        match args.get(2).map(String::as_str) {
+            Some("serve") if args.len() == 3 => {
+                return crate::tui::pet_watch::owner::serve(
+                    root,
+                    std::env::var("CODEWHALE_PET_PORT")
+                        .ok()
+                        .map(|p| p.parse::<u16>())
+                        .transpose()?
+                        .unwrap_or(4633),
+                );
+            }
+            _ => anyhow::bail!("Usage: codewhale pet serve"),
+        }
+    }
+
     // ── Fatal-signal terminal guard (#5424) ───────────────────────────────
     // Abort-class deaths (stack overflow, allocation failure, double panic)
     // skip the panic hook AND every Drop guard, leaving mouse capture and

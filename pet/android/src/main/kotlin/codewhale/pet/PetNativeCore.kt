@@ -8,11 +8,13 @@ import org.json.JSONObject
 import kotlin.math.roundToLong
 import java.io.OutputStream
 
+data class PetAppearance(val background: List<Int>, val backgroundTop: List<Int>, val dotScale: Float, val glow: Float, val environment: Boolean)
+
 data class PetFood(val x: Float, val y: Float, val life: Float)
 data class PetScene(
     val timeMs: Double, val state: PetState, val style: Frame, val dots: FloatArray,
     val behaviour: String, val needs: String, val surface: Float, val caustic: Float,
-    val food: PetFood?, val peers: Int, val digest: String,
+    val food: PetFood?, val peers: Int, val digest: String, val appearance: PetAppearance? = null, val activity: String? = null,
 )
 
 /** Confined to one worker. QuickJS runs the committed world, validation and
@@ -136,10 +138,10 @@ class PetNativeCore(bundle: String, pointsText: String, tape: String = "", saved
     companion object {
         const val MAX_HABITAT_BYTES = 8 * 1024 * 1024
         private fun quote(text: String): String = JSONObject.quote(text)
-        private fun decodeState(s: JSONObject) = PetState(s.getDouble("activity"), s.getDouble("coherence"),
+        internal fun decodeState(s: JSONObject) = PetState(s.getDouble("activity"), s.getDouble("coherence"),
             s.getDouble("attention"), s.getString("channel"), s.getDouble("observed"), s.getDouble("roamX"),
             s.getDouble("roamY"), s.getDouble("flip"), s.getDouble("lit"))
-        private fun decodeStyle(f: JSONObject) = Frame(f.getDouble("r"), f.getDouble("g"), f.getDouble("b"),
+        internal fun decodeStyle(f: JSONObject) = Frame(f.getDouble("r"), f.getDouble("g"), f.getDouble("b"),
             f.getDouble("alpha"), f.getBoolean("hollow"), f.getString("channel"), f.getString("arch"), f.getDouble("work"))
         private fun decodeCheckpoint(c: JSONObject): PetParticleCheckpoint {
             fun list(a: JSONArray) = (0 until a.length()).map(a::getDouble)

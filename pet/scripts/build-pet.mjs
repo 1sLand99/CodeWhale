@@ -7,7 +7,7 @@ import ts from 'typescript';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const result = spawnSync(process.execPath, [root + 'node_modules/typescript/bin/tsc', '-p', root + 'tsconfig.json'], { stdio: 'inherit' });
 if (result.status !== 0) process.exit(result.status || 1);
-for (const name of ['pet.html', 'pet.css', 'whale-points.tsv']) await cp(root + 'public/' + name, root + 'dist/' + name);
+for (const name of ['pet.html', 'shared.html', 'pet.css', 'whale-points.tsv']) await cp(root + 'public/' + name, root + 'dist/' + name);
 const modules = new Map();
 async function moduleFor(name) {
   if (modules.has(name)) return;
@@ -27,6 +27,7 @@ if (process.argv.includes('--tui')) {
   const destination = root + '../crates/tui/src/tui/pet_watch/';
   await mkdir(destination, { recursive: true });
   await writeFile(destination + 'pet-native.js', bundle);
+  await cp(root + 'public/shared.html', destination + 'shared.html');
 }
 if (process.argv.includes('--study')) {
   const study = root + 'world/';

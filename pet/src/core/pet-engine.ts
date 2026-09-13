@@ -1,6 +1,6 @@
 import { PET_MAX_SECONDS } from './pet-sim.js';
 import type { Category, WhaleEvent } from './model.js';
-import { toolCategory } from './codewhale.js';
+import { toolActivity, toolCategory } from './codewhale.js';
 import { compilePetTelemetry, PET_BIN_MS, type PetBucket } from './pet-telemetry.js';
 
 /** Read-only adapter for codewhale_protocol::EventMsg metadata. The foreground
@@ -13,6 +13,29 @@ export class PetEngineTelemetry {
   private waiting: WhaleEvent | undefined;
   private sequence = 0;
   private lastTime = 0;
+
+  /** Ephemeral receipts. Replay tapes retain measured categories, not tool
+   * names. Restoring/disconnecting clears these captions. Never mutates world. */
+  activity(at: number) {
+    const fresh = (e: WhaleEvent) => at >= e.startTime && at - e.endTime <= PET_BIN_MS * 2;
+    const spans = [...this.active].filter(([, e]) => fresh(e));
+    const parallel = spans.filter(([key]) => key.startsWith('agent:')).length;
+    const cue = ([key, e]: [string, WhaleEvent]) => ({
+      ...(key.startsWith('tool:') ? toolActivity(e.name) : key.startsWith('thinking:')
+        ? { kind: 'thinking', label: 'Thinking' } : key.startsWith('agent:')
+          ? { kind: 'delegating', label: 'Coordinating agents' } : { kind: 'responding', label: 'Writing the response' }),
+      tool: key.startsWith('tool:') ? e.name.replace(/[^a-zA-Z0-9_.:-]/g, '').slice(0, 96) : null,
+      sinceMs: e.startTime,
+    });
+    const active = spans.filter(([key]) => !key.startsWith('agent:')).slice(-4).reverse().map(cue);
+    const error = [...this.events].reverse().find(e => e.category === 'error' && fresh(e));
+    const primary = this.waiting && fresh(this.waiting)
+      ? { kind: 'waiting', label: 'Waiting for you', tool: null, sinceMs: this.waiting.startTime }
+      : error ? { kind: 'error', label: 'An operation failed', tool: null, sinceMs: error.startTime }
+        : active[0] ?? (parallel ? cue(spans.find(([key]) => key.startsWith('agent:'))!)
+          : { kind: 'unknown', label: 'Activity unobserved', tool: null, sinceMs: at });
+    return { ...primary, observed: primary.kind !== 'unknown', parallel, active };
+  }
 
   private add(name: string, category: Category, at: number, agentId = 'parent', continuation = false): WhaleEvent {
     if (this.events.length >= 8192) throw new Error('Pet Engine observation window is full.');
@@ -29,6 +52,21 @@ export class PetEngineTelemetry {
     if (at - e.endTime > PET_BIN_MS * 2) {
       this.active.set(key, this.add(e.name, e.category, at, e.agentId, true));
     } else e.endTime = at;
+  }
+
+  /** Transactional batch copy; failed validation cannot accept half a packet. */
+  clone(): PetEngineTelemetry {
+    const next = new PetEngineTelemetry();
+    const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+    next.events = copy(this.events);
+    const spans = new Map(next.events.map(event => [event.id, event]));
+    // Active and waiting spans must still reference their journal entry so a
+    // later heartbeat extends the coverage consumed by bucket().
+    const span = (event: WhaleEvent) => spans.get(event.id) ?? copy(event);
+    next.active = new Map(Array.from(this.active, ([key, event]) => [key, span(event)]));
+    next.waiting = this.waiting ? span(this.waiting) : undefined;
+    next.sequence = this.sequence; next.lastTime = this.lastTime;
+    return next;
   }
 
   observe(value: unknown, at: number): void {

@@ -1,4 +1,8 @@
 {
+  "PetHabitatWorkMode": "पूरी स्क्रीन पर काम → पूरा उत्तर (Esc से वापस)",
+  "PetHabitatTitle": "CODEWHALE / WHALESONG · एक साझा आवास",
+  "PetHabitatHints": "{back} वापस · {focus} ध्यान · {pulse} स्पंदन · {sound} ध्वनि · {still} स्थिर · {browser} ब्राउज़र · {window} विंडो",
+  "PetHabitatQueued": "साझा आवास को भेजा गया। /workbar watch fullscreen से पूरा दृश्य खुलता है।",
   "PetWatchSoundOn": "ध्वनि चालू",
   "PetWatchSoundOff": "ध्वनि बंद",
   "PetWatchSoundPaused": "ध्वनि रुकी हुई",

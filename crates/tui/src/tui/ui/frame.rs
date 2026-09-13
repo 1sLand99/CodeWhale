@@ -1321,6 +1321,7 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
     // Hover targets belong to the whole composed frame. Resetting inside the
     // transcript erased targets registered later by the composer and modals.
     crate::tui::hover_layer::begin_frame();
+    app.pet_watch.prepare_frame();
     let shell_area = session_shell_area(size);
     // Keep the view stack's focus-context texture prototype (#4823) in step
     // with the parsed setting each frame: a plain enum/theme copy, no
@@ -1365,6 +1366,10 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
     // launch surface.
     if app.redaction_gate {
         crate::tui::redaction_gate::render(f, size, app);
+        return None;
+    }
+    if app.view_stack.top_kind() == Some(crate::tui::views::ModalKind::PetHabitat) {
+        crate::tui::pet_watch::render_full(f, app);
         return None;
     }
 
@@ -1934,6 +1939,7 @@ pub(crate) fn draw_app_frame_inner(
         }
         let mut cursor_pos = None;
         terminal.draw(|f| cursor_pos = render(f, app, config))?;
+        app.pet_watch.present(terminal.backend_mut())?;
         finish_frame_cursor(terminal, cursor_pos)?;
         Ok(())
     })();

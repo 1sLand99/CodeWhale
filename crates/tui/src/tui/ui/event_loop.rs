@@ -1928,11 +1928,7 @@ pub(crate) async fn run_event_loop(
                     _ => true,
                 };
                 if pet_event_applies {
-                    app.pet_watch.observe(
-                        &event,
-                        app.current_session_id.as_deref(),
-                        Instant::now(),
-                    );
+                    crate::tui::pet_watch::observe(app, &event, Instant::now());
                 }
                 record_turn_activity(app, &event, Instant::now());
                 match event {

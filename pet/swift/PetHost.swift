@@ -4,9 +4,9 @@ import Dispatch
 import Darwin
 
 public enum PetSource: String, CaseIterable, Identifiable {
-    case wild, demo, live
+    case wild, demo, live, file
     public var id: String { rawValue }
-    public var label: String { switch self { case .wild: return "Wild"; case .demo: return "Event demo"; case .live: return "Live" } }
+    public var label: String { switch self { case .wild: return "Wild"; case .demo: return "Event demo"; case .live: return "Shared"; case .file: return "File study" } }
 }
 
 public func petArchiveLabel(_ name: String) -> String {
@@ -26,6 +26,7 @@ public func petArchiveLabel(_ name: String) -> String {
     @Published public var still = false { didSet { defaults.set(still, forKey: "pet.still") } }
     @Published public var sound = false { didSet { defaults.set(sound, forKey: "pet.sound"); configureSound() } }
     public var systemReducedMotion = false
+    public let shared = PetSharedHost()
     private let points: [(Double, Double)]
     private let bundle: Bundle
     private let defaults: UserDefaults
@@ -46,7 +47,7 @@ public func petArchiveLabel(_ name: String) -> String {
     public init(points: [(Double, Double)], bundle: Bundle = .main, defaults: UserDefaults = .standard, storageDirectory: URL? = nil) {
         self.points = points; self.bundle = bundle; self.defaults = defaults
         self.storageDirectory = storageDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("CodewhalePet", isDirectory: true)
-        source = PetSource(rawValue: defaults.string(forKey: "pet.source") ?? "wild") ?? .wild
+        source = PetSource(rawValue: defaults.string(forKey: "pet.source") ?? "live") ?? .live
         still = defaults.bool(forKey: "pet.still"); sound = defaults.bool(forKey: "pet.sound")
         restart()
         timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
@@ -55,10 +56,11 @@ public func petArchiveLabel(_ name: String) -> String {
     }
     public func suspend(_ value: Bool) {
         let wasPaused = paused; paused = value
+        if source == .live { if value { shared.stop() } else { shared.start() }; return }
         if value {
             save(); audio.stop(); monitor?.cancel(); fileMonitor?.cancel(); monitor = nil; fileMonitor = nil
         } else {
-            if wasPaused && source == .live {
+            if wasPaused && source == .file {
                 do { try core?.resumeLiveInput(); if let stateURL { watch(stateURL) }; objectWillChange.send() }
                 catch { message = error.localizedDescription }
             }
@@ -72,6 +74,8 @@ public func petArchiveLabel(_ name: String) -> String {
         return true
     }
     private func restart() {
+        shared.stop(); core = nil
+        if source == .live { store = nil; archiveStore = nil; archives = []; return }
         audio.stop(); restoring = false; failed = false; monitor?.cancel(); fileMonitor?.cancel(); monitor = nil; fileMonitor = nil
         store = nil; archiveStore = nil; archives = []; persistenceMessage = ""; migratingLegacy = false; count = 0
         do {
@@ -83,7 +87,7 @@ public func petArchiveLabel(_ name: String) -> String {
             }
             var saved: Data?
             do {
-                let files = try PetHabitatStore(directory: storageDirectory, source: source.rawValue)
+                let files = try PetHabitatStore(directory: storageDirectory, source: source == .file ? "live" : source.rawValue)
                 archiveStore = files; archives = (try? files.archives()) ?? []
                 saved = try files.load(); store = files
             } catch { persistenceMessage = "Habitat storage is unavailable. Existing files were kept. This visit stays in memory." }
@@ -92,15 +96,15 @@ public func petArchiveLabel(_ name: String) -> String {
             let interactions = legacy ? defaults.string(forKey: "pet.interactions") ?? "[]" : "[]"
             let restoredCore: PetNativeCore
             if let saved {
-                do { restoredCore = try PetNativeCore(points: points, bundle: script, live: source == .live, saved: saved) }
+                do { restoredCore = try PetNativeCore(points: points, bundle: script, live: source == .file, saved: saved) }
                 catch {
                     store = nil; persistenceMessage = "The habitat could not be restored. Its saved file was kept. This visit stays in memory."
-                    restoredCore = try PetNativeCore(points: points, bundle: script, tape: tape, live: source == .live)
+                    restoredCore = try PetNativeCore(points: points, bundle: script, tape: tape, live: source == .file)
                 }
-            } else { restoredCore = try PetNativeCore(points: points, bundle: script, tape: tape, interactions: interactions, live: source == .live, expressionVersion: hasLegacy ? 1 : 2) }
+            } else { restoredCore = try PetNativeCore(points: points, bundle: script, tape: tape, interactions: interactions, live: source == .file, expressionVersion: hasLegacy ? 1 : 2) }
             core = restoredCore
             message = source == .wild ? "Simulated creature" : source == .demo ? "Synthetic telemetry" : "Waiting for local telemetry"
-            if source == .live, let stateURL { watch(stateURL) }
+            if source == .file, let stateURL { watch(stateURL) }
             if legacy {
                 // Only pre-checkpoint preferences need historical simulation.
                 // The first successful atomic save retires both legacy keys.
@@ -128,13 +132,14 @@ public func petArchiveLabel(_ name: String) -> String {
     }
     public func setLiveFile(_ url: URL) {
         let changed = stateURL != url; stateURL = url
-        if source == .live && !paused {
+        if source == .file && !paused {
             monitor?.cancel(); fileMonitor?.cancel()
             do { if changed { try core?.resumeLiveInput() }; watch(url) }
             catch { message = error.localizedDescription }
         }
     }
     public func interact(food: Bool) {
+        if source == .live { shared.interact(food: food); return }
         do { try core?.interact(food: food); save() } catch { message = error.localizedDescription }
     }
     public func exportRecording(to url: URL) throws {
@@ -149,6 +154,7 @@ public func petArchiveLabel(_ name: String) -> String {
         return try archiveStore.archivedRecording(name)
     }
     private func configureSound() {
+        if source == .live { Task { await shared.setSound(sound) }; return }
         do { try audio.setEnabled(sound && !paused && !failed && !restoring, simulationTime: (core?.frame.timeMs ?? 0) / 1000) }
         catch { sound = false; message = "Sound unavailable: \(error.localizedDescription)" }
     }
@@ -162,7 +168,8 @@ public func petArchiveLabel(_ name: String) -> String {
             objectWillChange.send()
         } catch { audio.stop(); failed = true; message = error.localizedDescription }
     }
-    @discardableResult private func save() -> Bool {
+    @discardableResult public func save() -> Bool {
+        if source == .live { return true }
         guard let core else { return true }
         guard let store, !restoring, !failed else { return false }
         do {
@@ -182,7 +189,7 @@ public func petArchiveLabel(_ name: String) -> String {
         }
     }
     private func watch(_ url: URL) {
-        guard source == .live, stateURL == url, !paused else { return }
+        guard source == .file, stateURL == url, !paused else { return }
         // Watch the directory so atomic file replacement and initial creation work.
         let descriptor = open(url.deletingLastPathComponent().path, O_EVTONLY)
         guard descriptor >= 0 else { message = "Create the telemetry directory, then select Live again."; return }
@@ -191,7 +198,7 @@ public func petArchiveLabel(_ name: String) -> String {
         source.setCancelHandler { close(descriptor) }; monitor = source; source.resume(); watchContents(url)
     }
     private func watchContents(_ url: URL) {
-        guard source == .live, stateURL == url, !paused else { return }
+        guard source == .file, stateURL == url, !paused else { return }
         fileMonitor?.cancel(); fileMonitor = nil
         let descriptor = open(url.path, O_EVTONLY)
         guard descriptor >= 0 else { _ = try? core?.acceptLiveTail(""); message = "Telemetry unavailable · unobserved"; return }
@@ -200,7 +207,7 @@ public func petArchiveLabel(_ name: String) -> String {
         source.setCancelHandler { close(descriptor) }; fileMonitor = source; source.resume(); readPacket(url)
     }
     private func readPacket(_ url: URL) {
-        guard source == .live, stateURL == url, !paused else { return }
+        guard source == .file, stateURL == url, !paused else { return }
         do {
             let handle = try FileHandle(forReadingFrom: url); defer { try? handle.close() }
             let size = try handle.seekToEnd(); try handle.seek(toOffset: size > 262_144 ? size - 262_144 : 0)

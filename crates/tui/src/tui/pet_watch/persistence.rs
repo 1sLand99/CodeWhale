@@ -6,11 +6,14 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::artifacts::{open_session_relative, write_session_relative_immutable};
+#[cfg(test)]
+use crate::artifacts::open_session_relative;
+use crate::artifacts::write_session_relative_immutable;
 use crate::fleet::files::{WorkspaceFile, same_file};
 
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 pub(super) const MAX_EXPORT_BYTES: usize = 64 * 1024 * 1024;
+#[cfg(test)]
 const HABITAT: &str = "artifacts/pet/habitat.json";
 
 pub struct Store {
@@ -21,6 +24,19 @@ pub struct Store {
 }
 
 impl Store {
+    /// Shared presentation-owner state. Legacy session habitats stay in place.
+    pub fn at(root: &Path) -> io::Result<Self> {
+        let data = WorkspaceFile::open(root, Path::new("habitat.json"), true)?;
+        let lock = WorkspaceFile::open(root, Path::new("habitat.lock"), true)?;
+        let original_lock = lock.open_update(true, false)?;
+        Ok(Self {
+            data,
+            lock,
+            original_lock,
+            expected: None,
+        })
+    }
+    #[cfg(test)]
     pub fn open(session: &str) -> io::Result<Self> {
         let data = open_session_relative(session, Path::new(HABITAT), true)?;
         let lock = open_session_relative(session, Path::new("artifacts/pet/habitat.lock"), true)?;
@@ -71,6 +87,7 @@ impl Store {
         Ok(text)
     }
 
+    #[cfg(test)]
     pub fn save(&mut self, text: &str) -> io::Result<()> {
         self.save_archived(text, None)
     }
@@ -238,5 +255,24 @@ mod tests {
         std::fs::remove_file(root.path().join("habitat.lock")).unwrap();
         let _new_owner = store(root.path());
         assert!(files.save("split lock").is_err());
+    }
+}
+
+/// One command owns the world until export completes. Keep the large buffer in
+/// the host, outside QuickJS's 64 MiB heap, and retain the exact checkpoint.
+pub(super) fn export_recording(
+    ctx: &rquickjs::Ctx<'_>,
+    completed: bool,
+) -> rquickjs::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let mut index = 0usize;
+    loop {
+        let chunk: Option<String> = ctx.eval(format!("pet.recordingChunk({index},{completed})"))?;
+        let Some(chunk) = chunk else { return Ok(bytes) };
+        if bytes.len() + chunk.len() > MAX_EXPORT_BYTES {
+            return Err(rquickjs::Error::Unknown);
+        }
+        bytes.extend_from_slice(chunk.as_bytes());
+        index += 1;
     }
 }

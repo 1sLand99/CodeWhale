@@ -1,6 +1,6 @@
 import { PetWorld, type PetInteraction, type PetSegment } from './pet-world.js';
 import { compilePetTelemetry, decodePetJSONL, PetLiveTape } from './pet-telemetry.js';
-import { ARCH_OF, digest, layout } from './pet-sim.js';
+import { ARCH_OF, digest, layout, PetSim } from './pet-sim.js';
 import { renderPetPCM, type PetVoice } from './pet-audio.js';
 import { PetEngineTelemetry } from './pet-engine.js';
 
@@ -12,6 +12,7 @@ export class PetNative {
   private engineTick = 0;
   private segment?: PetSegment;
   private liveTape = new PetLiveTape();
+  private stillProjection?: { key: string; points: number[][]; style: PetSim['frame'] };
   constructor(pointsJSON: string, tapeJSONL = '', interactionsJSON = '[]', live = false, expressionVersion: 1 | 2 = 2) {
     const points = JSON.parse(pointsJSON) as [number, number][];
     if (!Array.isArray(points) || points.length !== 980 || points.some(p => !Array.isArray(p) || p.length !== 2 || !p.every(n => Number.isFinite(n) && Math.abs(n) <= 1)))
@@ -20,6 +21,25 @@ export class PetNative {
   }
   step(dt: number, motion: boolean): string { this.world.step(dt, { motion, sensitivity: 1 }); return this.snapshot(); }
   snapshot(): string { return JSON.stringify({ ...this.world.frame, voices: this.world.voices, digest: digest(this.world.sim) }); }
+  /** View-only projection. Display cadence and accessibility preferences never
+   * advance the owner, consume randomness, or change its score/checkpoint. */
+  presentation(): string {
+    const { sim, frame } = this.world;
+    const state = { ...frame.state, roamX: 0, roamY: 0, flip: 1, lit: frame.behaviour === 'doze' ? .18 : 1 };
+    const key = JSON.stringify([state, frame.pod]);
+    if (this.stillProjection?.key !== key) {
+      const still = new PetSim(sim.p.map(p => [p.hx, p.hy]), 0xC0FFEE, sim.expressionVersion);
+      const peers = frame.pod.filter(p => p.present);
+      still.step(1 / 30, state, { motion: false, sensitivity: 1,
+        podSlots: peers.length >= 3 ? peers.map(p => [[0, 2, 4, 1, 3, 5][p.slot], p.phase] as const) : undefined });
+      this.stillProjection = { key, points: still.p.map(p => [p.x, p.y]), style: still.frame };
+    }
+    return JSON.stringify({ ...frame, digest: digest(sim), style: sim.frame, activity: this.engine.activity(frame.timeMs),
+      points: sim.p.map(p => [p.x, p.y]),
+      still: { points: this.stillProjection.points, style: this.stillProjection.style, state } });
+  }
+  /** Losing a producer invalidates outstanding coverage, never the creature. */
+  disconnectEngine(): void { this.engine = new PetEngineTelemetry(); this.world.voices = []; }
   interact(kind: PetInteraction['kind'], x: number, y: number): void { this.world.interact(kind, x, y); }
   interactions(): string { return JSON.stringify(this.world.interactions); }
   accept(packet: string): void { this.world.acceptTelemetry(JSON.parse(packet)); }
@@ -55,6 +75,13 @@ export class PetNative {
     return this.world.frame.timeMs;
   }
   observeEngine(metadataJSON: string, timeMs: number): void { this.engine.observe(JSON.parse(metadataJSON), timeMs); }
+  observeEngineBatch(metadataJSON: string, timeMs: number): void {
+    const events: unknown = JSON.parse(metadataJSON);
+    if (!Array.isArray(events) || events.length > 64) throw new Error('Invalid Engine batch.');
+    const next = this.engine.clone();
+    for (const event of events) next.observe(event, timeMs);
+    this.engine = next;
+  }
   advanceEngine(timeMs: number, motion: boolean, waiting: boolean): void {
     const target = Math.floor(timeMs * 30 / 1000 + 1e-8);
     if (!Number.isFinite(timeMs) || target < this.engineTick || target - this.engineTick > 300) throw new Error('Engine pet clock jump.');

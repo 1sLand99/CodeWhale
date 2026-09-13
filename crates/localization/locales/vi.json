@@ -1,4 +1,8 @@
 {
+  "PetHabitatWorkMode": "Làm việc toàn màn hình → câu trả lời hoàn tất (Esc quay lại)",
+  "PetHabitatTitle": "CODEWHALE / WHALESONG · Một môi trường sống chung",
+  "PetHabitatHints": "{back} quay lại · {focus} tập trung · {pulse} xung · {sound} âm thanh · {still} tĩnh · {browser} trình duyệt · {window} cửa sổ",
+  "PetHabitatQueued": "Đã gửi đến môi trường sống chung. /workbar watch fullscreen mở chế độ xem toàn màn hình.",
   "PetWatchSoundOn": "Âm thanh bật",
   "PetWatchSoundOff": "Âm thanh tắt",
   "PetWatchSoundPaused": "Âm thanh tạm dừng",

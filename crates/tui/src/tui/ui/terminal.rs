@@ -243,6 +243,9 @@ pub(crate) fn enter_alt_screen<W: Write>(writer: &mut W) -> io::Result<()> {
 
 /// Leave the alternate screen; the counterpart of [`enter_alt_screen`].
 pub(crate) fn leave_alt_screen<W: Write>(writer: &mut W) -> io::Result<()> {
+    if crate::tui::mark::kitty_graphics_supported() {
+        crate::tui::pet_watch::clear_images(writer)?;
+    }
     execute!(writer, LeaveAlternateScreen)?;
     set_live_alt_screen(false);
     Ok(())
@@ -637,6 +640,9 @@ pub(crate) fn disable_alternate_scroll_mode<W: Write>(writer: &mut W) {
 /// raw mode + kitty keyboard flags cleared, which is what causes the
 /// `^[[>5u` shell pollution reported in #1583.
 pub fn emergency_restore_terminal() {
+    if crate::tui::mark::kitty_graphics_supported() {
+        let _ = crate::tui::pet_watch::clear_images(&mut std::io::stdout());
+    }
     let mut stdout = std::io::stdout();
     crate::tui::cursor_accent::restore_cursor_accent();
     pop_keyboard_enhancement_flags(&mut stdout);

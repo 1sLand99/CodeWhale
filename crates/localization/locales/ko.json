@@ -1,4 +1,8 @@
 {
+  "PetHabitatWorkMode": "전체 화면 작업 → 완료된 답변 (Esc로 돌아가기)",
+  "PetHabitatTitle": "CODEWHALE / WHALESONG · 하나의 공유 서식지",
+  "PetHabitatHints": "{back} 뒤로 · {focus} 집중 · {pulse} 파동 · {sound} 소리 · {still} 정지 · {browser} 브라우저 · {window} 창",
+  "PetHabitatQueued": "공유 서식지로 보냈습니다. /workbar watch fullscreen 명령으로 전체 화면을 엽니다.",
   "PetWatchSoundOn": "소리 켜짐",
   "PetWatchSoundOff": "소리 꺼짐",
   "PetWatchSoundPaused": "소리 일시 중지",

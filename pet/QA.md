@@ -4,6 +4,39 @@ Review the exact commit checked out (`git rev-parse HEAD`). Report the source SH
 OS/toolchain, commands, actual nonzero pass/fail counts, and reproducible findings.
 Synthetic fixtures prove local contracts, not provider or customer acceptance.
 
+## Shared pet acceptance
+
+See [Shared habitat](SHARED.md) for the ownership diagram, commands and bounded
+local transport. Live terminal, browser, macOS, iOS and Android clients attach
+to one companion; file studies, isolated worlds and replay remain explicit.
+The companion is a presentation process and does not create an Engine turn.
+
+`check-shared.py` starts only disposable loopback owners and checks ten contracts:
+common identity and immutable frame, competing-owner exclusion, authorization and
+origin validation, durable interaction deduplication, producer gaps and atomic
+validation, source changes and view closure, one sound lease, crash restoration,
+storage conflicts, and appearance persistence without simulation inputs. No provider is used by these checks.
+
+For Android, the twelfth instrumentation test is opt-in. Put a companion's
+private `connection.json` in the debug app's private files as
+`shared-test-connection.json` and use `adb reverse` for that port. It verifies
+two mobile clients against the real owner, a durable interaction and continued
+clock after detachment. Without this explicit fixture it is reported skipped.
+Do not publish the descriptor or include it in logs.
+
+Visual acceptance requires the actual Ratatui application in a terminal that
+answers the existing Kitty probe successfully, plus a fallback terminal. Inspect
+`/workbar watch`, `/workbar watch fullscreen`, F4–F9, Escape, resize, hidden
+composer/history/selection, approvals, Still, and image cleanup. Compare the
+browser and normal native window to the same identity and checkpoint. A CPU
+raster benchmark or PTY byte stream does not prove terminal appearance or input
+latency. Record measured FPS, CPU/RSS and output bandwidth separately from the
+60 fps presentation target. The canonical world remains fixed at 30 Hz.
+
+The CI macOS artifact bundles its own companion executable. It can open a
+normal detached window and start the owner without replacing an installed CLI.
+It remains a locally signed review artifact, not a notarized release.
+
 ## Fast Linux or macOS review
 
 ```sh
@@ -17,7 +50,7 @@ npm test
 npm run check:web
 ```
 
-The pet suite currently contains 63 tests: event occupancy/unknown coverage,
+The pet suite currently contains 66 tests: event occupancy/unknown coverage,
 late failures, human request pairing, read-only local SSE reconnect/cursor
 recovery, replay readiness and cancellation after garbage collection, bounded
 long sessions and recorder process restart, deterministic world/score/PCM,
@@ -35,6 +68,7 @@ For the full terminal, start with one build job on memory-limited machines:
 ```sh
 cargo build --locked -j 1 -p codewhale-tui --bin codewhale-tui
 cargo test --locked -j 1 -p codewhale-tui --lib tui::pet_watch::
+python3 pet/scripts/check-shared.py target/debug/codewhale-tui
 ```
 
 Do not rerun a full library test link that is already exhausting the machine.
@@ -85,7 +119,7 @@ cd pet/android
 ```
 
 Use JDK 17 and Android SDK 35; connect a device/emulator for the second command.
-The eleven instrumentation tests run the real QuickJS binding, Kotlin renderer,
+Eleven instrumentation tests run the real QuickJS binding, Kotlin renderer,
 PCM cursor, storage/recovery, immutable segments and Compose lifecycle. A test-only
 document provider delivers synthetic bytes through real descriptor IO; live pause,
 background, restart and malformed input reach the actual ViewModel. See [Android](android/README.md).

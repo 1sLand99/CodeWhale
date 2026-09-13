@@ -3,7 +3,7 @@
 This is a runnable Compose application, backed by the same committed world and
 score bundle as the terminal and Apple hosts. The existing Kotlin particle
 renderer receives that world's state and persistent pod slots. It owns no
-telemetry bucketer or score scheduler. The app has no Internet permission.
+telemetry bucketer or score scheduler. Shared mode instead attaches to the local companion and directly renders its immutable points. Internet permission is restricted by the client to authenticated loopback, with cleartext allowed only for 127.0.0.1. See [shared ownership](../SHARED.md).
 
 Use JDK 17 and an Android SDK with Platform 35 and Build Tools 35.0.0. Set
 `ANDROID_HOME` to that SDK, or set `sdk.dir` in an untracked `local.properties`.
@@ -30,7 +30,7 @@ Both kinds can be exported again. Autosave and native import are bounded to
 8 MiB. Export includes the current checkpoint and writes small chunks through a
 private staging file, up to 64 MiB; larger-than-autosave files open in the browser.
 
-More → Follow local tape selects a seekable document through Android's file
+More → Follow file study selects a seekable document through Android's file
 picker. A local producer must keep appending canonical PetBucket JSONL to it;
 desktop recorder output is not automatically transferred to the device. The
 first complete packet establishes a baseline. Only later sequence advancement
@@ -40,16 +40,16 @@ Polling reads at most 256 KiB every 400 ms on an IO worker. Pause/background
 closes the reader; resume establishes a fresh baseline and discards old sound.
 Unavailable, non-seekable or delayed files leave the live world unobserved.
 The selected document's read grant and URI are retained when its provider permits;
-use Follow again if access expires. This adds no network permission.
+use Follow again if access expires. This isolated file path does not use the network.
 
-Sound starts off on each process launch. One native AudioTrack receives the
+Sound starts off on each process launch. In isolated modes, one native AudioTrack receives the
 core's stereo 48 kHz float PCM. A bounded queue drops late output. Pause,
 backgrounding, audio-focus loss and headphone disconnection stop sound; an
 audio failure leaves the world and saves running. Still also honors the system
 animator-duration setting. Color is accompanied by semantic text and TalkBack
 descriptions. Portrait and landscape share the same dots.
 
-Each mode has a separate private, atomic recording, saved every five seconds
+Each isolated mode has a separate private, atomic recording, saved every five seconds
 and on suspension. Revision checks reject competing writers. Invalid files are
 retained. More → Start fresh habitat preserves the previous file as a recovery
 copy; More → Export previous world makes that copy available outside the app.

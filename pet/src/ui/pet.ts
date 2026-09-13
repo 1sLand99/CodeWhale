@@ -304,3 +304,16 @@ try {
   void refreshArchives().catch(() => {});
   setInterval(() => { void persist(); }, 5000); requestAnimationFrame(animate);
 } catch (error) { message.textContent = error instanceof Error ? error.message : 'Unable to start the habitat.'; }
+
+// Joining is a view switch; existing IndexedDB recordings are retained.
+get<HTMLInputElement>('join-shared').onchange = async event => {
+  const input = event.target as HTMLInputElement, file = input.files?.[0]; if (!file) return;
+  try {
+    if (file.size > 4096) throw new Error('Invalid local connection file.');
+    const d = JSON.parse(await file.text());
+    if (d.version !== 1 || !Number.isSafeInteger(d.port) || d.port < 1 || d.port > 65535 || !/^[a-f0-9]{64}$/i.test(d.token)) throw new Error('Invalid local connection file.');
+    if (!await mayLeave()) return;
+    location.assign(`http://127.0.0.1:${d.port}/#${d.token}`);
+  } catch (e) { message.textContent = e instanceof Error ? e.message : 'Unable to attach.'; }
+  finally { input.value = ''; }
+};

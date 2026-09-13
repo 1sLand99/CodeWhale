@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
     @State private var pendingSource: PetSource?
     @State private var confirmLeave = false
     @State private var exporting = false
+    @State private var joining = false
     @State private var recording: PetRecordingDocument?
     @State private var notice = ""
     var body: some Scene {
@@ -29,12 +30,14 @@ import UniformTypeIdentifiers
                         }
                     }
                 }.disabled(host.archives.isEmpty)
+                Button("Join shared pet…") { joining = true }
                 Button("Save recording…") {
+                    if host.source == .live { Task { do { recording = PetRecordingDocument(data: try await host.shared.export()); exporting = true } catch { notice = error.localizedDescription } }; return }
                     do { recording = PetRecordingDocument(data: try host.recordingForExport()); exporting = true }
                     catch { notice = error.localizedDescription }
-                }.disabled(host.core == nil)
+                }.disabled(host.core == nil && host.shared.frame == nil)
                 if !notice.isEmpty { Text(notice).font(.caption).foregroundStyle(.secondary) }
-                Text(host.source == .live ? "Live input: pet-state in this app’s Documents folder." : "Hollow dots mean missing telemetry. Sleep is a separate dimmer.")
+                Text(host.source == .file ? "File study: pet-state in this app’s Documents folder." : "Hollow dots mean missing telemetry. Sleep is a separate dimmer.")
                     .font(.caption).foregroundStyle(.secondary)
             }.padding(24).preferredColorScheme(.dark)
                 .onAppear {
@@ -43,6 +46,17 @@ import UniformTypeIdentifiers
                     catch { /* Visual world remains available; audio output reports start errors. */ }
                 }
                 .onChange(of: phase) { _, value in host.suspend(value != .active) }
+                .fileImporter(isPresented: $joining, allowedContentTypes: [.json]) { result in
+                    do {
+                        let url = try result.get(); let access = url.startAccessingSecurityScopedResource(); defer { if access {url.stopAccessingSecurityScopedResource()} }
+                        let file = try FileHandle(forReadingFrom:url); defer {try? file.close()}
+                        let data = try file.read(upToCount:4097) ?? Data(); guard data.count <= 4096 else {throw PetCoreError.invalid("Invalid connection file.")}
+                        let connection = try JSONDecoder().decode(PetConnection.self,from:data);try connection.validate()
+                        guard host.save() else {throw PetCoreError.invalid("Export the current world before leaving it.")}
+                        let target = FileManager.default.urls(for:.documentDirectory,in:.userDomainMask)[0].appendingPathComponent("pet-connection.json")
+                        try data.write(to:target,options:.atomic);host.selectSource(.live);host.shared.stop();host.shared.start()
+                    } catch {notice = error.localizedDescription}
+                }
                 .fileExporter(isPresented: $exporting, document: recording, contentType: .json, defaultFilename: "codewhale-pet.json") { result in
                     switch result {
                     case .success: notice = "Recording saved. Files over 8 MiB open in the browser."

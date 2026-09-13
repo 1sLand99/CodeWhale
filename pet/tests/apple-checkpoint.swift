@@ -111,7 +111,7 @@ import JavaScriptCore
         let liveSuite = "dev.shannonlabs.pet-live-test." + UUID().uuidString
         let liveDefaults = UserDefaults(suiteName: liveSuite)!
         defer { liveDefaults.removePersistentDomain(forName: liveSuite) }
-        liveDefaults.set("live", forKey: "pet.source")
+        liveDefaults.set("file", forKey: "pet.source")
         let liveFile = root.appendingPathComponent("local.jsonl")
         func packet(_ sequence: Int) throws -> Data {
             var value = try JSONSerialization.jsonObject(with: Data(human.utf8)) as! [String: Any]
@@ -194,6 +194,7 @@ import JavaScriptCore
         let hostDir = root.appendingPathComponent("host")
         let suite = "dev.shannonlabs.pet-checkpoint-test." + UUID().uuidString
         let defaults = UserDefaults(suiteName: suite)!
+        defaults.set("wild", forKey: "pet.source")
         defer { defaults.removePersistentDomain(forName: suite) }
         let host = PetHost(points: points, bundle: bundle, defaults: defaults, storageDirectory: hostDir)
         host.suspend(true)
@@ -259,7 +260,7 @@ import JavaScriptCore
         let longDir = root.appendingPathComponent("long")
         try FileManager.default.createDirectory(at: longDir, withIntermediateDirectories: true)
         try FileManager.default.copyItem(at: out.appendingPathComponent("long-habitat.json"), to: longDir.appendingPathComponent("live.json"))
-        defaults.set("live", forKey: "pet.source")
+        defaults.set("file", forKey: "pet.source")
         let start = ContinuousClock.now
         let long = PetHost(points: points, bundle: bundle, defaults: defaults, storageDirectory: longDir)
         long.suspend(true)

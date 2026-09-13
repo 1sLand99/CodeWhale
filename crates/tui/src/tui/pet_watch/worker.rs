@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+// Legacy per-host replay fixtures only; live production consumers use the companion.
 //! Sandboxed, read-only execution of the generated Whalesong world. This reuses
 //! the workspace's existing QuickJS dependency; no JS filesystem/network APIs,
 //! second Engine, async runtime, Node installation or external process is needed.
@@ -70,95 +72,9 @@ pub struct Worker {
     pub notices: mpsc::Receiver<Notice>,
 }
 
-/// One command owns the world until export completes. Keep the large buffer in
-/// the host, outside QuickJS's 64 MiB heap, and retain the exact checkpoint.
-fn export_recording(ctx: &rquickjs::Ctx<'_>, completed: bool) -> rquickjs::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    let mut index = 0usize;
-    loop {
-        let chunk: Option<String> = ctx.eval(format!("pet.recordingChunk({index},{completed})"))?;
-        let Some(chunk) = chunk else { return Ok(bytes) };
-        if bytes.len() + chunk.len() > persistence::MAX_EXPORT_BYTES {
-            return Err(rquickjs::Error::Unknown);
-        }
-        bytes.extend_from_slice(chunk.as_bytes());
-        index += 1;
-    }
-}
+use super::persistence::export_recording;
 
-/// Presentation retains only the voices that can still contribute samples.
-/// Their identities, timestamps and PCM all come from the existing JS core.
-struct AudioCursor {
-    target: Target,
-    sample: usize,
-    voices: Vec<serde_json::Value>,
-}
-
-impl AudioCursor {
-    fn present(
-        &mut self,
-        ctx: &rquickjs::Ctx<'_>,
-        target: &Target,
-        time_ms: f64,
-    ) -> rquickjs::Result<()> {
-        if !target.current() {
-            self.sample = (time_ms * audio::SAMPLE_RATE as f64 / 1000.0).floor() as usize;
-            self.voices.clear();
-            return Ok(());
-        }
-        if let Some(channels) = self.render_samples(ctx, time_ms)? {
-            target
-                .send(channels)
-                .map_err(|_| rquickjs::Error::Unknown)?;
-        }
-        Ok(())
-    }
-
-    fn render_samples(
-        &mut self,
-        ctx: &rquickjs::Ctx<'_>,
-        time_ms: f64,
-    ) -> rquickjs::Result<Option<[Vec<f32>; 2]>> {
-        let end = (time_ms * audio::SAMPLE_RATE as f64 / 1000.0).floor() as usize;
-        // A pause, new output or delayed catch-up cannot play historical sound.
-        if end < self.sample || end - self.sample > audio::MAX_FRAMES {
-            self.sample = end;
-            self.voices.clear();
-        }
-        let json: String = ctx.eval("JSON.stringify(JSON.parse(pet.snapshot()).voices)")?;
-        let voices: Vec<serde_json::Value> =
-            serde_json::from_str(&json).map_err(|_| rquickjs::Error::Unknown)?;
-        let start = self.sample as f64 / audio::SAMPLE_RATE as f64;
-        self.voices.extend(voices);
-        self.voices.retain(|v| {
-            v["start"]
-                .as_f64()
-                .zip(v["duration"].as_f64())
-                .is_some_and(|(at, duration)| at + duration > start)
-        });
-        if self.voices.len() > 128 {
-            return Err(rquickjs::Error::Unknown);
-        }
-        if end == self.sample {
-            return Ok(None);
-        }
-        ctx.globals().set(
-            "petAudioVoices",
-            serde_json::to_string(&self.voices).map_err(|_| rquickjs::Error::Unknown)?,
-        )?;
-        ctx.globals().set("petAudioStart", self.sample)?;
-        ctx.globals().set("petAudioLength", end - self.sample)?;
-        let json: String =
-            ctx.eval("pet.pcm(petAudioVoices, petAudioStart, petAudioLength, 48000)")?;
-        let channels: [Vec<f32>; 2] =
-            serde_json::from_str(&json).map_err(|_| rquickjs::Error::Unknown)?;
-        if channels[0].len() != end - self.sample || channels[1].len() != end - self.sample {
-            return Err(rquickjs::Error::Unknown);
-        }
-        self.sample = end;
-        Ok(Some(channels))
-    }
-}
+use super::audio_cursor::AudioCursor;
 
 impl Worker {
     pub fn start(session: Option<String>) -> std::io::Result<Self> {

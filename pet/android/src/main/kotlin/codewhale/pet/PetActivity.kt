@@ -70,6 +70,7 @@ class PetActivity : ComponentActivity() {
 private fun PetScreen(model: PetViewModel) {
     val ui by model.ui.collectAsStateWithLifecycle()
     val import = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { it?.let(model::importRecording) }
+    val join = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { it?.let(model::joinShared) }
     val follow = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { it?.let(model::followLocalTape) }
     val export = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { it?.let(model::exportRecording) }
     val recovery = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { it?.let(model::exportRecovery) }
@@ -107,11 +108,12 @@ private fun PetScreen(model: PetViewModel) {
                 TextButton(onClick = { menu = true }) { Text("More") }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     DropdownMenuItem(text = { Text("Import recording") }, onClick = { menu = false; import.launch(arrayOf("application/json", "text/plain", "application/octet-stream")) })
-                    DropdownMenuItem(text = { Text("Follow local tape") }, onClick = { menu = false; follow.launch(arrayOf("*/*")) })
+                    DropdownMenuItem(text = { Text("Join shared pet") }, onClick = { menu = false; join.launch(arrayOf("application/json", "*/*")) })
+                    DropdownMenuItem(text = { Text("Follow file study") }, onClick = { menu = false; follow.launch(arrayOf("*/*")) })
                     DropdownMenuItem(text = { Text("Export recording") }, enabled = ui.scene != null, onClick = { menu = false; export.launch("codewhale-pet.json") })
                     DropdownMenuItem(text = { Text("Earlier recordings") }, enabled = ui.archives.isNotEmpty(), onClick = { menu = false; showArchives = true })
                     DropdownMenuItem(text = { Text("Reopen saved habitat") }, onClick = { menu = false; reload = true })
-                    DropdownMenuItem(text = { Text("Start fresh habitat") }, enabled = ui.scene != null, onClick = { menu = false; restart = true })
+                    DropdownMenuItem(text = { Text("Start fresh habitat") }, enabled = ui.scene != null && ui.mode != PetMode.SHARED, onClick = { menu = false; restart = true })
                     DropdownMenuItem(text = { Text("Export previous world") }, enabled = ui.canExportRecovery,
                         onClick = { menu = false; recovery.launch("codewhale-pet-recovery.json") })
                 }
@@ -142,6 +144,7 @@ private fun Habitat(ui: PetUiState, modifier: Modifier) {
                 else Text("The habitat could not open.", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         ui.scene?.let { scene ->
+            scene.activity?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
             Text("${scene.style.channel} · ${scene.style.arch}${if (scene.style.hollow) " · unobserved" else ""}",
                 Modifier.padding(horizontal = 22.dp, vertical = 10.dp), fontFamily = FontFamily.Monospace,
                 style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -154,15 +157,16 @@ private fun Habitat(ui: PetUiState, modifier: Modifier) {
 private fun Controls(ui: PetUiState, model: PetViewModel, modifier: Modifier) {
     Column(modifier.padding(horizontal = 18.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            (listOf(PetMode.WILD, PetMode.DEMO) + if (ui.canFollowLive) listOf(PetMode.LIVE) else emptyList()).forEach { mode ->
+            (listOf(PetMode.SHARED, PetMode.WILD, PetMode.DEMO) + if (ui.canFollowLive) listOf(PetMode.LIVE) else emptyList()).forEach { mode ->
                 FilterChip(selected = ui.mode == mode, onClick = { model.mode(mode) }, label = { Text(mode.label) })
             }
             if (ui.mode == PetMode.RECORDING) FilterChip(selected = true, onClick = {}, label = { Text("Recording") })
         }
+        if (ui.identity.isNotEmpty() && ui.mode == PetMode.SHARED) Text(ui.identity, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.labelSmall)
         Text(ui.mode.detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(enabled = ui.scene != null, onClick = { model.setPaused(!ui.paused) }) { Text(if (ui.paused) "Resume" else "Pause") }
-            OutlinedButton(enabled = ui.scene != null, onClick = { model.setSound(!ui.sound) }) { Text(if (ui.sound) "Sound on" else "Sound off") }
+            OutlinedButton(enabled = ui.scene != null, onClick = { model.setSound(!ui.sound) }) { Text(if (ui.mode == PetMode.SHARED) { if (ui.sound) "Companion sound on" else "Companion sound off" } else if (ui.sound) "Sound on" else "Sound off") }
             OutlinedButton(enabled = !ui.systemStill, onClick = { model.setStill(!ui.still) }) {
                 Text(if (ui.systemStill) "System still" else if (ui.still) "Still on" else "Still off")
             }

@@ -18,7 +18,10 @@ import kotlin.math.sin
 fun CodewhalePet(scene: PetScene, modifier: Modifier = Modifier) {
     Canvas(modifier = modifier.fillMaxSize().semantics { contentDescription = petContentDescription(scene) }) {
         val w = size.width; val h = size.height
-        drawRect(Brush.verticalGradient(listOf(Color(0xff0b2029), Color(0xff071319))))
+        val appearance = scene.appearance
+        fun color(c: List<Int>) = Color(c[0],c[1],c[2])
+        drawRect(Brush.verticalGradient(appearance?.let { listOf(color(it.backgroundTop),color(it.background)) } ?: listOf(Color(0xff0b2029), Color(0xff071319))))
+        if (appearance?.environment != false) {
         val surfaceY = h * (1 + scene.surface) / 2
         val surface = Path().apply {
             moveTo(0f, surfaceY)
@@ -31,6 +34,7 @@ fun CodewhalePet(scene: PetScene, modifier: Modifier = Modifier) {
         drawRect(Brush.verticalGradient(listOf(Color(0xff73c9b5).copy(alpha = scene.caustic * 0.025f), Color.Transparent)),
             topLeft = Offset(0f, surfaceY))
         drawLine(Color(0xff264048), Offset(0f, h * 0.93f), Offset(w, h * 0.93f), 1f)
+        }
         scene.food?.let { food ->
             drawCircle(Color(0xffc2b787), 3f, Offset(w * (0.5f + food.x * 0.3f), h * (0.5f + food.y * 0.3f)),
                 alpha = food.life.coerceIn(0f, 1f))
@@ -38,12 +42,16 @@ fun CodewhalePet(scene: PetScene, modifier: Modifier = Modifier) {
         val f = scene.style
         val color = Color(f.r.toInt().coerceIn(0, 255), f.g.toInt().coerceIn(0, 255), f.b.toInt().coerceIn(0, 255))
         val lay = petLayout(w.toDouble(), h.toDouble(), scene.state)
-        val dot = lay.dot.toFloat()
+        val dot = lay.dot.toFloat() * (appearance?.dotScale ?: 1f)
         for (i in scene.dots.indices step 2) {
             val center = Offset((lay.ox + scene.dots[i] * lay.scale * lay.flipX).toFloat(),
                 (lay.oy + scene.dots[i + 1] * lay.scale).toFloat())
             if (f.hollow) drawCircle(color, dot / 2, center, f.alpha.toFloat(), style = Stroke(1f))
-            else drawCircle(color, dot / 2, center, f.alpha.toFloat())
+            else {
+                drawCircle(color, dot / 2, center, f.alpha.toFloat())
+                val glow = appearance?.glow ?: 0f
+                if (glow > 0 && i % 10 == 0) drawCircle(color,dot/2*(1+glow*5),center,.055f*glow)
+            }
         }
     }
 }

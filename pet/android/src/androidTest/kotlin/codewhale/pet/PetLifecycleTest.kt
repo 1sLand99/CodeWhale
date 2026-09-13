@@ -16,6 +16,7 @@ class PetLifecycleTest {
 
     @Test fun pauseStillSoundAndBackgroundLifecycleUseTheVisibleWorld() {
         val model = ViewModelProvider(compose.activity)[PetViewModel::class.java]
+        model.mode(PetMode.WILD) // Explicit isolated lifecycle fixture.
         compose.waitUntil(15_000) { model.ui.value.scene != null }
         assertFalse(model.ui.value.sound)
         compose.runOnIdle { model.setStill(false); model.setPaused(false) }
@@ -55,6 +56,7 @@ class PetLifecycleTest {
 
     @Test fun localLiveFileStaysFreshAcrossPauseBackgroundAndProducerRestart() {
         val model = ViewModelProvider(compose.activity)[PetViewModel::class.java]
+        model.mode(PetMode.WILD) // This fixture imports an isolated telemetry file.
         compose.waitUntil(15_000) { model.ui.value.scene != null }
         val resolver = compose.activity.contentResolver
         val uri = Uri.parse("content://dev.shannonlabs.codewhale.pet.test.live/tape")

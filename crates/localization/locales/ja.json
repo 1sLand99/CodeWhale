@@ -1,4 +1,8 @@
 {
+  "PetHabitatWorkMode": "全画面の作業 → 完了した回答（Esc で戻る）",
+  "PetHabitatTitle": "CODEWHALE / WHALESONG · 共有ハビタット",
+  "PetHabitatHints": "{back} 戻る · {focus} 集中 · {pulse} パルス · {sound} 音 · {still} 静止 · {browser} ブラウザー · {window} ウィンドウ",
+  "PetHabitatQueued": "共有ハビタットに送信しました。/workbar watch fullscreen で全画面表示を開きます。",
   "PetWatchSoundOn": "サウンド有効",
   "PetWatchSoundOff": "サウンド無効",
   "PetWatchSoundPaused": "サウンド一時停止",

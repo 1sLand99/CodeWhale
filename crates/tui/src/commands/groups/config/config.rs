@@ -615,6 +615,43 @@ pub fn sidebar(app: &mut App, arg: Option<&str>) -> CommandResult {
     const USAGE: &str =
         "Usage: /workbar [bottom|top|left|right|off|tasks|agents|context|watch|pinned] [--save]";
     let raw = arg.map(str::trim).unwrap_or("");
+    use crate::tui::pet_watch::{self, Control};
+    if matches!(
+        raw.to_ascii_lowercase().as_str(),
+        "watch work" | "watch work on" | "watch work off"
+    ) {
+        app.pet_watch.work_enabled = !raw.ends_with("off");
+        return CommandResult::message(format!(
+            "{}: {}",
+            tr(app.ui_locale, MessageId::PetHabitatWorkMode),
+            if app.pet_watch.work_enabled {
+                "on"
+            } else {
+                "off"
+            }
+        ));
+    }
+    if raw.eq_ignore_ascii_case("watch fullscreen") {
+        pet_watch::open_habitat(app);
+        return CommandResult::message(tr(app.ui_locale, MessageId::PetHabitatTitle));
+    }
+    if raw.eq_ignore_ascii_case("watch status") {
+        return CommandResult::message(app.pet_watch.status());
+    }
+    for (name, control) in [
+        ("watch browser", Control::Browser),
+        ("watch appearance", Control::Browser),
+        ("watch window", Control::Window),
+        ("watch source", Control::Select),
+        ("watch focus", Control::Focus),
+        ("watch pulse", Control::Pulse),
+        ("watch still", Control::Still),
+    ] {
+        if raw.eq_ignore_ascii_case(name) {
+            pet_watch::command(app, control);
+            return CommandResult::message(tr(app.ui_locale, MessageId::PetHabitatQueued));
+        }
+    }
     let sound_args = raw
         .split_whitespace()
         .map(str::to_ascii_lowercase)
@@ -730,7 +767,15 @@ pub fn sidebar(app: &mut App, arg: Option<&str>) -> CommandResult {
     }
 
     app.needs_redraw = true;
-    CommandResult::message(rail_status_message(app))
+    let message = rail_status_message(app);
+    CommandResult::message(if raw.eq_ignore_ascii_case("watch") {
+        format!(
+            "{message} · {}",
+            tr(app.ui_locale, MessageId::PetHabitatQueued)
+        )
+    } else {
+        message
+    })
 }
 
 /// Truthful workbar readout: the placement and panel that actually render,

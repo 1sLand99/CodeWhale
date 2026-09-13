@@ -1,4 +1,8 @@
 {
+  "PetHabitatWorkMode": "全螢幕工作 → 完成的回答（Esc 返回）",
+  "PetHabitatTitle": "CODEWHALE / WHALESONG · 共享棲息地",
+  "PetHabitatHints": "{back} 返回 · {focus} 聚焦 · {pulse} 脈衝 · {sound} 聲音 · {still} 靜止 · {browser} 瀏覽器 · {window} 視窗",
+  "PetHabitatQueued": "已傳送至共享棲息地。使用 /workbar watch fullscreen 開啟全螢幕檢視。",
   "PetWatchSoundOn": "聲音已開啟",
   "PetWatchSoundOff": "聲音已關閉",
   "PetWatchSoundPaused": "聲音已暫停",

@@ -1,4 +1,8 @@
 {
+  "PetHabitatWorkMode": "Kerja layar penuh → jawaban selesai (Esc kembali)",
+  "PetHabitatTitle": "CODEWHALE / WHALESONG · Satu habitat bersama",
+  "PetHabitatHints": "{back} kembali · {focus} fokus · {pulse} denyut · {sound} suara · {still} diam · {browser} browser · {window} jendela",
+  "PetHabitatQueued": "Dikirim ke habitat bersama. /workbar watch fullscreen membuka tampilan penuh.",
   "PetWatchSoundOn": "Suara aktif",
   "PetWatchSoundOff": "Suara nonaktif",
   "PetWatchSoundPaused": "Suara dijeda",
