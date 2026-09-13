@@ -12,4 +12,5 @@ exclude = ["tests/build_script_relocation.rs"]
 [lints]
 workspace = true
 
-[dependencies]
+[dev-dependencies]
+tempfile.workspace = true

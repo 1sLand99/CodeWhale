@@ -806,6 +806,9 @@ dependencies = [
 [[package]]
 name = "codewhale-build-support"
 version = "0.9.13"
+dependencies = [
+ "tempfile",
+]
 
 [[package]]
 name = "codewhale-cli"

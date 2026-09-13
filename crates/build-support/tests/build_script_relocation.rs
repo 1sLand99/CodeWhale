@@ -1,22 +1,13 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
+use tempfile::TempDir;
 
-struct Fixture(PathBuf);
+struct Fixture(TempDir);
 
 impl Fixture {
     fn new() -> Self {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "codewhale-build-relocation-{}-{nonce}",
-            std::process::id()
-        ));
-        std::fs::create_dir(&root).unwrap();
-        let fixture = Self(root);
-        let support = fixture.0.join("support.rs");
+        let fixture = Self(tempfile::tempdir().expect("create build-script fixture"));
+        let support = fixture.0.path().join("support.rs");
         std::fs::write(&support, include_str!("../src/lib.rs")).unwrap();
         checked(
             Command::new(rustc())
@@ -33,14 +24,15 @@ impl Fixture {
     }
 
     fn library(&self) -> PathBuf {
-        self.0.join("libcodewhale_build_support.rlib")
+        self.0.path().join("libcodewhale_build_support.rlib")
     }
 
     fn compile(&self, name: &str, source: &str, manifest: &Path) -> PathBuf {
-        let source_path = self.0.join(format!("{name}.rs"));
+        let source_path = self.0.path().join(format!("{name}.rs"));
         std::fs::write(&source_path, source).unwrap();
         let executable = self
             .0
+            .path()
             .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
         checked(
             Command::new(rustc())
@@ -56,12 +48,6 @@ impl Fixture {
                 .env("CARGO_PKG_VERSION", "1.2.3"),
         );
         executable
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
@@ -98,11 +84,11 @@ fn cached_build_scripts_classify_the_current_manifest_and_require_it() {
         ("cli", include_str!("../../cli/build.rs")),
         ("tui", include_str!("../../tui/build.rs")),
     ] {
-        let original = fixture.0.join(format!("{name} original"));
-        let relocated = fixture.0.join(format!("{name} relocated"));
+        let original = fixture.0.path().join(format!("{name} original"));
+        let relocated = fixture.0.path().join(format!("{name} relocated"));
         std::fs::create_dir(&original).unwrap();
         let executable = fixture.compile(name, source, &original);
-        let initial = checked(&mut run_script(&executable, &original, &fixture.0));
+        let initial = checked(&mut run_script(&executable, &original, fixture.0.path()));
         assert!(
             String::from_utf8_lossy(&initial.stdout)
                 .contains("cargo:rustc-env=CODEWHALE_BUILD_VERSION=1.2.3 (dev)\n")
@@ -111,13 +97,13 @@ fn cached_build_scripts_classify_the_current_manifest_and_require_it() {
         // Reuse the same executable after the path baked in at compilation is gone.
         std::fs::rename(&original, &relocated).unwrap();
         std::fs::write(relocated.join("Cargo.toml.orig"), "packaged source").unwrap();
-        let output = checked(&mut run_script(&executable, &relocated, &fixture.0));
+        let output = checked(&mut run_script(&executable, &relocated, fixture.0.path()));
         let directives = String::from_utf8_lossy(&output.stdout);
         assert!(directives.contains("cargo:rustc-env=CODEWHALE_BUILD_VERSION=1.2.3\n"));
         assert!(directives.contains("cargo:rerun-if-env-changed=CARGO_MANIFEST_DIR\n"));
 
         // Do not guess the current directory or fall back to the removed checkout.
-        let missing = run_script(&executable, &relocated, &fixture.0)
+        let missing = run_script(&executable, &relocated, fixture.0.path())
             .env_remove("CARGO_MANIFEST_DIR")
             .output()
             .unwrap();
@@ -131,15 +117,15 @@ fn macos_helper_compilation_follows_the_relocated_manifest() {
     use std::os::unix::fs::PermissionsExt;
 
     let fixture = Fixture::new();
-    let original = fixture.0.join("original manifest");
-    let relocated = fixture.0.join("relocated manifest");
+    let original = fixture.0.path().join("original manifest");
+    let relocated = fixture.0.path().join("relocated manifest");
     let source = Path::new("plugins/computer-use/src/backends/darwin-accessibility.m");
     std::fs::create_dir_all(original.join(source).parent().unwrap()).unwrap();
     std::fs::write(original.join(source), "fixture source").unwrap();
     let executable = fixture.compile("tui", include_str!("../../tui/build.rs"), &original);
     std::fs::rename(&original, &relocated).unwrap();
-    let out = fixture.0.join("out");
-    let bin = fixture.0.join("bin");
+    let out = fixture.0.path().join("out");
+    let bin = fixture.0.path().join("bin");
     std::fs::create_dir(&out).unwrap();
     std::fs::create_dir(&bin).unwrap();
     // Exercise the real build-script command arguments without requiring a macOS
@@ -163,7 +149,7 @@ fn macos_helper_compilation_follows_the_relocated_manifest() {
         &std::env::var_os("PATH").unwrap_or_default(),
     ));
     let output = checked(
-        run_script(&executable, &relocated, &fixture.0)
+        run_script(&executable, &relocated, fixture.0.path())
             .env("CARGO_CFG_TARGET_OS", "macos")
             .env("CARGO_CFG_TARGET_ARCH", "aarch64")
             .env("OUT_DIR", &out)
