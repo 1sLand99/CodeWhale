@@ -8740,15 +8740,16 @@ fn path_is_within_state_root(candidate: &Path, root: &Path) -> bool {
         return true;
     }
 
-    // If both paths exist, an ancestor of `candidate` that is the same file as
-    // `root` is also containment (covers residual alias pairs after resolve).
+    // Residual alias pairs after resolve are mainly a Windows concern; skip the
+    // extra canonicalize walk on Unix so containment stays cheap on hot paths.
+    #[cfg(windows)]
     if let Ok(root_canon) = root.canonicalize() {
         let mut cursor = candidate.clone();
         loop {
-            if let Ok(canon) = cursor.canonicalize() {
-                if canon == root_canon || canon.starts_with(&root_canon) {
-                    return true;
-                }
+            if let Ok(canon) = cursor.canonicalize()
+                && (canon == root_canon || canon.starts_with(&root_canon))
+            {
+                return true;
             }
             if !cursor.pop() {
                 break;
@@ -8849,44 +8850,63 @@ fn normalize_path_components(path: &Path) -> PathBuf {
 }
 
 fn reject_root_relative_symlinks(root: &Path, path: &Path) -> Result<()> {
-    // Resolve both sides onto the same identity spelling before strip_prefix so
-    // Windows `\\?\` / 8.3 pairs that already passed containment still yield a
-    // relative walk for the symlink check.
-    let root = match resolve_path_for_containment(root) {
-        Ok(path) => path,
-        Err(_) => root.to_path_buf(),
-    };
-    let path = match resolve_path_for_containment(path) {
-        Ok(path) => path,
-        Err(_) => path.to_path_buf(),
-    };
-    let relative = match path.strip_prefix(&root) {
-        Ok(relative) => relative.to_path_buf(),
+    // Walk the caller-supplied spellings with symlink_metadata. Do not
+    // canonicalize `path` first — canonicalize follows symlinks and would
+    // erase the components this check exists to reject (including a symlink
+    // leaf that still resolves inside the state root).
+    //
+    // Windows `\\?\` / 8.3 identity is aligned by callers
+    // (`normalize_subagent_workspace`, `checked_subagent_state_path`, etc.)
+    // before they invoke us. If strip_prefix still fails, fall back to
+    // resolving the *root* and the path *parent* only, then rejoin the leaf
+    // so a symlink leaf stays visible to the walk.
+    let (walk_root, relative) = match path.strip_prefix(root) {
+        Ok(relative) => (root.to_path_buf(), relative.to_path_buf()),
         Err(_) => {
-            #[cfg(windows)]
-            {
-                let path_cmp = strip_windows_verbatim_prefix(&path);
-                let root_cmp = strip_windows_verbatim_prefix(&root);
-                path_cmp
-                    .strip_prefix(&root_cmp)
-                    .map(|relative| relative.to_path_buf())
-                    .map_err(|_| {
-                        anyhow!(
+            let resolved_root = match resolve_path_for_containment(root) {
+                Ok(resolved) => resolved,
+                Err(_) => root.to_path_buf(),
+            };
+            let aligned_path = match (path.parent(), path.file_name()) {
+                (Some(parent), Some(name)) => {
+                    let parent = match resolve_path_for_containment(parent) {
+                        Ok(resolved) => resolved,
+                        Err(_) => parent.to_path_buf(),
+                    };
+                    parent.join(name)
+                }
+                _ => path.to_path_buf(),
+            };
+            let relative = match aligned_path.strip_prefix(&resolved_root) {
+                Ok(relative) => relative.to_path_buf(),
+                Err(_) => {
+                    #[cfg(windows)]
+                    {
+                        let path_cmp = strip_windows_verbatim_prefix(&aligned_path);
+                        let root_cmp = strip_windows_verbatim_prefix(&resolved_root);
+                        path_cmp
+                            .strip_prefix(&root_cmp)
+                            .map(|relative| relative.to_path_buf())
+                            .map_err(|_| {
+                                anyhow!(
+                                    "sub-agent state path must stay within state root: {}",
+                                    path.display()
+                                )
+                            })?
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        return Err(anyhow!(
                             "sub-agent state path must stay within state root: {}",
                             path.display()
-                        )
-                    })?
-            }
-            #[cfg(not(windows))]
-            {
-                return Err(anyhow!(
-                    "sub-agent state path must stay within state root: {}",
-                    path.display()
-                ));
-            }
+                        ));
+                    }
+                }
+            };
+            (resolved_root, relative)
         }
     };
-    let mut current = root.to_path_buf();
+    let mut current = walk_root;
     for component in relative.components() {
         current.push(component.as_os_str());
         let Ok(metadata) = fs::symlink_metadata(&current) else {

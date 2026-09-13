@@ -11247,7 +11247,10 @@ printf '%s\n' '{"text":"off-loop replacement"}'
     assert!(app.dispatch_in_flight);
     assert!(app.api_messages.is_empty(), "gate has not answered yet");
 
-    let apply_hook = tokio::time::timeout(std::time::Duration::from_secs(3), completion_rx.recv())
+    // Hook itself sleeps 1s; give macOS CI runners headroom under load. The
+    // invariant under test is that terminal dispatch returned in <250ms above,
+    // not that the off-loop hook finishes within a tight 3s budget.
+    let apply_hook = tokio::time::timeout(std::time::Duration::from_secs(15), completion_rx.recv())
         .await
         .expect("hook result timed out")
         .expect("hook result channel closed");
@@ -11258,7 +11261,7 @@ printf '%s\n' '{"text":"off-loop replacement"}'
     ));
 
     let apply_dispatch =
-        tokio::time::timeout(std::time::Duration::from_secs(3), completion_rx.recv())
+        tokio::time::timeout(std::time::Duration::from_secs(15), completion_rx.recv())
             .await
             .expect("dispatch result timed out")
             .expect("dispatch result channel closed");
