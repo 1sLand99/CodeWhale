@@ -13,6 +13,7 @@ import {
   EN_DOCS_COMPUTERS,
   EN_DOCS_AUTH,
   EN_DOCS_TRUST,
+  EN_COMPUTER_USE,
   EN_CHANGELOG,
   EN_DOCS_SHELL,
   EN_DOCS_TROUBLESHOOTING,
@@ -30,6 +31,7 @@ import {
   getDocsComputers,
   getDocsAuth,
   getDocsTrust,
+  getComputerUse,
   getChangelog,
   getDocsShell,
   getDocsTroubleshooting,
@@ -264,6 +266,7 @@ describe("website dictionaries", () => {
       ["docs-computers", getDocsComputers, EN_DOCS_COMPUTERS],
       ["docs-auth", getDocsAuth, EN_DOCS_AUTH],
       ["docs-trust", getDocsTrust, EN_DOCS_TRUST],
+      ["computer-use", getComputerUse, EN_COMPUTER_USE],
       ["changelog", getChangelog, EN_CHANGELOG],
     ] as const) {
       const enKeys = Object.keys(reference).sort();
