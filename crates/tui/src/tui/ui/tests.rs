@@ -722,15 +722,15 @@ fn focus_test_app() -> App {
 }
 
 #[test]
-fn bracketed_paste_returns_watch_focus_to_the_visible_composer() {
+fn bracketed_paste_returns_dock_focus_to_the_visible_composer() {
     let mut app = focus_test_app();
     crate::tui::work_surface::select_dock_panel(
         &mut app,
-        crate::tui::work_surface::RailPanel::Watch,
+        crate::tui::work_surface::RailPanel::Context,
     );
     assert!(app.work_surface.focused);
-    handle_bracketed_paste(&mut app, "/workbar watch export");
-    assert_eq!(app.input, "/workbar watch export");
+    handle_bracketed_paste(&mut app, "/pet status");
+    assert_eq!(app.input, "/pet status");
     assert!(!app.work_surface.focused);
     assert!(app.composer_enter_would_submit());
 }
@@ -743,10 +743,7 @@ fn shell_binding_probe(id: ShellBindingId) -> KeyEvent {
         ShellBindingId::PetResultPageUp => KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
         ShellBindingId::PetResultPageDown => KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
         ShellBindingId::PetBack => KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        ShellBindingId::PetFocus => KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE),
-        ShellBindingId::PetPulse => KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE),
         ShellBindingId::PetSound => KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE),
-        ShellBindingId::PetStill => KeyEvent::new(KeyCode::F(7), KeyModifiers::NONE),
         ShellBindingId::PetBrowser => KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE),
         ShellBindingId::PetWindow => KeyEvent::new(KeyCode::F(9), KeyModifiers::NONE),
 

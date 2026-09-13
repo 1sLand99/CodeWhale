@@ -27,10 +27,7 @@ impl ModalView for Habitat {
             Some(Id::PetResultPageUp) => Some(Control::Scroll(-10)),
             Some(Id::PetResultPageDown) => Some(Control::Scroll(10)),
             Some(Id::PetBack) => return ViewAction::Close,
-            Some(Id::PetFocus) => Some(Control::Focus),
-            Some(Id::PetPulse) => Some(Control::Pulse),
             Some(Id::PetSound) => Some(Control::Sound),
-            Some(Id::PetStill) => Some(Control::Still),
             Some(Id::PetBrowser) => Some(Control::Browser),
             Some(Id::PetWindow) => Some(Control::Window),
             _ => None,
@@ -56,10 +53,7 @@ pub fn hints(locale: codewhale_localization::Locale) -> String {
     let mut text = tr(locale, MessageId::PetHabitatHints).into_owned();
     for (name, id) in [
         ("back", Id::PetBack),
-        ("focus", Id::PetFocus),
-        ("pulse", Id::PetPulse),
         ("sound", Id::PetSound),
-        ("still", Id::PetStill),
         ("browser", Id::PetBrowser),
         ("window", Id::PetWindow),
     ] {
@@ -97,10 +91,10 @@ mod tests {
             None
         );
         app.view_stack
-            .handle_key(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE));
+            .handle_key(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE));
         assert!(matches!(
             controls.lock().unwrap().as_slice(),
-            [Control::Pulse]
+            [Control::Sound]
         ));
         app.view_stack
             .handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));

@@ -92,10 +92,7 @@ pub enum ShellBindingId {
     PetResultPageUp,
     PetResultPageDown,
     PetBack,
-    PetFocus,
-    PetPulse,
     PetSound,
-    PetStill,
     PetBrowser,
     PetWindow,
     RedactionGateConfirm,
@@ -145,10 +142,7 @@ impl ShellBinding {
                 key.code == KeyCode::PageDown && key.modifiers.is_empty()
             }
             ShellBindingId::PetBack => key.code == KeyCode::Esc && key.modifiers.is_empty(),
-            ShellBindingId::PetFocus => key.code == KeyCode::F(4) && key.modifiers.is_empty(),
-            ShellBindingId::PetPulse => key.code == KeyCode::F(5) && key.modifiers.is_empty(),
             ShellBindingId::PetSound => key.code == KeyCode::F(6) && key.modifiers.is_empty(),
-            ShellBindingId::PetStill => key.code == KeyCode::F(7) && key.modifiers.is_empty(),
             ShellBindingId::PetBrowser => key.code == KeyCode::F(8) && key.modifiers.is_empty(),
             ShellBindingId::PetWindow => key.code == KeyCode::F(9) && key.modifiers.is_empty(),
 
@@ -222,27 +216,9 @@ pub const SHELL_BINDINGS: &[ShellBinding] = &[
         focus: FocusScope::PetHabitat,
     },
     ShellBinding {
-        id: ShellBindingId::PetFocus,
-        catalog_chord: "F4",
-        footer_chord: "F4",
-        focus: FocusScope::PetHabitat,
-    },
-    ShellBinding {
-        id: ShellBindingId::PetPulse,
-        catalog_chord: "F5",
-        footer_chord: "F5",
-        focus: FocusScope::PetHabitat,
-    },
-    ShellBinding {
         id: ShellBindingId::PetSound,
         catalog_chord: "F6",
         footer_chord: "F6",
-        focus: FocusScope::PetHabitat,
-    },
-    ShellBinding {
-        id: ShellBindingId::PetStill,
-        catalog_chord: "F7",
-        footer_chord: "F7",
         focus: FocusScope::PetHabitat,
     },
     ShellBinding {

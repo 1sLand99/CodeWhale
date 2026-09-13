@@ -26,7 +26,15 @@ export const CHANGELOG: ChangelogRelease[] = [
     "date": null,
     "unreleased": true,
     "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.9.12...HEAD",
-    "sections": []
+    "sections": [
+      {
+        "heading": "Added",
+        "items": [
+          "/pet turns the terminal over to the Codewhale pet. /pet on (or bare /pet) gives the habitat the whole content viewport now and on every accepted turn, reveals the actual answer or error when the turn completes, and Escape returns to the composer without cancelling anything. /pet off closes the view and stops automatic entry while the durable companion keeps the pet alive; /pet appearance|window|source|sound|export|status address the shared companion. The pet no longer lives…"
+        ],
+        "itemCount": 1
+      }
+    ]
   },
   {
     "version": "0.9.13",

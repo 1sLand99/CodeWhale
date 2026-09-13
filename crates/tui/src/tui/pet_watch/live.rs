@@ -102,7 +102,6 @@ pub struct View {
 #[derive(Clone)]
 pub enum Command {
     Observe(String),
-    Interact(bool),
     Select,
     Browser,
     Window,
@@ -255,9 +254,9 @@ impl Client {
             if process.status()?.success() {
                 return Ok(());
             }
-            return Err(io::Error::other(
+            Err(io::Error::other(
                 "Build or install the Codewhale Pet app to open its companion window",
-            ));
+            ))
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -341,20 +340,6 @@ fn run(
                     } else {
                         events.clear();
                         producer_seq = None;
-                    }
-                }
-                Command::Interact(food) => {
-                    if let Some(s) = &scene
-                        && action.is_none()
-                    {
-                        action = Some(
-                            json!({"identity":s.identity,"client":id,"seq":sequence+1,"source_revision":s.source_revision,"action":{"kind":"interact","food":food,"x":0.2,"y":-0.15}}),
-                        );
-                    } else {
-                        let _ = notices.try_send(Notice::Message(
-                            "Pet connection or previous interaction still pending; try again."
-                                .into(),
-                        ));
                     }
                 }
                 Command::Select => {

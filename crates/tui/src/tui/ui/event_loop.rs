@@ -4192,7 +4192,7 @@ pub(crate) async fn run_event_loop(
         }
         maybe_throttled_recovery_snapshot(app, Instant::now(), &mut last_recovery_snapshot_at);
         let history_has_live_motion = history_has_live_motion(&app.history);
-        crate::tui::pet_watch::tick(app, Instant::now(), event_broker.is_paused());
+        crate::tui::pet_watch::tick(app, Instant::now());
         let active_cell_has_live_motion = active_cell_has_live_motion(app);
         let translation_placeholder_has_live_motion = app.translation_enabled
             && (pending_thinking_translations > 0 || app.streaming_thinking_active_entry.is_some());

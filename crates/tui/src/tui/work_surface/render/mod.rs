@@ -94,21 +94,6 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 
     super::model::resolve_view(app);
-    if app.work_surface.panel == RailPanel::Watch {
-        Block::default()
-            .style(Style::default().bg(app.ui_theme.surface_bg))
-            .render(area, frame.buffer_mut());
-        render_dock_tabs(frame, area, app);
-        register_dock_targets(app);
-        crate::tui::pet_watch::render(frame, body_area, app);
-        render_divider(frame, area, placement, app);
-        app.work_surface.last_area = Some(area);
-        app.work_surface.hitboxes.clear();
-        app.work_surface.latest_rows.clear();
-        app.work_surface.visible_rows = 0;
-        app.work_surface.total_rows = 0;
-        return;
-    }
     let rows = visible_rows_for_panel(app);
     let todo_ordinals = if placement.is_strip() {
         todo_ordinals(&rows)
@@ -486,7 +471,6 @@ fn empty_view_hint(panel: RailPanel) -> &'static str {
         RailPanel::Context => "context budget unknown",
         RailPanel::Git => "not a git repository",
         RailPanel::Price => "no priced turns yet",
-        RailPanel::Watch => "",
     }
 }
 
@@ -623,11 +607,7 @@ fn render_dock_tabs(frame: &mut Frame, area: Rect, app: &mut App) {
         if useful || panel == app.work_surface.panel {
             entries.push(DockTab {
                 target: DockTabTarget::Panel(panel),
-                label: if panel == RailPanel::Watch {
-                    codewhale_localization::tr(app.ui_locale, MessageId::PetWatchTitle)
-                } else {
-                    panel.title().into()
-                },
+                label: panel.title().into(),
                 count: count.unwrap_or(0),
             });
         }
@@ -766,7 +746,7 @@ fn dock_tab_count(app: &mut App, panel: RailPanel) -> Option<usize> {
         ),
         RailPanel::Files => Some(super::views::files_touched_count(app)),
         RailPanel::Notepad => Some(usize::from(super::views::notepad_has_text(app))),
-        RailPanel::Context | RailPanel::Git | RailPanel::Price | RailPanel::Watch => None,
+        RailPanel::Context | RailPanel::Git | RailPanel::Price => None,
     }
 }
 
@@ -785,7 +765,6 @@ fn register_dock_targets(app: &mut App) {
                     RailPanel::Context => Id::DOCK_TAB_CONTEXT,
                     RailPanel::Git => Id::DOCK_TAB_GIT,
                     RailPanel::Price => Id::DOCK_TAB_PRICE,
-                    RailPanel::Watch => Id::DOCK_TAB_WATCH,
                 };
                 (
                     id,

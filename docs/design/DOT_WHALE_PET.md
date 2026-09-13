@@ -52,12 +52,12 @@ Sleep dimming does not set unknown coverage.
 
 ## Evidence boundaries
 
-### Foreground Watch
+### `/pet` habitat
 
-`/workbar watch` selects `RailPanel::Watch`. Existing dock cycling, tab hitboxes,
-focus, dismissal, placement and resizing apply. The tank uses the work surface's
-available body; it never overlays transcript cells. Narrow views keep the text
-cue. Selecting Watch starts a read-only observer; it does not start an Engine
+`/pet` (or `/pet on`) opens the full habitat over the existing shell. The pet
+has no workbar panel: no dock cycling, tab, placement or dismissal applies. The
+tank uses the whole content viewport and never overlays transcript cells; narrow
+views keep the text cue. Opening it starts a read-only observer; it does not start an Engine
 turn or silently substitute demonstration data. It begins with unknown coverage
 and does not backfill events from before attachment.
 

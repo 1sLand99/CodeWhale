@@ -39,7 +39,7 @@ uses the browser's File System Access API; other browsers support import/export.
 ```sh
 # Regenerate embedded QuickJS and Apple bundles from the same source.
 npm --prefix pet run sync
-# Full product terminal; use /workbar watch and /workbar watch export.
+# Full product terminal; use /pet and /pet export.
 cargo build --locked -p codewhale-tui --bin codewhale-tui
 # Small standalone braille renderer, without the full product link.
 cargo fetch --locked --manifest-path pet/tui/Cargo.toml
@@ -55,14 +55,14 @@ The [Android application](android/README.md) builds with its Gradle wrapper and
 JDK 17. Compose, native audio, checkpoint import/export and lifecycle behavior
 are exercised on an Android 15 emulator; CI uploads the debug APK and test reports.
 
-In the full terminal, `/workbar watch sound on` enables the shared score and
-`/workbar watch sound off` mutes it. Sound starts off each time the application
+In the full terminal, `/pet sound on` enables the shared score and
+`/pet sound off` mutes it. Sound starts off each time the application
 opens. Install FFmpeg with `ffplay` on PATH to use this optional output; Watch
 and recording work without it. The terminal streams the core's stereo 48 kHz
 PCM to one player process. Hiding Watch, opening a modal, quiet mode, or stale
 telemetry presentation suspends output. Reopening starts at the current clock,
 without playing the intervening history. Player failure mutes sound and reports
-a warning while the world continues. `/workbar watch sound` shows its status.
+a warning while the world continues. `/pet sound` shows its status.
 
 ## One source of meaning
 

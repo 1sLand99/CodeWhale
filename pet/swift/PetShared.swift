@@ -79,7 +79,7 @@ public struct PetSharedFrame: Decodable {
     }
     private func loadConnection() throws {
         let fd = open(descriptorURL.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
-        guard fd >= 0 else { throw PetCoreError.invalid("Open /workbar watch in Codewhale to start the shared pet.") }
+        guard fd >= 0 else { throw PetCoreError.invalid("Run /pet in Codewhale to start the shared pet.") }
         defer { close(fd) }; var info = stat()
         guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG, info.st_nlink == 1, info.st_size <= 4096 else { throw PetCoreError.invalid("Invalid shared connection file.") }
         var bytes = [UInt8](repeating: 0, count: 4097); let count = Darwin.read(fd, &bytes, bytes.count)

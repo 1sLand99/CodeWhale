@@ -208,7 +208,10 @@ async fn frame(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let found = if let Some(tick) = query.get("tick") {
-        frames.iter().find(|f| f["tick"].to_string() == *tick)
+        let wanted = tick.parse::<u64>().ok();
+        frames
+            .iter()
+            .find(|f| wanted.is_some() && f["tick"].as_u64() == wanted)
     } else {
         frames.back()
     };
@@ -276,6 +279,9 @@ async fn attach(State(state): State<Service>, headers: HeaderMap) -> Response {
 
 /// Starts only on an explicit pet command or when a view first attaches.
 /// The lifetime lock is held across HTTP serving, ticks and all checkpoints.
+// `pet serve` is its own console process, never inside the alt-screen: its
+// startup line and stop reason are the operator's only output.
+#[allow(clippy::print_stdout, clippy::print_stderr)]
 pub fn serve(root: PathBuf, requested_port: u16) -> anyhow::Result<()> {
     std::fs::create_dir_all(&root)?;
     #[cfg(unix)]

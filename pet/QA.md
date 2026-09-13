@@ -26,8 +26,8 @@ Do not publish the descriptor or include it in logs.
 
 Visual acceptance requires the actual Ratatui application in a terminal that
 answers the existing Kitty probe successfully, plus a fallback terminal. Inspect
-`/workbar watch`, `/workbar watch fullscreen`, F4–F9, Escape, resize, hidden
-composer/history/selection, approvals, Still, and image cleanup. Compare the
+`/pet`, `/pet on`, F6/F8/F9, Escape, resize, hidden
+composer/history/selection, approvals, reduced motion, and image cleanup. Compare the
 browser and normal native window to the same identity and checkpoint. A CPU
 raster benchmark or PTY byte stream does not prove terminal appearance or input
 latency. Record measured FPS, CPU/RSS and output bandwidth separately from the
@@ -73,12 +73,12 @@ python3 pet/scripts/check-shared.py target/debug/codewhale-tui
 
 Do not rerun a full library test link that is already exhausting the machine.
 Report build/resource blockers and continue independent source/browser QA.
-Manually inspect `/workbar watch`, narrow layouts, paste/Enter focus, session
-save/reopen, immutable `/workbar watch export`, and import that exported JSON in
+Manually inspect `/pet`, narrow layouts, paste/Enter focus, session
+save/reopen, immutable `/pet export`, and import that exported JSON in
 the browser. Unknown must remain legible; stale approvals must not resurrect.
 Use a disposable session and synthetic/loopback telemetry for this assignment.
 
-With FFmpeg's `ffplay` on PATH, explicitly enable `/workbar watch sound on`.
+With FFmpeg's `ffplay` on PATH, explicitly enable `/pet sound on`.
 Check sound off/on, switching away from Watch and back, quiet mode, and a missing
 or failed player. These must not stop the world or its checkpoint. No historical
 sound should play after resuming. Unit tests use a capture sink or a disposable

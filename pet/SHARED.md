@@ -34,22 +34,20 @@ In the running application:
 
 | Command | Result |
 | --- | --- |
-| `/workbar watch` | Attach a docked view |
-| `/workbar watch work on\|off` | Automatically enter for a turn, then reveal its existing answer |
-| `/workbar watch appearance` | Configure the shared palette in the browser |
-| `/workbar watch fullscreen` | Give the habitat the entire content viewport |
-| `/workbar watch browser` | Open an authenticated local browser view |
-| `/workbar watch window` | Open the independently closable native macOS window |
-| `/workbar watch source` | Explicitly select this terminal session as the source |
-| `/workbar watch focus` / `pulse` | Order one interaction in the shared world |
-| `/workbar watch still` | Toggle this terminal's reduced-motion presentation |
-| `/workbar watch sound on\|off` | Request/release the companion's audio device |
-| `/workbar watch export` | Save a replay to this saved session's artifacts |
-| `/workbar watch status` | Identity and measured terminal output counters |
+| `/pet` | Toggle pet mode for this terminal: the habitat takes the whole content viewport now and on every accepted turn |
+| `/pet on` / `/pet off` | Enable or disable explicitly; `off` closes the view and stops automatic entry while the companion keeps the pet alive |
+| `/pet appearance` | Configure the shared palette in the authenticated local browser studio |
+| `/pet window` | Open the independently closable native macOS window |
+| `/pet source` | Explicitly select this terminal session as the source |
+| `/pet sound on\|off` | Request/release the companion's audio device |
+| `/pet export` | Save a replay to this saved session's artifacts |
+| `/pet status` | Mode, view, identity and measured terminal output counters |
 
-Escape leaves the full habitat. F4 focuses, F5 pulses, F6 toggles sound, F7
-selects stillness, F8 opens a browser, and F9 opens the native window. Hints and
-key admission use the existing shell binding table. The habitat uses the modal
+The pet has no workbar panel; the habitat is its only terminal view. Escape
+leaves it without cancelling the turn or touching the composer draft. F6
+toggles sound, F8 opens the appearance studio, and F9 opens the native window;
+reduced motion follows the shell's existing motion setting. Hints and key
+admission use the existing shell binding table. The habitat uses the modal
 stack; composer contents, transcript, selection and active Engine state stay
 underneath it. Consent and approval views retain their existing priority.
 
@@ -76,7 +74,7 @@ For an isolated, provider-free review, serve `pet/dist` and open
 is explicitly illustrative and no task or provider is run. The live studio's
 preview detaches into an isolated world and offers **Return to live pet**.
 
-The prepared `/workbar watch work on` integration is opt-in for the current TUI
+`/pet on` is opt-in for the current TUI
 instance. The existing Engine's accepted turn-start event opens the full habitat
 when no consent or other modal owns focus. Completion gives space to the actual
 last assistant/error cell through the existing transcript renderer, with arrows
@@ -177,7 +175,7 @@ process is replaced inside the existing Ratatui synchronized frame, with cursor
 save/restore and deletion on layout changes, covered views and exit. The
 transport follows the [Kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/).
 
-60 fps is a presentation target, not a universal guarantee. `/workbar watch
+60 fps is a presentation target, not a universal guarantee. `/pet
 status` reports actual frames, elapsed output time, bytes/second, raster time
 and write time for that visit. Slow encoding drops intermediate presentations.
 The 30 Hz world does not depend on display rate. Unsupported terminals, tmux,

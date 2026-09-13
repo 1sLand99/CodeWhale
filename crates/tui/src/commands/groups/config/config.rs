@@ -613,86 +613,8 @@ pub fn screen(app: &mut App, target: ScreenMode, arg: Option<&str>) -> CommandRe
 /// claim about a surface that cannot render.
 pub fn sidebar(app: &mut App, arg: Option<&str>) -> CommandResult {
     const USAGE: &str =
-        "Usage: /workbar [bottom|top|left|right|off|tasks|agents|context|watch|pinned] [--save]";
+        "Usage: /workbar [bottom|top|left|right|off|tasks|agents|context|pinned] [--save]";
     let raw = arg.map(str::trim).unwrap_or("");
-    use crate::tui::pet_watch::{self, Control};
-    if matches!(
-        raw.to_ascii_lowercase().as_str(),
-        "watch work" | "watch work on" | "watch work off"
-    ) {
-        app.pet_watch.work_enabled = !raw.ends_with("off");
-        return CommandResult::message(format!(
-            "{}: {}",
-            tr(app.ui_locale, MessageId::PetHabitatWorkMode),
-            if app.pet_watch.work_enabled {
-                "on"
-            } else {
-                "off"
-            }
-        ));
-    }
-    if raw.eq_ignore_ascii_case("watch fullscreen") {
-        pet_watch::open_habitat(app);
-        return CommandResult::message(tr(app.ui_locale, MessageId::PetHabitatTitle));
-    }
-    if raw.eq_ignore_ascii_case("watch status") {
-        return CommandResult::message(app.pet_watch.status());
-    }
-    for (name, control) in [
-        ("watch browser", Control::Browser),
-        ("watch appearance", Control::Browser),
-        ("watch window", Control::Window),
-        ("watch source", Control::Select),
-        ("watch focus", Control::Focus),
-        ("watch pulse", Control::Pulse),
-        ("watch still", Control::Still),
-    ] {
-        if raw.eq_ignore_ascii_case(name) {
-            pet_watch::command(app, control);
-            return CommandResult::message(tr(app.ui_locale, MessageId::PetHabitatQueued));
-        }
-    }
-    let sound_args = raw
-        .split_whitespace()
-        .map(str::to_ascii_lowercase)
-        .collect::<Vec<_>>();
-    if let [watch, sound, rest @ ..] = sound_args.as_slice()
-        && watch == "watch"
-        && sound == "sound"
-    {
-        let enabled = match rest {
-            [] => None,
-            [value] if value == "on" => Some(true),
-            [value] if value == "off" => Some(false),
-            _ => return CommandResult::error("/workbar watch sound on|off"),
-        };
-        if let Some(enabled) = enabled {
-            app.pet_watch.set_sound(enabled);
-            if enabled {
-                crate::tui::work_surface::select_dock_panel(
-                    app,
-                    crate::tui::work_surface::RailPanel::Watch,
-                );
-            }
-            app.needs_redraw = true;
-        }
-        let label = if enabled == Some(true) {
-            MessageId::PetWatchSoundOn
-        } else {
-            app.pet_watch.sound_label()
-        };
-        return CommandResult::message(format!(
-            "{} · /workbar watch sound on|off",
-            tr(app.ui_locale, label)
-        ));
-    }
-    if raw.eq_ignore_ascii_case("watch export") {
-        return if app.pet_watch.export() {
-            CommandResult::message(tr(app.ui_locale, MessageId::PetWatchExportQueued))
-        } else {
-            CommandResult::error(tr(app.ui_locale, MessageId::PetWatchExportUnavailable))
-        };
-    }
     let mut tokens = raw.split_whitespace().collect::<Vec<_>>();
     let persist = matches!(tokens.last(), Some(&"--save" | &"-s"));
     if persist {
@@ -732,7 +654,6 @@ pub fn sidebar(app: &mut App, arg: Option<&str>) -> CommandResult {
                 "context" | "session" => Some(crate::tui::work_surface::RailPanel::Context),
                 "git" | "branch" => Some(crate::tui::work_surface::RailPanel::Git),
                 "price" | "cost" => Some(crate::tui::work_surface::RailPanel::Price),
-                "watch" => Some(crate::tui::work_surface::RailPanel::Watch),
                 _ => None,
             };
             match (placement, panel) {
@@ -767,15 +688,100 @@ pub fn sidebar(app: &mut App, arg: Option<&str>) -> CommandResult {
     }
 
     app.needs_redraw = true;
-    let message = rail_status_message(app);
-    CommandResult::message(if raw.eq_ignore_ascii_case("watch") {
-        format!(
-            "{message} · {}",
-            tr(app.ui_locale, MessageId::PetHabitatQueued)
-        )
-    } else {
-        message
-    })
+    CommandResult::message(rail_status_message(app))
+}
+
+/// `/pet`: turn the terminal over to the Codewhale pet.
+///
+/// Bare `/pet` toggles. `on` enters the full habitat now and lets every
+/// accepted turn re-enter it until `off`. The habitat is a modal over the
+/// existing shell: composer draft, transcript, selection and the active
+/// Engine turn stay underneath, and Escape returns without cancelling
+/// anything. The remaining verbs address the shared companion: the browser
+/// appearance studio, the native window, source selection, replay export and
+/// the single audio lease. The pet has no workbar panel.
+pub fn pet(app: &mut App, arg: Option<&str>) -> CommandResult {
+    const USAGE: &str = "Usage: /pet [on|off|status|appearance|window|source|export|sound on|off]";
+    use crate::tui::pet_watch::{self, Control};
+    let words = arg
+        .map(str::trim)
+        .unwrap_or("")
+        .split_whitespace()
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    let words = words.iter().map(String::as_str).collect::<Vec<_>>();
+    let mode = |app: &mut App, enabled: bool| {
+        pet_watch::set_enabled(app, enabled);
+        CommandResult::message(tr(
+            app.ui_locale,
+            if enabled {
+                MessageId::PetModeOn
+            } else {
+                MessageId::PetModeOff
+            },
+        ))
+    };
+    let queued = |app: &mut App, control: Control| {
+        pet_watch::command(app, control);
+        CommandResult::message(tr(app.ui_locale, MessageId::PetHabitatQueued))
+    };
+    match words.as_slice() {
+        [] => {
+            let enabled = !app.pet_watch.enabled;
+            mode(app, enabled)
+        }
+        ["on"] => mode(app, true),
+        ["off"] => mode(app, false),
+        ["status"] => CommandResult::message(format!(
+            "{} · {} · {}",
+            tr(
+                app.ui_locale,
+                if app.pet_watch.enabled {
+                    MessageId::PetModeOnLabel
+                } else {
+                    MessageId::PetModeOffLabel
+                }
+            ),
+            tr(
+                app.ui_locale,
+                if pet_watch::is_open(app) {
+                    MessageId::PetViewOpen
+                } else {
+                    MessageId::PetViewClosed
+                }
+            ),
+            app.pet_watch.status()
+        )),
+        ["appearance"] => queued(app, Control::Browser),
+        ["window"] => queued(app, Control::Window),
+        ["source"] => queued(app, Control::Select),
+        ["export"] => {
+            if app.pet_watch.export() {
+                CommandResult::message(tr(app.ui_locale, MessageId::PetWatchExportQueued))
+            } else {
+                CommandResult::error(tr(app.ui_locale, MessageId::PetWatchExportUnavailable))
+            }
+        }
+        ["sound", rest @ ..] => {
+            let enabled = match rest {
+                [] => None,
+                ["on"] => Some(true),
+                ["off"] => Some(false),
+                _ => return CommandResult::error(USAGE),
+            };
+            if let Some(enabled) = enabled {
+                app.pet_watch.set_sound(enabled);
+                app.needs_redraw = true;
+            }
+            let label = if enabled == Some(true) {
+                MessageId::PetWatchSoundOn
+            } else {
+                app.pet_watch.sound_label()
+            };
+            CommandResult::message(format!("{} · /pet sound on|off", tr(app.ui_locale, label)))
+        }
+        _ => CommandResult::error(USAGE),
+    }
 }
 
 /// Truthful workbar readout: the placement and panel that actually render,
@@ -3780,30 +3786,70 @@ mod tests {
     }
 
     #[test]
-    fn watch_sound_command_is_opt_in_and_rejects_invalid_changes() {
+    fn pet_sound_command_is_opt_in_and_rejects_invalid_changes() {
         let mut app = create_test_app();
-        let initial_panel = app.work_surface.panel;
-        let status = sidebar(&mut app, Some("watch sound"));
+        let status = pet(&mut app, Some("sound"));
         assert!(!status.is_error);
         assert_eq!(app.pet_watch.sound_label(), MessageId::PetWatchSoundOff);
-        assert_eq!(app.work_surface.panel, initial_panel);
 
-        assert!(!sidebar(&mut app, Some(" WATCH sound ON ")).is_error);
-        assert_eq!(
-            app.work_surface.panel,
-            crate::tui::work_surface::RailPanel::Watch
-        );
+        assert!(!pet(&mut app, Some(" SOUND ON ")).is_error);
         assert_eq!(app.pet_watch.sound_label(), MessageId::PetWatchSoundPaused);
-        for invalid in [
-            "watch sound yes",
-            "watch sound off extra",
-            "watch sound on --save",
-        ] {
-            assert!(sidebar(&mut app, Some(invalid)).is_error);
+        for invalid in ["sound yes", "sound off extra", "sound on --save"] {
+            assert!(pet(&mut app, Some(invalid)).is_error, "{invalid}");
             assert_eq!(app.pet_watch.sound_label(), MessageId::PetWatchSoundPaused);
         }
-        assert!(!sidebar(&mut app, Some("watch sound off")).is_error);
+        assert!(!pet(&mut app, Some("sound off")).is_error);
         assert_eq!(app.pet_watch.sound_label(), MessageId::PetWatchSoundOff);
+    }
+
+    #[test]
+    fn pet_command_toggles_the_habitat_and_automatic_entry() {
+        let mut app = create_test_app();
+        app.onboarding = crate::tui::app::OnboardingState::None;
+        app.redaction_gate = false;
+        app.input = "kept draft".into();
+        app.pet_watch.detach_for_test();
+
+        let on = pet(&mut app, None);
+        assert!(!on.is_error);
+        assert!(app.pet_watch.enabled);
+        assert!(crate::tui::pet_watch::is_open(&app));
+        assert_eq!(
+            on.message.as_deref(),
+            Some(&*tr(app.ui_locale, MessageId::PetModeOn))
+        );
+        // Repeating `on` is harmless: still one habitat, still enabled.
+        assert!(!pet(&mut app, Some(" ON ")).is_error);
+        assert!(app.pet_watch.enabled);
+        assert!(crate::tui::pet_watch::is_open(&app));
+
+        let off = pet(&mut app, Some("off"));
+        assert!(!off.is_error);
+        assert!(!app.pet_watch.enabled);
+        assert!(!crate::tui::pet_watch::is_open(&app));
+        assert!(app.view_stack.is_empty());
+        assert_eq!(app.input, "kept draft");
+        assert_eq!(
+            off.message.as_deref(),
+            Some(&*tr(app.ui_locale, MessageId::PetModeOff))
+        );
+
+        // Bare /pet toggles back on; unknown verbs are refused with usage.
+        app.pet_watch.detach_for_test();
+        assert!(!pet(&mut app, None).is_error);
+        assert!(app.pet_watch.enabled);
+        assert!(pet(&mut app, Some("bogus")).is_error);
+        let status = pet(&mut app, Some("status"));
+        assert!(!status.is_error);
+        let message = status.message.unwrap_or_default();
+        assert!(
+            message.contains(&*tr(app.ui_locale, MessageId::PetModeOnLabel)),
+            "{message}"
+        );
+        assert!(
+            message.contains(&*tr(app.ui_locale, MessageId::PetViewOpen)),
+            "{message}"
+        );
     }
 
     #[test]

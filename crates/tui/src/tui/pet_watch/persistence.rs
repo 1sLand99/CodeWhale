@@ -144,6 +144,25 @@ pub fn export(session: &str, bytes: &[u8]) -> io::Result<PathBuf> {
     write_session_relative_immutable(session, &relative, bytes)
 }
 
+/// One command owns the world until export completes. Keep the large buffer in
+/// the host, outside QuickJS's 64 MiB heap, and retain the exact checkpoint.
+pub(super) fn export_recording(
+    ctx: &rquickjs::Ctx<'_>,
+    completed: bool,
+) -> rquickjs::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let mut index = 0usize;
+    loop {
+        let chunk: Option<String> = ctx.eval(format!("pet.recordingChunk({index},{completed})"))?;
+        let Some(chunk) = chunk else { return Ok(bytes) };
+        if bytes.len() + chunk.len() > MAX_EXPORT_BYTES {
+            return Err(rquickjs::Error::Unknown);
+        }
+        bytes.extend_from_slice(chunk.as_bytes());
+        index += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,24 +274,5 @@ mod tests {
         std::fs::remove_file(root.path().join("habitat.lock")).unwrap();
         let _new_owner = store(root.path());
         assert!(files.save("split lock").is_err());
-    }
-}
-
-/// One command owns the world until export completes. Keep the large buffer in
-/// the host, outside QuickJS's 64 MiB heap, and retain the exact checkpoint.
-pub(super) fn export_recording(
-    ctx: &rquickjs::Ctx<'_>,
-    completed: bool,
-) -> rquickjs::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    let mut index = 0usize;
-    loop {
-        let chunk: Option<String> = ctx.eval(format!("pet.recordingChunk({index},{completed})"))?;
-        let Some(chunk) = chunk else { return Ok(bytes) };
-        if bytes.len() + chunk.len() > MAX_EXPORT_BYTES {
-            return Err(rquickjs::Error::Unknown);
-        }
-        bytes.extend_from_slice(chunk.as_bytes());
-        index += 1;
     }
 }

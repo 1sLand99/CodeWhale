@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `/pet` turns the terminal over to the Codewhale pet. `/pet on` (or bare
+  `/pet`) gives the habitat the whole content viewport now and on every
+  accepted turn, reveals the actual answer or error when the turn completes,
+  and Escape returns to the composer without cancelling anything. `/pet off`
+  closes the view and stops automatic entry while the durable companion keeps
+  the pet alive; `/pet appearance|window|source|sound|export|status` address
+  the shared companion. The pet no longer lives in the workbar: the Watch
+  panel and `/workbar watch …` are gone (#6109, #6110).
+
 ## [0.9.13] - 2026-09-13
 
 Codewhale v0.9.13 addresses integrity issues in 0.9.12:

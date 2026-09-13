@@ -8,7 +8,6 @@ use crate::tui::{
     app::{App, StatusToastLevel},
     underwater::ShellPhase,
     views::ModalKind,
-    work_surface::RailPanel,
 };
 use codewhale_localization::{MessageId, tr};
 use codewhale_palette::{ChromeInk, chrome_style};
@@ -37,10 +36,7 @@ mod worker;
 use live::{Command, Notice, Presentation, Worker};
 #[derive(Clone, Copy)]
 pub enum Control {
-    Focus,
-    Pulse,
     Sound,
-    Still,
     Browser,
     Window,
     Select,
@@ -54,7 +50,6 @@ pub struct PetWatch {
     failed: bool,
     exporting: bool,
     sound_requested: bool,
-    still: bool,
     pub(crate) area: Option<Rect>,
     raster: Option<Presentation>,
     controls: Arc<Mutex<Vec<Control>>>,
@@ -66,7 +61,8 @@ pub struct PetWatch {
     bytes: u64,
     render_ms: f64,
     output_ms: f64,
-    pub(crate) work_enabled: bool,
+    /// `/pet on`: accepted turns enter the full habitat automatically.
+    pub(crate) enabled: bool,
     work_enter_pending: bool,
     work_complete: bool,
     work_history_start: usize,
@@ -116,10 +112,11 @@ impl PetWatch {
         self.exporting = !self.failed;
         self.exporting
     }
-    pub fn retry(&mut self) {
-        if self.failed {
-            self.reset(self.session.clone());
-        }
+    /// Tests drive the shell without a companion: never start a view worker.
+    #[cfg(test)]
+    pub(crate) fn detach_for_test(&mut self) {
+        self.worker = None;
+        self.failed = true;
     }
     pub fn observe(&mut self, event: &Event, session: Option<&str>, _now: Instant) {
         if self.session.as_deref() != session {
@@ -272,13 +269,10 @@ pub fn command(app: &mut App, control: Control) {
 }
 fn apply(state: &mut PetWatch, control: Control) {
     match control {
-        Control::Focus => state.send(Command::Interact(false)),
-        Control::Pulse => state.send(Command::Interact(true)),
         Control::Browser => state.send(Command::Browser),
         Control::Window => state.send(Command::Window),
         Control::Select => state.send(Command::Select),
         Control::Sound => state.sound_requested = !state.sound_requested,
-        Control::Still => state.still = !state.still,
         Control::Scroll(delta) => {
             state.result_scroll = state.result_scroll.saturating_add_signed(delta)
         }
@@ -292,6 +286,28 @@ pub fn open_habitat(app: &mut App) {
     }
     app.needs_redraw = true;
 }
+pub fn is_open(app: &App) -> bool {
+    app.view_stack.top_kind() == Some(ModalKind::PetHabitat)
+}
+/// `/pet on|off`. Enabling enters the habitat now and lets every accepted
+/// turn re-enter it; disabling closes the view and stops automatic entry.
+/// The durable pet keeps living in its companion either way, and the
+/// composer draft, transcript and active Engine turn are never touched.
+pub fn set_enabled(app: &mut App, enabled: bool) {
+    app.pet_watch.enabled = enabled;
+    if enabled {
+        open_habitat(app);
+        return;
+    }
+    app.pet_watch.work_enter_pending = false;
+    app.pet_watch.work_complete = false;
+    if is_open(app) {
+        app.view_stack.pop();
+    }
+    let session = app.pet_watch.session.clone();
+    app.pet_watch.reset(session);
+    app.needs_redraw = true;
+}
 /// The existing Engine determines work boundaries. Only the shell reads the
 /// answer; no conversation text enters the pet owner or recording.
 pub fn observe(app: &mut App, event: &Event, now: Instant) {
@@ -301,14 +317,14 @@ pub fn observe(app: &mut App, event: &Event, now: Instant) {
         app.pet_watch.work_history_start = app.history.len();
         app.pet_watch.work_complete = false;
         app.pet_watch.result_scroll = 0;
-        app.pet_watch.work_enter_pending = app.pet_watch.work_enabled;
+        app.pet_watch.work_enter_pending = app.pet_watch.enabled;
     } else if matches!(event, Event::TurnComplete { .. }) {
         app.pet_watch.work_enter_pending = false;
         app.pet_watch.work_complete = app.view_stack.top_kind() == Some(ModalKind::PetHabitat);
         app.needs_redraw = true;
     }
 }
-pub fn tick(app: &mut App, now: Instant, obscured: bool) {
+pub fn tick(app: &mut App, now: Instant) {
     if app.pet_watch.work_enter_pending
         && app.view_stack.is_empty()
         && !app.redaction_gate
@@ -317,17 +333,12 @@ pub fn tick(app: &mut App, now: Instant, obscured: bool) {
         app.pet_watch.work_enter_pending = false;
         open_habitat(app);
     }
-    let full = app.view_stack.top_kind() == Some(ModalKind::PetHabitat);
+    // The habitat is the pet's only terminal view: it owns the whole content
+    // viewport or nothing. Reduced motion follows the shell's motion setting.
     let visible = !app.redaction_gate
         && app.onboarding == crate::tui::app::OnboardingState::None
-        && (full
-            || (app.work_surface.panel == RailPanel::Watch
-                && app.work_surface.last_area.is_some()
-                && !app.work_surface.dismissed
-                && !obscured));
-    let motion = visible
-        && !app.pet_watch.still
-        && crate::tui::underwater::decorative_shell_motion_enabled(app);
+        && is_open(app);
+    let motion = visible && crate::tui::underwater::decorative_shell_motion_enabled(app);
     let waiting = matches!(
         ShellPhase::from_app(app),
         ShellPhase::Waiting | ShellPhase::Approval
@@ -436,7 +447,7 @@ pub fn tick(app: &mut App, now: Instant, obscured: bool) {
         app.needs_redraw = true;
     }
 }
-pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
+fn render_tank(frame: &mut Frame, area: Rect, app: &mut App) {
     app.pet_watch.area = Some(area);
     let raster = app.pet_watch.raster.as_ref();
     let hollow = raster.is_none_or(|r| !r.scene.producer_connected || r.scene.style.hollow);
@@ -450,7 +461,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
                 && activity.observed
                 && r.frame_changed.elapsed().as_millis() < 800
             {
-                text = format!("{} · {}", activity.tool.as_deref().unwrap_or(&activity.label), text);
+                text = format!(
+                    "{} · {}",
+                    activity.tool.as_deref().unwrap_or(&activity.label),
+                    text
+                );
                 if activity.parallel > 0 {
                     text.push_str(&format!(" · ×{}", activity.parallel));
                 }
@@ -537,7 +552,7 @@ pub fn render_full(frame: &mut Frame, app: &mut App) {
             area.height.saturating_sub(5)
         },
     };
-    render(frame, tank, app);
+    render_tank(frame, tank, app);
     if app.pet_watch.work_complete {
         let result_area = Rect {
             x: area.x.saturating_add(3),
@@ -552,14 +567,13 @@ pub fn render_full(frame: &mut Frame, app: &mut App) {
             .history
             .iter()
             .skip(app.pet_watch.work_history_start)
-            .filter(|cell| {
+            .rfind(|cell| {
                 matches!(
                     cell,
                     crate::tui::history::HistoryCell::Assistant { .. }
                         | crate::tui::history::HistoryCell::Error { .. }
                 )
-            })
-            .last();
+            });
         let lines = result
             .map(|cell| cell.transcript_lines(result_area.width))
             .unwrap_or_else(|| {
@@ -597,6 +611,10 @@ pub fn render_full(frame: &mut Frame, app: &mut App) {
         },
     );
 }
+pub(crate) fn clear_images(output: &mut impl Write) -> io::Result<()> {
+    graphics::clear(output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -612,7 +630,7 @@ mod tests {
         app.input = "retained draft".into();
         app.pet_watch.session = app.current_session_id.clone();
         app.pet_watch.failed = true; // No connection or provider for this shell test.
-        app.pet_watch.work_enabled = true;
+        app.pet_watch.enabled = true;
         observe(
             &mut app,
             &Event::TurnStarted {
@@ -622,7 +640,7 @@ mod tests {
             },
             Instant::now(),
         );
-        tick(&mut app, Instant::now(), false);
+        tick(&mut app, Instant::now());
         assert_eq!(app.view_stack.top_kind(), Some(ModalKind::PetHabitat));
         app.add_message(crate::tui::history::HistoryCell::Assistant {
             content: "Prepared result stays in the transcript".into(),
@@ -658,6 +676,35 @@ mod tests {
     }
 
     #[test]
+    fn pet_off_stops_automatic_entry_and_keeps_the_draft() {
+        let mut app =
+            crate::test_support::test_app_with_options(crate::test_support::test_tui_options("."));
+        app.onboarding = crate::tui::app::OnboardingState::None;
+        app.redaction_gate = false;
+        app.input = "kept draft".into();
+        app.pet_watch.session = app.current_session_id.clone();
+        app.pet_watch.detach_for_test();
+        app.pet_watch.enabled = true;
+        observe(
+            &mut app,
+            &Event::TurnStarted {
+                turn_id: "turn".into(),
+                created_at: chrono::Utc::now(),
+                route: None,
+            },
+            Instant::now(),
+        );
+        assert!(app.pet_watch.work_enter_pending);
+        set_enabled(&mut app, false);
+        tick(&mut app, Instant::now());
+        assert!(!app.pet_watch.enabled);
+        assert!(!app.pet_watch.work_enter_pending);
+        assert!(app.view_stack.is_empty());
+        assert_eq!(app.input, "kept draft");
+        assert!(app.pet_watch.worker.is_none());
+    }
+
+    #[test]
     fn foreground_projection_keeps_lifecycle_and_excludes_private_payloads() {
         let call = metadata(&Event::ToolCallStarted {
             id: "call-a".into(),
@@ -689,8 +736,4 @@ mod tests {
         assert!(!call.contains("PRIVATE"));
         assert!(!thought.contains("PRIVATE"));
     }
-}
-
-pub(crate) fn clear_images(output: &mut impl Write) -> io::Result<()> {
-    graphics::clear(output)
 }
