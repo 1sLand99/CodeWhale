@@ -10502,20 +10502,38 @@ async fn immediate_submit_custom_provider_missing_key_preflight_shows_auth_next_
     .await
     .expect("provider preflight failures must remain inside the TUI");
 
-    assert_eq!(app.input, "preserve 用户 input");
-    assert_eq!(app.cursor_position, app.input.chars().count());
+    // Echo first: missing-key must paint HistoryCell::User, not restore the
+    // composer as the only place the turn exists.
+    assert!(
+        app.input.is_empty(),
+        "auth failure must not restore the composer when the echo landed: {:?}",
+        app.input
+    );
     assert!(app.api_messages.is_empty());
-    assert!(app.history.is_empty());
+    assert_eq!(
+        app.history
+            .iter()
+            .filter(|cell| matches!(cell, HistoryCell::User { content } if content == "preserve 用户 input"))
+            .count(),
+        1,
+        "missing-key submit must keep exactly one user echo: {:?}",
+        app.history
+    );
     assert!(app.last_submitted_prompt.is_none());
     let status = app
         .status_message
         .as_deref()
         .expect("missing-key preflight should set status");
+    assert!(status.contains("Message not sent"));
     assert!(status.contains("Failed to configure provider route lm-studio / local-model."));
     assert!(
         status.contains(
             "Next step: Run /auth or /provider setup lm-studio to configure credentials."
         )
+    );
+    assert!(
+        !status.contains("restored to composer"),
+        "auth keep-echo must not claim composer restore: {status}"
     );
 }
 
