@@ -6,7 +6,6 @@ use serde_json::{Value, json};
 use std::{
     io::{self, Read},
     path::PathBuf,
-    process::{Command as Process, Stdio},
     sync::{Arc, Mutex, mpsc},
     time::{Duration, Instant},
 };
@@ -144,6 +143,7 @@ impl Client {
         }
         #[cfg(not(test))]
         {
+            use std::process::{Command as Process, Stdio};
             let mut process = Process::new(std::env::current_exe()?);
             process
                 .args(["pet", "serve"])
@@ -240,6 +240,7 @@ impl Client {
     pub fn open_window(&self) -> io::Result<()> {
         #[cfg(target_os = "macos")]
         {
+            use std::process::{Command as Process, Stdio};
             let mut process = Process::new("open");
             if let Some(path) = std::env::var_os("CODEWHALE_PET_APP") {
                 process.arg(path);
