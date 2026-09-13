@@ -26,15 +26,7 @@ export const CHANGELOG: ChangelogRelease[] = [
     "date": null,
     "unreleased": true,
     "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.9.12...HEAD",
-    "sections": [
-      {
-        "heading": "Added",
-        "items": [
-          "/pet turns the terminal over to the Codewhale pet. /pet on (or bare /pet) gives the habitat the whole content viewport now and on every accepted turn, reveals the actual answer or error when the turn completes, and Escape returns to the composer without cancelling anything. /pet off closes the view and stops automatic entry while the durable companion keeps the pet alive; /pet appearance|window|source|sound|export|status address the shared companion. The pet no longer lives…"
-        ],
-        "itemCount": 1
-      }
-    ]
+    "sections": []
   },
   {
     "version": "0.9.13",
@@ -43,8 +35,16 @@ export const CHANGELOG: ChangelogRelease[] = [
     "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.9.12...v0.9.13",
     "sections": [
       {
+        "heading": "Added",
+        "items": [
+          "/pet turns the terminal over to the Codewhale pet. /pet on (or bare /pet) gives the habitat the whole content viewport now and on every accepted turn, reveals the actual answer or error when the turn completes, and Escape returns to the composer without cancelling anything. /pet off closes the view and stops automatic entry while the durable companion keeps the pet alive; /pet appearance|window|source|sound|export|status address the shared companion. The pet no longer lives…"
+        ],
+        "itemCount": 1
+      },
+      {
         "heading": "Fixed",
         "items": [
+          "The website's Computer Use download page resolves its state without the GitHub API (using GITHUB_TOKEN only when bound), and every page regenerates on the Worker again: the Open Graph image route read brand SVGs at import time, which the Workers runtime cannot do, so codewhale.net had been serving its build-time snapshot.",
           "Operate can run structured workflows directly, with named phases, model assignments from Fleet, prerequisite results and shared budgets. Independent steps run together; dependent work waits for its required results and gates. Detached runs return their outcome to the owning conversation, and headless sessions stay alive between phases until the final handback is consumed.",
           "Computer Use 0.3.1: mouse actions no longer steal focus or reclaim the foreground when the user switches apps mid-action; background typing, scrolling and selection use semantic input, and screenshots stay scoped to the targeted app. The bundled plugin and the first-party marketplace pin carry the same 0.3.1 sources. A registered macOS helper stays in charge of input through its Pause and Stop controls; an unavailable registered helper produces an error instead of silently…",
           "The Fleet editor uses the standard model picker to manage sub-agent model and thinking assignments. Enter edits the selected row without changing the running session's model. Unconfigured providers are refused, failed saves retain the previous assignment, and a changed or removed team file must be reopened before a pick can overwrite it.",
@@ -55,10 +55,9 @@ export const CHANGELOG: ChangelogRelease[] = [
           "Sub-agents validate declared output files and distinguish real edit claims from file citations and unrelated workspace changes. Disjoint file claims can run together; overlapping writers receive the actual conflict and remedies. Explicit read-only shell analysis requires an enforcing native sandbox and refuses execution when that protection is unavailable.",
           "Delegation depth stays absolute through saved profiles, nested workers and continuations. Per-call token, step and time limits narrow inherited limits; continuation retains ancestor usage and deadlines. Workers reserve room for one tools-disabled partial report inside those limits, then run the declared- output checks. Missing usage or unavailable reporting room produces an explicit fallback; partial work is never marked complete.",
           "Agent rosters and detail pages have bounded output, visible continuation and descendant relationships, and usable handles for full diagnostic evidence. Completion receipts include measured worker and descendant token usage, count each continuation once, and distinguish unreported usage from zero.",
-          "Localization and native helper builds resolve the active checkout when the build script runs, so a shared Cargo target keeps working after a worktree moves or is removed.",
-          "Selecting a saved agent profile that is malformed, unreadable or duplicated now fails before any child request, including when its name matches a built-in role; the parent's default route is never substituted silently. agent(action: \"roster\") lists affected profile identities and paths, Fleet run creation performs the same check, and docs/SUBAGENTS.md documents the valid personal profile format with [permissions] (#6117, thanks @Gabriel-Degret)."
+          "Localization and native helper builds resolve the active checkout when the build script runs, so a shared Cargo target keeps working after a worktree moves or is removed."
         ],
-        "itemCount": 89
+        "itemCount": 90
       },
       {
         "heading": "Changed",

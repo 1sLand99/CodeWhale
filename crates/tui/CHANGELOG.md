@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.13] - 2026-09-13
+
+Codewhale v0.9.13 addresses integrity issues in 0.9.12:
+multiline paste is one paste again, truncated tool arguments can no longer execute, strict
+ACP clients connect again, concurrent instances stop destroying each
+other's queued text, and the Computer Use bundle includes plugin 0.3.1
+with an accessibility-first pointer that no longer steals focus. DeepSeek V4.1 Flash
+(`deepseek-flash`) is the default DeepSeek model, reasoning-capable routes
+keep reasoning out of the answer even when a model id carries no version
+number, and `/mcp reload` no longer freezes the interface while servers
+reconnect. The Codewhale pet arrives with `/pet`: a full-screen habitat that
+shows what the Engine is doing and reveals the answer when it is done.
+
 ### Added
 
 - `/pet` turns the terminal over to the Codewhale pet. `/pet on` (or bare
@@ -18,20 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the shared companion. The pet no longer lives in the workbar: the Watch
   panel and `/workbar watch …` are gone (#6109, #6110).
 
-## [0.9.13] - 2026-09-13
-
-Codewhale v0.9.13 addresses integrity issues in 0.9.12:
-multiline paste is one paste again, truncated tool arguments can no longer execute, strict
-ACP clients connect again, concurrent instances stop destroying each
-other's queued text, and the Computer Use bundle includes plugin 0.3.1
-with an accessibility-first pointer that no longer steals focus. DeepSeek V4.1 Flash
-(`deepseek-flash`) is the default DeepSeek model, reasoning-capable routes
-keep reasoning out of the answer even when a model id carries no version
-number, and `/mcp reload` no longer freezes the interface while servers
-reconnect.
-
 ### Fixed
 
+- The website's Computer Use download page resolves its state without the
+  GitHub API (using `GITHUB_TOKEN` only when bound), and every page regenerates
+  on the Worker again: the Open Graph image route read brand SVGs at import
+  time, which the Workers runtime cannot do, so codewhale.net had been serving
+  its build-time snapshot.
 - Operate can run structured workflows directly, with named phases, model
   assignments from Fleet, prerequisite results and shared budgets. Independent
   steps run together; dependent work waits for its required results and gates.
