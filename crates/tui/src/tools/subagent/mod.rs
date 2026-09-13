@@ -8722,44 +8722,81 @@ fn path_is_within_state_root(candidate: &Path, root: &Path) -> bool {
     if candidate.starts_with(root) {
         return true;
     }
-    // Windows path identity: verbatim prefixes, 8.3 aliases, and case folding
-    // can make `Path::starts_with` fail for the same tree. Compare components
-    // after stripping the verbatim prefix — still a containment check.
-    #[cfg(windows)]
-    {
-        let candidate = strip_windows_verbatim_prefix(candidate);
-        let root = strip_windows_verbatim_prefix(root);
-        let mut root_components = root.components();
-        let mut candidate_components = candidate.components();
+
+    // Align both sides onto the same identity spelling before the containment
+    // walk. Deepest-existing-ancestor resolve expands Windows 8.3 aliases
+    // (`RUNNER~1` → `runneradmin`) and adds a `\\?\` prefix on both the state
+    // root and the checked child. Compare after that; still a real containment
+    // check (no loose string prefix / no skipped gate).
+    let candidate = match resolve_path_for_containment(candidate) {
+        Ok(path) => path,
+        Err(_) => candidate.to_path_buf(),
+    };
+    let root = match resolve_path_for_containment(root) {
+        Ok(path) => path,
+        Err(_) => root.to_path_buf(),
+    };
+    if candidate.starts_with(&root) {
+        return true;
+    }
+
+    // If both paths exist, an ancestor of `candidate` that is the same file as
+    // `root` is also containment (covers residual alias pairs after resolve).
+    if let Ok(root_canon) = root.canonicalize() {
+        let mut cursor = candidate.clone();
         loop {
-            match (root_components.next(), candidate_components.next()) {
-                (None, _) => return true,
-                (Some(_), None) => return false,
-                (Some(r), Some(c)) => {
-                    use std::os::windows::ffi::OsStrExt as _;
-                    let fold = |value: &std::ffi::OsStr| {
-                        value
-                            .encode_wide()
-                            .map(|unit| {
-                                if (u32::from(b'A')..=u32::from(b'Z')).contains(&(unit as u32)) {
-                                    unit + (u32::from(b'a') - u32::from(b'A')) as u16
-                                } else {
-                                    unit
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                    };
-                    if fold(r.as_os_str()) != fold(c.as_os_str()) {
-                        return false;
-                    }
+            if let Ok(canon) = cursor.canonicalize() {
+                if canon == root_canon || canon.starts_with(&root_canon) {
+                    return true;
                 }
             }
+            if !cursor.pop() {
+                break;
+            }
         }
+    }
+
+    #[cfg(windows)]
+    {
+        windows_components_within(
+            &strip_windows_verbatim_prefix(&candidate),
+            &strip_windows_verbatim_prefix(&root),
+        )
     }
     #[cfg(not(windows))]
     {
         let _ = (candidate, root);
         false
+    }
+}
+
+#[cfg(windows)]
+fn windows_components_within(candidate: &Path, root: &Path) -> bool {
+    let mut root_components = root.components();
+    let mut candidate_components = candidate.components();
+    loop {
+        match (root_components.next(), candidate_components.next()) {
+            (None, _) => return true,
+            (Some(_), None) => return false,
+            (Some(r), Some(c)) => {
+                use std::os::windows::ffi::OsStrExt as _;
+                let fold = |value: &std::ffi::OsStr| {
+                    value
+                        .encode_wide()
+                        .map(|unit| {
+                            if (u32::from(b'A')..=u32::from(b'Z')).contains(&(unit as u32)) {
+                                unit + (u32::from(b'a') - u32::from(b'A')) as u16
+                            } else {
+                                unit
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                };
+                if fold(r.as_os_str()) != fold(c.as_os_str()) {
+                    return false;
+                }
+            }
+        }
     }
 }
 
@@ -8774,17 +8811,22 @@ fn strip_windows_verbatim_prefix(path: &Path) -> PathBuf {
 }
 
 fn normalize_subagent_workspace(workspace: &Path) -> PathBuf {
-    if let Ok(canonical) = workspace.canonicalize() {
-        return canonical;
+    // Use the same deepest-existing-ancestor resolve as containment checks so a
+    // not-yet-created state root still shares the Windows long-path / `\\?\`
+    // spelling of paths resolved under it (for example transcript artifacts).
+    match resolve_path_for_containment(workspace) {
+        Ok(resolved) => resolved,
+        Err(_) => {
+            let absolute = if workspace.is_absolute() {
+                workspace.to_path_buf()
+            } else {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(workspace)
+            };
+            normalize_path_components(&absolute)
+        }
     }
-    let absolute = if workspace.is_absolute() {
-        workspace.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(workspace)
-    };
-    normalize_path_components(&absolute)
 }
 
 fn normalize_path_components(path: &Path) -> PathBuf {
@@ -8807,14 +8849,26 @@ fn normalize_path_components(path: &Path) -> PathBuf {
 }
 
 fn reject_root_relative_symlinks(root: &Path, path: &Path) -> Result<()> {
-    let relative = match path.strip_prefix(root) {
+    // Resolve both sides onto the same identity spelling before strip_prefix so
+    // Windows `\\?\` / 8.3 pairs that already passed containment still yield a
+    // relative walk for the symlink check.
+    let root = match resolve_path_for_containment(root) {
+        Ok(path) => path,
+        Err(_) => root.to_path_buf(),
+    };
+    let path = match resolve_path_for_containment(path) {
+        Ok(path) => path,
+        Err(_) => path.to_path_buf(),
+    };
+    let relative = match path.strip_prefix(&root) {
         Ok(relative) => relative.to_path_buf(),
         Err(_) => {
             #[cfg(windows)]
             {
-                let path = strip_windows_verbatim_prefix(path);
-                let root_stripped = strip_windows_verbatim_prefix(root);
-                path.strip_prefix(&root_stripped)
+                let path_cmp = strip_windows_verbatim_prefix(&path);
+                let root_cmp = strip_windows_verbatim_prefix(&root);
+                path_cmp
+                    .strip_prefix(&root_cmp)
                     .map(|relative| relative.to_path_buf())
                     .map_err(|_| {
                         anyhow!(
