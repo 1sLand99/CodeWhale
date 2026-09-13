@@ -8669,13 +8669,13 @@ fn checked_subagent_state_path(state_root: &Path, path: &Path) -> Result<PathBuf
     let parent = absolute
         .parent()
         .ok_or_else(|| anyhow!("sub-agent state path must include a parent directory"))?;
-    let parent = match parent.canonicalize() {
-        Ok(parent) => parent,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => normalize_path_components(parent),
-        Err(err) => return Err(err.into()),
-    };
+    // Resolve through the deepest existing ancestor so Windows short/long names
+    // and verbatim (`\\?\`) spellings match the already-canonical state root.
+    // A missing parent used to fall back to lexical normalization and could keep
+    // an 8.3 component (for example `RUNNER~1`) that no longer prefixes the root.
+    let parent = resolve_path_for_containment(parent)?;
     let state_path = parent.join(file_name);
-    if !state_path.starts_with(&state_root) {
+    if !path_is_within_state_root(&state_path, &state_root) {
         return Err(anyhow!(
             "sub-agent state path must stay within state root: {}",
             state_path.display()
@@ -8683,6 +8683,94 @@ fn checked_subagent_state_path(state_root: &Path, path: &Path) -> Result<PathBuf
     }
     reject_root_relative_symlinks(&state_root, &state_path)?;
     Ok(state_path)
+}
+
+/// Canonicalize `path` when it exists; otherwise canonicalize the deepest
+/// existing ancestor and re-append the missing tail. Keeps containment checks
+/// on the same identity spelling as [`normalize_subagent_workspace`].
+fn resolve_path_for_containment(path: &Path) -> Result<PathBuf> {
+    let mut missing = Vec::new();
+    let mut current = path.to_path_buf();
+    loop {
+        match current.canonicalize() {
+            Ok(canonical) => {
+                let mut resolved = canonical;
+                for component in missing.iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(resolved);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                let Some(name) = current.file_name() else {
+                    return Ok(normalize_path_components(path));
+                };
+                missing.push(name.to_os_string());
+                let Some(parent) = current.parent() else {
+                    return Ok(normalize_path_components(path));
+                };
+                if parent.as_os_str().is_empty() || parent == current.as_path() {
+                    return Ok(normalize_path_components(path));
+                }
+                current = parent.to_path_buf();
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+}
+
+fn path_is_within_state_root(candidate: &Path, root: &Path) -> bool {
+    if candidate.starts_with(root) {
+        return true;
+    }
+    // Windows path identity: verbatim prefixes, 8.3 aliases, and case folding
+    // can make `Path::starts_with` fail for the same tree. Compare components
+    // after stripping the verbatim prefix — still a containment check.
+    #[cfg(windows)]
+    {
+        let candidate = strip_windows_verbatim_prefix(candidate);
+        let root = strip_windows_verbatim_prefix(root);
+        let mut root_components = root.components();
+        let mut candidate_components = candidate.components();
+        loop {
+            match (root_components.next(), candidate_components.next()) {
+                (None, _) => return true,
+                (Some(_), None) => return false,
+                (Some(r), Some(c)) => {
+                    use std::os::windows::ffi::OsStrExt as _;
+                    let fold = |value: &std::ffi::OsStr| {
+                        value
+                            .encode_wide()
+                            .map(|unit| {
+                                if (u32::from(b'A')..=u32::from(b'Z')).contains(&(unit as u32)) {
+                                    unit + (u32::from(b'a') - u32::from(b'A')) as u16
+                                } else {
+                                    unit
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    };
+                    if fold(r.as_os_str()) != fold(c.as_os_str()) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (candidate, root);
+        false
+    }
+}
+
+#[cfg(windows)]
+fn strip_windows_verbatim_prefix(path: &Path) -> PathBuf {
+    let raw = path.as_os_str().to_string_lossy();
+    let stripped = raw
+        .strip_prefix(r"\\?\")
+        .or_else(|| raw.strip_prefix("//?/"))
+        .unwrap_or(raw.as_ref());
+    PathBuf::from(stripped)
 }
 
 fn normalize_subagent_workspace(workspace: &Path) -> PathBuf {
@@ -8719,12 +8807,31 @@ fn normalize_path_components(path: &Path) -> PathBuf {
 }
 
 fn reject_root_relative_symlinks(root: &Path, path: &Path) -> Result<()> {
-    let relative = path.strip_prefix(root).map_err(|_| {
-        anyhow!(
-            "sub-agent state path must stay within state root: {}",
-            path.display()
-        )
-    })?;
+    let relative = match path.strip_prefix(root) {
+        Ok(relative) => relative.to_path_buf(),
+        Err(_) => {
+            #[cfg(windows)]
+            {
+                let path = strip_windows_verbatim_prefix(path);
+                let root_stripped = strip_windows_verbatim_prefix(root);
+                path.strip_prefix(&root_stripped)
+                    .map(|relative| relative.to_path_buf())
+                    .map_err(|_| {
+                        anyhow!(
+                            "sub-agent state path must stay within state root: {}",
+                            path.display()
+                        )
+                    })?
+            }
+            #[cfg(not(windows))]
+            {
+                return Err(anyhow!(
+                    "sub-agent state path must stay within state root: {}",
+                    path.display()
+                ));
+            }
+        }
+    };
     let mut current = root.to_path_buf();
     for component in relative.components() {
         current.push(component.as_os_str());

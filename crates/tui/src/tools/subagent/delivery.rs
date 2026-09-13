@@ -134,7 +134,10 @@ impl DeliveryEvidence {
                     .map(|head| head.trim().to_string());
                 let dirty = status_paths(&root)?
                     .into_iter()
-                    .map(|path| fingerprint(&root, &path).map(|hash| (path, hash)))
+                    .map(|path| {
+                        let path = normalize_claim_path(&path).ok()?;
+                        fingerprint(&root, &path).map(|hash| (path, hash))
+                    })
                     .collect::<Option<BTreeMap<_, _>>>()?;
                 Some(GitDeliveryBaseline { root, head, dirty })
             })
@@ -151,7 +154,8 @@ impl DeliveryEvidence {
         // or pass caller-controlled options to git after a restart.
         let current_root =
             String::from_utf8(git(workspace, &["rev-parse", "--show-toplevel"])?).ok()?;
-        if baseline.root != Path::new(current_root.trim())
+        let current_root = PathBuf::from(current_root.trim());
+        if !same_path_identity(&baseline.root, &current_root)
             || baseline.dirty.len() > MAX_BASELINE_PATHS
             || baseline
                 .dirty
@@ -186,21 +190,48 @@ impl DeliveryEvidence {
                 candidates.insert(std::str::from_utf8(path).ok()?.to_string());
             }
         }
-        let workspace = workspace.canonicalize().ok()?;
+        // Git status paths are already repo-relative. Prefer them when the
+        // worker workspace is the git toplevel by identity; otherwise project
+        // through a shared canonicalize spelling. Always normalize separators
+        // so Windows `src\lib.rs` matches claim paths like `src/lib.rs`.
+        let workspace_root = workspace.canonicalize().ok()?;
+        let baseline_root = baseline.root.canonicalize().ok()?;
+        let workspace_is_repo_root = same_path_identity(&workspace_root, &baseline_root);
         let mut changed = BTreeSet::new();
         for path in candidates {
-            let absolute = baseline.root.join(&path);
+            let Ok(path) = normalize_claim_path(&path) else {
+                continue;
+            };
             if let Some(before) = baseline.dirty.get(&path)
                 && fingerprint(&baseline.root, &path).as_ref() == Some(before)
             {
                 continue;
             }
-            let Ok(relative) = absolute.strip_prefix(&workspace) else {
-                continue;
+            let relative = if workspace_is_repo_root {
+                path
+            } else {
+                let absolute = baseline_root.join(Path::new(&path));
+                let Ok(relative) = absolute.strip_prefix(&workspace_root) else {
+                    continue;
+                };
+                let Ok(normalized) = normalize_claim_path(&relative.to_string_lossy()) else {
+                    continue;
+                };
+                normalized
             };
-            changed.insert(relative.to_string_lossy().to_string());
+            changed.insert(relative);
         }
         Some(changed)
+    }
+}
+
+fn same_path_identity(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
     }
 }
 
