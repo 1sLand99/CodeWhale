@@ -1457,6 +1457,14 @@ pub(crate) async fn run_event_loop(
     // without replacing the user's configured footer/status-line chips.
     let mut version_check: Option<tokio::task::JoinHandle<Option<UpdateNotice>>> =
         spawn_startup_version_check(config.update_config());
+    // First-run / missing-key: if a live local Ollama catalog answers, adopt a
+    // real /api/tags model into chrome instead of leaving the DeepSeek costume.
+    let mut local_ollama_probe: Option<
+        tokio::task::JoinHandle<Option<crate::local_ollama::LiveLocalOllamaCatalog>>,
+    > = crate::local_ollama::spawn_local_ollama_adoption_probe(
+        config,
+        crate::local_ollama::should_adopt_live_local_ollama(app),
+    );
 
     // Startup version-change hint: once per version, never on first run.
     // `record_launch` owns the semantics (strict semver forward move, corrupt
@@ -1572,6 +1580,18 @@ pub(crate) async fn run_event_loop(
             app.add_message(HistoryCell::System {
                 content: notice.notice_block(install),
             });
+        }
+
+        // Adopt a live local Ollama tag into first-run / missing-key chrome.
+        let mut local_done = false;
+        if let Some(ref handle) = local_ollama_probe {
+            local_done = handle.is_finished();
+        }
+        if local_done
+            && let Ok(Some(catalog)) = local_ollama_probe.take().unwrap().await
+            && crate::local_ollama::should_adopt_live_local_ollama(app)
+        {
+            adopt_live_local_ollama_catalog(app, &mut engine_handle, config, catalog).await;
         }
 
         // Non-blocking startup-default writes (mode / thinking) report their
@@ -6735,6 +6755,37 @@ pub(crate) async fn run_cache_warmup(app: &App, config: &Config) -> Result<Cache
         base_url,
         inspection,
     })
+}
+
+
+/// Switch a first-run / missing-key session onto a live local Ollama tag.
+async fn adopt_live_local_ollama_catalog(
+    app: &mut App,
+    engine_handle: &mut EngineHandle,
+    config: &mut Config,
+    catalog: crate::local_ollama::LiveLocalOllamaCatalog,
+) {
+    let Some(tag) = catalog.preferred_tag().map(str::to_string) else {
+        return;
+    };
+    // switch_provider resolves against the lake we just refreshed.
+    let switched = switch_provider(
+        app,
+        engine_handle,
+        config,
+        ApiProvider::Ollama,
+        Some(tag.clone()),
+    )
+    .await;
+    if !switched {
+        return;
+    }
+    app.onboarding_needs_api_key = false;
+    app.onboarding_missing_key_recovery = false;
+    app.status_message = Some(format!(
+        "Local Ollama ready · {tag} (from GET /api/tags)"
+    ));
+    app.needs_redraw = true;
 }
 
 pub(crate) async fn run_prepared_dispatch(

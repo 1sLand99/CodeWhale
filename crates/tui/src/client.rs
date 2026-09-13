@@ -3962,7 +3962,7 @@ struct BasetenArchitecture {
     output_modalities: Option<Vec<String>>,
 }
 
-pub(super) fn parse_models_response(payload: &str) -> Result<Vec<AvailableModel>> {
+pub(crate) fn parse_models_response(payload: &str) -> Result<Vec<AvailableModel>> {
     let parsed: ModelsListResponse =
         serde_json::from_str(payload).context("Failed to parse model list JSON")?;
 
