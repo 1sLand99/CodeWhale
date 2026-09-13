@@ -665,33 +665,6 @@ impl Engine {
         result.map(|_| ())
     }
 
-    async fn request_turn_owned_child_coordination(
-        &mut self,
-        foreground_children: Option<&Arc<ForegroundChildRegistry>>,
-        turn_has_error: bool,
-        guard_already_sent: bool,
-    ) -> Option<usize> {
-        let agent_ids =
-            foreground_children.map_or_else(Vec::new, |registry| registry.active_agent_ids());
-        let running = agent_ids.len();
-        if !should_guard_turn_end_for_owned_children(turn_has_error, running, guard_already_sent) {
-            return None;
-        }
-
-        self.add_session_message(self.runtime_text_message_with_turn_metadata(
-            turn_owned_child_guard_runtime_text(&agent_ids),
-            UserInputProvenance::Runtime,
-        ))
-        .await;
-        let _ = self
-            .tx_event
-            .send(Event::status(format!(
-                "Continuing once — {running} turn-owned sub-agent(s) still running; wait or let them continue in the background"
-            )))
-            .await;
-        Some(running)
-    }
-
     pub(super) async fn run_turn(
         &mut self,
         turn: &mut TurnContext,
@@ -786,15 +759,6 @@ impl Engine {
         // would put a message the user never sent into the transcript, the
         // exports, and every later turn's context.
         let mut reasoning_only_nudge: Option<Message> = None;
-        // A normally ending turn gets one explicit chance to join its owned
-        // children. If the model ends again while they are still live, the
-        // outer terminal barrier parks them as resumable Interrupted work.
-        let mut turn_end_child_guard_sent = false;
-        // A settlement prompt appended at the model-step ceiling must reach
-        // the provider, and a wait/tool/completion handoff needs one bounded
-        // follow-up response. Count accepted provider responses, not transport
-        // retries, so this grace cannot become an unbounded model loop.
-        let mut turn_end_child_coordination_responses_remaining = 0u8;
         // Outer stream-retry budget: when the chunked-transfer connection
         // dies mid-stream and either nothing useful was streamed (#103
         // Phase 3), the host slept mid-turn (#2990), or a host hit a
@@ -860,16 +824,10 @@ impl Engine {
                     )))
                     .await;
             }
-            if accepted_steer {
-                if let Some(guard) = fleet_denial_guard.as_mut() {
-                    guard.reset();
-                    turn.stop_diagnostics
-                        .permission_denial_rounds_without_progress = 0;
-                }
-                grant_turn_end_steer_response_allowance(
-                    turn_end_child_guard_sent,
-                    &mut turn_end_child_coordination_responses_remaining,
-                );
+            if accepted_steer && let Some(guard) = fleet_denial_guard.as_mut() {
+                guard.reset();
+                turn.stop_diagnostics
+                    .permission_denial_rounds_without_progress = 0;
             }
 
             // Child agents can finish while the parent model is still taking
@@ -878,15 +836,6 @@ impl Engine {
             // discovering them only when it eventually emits no more tools or
             // the idle handler starts a separate follow-up turn.
             self.drain_subagent_completion_events("queued").await;
-
-            // The settlement grace counts accepted provider responses, not
-            // model steps. Enforce it independently of the ordinary step
-            // ceiling: a model that keeps issuing tools after the targeted
-            // wait/finalization handoff must not turn the one-shot parent
-            // warning into another unbounded work loop.
-            if turn_end_child_guard_sent && turn_end_child_coordination_responses_remaining == 0 {
-                break;
-            }
 
             // The pinned system + tools prefix is frozen for the session:
             // recomposing it here from disk on every tool step is exactly what
@@ -924,27 +873,9 @@ impl Engine {
                     .await;
             }
 
-            if turn.at_max_steps() && turn_end_child_coordination_responses_remaining == 0 {
+            if turn.at_max_steps() {
                 turn.stop_diagnostics.reason = Some(TurnStopReason::StepBudgetExhausted);
-                if self
-                    .request_turn_owned_child_coordination(
-                        foreground_children.as_ref(),
-                        turn_error.is_some(),
-                        turn_end_child_guard_sent,
-                    )
-                    .await
-                    .is_some()
-                {
-                    turn_end_child_guard_sent = true;
-                    turn_end_child_coordination_responses_remaining = 2;
-                    // The model already supplied a final answer before this
-                    // bounded coordination pass. A tool result from the pass
-                    // may therefore close cleanly at the next ceiling check.
-                    step_budget_exhaustion_is_terminal = false;
-                    // A prior continuation/tool result already advanced to
-                    // this provider slot. Fall through and dispatch it without
-                    // incrementing the model-step counter a second time.
-                } else if step_budget_exhaustion_is_terminal && !final_report_sent {
+                if step_budget_exhaustion_is_terminal && !final_report_sent {
                     // A2 report-on-exhaustion: the budget died while the model
                     // still owes work. Never finish silently — grant exactly
                     // one final provider turn to write a bounded report, then
@@ -1943,10 +1874,6 @@ impl Engine {
                 // state from a previous bad round.
                 stream_retry_budget.reset();
             }
-            if turn_end_child_coordination_responses_remaining > 0 {
-                turn_end_child_coordination_responses_remaining =
-                    turn_end_child_coordination_responses_remaining.saturating_sub(1);
-            }
 
             // Persist only reasoning the provider actually emitted. Some chat
             // wires require a non-empty `reasoning_content` field when an
@@ -2139,9 +2066,9 @@ impl Engine {
             // finish the turn. Honest ladder (NOTE-turn-loop-wrongness §3):
             // 1) pending steers → resume, 2) queued subagent completions →
             // resume, 3) REPL fences → run (empty cap may end), 4) goal
-            // continuation if under cap → resume, 5) one settlement prompt
-            // for turn-owned children → resume, 6) else end. No status
-            // claims "ending" before step 6.
+            // continuation if under cap → resume, 5) else end. Healthy
+            // children continue in the background; their existence alone
+            // does not authorize another parent model request.
             if tool_uses.is_empty() && !fleet_no_progress_report {
                 if !pending_steers.is_empty() {
                     if let Some(guard) = fleet_denial_guard.as_mut() {
@@ -2160,10 +2087,6 @@ impl Engine {
                         .tx_event
                         .send(Event::status("Continuing — queued steer input".to_string()))
                         .await;
-                    grant_turn_end_steer_response_allowance(
-                        turn_end_child_guard_sent,
-                        &mut turn_end_child_coordination_responses_remaining,
-                    );
                     turn.next_step();
                     continue;
                 }
@@ -2179,9 +2102,8 @@ impl Engine {
 
                 // Sub-agent completion handoff (issue #756). Resuming when
                 // queued completions exist is correct; #3216 says do not wait
-                // indefinitely for every running child here. Turn-owned work
-                // gets one bounded settlement prompt later in this ladder;
-                // detached work can still report by sentinel on a later turn.
+                // indefinitely for every running child here. Healthy work
+                // keeps running and reports by sentinel on a later turn.
                 let subagent_completions = self.drain_subagent_completion_events("").await;
                 if subagent_completions > 0 {
                     let _ = self
@@ -2445,21 +2367,6 @@ impl Engine {
                             }
                         }
                         self.emit_session_updated().await;
-                        if self
-                            .request_turn_owned_child_coordination(
-                                foreground_children.as_ref(),
-                                turn_error.is_some(),
-                                turn_end_child_guard_sent,
-                            )
-                            .await
-                            .is_some()
-                        {
-                            turn_end_child_guard_sent = true;
-                            turn_end_child_coordination_responses_remaining = 2;
-                            step_budget_exhaustion_is_terminal = false;
-                            turn.next_step();
-                            continue;
-                        }
                         break;
                     }
 
@@ -2468,21 +2375,6 @@ impl Engine {
                         // inside the round loop. End the turn now instead of
                         // letting the outer ladder synthesize another provider
                         // request.
-                        if self
-                            .request_turn_owned_child_coordination(
-                                foreground_children.as_ref(),
-                                turn_error.is_some(),
-                                turn_end_child_guard_sent,
-                            )
-                            .await
-                            .is_some()
-                        {
-                            turn_end_child_guard_sent = true;
-                            turn_end_child_coordination_responses_remaining = 2;
-                            step_budget_exhaustion_is_terminal = false;
-                            turn.next_step();
-                            continue;
-                        }
                         break;
                     }
 
@@ -2500,8 +2392,8 @@ impl Engine {
                 // Issue #1727: the turn is now genuinely finishing with no
                 // sendable content. Control only reaches here when there were
                 // no pending steers (`continue`d above) and no sub-agent
-                // completions to resume with. The bounded turn-owned-child
-                // settlement guard runs below after other continuation paths.
+                // completions to resume with. Healthy running children do
+                // not force another model request.
                 // If the assistant produced ONLY a reasoning block, the prior
                 // code fell straight through to this `break`, emitting nothing
                 // and leaving the UI spinner hung. Surface a status now —
@@ -2566,22 +2458,6 @@ impl Engine {
                             "Continuing — goal still active (pass {goal_continuations_this_turn})"
                         )))
                         .await;
-                    turn.next_step();
-                    continue;
-                }
-
-                if self
-                    .request_turn_owned_child_coordination(
-                        foreground_children.as_ref(),
-                        turn_error.is_some(),
-                        turn_end_child_guard_sent,
-                    )
-                    .await
-                    .is_some()
-                {
-                    turn_end_child_guard_sent = true;
-                    turn_end_child_coordination_responses_remaining = 2;
-                    step_budget_exhaustion_is_terminal = false;
                     turn.next_step();
                     continue;
                 }
@@ -2811,10 +2687,6 @@ impl Engine {
                     self.add_session_message(self.user_text_message_with_turn_metadata(steer))
                         .await;
                 }
-                grant_turn_end_steer_response_allowance(
-                    turn_end_child_guard_sent,
-                    &mut turn_end_child_coordination_responses_remaining,
-                );
             }
 
             if authority_changed || accepted_steer_after_tools {
@@ -5699,38 +5571,8 @@ fn truncate_runtime_status_field(text: &str, max_chars: usize) -> String {
     out
 }
 
-fn should_guard_turn_end_for_owned_children(
-    turn_has_error: bool,
-    running_children: usize,
-    guard_already_sent: bool,
-) -> bool {
-    !turn_has_error && running_children > 0 && !guard_already_sent
-}
-
-fn grant_turn_end_steer_response_allowance(guard_sent: bool, remaining: &mut u8) {
-    if guard_sent {
-        // User input is not coordination grace. Preserve the same bounded
-        // response + tool/finalization shape so a steer can call one tool and
-        // still receive an answer without reopening an unbounded loop.
-        *remaining = (*remaining).max(2);
-    }
-}
-
 fn turn_detached_child_count(session_running: usize, turn_owned_running: usize) -> usize {
     session_running.saturating_sub(turn_owned_running)
-}
-
-fn turn_owned_child_guard_runtime_text(agent_ids: &[String]) -> String {
-    let targeted_waits = agent_ids
-        .iter()
-        .map(|agent_id| format!("agent(action=\"wait\", agent_id=\"{agent_id}\", until=\"all\")"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "<codewhale:runtime_event kind=\"turn_owned_children_active\" visibility=\"internal\">\nThis is an internal runtime event, not user input. {} owned sub-agent(s) are still running. You may wait for these exact agents: {targeted_waits}, continue independent work, or answer the user. Ordinary turn completion keeps healthy children running and their results arrive through <codewhale:subagent.done> sentinels. Explicit cancellation still stops owned work; detached=true opts future work out of the parent turn cancellation. {}\n</codewhale:runtime_event>",
-        agent_ids.len(),
-        crate::tools::subagent::subagent_followup_recovery("<agent_id>"),
-    )
 }
 
 fn turn_owned_child_background_runtime_text(running: usize) -> String {
@@ -6786,42 +6628,14 @@ mod tests {
     }
 
     #[test]
-    fn turn_owned_children_get_one_coordination_prompt_then_keep_running() {
-        assert!(should_guard_turn_end_for_owned_children(false, 1, false));
-        assert!(!should_guard_turn_end_for_owned_children(false, 1, true));
-        assert!(!should_guard_turn_end_for_owned_children(false, 0, false));
-        assert!(!should_guard_turn_end_for_owned_children(true, 1, false));
-
-        let guard = turn_owned_child_guard_runtime_text(&[
-            "agent_owned_a".to_string(),
-            "agent_owned_b".to_string(),
-        ]);
-        assert!(
-            guard.contains("agent(action=\"wait\", agent_id=\"agent_owned_a\", until=\"all\")")
-        );
-        assert!(
-            guard.contains("agent(action=\"wait\", agent_id=\"agent_owned_b\", until=\"all\")")
-        );
-        assert!(guard.contains("Ordinary turn completion keeps healthy children running"));
-        assert!(guard.contains("detached=true"));
-        assert!(guard.contains("action=\"followup\""));
-        assert!(!guard.contains("resume_from="));
-
-        let parking = turn_owned_child_background_runtime_text(2);
-        assert!(parking.contains("keep running with their existing identities"));
-        assert!(!parking.contains("resume_from="));
-
+    fn turn_owned_children_keep_running_with_no_recovery_request() {
+        let notice = turn_owned_child_background_runtime_text(2);
+        assert!(notice.contains("keep running with their existing identities"));
+        assert!(notice.contains("No continuation is needed for healthy running work"));
+        assert!(!notice.contains("resume_from="));
+        assert!(!notice.contains("action=\"followup\""));
         assert_eq!(turn_detached_child_count(2, 1), 1);
         assert_eq!(turn_detached_child_count(1, 2), 0);
-
-        for (starting, expected) in [(0, 2), (1, 2), (2, 2), (3, 3)] {
-            let mut remaining = starting;
-            grant_turn_end_steer_response_allowance(true, &mut remaining);
-            assert_eq!(remaining, expected);
-        }
-        let mut no_guard = 0;
-        grant_turn_end_steer_response_allowance(false, &mut no_guard);
-        assert_eq!(no_guard, 0);
     }
 
     #[test]

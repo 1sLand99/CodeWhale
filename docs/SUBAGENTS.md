@@ -577,11 +577,35 @@ Worker records distinguish the worker's own token totals from shared
 `budget_spent_tokens` and `budget_remaining_tokens`; do not sum a shared
 pool once for every descendant.
 
-At a token, step, or wall-time limit, the worker stops with `BudgetExhausted`
-and the specific cause in its checkpoint and durable error. It returns
-recorded partial text, checkpoint, usage, and deliverable verdicts without
-another model request to summarize. Exhausted scopes reject further spawns or
-continuations; an actionable partial receipt is not successful completion.
+The worker reserves room for one final report inside these limits: up to 10%
+of a token allowance (at most 8192 tokens, only when at least 1024 can be
+reserved), one turn when the step cap permits at least two, and up to 10% of
+wall time (at most 10 seconds). Ordinary task execution stops before using
+that reserve. Shared scopes hold back one token reserve for the scope;
+reporting workers atomically claim remaining headroom so siblings cannot
+independently reuse it. Continuation never refunds measured usage or resets
+the original deadline.
+
+The final reporting turn uses the worker's existing resolved provider and
+model, with tools disabled and at most 1024 output tokens. It consolidates
+bounded assistant notes and tool results into findings, evidence, produced
+files, unfinished work and next steps. Estimated input cost counts against
+its allowance. Provider transport retries remain inside the one logical
+turn and its original wall-time deadline; no worker summary retry loop is
+added. Token estimates are not billing receipts: unknown provider input and
+requests already in flight can still overshoot, and actual usage is recorded.
+
+The outcome stays `BudgetExhausted`, even when a useful report is obtained,
+with the specific cause, checkpoint, measured usage and normal deliverable
+verdicts. If the allowance is too small or already spent, earlier bounded
+usage is unknown, the provider fails, or time expires, the worker returns
+recorded partial text and says why a model report was unavailable.
+Known missing response usage and attempts interrupted by timeout or cancellation
+stay recorded across continuations and shared siblings; later known usage remains a
+subtotal and cannot restore reporting headroom in that bounded scope.
+Cancellation wins over reporting. Missing usage stays unknown. Exhausted
+scopes reject further spawns or continuations; a partial report is not
+successful completion.
 
 ## Per-role models (#3018)
 
@@ -838,14 +862,21 @@ continuing parked work with `followup`.
 Unscoped `agent(action="status")` returns a session-scoped page bounded to
 8 KiB. `offset` and `limit` page the roster; the default and maximum limit is
 20. Follow `next_offset`, since the byte bound can return fewer rows than
-requested. Rows include worker and parent IDs, current/maximum depth, state,
+requested. The model-facing roster wire uses one stable `columns` header and
+an array of values per entry in `agents`; pair each row with the header instead
+of reading it as an object. `null` means absent or unreported, and a measured
+zero stays numeric `0`. The header is present even on an empty page.
+Rows include worker and parent IDs, current depth, state,
 elapsed time, own token total, recent activity, pending input, and continuation
 lineage (`resumed_from` / `resumed_as`). Verification includes the verdict,
-nonempty deliverable counts and a short warning when needed. Routes, effective
-limits and token breakdowns remain available when addressing one `agent_id`.
+nonempty deliverable counts and a short warning when needed. Names, steps,
+routes, effective limits (including maximum depth), and token breakdowns remain
+available in the unchanged object projection when addressing one `agent_id`.
 Aggregate usage counts each worker's own reported tokens once and reports its
 coverage. Completion receipts additionally report measured descendant usage,
-deduplicate continuation lineage, and distinguish unknown usage from zero.
+deduplicate continuation lineage, and distinguish unknown usage from zero. A worker's
+`has_unreported_usage` and the descendant/subtree `unreported_usage_workers`
+counts identify missing responses even when later responses provide a measured subtotal.
 
 Request one worker's detail when investigating a failure:
 

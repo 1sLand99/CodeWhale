@@ -9980,9 +9980,9 @@ async fn status_projection_reconciles_stale_running_agent() {
             .expect("status projection should succeed");
     let payload: serde_json::Value =
         serde_json::from_str(&result.content).expect("status payload should be json");
-    let agent = payload["agents"]
-        .as_array()
-        .and_then(|agents| agents.first())
+    let rows = lifecycle_tests::status_rows(&payload);
+    let agent = rows
+        .first()
         .expect("stale current-session agent should remain inspectable");
 
     assert_eq!(payload["count"], 1);
@@ -13417,7 +13417,7 @@ async fn foreground_registration_releases_when_the_child_future_returns_or_unwin
     let registry = Arc::new(ForegroundChildRegistry::new());
 
     let completed = registry
-        .register("agent_completed_registration", CancellationToken::new())
+        .register(CancellationToken::new())
         .expect("registry open");
     let result: Result<(), ()> = async move {
         let _registration = completed;
@@ -13427,7 +13427,7 @@ async fn foreground_registration_releases_when_the_child_future_returns_or_unwin
     assert!(result.is_err());
 
     let panicked = registry
-        .register("agent_panicked_registration", CancellationToken::new())
+        .register(CancellationToken::new())
         .expect("registry open");
     let task = tokio::spawn(async move {
         let _registration = panicked;
@@ -13463,13 +13463,6 @@ async fn turn_owned_descendants_join_and_park_with_the_same_foreground_registry(
         .expect("a turn-owned descendant must register with the root turn barrier");
     let grandchild_parking = grandchild_registration.parking_signal();
     assert_eq!(registry.active_count(), 2);
-    assert_eq!(
-        registry.active_agent_ids(),
-        vec![
-            "agent_owned_child".to_string(),
-            "agent_owned_grandchild".to_string()
-        ]
-    );
 
     let child_task = tokio::spawn(async move {
         child_token.cancelled().await;
@@ -16480,7 +16473,7 @@ async fn queued_turn_owned_child_parks_without_a_false_start_transition() {
 
     let foreground_children = Arc::new(ForegroundChildRegistry::new());
     let registration = foreground_children
-        .register(&agent_id, runtime.cancel_token.clone())
+        .register(runtime.cancel_token.clone())
         .expect("turn-owned queued child registers before settlement");
     let gate = Arc::new(Semaphore::new(1));
     let held_launch_permit = Arc::clone(&gate)
@@ -20593,15 +20586,16 @@ async fn unscoped_status_compacts_every_state_even_with_verbose() {
     .expect("status projection should succeed");
     let payload: serde_json::Value =
         serde_json::from_str(&result.content).expect("status payload should be json");
-    let agent_row = payload["agents"]
-        .as_array()
-        .and_then(|agents| agents.first())
-        .expect("running agent row");
+    let rows = lifecycle_tests::status_rows(&payload);
+    let agent_row = rows.first().expect("running agent row");
     assert_eq!(agent_row["status"], "running", "{agent_row}");
     assert_eq!(payload["compact"], true, "{payload}");
     assert!(agent_row.get("snapshot").is_none(), "{agent_row}");
     assert!(agent_row.get("worker_record").is_none(), "{agent_row}");
-    assert!(agent_row["usage"].is_object(), "supervision keeps usage");
+    assert!(
+        agent_row["total_tokens"].is_null(),
+        "unknown usage stays unknown"
+    );
 
     // Unscoped verbose cannot restore every worker archive.
     let verbose = inspect_agent_from_input(
@@ -20615,10 +20609,8 @@ async fn unscoped_status_compacts_every_state_even_with_verbose() {
     .expect("verbose status should succeed");
     let verbose_payload: serde_json::Value =
         serde_json::from_str(&verbose.content).expect("verbose payload json");
-    let verbose_row = verbose_payload["agents"]
-        .as_array()
-        .and_then(|agents| agents.first())
-        .expect("verbose agent row");
+    let rows = lifecycle_tests::status_rows(&verbose_payload);
+    let verbose_row = rows.first().expect("verbose agent row");
     assert!(verbose_row.get("snapshot").is_none(), "{verbose_row}");
     assert_eq!(verbose_payload["compact"], true, "{verbose_payload}");
 }
@@ -22845,7 +22837,7 @@ fn agent_tool_description_names_only_schema_roles() {
         .into_iter()
         .collect();
     let texts = [
-        super::AGENT_TOOL_DESCRIPTION,
+        super::AGENT_TOOL_DESCRIPTION.as_str(),
         super::SUBAGENT_TYPE_DESCRIPTION,
     ];
     let mut seen = 0;

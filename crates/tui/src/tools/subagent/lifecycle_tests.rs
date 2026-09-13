@@ -1,6 +1,31 @@
 use super::*;
 use tempfile::tempdir;
 
+pub(super) fn status_rows(payload: &Value) -> Vec<Value> {
+    let columns = payload["columns"].as_array().expect("roster columns");
+    let unique = columns
+        .iter()
+        .map(|column| column.as_str().expect("column name"))
+        .collect::<HashSet<_>>();
+    assert_eq!(columns.len(), unique.len(), "duplicate roster column");
+    payload["agents"]
+        .as_array()
+        .expect("roster rows")
+        .iter()
+        .map(|row| {
+            let values = row.as_array().expect("roster row array");
+            assert_eq!(columns.len(), values.len(), "row must match its header");
+            Value::Object(
+                columns
+                    .iter()
+                    .zip(values)
+                    .map(|(column, value)| (column.as_str().unwrap().to_string(), value.clone()))
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
 fn prior_messages() -> Vec<Message> {
     vec![Message {
         role: Role::User,
@@ -203,6 +228,7 @@ async fn lifecycle_compact_roster_bounds_every_state_and_pages_multibyte_names()
     }
     let mut offset = 0;
     let mut seen = HashSet::new();
+    let mut header = None;
     loop {
         let result = inspect_agent_from_input(
             &json!({"action": "status", "verbose": true, "offset": offset}),
@@ -219,12 +245,16 @@ async fn lifecycle_compact_roster_bounds_every_state_and_pages_multibyte_names()
             result.content.len()
         );
         let value: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(
+            *header.get_or_insert_with(|| value["columns"].clone()),
+            value["columns"]
+        );
         assert_eq!(value["total_count"], 37);
         assert_eq!(
             value["usage"]["total_tokens"], 3700,
             "scope totals must not be counted per child"
         );
-        let rows = value["agents"].as_array().unwrap();
+        let rows = status_rows(&value);
         assert!(!rows.is_empty());
         for row in rows {
             assert!(seen.insert(row["agent_id"].as_str().unwrap().to_string()));
@@ -247,6 +277,40 @@ async fn lifecycle_compact_roster_bounds_every_state_and_pages_multibyte_names()
 }
 
 #[tokio::test]
+async fn lifecycle_compact_columns_keep_unknown_usage_and_pending_input_explicit() {
+    let dir = tempdir().unwrap();
+    let mut manager = SubAgentManager::new(dir.path().to_path_buf(), 3);
+    let zero = manager.insert_test_running_agent("zero", dir.path());
+    manager
+        .worker_records
+        .get_mut(&zero)
+        .unwrap()
+        .usage
+        .total_tokens = Some(0);
+    let (pending, _) =
+        manager.insert_test_interrupted_continuable_agent("pending", dir.path(), prior_messages());
+    manager.agents.get_mut(&pending).unwrap().needs_input = Some(SubAgentNeedsInput {
+        question: "Approve the next validation step?".into(),
+    });
+    let payload =
+        lifecycle::compact_roster(&manager, &json!({}), "workspace", false, false).unwrap();
+    let rows = status_rows(&payload);
+    let zero = rows.iter().find(|row| row["agent_id"] == zero).unwrap();
+    let pending = rows.iter().find(|row| row["agent_id"] == pending).unwrap();
+    assert_eq!(zero["total_tokens"], 0);
+    assert!(zero["needs_input"].is_null());
+    assert!(pending["total_tokens"].is_null());
+    assert_eq!(pending["needs_input"], "Approve the next validation step?");
+    assert_eq!(pending["needs_continuation"], true);
+    assert_eq!(payload["usage"]["total_tokens"], 0);
+    assert_eq!(payload["usage"]["reported_workers"], 1);
+    let empty = SubAgentManager::new(dir.path().join("empty"), 1);
+    let empty = lifecycle::compact_roster(&empty, &json!({}), "workspace", false, false).unwrap();
+    assert_eq!(empty["columns"], payload["columns"]);
+    assert!(status_rows(&empty).is_empty());
+}
+
+#[tokio::test]
 async fn lifecycle_addressed_status_follows_lineage_and_detail_is_bounded() {
     let dir = tempdir().unwrap();
     let manager = new_shared_subagent_manager(dir.path().to_path_buf(), 3);
@@ -260,6 +324,25 @@ async fn lifecycle_addressed_status_follows_lineage_and_detail_is_bounded() {
         (old, latest)
     };
     let context = ToolContext::new(dir.path());
+    let roster = inspect_agent_from_input(
+        &json!({"action": "status"}),
+        Arc::clone(&manager),
+        &context,
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    let roster: Value = serde_json::from_str(&roster.content).unwrap();
+    let rows = status_rows(&roster);
+    assert_eq!(
+        rows.iter().find(|row| row["agent_id"] == old).unwrap()["resumed_as"],
+        latest
+    );
+    assert_eq!(
+        rows.iter().find(|row| row["agent_id"] == latest).unwrap()["resumed_from"],
+        old
+    );
     let result = inspect_agent_from_input(
         &json!({"agent_id": old}),
         Arc::clone(&manager),
@@ -324,6 +407,34 @@ fn lifecycle_recovery_never_forks_and_byte_preview_preserves_utf8() {
     let preview = lifecycle::text_preview(&"🐋".repeat(10_000), 65);
     assert!(preview.len() <= 65);
     assert!(preview.ends_with("..."));
+}
+
+#[test]
+fn lifecycle_park_event_sentinel_and_tool_share_recovery_instruction() {
+    let agent_id = "agent_parked";
+    let instruction = subagent_followup_recovery(agent_id);
+    let parking = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let (status, output, checkpoint, needs_input, _, _) =
+        subagent_cancellation_projection(agent_id, &prior_messages(), 1, None, Some(&parking));
+    assert!(output.as_deref().unwrap().contains(&instruction));
+    assert_eq!(needs_input.as_ref().unwrap().question, instruction);
+
+    let mut result = super::tests::make_snapshot(status);
+    result.agent_id = agent_id.into();
+    result.result = output;
+    result.checkpoint = checkpoint;
+    result.needs_input = needs_input;
+    let sentinel = subagent_done_sentinel(agent_id, &result, false);
+    let metadata: Value = serde_json::from_str(
+        sentinel
+            .strip_prefix("<codewhale:subagent.done>")
+            .unwrap()
+            .strip_suffix("</codewhale:subagent.done>")
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(metadata["needs_input"]["question"], instruction);
+    assert!(AGENT_TOOL_DESCRIPTION.contains(&subagent_followup_recovery("<agent_id>")));
 }
 
 #[tokio::test]

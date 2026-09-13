@@ -260,7 +260,7 @@ fn budget_partial_handback_is_bounded_and_keeps_unknown_usage_honest() {
     let summary = result.result.unwrap();
     assert!(summary.chars().count() < 4_500);
     assert!(summary.contains("usage has not been reported"));
-    assert!(summary.contains("No extra model request"));
+    assert!(summary.contains("makes no further model request"));
     let checkpoint = result.checkpoint.unwrap();
     assert!(!checkpoint.continuable);
     assert_eq!(

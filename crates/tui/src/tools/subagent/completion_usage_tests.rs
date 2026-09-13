@@ -252,6 +252,77 @@ async fn completion_usage_distinguishes_unknown_zero_partial_and_overflow() {
 }
 
 #[tokio::test]
+async fn completion_usage_keeps_unknown_then_known_response_subtotals_visible() {
+    let dir = tempdir().unwrap();
+    let mut manager = SubAgentManager::new(dir.path().to_path_buf(), 8);
+    let root = child(&mut manager, "partial-root", None, None);
+    let direct = child(&mut manager, "partial-child", Some(&root), None);
+    let zero = child(&mut manager, "known-zero", Some(&direct), None);
+    // The parent, manifest and successor map describe the same descendant.
+    resume(&mut manager, &zero, &direct);
+    let foreign = child(&mut manager, "foreign-unknown", Some(&root), None);
+    manager.assign_test_session_owner(&foreign, "another-owner");
+    manager.record_worker_usage(&foreign, "foreign-unknown", &Usage::default(), None);
+
+    for (id, input, output) in [(&root, 8, 2), (&direct, 16, 4)] {
+        manager.record_worker_usage(id, "unreported-response", &Usage::default(), None);
+        let before = receipt(&manager, id);
+        assert!(before["usage"]["own"]["total_tokens"].is_null());
+        assert_eq!(before["usage"]["own"]["has_unreported_usage"], true);
+        manager.record_worker_usage(
+            id,
+            "reported-response",
+            &Usage {
+                input_tokens: input,
+                output_tokens: output,
+                ..Usage::default()
+            },
+            None,
+        );
+    }
+    manager.record_worker_usage(
+        &zero,
+        "reported-zero-response",
+        &Usage {
+            prompt_cache_hit_tokens: Some(0),
+            ..Usage::default()
+        },
+        None,
+    );
+
+    let payload = receipt(&manager, &root);
+    let usage = &payload["usage"];
+    assert_eq!(usage["own"]["input_tokens"], 8);
+    assert_eq!(usage["own"]["output_tokens"], 2);
+    assert_eq!(usage["own"]["total_tokens"], 10);
+    assert_eq!(usage["own"]["has_unreported_usage"], true);
+    assert_eq!(usage["descendants"]["workers"], 2);
+    assert_eq!(usage["descendants"]["unreported_usage_workers"], 1);
+    assert_eq!(usage["descendants"]["total_tokens"]["known"], 20);
+    assert_eq!(usage["subtree"]["workers"], 3);
+    assert_eq!(usage["subtree"]["unreported_usage_workers"], 2);
+    assert_eq!(usage["subtree"]["input_tokens"]["known"], 24);
+    assert_eq!(usage["subtree"]["output_tokens"]["known"], 6);
+    assert_eq!(usage["subtree"]["total_tokens"]["known"], 30);
+    assert_eq!(usage["subtree"]["total_tokens"]["reported_workers"], 3);
+    assert!(serde_json::to_vec(usage).unwrap().len() <= 1600);
+
+    let zero_receipt = receipt(&manager, &zero);
+    assert_eq!(zero_receipt["usage"]["own"]["total_tokens"], 0);
+    assert_eq!(zero_receipt["usage"]["own"]["has_unreported_usage"], false);
+    assert_eq!(
+        zero_receipt["usage"]["subtree"]["unreported_usage_workers"],
+        0
+    );
+    assert_eq!(
+        zero_receipt["usage"]["descendants"]["unreported_usage_workers"],
+        0
+    );
+    assert_eq!(manager.worker_records[&root].usage.total_tokens, Some(10));
+    assert_eq!(manager.worker_records[&direct].usage.total_tokens, Some(20));
+}
+
+#[tokio::test]
 async fn completion_usage_counts_real_manifest_only_root_fork() {
     let dir = tempdir().unwrap();
     let manager = new_shared_subagent_manager(dir.path().to_path_buf(), 4);
@@ -309,22 +380,30 @@ async fn completion_usage_dozen_child_status_measures_bytes_and_keeps_descendant
     let mut ids: Vec<String> = Vec::new();
     {
         let mut guard = manager.write().await;
-        for index in 0..12 {
+        for (index, name) in [
+            "a2f4095d", "846bd172", "ce819730", "918deb4a", "716a54bf", "f291ac63", "b5701e92",
+            "294e7cab", "ac967f81", "670d2ea9", "edf94328", "547ab013",
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let parent = (index > 0).then(|| ids[(index - 1) / 2].clone());
-            let id = child(
-                &mut guard,
-                &format!("child{index:02}"),
-                parent.as_deref(),
-                Some(index as u64 + 1),
-            );
+            let depth = parent.as_ref().map_or(1, |parent| {
+                guard.worker_records[parent].spec.spawn_depth + 1
+            });
+            let id = child(&mut guard, name, parent.as_deref(), Some(index as u64 + 1));
             let record = guard.worker_records.get_mut(&id).unwrap();
+            record.spec.spawn_depth = depth;
+            record.spec.max_spawn_depth = 4;
+            record.spec.runtime_profile.spawn_depth = depth;
+            record.spec.runtime_profile.max_spawn_depth = 4;
             record.latest_message = Some("starting".into());
             record.spec.child_route = Some(ChildRouteReceipt {
                 requested_type: "explore".into(),
                 requested_profile: Some("scout".into()),
                 resolved_profile_id: Some("scout".into()),
                 profile_origin: Some("workspace".into()),
-                canonical_role: "scout".into(),
+                canonical_role: "explore".into(),
                 provider_id: "deepseek".into(),
                 model_id: "deepseek-v4-flash".into(),
                 route_source: "profile.model".into(),
@@ -367,26 +446,30 @@ async fn completion_usage_dozen_child_status_measures_bytes_and_keeps_descendant
         .unwrap();
         bytes += output.content.len();
         pages += 1;
+        eprintln!("DOZEN_CHILD_STATUS_JSON {}", output.content);
         assert!(output.content.len() <= lifecycle::COMPACT_STATUS_BYTES);
         let payload: Value = serde_json::from_str(&output.content).unwrap();
         assert_eq!(payload["usage"]["total_tokens"], 780);
-        for row in payload["agents"].as_array().unwrap() {
+        for row in lifecycle_tests::status_rows(&payload) {
             let id = row["agent_id"].as_str().unwrap();
             assert!(seen.insert(id.to_string()));
             let index = ids.iter().position(|expected| expected == id).unwrap();
-            assert_eq!(row["usage"]["total_tokens"], (index + 1) * 10);
-            assert_eq!(row["usage"].as_object().unwrap().len(), 1);
-            for key in ["compact", "terminal", "child_route", "effective_limits"] {
-                assert!(row.get(key).is_none(), "{key}: {row}");
-            }
-            assert!(row.get("needs_continuation").is_none(), "{row}");
-            assert_eq!(row["activity"], "starting");
+            assert_eq!(row["total_tokens"], (index + 1) * 10);
             for key in [
-                "duration_ms",
-                "last_activity_ms",
-                "spawn_depth",
+                "compact",
+                "terminal",
+                "name",
+                "steps_taken",
+                "child_route",
+                "effective_limits",
+                "usage",
                 "max_spawn_depth",
             ] {
+                assert!(row.get(key).is_none(), "{key}: {row}");
+            }
+            assert_eq!(row["needs_continuation"], false, "{row}");
+            assert_eq!(row["activity"], "starting");
+            for key in ["duration_ms", "last_activity_ms", "spawn_depth"] {
                 assert!(row[key].is_u64(), "{key}: {row}");
             }
             if index == 11 {
@@ -411,7 +494,7 @@ async fn completion_usage_dozen_child_status_measures_bytes_and_keeps_descendant
     }
     assert_eq!(seen.len(), 12);
     assert_eq!(pages, 1, "ordinary twelve-worker roster must fit one page");
-    assert!(bytes <= 4096, "twelve-worker roster used {bytes} bytes");
+    assert!(bytes <= 3072, "twelve-worker roster used {bytes} bytes");
     let addressed = inspect_agent_from_input(
         &json!({"action":"status", "agent_id":ids[0]}),
         Arc::clone(&manager),
@@ -425,6 +508,7 @@ async fn completion_usage_dozen_child_status_measures_bytes_and_keeps_descendant
     assert_eq!(addressed["compact"], true);
     assert_eq!(addressed["child_route"]["model_id"], "deepseek-v4-flash");
     assert_eq!(addressed["effective_limits"]["token_budget"], 12_000);
+    assert_eq!(addressed["max_spawn_depth"], 4);
     assert_eq!(addressed["usage"]["input_tokens"], 8);
     assert_eq!(addressed["usage"]["output_tokens"], 2);
     eprintln!(

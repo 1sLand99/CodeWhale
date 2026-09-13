@@ -87,6 +87,7 @@ use coord::{
 };
 
 pub mod advisor;
+mod budget_handback;
 pub mod coord;
 mod delivery;
 mod lifecycle;
@@ -467,10 +468,9 @@ pub enum SubAgentStatus {
     Interrupted(String),
     Failed(String),
     Cancelled,
-    /// Worker stopped because it exceeded its own per-worker token budget.
-    /// Distinct from the scope-level admission gate (#3319): this caps a
-    /// single runaway worker mid-run, while the scope gate bounds total
-    /// fan-out across a root run and its descendants.
+    /// Worker stopped at an own/shared token, step, or wall-time budget.
+    /// Partial output retains usage and deliverable receipts without claiming
+    /// successful completion.
     BudgetExhausted,
 }
 
@@ -666,8 +666,8 @@ pub struct ParentMailReceipt {
     pub woke: bool,
     pub continued_from_checkpoint: bool,
     /// Present when the child is interrupted_continuable and still has a
-    /// checkpoint handle the parent can re-dispatch with. Live in-place
-    /// resume from `agents/followup` is not automated yet.
+    /// checkpoint handle. With a runtime attached, `followup` resumes it and
+    /// returns the current continuation; a manager-only call queues the note.
     pub continuation_handle: Option<String>,
     pub note: String,
 }
@@ -820,6 +820,12 @@ pub struct AgentWorkerRecord {
     /// retried delivery idempotent in both projections after reload.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub usage_source_fingerprints: BTreeSet<String>,
+    /// A decoded response omitted usable usage, or a logical provider call
+    /// ended at a deadline or cancellation without decoded usage. This records
+    /// missing coverage, never inferred billed tokens. Later receipts cannot erase it.
+    /// Legacy records default to no positively known missing response.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_unreported_usage: bool,
     #[serde(default)]
     pub delivery_evidence: DeliveryEvidence,
     #[serde(default = "default_agent_run_verification")]
@@ -896,6 +902,7 @@ impl AgentWorkerRecord {
             artifacts,
             usage: default_agent_run_usage(),
             usage_source_fingerprints: BTreeSet::new(),
+            has_unreported_usage: false,
             delivery_evidence,
             verification,
             recommended_action,
@@ -2260,7 +2267,6 @@ pub(crate) enum ForegroundSettlement {
 
 #[derive(Debug)]
 struct ForegroundChildEntry {
-    agent_id: String,
     token: CancellationToken,
     parking_requested: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -2290,7 +2296,6 @@ impl ForegroundChildRegistry {
 
     pub(crate) fn register(
         self: &Arc<Self>,
-        agent_id: impl Into<String>,
         token: CancellationToken,
     ) -> Result<ForegroundChildRegistration, ForegroundSettlement> {
         let mut state = self
@@ -2307,7 +2312,6 @@ impl ForegroundChildRegistry {
         state.children.insert(
             id,
             ForegroundChildEntry {
-                agent_id: agent_id.into(),
                 token,
                 parking_requested: Arc::clone(&parking_requested),
             },
@@ -2326,21 +2330,6 @@ impl ForegroundChildRegistry {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .children
             .len()
-    }
-
-    #[must_use]
-    pub(crate) fn active_agent_ids(&self) -> Vec<String> {
-        let state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut agent_ids = state
-            .children
-            .values()
-            .map(|entry| entry.agent_id.clone())
-            .collect::<Vec<_>>();
-        agent_ids.sort();
-        agent_ids
     }
 
     fn release(&self, id: u64) {
@@ -2861,7 +2850,7 @@ impl SubAgentRuntime {
             return Ok(None);
         };
         registry
-            .register(agent_id, self.cancel_token.clone())
+            .register(self.cancel_token.clone())
             .map(Some)
             .map_err(|settlement| {
                 anyhow!(
@@ -3308,6 +3297,10 @@ impl Drop for CoordinationProcessLock {
 pub struct SubAgentManager {
     agents: HashMap<String, SubAgent>,
     worker_records: HashMap<String, AgentWorkerRecord>,
+    /// In-flight report allowances, not billed usage. Weak leases disappear
+    /// on cancellation/abort without awaiting the manager lock or persisting
+    /// a refundable reservation across process recovery.
+    handback_reservations: HashMap<String, std::sync::Weak<u64>>,
     worker_event_seq: u64,
     persist_sequence: std::sync::atomic::AtomicU64,
     coordination: CoordinationLedger,
@@ -3457,6 +3450,7 @@ impl SubAgentManager {
         Self {
             agents: HashMap::new(),
             worker_records: HashMap::new(),
+            handback_reservations: HashMap::new(),
             worker_event_seq: 0,
             persist_sequence: std::sync::atomic::AtomicU64::new(0),
             coordination: CoordinationLedger::default(),
@@ -4898,8 +4892,8 @@ impl SubAgentManager {
                     && !self.agents.contains_key(id))
                 // A child parked at its parent's turn end is not a child that
                 // asked a question (#5906). Nothing will answer it: the
-                // recovery path is `resume_from`, which starts a *new* agent
-                // that registers its own claim. Counting the parked record
+                // recovery path is `followup`, whose continuation registers
+                // its own claim. Counting the parked record
                 // live left its claim standing forever — refusing the resume
                 // itself, every later write-capable spawn overlapping the
                 // scope, and (through the shared-checkout peer gate) all
@@ -5255,9 +5249,12 @@ impl SubAgentManager {
         }
         let spent = self.aggregate_budget_spent(&scope_id);
         let remaining = limit.saturating_sub(spent);
-        if remaining < MIN_SUBAGENT_SPAWN_TOKEN_RESERVE {
+        let work_remaining = remaining
+            .saturating_sub(budget_handback::token_reserve(limit))
+            .saturating_sub(self.reserved_handback_tokens(&scope_id, Some(&scope_id)));
+        if work_remaining < MIN_SUBAGENT_SPAWN_TOKEN_RESERVE {
             return Err(anyhow!(
-                "Sub-agent token budget exhausted for scope {scope_id}: {spent}/{limit} tokens spent, {remaining} remaining. Wait for the parent/Workflow to summarize results or start a fresh agent run."
+                "Sub-agent token budget exhausted for scope {scope_id}: {spent}/{limit} tokens spent, {remaining} remaining (including reserved reporting allowance). Wait for the parent/Workflow to summarize results or start a fresh agent run."
             ));
         }
         Ok(AgentUsageBudgetScope {
@@ -5481,7 +5478,7 @@ impl SubAgentManager {
         // An omitted provider usage payload is not a measured zero. Keep its
         // receipt identity for deduplication, but leave token totals unknown.
         if !usage_has_reported_data(usage) {
-            self.persist_state_debounced();
+            self.mark_worker_unreported_usage(worker_id);
             return;
         }
         record.usage.input_tokens = Some(
@@ -5520,6 +5517,14 @@ impl SubAgentManager {
             self.refresh_budget_scope(&scope_id);
         }
         self.persist_state_debounced();
+    }
+
+    fn mark_worker_unreported_usage(&mut self, worker_id: &str) {
+        if let Some(record) = self.worker_records.get_mut(worker_id) {
+            record.has_unreported_usage = true;
+            record.updated_at_ms = epoch_millis_now();
+            self.persist_state_debounced();
+        }
     }
 
     fn push_worker_event(
@@ -8142,6 +8147,7 @@ impl SubAgentManager {
         let mut pending = vec![result.agent_id.as_str()];
         let mut descendants = Vec::new();
         let mut active_descendants = 0;
+        let mut unreported_descendants = 0;
         while let Some(id) = pending.pop() {
             if !visited.insert(id) {
                 continue;
@@ -8150,16 +8156,25 @@ impl SubAgentManager {
             if id != result.agent_id {
                 descendants.push(&record.usage);
                 active_descendants += usize::from(!record.status.is_terminal());
+                unreported_descendants += usize::from(record.has_unreported_usage);
             }
             pending.extend(children.get(id).into_iter().flatten().copied());
         }
-        let descendant_totals = completion_token_totals(&descendants, active_descendants);
+        let mut descendant_totals = completion_token_totals(&descendants, active_descendants);
+        descendant_totals["unreported_usage_workers"] = json!(unreported_descendants);
         descendants.push(&own.usage);
+        let mut subtree_totals = completion_token_totals(&descendants, active_descendants);
+        subtree_totals["unreported_usage_workers"] =
+            json!(unreported_descendants + usize::from(own.has_unreported_usage));
+        let mut own_tokens = completion_own_tokens(Some(&own.usage));
+        // A later measured response cannot make earlier missing usage known.
+        // Keep the numeric subtotal and report its incomplete coverage beside it.
+        own_tokens["has_unreported_usage"] = json!(own.has_unreported_usage);
         Some(json!({
             "scope": "retained_subtree",
-            "own": completion_own_tokens(Some(&own.usage)),
+            "own": own_tokens,
             "descendants": descendant_totals,
-            "subtree": completion_token_totals(&descendants, active_descendants),
+            "subtree": subtree_totals,
         }))
     }
 
@@ -9187,21 +9202,22 @@ fn start_requests_read_only_role(input: &Value) -> bool {
 /// declared enum (#5940). `agent_tool_description_names_only_schema_roles`
 /// pins this. Field descriptions own lifecycle and scope details; do not
 /// repeat them here on every request.
-const AGENT_TOOL_DESCRIPTION: &str = concat!(
-    "Start with action=start and prompt; returns an agent_id immediately. Read-only roles need no extra fields. Healthy children continue after an ordinary parent response; detached=true also opts out of parent-turn cancellation. ",
-    "Use multiple starts for independent parallel tasks. ",
-    "type selects the Fleet role: general (full tool access for multi-step tasks), explore (fast read-only exploration), planner (grounded strategy, read-only probes), reviewer (reads and grades code), implement (lands focused code changes), test (runs tests and reports evidence), advisor (read-only design counsel), or custom (allowed_tools on the parent's posture). ",
-    "profile selects a saved member or built-in role. Saved profile and manual role pins are exact; model/strength choose unpinned routes; thinking overrides the tier. ",
-    "Use action=roster for resolved roles, models, reasoning, context and cost evidence; it makes no provider request. ",
-    "token_budget, max_steps and wall_time_secs narrow inherited and operator limits. At a limit, recorded partial work and usage return without an extra model request. ",
-    "Prefer type=implement for write work and type=test (or the Run tool with action=\"verifiers\") after writes settle — dispatch is not completion. ",
-    "Coordinate through this same tool; action and until describe message, followup, interrupt and wait behavior. ",
-    "action=claim widens your own enforced write scope: pass write_roots (and optionally exact_files, coordination_contracts) before mutating anything a fail-closed write refusal named. It records a durable claim receipt and fails on contention with a peer claim; it never touches another agent's scope. ",
-    "Action contract: start requires prompt; message/followup require targets and a message; followup accepts one id, agent_ids or all_parked=true and returns continuation mappings. peek/interrupt/cancel require a target; claim requires scope entries; status is compact and paginated unless an addressed detail is requested. ",
-    "This is the whole model-facing sub-agent surface; there is no second transport. ",
-    "In Operate, arbitrary shell remains gated. ",
-    "Legacy action=status|peek|cancel remain for compatibility."
-);
+static AGENT_TOOL_DESCRIPTION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    let description = concat!(
+        "Start with action=start and prompt; returns an agent_id immediately. Read-only roles need no extra fields. Healthy children continue after an ordinary parent response; detached=true also opts out of parent-turn cancellation. ",
+        "Use Workflow for dependencies; use multiple starts for independent tasks. ",
+        "type selects the Fleet role: general (full tool access for multi-step tasks), explore (fast read-only exploration), planner (grounded strategy, read-only probes), reviewer (reads and grades code), implement (lands focused code changes), test (runs tests and reports evidence), advisor (read-only design counsel), or custom (allowed_tools on the parent's posture). ",
+        "profile selects a saved member or built-in role. Saved profile and manual role pins are exact; model/strength choose unpinned routes; thinking overrides the tier. ",
+        "Use action=roster for resolved roles, models, reasoning, context and cost evidence; it makes no provider request. ",
+        "token_budget, max_steps and wall_time_secs only narrow inherited limits; the worker reserves an allowance for one tools-disabled partial-report turn within those limits and falls back to recorded work when reporting is unavailable. ",
+        "Prefer type=implement for write work and type=test (or the Run tool with action=\"verifiers\") after writes settle — dispatch is not completion. ",
+        "action=claim widens your own enforced write scope: pass write_roots (and optionally exact_files, coordination_contracts) before mutating anything a fail-closed write refusal named. It records a durable claim receipt and fails on contention with a peer claim; it never touches another agent's scope. ",
+        "Action contract: start requires prompt; message/followup require targets and a message; followup accepts one id, agent_ids or all_parked=true and returns continuation mappings. peek/interrupt/cancel require a target; claim requires scope entries; status is compact and paginated unless an addressed detail is requested. ",
+        "In Operate, arbitrary shell remains gated. ",
+        "Legacy action=status|peek|cancel remain for compatibility."
+    );
+    format!("{description} {}", subagent_followup_recovery("<agent_id>"))
+});
 
 #[async_trait]
 impl ToolSpec for AgentTool {
@@ -9210,7 +9226,7 @@ impl ToolSpec for AgentTool {
     }
 
     fn description(&self) -> &'static str {
-        AGENT_TOOL_DESCRIPTION
+        AGENT_TOOL_DESCRIPTION.as_str()
     }
 
     /// One schema advertises the runtime's routing, scope, lifecycle and
@@ -11135,9 +11151,21 @@ async fn supervise_subagent_task_body(
     std::panic::resume_unwind(panic);
 }
 
-/// Budget handback consumes no additional model turns or tokens. Preserve
-/// recorded work and its checkpoint, without claiming that it is complete.
-fn budget_partial_result(mut result: SubAgentResult, cause: &str) -> SubAgentResult {
+/// The deterministic fallback makes no additional request. An earlier
+/// reporting attempt may have timed out, so do not claim it never happened.
+fn budget_partial_result(result: SubAgentResult, cause: &str) -> SubAgentResult {
+    budget_partial_result_with_note(
+        result,
+        cause,
+        "Reporting allowance was unavailable or expired. This deterministic fallback makes no further model request.",
+    )
+}
+
+fn budget_partial_result_with_note(
+    mut result: SubAgentResult,
+    cause: &str,
+    handback_note: &str,
+) -> SubAgentResult {
     let text = result
         .result
         .take()
@@ -11172,7 +11200,7 @@ fn budget_partial_result(mut result: SubAgentResult, cause: &str) -> SubAgentRes
         });
     result.status = SubAgentStatus::BudgetExhausted;
     result.result = Some(format!(
-        "{cause}. {measured} No extra model request was made for this handback.\nPartial output:\n{partial}"
+        "{cause}. {measured} {handback_note}\nPartial output:\n{partial}"
     ));
     let checkpoint = result.checkpoint.get_or_insert_with(|| {
         build_subagent_checkpoint(&result.agent_id, cause, &[], result.steps_taken, false)
@@ -12132,6 +12160,7 @@ async fn request_subagent_model_response_with_retries(
     steps: u32,
     max_steps: u32,
     request: MessageRequest,
+    request_attempted: &std::sync::atomic::AtomicBool,
 ) -> std::result::Result<
     (MessageResponse, crate::cost_status::EffectiveRouteEnvelope),
     SubAgentApiRequestFailure,
@@ -12145,6 +12174,7 @@ async fn request_subagent_model_response_with_retries(
         let usage_route = runtime
             .client
             .effective_route_envelope(&runtime.model, chrono::Utc::now());
+        request_attempted.store(true, std::sync::atomic::Ordering::Relaxed);
         match tokio::time::timeout(
             runtime.step_api_timeout,
             runtime.client.create_message(request.clone()),
@@ -12191,6 +12221,11 @@ async fn request_subagent_model_response_with_retries(
                 // A wall-clock timeout is usually a live-but-slow provider
                 // call, not a dead one: retry with backoff like the transient
                 // path before giving up the step (FINISH-0.9.4 entry #40).
+                runtime
+                    .manager
+                    .write()
+                    .await
+                    .mark_worker_unreported_usage(agent_id);
                 if timeout_failures >= SUBAGENT_API_TIMEOUT_MAX_RETRIES {
                     let attempts = timeout_failures.saturating_add(1);
                     return Err(SubAgentApiRequestFailure::Interrupted {
@@ -12579,6 +12614,30 @@ async fn run_subagent(
     let mut tokens_used: u64 = 0;
     let mut terminal_failure_reason: Option<String> = None;
     let mut budget_failure_reason: Option<String> = None;
+    let mut handback_note: Option<String> = None;
+    let mut usage_complete = true;
+    let initial_allowance = narrow_optional_limit(
+        runtime
+            .manager
+            .read()
+            .await
+            .remaining_worker_tokens(&agent_id),
+        token_budget,
+    );
+    let handback_allowance = initial_allowance
+        .map(budget_handback::token_reserve)
+        .unwrap_or(budget_handback::MAX_HAND_BACK_TOKENS);
+    let work_max_steps = if handback_allowance > 0 && max_steps >= 2 {
+        max_steps - 1
+    } else {
+        max_steps
+    };
+    let (work_deadline, hard_deadline) = budget_handback::wall_deadlines(runtime);
+    let work_deadline = if handback_allowance > 0 {
+        work_deadline
+    } else {
+        hard_deadline
+    };
     // Distinguish a real "the model chose to stop" exit from an explicitly
     // configured step-cap exit. The normal loop is unbounded (max_steps == 0).
     let mut stopped_naturally = false;
@@ -12636,7 +12695,7 @@ async fn run_subagent(
     .await;
 
     loop {
-        match subagent_loop_boundary(max_steps, steps, runtime.cancel_token.is_cancelled()) {
+        match subagent_loop_boundary(work_max_steps, steps, runtime.cancel_token.is_cancelled()) {
             // Cancellation must win even after the final allowed tool step.
             // Otherwise a turn-end park at that seam is mislabeled as step
             // exhaustion and its continuable checkpoint becomes terminal.
@@ -12660,7 +12719,7 @@ async fn run_subagent(
             }
             SubAgentLoopBoundary::StepLimit => {
                 budget_failure_reason = Some(format!(
-                    "child step budget exhausted (limit: {max_steps}; used: {steps})"
+                    "child step budget exhausted for task execution (limit: {max_steps}; used: {steps}; any remaining turn is reserved for hand-back)"
                 ));
                 break;
             }
@@ -12669,8 +12728,16 @@ async fn run_subagent(
         let remaining_tokens = {
             let manager = runtime.manager.read().await;
             narrow_optional_limit(
-                manager.remaining_worker_tokens(&agent_id),
-                token_budget.map(|limit| limit.saturating_sub(tokens_used)),
+                manager.available_worker_tokens(&agent_id, true),
+                token_budget.map(|limit| {
+                    limit
+                        .saturating_sub(tokens_used)
+                        .saturating_sub(if handback_allowance > 0 {
+                            budget_handback::token_reserve(limit)
+                        } else {
+                            0
+                        })
+                }),
             )
         };
         if remaining_tokens == Some(0) {
@@ -12682,10 +12749,14 @@ async fn run_subagent(
                     .token_budget_exhausted_detail(&agent_id)
                     .unwrap_or_else(|| {
                         format!(
-                            "token budget exhausted ({tokens_used} measured input + output tokens)"
+                            "token budget exhausted for task execution ({tokens_used} measured input + output tokens; remaining allowance is reserved for hand-back)"
                         )
                     }),
             );
+            break;
+        }
+        if work_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            budget_failure_reason = Some("child wall-time budget exhausted for task execution; remaining time is reserved for hand-back within the original deadline".to_string());
             break;
         }
 
@@ -12762,6 +12833,28 @@ async fn run_subagent(
             image_input,
             &request_route.model,
         );
+        let work_output_allowance = if handback_allowance > 0 {
+            let input_estimate = crate::compaction::estimate_input_tokens_conservative(
+                &request_messages,
+                Some(&request_system),
+            )
+            .saturating_add(
+                tools
+                    .iter()
+                    .map(|tool| serde_json::to_vec(tool).map_or(0, |bytes| bytes.len().div_ceil(3)))
+                    .sum::<usize>(),
+            ) as u64;
+            remaining_tokens.map(|remaining| remaining.saturating_sub(input_estimate))
+        } else {
+            remaining_tokens
+        };
+        if work_output_allowance == Some(0) {
+            // This step has not made a request; preserve its model-turn slot
+            // for the bounded report instead of charging an unmade turn.
+            steps = steps.saturating_sub(1);
+            budget_failure_reason = Some("token budget exhausted for task execution: the estimated next request would consume the reporting allowance".to_string());
+            break;
+        }
         let request = MessageRequest {
             model: runtime.model.clone(),
             messages: request_messages,
@@ -12769,7 +12862,7 @@ async fn run_subagent(
             // Unknown provider tokenization and parallel in-flight responses
             // can overshoot; settle their real usage and stop before more work.
             max_tokens: u32::try_from(
-                remaining_tokens.unwrap_or(u64::MAX).min(u64::from(
+                work_output_allowance.unwrap_or(u64::MAX).min(u64::from(
                     runtime
                         .client
                         .effective_max_output_tokens(&request_route.model),
@@ -12815,9 +12908,13 @@ async fn run_subagent(
         // Race the API call against the cancellation token so a parent
         // cancel during a long thinking turn doesn't have to wait for the
         // step timeout.
+        let request_attempted = std::sync::atomic::AtomicBool::new(false);
         let (response, usage_route) = tokio::select! {
             biased;
             () = runtime.cancel_token.cancelled() => {
+                if request_attempted.load(std::sync::atomic::Ordering::Relaxed) {
+                    runtime.manager.write().await.mark_worker_unreported_usage(&agent_id);
+                }
                 return Ok(cancelled_subagent_result(
                     runtime,
                     &agent_id,
@@ -12835,12 +12932,29 @@ async fn run_subagent(
                 )
                 .await);
             }
+            () = async {
+                match work_deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                if request_attempted.load(std::sync::atomic::Ordering::Relaxed) {
+                    budget_failure_reason = Some("child wall-time budget exhausted during a model request; reporting remains bounded by the original deadline, and any unreported in-flight usage is unknown".to_string());
+                    usage_complete = false;
+                    runtime.manager.write().await.mark_worker_unreported_usage(&agent_id);
+                } else {
+                    budget_failure_reason = Some("child wall-time budget exhausted before model request dispatch; remaining time is reserved for hand-back".to_string());
+                    steps = steps.saturating_sub(1);
+                }
+                break;
+            }
             api = request_subagent_model_response_with_retries(
                 runtime,
                 &agent_id,
                 steps,
                 max_steps,
                 request,
+                &request_attempted,
             ) => {
                 match api {
                     Ok(response) => response,
@@ -12979,6 +13093,7 @@ async fn run_subagent(
         .await;
 
         tokens_used = tokens_used.saturating_add(usage_total_tokens(&response.usage));
+        usage_complete &= usage_has_reported_data(&response.usage);
         let budget_exhausted_detail = runtime.manager.read().await
             .token_budget_exhausted_detail(&agent_id)
             .or_else(|| token_budget.filter(|&limit| tokens_used >= limit)
@@ -13131,6 +13246,20 @@ async fn run_subagent(
         );
         let mut tool_results: Vec<ContentBlock> = Vec::new();
         for (tool_id, tool_name, tool_input) in tool_uses {
+            if work_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                budget_failure_reason = Some("child wall-time budget exhausted during task execution; remaining time is reserved for hand-back".to_string());
+                break;
+            }
+            if runtime
+                .manager
+                .read()
+                .await
+                .available_worker_tokens(&agent_id, true)
+                == Some(0)
+            {
+                budget_failure_reason = Some("token budget exhausted for task execution; remaining allowance is reserved for hand-back".to_string());
+                break;
+            }
             if let Some(detail) = runtime
                 .manager
                 .read()
@@ -13160,7 +13289,12 @@ async fn run_subagent(
                     step: steps,
                 });
             }
-            let output = match tokio::time::timeout(runtime.tool_timeout, async {
+            let tool_timeout = work_deadline.map_or(runtime.tool_timeout, |deadline| {
+                runtime
+                    .tool_timeout
+                    .min(deadline.saturating_duration_since(Instant::now()))
+            });
+            let output = match tokio::time::timeout(tool_timeout, async {
                 tool_registry
                     .execute_from_surface(
                         &agent_id,
@@ -13281,6 +13415,79 @@ async fn run_subagent(
         }
     }
 
+    if let Some(cause) = budget_failure_reason.as_deref() {
+        budget_handback::repair_stopped_tool_calls(&mut messages, cause);
+        // Unavailable or rejected reports must not replace the recorded work
+        // used by the deterministic fallback.
+        if final_result.is_none() {
+            final_result = Some(
+                "No assistant text was recorded; inspect the checkpoint for completed tool work."
+                    .to_string(),
+            );
+        }
+        match budget_handback::request_report(
+            runtime,
+            &agent_id,
+            &assignment,
+            &mut messages,
+            &mut steps,
+            max_steps,
+            token_budget,
+            tokens_used,
+            handback_allowance,
+            usage_complete,
+            hard_deadline,
+            cause,
+        )
+        .await
+        {
+            budget_handback::Outcome::Report {
+                text,
+                usage_reported,
+            } => {
+                final_result = Some(text);
+                let mut note = "One tools-disabled model hand-back turn produced this partial report using the reserved allowance. The assignment is not complete.".to_string();
+                if !usage_reported {
+                    note.push_str(" Reporting-call usage was not provided; the measured total is only a subtotal, not a zero-cost report.");
+                }
+                handback_note = Some(note);
+            }
+            budget_handback::Outcome::Fallback(note) => handback_note = Some(note),
+            budget_handback::Outcome::Cancelled => {
+                let checkpoint = build_subagent_checkpoint(
+                    &agent_id,
+                    "cancelled during budget hand-back",
+                    &messages,
+                    steps,
+                    false,
+                );
+                let mut result = cancelled_subagent_result(
+                    runtime,
+                    &agent_id,
+                    &agent_type,
+                    &assignment,
+                    &messages,
+                    steps,
+                    max_steps,
+                    Some(&checkpoint),
+                    turn_end_parking.as_ref(),
+                    &mut transcript_artifact,
+                    started_at,
+                    fork_context_enabled,
+                    " during budget hand-back",
+                )
+                .await;
+                result.usage = runtime
+                    .manager
+                    .read()
+                    .await
+                    .worker_records
+                    .get(&agent_id)
+                    .map(|record| record.usage.clone());
+                return Ok(result);
+            }
+        }
+    }
     release_resident_leases_for(&agent_id);
     let has_final_summary = final_result
         .as_deref()
@@ -13369,7 +13576,13 @@ async fn run_subagent(
         from_prior_session: false,
     };
     Ok(match budget_failure_reason {
-        Some(cause) => budget_partial_result(result, &cause),
+        Some(cause) => budget_partial_result_with_note(
+            result,
+            &cause,
+            handback_note.as_deref().unwrap_or(
+                "No model hand-back report was obtained; recorded partial output is preserved.",
+            ),
+        ),
         None => result,
     })
 }
@@ -17934,6 +18147,8 @@ const VERIFIER_AGENT_INTRO: &str = concat!(
 
 // === Tests ===
 
+#[cfg(test)]
+mod budget_handback_tests;
 #[cfg(test)]
 mod completion_usage_tests;
 #[cfg(test)]

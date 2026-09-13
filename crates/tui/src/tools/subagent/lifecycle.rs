@@ -271,6 +271,25 @@ pub(super) fn compact_roster(
         }
     }
     let total = agents.len();
+    // A stable header carries field names once. Null cells mean absent or
+    // unreported values; a reported zero remains a numeric zero.
+    let columns = [
+        "agent_id",
+        "parent_agent_id",
+        "resumed_from",
+        "resumed_as",
+        "spawn_depth",
+        "status",
+        "duration_ms",
+        "total_tokens",
+        "last_activity_ms",
+        "activity",
+        "needs_input",
+        "needs_continuation",
+        "verification",
+        "summary",
+        "lineage_error",
+    ];
     let mut rows = agents
         .into_iter()
         .skip(offset)
@@ -281,7 +300,7 @@ pub(super) fn compact_roster(
                 .pointer("/usage/total_tokens")
                 .cloned()
                 .unwrap_or(Value::Null);
-            row["usage"] = json!({"total_tokens": total_tokens});
+            row["total_tokens"] = total_tokens;
             if let Some(record) = manager.worker_records.get(&agent.id) {
                 let mut verification =
                     json!({"status": text_preview(&record.verification.status, 64)});
@@ -301,16 +320,12 @@ pub(super) fn compact_roster(
                 }
                 row["verification"] = verification;
             }
-            // The envelope identifies this compact roster. Route and limit
-            // detail remain available on the unchanged addressed projection.
-            let object = row.as_object_mut().expect("row object");
-            for key in ["compact", "terminal", "child_route", "effective_limits"] {
-                object.remove(key);
-            }
-            if object.get("needs_continuation").and_then(Value::as_bool) == Some(false) {
-                object.remove("needs_continuation");
-            }
-            row
+            Value::Array(
+                columns
+                    .iter()
+                    .map(|column| row.get(*column).cloned().unwrap_or(Value::Null))
+                    .collect(),
+            )
         })
         .collect::<Vec<_>>();
     loop {
@@ -320,10 +335,10 @@ pub(super) fn compact_roster(
             "action": if peek { "peek" } else { "status" }, "compact": true,
             "count": shown, "total_count": total, "status_counts": counts,
             "usage": {"total_tokens": total_tokens, "reported_workers": reported_workers, "workers": total},
-            "agents": rows, "offset": offset,
+            "columns": columns, "agents": rows, "offset": offset,
             "next_offset": (next < total).then_some(next),
             "omitted": total.saturating_sub(shown),
-            "detail_hint": "Use agent_id with detail=true for a bounded diagnostic page; offset/limit pages the roster.",
+            "detail_hint": "Rows follow columns. Inspect with agent_id and detail=true.",
         });
         if serde_json::to_vec(&payload)
             .map_err(|error| ToolError::execution_failed(error.to_string()))?

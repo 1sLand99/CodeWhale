@@ -59,14 +59,17 @@ reconnect.
   refuses execution when that protection is unavailable.
 - Delegation depth stays absolute through saved profiles, nested workers and
   continuations. Per-call token, step and time limits narrow inherited limits;
-  continuation retains ancestor usage and deadlines. Budget stops preserve a
-  bounded partial result and run the declared-output checks.
+  continuation retains ancestor usage and deadlines. Workers reserve room for
+  one tools-disabled partial report inside those limits, then run the declared-
+  output checks. Missing usage or unavailable reporting room produces an
+  explicit fallback; partial work is never marked complete.
 - Agent rosters and detail pages have bounded output, visible continuation and
   descendant relationships, and usable handles for full diagnostic evidence.
   Completion receipts include measured worker and descendant token usage,
   count each continuation once, and distinguish unreported usage from zero.
-- Localization builds resolve the active checkout at build-script execution,
-  preventing a shared Cargo target from embedding another worktree's catalog.
+- Localization and native helper builds resolve the active checkout when the
+  build script runs, so a shared Cargo target keeps working after a worktree
+  moves or is removed.
 - Selecting a saved agent profile that is malformed, unreadable or duplicated
   now fails before any child request, including when its name matches a
   built-in role; the parent's default route is never substituted silently.

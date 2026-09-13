@@ -2682,6 +2682,7 @@ async fn agent_runs_runtime_api_exposes_persisted_worker_receipts() -> Result<()
             note: "not reported".to_string(),
         },
         usage_source_fingerprints: Default::default(),
+        has_unreported_usage: false,
         delivery_evidence: Default::default(),
         verification: AgentRunVerificationSummary {
             status: "self_report_only".to_string(),
