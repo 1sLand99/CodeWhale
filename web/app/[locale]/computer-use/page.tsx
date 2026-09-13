@@ -4,7 +4,12 @@ import { buildPageMetadata } from "@/lib/page-meta";
 import { COMPUTER_USE_REPO, getComputerUseRelease } from "@/lib/computer-use-release";
 import { getEnv } from "@/lib/kv";
 
-export const revalidate = 300;
+// Rendered per request rather than through ISR: the download state must be
+// right the moment a release is published, the page must never serve a
+// build-time snapshot, and OpenNext's in-isolate revalidation queue was seen
+// leaving stale copies in place for many minutes. The GitHub reads inside
+// getComputerUseRelease stay cached for five minutes via the fetch data cache.
+export const dynamic = "force-dynamic";
 
 export async function generateMetadata({ params }: { params: Promise<{ locale: string }> }) {
   const { locale } = await params;
