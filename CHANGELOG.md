@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- MCP OAuth re-login now forces the provider's consent screen: logout only
+  clears the local token, so without a prompt the provider silently
+  re-granted the same account/workspace and a re-login could never change
+  it. `/mcp logout` and `codewhale mcp logout` also say plainly that they
+  clear local credentials only (#6040).
 - Session retention no longer deletes transcripts once the store reaches the
   cap: the oldest active session is archived — still openable from the
   picker's archived view — instead of being unlinked, and archived records

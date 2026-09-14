@@ -94,6 +94,12 @@ codewhale mcp remove <name>
 codewhale mcp validate
 ```
 
+`codewhale mcp logout <name>` (and `/mcp logout`) clears locally stored
+OAuth credentials only — the provider may keep its standing grant. The next
+login forces the consent screen, so the authorized account/workspace can
+change; to sever the grant remotely, revoke the app from the provider's
+account settings.
+
 ## In-TUI Manager
 
 Inside the interactive TUI, `/mcp` opens a compact manager for the resolved

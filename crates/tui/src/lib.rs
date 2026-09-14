@@ -9991,7 +9991,9 @@ async fn run_mcp_command(
                 .get(&name)
                 .ok_or_else(|| anyhow!("MCP server '{name}' not found"))?;
             if crate::mcp::oauth::delete_oauth_tokens_for_server(&name, server)? {
-                println!("Deleted stored OAuth credentials for MCP server '{name}'.");
+                println!(
+                    "Deleted locally stored OAuth credentials for MCP server '{name}'. That clears this machine only; the provider may keep its grant, and the next login forces the consent screen."
+                );
             } else {
                 println!("No stored OAuth credentials found for MCP server '{name}'.");
             }

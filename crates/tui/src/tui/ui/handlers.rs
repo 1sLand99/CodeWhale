@@ -743,7 +743,7 @@ pub(crate) async fn handle_mcp_ui_action(
                 changed = deleted;
                 message = Some(if deleted {
                     format!(
-                        "Deleted stored OAuth credentials for MCP server '{name}'. Run /mcp reload to reconnect it."
+                        "Deleted locally stored OAuth credentials for MCP server '{name}'. That clears this machine only — the provider may keep its grant; the next /mcp login re-prompts for consent. Run /mcp reload to reconnect."
                     )
                 } else {
                     format!("No stored OAuth credentials found for MCP server '{name}'.")
