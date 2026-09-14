@@ -799,6 +799,7 @@ pub(crate) async fn handle_mcp_ui_action(
     // freezing. `reject_inline_inference_while_runtime_chat_owns_run`
     // (apply.rs) is the same fail-closed rule for inline inference.
     let engine_busy = app.is_loading
+        || app.dispatch_in_flight
         || matches!(app.runtime_turn_status.as_deref(), Some("in_progress"))
         || app.is_compacting
         || app.manual_compaction_queued;
