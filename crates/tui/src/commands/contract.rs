@@ -1835,7 +1835,6 @@ fn key_to_utility_message_id(key: &str) -> Option<MessageId> {
         "mcp_recommendation_github" => MessageId::McpRecommendationGithub,
         "mcp_recommendation_chrome" => MessageId::McpRecommendationChrome,
         "mcp_recommendation_playwright" => MessageId::McpRecommendationPlaywright,
-        "mcp_recommendation_cua" => MessageId::McpRecommendationCua,
         "mcp_recommendation_container_use" => MessageId::McpRecommendationContainerUse,
         _ => return None,
     })

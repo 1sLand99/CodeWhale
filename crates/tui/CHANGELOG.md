@@ -21,6 +21,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tui.selection_copy_markdown = false` keeps the rendered-text payload
   (#6156).
 
+### Changed
+
+- Computer Use is the only computer-use product in Extensions and
+  `/mcp recommendations`. Cua is no longer suggested as a parallel
+  desktop-control MCP; enable the first-party `computer-use` plugin
+  instead. The bundled plugin is 0.4.0: Return/Enter from `type`,
+  filtered and paginated `get_app_state`, `focus`/`get_value`, and
+  `strategy:"app"` window-scoped clicks. Shared-desktop pointer
+  gestures stay gated.
+- The bundled first-party catalog pins marketplace revision `ca6be22`, so
+  installing Computer Use from the Extensions listing fetches the same 0.4.0
+  source and the published notarized 0.4.0 Mac app.
+
 ### Fixed
 
 - A failed workflow run no longer settles silently: its terminal failure

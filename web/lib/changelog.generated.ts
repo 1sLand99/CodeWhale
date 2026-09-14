@@ -36,6 +36,14 @@ export const CHANGELOG: ChangelogRelease[] = [
         "itemCount": 2
       },
       {
+        "heading": "Changed",
+        "items": [
+          "Computer Use is the only computer-use product in Extensions and /mcp recommendations. Cua is no longer suggested as a parallel desktop-control MCP; enable the first-party computer-use plugin instead. The bundled plugin is 0.4.0: Return/Enter from type, filtered and paginated get_app_state, focus/get_value, and strategy:\"app\" window-scoped clicks. Shared-desktop pointer gestures stay gated.",
+          "The bundled first-party catalog pins marketplace revision ca6be22, so installing Computer Use from the Extensions listing fetches the same 0.4.0 source and the published notarized 0.4.0 Mac app."
+        ],
+        "itemCount": 2
+      },
+      {
         "heading": "Fixed",
         "items": [
           "A failed workflow run no longer settles silently: its terminal failure raises a sticky error toast naming the cause (dispatch, schema, or script errors), alongside the existing panel state (#5528).",

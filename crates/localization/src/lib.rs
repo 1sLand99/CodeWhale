@@ -535,7 +535,6 @@ pub enum MessageId {
     McpRecommendationGithub,
     McpRecommendationChrome,
     McpRecommendationPlaywright,
-    McpRecommendationCua,
     McpRecommendationContainerUse,
     McpCapabilitiesAdvertised,
     McpCapabilitiesLegacyFallback,
@@ -591,7 +590,6 @@ pub enum MessageId {
     ExtensionsPluginDetail,
     ExtensionsProductBrowserUseDescription,
     ExtensionsProductChromeDescription,
-    ExtensionsProductCuaDescription,
     ExtensionsProductDetail,
     ExtensionsProductPlaywrightDescription,
     ExtensionsProductCodewhaleComputerUseDescription,
@@ -2883,7 +2881,6 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::McpRecommendationGithub,
     MessageId::McpRecommendationChrome,
     MessageId::McpRecommendationPlaywright,
-    MessageId::McpRecommendationCua,
     MessageId::McpRecommendationContainerUse,
     MessageId::McpCapabilitiesAdvertised,
     MessageId::McpCapabilitiesLegacyFallback,
@@ -2938,7 +2935,6 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::ExtensionsPluginDetail,
     MessageId::ExtensionsProductBrowserUseDescription,
     MessageId::ExtensionsProductChromeDescription,
-    MessageId::ExtensionsProductCuaDescription,
     MessageId::ExtensionsProductDetail,
     MessageId::ExtensionsProductPlaywrightDescription,
     MessageId::ExtensionsProductCodewhaleComputerUseDescription,
@@ -6094,7 +6090,6 @@ mod tests {
             MessageId::McpRecommendationGithub,
             MessageId::McpRecommendationChrome,
             MessageId::McpRecommendationPlaywright,
-            MessageId::McpRecommendationCua,
             MessageId::McpRecommendationContainerUse,
             MessageId::PluginKimiUsage,
             MessageId::PluginKimiManagedRootHeading,
@@ -6171,7 +6166,7 @@ mod tests {
             .filter(|key| key.starts_with("Extensions"))
             .cloned()
             .collect::<Vec<_>>();
-        assert_eq!(keys.len(), 94, "the complete extensions locale set changed");
+        assert_eq!(keys.len(), 93, "the complete extensions locale set changed");
 
         let prose_keys = [
             "ExtensionsMarketplaceUnavailable",
@@ -6181,7 +6176,6 @@ mod tests {
             "ExtensionsNoMatches",
             "ExtensionsProductBrowserUseDescription",
             "ExtensionsProductChromeDescription",
-            "ExtensionsProductCuaDescription",
             "ExtensionsProductPlaywrightDescription",
             "ExtensionsProductSandboxDescription",
         ];
