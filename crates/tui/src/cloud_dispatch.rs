@@ -1380,7 +1380,7 @@ impl LiveDaytonaLauncher {
     }
 
     fn blocking_client_with_timeout(total_secs: u64) -> Result<reqwest::blocking::Client> {
-        reqwest::blocking::Client::builder()
+        crate::tls::reqwest_blocking_client_builder()
             .connect_timeout(std::time::Duration::from_secs(8))
             .timeout(std::time::Duration::from_secs(total_secs))
             .redirect(reqwest::redirect::Policy::none())

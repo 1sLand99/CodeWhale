@@ -818,9 +818,7 @@ fn merge_incremental_entries(
 /// memory, and atomically replace the cache file. Retried on failure;
 /// the old snapshot survives any failed sync.
 async fn sync_once(path: &Path) -> Result<(), ToolError> {
-    // rustls default-provider install pattern (matches `client.rs`).
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let client = reqwest::Client::builder()
+    let client = crate::tls::reqwest_client_builder()
         .user_agent(USER_AGENT)
         .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
         .build()
