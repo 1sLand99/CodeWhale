@@ -1607,6 +1607,7 @@
   "FleetDestProjectDisabledSave": "Profil proyek dinonaktifkan untuk sesi ini (--no-project-config); tidak ada yang disimpan. Pilih Pribadi atau mulai ulang tanpa flag tersebut.",
   "WorkflowStatusWaiting": "menunggu",
   "WorkflowStatusDegraded": "terdegradasi",
+  "WorkflowRunFailedToast": "Workflow gagal dijalankan",
   "WorkflowDebrief": "debrief: {done}/{total} tuntas · {failed} gagal · {cancelled} dibatalkan · {elapsed}",
   "WorkflowDispatchFailureLine": "dispatch gagal · {slot}: {message}",
   "WorkflowDispatchFailuresOmitted": "kegagalan dispatch: {count} sebelumnya tidak ditampilkan",

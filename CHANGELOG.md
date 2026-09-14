@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A failed workflow run no longer settles silently: its terminal failure
+  raises a sticky error toast naming the cause (dispatch, schema, or script
+  errors), alongside the existing panel state (#5528).
 - MCP OAuth re-login now forces the provider's consent screen: logout only
   clears the local token, so without a prompt the provider silently
   re-granted the same account/workspace and a re-login could never change

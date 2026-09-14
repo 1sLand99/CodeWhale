@@ -1607,6 +1607,7 @@
   "FleetDestProjectDisabledSave": "इस सत्र में प्रोजेक्ट प्रोफ़ाइलें अक्षम हैं (--no-project-config); कुछ भी सहेजा नहीं गया। व्यक्तिगत चुनें या फ़्लैग के बिना पुनः आरंभ करें।",
   "WorkflowStatusWaiting": "प्रतीक्षारत",
   "WorkflowStatusDegraded": "आंशिक",
+  "WorkflowRunFailedToast": "वर्कफ़्लो रन विफल रहा",
   "WorkflowDebrief": "डिब्रीफ़: {done}/{total} निपटे · {failed} विफल · {cancelled} रद्द · {elapsed}",
   "WorkflowDispatchFailureLine": "डिस्पैच विफल · {slot}: {message}",
   "WorkflowDispatchFailuresOmitted": "डिस्पैच विफलताएँ: पिछली {count} नहीं दिखाई गईं",

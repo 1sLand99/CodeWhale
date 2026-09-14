@@ -1630,6 +1630,7 @@
   "FleetDestProjectDisabledSave": "이 세션에서는 프로젝트 프로필이 비활성화되어 있습니다 (--no-project-config). 아무것도 저장되지 않았습니다. 개인을 선택하거나 플래그 없이 다시 시작하세요.",
   "WorkflowStatusWaiting": "대기",
   "WorkflowStatusDegraded": "일부 실패",
+  "WorkflowRunFailedToast": "워크플로 실행 실패",
   "WorkflowDebrief": "결과 보고: {done}/{total} 종결 · {failed} 실패 · {cancelled} 취소 · {elapsed}",
   "WorkflowDispatchFailureLine": "디스패치 실패 · {slot}: {message}",
   "WorkflowDispatchFailuresOmitted": "디스패치 실패: 이전 {count}건은 표시하지 않음",

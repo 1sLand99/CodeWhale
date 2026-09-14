@@ -1607,6 +1607,7 @@
   "FleetDestProjectDisabledSave": "Профили проекта отключены в этом сеансе (--no-project-config); ничего не сохранено. Выберите «Личный» или перезапустите без этого флага.",
   "WorkflowStatusWaiting": "ожидание",
   "WorkflowStatusDegraded": "частично",
+  "WorkflowRunFailedToast": "Запуск workflow завершился ошибкой",
   "WorkflowDebrief": "итоги: {done}/{total} завершено · {failed} ошибок · {cancelled} отменено · {elapsed}",
   "WorkflowDispatchFailureLine": "сбой запуска · {slot}: {message}",
   "WorkflowDispatchFailuresOmitted": "сбои запуска: не показано предыдущих — {count}",

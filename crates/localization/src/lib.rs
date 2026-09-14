@@ -2013,6 +2013,7 @@ pub enum MessageId {
     // Workflow panel.
     WorkflowStatusWaiting,
     WorkflowStatusDegraded,
+    WorkflowRunFailedToast,
     WorkflowDebrief,
     WorkflowDispatchFailureLine,
     WorkflowDispatchFailuresOmitted,
@@ -4283,6 +4284,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::FleetDestProjectDisabledSave,
     MessageId::WorkflowStatusWaiting,
     MessageId::WorkflowStatusDegraded,
+    MessageId::WorkflowRunFailedToast,
     MessageId::WorkflowDebrief,
     MessageId::WorkflowDispatchFailureLine,
     MessageId::WorkflowDispatchFailuresOmitted,

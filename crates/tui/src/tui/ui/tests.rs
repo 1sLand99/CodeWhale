@@ -2225,6 +2225,87 @@ fn workflow_ui_events_apply_only_to_the_active_session_owner() {
 }
 
 #[test]
+fn failed_workflow_run_raises_a_sticky_error() {
+    let mut app = create_test_app();
+    app.current_session_id = Some("session-a".to_string());
+    let started = serde_json::json!({
+        "type": "run_started",
+        "at_ms": 1,
+        "workflow_goal": "Failing workflow"
+    });
+    assert!(apply_owned_workflow_ui_event(
+        &mut app,
+        "session-a",
+        "workflow-fail",
+        &started,
+    ));
+    assert!(
+        app.sticky_status.is_none(),
+        "starting a run must not raise a failure toast"
+    );
+
+    let completed = serde_json::json!({
+        "type": "run_completed",
+        "at_ms": 2,
+        "status": "failed",
+        "error": "task(): invalid options: unknown field `count`"
+    });
+    assert!(apply_owned_workflow_ui_event(
+        &mut app,
+        "session-a",
+        "workflow-fail",
+        &completed,
+    ));
+    let sticky = app
+        .sticky_status
+        .as_ref()
+        .expect("a failed workflow run must be loud (#5528)");
+    assert_eq!(sticky.level, StatusToastLevel::Error);
+    assert_eq!(
+        sticky.ttl_ms,
+        Some(crate::tui::app::App::STICKY_ERROR_TTL_MS)
+    );
+    assert!(
+        sticky.text.contains("Workflow run failed")
+            && sticky.text.contains("unknown field `count`"),
+        "the sticky strip must name the failure and its cause: {:?}",
+        sticky.text
+    );
+}
+
+#[test]
+fn successful_workflow_run_raises_no_failure_toast() {
+    let mut app = create_test_app();
+    app.current_session_id = Some("session-a".to_string());
+    let started = serde_json::json!({
+        "type": "run_started",
+        "at_ms": 1,
+        "workflow_goal": "Healthy workflow"
+    });
+    assert!(apply_owned_workflow_ui_event(
+        &mut app,
+        "session-a",
+        "workflow-ok",
+        &started,
+    ));
+    let succeeded = serde_json::json!({
+        "type": "run_completed",
+        "at_ms": 2,
+        "status": "succeeded"
+    });
+    assert!(apply_owned_workflow_ui_event(
+        &mut app,
+        "session-a",
+        "workflow-ok",
+        &succeeded,
+    ));
+    assert!(
+        app.sticky_status.is_none(),
+        "a successful run must not raise a failure toast"
+    );
+}
+
+#[test]
 fn workflow_panel_plain_letters_return_to_composer() {
     let mut app = create_test_app();
     app.workflow_panel = Some(crate::tui::widgets::workflow_panel::WorkflowPanel::new(

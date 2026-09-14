@@ -1607,6 +1607,7 @@
   "FleetDestProjectDisabledSave": "Els perfils de projecte estan desactivats en aquesta sessió (--no-project-config); no s'ha desat res. Tria Personal o reinicia sense l'opció.",
   "WorkflowStatusWaiting": "esperant",
   "WorkflowStatusDegraded": "degradat",
+  "WorkflowRunFailedToast": "L'execució del flux de treball ha fallat",
   "WorkflowDebrief": "resum: {done}/{total} resolts · {failed} fallits · {cancelled} cancel·lats · {elapsed}",
   "WorkflowDispatchFailureLine": "ha fallat l'enviament · {slot}: {message}",
   "WorkflowDispatchFailuresOmitted": "errors d'enviament: {count} d'anteriors no es mostren",

@@ -1778,6 +1778,7 @@
   "WorkflowReceiptVia": "路由 {value}",
   "WorkflowStatusWaiting": "等待中",
   "WorkflowStatusDegraded": "部分失敗",
+  "WorkflowRunFailedToast": "工作流程執行失敗",
   "WorkflowTranscriptDetails": "記錄：完整執行 JSON 可在工具詳情中查看（{details}）",
   "XaiAuthChoiceApiKeyOption": "xAI API 金鑰 — 輸入或粘貼，然後儲存到 xAI 提供商槽位",
   "XaiAuthChoiceDeviceOAuthOption": "原生設備 OAuth — 通過瀏覽器/設備程式碼登入，並使用 Codewhale 自有儲存",

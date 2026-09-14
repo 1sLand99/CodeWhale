@@ -1607,6 +1607,7 @@
   "FleetDestProjectDisabledSave": "Профілі проєкту вимкнено в цьому сеансі (--no-project-config); нічого не збережено. Виберіть «Особистий» або перезапустіть без цього прапорця.",
   "WorkflowStatusWaiting": "очікування",
   "WorkflowStatusDegraded": "частково",
+  "WorkflowRunFailedToast": "Запуск workflow завершився помилкою",
   "WorkflowDebrief": "підсумок: {done}/{total} завершено · {failed} невдало · {cancelled} скасовано · {elapsed}",
   "WorkflowDispatchFailureLine": "збій запуску · {slot}: {message}",
   "WorkflowDispatchFailuresOmitted": "збої запуску: не показано попередніх — {count}",

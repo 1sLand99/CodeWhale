@@ -1630,6 +1630,7 @@
   "FleetDestProjectDisabledSave": "Project profiles are off this session (--no-project-config); nothing was saved. Choose Personal or restart without the flag.",
   "WorkflowStatusWaiting": "waiting",
   "WorkflowStatusDegraded": "degraded",
+  "WorkflowRunFailedToast": "Workflow run failed",
   "WorkflowDebrief": "debrief: {done}/{total} settled · {failed} failed · {cancelled} cancelled · {elapsed}",
   "WorkflowDispatchFailureLine": "dispatch failed · {slot}: {message}",
   "WorkflowDispatchFailuresOmitted": "dispatch failures: {count} earlier not shown",

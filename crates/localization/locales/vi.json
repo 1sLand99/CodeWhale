@@ -1630,6 +1630,7 @@
   "FleetDestProjectDisabledSave": "Hồ sơ dự án đã bị tắt trong phiên này (--no-project-config); chưa lưu gì. Hãy chọn Cá nhân hoặc khởi động lại không có cờ đó.",
   "WorkflowStatusWaiting": "chờ",
   "WorkflowStatusDegraded": "một phần",
+  "WorkflowRunFailedToast": "Chạy Workflow thất bại",
   "WorkflowDebrief": "tổng kết: {done}/{total} đã chốt · {failed} thất bại · {cancelled} đã hủy · {elapsed}",
   "WorkflowDispatchFailureLine": "điều phối thất bại · {slot}: {message}",
   "WorkflowDispatchFailuresOmitted": "lỗi điều phối: {count} lỗi trước đó không hiển thị",

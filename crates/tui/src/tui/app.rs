@@ -5318,7 +5318,9 @@ impl App {
         event_run_id: &str,
         event: crate::tui::widgets::workflow_panel::WorkflowPanelEvent,
     ) -> bool {
-        use crate::tui::widgets::workflow_panel::{WorkflowPanel, WorkflowPanelEvent};
+        use crate::tui::widgets::workflow_panel::{
+            WorkflowPanel, WorkflowPanelEvent, WorkflowPanelLifecycle,
+        };
         if event_run_id.trim().is_empty() {
             return false;
         }
@@ -5337,6 +5339,21 @@ impl App {
         }
 
         let budget_only = matches!(&event, WorkflowPanelEvent::BudgetUpdated { .. });
+        // #5528: a failed run must be loud, not just a panel row. Capture the
+        // failure before the event is consumed below; the sticky notice fires
+        // once per run because the live stream and the tool-complete hydration
+        // can both deliver the same terminal event.
+        let run_failure = match &event {
+            WorkflowPanelEvent::RunCompleted {
+                status: WorkflowPanelLifecycle::Failed,
+                error,
+                ..
+            } => Some(error.clone()),
+            _ => None,
+        };
+        let already_failed = self.workflow_panel.as_ref().is_some_and(|panel| {
+            panel.run_id == event_run_id && panel.lifecycle == WorkflowPanelLifecycle::Failed
+        });
         match (&mut self.workflow_panel, &event) {
             (
                 None,
@@ -5373,6 +5390,27 @@ impl App {
         }
         if !budget_only {
             self.needs_redraw = true;
+        }
+        if let Some(error) = run_failure
+            && !already_failed
+        {
+            let detail = error
+                .as_deref()
+                .map(str::trim)
+                .filter(|detail| !detail.is_empty());
+            let message = match detail {
+                Some(detail) => format!(
+                    "{} · {}",
+                    self.tr(MessageId::WorkflowRunFailedToast),
+                    bound_agent_activity_text(detail)
+                ),
+                None => self.tr(MessageId::WorkflowRunFailedToast).into_owned(),
+            };
+            self.set_sticky_status(
+                message,
+                StatusToastLevel::Error,
+                Some(Self::STICKY_ERROR_TTL_MS),
+            );
         }
         true
     }

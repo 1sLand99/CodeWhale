@@ -1630,6 +1630,7 @@
   "FleetDestProjectDisabledSave": "このセッションではプロジェクト用プロファイルが無効です (--no-project-config)。何も保存されませんでした。個人用を選ぶか、フラグなしで再起動してください。",
   "WorkflowStatusWaiting": "待機中",
   "WorkflowStatusDegraded": "一部失敗",
+  "WorkflowRunFailedToast": "ワークフローの実行に失敗しました",
   "WorkflowDebrief": "総括: {done}/{total} 確定 · {failed} 失敗 · {cancelled} キャンセル · {elapsed}",
   "WorkflowDispatchFailureLine": "ディスパッチ失敗 · {slot}: {message}",
   "WorkflowDispatchFailuresOmitted": "ディスパッチ失敗: 以前の {count} 件は非表示",

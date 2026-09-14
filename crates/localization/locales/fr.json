@@ -1607,6 +1607,7 @@
   "FleetDestProjectDisabledSave": "Les profils de projet sont désactivés pour cette session (--no-project-config) ; rien n'a été enregistré. Choisissez Personnel ou relancez sans l'option.",
   "WorkflowStatusWaiting": "en attente",
   "WorkflowStatusDegraded": "dégradé",
+  "WorkflowRunFailedToast": "L'exécution du Workflow a échoué",
   "WorkflowDebrief": "débrief : {done}/{total} réglés · {failed} échoués · {cancelled} annulés · {elapsed}",
   "WorkflowDispatchFailureLine": "échec de lancement · {slot} : {message}",
   "WorkflowDispatchFailuresOmitted": "échecs de lancement : {count} précédents non affichés",

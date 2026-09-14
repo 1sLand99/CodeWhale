@@ -1607,6 +1607,7 @@
   "FleetDestProjectDisabledSave": "Projektprofile sind in dieser Sitzung deaktiviert (--no-project-config); es wurde nichts gespeichert. Wähle Persönlich oder starte ohne das Flag neu.",
   "WorkflowStatusWaiting": "wartet",
   "WorkflowStatusDegraded": "teilweise",
+  "WorkflowRunFailedToast": "Workflow-Lauf fehlgeschlagen",
   "WorkflowDebrief": "Debrief: {done}/{total} erledigt · {failed} fehlgeschlagen · {cancelled} abgebrochen · {elapsed}",
   "WorkflowDispatchFailureLine": "Start fehlgeschlagen · {slot}: {message}",
   "WorkflowDispatchFailuresOmitted": "fehlgeschlagene Starts: {count} frühere nicht angezeigt",
