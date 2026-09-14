@@ -2343,13 +2343,24 @@ reasoning contract, and all four membership ids omit generic sampling fields.
   (default `["turn-complete", "approval-needed"]`), and `quiet` (default `false`).
   `min_interval_ms` (default `2000`) applies to each category's audio in both modes.
 - `tui.alternate_screen` (string, optional, default `auto`): which screen an interactive session starts on. `auto` and `always` start on the TUI-owned alternate screen; `never` starts in inline mode — a ratatui viewport the full height of the terminal with no alternate screen, so the shell's scrollback survives the session and stays scrollable after exit. `/fullscreen` and `/inline` switch it in-process; a switch that the terminal refuses rolls back and says why. Inline mode paints the whole transcript inside its viewport — nothing is written into the host scrollback while the session runs.
-- `tui.mouse_capture` (bool, optional, default `true` on non-Windows terminals and on Windows Terminal/ConEmu/Cmder when the alternate screen is active; `false` on legacy Windows console and inside JetBrains JediTerm — PyCharm/IDEA/CLion/etc. — where mouse-event escapes leak into the input stream as garbled text, see #878 / #898): enable internal mouse scrolling, transcript selection, right-click context actions, and transcript scrollbar dragging. TUI-owned drag selection copies only transcript text, removes visual wrap-column line breaks from paragraphs, and keeps selection scoped to the transcript pane. Set this to `false` or run with `--no-mouse-capture` for raw terminal selection; set it to `true` or run with `--mouse-capture` to opt in anywhere it's defaulted off. On raw terminal selection, especially on legacy Windows console or when mouse capture is disabled, selection may cross the right workbar and include visual wraps because the terminal, not the TUI, owns the selection.
+- `tui.mouse_capture` (bool, optional, default `true` on non-Windows terminals and on Windows Terminal/ConEmu/Cmder when the alternate screen is active; `false` on legacy Windows console and inside JetBrains JediTerm — PyCharm/IDEA/CLion/etc. — where mouse-event escapes leak into the input stream as garbled text, see #878 / #898): enable internal mouse scrolling, transcript selection, right-click context actions, and transcript scrollbar dragging. TUI-owned drag selection copies the intersected cells, removes visual wrap-column line breaks from paragraphs, and keeps selection scoped to the transcript pane; the payload is Markdown source by default, see `tui.selection_copy_markdown` below. Set this to `false` or run with `--no-mouse-capture` for raw terminal selection; set it to `true` or run with `--mouse-capture` to opt in anywhere it's defaulted off. On raw terminal selection, especially on legacy Windows console or when mouse capture is disabled, selection may cross the right workbar and include visual wraps because the terminal, not the TUI, owns the selection.
   On Linux, finishing a transcript or composer selection quietly copies text to
   PRIMARY, leaving the regular clipboard unchanged. Middle-click inside the
   composer pastes PRIMARY at the pointer without submitting it. This uses native
   X11 or Wayland data control; compositors must support PRIMARY selection. Over
   SSH without a forwarded graphical display, use your terminal's selection/paste
   gestures or `--no-mouse-capture`. Explicit Copy still uses the regular clipboard.
+
+- `tui.selection_copy_markdown` (bool, optional, default `true`): copy TUI-owned
+  transcript selections (drag release, context-menu Copy, and `Cmd+C`/`Ctrl+C`
+  on an active selection) as Markdown source instead of rendered text. Every
+  intersected cell serializes through the same canonical projection `Ctrl-Y`
+  and `/copy` use — user and assistant cells keep their authored Markdown,
+  other cells keep their full transcript form — partial intersections round out
+  to whole cells, cells join with blank lines, and a toast names the copied
+  cell count. Set `false` to copy the rendered text as displayed. Composer
+  selections and the Linux PRIMARY auto-copy are unchanged; PRIMARY always
+  carries rendered text.
 
 - `tui.terminal_probe_timeout_ms` (int, optional): legacy setting, accepted for configuration compatibility but no longer used. Startup sets raw mode directly after checking terminal ownership; worker scheduling delays do not abort startup.
 - `tui.stream_chunk_timeout_secs` (int, optional, default `900`): per-SSE-chunk idle timeout for streamed model responses. Slow local or compatible servers can raise this with `/config stream_chunk_timeout_secs <seconds>`; `0` maps to the default and explicit values must be `1..=3600`. The legacy `DEEPSEEK_STREAM_IDLE_TIMEOUT_SECS` env var is still honored when this key is omitted.

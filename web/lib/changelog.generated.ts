@@ -28,6 +28,13 @@ export const CHANGELOG: ChangelogRelease[] = [
     "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.9.12...HEAD",
     "sections": [
       {
+        "heading": "Added",
+        "items": [
+          "Transcript drag selection copies Markdown source by default: every cell the selection touches serializes through the same canonical path Ctrl-Y and /copy use, partial intersections round out to whole cells joined with blank lines, and the toast names the copied cell count. tui.selection_copy_markdown = false keeps the rendered-text payload (#6156)."
+        ],
+        "itemCount": 1
+      },
+      {
         "heading": "Fixed",
         "items": [
           "MCP OAuth login no longer fails with \"Authorization server response missing required issuer\" against servers that implement RFC 9207, such as Cloudflare's mcp.cloudflare.com. The local callback listener now keeps the iss parameter from the redirect and hands it to the token exchange so the callback binds to the discovered issuer; servers that do not send iss keep working unchanged. (#6157)"

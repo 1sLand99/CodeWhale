@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Transcript drag selection copies Markdown source by default: every cell the
+  selection touches serializes through the same canonical path `Ctrl-Y` and
+  `/copy` use, partial intersections round out to whole cells joined with
+  blank lines, and the toast names the copied cell count.
+  `tui.selection_copy_markdown = false` keeps the rendered-text payload
+  (#6156).
+
 ### Fixed
 
 - MCP OAuth login no longer fails with "Authorization server response missing
