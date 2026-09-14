@@ -6484,8 +6484,11 @@ fn doctor_operate_fleet_report_json(config: &Config, workspace: &Path) -> serde_
         })
         .collect();
 
+    let model_pin_drift = doctor_model_pin_drift(config, workspace, &roster);
+
     json!({
         "ready": has_credentials_or_local && runtime_ready && roster_ready,
+        "model_pin_drift": model_pin_drift,
         "provider": {
             "id": config.provider_identity_for(provider),
             "auth": {
@@ -6523,6 +6526,105 @@ fn doctor_operate_fleet_report_json(config: &Config, workspace: &Path) -> serde_
             "max_admitted": max_admitted,
             "plan_limit_probed": false,
         },
+    })
+}
+
+/// Warning-only model-pin drift surfacing (#6035). A pin is flagged only
+/// when a FRESH cached live roster for that provider route exists and does
+/// not list the pinned wire id — stale, failed, or absent rosters cannot
+/// prove drift, and bundled catalog rows say nothing about what the account
+/// currently serves. The id may still answer (soft deprecation) or be served
+/// by other providers on their own routes, so this never rewrites the pin.
+fn doctor_model_pin_drift(
+    config: &Config,
+    workspace: &Path,
+    roster: &crate::fleet::roster::FleetRoster,
+) -> serde_json::Value {
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    // One row per affected route: (provider, model) -> pin owners.
+    let mut pins: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+
+    for entry in crate::fleet::store::list_fleets(workspace) {
+        if entry.parse_error.is_some() {
+            continue;
+        }
+        let Ok((fleet, scope)) = crate::fleet::store::load_fleet_at(&entry.path) else {
+            continue;
+        };
+        let owner = format!("fleet:{} ({})", fleet.name, scope.label());
+        if let Some(operator) = fleet.operator.as_ref() {
+            pins.entry((operator.provider.clone(), operator.model.clone()))
+                .or_default()
+                .push(format!("{owner} operator"));
+        }
+        for member in &fleet.members {
+            if let (Some(provider), Some(model)) = (member.provider.as_ref(), member.model.as_ref())
+            {
+                pins.entry((provider.clone(), model.clone()))
+                    .or_default()
+                    .push(format!("{owner} member:{}", member.id));
+            }
+        }
+    }
+    for member in roster.members() {
+        if let (Some(provider), Some(model)) = (
+            member.profile.provider.as_ref(),
+            member.profile.model.as_ref(),
+        ) {
+            pins.entry((provider.clone(), model.clone()))
+                .or_default()
+                .push(format!("agent:{}", member.id));
+        }
+    }
+
+    let mut unverifiable = 0usize;
+    let drifted = pins
+        .iter()
+        .filter_map(|((provider, model), owners)| {
+            let kind = crate::config::ApiProvider::parse(provider)
+                .unwrap_or(crate::config::ApiProvider::Custom);
+            let identity = match kind {
+                crate::config::ApiProvider::Custom => provider.clone(),
+                _ => kind.as_str().to_string(),
+            };
+            let base_url = config.base_url_for_route_identity(kind, &identity);
+            if crate::provider_catalog_live::status_for_route(kind, &identity, &base_url)
+                != codewhale_config::catalog::CatalogStatus::Fresh
+            {
+                unverifiable += 1;
+                return None;
+            }
+            let listed =
+                crate::provider_catalog_live::cached_entry_for_route(kind, &identity, &base_url)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|entry| {
+                        entry.offerings.iter().any(|offering| {
+                            offering.wire_model_id == *model
+                                || offering.canonical_model.as_deref() == Some(model.as_str())
+                        })
+                    });
+            (!listed).then(|| {
+                json!({
+                    "provider": provider,
+                    "model": model,
+                    "owners": owners,
+                    "message": format!(
+                        "pinned id `{model}` is absent from {provider}'s current live roster; \
+                         the id may still answer (soft deprecation) or be served by other \
+                         providers on their own routes — the pin is left unchanged"
+                    ),
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "checked": pins.len(),
+        "unverifiable": unverifiable,
+        "drifted": drifted,
     })
 }
 
@@ -14895,6 +14997,84 @@ mod terminal_mode_tests {
                 .iter()
                 .any(|layer| layer["origin"] == "project" && layer["wins"] == true),
             "project layer wins: {builder}"
+        );
+    }
+
+    #[test]
+    fn doctor_fleet_report_flags_pins_absent_from_fresh_live_roster() {
+        // #6035: a pin that vanished from the provider's current live roster
+        // is drift the report must name — warning only, never a rewrite.
+        let _env_lock = crate::test_support::lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let home = tmp.path().join("home");
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let _codewhale_home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home);
+        crate::provider_catalog_live::reset_cache_for_test();
+
+        let fleets = home.join("fleets");
+        std::fs::create_dir_all(&fleets).expect("fleets dir");
+        std::fs::write(
+            fleets.join("default.toml"),
+            "schema = \"fleet\"\nschema_revision = 2\nname = \"default\"\n\
+             [operator]\nprovider = \"deepseek\"\nmodel = \"deepseek-flash\"\n\
+             [[members]]\nid = \"builder\"\nprovider = \"deepseek\"\nmodel = \"deepseek-v4-flash\"\n",
+        )
+        .expect("fleet file");
+
+        let config = Config {
+            provider: Some("deepseek".to_string()),
+            ..Default::default()
+        };
+        let kind = crate::config::ApiProvider::Deepseek;
+        let base_url = config.base_url_for_route_identity(kind, "deepseek");
+        let fetched_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_secs();
+        let fingerprint = codewhale_config::catalog::base_url_fingerprint(&base_url);
+        assert_eq!(
+            crate::provider_catalog_live::record_success(
+                codewhale_config::catalog::ProviderCatalogDelta {
+                    provider: "deepseek".to_string(),
+                    base_url_fingerprint: fingerprint.clone(),
+                    fetched_at,
+                    offerings: vec![codewhale_config::catalog::CatalogOffering {
+                        provider: "deepseek".to_string(),
+                        wire_model_id: "deepseek-flash".to_string(),
+                        endpoint_key: "chat".to_string(),
+                        source: codewhale_config::catalog::CatalogSource::Live {
+                            base_url_fingerprint: fingerprint,
+                            fetched_at,
+                        },
+                        ..Default::default()
+                    }],
+                }
+            ),
+            codewhale_config::catalog::CatalogStatus::Fresh
+        );
+
+        let operate = doctor_operate_fleet_report_json(&config, &workspace);
+        let drift = &operate["model_pin_drift"];
+        let drifted = drift["drifted"].as_array().expect("drifted array");
+        let row = drifted
+            .iter()
+            .find(|row| row["model"] == "deepseek-v4-flash")
+            .expect("member pin flagged: {drift}");
+        assert_eq!(row["provider"], "deepseek");
+        assert!(
+            row["owners"]
+                .as_array()
+                .expect("owners")
+                .iter()
+                .any(|owner| owner.as_str().is_some_and(|o| o.contains("member:builder"))),
+            "the fleet member pin is named: {row}"
+        );
+        // The operator pin moved to the listed id — not drift.
+        assert!(
+            !drifted.iter().any(|row| row["model"] == "deepseek-flash"),
+            "listed pin must not be flagged: {drifted:?}"
         );
     }
 
