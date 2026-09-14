@@ -2243,5 +2243,9 @@
   "NotificationWebDenied": "Ditolak di web.",
   "NotificationInputSubmitFailed": "Jawaban Anda tidak dapat dikirim: {error}. Coba lagi.",
   "PagerActionConfirm": "Konfirmasi",
-"SelectionCopiedAsMarkdown": "Pilihan disalin sebagai Markdown ({count})"
+"SelectionCopiedAsMarkdown": "Pilihan disalin sebagai Markdown ({count})",
+  "McpShowCachedWhileTurnRuns": "Satu turn sedang berjalan; menampilkan snapshot MCP terakhir yang diketahui. Jalankan /mcp lagi setelah turn selesai untuk penyegaran langsung.",
+  "McpShowUnavailableWhileTurnRuns": "Satu turn sedang berjalan dan belum ada snapshot MCP yang teramati. Jalankan /mcp lagi setelah turn selesai.",
+  "McpLivePoolRefreshDeferredWhileTurnRuns": "Satu turn sedang berjalan; penyegaran pool MCP langsung ditunda. Jalankan /mcp reload setelah turn selesai.",
+  "McpRetryDeferredWhileTurnRuns": "Satu turn sedang berjalan; jalankan /mcp retry {server} lagi setelah turn selesai."
 }

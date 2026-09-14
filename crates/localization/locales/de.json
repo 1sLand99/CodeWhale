@@ -2243,5 +2243,9 @@
   "NotificationWebDenied": "Im Web abgelehnt.",
   "NotificationInputSubmitFailed": "Deine Antwort konnte nicht gesendet werden: {error}. Versuche es erneut.",
   "PagerActionConfirm": "Bestätigen",
-"SelectionCopiedAsMarkdown": "Auswahl als Markdown kopiert ({count})"
+"SelectionCopiedAsMarkdown": "Auswahl als Markdown kopiert ({count})",
+  "McpShowCachedWhileTurnRuns": "Ein Turn läuft; angezeigt wird der zuletzt bekannte MCP-Snapshot. Führe /mcp nach dem Turn erneut aus, um live zu aktualisieren.",
+  "McpShowUnavailableWhileTurnRuns": "Ein Turn läuft und es wurde noch kein MCP-Snapshot beobachtet. Führe /mcp nach dem Turn erneut aus.",
+  "McpLivePoolRefreshDeferredWhileTurnRuns": "Ein Turn läuft; die Aktualisierung des Live-MCP-Pools ist zurückgestellt. Führe /mcp reload nach dem Turn aus.",
+  "McpRetryDeferredWhileTurnRuns": "Ein Turn läuft; führe /mcp retry {server} nach dem Turn erneut aus."
 }

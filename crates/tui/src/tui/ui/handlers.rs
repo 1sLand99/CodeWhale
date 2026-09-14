@@ -790,6 +790,56 @@ pub(crate) async fn handle_mcp_ui_action(
         add_mcp_message(app, message);
     }
 
+    // Every branch below is an engine round-trip, and the engine services ops
+    // only between turns (`Engine::run` runs a turn inline and never polls
+    // `rx_op` mid-turn): awaiting one from this UI path parked every keypress
+    // and repaint behind the running turn — a full console freeze (#6159).
+    // While a turn (or its compaction work) owns the engine, serve the last
+    // known snapshot and say so; mutations name the deferral instead of
+    // freezing. `reject_inline_inference_while_runtime_chat_owns_run`
+    // (apply.rs) is the same fail-closed rule for inline inference.
+    let engine_busy = app.is_loading
+        || matches!(app.runtime_turn_status.as_deref(), Some("in_progress"))
+        || app.is_compacting
+        || app.manual_compaction_queued;
+    if engine_busy && (retry_name.is_some() || snapshot_live_pool || is_reload || changed) {
+        if snapshot_live_pool {
+            match app.mcp_snapshot.clone() {
+                Some(snapshot) => {
+                    app.mcp_configured_count = snapshot.servers.len();
+                    app.mcp_snapshot = Some(snapshot);
+                    app.mcp_initializing = false;
+                    app.mcp_connecting.clear();
+                    app.hotbar_actions
+                        .replace_mcp_tools(app.mcp_snapshot.as_ref());
+                    add_mcp_message(
+                        app,
+                        app.tr(MessageId::McpShowCachedWhileTurnRuns).into_owned(),
+                    );
+                    open_mcp_extensions(app);
+                }
+                None => add_mcp_message(
+                    app,
+                    app.tr(MessageId::McpShowUnavailableWhileTurnRuns)
+                        .into_owned(),
+                ),
+            }
+        } else if let Some(name) = retry_name.as_deref() {
+            add_mcp_message(
+                app,
+                app.tr(MessageId::McpRetryDeferredWhileTurnRuns)
+                    .replace("{server}", name),
+            );
+        } else {
+            add_mcp_message(
+                app,
+                app.tr(MessageId::McpLivePoolRefreshDeferredWhileTurnRuns)
+                    .into_owned(),
+            );
+        }
+        return;
+    }
+
     // A successful MCP mutation is an explicit request to change the tools
     // available to this running session. Apply it to the engine-owned pool in
     // the same operation instead of leaving Extensions and `/mcp` users on a

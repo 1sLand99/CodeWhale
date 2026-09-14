@@ -2243,5 +2243,9 @@
   "NotificationWebDenied": "已在網頁上拒絕。",
   "NotificationInputSubmitFailed": "無法提交你的回答：{error}。請再試一次。",
   "PagerActionConfirm": "確認",
-"SelectionCopiedAsMarkdown": "已將所選內容複製為 Markdown（{count}）"
+"SelectionCopiedAsMarkdown": "已將所選內容複製為 Markdown（{count}）",
+  "McpShowCachedWhileTurnRuns": "有回合正在執行；顯示最近已知的 MCP 快照。回合結束後重新執行 /mcp 可即時重新整理。",
+  "McpShowUnavailableWhileTurnRuns": "有回合正在執行，尚未觀測到 MCP 快照。請於回合結束後重新執行 /mcp。",
+  "McpLivePoolRefreshDeferredWhileTurnRuns": "有回合正在執行；即時 MCP 集區重新整理已延後。請於回合結束後執行 /mcp reload。",
+  "McpRetryDeferredWhileTurnRuns": "有回合正在執行；請於回合結束後重新執行 /mcp retry {server}。"
 }

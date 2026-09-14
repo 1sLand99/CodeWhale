@@ -2463,6 +2463,10 @@ pub enum MessageId {
     ConfigHintGoalCommand,
     ConfigHintWorkflow,
     SelectionCopiedAsMarkdown,
+    McpShowCachedWhileTurnRuns,
+    McpShowUnavailableWhileTurnRuns,
+    McpLivePoolRefreshDeferredWhileTurnRuns,
+    McpRetryDeferredWhileTurnRuns,
 }
 
 #[allow(dead_code)]
@@ -4713,6 +4717,10 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::ConfigHintGoalCommand,
     MessageId::ConfigHintWorkflow,
     MessageId::SelectionCopiedAsMarkdown,
+    MessageId::McpShowCachedWhileTurnRuns,
+    MessageId::McpShowUnavailableWhileTurnRuns,
+    MessageId::McpLivePoolRefreshDeferredWhileTurnRuns,
+    MessageId::McpRetryDeferredWhileTurnRuns,
 ];
 
 pub fn tr(locale: Locale, id: MessageId) -> Cow<'static, str> {

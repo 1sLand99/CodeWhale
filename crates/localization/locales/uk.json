@@ -2243,5 +2243,9 @@
   "NotificationWebDenied": "Відхилено у вебінтерфейсі.",
   "NotificationInputSubmitFailed": "Не вдалося надіслати відповідь: {error}. Спробуйте ще раз.",
   "PagerActionConfirm": "Підтвердити",
-"SelectionCopiedAsMarkdown": "Виділення скопійовано як Markdown ({count})"
+"SelectionCopiedAsMarkdown": "Виділення скопійовано як Markdown ({count})",
+  "McpShowCachedWhileTurnRuns": "Триває хід; показано останній відомий знімок MCP. Запустіть /mcp знову після завершення ходу, щоб оновити його наживо.",
+  "McpShowUnavailableWhileTurnRuns": "Триває хід, і знімок MCP ще не спостерігався. Запустіть /mcp знову після завершення ходу.",
+  "McpLivePoolRefreshDeferredWhileTurnRuns": "Триває хід; оновлення живого пулу MCP відкладено. Запустіть /mcp reload після завершення ходу.",
+  "McpRetryDeferredWhileTurnRuns": "Триває хід; повторіть /mcp retry {server} після завершення ходу."
 }

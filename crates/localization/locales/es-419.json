@@ -2243,5 +2243,9 @@
   "NotificationWebDenied": "Rechazado en la web.",
   "NotificationInputSubmitFailed": "No se pudo enviar tu respuesta: {error}. Inténtalo de nuevo.",
   "PagerActionConfirm": "Confirmar",
-"SelectionCopiedAsMarkdown": "Selección copiada como Markdown ({count})"
+"SelectionCopiedAsMarkdown": "Selección copiada como Markdown ({count})",
+  "McpShowCachedWhileTurnRuns": "Hay un turno en curso; se muestra la última instantánea MCP conocida. Ejecuta /mcp de nuevo cuando termine el turno para actualizarla en vivo.",
+  "McpShowUnavailableWhileTurnRuns": "Hay un turno en curso y aún no se ha observado ninguna instantánea MCP. Ejecuta /mcp de nuevo cuando termine el turno.",
+  "McpLivePoolRefreshDeferredWhileTurnRuns": "Hay un turno en curso; la actualización del pool MCP en vivo queda aplazada. Ejecuta /mcp reload cuando termine el turno.",
+  "McpRetryDeferredWhileTurnRuns": "Hay un turno en curso; vuelve a ejecutar /mcp retry {server} cuando termine el turno."
 }

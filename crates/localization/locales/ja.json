@@ -2243,5 +2243,9 @@
   "NotificationWebDenied": "ウェブで拒否されました。",
   "NotificationInputSubmitFailed": "回答を送信できませんでした：{error}。もう一度お試しください。",
   "PagerActionConfirm": "確認",
-"SelectionCopiedAsMarkdown": "選択範囲をMarkdownとしてコピーしました（{count}）"
+"SelectionCopiedAsMarkdown": "選択範囲をMarkdownとしてコピーしました（{count}）",
+  "McpShowCachedWhileTurnRuns": "ターン実行中は最後に確認された MCP スナップショットを表示します。ライブ更新にはターン終了後に /mcp を再実行してください。",
+  "McpShowUnavailableWhileTurnRuns": "ターン実行中で、まだ MCP スナップショットを確認できていません。ターン終了後に /mcp を再実行してください。",
+  "McpLivePoolRefreshDeferredWhileTurnRuns": "ターン実行中のため、ライブ MCP プールの更新は保留されます。ターン終了後に /mcp reload を実行してください。",
+  "McpRetryDeferredWhileTurnRuns": "ターン実行中です。ターン終了後に /mcp retry {server} を再実行してください。"
 }

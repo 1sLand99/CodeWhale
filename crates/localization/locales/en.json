@@ -2243,5 +2243,9 @@
   "NotificationWebDenied": "Denied on the web.",
   "NotificationInputSubmitFailed": "Could not submit your answer: {error}. Try again.",
   "PagerActionConfirm": "Confirm",
-"SelectionCopiedAsMarkdown": "Selection copied as Markdown ({count})"
+"SelectionCopiedAsMarkdown": "Selection copied as Markdown ({count})",
+  "McpShowCachedWhileTurnRuns": "A turn is running; showing the last known MCP snapshot. Run /mcp again after the turn finishes for a live refresh.",
+  "McpShowUnavailableWhileTurnRuns": "A turn is running and no MCP snapshot has been observed yet. Run /mcp again after the turn finishes.",
+  "McpLivePoolRefreshDeferredWhileTurnRuns": "A turn is running; the live MCP pool refresh is deferred. Run /mcp reload after the turn finishes.",
+  "McpRetryDeferredWhileTurnRuns": "A turn is running; run /mcp retry {server} again after the turn finishes."
 }

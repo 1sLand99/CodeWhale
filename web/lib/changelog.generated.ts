@@ -37,9 +37,10 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Fixed",
         "items": [
+          "/mcp no longer freezes the console while a turn is running: the panel opens immediately from the last known MCP snapshot with a receipt naming the wait, and live-pool mutations say their refresh is deferred instead of parking the UI event loop behind the running turn (#6159).",
           "MCP OAuth login no longer fails with \"Authorization server response missing required issuer\" against servers that implement RFC 9207, such as Cloudflare's mcp.cloudflare.com. The local callback listener now keeps the iss parameter from the redirect and hands it to the token exchange so the callback binds to the discovered issuer; servers that do not send iss keep working unchanged. (#6157)"
         ],
-        "itemCount": 1
+        "itemCount": 2
       }
     ]
   },

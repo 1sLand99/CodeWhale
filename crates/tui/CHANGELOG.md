@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `/mcp` no longer freezes the console while a turn is running: the panel
+  opens immediately from the last known MCP snapshot with a receipt naming
+  the wait, and live-pool mutations say their refresh is deferred instead of
+  parking the UI event loop behind the running turn (#6159).
 - MCP OAuth login no longer fails with "Authorization server response missing
   required issuer" against servers that implement RFC 9207, such as
   Cloudflare's `mcp.cloudflare.com`. The local callback listener now keeps the

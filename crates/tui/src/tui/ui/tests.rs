@@ -2462,6 +2462,181 @@ fn plain_mcp_show_refreshes_discovery_counts() {
 }
 
 #[tokio::test]
+async fn mcp_show_while_turn_running_serves_cached_snapshot_without_engine_roundtrip() {
+    use crate::mcp::{McpManagerSnapshot, McpServerCapabilityMetadata, McpServerSnapshot};
+    use crate::tui::app::McpUiAction;
+
+    let mut app = create_test_app();
+    app.is_loading = true;
+    app.mcp_snapshot = Some(McpManagerSnapshot {
+        config_path: PathBuf::from("mcp.json"),
+        config_exists: true,
+        reload_required: false,
+        servers: vec![McpServerSnapshot {
+            name: "cached".into(),
+            enabled: true,
+            required: false,
+            transport: "stdio".into(),
+            command_or_url: "cached-mcp".into(),
+            connect_timeout: 5,
+            execute_timeout: 5,
+            read_timeout: 5,
+            connected: true,
+            error: None,
+            auth_required: false,
+            capability_metadata: McpServerCapabilityMetadata::LegacyFallback,
+            tools: Vec::new(),
+            resources: Vec::new(),
+            prompts: Vec::new(),
+        }],
+    });
+    let mut mock = mock_engine_handle();
+    tokio::time::timeout(
+        Duration::from_millis(200),
+        handle_mcp_ui_action(
+            &mut app,
+            &mock.handle,
+            &Config::default(),
+            McpUiAction::Show,
+        ),
+    )
+    .await
+    .expect("bare /mcp must return immediately while a turn is in flight (#6159)");
+    assert!(
+        mock.rx_op.try_recv().is_err(),
+        "no engine op may be started while a turn owns the engine loop"
+    );
+    assert_eq!(app.view_stack.top_kind(), Some(ModalKind::Extensions));
+    assert_eq!(app.mcp_configured_count, 1);
+    assert!(
+        app.history.iter().any(|cell| matches!(
+            cell,
+            HistoryCell::System { content }
+                if content.contains("last known MCP snapshot")
+        )),
+        "the receipt must name the cached snapshot the panel is showing"
+    );
+}
+
+#[tokio::test]
+async fn mcp_show_while_turn_running_without_snapshot_fails_closed() {
+    use crate::tui::app::McpUiAction;
+
+    let mut app = create_test_app();
+    app.is_loading = true;
+    assert!(app.mcp_snapshot.is_none());
+    let mut mock = mock_engine_handle();
+    tokio::time::timeout(
+        Duration::from_millis(200),
+        handle_mcp_ui_action(
+            &mut app,
+            &mock.handle,
+            &Config::default(),
+            McpUiAction::Show,
+        ),
+    )
+    .await
+    .expect("bare /mcp must return immediately while a turn is in flight (#6159)");
+    assert!(mock.rx_op.try_recv().is_err());
+    assert_ne!(
+        app.view_stack.top_kind(),
+        Some(ModalKind::Extensions),
+        "without an observed snapshot there is nothing honest to show"
+    );
+    assert!(app.history.iter().any(|cell| matches!(
+        cell,
+        HistoryCell::System { content }
+            if content.contains("no MCP snapshot has been observed")
+    )));
+}
+
+#[tokio::test]
+async fn mcp_mutations_while_turn_running_defer_the_live_pool_refresh() {
+    use crate::tui::app::McpUiAction;
+
+    let temp = tempfile::tempdir().expect("temporary MCP home");
+    let path = temp.path().join("mcp.json");
+    crate::mcp::add_server_config(
+        &path,
+        "fixture".to_string(),
+        Some("fixture-mcp".to_string()),
+        None,
+        Vec::new(),
+        None,
+    )
+    .expect("seed MCP server");
+    crate::mcp::set_server_enabled(&path, "fixture", false).expect("disable MCP server");
+
+    let mut app = create_test_app();
+    app.mcp_config_path = path.clone();
+    app.is_loading = true;
+    let mut mock = mock_engine_handle();
+    tokio::time::timeout(
+        Duration::from_millis(200),
+        handle_mcp_ui_action(
+            &mut app,
+            &mock.handle,
+            &Config::default(),
+            McpUiAction::Enable {
+                name: "fixture".to_string(),
+            },
+        ),
+    )
+    .await
+    .expect("a mutation must not park the UI loop behind the running turn (#6159)");
+    assert!(
+        mock.rx_op.try_recv().is_err(),
+        "the live-pool reload op must not be sent while a turn owns the engine"
+    );
+    assert!(
+        crate::mcp::load_config(&app.mcp_config_path)
+            .expect("persisted MCP config")
+            .servers
+            .get("fixture")
+            .expect("persisted fixture")
+            .is_enabled(),
+        "the durable config still advances while the live pool waits"
+    );
+    assert!(app.mcp_reload_required);
+    assert!(app.history.iter().any(|cell| matches!(
+        cell,
+        HistoryCell::System { content } if content.contains("Enabled MCP server 'fixture'")
+    )));
+    assert!(app.history.iter().any(|cell| matches!(
+        cell,
+        HistoryCell::System { content }
+            if content.contains("live MCP pool refresh is deferred")
+    )));
+}
+
+#[tokio::test]
+async fn mcp_retry_while_turn_running_names_the_deferral_and_never_awaits() {
+    use crate::tui::app::McpUiAction;
+
+    let mut app = create_test_app();
+    app.is_loading = true;
+    let mut mock = mock_engine_handle();
+    tokio::time::timeout(
+        Duration::from_millis(200),
+        handle_mcp_ui_action(
+            &mut app,
+            &mock.handle,
+            &Config::default(),
+            McpUiAction::Retry {
+                name: "flaky".to_string(),
+            },
+        ),
+    )
+    .await
+    .expect("retry must not park the UI loop behind the running turn (#6159)");
+    assert!(mock.rx_op.try_recv().is_err());
+    assert!(app.history.iter().any(|cell| matches!(
+        cell,
+        HistoryCell::System { content } if content.contains("/mcp retry flaky")
+    )));
+}
+
+#[tokio::test]
 async fn mcp_login_stalled_discovery_is_cancellable_and_repeat_clicks_keep_one_owner() {
     use crate::tui::app::{McpLoginProgress, McpUiAction};
     use tokio::io::AsyncReadExt;

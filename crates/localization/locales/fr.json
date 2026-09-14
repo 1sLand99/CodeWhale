@@ -2243,5 +2243,9 @@
   "NotificationWebDenied": "Refusé sur le Web.",
   "NotificationInputSubmitFailed": "Impossible d'envoyer votre réponse : {error}. Réessayez.",
   "PagerActionConfirm": "Confirmer",
-"SelectionCopiedAsMarkdown": "Sélection copiée en Markdown ({count})"
+"SelectionCopiedAsMarkdown": "Sélection copiée en Markdown ({count})",
+  "McpShowCachedWhileTurnRuns": "Un tour est en cours ; affichage du dernier instantané MCP connu. Relancez /mcp une fois le tour terminé pour un rafraîchissement en direct.",
+  "McpShowUnavailableWhileTurnRuns": "Un tour est en cours et aucun instantané MCP n'a encore été observé. Relancez /mcp une fois le tour terminé.",
+  "McpLivePoolRefreshDeferredWhileTurnRuns": "Un tour est en cours ; le rafraîchissement du pool MCP en direct est différé. Lancez /mcp reload une fois le tour terminé.",
+  "McpRetryDeferredWhileTurnRuns": "Un tour est en cours ; relancez /mcp retry {server} une fois le tour terminé."
 }
