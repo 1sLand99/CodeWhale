@@ -20,6 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   blank lines, and the toast names the copied cell count.
   `tui.selection_copy_markdown = false` keeps the rendered-text payload
   (#6156).
+- The Runtime API serves the workspace files a native client browses and edits:
+  `GET /v1/workspace/files` lists one directory, `GET /v1/workspace/files/read`
+  returns a bounded byte window with a whole-file SHA-256 revision, and
+  `PUT /v1/workspace/files` writes atomically through the confined opener with
+  revision-checked overwrites (409 on drift). `.git` is never served and
+  symlinks are never followed. A saved session's oversized tool outputs are
+  served as artifacts at `GET /v1/sessions/{id}/artifacts` and
+  `GET /v1/sessions/{id}/artifacts/{artifact_id}`. (#6163)
 
 ### Changed
 

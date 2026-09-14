@@ -14846,3 +14846,548 @@ async fn output_cap_compatibility_stream_rejects_before_thread_creation() -> Res
     server.abort();
     Ok(())
 }
+
+#[tokio::test]
+async fn workspace_files_list_read_write_bounds_and_confinement() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let workspace = tmp.path().join("workspace");
+    fs::create_dir_all(workspace.join("src"))?;
+    fs::create_dir_all(workspace.join("bin"))?;
+    fs::create_dir_all(workspace.join("empty"))?;
+    fs::create_dir_all(workspace.join(".git/hooks"))?;
+    fs::write(workspace.join("src/main.rs"), "fn main() {}\n")?;
+    fs::write(workspace.join("README.md"), "# readme\n")?;
+    fs::write(workspace.join("bin/blob"), [0u8, 1, 2, 255])?;
+    fs::write(workspace.join(".git/config"), "[core]\n")?;
+    let outside = tmp.path().join("outside");
+    fs::create_dir_all(&outside)?;
+    fs::write(outside.join("secret.txt"), "never served")?;
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&outside, workspace.join("link-dir"))?;
+        std::os::unix::fs::symlink(outside.join("secret.txt"), workspace.join("link-file"))?;
+    }
+    let (addr, _, handle) = spawn_test_server_with_root_token_mobile_workspace(
+        tmp.path().join("runtime"),
+        tmp.path().join("sessions"),
+        Some("files-token".to_string()),
+        false,
+        workspace.clone(),
+    )
+    .await?
+    .context("files test requires a loopback listener")?;
+    let client = crate::tls::reqwest_client();
+    let base = format!("http://{addr}");
+    let url = |route: &str, pairs: &[(&str, &str)]| {
+        let mut url = reqwest::Url::parse(&format!("{base}{route}")).unwrap();
+        url.query_pairs_mut().extend_pairs(pairs.iter().copied());
+        url
+    };
+
+    // Authentication is required on every route.
+    for route in [
+        "/v1/workspace/files",
+        "/v1/workspace/files/read?path=README.md",
+    ] {
+        let status = client.get(format!("{base}{route}")).send().await?.status();
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{route}");
+    }
+
+    // Listing: directories first, `.git` hidden, links named but never followed.
+    let root_listing: Value = client
+        .get(url("/v1/workspace/files", &[]))
+        .bearer_auth("files-token")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let names: Vec<(String, String)> = root_listing["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| {
+            (
+                entry["name"].as_str().unwrap().to_string(),
+                entry["kind"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert!(!names.iter().any(|(name, _)| name == ".git"));
+    assert!(names.contains(&("bin".to_string(), "directory".to_string())));
+    assert!(names.contains(&("src".to_string(), "directory".to_string())));
+    assert!(names.contains(&("README.md".to_string(), "file".to_string())));
+    #[cfg(unix)]
+    {
+        assert!(names.contains(&("link-dir".to_string(), "symlink".to_string())));
+        assert!(names.contains(&("link-file".to_string(), "symlink".to_string())));
+    }
+    let last_directory = names
+        .iter()
+        .rposition(|(_, kind)| kind == "directory")
+        .unwrap();
+    assert!(
+        names[..=last_directory]
+            .iter()
+            .all(|(_, kind)| kind == "directory"),
+        "directories are listed first: {names:?}"
+    );
+    let readme = root_listing["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "README.md")
+        .unwrap();
+    assert_eq!(readme["size"], 9);
+    assert_eq!(readme["path"], "README.md");
+    assert!(readme["modified"].is_string());
+    assert_eq!(root_listing["truncated"], false);
+
+    let src_listing: Value = client
+        .get(url("/v1/workspace/files", &[("path", "src/")]))
+        .bearer_auth("files-token")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(src_listing["path"], "src");
+    assert_eq!(src_listing["entries"][0]["path"], "src/main.rs");
+    let limited: Value = client
+        .get(url("/v1/workspace/files", &[("limit", "1")]))
+        .bearer_auth("files-token")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(limited["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(limited["truncated"], true);
+    let mut rejected_listings = vec![
+        ("../", StatusCode::BAD_REQUEST),
+        ("/etc", StatusCode::BAD_REQUEST),
+        ("src/../src", StatusCode::BAD_REQUEST),
+        ("src\\main", StatusCode::BAD_REQUEST),
+        (".git", StatusCode::FORBIDDEN),
+        ("README.md", StatusCode::BAD_REQUEST),
+        ("missing", StatusCode::NOT_FOUND),
+    ];
+    if cfg!(unix) {
+        rejected_listings.push(("link-dir", StatusCode::FORBIDDEN));
+    }
+    for (path, expected) in rejected_listings {
+        let status = client
+            .get(url("/v1/workspace/files", &[("path", path)]))
+            .bearer_auth("files-token")
+            .send()
+            .await?
+            .status();
+        assert_eq!(status, expected, "list path={path:?}");
+    }
+    let status = client
+        .get(url("/v1/workspace/files", &[("limit", "0")]))
+        .bearer_auth("files-token")
+        .send()
+        .await?
+        .status();
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Reads: whole-file revision, byte windows, binary fallback, confinement.
+    let read: Value = client
+        .get(url("/v1/workspace/files/read", &[("path", "src/main.rs")]))
+        .bearer_auth("files-token")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let expected_revision = {
+        let digest = sha2::Sha256::digest(b"fn main() {}\n");
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    assert_eq!(read["path"], "src/main.rs");
+    assert_eq!(read["encoding"], "utf-8");
+    assert_eq!(read["content"], "fn main() {}\n");
+    assert_eq!(read["size"], 13);
+    assert_eq!(read["bytes"], 13);
+    assert_eq!(read["truncated"], false);
+    assert_eq!(read["revision"], expected_revision);
+    let window: Value = client
+        .get(url(
+            "/v1/workspace/files/read",
+            &[("path", "src/main.rs"), ("offset", "3"), ("limit", "4")],
+        ))
+        .bearer_auth("files-token")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(window["content"], "main");
+    assert_eq!(window["offset"], 3);
+    assert_eq!(window["bytes"], 4);
+    assert_eq!(window["truncated"], true);
+    assert_eq!(
+        window["revision"], expected_revision,
+        "revision covers the whole file"
+    );
+    let binary: Value = client
+        .get(url("/v1/workspace/files/read", &[("path", "bin/blob")]))
+        .bearer_auth("files-token")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(binary["encoding"], "base64");
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(binary["content"].as_str().unwrap())
+            .unwrap(),
+        vec![0u8, 1, 2, 255]
+    );
+    let mut rejected_reads = vec![
+        ("", StatusCode::BAD_REQUEST),
+        ("../outside/secret.txt", StatusCode::BAD_REQUEST),
+        (".git/config", StatusCode::FORBIDDEN),
+        ("src", StatusCode::BAD_REQUEST),
+        ("missing.txt", StatusCode::NOT_FOUND),
+        ("src/missing.rs", StatusCode::NOT_FOUND),
+    ];
+    if cfg!(unix) {
+        rejected_reads.push(("link-file", StatusCode::FORBIDDEN));
+        rejected_reads.push(("link-dir/secret.txt", StatusCode::FORBIDDEN));
+    }
+    for (path, expected) in rejected_reads {
+        let status = client
+            .get(url("/v1/workspace/files/read", &[("path", path)]))
+            .bearer_auth("files-token")
+            .send()
+            .await?
+            .status();
+        assert_eq!(status, expected, "read path={path:?}");
+    }
+    let status = client
+        .get(url(
+            "/v1/workspace/files/read",
+            &[("path", "README.md"), ("limit", "0")],
+        ))
+        .bearer_auth("files-token")
+        .send()
+        .await?
+        .status();
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Writes: create, then optimistic concurrency on the whole-file revision.
+    let put = |body: Value| {
+        client
+            .put(format!("{base}/v1/workspace/files"))
+            .bearer_auth("files-token")
+            .json(&body)
+    };
+    let status = client
+        .put(format!("{base}/v1/workspace/files"))
+        .json(&json!({"path": "notes/todo.md", "content": "x"}))
+        .send()
+        .await?
+        .status();
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let created = put(json!({"path": "notes/todo.md", "content": "- first\n"}))
+        .send()
+        .await?;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created: Value = created.json().await?;
+    assert_eq!(created["created"], true);
+    assert_eq!(created["path"], "notes/todo.md");
+    assert_eq!(created["size"], 8);
+    assert_eq!(
+        fs::read_to_string(workspace.join("notes/todo.md"))?,
+        "- first\n"
+    );
+    let first_revision = created["revision"].as_str().unwrap().to_string();
+    let read_back: Value = client
+        .get(url(
+            "/v1/workspace/files/read",
+            &[("path", "notes/todo.md")],
+        ))
+        .bearer_auth("files-token")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(read_back["revision"], first_revision);
+
+    // Overwrites need the revision that was read; a stale one is refused.
+    let status = put(json!({"path": "notes/todo.md", "content": "- second\n"}))
+        .send()
+        .await?
+        .status();
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "overwrite without expected_revision"
+    );
+    let stale = put(json!({
+        "path": "notes/todo.md",
+        "content": "- second\n",
+        "expected_revision": "0".repeat(64),
+    }))
+    .send()
+    .await?;
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    let stale: Value = stale.json().await?;
+    assert!(
+        stale["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(&first_revision),
+        "conflict names the current revision"
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.join("notes/todo.md"))?,
+        "- first\n"
+    );
+    let updated = put(json!({
+        "path": "notes/todo.md",
+        "content": "- second\n",
+        "expected_revision": first_revision,
+    }))
+    .send()
+    .await?;
+    assert_eq!(updated.status(), StatusCode::OK);
+    let updated: Value = updated.json().await?;
+    assert_eq!(updated["created"], false);
+    assert_ne!(updated["revision"], first_revision);
+    assert_eq!(
+        fs::read_to_string(workspace.join("notes/todo.md"))?,
+        "- second\n"
+    );
+    let status = put(json!({
+        "path": "notes/new.md",
+        "content": "x",
+        "expected_revision": first_revision,
+    }))
+    .send()
+    .await?
+    .status();
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "expected_revision on a new file"
+    );
+    assert!(!workspace.join("notes/new.md").exists());
+
+    // Binary payloads, bad encodings, oversized bodies and confinement.
+    let encoded = put(json!({
+        "path": "bin/written.bin",
+        "content": base64::engine::general_purpose::STANDARD.encode([7u8, 0, 9]),
+        "encoding": "base64",
+    }))
+    .send()
+    .await?;
+    assert_eq!(encoded.status(), StatusCode::CREATED);
+    assert_eq!(
+        fs::read(workspace.join("bin/written.bin"))?,
+        vec![7u8, 0, 9]
+    );
+    let status = put(json!({"path": "bin/x", "content": "x", "encoding": "hex"}))
+        .send()
+        .await?
+        .status();
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let status = put(json!({"path": "bin/x", "content": "***", "encoding": "base64"}))
+        .send()
+        .await?
+        .status();
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let status = put(json!({"path": "big.txt", "content": "a".repeat(4 * 1024 * 1024 + 1)}))
+        .send()
+        .await?
+        .status();
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    let mut rejected_writes = vec![
+        ("../outside/x.txt", StatusCode::BAD_REQUEST),
+        ("/tmp/x.txt", StatusCode::BAD_REQUEST),
+        (".git/hooks/pre-commit", StatusCode::FORBIDDEN),
+        ("src", StatusCode::BAD_REQUEST),
+    ];
+    if cfg!(unix) {
+        rejected_writes.push(("link-dir/x.txt", StatusCode::FORBIDDEN));
+        rejected_writes.push(("link-file", StatusCode::FORBIDDEN));
+    }
+    for (path, expected) in rejected_writes {
+        let status = put(json!({"path": path, "content": "x"}))
+            .send()
+            .await?
+            .status();
+        assert_eq!(status, expected, "write path={path:?}");
+    }
+    assert!(!outside.join("x.txt").exists());
+    assert_eq!(
+        fs::read_to_string(outside.join("secret.txt"))?,
+        "never served"
+    );
+    assert!(!workspace.join(".git/hooks/pre-commit").exists());
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_artifacts_list_and_bounded_read() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let sessions_dir = tmp.path().join("sessions");
+    let workspace = tmp.path().join("workspace");
+    fs::create_dir_all(&workspace)?;
+    let manager = crate::session_manager::SessionManager::new(sessions_dir.clone())?;
+    let session_id = "sess_artifacts_route".to_string();
+    let mut session = crate::session_manager::create_saved_session_with_id_and_mode(
+        session_id.clone(),
+        &[],
+        "deepseek-v4-pro",
+        &workspace,
+        0,
+        None,
+        Some("plan"),
+    );
+    let artifact_dir = sessions_dir.join(&session_id).join("artifacts");
+    fs::create_dir_all(&artifact_dir)?;
+    let body = "line one\nline two\n".repeat(64);
+    fs::write(artifact_dir.join("art_call_1.txt"), &body)?;
+    let served = crate::artifacts::record_tool_output_artifact_with_size(
+        &session_id,
+        "call_1",
+        "bash",
+        PathBuf::from("artifacts/art_call_1.txt"),
+        body.len() as u64,
+        "line one",
+    );
+    let escaping = crate::artifacts::record_tool_output_artifact_with_size(
+        &session_id,
+        "call_2",
+        "bash",
+        PathBuf::from("../../escape.txt"),
+        4,
+        "nope",
+    );
+    fs::write(tmp.path().join("escape.txt"), "nope")?;
+    let missing = crate::artifacts::record_tool_output_artifact_with_size(
+        &session_id,
+        "call_3",
+        "bash",
+        PathBuf::from("artifacts/gone.txt"),
+        4,
+        "gone",
+    );
+    session.artifacts = vec![served.clone(), escaping.clone(), missing.clone()];
+    manager.save_session(&session)?;
+
+    let (addr, _, handle) = spawn_test_server_with_root_token_mobile_workspace(
+        tmp.path().join("runtime"),
+        sessions_dir.clone(),
+        Some("artifacts-token".to_string()),
+        false,
+        workspace,
+    )
+    .await?
+    .context("artifacts test requires a loopback listener")?;
+    let client = crate::tls::reqwest_client();
+    let base = format!("http://{addr}");
+
+    let status = client
+        .get(format!("{base}/v1/sessions/{session_id}/artifacts"))
+        .send()
+        .await?
+        .status();
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let listing: Value = client
+        .get(format!("{base}/v1/sessions/{session_id}/artifacts"))
+        .bearer_auth("artifacts-token")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(listing["session_id"], session_id);
+    let artifacts = listing["artifacts"].as_array().unwrap();
+    assert_eq!(artifacts.len(), 3);
+    assert_eq!(artifacts[0]["id"], served.id);
+    assert_eq!(artifacts[0]["kind"], "tool_output");
+    assert_eq!(artifacts[0]["tool_name"], "bash");
+    assert_eq!(artifacts[0]["tool_call_id"], "call_1");
+    assert_eq!(artifacts[0]["byte_size"], body.len() as u64);
+    assert_eq!(artifacts[0]["path"], "artifacts/art_call_1.txt");
+    assert_eq!(artifacts[0]["preview"], "line one");
+    assert!(artifacts[0].get("storage_path").is_none());
+
+    let read: Value = client
+        .get(format!(
+            "{base}/v1/sessions/{session_id}/artifacts/{}",
+            served.id
+        ))
+        .bearer_auth("artifacts-token")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(read["artifact"]["id"], served.id);
+    assert_eq!(read["encoding"], "utf-8");
+    assert_eq!(read["content"], body);
+    assert_eq!(read["size"], body.len() as u64);
+    assert_eq!(read["truncated"], false);
+    let window: Value = client
+        .get(format!(
+            "{base}/v1/sessions/{session_id}/artifacts/{}?offset=5&limit=3",
+            served.id
+        ))
+        .bearer_auth("artifacts-token")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(window["content"], "one");
+    assert_eq!(window["truncated"], true);
+    assert_eq!(window["revision"], read["revision"]);
+
+    for (artifact_id, expected) in [
+        (escaping.id.as_str(), StatusCode::FORBIDDEN),
+        (missing.id.as_str(), StatusCode::NOT_FOUND),
+        ("art_unknown", StatusCode::NOT_FOUND),
+    ] {
+        let status = client
+            .get(format!(
+                "{base}/v1/sessions/{session_id}/artifacts/{artifact_id}"
+            ))
+            .bearer_auth("artifacts-token")
+            .send()
+            .await?
+            .status();
+        assert_eq!(status, expected, "artifact={artifact_id}");
+    }
+    let status = client
+        .get(format!(
+            "{base}/v1/sessions/{session_id}/artifacts/{}?limit=0",
+            served.id
+        ))
+        .bearer_auth("artifacts-token")
+        .send()
+        .await?
+        .status();
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let status = client
+        .get(format!("{base}/v1/sessions/sess_missing/artifacts"))
+        .bearer_auth("artifacts-token")
+        .send()
+        .await?
+        .status();
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    handle.abort();
+    Ok(())
+}

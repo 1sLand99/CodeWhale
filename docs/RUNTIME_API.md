@@ -101,6 +101,62 @@ can finish after that budget. Each request scans anew; there is no new index or
 cache. This read-only endpoint does not alter sessions or the pinned model
 prompt/tool prefix.
 
+### Workspace files and session artifacts
+
+Native clients (the GPUI desktop's Files and Preview modules) browse and edit
+the server's configured workspace through three authenticated routes. They
+read and write the workspace directly; there is no second file store, cache
+or index, and no path override: the workspace root is the only root.
+
+- `GET /v1/workspace/files?path=<dir>&limit=<1-2000>` lists one directory.
+  `path` is workspace-relative with `/` separators; empty or `.` is the root.
+  Each entry carries `name`, `path`, `kind` (`file`, `directory`, `symlink`,
+  `other`), and for files `size` and `modified` (RFC 3339). Directories sort
+  first, then names case-insensitively. `limit` defaults to 200; `truncated`
+  reports a cut. `.git` is never listed or served, and symlinks are listed by
+  name only: they are never followed, so `path=<link>` returns 403.
+- `GET /v1/workspace/files/read?path=<file>&offset=<bytes>&limit=<1-4194304>`
+  returns one byte window of a regular file with `size`, `revision` (the
+  SHA-256 hex of the **whole** file, not of the window), `modified`,
+  `offset`, `bytes`, `truncated`, `encoding` and `content`. Text windows are
+  `utf-8`; a window with a NUL byte, invalid UTF-8, or a split multi-byte
+  character is `base64`. `limit` defaults to 256 KiB. Files above 16 MiB are
+  refused with 413; a directory is 400; a link is 403; a missing file is 404.
+- `PUT /v1/workspace/files` with `{"path", "content", "encoding"?,
+  "expected_revision"?}` writes one file atomically through the same confined
+  opener Fleet artifacts use. `encoding` is `utf-8` (default) or `base64`;
+  bodies above 4 MiB are 413. Creating a new file requires **no**
+  `expected_revision` (and creates missing parent directories inside the
+  workspace); overwriting requires the `revision` from the read that the
+  edit was based on, and a stale or missing one is 409 with the current
+  revision in the error message so the client can re-read and merge. This is
+  optimistic concurrency, not a lock: two writers racing between the check and
+  the write can still interleave. The response carries `path`, `size`,
+  `revision`, `created` and `written_at`; 201 for a new file, 200 otherwise.
+  Writes through a link, into `.git`, or to a directory are refused.
+
+Every path is validated before any filesystem access: absolute paths,
+backslashes, `.` or `..` components are 400, and each directory on the way is
+opened without following links (`O_NOFOLLOW` per component on Unix, reparse
+point checks on Windows). These routes use the runtime bearer token like every
+other `/v1/*` route; they do not consult the model's tool permission posture,
+because the caller is the authenticated operator, not the model.
+
+Session artifacts are the oversized tool outputs a session recorded as
+`ArtifactRecord`s (`crates/tui/src/artifacts.rs`), stored under
+`sessions/<id>/artifacts/`:
+
+- `GET /v1/sessions/{id}/artifacts` lists the records a saved session carries:
+  `id`, `kind`, `tool_call_id`, `tool_name`, `created_at`, `byte_size`,
+  `preview` and the session-relative `path`.
+- `GET /v1/sessions/{id}/artifacts/{artifact_id}?offset=&limit=` reads one
+  artifact with the same window, `revision` and `encoding` contract as the
+  workspace file read. A record whose stored path is absolute or leaves the
+  session directory is 403; a record whose file is gone is 404.
+
+Fleet receipt artifacts keep their own route
+(`GET /v1/fleet/runs/{run_id}/receipts/{task_id}/evidence`).
+
 ### Runtime and account identity
 
 `GET /v1/runtime/info` reports `codewhale_version` plus the full 40-character
@@ -563,6 +619,8 @@ a TLS or verified transport boundary.
 - `PATCH /v1/sessions/{id}` (`{ "title"?: string, "archived"?: bool }`)
 - `DELETE /v1/sessions/{id}`
 - `POST /v1/sessions/{id}/resume-thread`
+- `GET /v1/sessions/{id}/artifacts` and `GET /v1/sessions/{id}/artifacts/{artifact_id}?offset=&limit=`
+  (see workspace files and session artifacts above)
 
 Sessions and threads answer the same `include_archived` / `archived_only` pair
 with the same meaning, and `search` is the same fuzzy match (title, id,
@@ -1072,6 +1130,8 @@ human gate. Auto-merge is `scripts/check-auto-merge.py --repo … --pr …
 **Introspection**
 - `GET /v1/workspace/status`
 - `GET /v1/workspace/files/search?query=<partial>&limit=<1-100>` (see workspace file suggestions above)
+- `GET /v1/workspace/files?path=<dir>&limit=<1-2000>`, `GET /v1/workspace/files/read?path=<file>&offset=&limit=`
+  and `PUT /v1/workspace/files` (see workspace files and session artifacts above)
 - `GET /v1/skills`
 - `GET /v1/apps/mcp/servers`
 - `GET /v1/apps/mcp/tools?server=<optional>`

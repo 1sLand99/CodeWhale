@@ -31,9 +31,10 @@ export const CHANGELOG: ChangelogRelease[] = [
         "heading": "Added",
         "items": [
           "The interactive approval card can be bounded: [approval] timeout_seconds resolves an unanswered card to deny when the window elapses — the same fail-closed decision the external approval path takes — and the transcript says the bound denied the call, not the operator. Omitted or 0 keeps today's unbounded wait, so nothing changes unless you opt in (#6101).",
-          "Transcript drag selection copies Markdown source by default: every cell the selection touches serializes through the same canonical path Ctrl-Y and /copy use, partial intersections round out to whole cells joined with blank lines, and the toast names the copied cell count. tui.selection_copy_markdown = false keeps the rendered-text payload (#6156)."
+          "Transcript drag selection copies Markdown source by default: every cell the selection touches serializes through the same canonical path Ctrl-Y and /copy use, partial intersections round out to whole cells joined with blank lines, and the toast names the copied cell count. tui.selection_copy_markdown = false keeps the rendered-text payload (#6156).",
+          "The Runtime API serves the workspace files a native client browses and edits: GET /v1/workspace/files lists one directory, GET /v1/workspace/files/read returns a bounded byte window with a whole-file SHA-256 revision, and PUT /v1/workspace/files writes atomically through the confined opener with revision-checked overwrites (409 on drift). .git is never served and symlinks are never followed. A saved session's oversized tool outputs are served as artifacts at GET…"
         ],
-        "itemCount": 2
+        "itemCount": 3
       },
       {
         "heading": "Changed",

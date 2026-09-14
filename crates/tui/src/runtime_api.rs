@@ -105,14 +105,18 @@ use self::auth::{
     runtime_request_is_authorized,
 };
 use self::sessions::{
-    create_session_from_thread, delete_session, get_session, list_sessions, list_sessions_summary,
-    patch_session, resume_session_thread, save_current_session,
+    create_session_from_thread, delete_session, get_session, list_session_artifacts, list_sessions,
+    list_sessions_summary, patch_session, read_session_artifact, resume_session_thread,
+    save_current_session,
 };
 #[cfg(test)]
 use self::sessions::{messages_from_thread_detail, session_to_detail};
 #[cfg(test)]
 use self::workspace::collect_workspace_status;
-use self::workspace::{collect_workspace_git_metadata, workspace_file_search, workspace_status};
+use self::workspace::{
+    collect_workspace_git_metadata, workspace_file_read, workspace_file_search,
+    workspace_file_write, workspace_files_list, workspace_status,
+};
 
 const RUNTIME_TOKEN_ENV: &str = "CODEWHALE_RUNTIME_TOKEN";
 const LEGACY_RUNTIME_TOKEN_ENV: &str = "DEEPSEEK_RUNTIME_TOKEN";
@@ -1089,8 +1093,22 @@ pub fn build_router(state: RuntimeApiState) -> Router {
             "/v1/sessions/{id}/resume-thread",
             post(resume_session_thread),
         )
+        .route("/v1/sessions/{id}/artifacts", get(list_session_artifacts))
+        .route(
+            "/v1/sessions/{id}/artifacts/{artifact_id}",
+            get(read_session_artifact),
+        )
         .route("/v1/workspace/status", get(workspace_status))
         .route("/v1/workspace/files/search", get(workspace_file_search))
+        .route(
+            "/v1/workspace/files",
+            get(workspace_files_list)
+                .put(workspace_file_write)
+                .layer(DefaultBodyLimit::max(
+                    self::workspace::FILE_WRITE_BODY_LIMIT_BYTES,
+                )),
+        )
+        .route("/v1/workspace/files/read", get(workspace_file_read))
         .route("/v1/agent-runs", get(list_agent_runs))
         .route("/v1/agent-runs/{run_id}", get(get_agent_run))
         .route("/v1/fleet/profiles", get(list_fleet_profiles))
@@ -8143,6 +8161,13 @@ impl ApiError {
     fn forbidden(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::FORBIDDEN,
+            message: message.into(),
+        }
+    }
+
+    fn payload_too_large(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
             message: message.into(),
         }
     }
