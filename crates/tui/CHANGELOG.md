@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Session retention no longer deletes transcripts once the store reaches the
+  cap: the oldest active session is archived — still openable from the
+  picker's archived view — instead of being unlinked, and archived records
+  sit outside the cap until they are pruned (#6136).
+- Empty auto-created "New Session" stubs are capped separately (the ten
+  newest are kept) and can no longer occupy a real transcript's slot in the
+  session cap (#6137).
 - A failed resume or session load is now a durable transcript error instead
   of a status line the next footer update replaces, so a resume that cannot
   restore its target no longer looks like a silent new session (#6138).
