@@ -30,6 +30,13 @@ shows what the Engine is doing and reveals the answer when it is done.
   the pet alive; `/pet appearance|window|source|sound|export|status` address
   the shared companion. The pet no longer lives in the workbar: the Watch
   panel and `/workbar watch …` are gone (#6109, #6110).
+- Codewhale Computer Use 0.3.1 ships as its own notarized Mac app. Download
+  the disk image from [codewhale.net/computer-use](https://codewhale.net/computer-use)
+  or the [v0.3.1 release](https://github.com/Hmbown/codewhale-cu-plugin/releases/tag/v0.3.1)
+  (`Codewhale-Computer-Use-0.3.1-macos-universal.dmg`, drag into
+  Applications; the ZIP stays for the in-app updater). The bundled plugin and
+  the first-party marketplace pin the same 0.3.1 sources, so the app, the
+  `computer-use` plugin and `/mcp` see one implementation.
 
 ### Fixed
 

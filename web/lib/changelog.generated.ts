@@ -37,9 +37,10 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Added",
         "items": [
-          "/pet turns the terminal over to the Codewhale pet. /pet on (or bare /pet) gives the habitat the whole content viewport now and on every accepted turn, reveals the actual answer or error when the turn completes, and Escape returns to the composer without cancelling anything. /pet off closes the view and stops automatic entry while the durable companion keeps the pet alive; /pet appearance|window|source|sound|export|status address the shared companion. The pet no longer lives…"
+          "/pet turns the terminal over to the Codewhale pet. /pet on (or bare /pet) gives the habitat the whole content viewport now and on every accepted turn, reveals the actual answer or error when the turn completes, and Escape returns to the composer without cancelling anything. /pet off closes the view and stops automatic entry while the durable companion keeps the pet alive; /pet appearance|window|source|sound|export|status address the shared companion. The pet no longer lives…",
+          "Codewhale Computer Use 0.3.1 ships as its own notarized Mac app. Download the disk image from codewhale.net/computer-use or the v0.3.1 release (Codewhale-Computer-Use-0.3.1-macos-universal.dmg, drag into Applications; the ZIP stays for the in-app updater). The bundled plugin and the first-party marketplace pin the same 0.3.1 sources, so the app, the computer-use plugin and /mcp see one implementation."
         ],
-        "itemCount": 1
+        "itemCount": 2
       },
       {
         "heading": "Fixed",
