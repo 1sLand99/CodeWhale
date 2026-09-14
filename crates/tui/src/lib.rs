@@ -496,6 +496,13 @@ struct ExecArgs {
     /// Internal Fleet worker authority envelope. Non-secret, versioned JSON.
     #[arg(long, value_name = "JSON", hide = true)]
     tool_authority_json: Option<String>,
+    /// Fire the configured hooks in this run (opt-in). On the headless path
+    /// the engine-side events are `tool_call_before` — which may still deny
+    /// a call — and `shell_env`. A hook `ask` resolves fail-closed because
+    /// nothing can prompt headlessly. Fleet worker subprocesses never fire
+    /// operator hooks.
+    #[arg(long, default_value_t = false)]
+    hooks: bool,
     /// Prompt to send to the model
     #[arg(
         value_name = "PROMPT",
@@ -2429,6 +2436,7 @@ async fn run_async_main_dispatch(
                     || args.disallowed_tools.is_some()
                     || args.append_system_prompt.is_some()
                     || args.tool_authority_json.is_some()
+                    || args.hooks
                     || args.sandbox.is_some()
                     || args.allow_sandbox_elevation
                     || env_tool_surface.is_some();
@@ -2469,6 +2477,7 @@ async fn run_async_main_dispatch(
                         disallowed_tools,
                         args.append_system_prompt.clone(),
                         args.tool_authority_json.clone(),
+                        args.hooks,
                         std::sync::Arc::clone(&plugin_registry),
                     )
                     .await
@@ -17106,6 +17115,7 @@ api_key = "test-only-key"
         assert_eq!(args.resume.as_deref(), Some("abc123"));
         assert_eq!(args.output_format, ExecOutputFormat::StreamJson);
         assert_eq!(args.prompt, vec!["follow up"]);
+        assert!(!args.hooks, "headless hooks stay opt-in by default");
     }
 
     #[test]
@@ -17137,6 +17147,7 @@ api_key = "test-only-key"
             "extra rules",
             "--tool-authority-json",
             envelope,
+            "--hooks",
             "do the thing",
         ]);
         let Some(Commands::Exec(args)) = cli.command else {
@@ -17155,6 +17166,7 @@ api_key = "test-only-key"
         assert_eq!(args.max_tool_calls, Some(9));
         assert_eq!(args.append_system_prompt.as_deref(), Some("extra rules"));
         assert_eq!(args.tool_authority_json.as_deref(), Some(envelope));
+        assert!(args.hooks);
         assert_eq!(args.prompt, vec!["do the thing"]);
     }
 

@@ -274,6 +274,7 @@ pub(crate) async fn run_exec_agent(
     disallowed_tools: Option<Vec<String>>,
     append_system_prompt: Option<String>,
     tool_authority_json: Option<String>,
+    exec_hooks_enabled: bool,
     plugin_registry: std::sync::Arc<crate::plugins::PluginRegistry>,
 ) -> Result<()> {
     use crate::compaction::CompactionConfig;
@@ -438,6 +439,25 @@ pub(crate) async fn run_exec_agent(
     } else {
         plugin_registry
     };
+    // `exec --hooks` (#6099) is the operator's explicit opt-in: headless runs
+    // fire no hooks by default. When armed, the executor is the same one the
+    // TUI builds — global config, reviewed plugin snapshots, then trusted
+    // project `.codewhale/hooks.toml` — so `tool_call_before` can still deny
+    // and `shell_env` still applies. It is shared with the engine config, the
+    // turn's SendMessage op (which re-installs it into the engine), and the
+    // tool runtime services. Fleet workers never opt in: the narrowed
+    // authority envelope does not carry the operator's hook set into a child.
+    let exec_hook_executor = (exec_hooks_enabled && !fleet_authority_active).then(|| {
+        let hooks_config = crate::hooks::HooksConfig::load_with_project_and_plugins(
+            execution_config.hooks_config(),
+            &workspace,
+            Some(engine_plugin_registry.as_ref()),
+        );
+        std::sync::Arc::new(crate::hooks::HookExecutor::new(
+            hooks_config,
+            workspace.clone(),
+        ))
+    });
     let exec_allow_shell = crate::tools::spec::fleet_exec_shell_enabled(
         fleet_authority_active,
         outer_shell_authority,
@@ -456,6 +476,7 @@ pub(crate) async fn run_exec_agent(
         persist_services_enabled,
         automations: exec_automations,
         media_originals_dir: crate::media_originals::default_store_dir(),
+        hook_executor: exec_hook_executor.clone(),
         ..crate::tools::spec::RuntimeToolServices::default()
     };
 
@@ -564,7 +585,7 @@ pub(crate) async fn run_exec_agent(
         allowed_tools: allowed_tools.clone(),
         disallowed_tools: disallowed_tools.clone(),
         max_tool_calls,
-        hook_executor: None,
+        hook_executor: exec_hook_executor.clone(),
         locale_tag: codewhale_localization::resolve_locale(&settings.locale)
             .tag()
             .to_string(),
@@ -674,7 +695,7 @@ pub(crate) async fn run_exec_agent(
             goal_status: crate::tools::goal::GoalStatus::Active,
             allowed_tools: allowed_tools.clone(),
             dynamic_tools: Vec::new(),
-            hook_executor: None,
+            hook_executor: exec_hook_executor.clone(),
             reasoning_effort: effective_reasoning_effort,
             reasoning_effort_auto,
             auto_model,
