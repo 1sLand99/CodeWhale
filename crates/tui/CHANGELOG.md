@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A failed resume or session load is now a durable transcript error instead
+  of a status line the next footer update replaces, so a resume that cannot
+  restore its target no longer looks like a silent new session (#6138).
 - Compaction no longer retains a tool result whose tool call was summarized
   away: an older turn that mixes text with a tool result keeps its text and
   drops the orphaned result blocks, which providers reject outright (#6119).

@@ -3060,6 +3060,28 @@ async fn mcp_reload_failure_keeps_pending_state_and_live_snapshot() {
 }
 
 #[test]
+fn session_load_failure_is_durable_in_the_transcript() {
+    // #6138: a failed resume must not exist only in the status line, which
+    // the next footer update replaces.
+    let mut app = create_test_app();
+    let before = app.history.len();
+    crate::tui::ui::session_state::surface_session_load_failure(
+        &mut app,
+        "Failed to load session: No session found with prefix: abc".to_string(),
+    );
+    assert_eq!(app.history.len(), before + 1);
+    assert!(matches!(
+        app.history.last(),
+        Some(HistoryCell::Error { message, .. })
+            if message.contains("No session found with prefix")
+    ));
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Failed to load session: No session found with prefix: abc")
+    );
+}
+
+#[test]
 fn focus_gained_forces_terminal_viewport_recapture() {
     assert!(terminal_event_needs_viewport_recapture(&Event::FocusGained));
     assert!(!terminal_event_needs_viewport_recapture(&Event::FocusLost));

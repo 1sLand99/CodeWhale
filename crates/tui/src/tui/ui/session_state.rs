@@ -10,6 +10,20 @@ pub(crate) struct OfflineQueueTransition {
     restored: Option<OfflineQueueState>,
 }
 
+/// A session load/resume failure must survive past the next footer update.
+///
+/// The status line is replaced almost immediately, which left a failed
+/// resume looking like a silent new session — the screen even offered to
+/// resume the id it had just created (#6138). Keep both: the transcript
+/// error cell is the durable record, the status line the immediate one.
+pub(crate) fn surface_session_load_failure(app: &mut App, message: String) {
+    app.add_message(crate::tui::history::HistoryCell::Error {
+        message: message.clone(),
+        severity: crate::error_taxonomy::ErrorSeverity::Error,
+    });
+    app.status_message = Some(message);
+}
+
 /// Complete all fallible queue work before a session switch mutates the App.
 /// A second editor must fail without touching either composer or queue file.
 pub(crate) fn prepare_offline_queue_transition(

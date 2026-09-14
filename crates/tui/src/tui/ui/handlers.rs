@@ -1427,8 +1427,10 @@ pub(crate) async fn handle_view_events(
                         ) {
                             Ok(outcome) => outcome,
                             Err(err) => {
-                                app.status_message =
-                                    Some(format!("Failed to restore session: {err}"));
+                                crate::tui::ui::session_state::surface_session_load_failure(
+                                    app,
+                                    format!("Failed to restore session: {err}"),
+                                );
                                 continue;
                             }
                         };
@@ -1478,10 +1480,13 @@ pub(crate) async fn handle_view_events(
                         app.launch.status = None;
                     }
                     Err(err) => {
-                        app.status_message = Some(format!(
-                            "Failed to load session {}: {err}",
-                            crate::session_manager::truncate_id(&session_id)
-                        ));
+                        crate::tui::ui::session_state::surface_session_load_failure(
+                            app,
+                            format!(
+                                "Failed to load session {}: {err}",
+                                crate::session_manager::truncate_id(&session_id)
+                            ),
+                        );
                     }
                 }
             }

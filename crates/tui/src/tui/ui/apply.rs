@@ -1316,10 +1316,10 @@ pub(crate) async fn apply_command_result(
                 {
                     Ok(session) => session,
                     Err(err) => {
-                        app.status_message = Some(format!(
-                            "Failed to load session from {}: {err}",
-                            path.display()
-                        ));
+                        crate::tui::ui::session_state::surface_session_load_failure(
+                            app,
+                            format!("Failed to load session from {}: {err}", path.display()),
+                        );
                         return Ok(false);
                     }
                 };
@@ -1327,9 +1327,10 @@ pub(crate) async fn apply_command_result(
                     match Config::load(app.config_path.clone(), app.config_profile.as_deref()) {
                         Ok(config) => config,
                         Err(err) => {
-                            app.status_message = Some(format!(
-                                "Failed to load live config for session restore: {err}"
-                            ));
+                            crate::tui::ui::session_state::surface_session_load_failure(
+                                app,
+                                format!("Failed to load live config for session restore: {err}"),
+                            );
                             return Ok(false);
                         }
                     };
@@ -1342,7 +1343,10 @@ pub(crate) async fn apply_command_result(
                 ) {
                     Ok(outcome) => outcome,
                     Err(err) => {
-                        app.status_message = Some(format!("Failed to restore session: {err}"));
+                        crate::tui::ui::session_state::surface_session_load_failure(
+                            app,
+                            format!("Failed to restore session: {err}"),
+                        );
                         return Ok(false);
                     }
                 };
