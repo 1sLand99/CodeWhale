@@ -280,10 +280,7 @@ fn transcript_copy_falls_back_to_rendered_text_when_markdown_is_off() {
     let expected = selection_to_text(&app).expect("rendered fallback text");
     let toasts_before = app.status_toasts.len();
     copy_active_selection(&mut app);
-    assert_eq!(
-        app.clipboard.last_written_text(),
-        Some(expected.as_str())
-    );
+    assert_eq!(app.clipboard.last_written_text(), Some(expected.as_str()));
     assert_eq!(app.status_message.as_deref(), Some("Selection copied"));
     assert_eq!(app.status_toasts.len(), toasts_before);
 }
