@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Compaction no longer retains a tool result whose tool call was summarized
+  away: an older turn that mixes text with a tool result keeps its text and
+  drops the orphaned result blocks, which providers reject outright (#6119).
 - Automation runs that need a tool approval no longer die as silent
   idle-timeout cancels: a pending approval suspends the idle watchdog for its
   decision window, and an unanswered window settles the run Failed with the
