@@ -196,7 +196,10 @@ impl TerminalInputPump {
         now.saturating_duration_since(self.last_alive_at.get())
     }
 
-    pub(super) fn pause_for_child_terminal(&self) -> io::Result<()> {
+    /// Async: callers are on the event-loop task, so the ack wait uses
+    /// `tokio::time::sleep` — a `thread::sleep` here would park a Tokio
+    /// worker for up to `TERMINAL_INPUT_CHILD_PAUSE_TIMEOUT`.
+    pub(super) async fn pause_for_child_terminal(&self) -> io::Result<()> {
         self.paused.store(true, Ordering::Release);
         if self.handle.is_none() {
             self.paused_ack.store(true, Ordering::Release);
@@ -214,7 +217,7 @@ impl TerminalInputPump {
                     "terminal input pump did not pause before child terminal handoff",
                 ));
             }
-            thread::sleep(TERMINAL_INPUT_CHILD_PAUSE_POLL_INTERVAL);
+            tokio::time::sleep(TERMINAL_INPUT_CHILD_PAUSE_POLL_INTERVAL).await;
         }
         self.mark_alive();
         Ok(())

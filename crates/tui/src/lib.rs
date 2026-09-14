@@ -4524,7 +4524,7 @@ async fn run_doctor(
         );
         // Secret hygiene: name the keys, never the values. Plain-text config
         // is not a secret store.
-        if let Ok(raw) = std::fs::read_to_string(config_path) {
+        if let Ok(raw) = tokio::fs::read_to_string(config_path).await {
             let flagged = crate::doctor::config_credential_shaped_keys(&raw);
             if !flagged.is_empty() {
                 println!(
@@ -7765,10 +7765,12 @@ async fn run_speech(config: &Config, args: SpeechArgs) -> Result<()> {
         .await?;
 
     if let Some(parent) = output.parent().filter(|path| !path.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)
+        tokio::fs::create_dir_all(parent)
+            .await
             .with_context(|| format!("Failed to create output directory {}", parent.display()))?;
     }
-    std::fs::write(&output, &response.audio_bytes)
+    tokio::fs::write(&output, &response.audio_bytes)
+        .await
         .with_context(|| format!("Failed to write audio file {}", output.display()))?;
 
     if json_output {

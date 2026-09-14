@@ -25959,8 +25959,8 @@ fn queued_terminal_events_keep_receipt_gap_for_late_unbracketed_submit() {
     );
 }
 
-#[test]
-fn terminal_input_child_pause_drains_codewhale_events_before_editor_handoff() {
+#[tokio::test]
+async fn terminal_input_child_pause_drains_codewhale_events_before_editor_handoff() {
     let (tx, rx) = std::sync::mpsc::channel();
     tx.send(TerminalInputMessage::Event(ObservedTerminalEvent::new(
         Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
@@ -25990,6 +25990,7 @@ fn terminal_input_child_pause_drains_codewhale_events_before_editor_handoff() {
 
     input
         .pause_for_child_terminal()
+        .await
         .expect("synthetic pump can pause");
     assert!(
         prepare_terminal_input_handoff(&input, &mut pending_terminal_events)
@@ -26010,8 +26011,8 @@ fn terminal_input_child_pause_drains_codewhale_events_before_editor_handoff() {
     assert!(!input.paused_ack.load(std::sync::atomic::Ordering::Acquire));
 }
 
-#[test]
-fn terminal_input_handoff_preserves_pending_cancellation_keys() {
+#[tokio::test]
+async fn terminal_input_handoff_preserves_pending_cancellation_keys() {
     let (tx, rx) = std::sync::mpsc::channel();
     tx.send(TerminalInputMessage::Event(ObservedTerminalEvent::new(
         Event::Key(KeyEvent::new(KeyCode::Char('\u{3}'), KeyModifiers::NONE)),
@@ -26040,6 +26041,7 @@ fn terminal_input_handoff_preserves_pending_cancellation_keys() {
 
     input
         .pause_for_child_terminal()
+        .await
         .expect("synthetic pump can pause");
     assert!(
         !prepare_terminal_input_handoff(&input, &mut pending_terminal_events)

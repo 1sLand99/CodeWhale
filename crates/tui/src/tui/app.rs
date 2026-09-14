@@ -5887,9 +5887,12 @@ impl App {
         self.bump_history_cell(index);
     }
 
-    /// Retry a `try_lock` up to `retries` times with a 1ms pause between
+    /// Retry a `try_lock` up to `retries` times, yielding the thread between
     /// attempts. Returns `Some(guard)` on success, `None` if the lock
-    /// remains contended after all retries.
+    /// remains contended after all retries. Reached from the async UI/event
+    /// paths, so this must not park a Tokio worker with `thread::sleep` —
+    /// `yield_now` covers the microsecond-scale critical sections behind
+    /// these mutexes, and a still-contended lock degrades to `None`.
     fn retry_lock<T>(
         mutex: &tokio::sync::Mutex<T>,
         retries: u32,
@@ -5898,7 +5901,7 @@ impl App {
             if let Ok(guard) = mutex.try_lock() {
                 return Some(guard);
             }
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            std::thread::yield_now();
         }
         None
     }

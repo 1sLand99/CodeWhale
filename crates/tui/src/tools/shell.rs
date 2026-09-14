@@ -6339,21 +6339,26 @@ impl ToolSpec for NoteTool {
     ) -> Result<ToolResult, ToolError> {
         let note_content = required_str(&input, "content")?;
 
-        // Ensure parent directory exists
+        // Ensure parent directory exists. Tool handlers run on the Tokio
+        // runtime, so filesystem calls use tokio::fs (blocking-call
+        // convention, #6149).
         if let Some(parent) = context.notes_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
                 ToolError::execution_failed(format!("Failed to create notes directory: {e}"))
             })?;
         }
 
         // Append to notes file
-        let mut file = std::fs::OpenOptions::new()
+        let mut file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&context.notes_path)
+            .await
             .map_err(|e| ToolError::execution_failed(format!("Failed to open notes file: {e}")))?;
 
-        writeln!(file, "\n---\n{note_content}")
+        use tokio::io::AsyncWriteExt;
+        file.write_all(format!("\n---\n{note_content}\n").as_bytes())
+            .await
             .map_err(|e| ToolError::execution_failed(format!("Failed to write note: {e}")))?;
 
         Ok(ToolResult::success(format!(

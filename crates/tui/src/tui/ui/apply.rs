@@ -1310,7 +1310,11 @@ pub(crate) async fn apply_command_result(
                 return Ok(true);
             }
             AppAction::LoadSession(path) => {
-                let session: SavedSession = match std::fs::read_to_string(&path)
+                // Session files can be large; this is the UI action path, so
+                // the read must not park a Tokio worker (blocking-call
+                // convention, #6149).
+                let session: SavedSession = match tokio::fs::read_to_string(&path)
+                    .await
                     .map_err(|err| err.to_string())
                     .and_then(|raw| serde_json::from_str(&raw).map_err(|err| err.to_string()))
                 {

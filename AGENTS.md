@@ -143,6 +143,18 @@ because they did anything wrong. Treat their time as more expensive than ours.
   `config/src/route/`. Native memory lives in `tui/src/native_memory.rs`;
   `tools/remember.rs` is its capture path.
 - Environment-specific behavior belongs in `docs/ENVIRONMENTS.md`, not here.
+- Blocking-call convention (#6149): code on the Tokio runtime — tool
+  handlers, engine tasks, the UI event loop, anything reached through an
+  `async` call chain — must not run blocking operations inline.
+  `std::fs`/`std::process` calls inside `async` code use `tokio::fs`/
+  `tokio::process`, or move the synchronous work into
+  `tokio::task::spawn_blocking` (`utils::spawn_blocking_supervised` for
+  fire-and-forget). `thread::sleep` is for dedicated `std::thread`s and
+  bounded contention retries in synchronous APIs that are only reachable
+  from blocking scopes — an async-path wait uses `tokio::time`. A sync
+  helper containing blocking calls must only be called under
+  `spawn_blocking` or from a dedicated thread; `scripts/
+  check-blocking-calls-budget.py` ratchets the unprotected-site count.
 
 ## Code, migrations, and evidence
 
