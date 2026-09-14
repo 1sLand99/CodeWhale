@@ -1070,6 +1070,7 @@
   "ApprovalRiskReview": "PRÜFUNG",
   "ApprovalRiskElevated": "FREIGABE",
   "ApprovalRiskDestructive": "DESTRUKTIV",
+  "ApprovalTimedOutDenied": "Genehmigungsanfrage abgelaufen - verweigert",
   "ApprovalCategorySafe": "Sicher",
   "ApprovalCategoryFileWrite": "Datei schreiben",
   "ApprovalCategoryShell": "Bash",

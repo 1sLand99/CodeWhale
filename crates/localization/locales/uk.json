@@ -1070,6 +1070,7 @@
   "ApprovalRiskReview": "ПЕРЕГЛЯД",
   "ApprovalRiskElevated": "СХВАЛЕННЯ",
   "ApprovalRiskDestructive": "РУЙНІВНА",
+  "ApprovalTimedOutDenied": "Запит на схвалення минув - відхилено",
   "ApprovalCategorySafe": "Безпечна",
   "ApprovalCategoryFileWrite": "Запис файлу",
   "ApprovalCategoryShell": "Bash",

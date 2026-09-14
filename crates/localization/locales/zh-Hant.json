@@ -192,6 +192,7 @@
   "ApprovalRepoLawTitle": "儲存庫規則",
   "ApprovalRepoLawWarning": "儲存庫規則會在啟用審批的權限模式下要求確認。",
   "ApprovalRiskDestructive": "破壞性",
+  "ApprovalTimedOutDenied": "審批請求逾時 - 已拒絕",
   "ApprovalRiskElevated": "需要批准",
   "ApprovalRiskReview": "審查",
   "ApprovalSaveAskRuleHint": "  s 僅允許一次 + 一律詢問精確規則",

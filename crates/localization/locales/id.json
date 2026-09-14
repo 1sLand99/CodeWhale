@@ -1070,6 +1070,7 @@
   "ApprovalRiskReview": "TINJAU",
   "ApprovalRiskElevated": "PERSETUJUAN",
   "ApprovalRiskDestructive": "DESTRUKTIF",
+  "ApprovalTimedOutDenied": "Permintaan persetujuan habis waktu - ditolak",
   "ApprovalCategorySafe": "Aman",
   "ApprovalCategoryFileWrite": "Tulis File",
   "ApprovalCategoryShell": "Bash",

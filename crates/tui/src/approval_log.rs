@@ -16,9 +16,14 @@ const APPROVAL_LOCK_FILE: &str = "approval_receipts.lock";
 pub(crate) enum ApprovalOutcome {
     ApprovedOnce,
     Denied,
+    /// The interactive approval card expired unanswered (#6101): the
+    /// configured bound denied the call, not the operator.
+    Timeout,
     Cancelled,
     Unavailable,
-    RetryWithPolicy { policy: SandboxPolicy },
+    RetryWithPolicy {
+        policy: SandboxPolicy,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

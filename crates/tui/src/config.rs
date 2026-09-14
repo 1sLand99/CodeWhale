@@ -2770,6 +2770,13 @@ pub struct ApprovalConfig {
     /// Default: `deny`.
     #[serde(default)]
     pub default_selection: ApprovalDefaultSelection,
+    /// Seconds an interactive approval card may wait before it resolves
+    /// **deny** on its own (#6101). Absent or an explicit `0` waits
+    /// indefinitely — the operator is at the terminal, so the card stays
+    /// unbounded by default. Values above 86,400 (24h) are clamped with a
+    /// warning.
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
 }
 
 /// `transcript.prose_measure` exactly as written in `config.toml`.
@@ -8174,6 +8181,25 @@ impl Config {
     #[must_use]
     pub fn approval_default_selection(&self) -> ApprovalDefaultSelection {
         self.approval.unwrap_or_default().default_selection
+    }
+
+    /// Effective expiry for the interactive approval card (#6101).
+    /// `None` (absent or an explicit `0`) waits indefinitely; a positive
+    /// value bounds the wait and expiry resolves to deny (fail-closed).
+    /// Values above 24h clamp with a warning.
+    #[must_use]
+    pub fn approval_timeout(&self) -> Option<std::time::Duration> {
+        const MAX_SECONDS: u64 = 86_400;
+        let seconds = self.approval.unwrap_or_default().timeout_seconds?;
+        if seconds == 0 {
+            return None;
+        }
+        if seconds > MAX_SECONDS {
+            tracing::warn!(
+                "[approval] timeout_seconds={seconds} exceeds 24h; clamping to {MAX_SECONDS}"
+            );
+        }
+        Some(std::time::Duration::from_secs(seconds.min(MAX_SECONDS)))
     }
 
     /// Resolve workspace side-git snapshot settings with defaults applied.

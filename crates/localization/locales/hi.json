@@ -1070,6 +1070,7 @@
   "ApprovalRiskReview": "समीक्षा",
   "ApprovalRiskElevated": "अनुमति",
   "ApprovalRiskDestructive": "विनाशकारी",
+  "ApprovalTimedOutDenied": "अनुमोदन अनुरोध का समय समाप्त - अस्वीकृत",
   "ApprovalCategorySafe": "सुरक्षित",
   "ApprovalCategoryFileWrite": "फ़ाइल लेखन",
   "ApprovalCategoryShell": "Bash",

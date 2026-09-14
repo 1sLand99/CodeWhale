@@ -2802,11 +2802,17 @@ pub(crate) async fn apply_approval_decision(
             }
             app.remote_control
                 .resolve_pending_approval(&event.tool_id, false);
-            if engine_handle
-                .deny_tool_call(event.tool_id.clone())
-                .await
-                .is_ok()
-            {
+            // A bound expiry carries its own outcome (#6101) so the receipt
+            // distinguishes "no answer within the window" from an operator
+            // denial.
+            let denied = if event.timed_out {
+                engine_handle
+                    .deny_tool_call_timed_out(event.tool_id.clone())
+                    .await
+            } else {
+                engine_handle.deny_tool_call(event.tool_id.clone()).await
+            };
+            if denied.is_ok() {
                 app.retire_action_notices(Some(&event.tool_id));
             }
         }

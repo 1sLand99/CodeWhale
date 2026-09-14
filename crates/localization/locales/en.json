@@ -1093,6 +1093,7 @@
   "ApprovalRiskReview": "REVIEW",
   "ApprovalRiskElevated": "APPROVAL",
   "ApprovalRiskDestructive": "DESTRUCTIVE",
+  "ApprovalTimedOutDenied": "Approval request timed out - denied",
   "ApprovalCategorySafe": "Safe",
   "ApprovalCategoryFileWrite": "File Write",
   "ApprovalCategoryShell": "Bash",

@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The interactive approval card can be bounded: `[approval] timeout_seconds`
+  resolves an unanswered card to **deny** when the window elapses — the same
+  fail-closed decision the external approval path takes — and the transcript
+  says the bound denied the call, not the operator. Omitted or `0` keeps
+  today's unbounded wait, so nothing changes unless you opt in (#6101).
 - Transcript drag selection copies Markdown source by default: every cell the
   selection touches serializes through the same canonical path `Ctrl-Y` and
   `/copy` use, partial intersections round out to whole cells joined with

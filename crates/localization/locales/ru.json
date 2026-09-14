@@ -1070,6 +1070,7 @@
   "ApprovalRiskReview": "ПРОВЕРКА",
   "ApprovalRiskElevated": "ОДОБРЕНИЕ",
   "ApprovalRiskDestructive": "РАЗРУШИТЕЛЬНО",
+  "ApprovalTimedOutDenied": "Запрос на одобрение истёк - отклонено",
   "ApprovalCategorySafe": "Безопасно",
   "ApprovalCategoryFileWrite": "Запись файла",
   "ApprovalCategoryShell": "Bash",

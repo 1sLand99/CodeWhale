@@ -1093,6 +1093,7 @@
   "ApprovalRiskReview": "검토",
   "ApprovalRiskElevated": "승인",
   "ApprovalRiskDestructive": "파괴적",
+  "ApprovalTimedOutDenied": "승인 요청 시간 초과 - 거부됨",
   "ApprovalCategorySafe": "안전",
   "ApprovalCategoryFileWrite": "파일 쓰기",
   "ApprovalCategoryShell": "Bash",

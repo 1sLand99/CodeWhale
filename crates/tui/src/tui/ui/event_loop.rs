@@ -3777,6 +3777,7 @@ pub(crate) async fn run_event_loop(
                                     &approval_key,
                                     intent_summary.as_deref(),
                                     config.approval_default_selection(),
+                                    config.approval_timeout(),
                                 );
                                 log_sensitive_event(
                                     "tool.approval.prompted",

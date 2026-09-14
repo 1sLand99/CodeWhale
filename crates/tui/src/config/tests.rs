@@ -1920,6 +1920,56 @@ fn user_input_timeout_defaults_disabled_and_clamps() {
 }
 
 #[test]
+fn approval_timeout_defaults_unbounded_and_clamps() {
+    let parsed: ConfigFile = toml::from_str("").expect("empty config");
+    assert_eq!(parsed.base.approval_timeout(), None);
+
+    // The card stays unbounded when only presentation is configured.
+    let parsed: ConfigFile = toml::from_str(
+        r#"
+        [approval]
+        default_selection = "allow_once"
+        "#,
+    )
+    .expect("approval config");
+    assert_eq!(parsed.base.approval_timeout(), None);
+
+    let parsed: ConfigFile = toml::from_str(
+        r#"
+        [approval]
+        timeout_seconds = 300
+        "#,
+    )
+    .expect("approval config");
+    assert_eq!(
+        parsed.base.approval_timeout(),
+        Some(std::time::Duration::from_secs(300))
+    );
+
+    // An explicit 0 follows the repo's "wait forever" convention (#6101).
+    let parsed: ConfigFile = toml::from_str(
+        r#"
+        [approval]
+        timeout_seconds = 0
+        "#,
+    )
+    .expect("approval config");
+    assert_eq!(parsed.base.approval_timeout(), None);
+
+    let parsed: ConfigFile = toml::from_str(
+        r#"
+        [approval]
+        timeout_seconds = 999999
+        "#,
+    )
+    .expect("approval config");
+    assert_eq!(
+        parsed.base.approval_timeout(),
+        Some(std::time::Duration::from_secs(86_400))
+    );
+}
+
+#[test]
 fn explicit_duckduckgo_search_provider_is_preserved() {
     let config: Config = toml::from_str(
         r#"

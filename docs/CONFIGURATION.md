@@ -1945,6 +1945,17 @@ reasoning contract, and all four membership ids omit generic sampling fields.
   [approval]
   default_selection = "allow_once"
   ```
+- `[approval] timeout_seconds` (integer, optional): bound how long an
+  interactive approval card may wait. When the window elapses the card
+  resolves to **deny** — fail-closed, matching the external approval path —
+  and the transcript records that the bound denied the call, not the
+  operator. Omitted or `0` waits indefinitely, which stays the interactive
+  default; values above 24h clamp with a warning (#6101).
+
+  ```toml
+  [approval]
+  timeout_seconds = 300
+  ```
 - `sandbox_mode` (string, optional): `read-only`, `workspace-write`, `danger-full-access`, `external-sandbox`.
   Platform support is not identical. macOS uses Seatbelt when its runtime
   probe succeeds. Linux uses bubblewrap only when `prefer_bwrap = true` and

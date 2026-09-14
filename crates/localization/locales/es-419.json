@@ -1091,6 +1091,7 @@
   "ApprovalRiskReview": "REVISAR",
   "ApprovalRiskElevated": "APROBACIÓN",
   "ApprovalRiskDestructive": "DESTRUCTIVO",
+  "ApprovalTimedOutDenied": "La solicitud de aprobación agotó el tiempo de espera - rechazada",
   "ApprovalCategorySafe": "Seguro",
   "ApprovalCategoryFileWrite": "Escritura de Archivo",
   "ApprovalCategoryShell": "Bash",

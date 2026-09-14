@@ -1070,6 +1070,7 @@
   "ApprovalRiskReview": "RÉVISION",
   "ApprovalRiskElevated": "APPROBATION",
   "ApprovalRiskDestructive": "DESTRUCTIF",
+  "ApprovalTimedOutDenied": "La demande d'approbation a expiré - refusée",
   "ApprovalCategorySafe": "Sûr",
   "ApprovalCategoryFileWrite": "Écriture de fichier",
   "ApprovalCategoryShell": "Bash",

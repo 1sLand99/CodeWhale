@@ -1070,6 +1070,7 @@
   "ApprovalRiskReview": "REVISIÓ",
   "ApprovalRiskElevated": "APROVACIÓ",
   "ApprovalRiskDestructive": "DESTRUCTIU",
+  "ApprovalTimedOutDenied": "La sol·licitud d'aprovació ha expirat - denegada",
   "ApprovalCategorySafe": "Segur",
   "ApprovalCategoryFileWrite": "Escriptura de fitxer",
   "ApprovalCategoryShell": "Bash",

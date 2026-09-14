@@ -1339,7 +1339,7 @@ pub(crate) async fn handle_view_events(
 
                 if timed_out {
                     app.add_message(HistoryCell::System {
-                        content: "Approval request timed out - denied".to_string(),
+                        content: app.tr(MessageId::ApprovalTimedOutDenied).into_owned(),
                     });
                 }
             }

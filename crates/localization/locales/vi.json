@@ -1091,6 +1091,7 @@
   "ApprovalRiskReview": "XEM XÉT",
   "ApprovalRiskElevated": "PHÊ DUYỆT",
   "ApprovalRiskDestructive": "NGUY HẠI",
+  "ApprovalTimedOutDenied": "Yêu cầu phê duyệt quá hạn - bị từ chối",
   "ApprovalCategorySafe": "An toàn",
   "ApprovalCategoryFileWrite": "Ghi Tệp",
   "ApprovalCategoryShell": "Bash",

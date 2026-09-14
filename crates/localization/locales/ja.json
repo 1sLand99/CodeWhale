@@ -1091,6 +1091,7 @@
   "ApprovalRiskReview": "確認",
   "ApprovalRiskElevated": "承認",
   "ApprovalRiskDestructive": "破壊的操作",
+  "ApprovalTimedOutDenied": "承認リクエストがタイムアウトしました - 拒否しました",
   "ApprovalCategorySafe": "安全",
   "ApprovalCategoryFileWrite": "ファイル書き込み",
   "ApprovalCategoryShell": "Bash",

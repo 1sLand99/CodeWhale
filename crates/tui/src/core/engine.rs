@@ -2381,6 +2381,11 @@ impl Engine {
             super::engine::approval::ApprovalDecision::Denied { id } => {
                 (id.clone(), ChildApprovalOutcome::Denied)
             }
+            // A child has no timeout outcome of its own (#6101); an expired
+            // card is a deny for whichever call it was answering.
+            super::engine::approval::ApprovalDecision::TimedOut { id } => {
+                (id.clone(), ChildApprovalOutcome::Denied)
+            }
             // A sandbox retry only exists for the parent's own tool call.
             super::engine::approval::ApprovalDecision::RetryWithPolicy { .. } => return false,
         };
@@ -7274,6 +7279,9 @@ pub(crate) enum MockApprovalEvent {
     Denied {
         id: String,
     },
+    TimedOut {
+        id: String,
+    },
     RetryWithPolicy {
         id: String,
         policy: crate::sandbox::SandboxPolicy,
@@ -7286,6 +7294,7 @@ impl MockEngineHandle {
         match self.rx_approval.recv().await? {
             ApprovalDecision::Approved { id } => Some(MockApprovalEvent::Approved { id }),
             ApprovalDecision::Denied { id } => Some(MockApprovalEvent::Denied { id }),
+            ApprovalDecision::TimedOut { id } => Some(MockApprovalEvent::TimedOut { id }),
             ApprovalDecision::RetryWithPolicy { id, policy } => {
                 Some(MockApprovalEvent::RetryWithPolicy { id, policy })
             }

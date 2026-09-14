@@ -22894,6 +22894,7 @@ fn approval_prompt_uses_event_input_after_message_complete_drain() {
         "approval-key",
         None,
         crate::config::ApprovalDefaultSelection::Deny,
+        None,
     );
 
     let mut view = app.view_stack.pop().expect("approval view");
@@ -22927,6 +22928,7 @@ fn approval_prompt_uses_configured_default_selection() {
         "approval-key",
         None,
         crate::config::ApprovalDefaultSelection::AllowOnce,
+        None,
     );
 
     let mut view = app.view_stack.pop().expect("approval view");
@@ -22962,6 +22964,7 @@ fn patch_approval_modal_does_not_displace_the_active_file_receipt() {
         "approval-key",
         None,
         crate::config::ApprovalDefaultSelection::Deny,
+        None,
     );
 
     assert!(
@@ -22987,6 +22990,41 @@ fn patch_approval_modal_does_not_displace_the_active_file_receipt() {
     assert_eq!(
         cell.receipt.as_ref().map(|receipt| receipt.outcome_label()),
         Some("Updated src/lib.rs".to_string())
+    );
+}
+
+#[tokio::test]
+async fn timed_out_approval_denial_reaches_the_engine_as_a_timeout() {
+    let mut app = create_test_app();
+    let mut config = Config::default();
+    let mut engine = mock_engine_handle();
+
+    apply_approval_decision(
+        &mut app,
+        &mut engine.handle,
+        &mut config,
+        ApprovalDecisionEvent {
+            tool_id: "tool-timeout".to_string(),
+            tool_name: "exec_shell".to_string(),
+            decision: ReviewDecision::Denied,
+            timed_out: true,
+            approval_key: "approval-timeout-key".to_string(),
+            approval_grouping_key: "approval-group".to_string(),
+            persistent_rules: Vec::new(),
+        },
+    )
+    .await;
+
+    assert_eq!(
+        engine.recv_approval_event().await,
+        Some(crate::core::engine::MockApprovalEvent::TimedOut {
+            id: "tool-timeout".to_string()
+        }),
+        "a bound expiry must reach the engine as a timeout, not an operator denial"
+    );
+    assert!(
+        !app.approval_session_denied.contains("approval-timeout-key"),
+        "an expired card must not cache a session denial"
     );
 }
 
