@@ -1674,13 +1674,21 @@ impl OauthLoginFlow {
                     )
                 })?
                 .context("OAuth callback was cancelled")?;
-            let OauthCallbackResult { code, state } = match callback {
+            let OauthCallbackResult {
+                code,
+                state,
+                issuer,
+            } = match callback {
                 CallbackResult::Success(callback) => callback,
                 CallbackResult::Error(error) => return Err(anyhow!(error)),
             };
 
+            // RFC 9207: servers that advertise
+            // `authorization_response_iss_parameter_supported` send `iss` on the
+            // redirect and rmcp requires it back; forward it so the callback binds
+            // to the discovered issuer instead of failing as "missing".
             self.oauth_state
-                .handle_callback(&code, &state)
+                .handle_callback_with_issuer(&code, &state, issuer.as_deref())
                 .await
                 .context("handling MCP OAuth callback")?;
 
@@ -1909,6 +1917,8 @@ async fn write_http_response(
 struct OauthCallbackResult {
     code: String,
     state: String,
+    /// RFC 9207 `iss` from the redirect, when the authorization server sends it.
+    issuer: Option<String>,
 }
 
 enum CallbackResult {
@@ -1933,6 +1943,7 @@ fn parse_oauth_callback(path: &str, expected_callback_path: &str) -> CallbackOut
 
     let mut code = None;
     let mut state = None;
+    let mut issuer = None;
     let mut error = None;
     let mut error_description = None;
     for pair in query.split('&') {
@@ -1946,6 +1957,7 @@ fn parse_oauth_callback(path: &str, expected_callback_path: &str) -> CallbackOut
         match key {
             "code" => code = Some(decoded),
             "state" => state = Some(decoded),
+            "iss" => issuer = Some(decoded),
             "error" => error = Some(decoded),
             "error_description" => error_description = Some(decoded),
             _ => {}
@@ -1953,7 +1965,11 @@ fn parse_oauth_callback(path: &str, expected_callback_path: &str) -> CallbackOut
     }
 
     if let (Some(code), Some(state)) = (code, state) {
-        return CallbackOutcome::Success(OauthCallbackResult { code, state });
+        return CallbackOutcome::Success(OauthCallbackResult {
+            code,
+            state,
+            issuer,
+        });
     }
     if error.is_some() || error_description.is_some() {
         return CallbackOutcome::Error(OAuthProviderError::new(error, error_description));
@@ -2251,7 +2267,33 @@ mod tests {
     #[test]
     fn parse_oauth_callback_accepts_success() {
         let parsed = parse_oauth_callback("/callback/id?code=abc&state=xyz", "/callback/id");
-        assert!(matches!(parsed, CallbackOutcome::Success(_)));
+        assert_eq!(
+            parsed,
+            CallbackOutcome::Success(OauthCallbackResult {
+                code: "abc".to_string(),
+                state: "xyz".to_string(),
+                issuer: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_oauth_callback_keeps_rfc9207_issuer() {
+        // Cloudflare's MCP authorization server advertises
+        // authorization_response_iss_parameter_supported and sends `iss` back;
+        // dropping it makes rmcp reject the callback as missing a required issuer.
+        let parsed = parse_oauth_callback(
+            "/callback/id?code=abc&state=xyz&iss=https%3A%2F%2Fmcp.cloudflare.com",
+            "/callback/id",
+        );
+        assert_eq!(
+            parsed,
+            CallbackOutcome::Success(OauthCallbackResult {
+                code: "abc".to_string(),
+                state: "xyz".to_string(),
+                issuer: Some("https://mcp.cloudflare.com".to_string()),
+            })
+        );
     }
 
     #[test]

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- MCP OAuth login no longer fails with "Authorization server response missing
+  required issuer" against servers that implement RFC 9207, such as
+  Cloudflare's `mcp.cloudflare.com`. The local callback listener now keeps the
+  `iss` parameter from the redirect and hands it to the token exchange so the
+  callback binds to the discovered issuer; servers that do not send `iss`
+  keep working unchanged. (#6157)
+
 ## [0.9.13] - 2026-09-13
 
 Codewhale v0.9.13 addresses integrity issues in 0.9.12:

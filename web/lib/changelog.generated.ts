@@ -26,7 +26,15 @@ export const CHANGELOG: ChangelogRelease[] = [
     "date": null,
     "unreleased": true,
     "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.9.12...HEAD",
-    "sections": []
+    "sections": [
+      {
+        "heading": "Fixed",
+        "items": [
+          "MCP OAuth login no longer fails with \"Authorization server response missing required issuer\" against servers that implement RFC 9207, such as Cloudflare's mcp.cloudflare.com. The local callback listener now keeps the iss parameter from the redirect and hands it to the token exchange so the callback binds to the discovered issuer; servers that do not send iss keep working unchanged. (#6157)"
+        ],
+        "itemCount": 1
+      }
+    ]
   },
   {
     "version": "0.9.13",
