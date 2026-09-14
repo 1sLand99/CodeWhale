@@ -1219,8 +1219,14 @@ fn mcp_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                 .map(|server| server.enabled)
                 .or_else(|| config.map(crate::mcp::McpServerConfig::is_enabled))
                 .unwrap_or(true);
-            let initializing = app.mcp_initializing
-                && enabled
+            // `connecting` is the engine's real in-flight set (#6033): under
+            // lazy boot a configured-but-unstarted server reads "configured",
+            // never "connecting".
+            let initializing = enabled
+                && app
+                    .mcp_connecting
+                    .iter()
+                    .any(|connecting| connecting == &name)
                 && observed.is_none_or(|server| !server.connected && server.error.is_none());
             let state = if !enabled {
                 tr(locale, MessageId::HotbarSetupStatusDisabled)

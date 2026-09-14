@@ -21933,7 +21933,10 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
             "timeouts": { "connect_timeout": 120 },
             "servers": {
                 "fast": { "command": node, "args": [server, "fast", tmp.path()] },
-                "slow": { "command": node, "args": [server, "slow", tmp.path()] },
+                // `slow` is deliberately unselected: `required` keeps it in
+                // the eager boot set under lazy boot (#6033) so it can stand
+                // in for "an unrelated server still connecting".
+                "slow": { "command": node, "args": [server, "slow", tmp.path()], "required": true },
                 "failed": { "command": "codewhale-missing-mcp-fixture-38911" }
             }
         }))
@@ -22170,8 +22173,11 @@ lines.on('line', async (line) => {
         serde_json::to_vec(&serde_json::json!({
             "timeouts": { "connect_timeout": 30 },
             "servers": {
-                "fast": { "command": "node", "args": [server, "fast", release] },
-                "slow": { "command": "node", "args": [server, "slow", release] }
+                // Both marked `required` so lazy boot (#6033) still starts
+                // them eagerly — this test proves progress ordering, not the
+                // lazy/eligible split.
+                "fast": { "command": "node", "args": [server, "fast", release], "required": true },
+                "slow": { "command": "node", "args": [server, "slow", release], "required": true }
             }
         }))
         .expect("config JSON"),
@@ -22261,6 +22267,103 @@ lines.on('line', async (line) => {
     } else {
         assert!(finished.servers.iter().all(|row| row.connected));
     }
+}
+
+/// Lazy boot (#6033): a configured server nobody selected and nobody marked
+/// `required` must not be spawned at session start. The fixture writes a
+/// `started-<name>` marker when it receives `initialize`, so the lazy
+/// server's absence is proven by the file that never appears — not by a
+/// timeout on "it would have started by now".
+#[tokio::test]
+async fn lazy_boot_leaves_unselected_servers_unspawned() {
+    let Some(node) = crate::dependencies::resolve_node() else {
+        return;
+    };
+    let tmp = tempdir().expect("tempdir");
+    let server = tmp.path().join("server.mjs");
+    fs::write(
+        &server,
+        r#"import fs from 'node:fs';
+import path from 'node:path';
+import readline from 'node:readline';
+readline.createInterface({ input: process.stdin }).on('line', line => {
+  const request = JSON.parse(line);
+  if (request.id === undefined) return;
+  if (request.method === 'initialize') {
+    fs.writeFileSync(path.join(process.argv[3], 'started-' + process.argv[2]), 'ready');
+  }
+  const result = request.method === 'initialize'
+    ? { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: process.argv[2], version: '1' } }
+    : { tools: [{ name: 'ready', inputSchema: { type: 'object' } }] };
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\n');
+});"#,
+    )
+    .expect("fixture");
+    let config_path = tmp.path().join("mcp.json");
+    fs::write(
+        &config_path,
+        serde_json::to_vec(&serde_json::json!({
+            "servers": {
+                "eager": { "command": node, "args": [server, "eager", tmp.path()], "required": true },
+                "lazy": { "command": node, "args": [server, "lazy", tmp.path()] }
+            }
+        }))
+        .unwrap(),
+    )
+    .expect("MCP config");
+    let (engine, handle) = Engine::new(
+        EngineConfig {
+            workspace: tmp.path().to_path_buf(),
+            mcp_config_path: config_path,
+            ..Default::default()
+        },
+        &Config::default(),
+    );
+    let task = tokio::spawn(async move { engine.run().await });
+    let mut events = handle.rx_event.write().await;
+    let finished = tokio::time::timeout(Duration::from_secs(30), async {
+        while let Some(event) = events.recv().await {
+            if let Event::McpSessionBoot {
+                snapshot,
+                connecting,
+                finished: true,
+                ..
+            } = event
+            {
+                return (snapshot, connecting);
+            }
+        }
+        panic!("engine event channel closed");
+    })
+    .await
+    .expect("boot must finish");
+    drop(events);
+    handle.send(Op::Shutdown).await.expect("shutdown");
+    task.await.expect("engine task");
+
+    let (snapshot, connecting) = finished;
+    assert!(
+        tmp.path().join("started-eager").exists(),
+        "a required server is still eager"
+    );
+    assert!(
+        !tmp.path().join("started-lazy").exists(),
+        "an unselected, unrequired server must not be spawned at boot"
+    );
+    assert!(connecting.is_empty());
+    let lazy = snapshot
+        .servers
+        .iter()
+        .find(|server| server.name == "lazy")
+        .expect("configured lazy server still appears in the snapshot");
+    assert!(!lazy.connected);
+    assert!(lazy.error.is_none(), "lazy is a state, not a failure");
+    let eager = snapshot
+        .servers
+        .iter()
+        .find(|server| server.name == "eager")
+        .expect("required server in snapshot");
+    assert!(eager.connected);
 }
 
 #[tokio::test]
@@ -22449,7 +22552,9 @@ async fn bootstrap_and_retry_mcp_use_the_engine_owned_pool() {
     let config_path = tmp.path().join("mcp.json");
     std::fs::write(
         &config_path,
-        r#"{"servers":{"disabled":{"command":"node","disabled":true},"alpha":{"command":"codewhale-mcp-missing-alpha-9f8e7d6c"},"beta":{"command":"codewhale-mcp-missing-beta-9f8e7d6c"}}}"#,
+        // `required` keeps alpha/beta in the eager boot set under lazy boot
+        // (#6033) so they carry the connection diagnoses this test checks.
+        r#"{"servers":{"disabled":{"command":"node","disabled":true},"alpha":{"command":"codewhale-mcp-missing-alpha-9f8e7d6c","required":true},"beta":{"command":"codewhale-mcp-missing-beta-9f8e7d6c","required":true}}}"#,
     )
     .expect("MCP config");
     let engine_config = EngineConfig {
