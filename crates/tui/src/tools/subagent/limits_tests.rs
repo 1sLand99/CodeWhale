@@ -255,7 +255,7 @@ fn cleanup_retains_completed_budget_evidence_while_a_pool_member_runs() {
 fn budget_partial_handback_is_bounded_and_keeps_unknown_usage_honest() {
     let mut snapshot = make_snapshot(SubAgentStatus::Running);
     snapshot.result = Some("partial 🐳 ".repeat(2_000));
-    let result = budget_partial_result(snapshot, "child wall-time budget exhausted");
+    let result = budget_partial_result(snapshot, "child wall-time budget exhausted", None);
     assert_eq!(result.status, SubAgentStatus::BudgetExhausted);
     let summary = result.result.unwrap();
     assert!(summary.chars().count() < 4_500);

@@ -11333,12 +11333,67 @@ async fn supervise_subagent_task_body(
 
 /// The deterministic fallback makes no additional request. An earlier
 /// reporting attempt may have timed out, so do not claim it never happened.
-fn budget_partial_result(result: SubAgentResult, cause: &str) -> SubAgentResult {
-    budget_partial_result_with_note(
-        result,
-        cause,
-        "Reporting allowance was unavailable or expired. This deterministic fallback makes no further model request.",
-    )
+fn budget_partial_result(
+    result: SubAgentResult,
+    cause: &str,
+    preservation_note: Option<&str>,
+) -> SubAgentResult {
+    let note = match preservation_note {
+        Some(note) => format!(
+            "Reporting allowance was unavailable or expired. This deterministic fallback makes no further model request. {note}"
+        ),
+        None => "Reporting allowance was unavailable or expired. This deterministic fallback makes no further model request.".to_string(),
+    };
+    budget_partial_result_with_note(result, cause, &note)
+}
+
+/// Inventory the workspace changes a budget-killed worker left behind, for
+/// the preservation receipt in its terminal result (#5529). The spawn-time
+/// delivery baseline makes `changed_paths` name exactly what this worker
+/// touched — committed or not — so a wall-time or token death is never a
+/// silent loss. Returns `None` when no write-scoped baseline exists (a
+/// read-only worker cannot have left file work) or git cannot answer.
+async fn budget_work_preservation_note(
+    runtime: &SubAgentRuntime,
+    agent_id: &str,
+) -> Option<String> {
+    let (evidence, workspace) = runtime
+        .manager
+        .read()
+        .await
+        .worker_records
+        .get(agent_id)
+        .map(|record| {
+            (
+                record.delivery_evidence.clone(),
+                record.spec.workspace.clone(),
+            )
+        })?;
+    let display = workspace.display().to_string();
+    let changed = tokio::task::spawn_blocking(move || evidence.changed_paths(&workspace))
+        .await
+        .ok()??;
+    Some(if changed.is_empty() {
+        format!("No workspace changes were recorded under {display}.")
+    } else {
+        const MAX_LISTED_PATHS: usize = 12;
+        let listed = changed
+            .iter()
+            .take(MAX_LISTED_PATHS)
+            .cloned()
+            .collect::<Vec<_>>();
+        let suffix = if changed.len() > listed.len() {
+            format!(" and {} more", changed.len() - listed.len())
+        } else {
+            String::new()
+        };
+        format!(
+            "The worker left {} workspace change(s) under {display}: {}{suffix}. \
+             The files survive on disk; salvage them or re-dispatch the remaining task.",
+            changed.len(),
+            listed.join(", ")
+        )
+    })
 }
 
 fn budget_partial_result_with_note(
@@ -11496,6 +11551,18 @@ async fn run_subagent_task_inner(task: SubAgentTask) {
         )
     });
 
+    // #5529: a wall-time task error must still name the work the child left
+    // on disk. The inventory takes blocking git/fs reads, so it runs before
+    // the manager write lock below is taken.
+    let preservation_note = if failure_error
+        .as_deref()
+        .is_some_and(|error| error.contains("wall-time budget exhausted"))
+    {
+        budget_work_preservation_note(&task.runtime, &agent_id).await
+    } else {
+        None
+    };
+
     // Every terminal path — successful/fatal model exit, explicit Stop,
     // coordination interrupt, and stale cleanup — arbitrates and publishes
     // through `finish_terminal_result`. Cancellation that already won leaves
@@ -11521,7 +11588,7 @@ async fn run_subagent_task_inner(task: SubAgentTask) {
                     .clone()
                     .expect("failed task should carry annotated error");
                 if error.contains("wall-time budget exhausted") {
-                    budget_partial_result(result, &error)
+                    budget_partial_result(result, &error, preservation_note.as_deref())
                 } else {
                     result.status = SubAgentStatus::Failed(error);
                     result.result = None;
@@ -13670,6 +13737,17 @@ async fn run_subagent(
                     .map(|record| record.usage.clone());
                 return Ok(result);
             }
+        }
+        // #5529: a budget death is never a silent loss. The hand-back report
+        // describes what the model remembered; this names the on-disk changes
+        // the worker actually left, so the parent can salvage them without
+        // trusting the partial report.
+        if let Some(preservation) = budget_work_preservation_note(runtime, &agent_id).await {
+            let note = handback_note.get_or_insert_with(String::new);
+            if !note.is_empty() {
+                note.push(' ');
+            }
+            note.push_str(&preservation);
         }
     }
     release_resident_leases_for(&agent_id);
