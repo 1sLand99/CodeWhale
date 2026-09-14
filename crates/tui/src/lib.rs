@@ -49,7 +49,6 @@ mod dsh_credentials;
 mod elapsed;
 mod error_taxonomy;
 mod eval;
-mod execpolicy;
 mod external_credentials;
 mod fast_hash;
 mod features;

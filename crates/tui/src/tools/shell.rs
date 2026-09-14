@@ -3393,7 +3393,6 @@ pub fn new_shared_shell_manager(workspace: PathBuf) -> SharedShellManager {
 
 // === ToolSpec Implementations ===
 
-use crate::execpolicy::{ExecPolicyDecision, load_default_policy};
 use crate::features::Feature;
 use crate::tools::cargo_failure_summary::summarize_cargo_failure;
 use crate::tools::spec::{
@@ -3405,7 +3404,24 @@ use codewhale_execpolicy::command_safety::{
     SafetyLevel, analyze_command, extract_primary_command, is_agent_readonly_shell_command,
     is_github_readonly_command, is_parallel_readonly_command, normalize_windows_command_paths,
 };
+use codewhale_execpolicy::toml_rules::{ExecPolicyConfig, RuleDecision};
 use serde_json::json;
+
+/// The TOML execpolicy file lives in the user config home; the rule engine
+/// itself is `codewhale_execpolicy::toml_rules`.
+fn default_execpolicy_path() -> Option<std::path::PathBuf> {
+    crate::config::effective_home_dir().map(|home| home.join(".deepseek").join("execpolicy.toml"))
+}
+
+fn load_default_policy() -> anyhow::Result<Option<ExecPolicyConfig>> {
+    let Some(path) = default_execpolicy_path() else {
+        return Ok(None);
+    };
+    if !path.exists() {
+        return Ok(None);
+    }
+    ExecPolicyConfig::from_path(&path).map(Some)
+}
 
 const FOREGROUND_TIMEOUT_RECOVERY_HINT: &str = "Foreground Bash is for bounded commands. \
 The timed-out process was killed; rerun long work as Bash action=\"run\" background=true, \
@@ -5020,14 +5036,18 @@ impl ToolSpec for BashTool {
 
         let background = background || tty;
 
-        let mut execpolicy_decision: Option<ExecPolicyDecision> = None;
+        let mut execpolicy_decision: Option<RuleDecision> = None;
         if context.features.enabled(Feature::ExecPolicy)
-            && let Some(policy) = load_default_policy()
+            && let Some(policy) = tokio::task::spawn_blocking(load_default_policy)
+                .await
+                .map_err(|e| {
+                    ToolError::execution_failed(format!("execpolicy load task failed: {e}"))
+                })?
                 .map_err(|e| ToolError::execution_failed(format!("execpolicy load failed: {e}")))?
         {
             let decision = policy.evaluate(command);
             execpolicy_decision = Some(decision.clone());
-            if let ExecPolicyDecision::Deny(reason) = decision {
+            if let RuleDecision::Deny(reason) = decision {
                 return Ok(ToolResult {
                     content: format!("BLOCKED: {reason}"),
                     success: false,
@@ -5542,14 +5562,14 @@ impl ToolSpec for BashTool {
                     "combined_output": combined_output,
                     "canceled": was_cancelled,
                     "execpolicy": execpolicy_decision.as_ref().map(|decision| match decision {
-                        ExecPolicyDecision::Allow => json!({
+                        RuleDecision::Allow => json!({
                             "decision": "allow",
                         }),
-                        ExecPolicyDecision::Deny(reason) => json!({
+                        RuleDecision::Deny(reason) => json!({
                             "decision": "deny",
                             "reason": reason,
                         }),
-                        ExecPolicyDecision::AskUser(reason) => json!({
+                        RuleDecision::AskUser(reason) => json!({
                             "decision": "ask_user",
                             "reason": reason,
                         }),

@@ -931,8 +931,10 @@ version = "0.9.13"
 dependencies = [
  "anyhow",
  "codewhale-protocol",
+ "regex",
  "serde",
  "shlex 1.3.0",
+ "toml 1.1.4+spec-1.1.0",
 ]
 
 [[package]]

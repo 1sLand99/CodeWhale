@@ -49,6 +49,9 @@
   "crates/core/tests/single_turn_loop.rs": {
     "std_fs": 1
   },
+  "crates/execpolicy/src/toml_rules.rs": {
+    "std_fs": 1
+  },
   "crates/lane/src/runtime.rs": {
     "std_fs": 3
   },
@@ -153,9 +156,6 @@
   },
   "crates/tui/src/doctor_fix.rs": {
     "std_fs": 6
-  },
-  "crates/tui/src/execpolicy/rules.rs": {
-    "std_fs": 1
   },
   "crates/tui/src/external_credentials.rs": {
     "std_fs": 2
