@@ -97,7 +97,6 @@ pub enum PluginProductComponentKind {
     Skills,
     BrowserDriver,
     SandboxRuntime,
-    NativeRuntime,
 }
 
 impl PluginProductComponentKind {
@@ -107,7 +106,6 @@ impl PluginProductComponentKind {
             Self::Skills => tr(locale, MessageId::HelpSkills),
             Self::BrowserDriver => tr(locale, MessageId::ExtensionsComponentBrowserDriver),
             Self::SandboxRuntime => tr(locale, MessageId::ExtensionsComponentSandboxRuntime),
-            Self::NativeRuntime => tr(locale, MessageId::ExtensionsComponentNativeRuntime),
         }
         .into_owned()
     }
@@ -382,7 +380,6 @@ impl ExtensionsSnapshot {
             let recommendation = match item.id.as_str() {
                 "playwright-browser" => Some(("playwright", "playwright")),
                 "chrome-devtools" => Some(("chrome-devtools", "chrome-devtools")),
-                "cua-computer-use" => Some(("cua-driver", "cua")),
                 _ => None,
             };
             if let Some((server_name, recommendation_id)) = recommendation {
@@ -437,9 +434,8 @@ impl ExtensionsSnapshot {
 /// manifests produced by the packaging lane remain the installation authority.
 fn reviewed_product_catalog(locale: Locale) -> Vec<PluginProduct> {
     vec![
-        // Codewhale's own, and the reason this row exists: someone browsing
-        // the marketplace for computer use saw Cua and Browser Use and not
-        // the plugin that already ships inside the binary.
+        // First-party computer use. This is the only computer-use product
+        // row: third-party desktop-control MCPs are not recommended here.
         PluginProduct {
             id: "codewhale-computer-use".into(),
             name: "Computer Use".into(),
@@ -497,18 +493,6 @@ fn reviewed_product_catalog(locale: Locale) -> Vec<PluginProduct> {
                 },
             ],
             maturity: tr(locale, MessageId::ExtensionsStateReviewedCandidate).into_owned(),
-        },
-        PluginProduct {
-            id: "cua-computer-use".into(),
-            name: "Cua Computer Use".into(),
-            description: tr(locale, MessageId::ExtensionsProductCuaDescription).into_owned(),
-            publisher: "Cua".into(),
-            source_reference: "trycua/cua".into(),
-            components: vec![PluginProductComponent {
-                kind: PluginProductComponentKind::NativeRuntime,
-                name: "Cua Driver".into(),
-            }],
-            maturity: tr(locale, MessageId::ExtensionsStateUnderEvaluation).into_owned(),
         },
         PluginProduct {
             id: "browser-use".into(),

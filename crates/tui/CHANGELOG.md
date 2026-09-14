@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Computer Use is the only computer-use product in Extensions and
+  `/mcp recommendations`. Cua is no longer suggested as a parallel
+  desktop-control MCP; enable the first-party `computer-use` plugin
+  instead. The bundled plugin is 0.4.0: Return/Enter from `type`,
+  filtered and paginated `get_app_state`, `focus`/`get_value`, and
+  `strategy:"app"` window-scoped clicks. Shared-desktop pointer
+  gestures stay gated.
+
 ### Fixed
 
 - MCP OAuth login no longer fails with "Authorization server response missing
