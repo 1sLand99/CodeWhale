@@ -589,7 +589,7 @@ impl RuntimeThreadManager {
     /// user_input_timeout_seconds` governs (#6003): absent uses the built-in
     /// default, an explicit 0 returns `None` and the decision waits
     /// indefinitely.
-    fn approval_decision_timeout(&self) -> Option<Duration> {
+    pub(crate) fn approval_decision_timeout(&self) -> Option<Duration> {
         #[cfg(test)]
         {
             let ms = TEST_APPROVAL_DECISION_TIMEOUT_MS.load(std::sync::atomic::Ordering::SeqCst);

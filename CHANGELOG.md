@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Automation runs that need a tool approval no longer die as silent
+  idle-timeout cancels: a pending approval suspends the idle watchdog for its
+  decision window, and an unanswered window settles the run Failed with the
+  recorded reason instead of a silent Canceled (#6118).
 - `/mcp` no longer freezes the console while a turn is running: the panel
   opens immediately from the last known MCP snapshot with a receipt naming
   the wait, and live-pool mutations say their refresh is deferred instead of
