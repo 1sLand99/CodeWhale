@@ -31,6 +31,9 @@ pub enum AutomationCellKind {
     Completed,
     /// A run genuinely crashed — the only kind that may wear Failure red.
     Failed,
+    /// A run was canceled by the operator, a cancel timeout or shutdown
+    /// (#6162). Consequential enough to see, never a failure.
+    Canceled,
     /// Missed slots collapsed into a single delivery.
     Coalesced,
     /// A scheduled run was missed while the app was down.
@@ -53,7 +56,7 @@ impl AutomationCellKind {
             Self::Fired | Self::Started => ChromeInk::Active,
             Self::Completed => ChromeInk::Outcome,
             Self::Failed => ChromeInk::Failure,
-            Self::Coalesced | Self::Missed | Self::Expired => ChromeInk::Attention,
+            Self::Canceled | Self::Coalesced | Self::Missed | Self::Expired => ChromeInk::Attention,
             Self::Mutated => ChromeInk::Info,
         }
     }
@@ -68,6 +71,7 @@ impl AutomationCellKind {
             Self::Started => MessageId::AutomationReceiptStarted,
             Self::Completed => MessageId::AutomationReceiptCompleted,
             Self::Failed => MessageId::AutomationRunStatusFailed,
+            Self::Canceled => MessageId::AutomationRunStatusCanceled,
             Self::Coalesced => MessageId::AutomationReceiptCoalesced,
             Self::Missed => MessageId::AutomationReceiptMissed,
             Self::Expired => MessageId::AutomationReceiptExpired,
@@ -197,6 +201,7 @@ mod tests {
         );
         assert_eq!(AutomationCellKind::Failed.chrome_ink(), ChromeInk::Failure);
         for kind in [
+            AutomationCellKind::Canceled,
             AutomationCellKind::Coalesced,
             AutomationCellKind::Missed,
             AutomationCellKind::Expired,
@@ -218,6 +223,7 @@ mod tests {
                 AutomationCellKind::Fired,
                 AutomationCellKind::Started,
                 AutomationCellKind::Completed,
+                AutomationCellKind::Canceled,
                 AutomationCellKind::Coalesced,
                 AutomationCellKind::Missed,
                 AutomationCellKind::Expired,

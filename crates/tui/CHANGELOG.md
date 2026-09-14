@@ -36,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A canceled automation run now settles with a transcript receipt that names
+  the cancellation (by request, cancel timeout, or shutdown) instead of
+  vanishing from the live band silently. The receipt wears attention ink and
+  never lights the failure demand; the run record keeps the cancellation
+  reason as its error detail. (#6162)
 - A failed workflow run no longer settles silently: its terminal failure
   raises a sticky error toast naming the cause (dispatch, schema, or script
   errors), alongside the existing panel state (#5528).

@@ -46,6 +46,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Fixed",
         "items": [
+          "A canceled automation run now settles with a transcript receipt that names the cancellation (by request, cancel timeout, or shutdown) instead of vanishing from the live band silently. The receipt wears attention ink and never lights the failure demand; the run record keeps the cancellation reason as its error detail. (#6162)",
           "A failed workflow run no longer settles silently: its terminal failure raises a sticky error toast naming the cause (dispatch, schema, or script errors), alongside the existing panel state (#5528).",
           "MCP OAuth re-login now forces the provider's consent screen: logout only clears the local token, so without a prompt the provider silently re-granted the same account/workspace and a re-login could never change it. /mcp logout and codewhale mcp logout also say plainly that they clear local credentials only (#6040).",
           "Session retention no longer deletes transcripts once the store reaches the cap: the oldest active session is archived — still openable from the picker's archived view — instead of being unlinked, and archived records sit outside the cap until they are pruned (#6136).",
@@ -56,7 +57,7 @@ export const CHANGELOG: ChangelogRelease[] = [
           "/mcp no longer freezes the console while a turn is running: the panel opens immediately from the last known MCP snapshot with a receipt naming the wait, and live-pool mutations say their refresh is deferred instead of parking the UI event loop behind the running turn (#6159).",
           "MCP OAuth login no longer fails with \"Authorization server response missing required issuer\" against servers that implement RFC 9207, such as Cloudflare's mcp.cloudflare.com. The local callback listener now keeps the iss parameter from the redirect and hands it to the token exchange so the callback binds to the discovered issuer; servers that do not send iss keep working unchanged. (#6157)"
         ],
-        "itemCount": 9
+        "itemCount": 10
       }
     ]
   },
