@@ -449,17 +449,31 @@ pub(crate) async fn handle_bang_shell_input(
         }
     };
 
-    engine_handle
-        .send(Op::RunShellCommand {
-            command: command.to_string(),
-            mode: app.mode,
-            allow_shell: app.allow_shell,
-            trust_mode: app.trust_mode,
-            auto_approve: app_auto_approve_enabled(app),
-            approval_mode: app.approval_mode,
-        })
-        .await?;
-    app.status_message = Some(format!("Shell command submitted: {command}"));
+    // #6150: composer input never awaits a full op channel — a saturated
+    // engine reports busy instead of freezing the loop.
+    match engine_handle.tx_op.clone().try_reserve_owned() {
+        Ok(permit) => {
+            engine_handle.send_reserved_op(
+                permit,
+                Op::RunShellCommand {
+                    command: command.to_string(),
+                    mode: app.mode,
+                    allow_shell: app.allow_shell,
+                    trust_mode: app.trust_mode,
+                    auto_approve: app_auto_approve_enabled(app),
+                    approval_mode: app.approval_mode,
+                },
+            );
+            app.status_message = Some(format!("Shell command submitted: {command}"));
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            app.status_message =
+                Some("Engine busy — shell command not sent; try again".to_string());
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            return Err(anyhow::anyhow!("engine channel closed"));
+        }
+    }
     Ok(true)
 }
 
@@ -1436,6 +1450,11 @@ pub(crate) async fn handle_view_events(
                             }
                         };
                         sync_runtime_workspace_state(task_manager, app.workspace.clone()).await;
+                        // #6150 audit: these sends may await a full op channel,
+                        // and that await is load-bearing — the session switch
+                        // is already committed UI-side, so each op must land in
+                        // order (drop = engine/UI desync). A wedge is possible
+                        // only while a saturated engine finishes its turn.
                         if respawn {
                             let _ = engine_handle.send(Op::Shutdown).await;
                             *engine_handle =
@@ -2091,11 +2110,12 @@ pub(crate) async fn handle_view_events(
             }
             ViewEvent::SidebarAgentCancel { agent_id } => {
                 app.status_message = Some(format!("Cancelling {agent_id}..."));
+                // #6150: the input path never awaits a full op channel. The
+                // cancel is retryable; a rejected send surfaces immediately.
                 if engine_handle
-                    .send(Op::CancelSubAgent {
+                    .try_send(Op::CancelSubAgent {
                         agent_id: agent_id.clone(),
                     })
-                    .await
                     .is_err()
                 {
                     app.status_message = Some(format!("Could not cancel {agent_id}"));
@@ -2574,18 +2594,39 @@ pub(crate) async fn handle_view_events(
             }
             ViewEvent::BacktrackConfirm => {
                 if let Some(depth) = app.backtrack.confirm() {
-                    apply_backtrack(app, depth);
-                    let _ = engine_handle
-                        .send(Op::SyncSession {
-                            session_id: app.current_session_id.clone(),
-                            messages: app.api_messages.clone(),
-                            system_prompt: app.system_prompt.clone(),
-                            system_prompt_override: false,
-                            model: app.model.clone(),
-                            workspace: app.workspace.clone(),
-                            mode: app.mode,
-                        })
-                        .await;
+                    // Reserve the slot before mutating history (#6150): the
+                    // loop must not await a full op channel, and applying the
+                    // backtrack without delivering SyncSession would desync
+                    // the engine's messages from ours.
+                    match engine_handle.tx_op.clone().try_reserve_owned() {
+                        Ok(permit) => {
+                            apply_backtrack(app, depth);
+                            engine_handle.send_reserved_op(
+                                permit,
+                                Op::SyncSession {
+                                    session_id: app.current_session_id.clone(),
+                                    messages: app.api_messages.clone(),
+                                    system_prompt: app.system_prompt.clone(),
+                                    system_prompt_override: false,
+                                    model: app.model.clone(),
+                                    workspace: app.workspace.clone(),
+                                    mode: app.mode,
+                                },
+                            );
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            app.status_message = Some(
+                                "Engine busy — backtrack not applied; try again in a moment"
+                                    .to_string(),
+                            );
+                            app.needs_redraw = true;
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                            app.status_message =
+                                Some("Engine stopped — backtrack not applied".to_string());
+                            app.needs_redraw = true;
+                        }
+                    }
                 }
             }
             ViewEvent::BacktrackCancel => {

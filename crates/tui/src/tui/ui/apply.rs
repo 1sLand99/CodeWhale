@@ -1663,24 +1663,22 @@ pub(crate) async fn apply_command_result(
                 let inputs =
                     build_preview_request_inputs(app, config, engine_handle, hypothetical_prompt)
                         .await;
-                if let Err(err) = engine_handle
-                    .send(Op::PreviewOutboundRequest {
-                        inputs: Box::new(inputs),
-                        json,
-                        base_prompt_only,
-                    })
-                    .await
-                {
+                // #6150: the input path never awaits a full op channel; a
+                // rejected preview is reported and retryable.
+                if let Err(err) = engine_handle.try_send(Op::PreviewOutboundRequest {
+                    inputs: Box::new(inputs),
+                    json,
+                    base_prompt_only,
+                }) {
                     app.status_message = Some(format!("Cannot preview request: {err}"));
                 }
             }
             AppAction::CancelSubAgent { agent_id } => {
                 app.status_message = Some(format!("Cancelling {agent_id}..."));
                 if engine_handle
-                    .send(Op::CancelSubAgent {
+                    .try_send(Op::CancelSubAgent {
                         agent_id: agent_id.clone(),
                     })
-                    .await
                     .is_err()
                 {
                     app.status_message = Some(format!("Could not cancel {agent_id}"));
@@ -1917,9 +1915,14 @@ pub(crate) async fn apply_command_result(
                 }
             }
             AppAction::UpdateStreamChunkTimeout(timeout_secs) => {
-                let _ = engine_handle
-                    .send(Op::SetStreamChunkTimeout { timeout_secs })
-                    .await;
+                // #6150: the input path never awaits a full op channel.
+                if engine_handle
+                    .try_send(Op::SetStreamChunkTimeout { timeout_secs })
+                    .is_err()
+                {
+                    app.status_message =
+                        Some("Engine busy — setting not applied; try again".to_string());
+                }
             }
             AppAction::UpdateSubagentRuntimeConfig {
                 enabled,
@@ -1929,8 +1932,8 @@ pub(crate) async fn apply_command_result(
                 api_timeout_secs,
                 heartbeat_timeout_secs,
             } => {
-                let _ = engine_handle
-                    .send(Op::SetSubagentRuntimeConfig {
+                if engine_handle
+                    .try_send(Op::SetSubagentRuntimeConfig {
                         enabled,
                         max_subagents,
                         launch_concurrency,
@@ -1938,15 +1941,30 @@ pub(crate) async fn apply_command_result(
                         api_timeout_secs,
                         heartbeat_timeout_secs,
                     })
-                    .await;
+                    .is_err()
+                {
+                    app.status_message =
+                        Some("Engine busy — setting not applied; try again".to_string());
+                }
             }
             AppAction::UpdateSearchProvider { provider } => {
-                let effective_provider = config.set_search_provider(provider);
-                let _ = engine_handle
-                    .send(Op::SetSearchProvider {
-                        provider: effective_provider,
-                    })
-                    .await;
+                // Reserve before committing the config change so a full
+                // channel cannot desync the engine from it.
+                match engine_handle.tx_op.clone().try_reserve_owned() {
+                    Ok(permit) => {
+                        let effective_provider = config.set_search_provider(provider);
+                        engine_handle.send_reserved_op(
+                            permit,
+                            Op::SetSearchProvider {
+                                provider: effective_provider,
+                            },
+                        );
+                    }
+                    Err(_) => {
+                        app.status_message =
+                            Some("Engine busy — provider not applied; try again".to_string());
+                    }
+                }
             }
             AppAction::UpdatePromptSuggestion { enabled } => {
                 config.prompt_suggestion = Some(enabled);
@@ -1957,7 +1975,13 @@ pub(crate) async fn apply_command_result(
                 }
             }
             AppAction::SetAdvisorEnabled { enabled } => {
-                let _ = engine_handle.send(Op::SetAdvisorEnabled { enabled }).await;
+                if engine_handle
+                    .try_send(Op::SetAdvisorEnabled { enabled })
+                    .is_err()
+                {
+                    app.status_message =
+                        Some("Engine busy — setting not applied; try again".to_string());
+                }
             }
             AppAction::OpenConfigView => {
                 if app.view_stack.top_kind() != Some(ModalKind::Config) {
@@ -2309,8 +2333,12 @@ pub(crate) async fn apply_command_result(
                 try_queue_manual_compaction(app, config, engine_handle, focus);
             }
             AppAction::PurgeContext => {
-                app.status_message = Some("Agent purging context...".to_string());
-                let _ = engine_handle.send(Op::PurgeContext).await;
+                if engine_handle.try_send(Op::PurgeContext).is_err() {
+                    app.status_message =
+                        Some("Engine busy — purge not sent; try again".to_string());
+                } else {
+                    app.status_message = Some("Agent purging context...".to_string());
+                }
             }
             AppAction::TaskAdd { prompt } => {
                 let owner_session_id = app
