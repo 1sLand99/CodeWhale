@@ -1777,6 +1777,12 @@ where
 pub struct TuiConfig {
     pub alternate_screen: Option<String>,
     pub mouse_capture: Option<bool>,
+    /// Copy a transcript drag selection as Markdown source (`true`, the
+    /// default) instead of rendered terminal text. The payload projects every
+    /// intersected cell through the same canonical serialization Ctrl-Y and
+    /// `/copy` use. Set `false` to restore the rendered-text payload (#6156).
+    /// PRIMARY selection on Linux always keeps rendered text.
+    pub selection_copy_markdown: Option<bool>,
     /// Legacy setting retained for config compatibility. Raw mode is set
     /// directly on the terminal-owning thread; this value has no effect.
     pub terminal_probe_timeout_ms: Option<u64>,

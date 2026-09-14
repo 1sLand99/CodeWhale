@@ -2242,5 +2242,6 @@
   "NotificationWebApproved": "Approuvé sur le Web.",
   "NotificationWebDenied": "Refusé sur le Web.",
   "NotificationInputSubmitFailed": "Impossible d'envoyer votre réponse : {error}. Réessayez.",
-  "PagerActionConfirm": "Confirmer"
+  "PagerActionConfirm": "Confirmer",
+"SelectionCopiedAsMarkdown": "Sélection copiée en Markdown ({count})"
 }

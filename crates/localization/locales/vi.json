@@ -2242,5 +2242,6 @@
   "NotificationWebApproved": "Đã chấp thuận trên web.",
   "NotificationWebDenied": "Đã từ chối trên web.",
   "NotificationInputSubmitFailed": "Không thể gửi câu trả lời của bạn: {error}. Hãy thử lại.",
-  "PagerActionConfirm": "Xác nhận"
+  "PagerActionConfirm": "Xác nhận",
+"SelectionCopiedAsMarkdown": "Đã sao chép vùng chọn dưới dạng Markdown ({count})"
 }

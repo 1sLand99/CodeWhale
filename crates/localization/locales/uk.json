@@ -2242,5 +2242,6 @@
   "NotificationWebApproved": "Схвалено у вебінтерфейсі.",
   "NotificationWebDenied": "Відхилено у вебінтерфейсі.",
   "NotificationInputSubmitFailed": "Не вдалося надіслати відповідь: {error}. Спробуйте ще раз.",
-  "PagerActionConfirm": "Підтвердити"
+  "PagerActionConfirm": "Підтвердити",
+"SelectionCopiedAsMarkdown": "Виділення скопійовано як Markdown ({count})"
 }

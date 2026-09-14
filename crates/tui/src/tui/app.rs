@@ -932,6 +932,10 @@ pub struct ViewportState {
     pub transcript_selection: TranscriptSelection,
     pub selection_autoscroll: Option<SelectionAutoscroll>,
     pub transcript_scrollbar_dragging: bool,
+    /// Copy transcript drag selections as Markdown source (see
+    /// `TuiConfig::selection_copy_markdown`). Resolved from config at startup;
+    /// defaults to on.
+    pub selection_copy_markdown: bool,
     pub last_transcript_area: Option<Rect>,
     pub last_composer_area: Option<Rect>,
     /// Selectable targets from the latest painted frame. Cleared before every
@@ -985,6 +989,7 @@ impl Default for ViewportState {
             transcript_selection: TranscriptSelection::default(),
             selection_autoscroll: None,
             transcript_scrollbar_dragging: false,
+            selection_copy_markdown: true,
             last_transcript_area: None,
             last_composer_area: None,
             interaction_targets: crate::tui::tideline::InteractionRegistry::default(),

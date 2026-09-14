@@ -2242,5 +2242,6 @@
   "NotificationWebApproved": "वेब पर मंज़ूरी दी गई।",
   "NotificationWebDenied": "वेब पर अस्वीकार किया गया।",
   "NotificationInputSubmitFailed": "आपका जवाब भेजा नहीं जा सका: {error}। फिर से कोशिश करें।",
-  "PagerActionConfirm": "पुष्टि करें"
+  "PagerActionConfirm": "पुष्टि करें",
+"SelectionCopiedAsMarkdown": "चयन Markdown के रूप में कॉपी किया गया ({count})"
 }

@@ -2242,5 +2242,6 @@
   "NotificationWebApproved": "Disetujui di web.",
   "NotificationWebDenied": "Ditolak di web.",
   "NotificationInputSubmitFailed": "Jawaban Anda tidak dapat dikirim: {error}. Coba lagi.",
-  "PagerActionConfirm": "Konfirmasi"
+  "PagerActionConfirm": "Konfirmasi",
+"SelectionCopiedAsMarkdown": "Pilihan disalin sebagai Markdown ({count})"
 }

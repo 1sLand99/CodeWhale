@@ -2242,5 +2242,6 @@
   "NotificationWebApproved": "웹에서 승인되었습니다.",
   "NotificationWebDenied": "웹에서 거부되었습니다.",
   "NotificationInputSubmitFailed": "답변을 제출하지 못했습니다: {error}. 다시 시도하세요.",
-  "PagerActionConfirm": "확인"
+  "PagerActionConfirm": "확인",
+"SelectionCopiedAsMarkdown": "선택 영역을 Markdown으로 복사했습니다 ({count})"
 }

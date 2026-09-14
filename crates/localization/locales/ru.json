@@ -2242,5 +2242,6 @@
   "NotificationWebApproved": "Одобрено в веб-интерфейсе.",
   "NotificationWebDenied": "Отклонено в веб-интерфейсе.",
   "NotificationInputSubmitFailed": "Не удалось отправить ответ: {error}. Попробуйте ещё раз.",
-  "PagerActionConfirm": "Подтвердить"
+  "PagerActionConfirm": "Подтвердить",
+"SelectionCopiedAsMarkdown": "Выделение скопировано как Markdown ({count})"
 }

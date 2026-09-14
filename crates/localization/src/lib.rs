@@ -2462,6 +2462,7 @@ pub enum MessageId {
     ConfigHintFeatureVisionModel,
     ConfigHintGoalCommand,
     ConfigHintWorkflow,
+    SelectionCopiedAsMarkdown,
 }
 
 #[allow(dead_code)]
@@ -4711,6 +4712,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::ConfigHintFeatureVisionModel,
     MessageId::ConfigHintGoalCommand,
     MessageId::ConfigHintWorkflow,
+    MessageId::SelectionCopiedAsMarkdown,
 ];
 
 pub fn tr(locale: Locale, id: MessageId) -> Cow<'static, str> {

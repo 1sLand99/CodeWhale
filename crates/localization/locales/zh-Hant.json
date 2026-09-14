@@ -2242,5 +2242,6 @@
   "NotificationWebApproved": "已在網頁上核准。",
   "NotificationWebDenied": "已在網頁上拒絕。",
   "NotificationInputSubmitFailed": "無法提交你的回答：{error}。請再試一次。",
-  "PagerActionConfirm": "確認"
+  "PagerActionConfirm": "確認",
+"SelectionCopiedAsMarkdown": "已將所選內容複製為 Markdown（{count}）"
 }

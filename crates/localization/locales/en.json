@@ -2242,5 +2242,6 @@
   "NotificationWebApproved": "Approved on the web.",
   "NotificationWebDenied": "Denied on the web.",
   "NotificationInputSubmitFailed": "Could not submit your answer: {error}. Try again.",
-  "PagerActionConfirm": "Confirm"
+  "PagerActionConfirm": "Confirm",
+"SelectionCopiedAsMarkdown": "Selection copied as Markdown ({count})"
 }

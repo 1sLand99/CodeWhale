@@ -2242,5 +2242,6 @@
   "NotificationWebApproved": "ウェブで承認されました。",
   "NotificationWebDenied": "ウェブで拒否されました。",
   "NotificationInputSubmitFailed": "回答を送信できませんでした：{error}。もう一度お試しください。",
-  "PagerActionConfirm": "確認"
+  "PagerActionConfirm": "確認",
+"SelectionCopiedAsMarkdown": "選択範囲をMarkdownとしてコピーしました（{count}）"
 }
