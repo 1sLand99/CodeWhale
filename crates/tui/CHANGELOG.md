@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filtered and paginated `get_app_state`, `focus`/`get_value`, and
   `strategy:"app"` window-scoped clicks. Shared-desktop pointer
   gestures stay gated.
+- The bundled first-party catalog pins marketplace revision `ca6be22`, so
+  installing Computer Use from the Extensions listing fetches the same 0.4.0
+  source and the published notarized 0.4.0 Mac app.
 
 ### Fixed
 
