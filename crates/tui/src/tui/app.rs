@@ -3372,7 +3372,7 @@ impl App {
     }
 
     /// Cycle through modes in reverse.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn cycle_mode_reverse(&mut self) {
         let next = self.mode.previous();
         let outcome = self.select_mode(next);
@@ -3865,7 +3865,7 @@ impl App {
 
     /// Add `delta` to the parent-turn session cost and bump the displayed
     /// high-water mark so the footer total never reverses (#244).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn accrue_session_cost(&mut self, delta: f64) {
         self.accrue_session_cost_estimate(CostEstimate::usd_only(delta));
     }
@@ -4089,7 +4089,7 @@ impl App {
 
     /// Add `delta` to the running sub-agent cost and bump the displayed
     /// high-water mark so the footer total never reverses (#244).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn accrue_subagent_cost(&mut self, delta: f64) {
         self.accrue_subagent_cost_estimate(CostEstimate::usd_only(delta));
     }
@@ -4172,7 +4172,7 @@ impl App {
     /// Read the visible session+sub-agent cost. Guaranteed monotonic across
     /// reconciliation events (cache adjustments, provisional → final swaps)
     /// for the lifetime of one session (#244).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn displayed_session_cost(&self) -> f64 {
         self.displayed_session_cost_for_currency(CostCurrency::Usd)
     }
@@ -5728,7 +5728,7 @@ impl App {
     /// Park a legacy pending steer. New keyboard handling routes running-turn
     /// drafts through Ctrl+Enter (same-turn steer) or Enter (next-turn
     /// follow-up).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn push_pending_steer(&mut self, message: QueuedMessage) {
         self.pending_steers.push_back(message);
         self.submit_pending_steers_after_interrupt = true;

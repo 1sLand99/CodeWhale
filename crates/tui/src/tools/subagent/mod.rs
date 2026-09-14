@@ -3430,7 +3430,7 @@ impl SubAgentManager {
 
     /// Number of child prompts currently awaiting a person.
     #[must_use]
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn pending_child_approvals(&self) -> usize {
         self.child_approvals.len()
     }
@@ -6602,12 +6602,12 @@ impl SubAgentManager {
         self.coordination_summary_for(&agent_id, recent_limit)
     }
 
-    #[allow(dead_code)] // coord list/wait surfaces; wired when agents/list hosts go live
+    #[cfg(test)] // coord list/wait surfaces; wired when agents/list hosts go live
     pub fn queued_mail_depth(&self, agent_id: &str) -> Option<usize> {
         self.queued_mail.get(agent_id).map(VecDeque::len)
     }
 
-    #[allow(dead_code)] // followup honesty probe for coordination tools
+    #[cfg(test)] // followup honesty probe for coordination tools
     pub fn child_was_woken(&self, agent_id: &str) -> bool {
         self.woken_agents.get(agent_id).copied().unwrap_or(false)
     }

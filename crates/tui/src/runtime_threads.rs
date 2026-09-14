@@ -5457,12 +5457,12 @@ impl RuntimeThreadManager {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn pending_approvals_count(&self) -> usize {
         self.pending_approvals.lock().len()
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn pending_dynamic_tools_count(&self) -> usize {
         self.pending_dynamic_tools.lock().len()
     }
@@ -12559,14 +12559,14 @@ fn tool_kind_for_name(name: &str) -> TurnItemKind {
 /// The helper is the testable contract here — actual TUI wire-up to the
 /// resume flow is a follow-up.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // consumed by #128 follow-up TUI resume wiring; tested here.
+#[cfg(test)] // consumed by #128 follow-up TUI resume wiring; tested here.
 pub struct AgentRebindHint {
     pub agent_id: String,
     pub status: AgentRebindStatus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
+#[cfg(test)]
 pub enum AgentRebindStatus {
     Spawned,
     InProgress,
@@ -12584,7 +12584,7 @@ pub enum AgentRebindStatus {
 /// open to mutation by subsequent live mailbox envelopes (each envelope's
 /// `agent_id` matches one already in the rebind map).
 #[must_use]
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn collect_agent_rebind_hints(events: &[RuntimeEventRecord]) -> Vec<AgentRebindHint> {
     use std::collections::BTreeMap;
     let mut latest: BTreeMap<String, (AgentRebindStatus, u64, bool)> = BTreeMap::new();

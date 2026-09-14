@@ -3261,7 +3261,7 @@ impl ShellManager {
     }
 
     /// Remember a restart-stale job so the UI can show it instead of hiding it.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn remember_stale_job(
         &mut self,
         id: impl Into<String>,

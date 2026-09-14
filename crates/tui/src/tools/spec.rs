@@ -964,7 +964,7 @@ impl ToolContext {
     /// Attach an LSP manager so that edit tools can auto-inject diagnostics
     /// into their results after a successful file modification (#428).
     #[must_use]
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn with_lsp_manager(mut self, manager: Arc<LspManager>) -> Self {
         self.lsp_manager = Some(manager);
         self
@@ -1207,7 +1207,7 @@ impl ToolContext {
     }
 
     /// Set the trust mode.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn with_trust_mode(mut self, trust: bool) -> Self {
         self.trust_mode = trust;
         self
@@ -1443,7 +1443,7 @@ pub trait ToolSpec: Send + Sync {
     }
 
     /// Returns whether this tool is sandboxable.
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn is_sandboxable(&self) -> bool {
         self.capabilities().contains(&ToolCapability::Sandboxable)
     }
