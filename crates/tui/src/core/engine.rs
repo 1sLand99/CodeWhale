@@ -88,6 +88,17 @@ use super::turn::{TurnContext, post_turn_snapshot, pre_turn_snapshot};
 use codewhale_models::Role;
 
 const ENGINE_OP_CHANNEL_CAPACITY: usize = 32;
+/// Bound on the sub-agent completion inbox (#6147). One completion per
+/// terminal child plus small re-queue batches; a full inbox drops the wake,
+/// and the terminal-results synthesis path still delivers the content it
+/// names at the next explicit turn — the same deferral a host-managed
+/// engine already has.
+const SUBAGENT_COMPLETION_CHANNEL_CAPACITY: usize = 256;
+/// Bound on the MCP session-boot progress channel (#6147). One progress
+/// update per pending server plus the terminal update; progress drops are
+/// tolerated by design (`let _ =`), and the terminal `Finished` waits for a
+/// slot instead of being dropped.
+const MCP_BOOT_CHANNEL_CAPACITY: usize = 64;
 const GOAL_CONTINUATION_FAILURE_DETAIL_MAX_BYTES: usize = 512;
 const PLAN_SHELL_NETWORK_DENIED_HINT: &str = "Shell command blocked: Plan mode runs shell commands in a read-only sandbox — no writes, no network. Use Act mode (`/mode act`) for any command that creates or modifies files, or that needs network access.";
 
@@ -832,7 +843,7 @@ pub struct Engine {
     /// True while the spawn-time concurrent connect pass is still running.
     /// `mcp_tools` snapshots ready servers instead of waiting on optionals.
     mcp_boot_in_flight: bool,
-    mcp_boot_rx: Option<mpsc::UnboundedReceiver<McpBootUpdate>>,
+    mcp_boot_rx: Option<mpsc::Receiver<McpBootUpdate>>,
     mcp_boot_done: Option<tokio::sync::watch::Receiver<bool>>,
     /// Generation owned by the currently installed boot receiver. Terminal
     /// cleanup is conditional on this exact value so an older pass can never
@@ -877,11 +888,11 @@ pub struct Engine {
     /// Wakeup channel for the parent turn loop when a direct child sub-agent
     /// terminates (issue #756). Cloned into `SubAgentRuntime` so the runtime
     /// can fan completion events back into the engine.
-    tx_subagent_completion: mpsc::UnboundedSender<SubAgentCompletion>,
+    tx_subagent_completion: mpsc::Sender<SubAgentCompletion>,
     /// Receiver paired with `tx_subagent_completion`. Drained at the
     /// turn-loop's empty-tool_uses branch to surface `<codewhale:subagent.done>`
     /// sentinels into the parent's transcript before deciding to end the turn.
-    pub(super) rx_subagent_completion: mpsc::UnboundedReceiver<SubAgentCompletion>,
+    pub(super) rx_subagent_completion: mpsc::Receiver<SubAgentCompletion>,
     /// Sub-agent completions already injected into the parent transcript.
     /// Channel delivery and watchdog reconciliation both mark this set so a
     /// dropped event can be synthesized once without duplicating a later
@@ -1432,7 +1443,8 @@ impl Engine {
         let (tx_user_input, rx_user_input) = mpsc::channel(32);
         let (tx_steer, rx_steer) = mpsc::channel(64);
         let turn_controls = Arc::new(StdMutex::new(handle::TurnControls::default()));
-        let (tx_subagent_completion, rx_subagent_completion) = mpsc::unbounded_channel();
+        let (tx_subagent_completion, rx_subagent_completion) =
+            mpsc::channel(SUBAGENT_COMPLETION_CHANNEL_CAPACITY);
         let cancel_token = CancellationToken::new();
         let shared_cancel_token = Arc::new(StdMutex::new(cancel_token.clone()));
         let cancel_reason: Arc<StdMutex<Option<CancelReason>>> = Arc::new(StdMutex::new(None));
@@ -3836,7 +3848,7 @@ impl Engine {
         // background-shell wake. Keep the receipt queued for the next explicit
         // turn; canceled workers must not restart their interrupted parent.
         if self.cancel_token.is_cancelled() {
-            let _ = self.tx_subagent_completion.send(first);
+            let _ = self.tx_subagent_completion.try_send(first);
             return;
         }
         let mut completions = Vec::new();
@@ -3950,7 +3962,7 @@ impl Engine {
                 // Admission lost to cancellation before the transcript took
                 // ownership. Leave these receipts for the next explicit turn.
                 for completion in completions {
-                    let _ = self.tx_subagent_completion.send(completion);
+                    let _ = self.tx_subagent_completion.try_send(completion);
                 }
             }
         }
@@ -6471,7 +6483,7 @@ impl Engine {
 
         self.mcp_boot_in_flight = true;
         self.mcp_boot_generation = Some(generation);
-        let (progress_tx, progress_rx) = mpsc::unbounded_channel();
+        let (progress_tx, progress_rx) = mpsc::channel(MCP_BOOT_CHANNEL_CAPACITY);
         let (done_tx, done_rx) = tokio::sync::watch::channel(false);
         self.mcp_boot_rx = Some(progress_rx);
         self.mcp_boot_done = Some(done_rx);
@@ -6524,7 +6536,7 @@ impl Engine {
                                 .insert(name, crate::mcp::format_mcp_error_for_display(&error));
                         }
                     }
-                    let _ = progress_tx.send(McpBootUpdate::Progress {
+                    let _ = progress_tx.try_send(McpBootUpdate::Progress {
                         generation,
                         authority_errors: Arc::clone(&authority_errors),
                         connection_errors: connection_errors.clone(),
@@ -6541,11 +6553,15 @@ impl Engine {
                             .or_insert_with(|| crate::mcp::format_mcp_error_for_display(&error));
                     }
                 }
-                let _ = progress_tx.send(McpBootUpdate::Finished {
-                    generation,
-                    authority_errors,
-                    connection_errors,
-                });
+                // The terminal update carries the boot's settlement signal;
+                // wait for a slot instead of dropping it (#6147).
+                let _ = progress_tx
+                    .send(McpBootUpdate::Finished {
+                        generation,
+                        authority_errors,
+                        connection_errors,
+                    })
+                    .await;
                 let _ = done_tx.send(true);
             },
         );
