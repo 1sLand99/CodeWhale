@@ -1089,6 +1089,7 @@
   "ApprovalRiskReview": "审查",
   "ApprovalRiskElevated": "需要批准",
   "ApprovalRiskDestructive": "破坏性",
+  "ApprovalTimedOutDenied": "审批请求已超时 - 已拒绝",
   "ApprovalCategorySafe": "安全",
   "ApprovalCategoryFileWrite": "文件写入",
   "ApprovalCategoryShell": "Bash",
@@ -1627,6 +1628,7 @@
   "FleetDestProjectDisabledSave": "本次会话已禁用项目配置文件 (--no-project-config)；未保存任何内容。请选择个人，或不带该参数重新启动。",
   "WorkflowStatusWaiting": "等待中",
   "WorkflowStatusDegraded": "部分失败",
+  "WorkflowRunFailedToast": "工作流运行失败",
   "WorkflowDebrief": "复盘：{done}/{total} 已完结 · {failed} 失败 · {cancelled} 已取消 · {elapsed}",
   "WorkflowDispatchFailureLine": "调度失败 · {slot}：{message}",
   "WorkflowDispatchFailuresOmitted": "调度失败：另有 {count} 条较早记录未显示",
@@ -2240,5 +2242,10 @@
   "NotificationWebApproved": "已在网页上批准。",
   "NotificationWebDenied": "已在网页上拒绝。",
   "NotificationInputSubmitFailed": "无法提交你的回答：{error}。请重试。",
-  "PagerActionConfirm": "确认"
+  "PagerActionConfirm": "确认",
+"SelectionCopiedAsMarkdown": "已将所选内容复制为 Markdown（{count}）",
+  "McpShowCachedWhileTurnRuns": "有回合正在运行；显示最近已知的 MCP 快照。回合结束后重新运行 /mcp 可实时刷新。",
+  "McpShowUnavailableWhileTurnRuns": "有回合正在运行，尚未观测到 MCP 快照。回合结束后请重新运行 /mcp。",
+  "McpLivePoolRefreshDeferredWhileTurnRuns": "有回合正在运行；实时 MCP 池刷新已推迟。回合结束后请运行 /mcp reload。",
+  "McpRetryDeferredWhileTurnRuns": "有回合正在运行；请在回合结束后重新运行 /mcp retry {server}。"
 }

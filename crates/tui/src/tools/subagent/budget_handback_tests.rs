@@ -14,7 +14,7 @@ struct Fixture {
     release_report: Arc<Notify>,
     cancel: CancellationToken,
     resume_runtime: SubAgentRuntime,
-    completions: mpsc::UnboundedReceiver<SubAgentCompletion>,
+    completions: mpsc::Receiver<SubAgentCompletion>,
     mailbox: MailboxReceiver,
 }
 
@@ -161,7 +161,7 @@ async fn fixture(
         Duration::from_secs(2)
     };
     let cancel = runtime.cancel_token.clone();
-    let (parent_tx, completions) = mpsc::unbounded_channel();
+    let (parent_tx, completions) = mpsc::channel(16);
     runtime.parent_completion_tx = Some(parent_tx);
     let (mailbox, mailbox_rx) = Mailbox::new(CancellationToken::new());
     runtime.mailbox = Some(mailbox);

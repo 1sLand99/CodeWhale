@@ -1068,6 +1068,7 @@
   "ApprovalRiskReview": "ПРОВЕРКА",
   "ApprovalRiskElevated": "ОДОБРЕНИЕ",
   "ApprovalRiskDestructive": "РАЗРУШИТЕЛЬНО",
+  "ApprovalTimedOutDenied": "Запрос на одобрение истёк - отклонено",
   "ApprovalCategorySafe": "Безопасно",
   "ApprovalCategoryFileWrite": "Запись файла",
   "ApprovalCategoryShell": "Bash",
@@ -1604,6 +1605,7 @@
   "FleetDestProjectDisabledSave": "Профили проекта отключены в этом сеансе (--no-project-config); ничего не сохранено. Выберите «Личный» или перезапустите без этого флага.",
   "WorkflowStatusWaiting": "ожидание",
   "WorkflowStatusDegraded": "частично",
+  "WorkflowRunFailedToast": "Запуск workflow завершился ошибкой",
   "WorkflowDebrief": "итоги: {done}/{total} завершено · {failed} ошибок · {cancelled} отменено · {elapsed}",
   "WorkflowDispatchFailureLine": "сбой запуска · {slot}: {message}",
   "WorkflowDispatchFailuresOmitted": "сбои запуска: не показано предыдущих — {count}",
@@ -2240,5 +2242,10 @@
   "NotificationWebApproved": "Одобрено в веб-интерфейсе.",
   "NotificationWebDenied": "Отклонено в веб-интерфейсе.",
   "NotificationInputSubmitFailed": "Не удалось отправить ответ: {error}. Попробуйте ещё раз.",
-  "PagerActionConfirm": "Подтвердить"
+  "PagerActionConfirm": "Подтвердить",
+"SelectionCopiedAsMarkdown": "Выделение скопировано как Markdown ({count})",
+  "McpShowCachedWhileTurnRuns": "Идёт ход; показан последний известный снимок MCP. Запустите /mcp снова после завершения хода, чтобы обновить его вживую.",
+  "McpShowUnavailableWhileTurnRuns": "Идёт ход, и снимок MCP ещё не наблюдался. Запустите /mcp снова после завершения хода.",
+  "McpLivePoolRefreshDeferredWhileTurnRuns": "Идёт ход; обновление живого пула MCP отложено. Запустите /mcp reload после завершения хода.",
+  "McpRetryDeferredWhileTurnRuns": "Идёт ход; повторите /mcp retry {server} после завершения хода."
 }

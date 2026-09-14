@@ -787,19 +787,31 @@ pub async fn run_tui(
                             ));
                         }
                         Err(err) => {
-                            app.status_message = Some(format!("Failed to restore session: {err}"));
+                            crate::tui::ui::session_state::surface_session_load_failure(
+                                &mut app,
+                                format!("Failed to restore session: {err}"),
+                            );
                         }
                     }
                 }
                 Err(err) => {
-                    app.status_message = Some(format!("Failed to restore session goal: {err}"));
+                    crate::tui::ui::session_state::surface_session_load_failure(
+                        &mut app,
+                        format!("Failed to restore session goal: {err}"),
+                    );
                 }
             },
             Ok(None) => {
-                app.status_message = Some("No sessions found to resume".to_string());
+                crate::tui::ui::session_state::surface_session_load_failure(
+                    &mut app,
+                    "No sessions found to resume".to_string(),
+                );
             }
             Err(e) => {
-                app.status_message = Some(format!("Failed to load session: {e}"));
+                crate::tui::ui::session_state::surface_session_load_failure(
+                    &mut app,
+                    format!("Failed to load session: {e}"),
+                );
             }
         }
     }
@@ -3765,6 +3777,7 @@ pub(crate) async fn run_event_loop(
                                     &approval_key,
                                     intent_summary.as_deref(),
                                     config.approval_default_selection(),
+                                    config.approval_timeout(),
                                 );
                                 log_sensitive_event(
                                     "tool.approval.prompted",

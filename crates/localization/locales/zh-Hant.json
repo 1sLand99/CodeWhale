@@ -191,6 +191,7 @@
   "ApprovalRepoLawTitle": "儲存庫規則",
   "ApprovalRepoLawWarning": "儲存庫規則會在啟用審批的權限模式下要求確認。",
   "ApprovalRiskDestructive": "破壞性",
+  "ApprovalTimedOutDenied": "審批請求逾時 - 已拒絕",
   "ApprovalRiskElevated": "需要批准",
   "ApprovalRiskReview": "審查",
   "ApprovalSaveAskRuleHint": "  s 僅允許一次 + 一律詢問精確規則",
@@ -1775,6 +1776,7 @@
   "WorkflowReceiptVia": "路由 {value}",
   "WorkflowStatusWaiting": "等待中",
   "WorkflowStatusDegraded": "部分失敗",
+  "WorkflowRunFailedToast": "工作流程執行失敗",
   "WorkflowTranscriptDetails": "記錄：完整執行 JSON 可在工具詳情中查看（{details}）",
   "XaiAuthChoiceApiKeyOption": "xAI API 金鑰 — 輸入或粘貼，然後儲存到 xAI 提供商槽位",
   "XaiAuthChoiceDeviceOAuthOption": "原生設備 OAuth — 通過瀏覽器/設備程式碼登入，並使用 Codewhale 自有儲存",
@@ -2240,5 +2242,10 @@
   "NotificationWebApproved": "已在網頁上核准。",
   "NotificationWebDenied": "已在網頁上拒絕。",
   "NotificationInputSubmitFailed": "無法提交你的回答：{error}。請再試一次。",
-  "PagerActionConfirm": "確認"
+  "PagerActionConfirm": "確認",
+"SelectionCopiedAsMarkdown": "已將所選內容複製為 Markdown（{count}）",
+  "McpShowCachedWhileTurnRuns": "有回合正在執行；顯示最近已知的 MCP 快照。回合結束後重新執行 /mcp 可即時重新整理。",
+  "McpShowUnavailableWhileTurnRuns": "有回合正在執行，尚未觀測到 MCP 快照。請於回合結束後重新執行 /mcp。",
+  "McpLivePoolRefreshDeferredWhileTurnRuns": "有回合正在執行；即時 MCP 集區重新整理已延後。請於回合結束後執行 /mcp reload。",
+  "McpRetryDeferredWhileTurnRuns": "有回合正在執行；請於回合結束後重新執行 /mcp retry {server}。"
 }

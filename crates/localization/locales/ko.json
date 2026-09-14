@@ -1091,6 +1091,7 @@
   "ApprovalRiskReview": "검토",
   "ApprovalRiskElevated": "승인",
   "ApprovalRiskDestructive": "파괴적",
+  "ApprovalTimedOutDenied": "승인 요청 시간 초과 - 거부됨",
   "ApprovalCategorySafe": "안전",
   "ApprovalCategoryFileWrite": "파일 쓰기",
   "ApprovalCategoryShell": "Bash",
@@ -1627,6 +1628,7 @@
   "FleetDestProjectDisabledSave": "이 세션에서는 프로젝트 프로필이 비활성화되어 있습니다 (--no-project-config). 아무것도 저장되지 않았습니다. 개인을 선택하거나 플래그 없이 다시 시작하세요.",
   "WorkflowStatusWaiting": "대기",
   "WorkflowStatusDegraded": "일부 실패",
+  "WorkflowRunFailedToast": "워크플로 실행 실패",
   "WorkflowDebrief": "결과 보고: {done}/{total} 종결 · {failed} 실패 · {cancelled} 취소 · {elapsed}",
   "WorkflowDispatchFailureLine": "디스패치 실패 · {slot}: {message}",
   "WorkflowDispatchFailuresOmitted": "디스패치 실패: 이전 {count}건은 표시하지 않음",
@@ -2240,5 +2242,10 @@
   "NotificationWebApproved": "웹에서 승인되었습니다.",
   "NotificationWebDenied": "웹에서 거부되었습니다.",
   "NotificationInputSubmitFailed": "답변을 제출하지 못했습니다: {error}. 다시 시도하세요.",
-  "PagerActionConfirm": "확인"
+  "PagerActionConfirm": "확인",
+"SelectionCopiedAsMarkdown": "선택 영역을 Markdown으로 복사했습니다 ({count})",
+  "McpShowCachedWhileTurnRuns": "턴이 실행 중이라 마지막으로 알려진 MCP 스냅샷을 표시합니다. 실시간 갱신은 턴이 끝난 뒤 /mcp를 다시 실행하세요.",
+  "McpShowUnavailableWhileTurnRuns": "턴이 실행 중이며 아직 MCP 스냅샷이 확인되지 않았습니다. 턴이 끝난 뒤 /mcp를 다시 실행하세요.",
+  "McpLivePoolRefreshDeferredWhileTurnRuns": "턴이 실행 중이라 실시간 MCP 풀 갱신이 보류됩니다. 턴이 끝난 뒤 /mcp reload를 실행하세요.",
+  "McpRetryDeferredWhileTurnRuns": "턴이 실행 중입니다. 턴이 끝난 뒤 /mcp retry {server}를 다시 실행하세요."
 }

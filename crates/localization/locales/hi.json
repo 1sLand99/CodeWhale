@@ -1068,6 +1068,7 @@
   "ApprovalRiskReview": "समीक्षा",
   "ApprovalRiskElevated": "अनुमति",
   "ApprovalRiskDestructive": "विनाशकारी",
+  "ApprovalTimedOutDenied": "अनुमोदन अनुरोध का समय समाप्त - अस्वीकृत",
   "ApprovalCategorySafe": "सुरक्षित",
   "ApprovalCategoryFileWrite": "फ़ाइल लेखन",
   "ApprovalCategoryShell": "Bash",
@@ -1604,6 +1605,7 @@
   "FleetDestProjectDisabledSave": "इस सत्र में प्रोजेक्ट प्रोफ़ाइलें अक्षम हैं (--no-project-config); कुछ भी सहेजा नहीं गया। व्यक्तिगत चुनें या फ़्लैग के बिना पुनः आरंभ करें।",
   "WorkflowStatusWaiting": "प्रतीक्षारत",
   "WorkflowStatusDegraded": "आंशिक",
+  "WorkflowRunFailedToast": "वर्कफ़्लो रन विफल रहा",
   "WorkflowDebrief": "डिब्रीफ़: {done}/{total} निपटे · {failed} विफल · {cancelled} रद्द · {elapsed}",
   "WorkflowDispatchFailureLine": "डिस्पैच विफल · {slot}: {message}",
   "WorkflowDispatchFailuresOmitted": "डिस्पैच विफलताएँ: पिछली {count} नहीं दिखाई गईं",
@@ -2240,5 +2242,10 @@
   "NotificationWebApproved": "वेब पर मंज़ूरी दी गई।",
   "NotificationWebDenied": "वेब पर अस्वीकार किया गया।",
   "NotificationInputSubmitFailed": "आपका जवाब भेजा नहीं जा सका: {error}। फिर से कोशिश करें।",
-  "PagerActionConfirm": "पुष्टि करें"
+  "PagerActionConfirm": "पुष्टि करें",
+"SelectionCopiedAsMarkdown": "चयन Markdown के रूप में कॉपी किया गया ({count})",
+  "McpShowCachedWhileTurnRuns": "एक टर्न चल रहा है; अंतिम ज्ञात MCP स्नैपशॉट दिखाया जा रहा है। लाइव रीफ़्रेश के लिए टर्न पूरा होने पर /mcp फिर चलाएँ।",
+  "McpShowUnavailableWhileTurnRuns": "एक टर्न चल रहा है और अभी तक कोई MCP स्नैपशॉट नहीं देखा गया। टर्न पूरा होने पर /mcp फिर चलाएँ।",
+  "McpLivePoolRefreshDeferredWhileTurnRuns": "एक टर्न चल रहा है; लाइव MCP पूल रीफ़्रेश स्थगित है। टर्न पूरा होने पर /mcp reload चलाएँ।",
+  "McpRetryDeferredWhileTurnRuns": "एक टर्न चल रहा है; टर्न पूरा होने पर /mcp retry {server} फिर चलाएँ।"
 }

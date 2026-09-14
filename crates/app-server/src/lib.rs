@@ -2965,7 +2965,7 @@ mod tests {
     fn sentinel_bridge() -> SharedRuntimeBridge {
         Arc::new(Mutex::new(RuntimeBridge {
             base_url: "http://127.0.0.1:0".to_string(),
-            client: reqwest::Client::new(),
+            client: codewhale_release::tls::reqwest_client(),
             auth_token: None,
             child: None,
             thread_map: HashMap::from([("stdio-1".to_string(), "runtime-1".to_string())]),

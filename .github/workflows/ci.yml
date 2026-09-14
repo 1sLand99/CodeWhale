@@ -412,6 +412,11 @@ jobs:
           else
             python3 scripts/check-command-migration-manifest.py
           fi
+      - name: Check reqwest client constructors
+        if: needs.changes.outputs.heavy == 'true'
+        run: |
+          python3 scripts/test_check_reqwest_builders.py
+          python3 scripts/check-reqwest-builders.py
       # Clippy above runs without `--all-targets`, so it cannot see dead code
       # that only tests keep alive. This ratchet covers that blind spot by
       # refusing to let the `#[allow(dead_code)]` total rise (#4785).

@@ -1466,6 +1466,7 @@ pub enum MessageId {
     NotificationTurnFailed,
     NotificationProviderFallback,
     ApprovalNeverPostureBlocked,
+    ApprovalTimedOutDenied,
     NotificationWebApproved,
     NotificationWebDenied,
     NotificationInputSubmitFailed,
@@ -2010,6 +2011,7 @@ pub enum MessageId {
     // Workflow panel.
     WorkflowStatusWaiting,
     WorkflowStatusDegraded,
+    WorkflowRunFailedToast,
     WorkflowDebrief,
     WorkflowDispatchFailureLine,
     WorkflowDispatchFailuresOmitted,
@@ -2460,6 +2462,11 @@ pub enum MessageId {
     ConfigHintFeatureVisionModel,
     ConfigHintGoalCommand,
     ConfigHintWorkflow,
+    SelectionCopiedAsMarkdown,
+    McpShowCachedWhileTurnRuns,
+    McpShowUnavailableWhileTurnRuns,
+    McpLivePoolRefreshDeferredWhileTurnRuns,
+    McpRetryDeferredWhileTurnRuns,
 }
 
 #[allow(dead_code)]
@@ -3776,6 +3783,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::NotificationTurnFailed,
     MessageId::NotificationProviderFallback,
     MessageId::ApprovalNeverPostureBlocked,
+    MessageId::ApprovalTimedOutDenied,
     MessageId::NotificationWebApproved,
     MessageId::NotificationWebDenied,
     MessageId::NotificationInputSubmitFailed,
@@ -4272,6 +4280,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::FleetDestProjectDisabledSave,
     MessageId::WorkflowStatusWaiting,
     MessageId::WorkflowStatusDegraded,
+    MessageId::WorkflowRunFailedToast,
     MessageId::WorkflowDebrief,
     MessageId::WorkflowDispatchFailureLine,
     MessageId::WorkflowDispatchFailuresOmitted,
@@ -4707,6 +4716,11 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::ConfigHintFeatureVisionModel,
     MessageId::ConfigHintGoalCommand,
     MessageId::ConfigHintWorkflow,
+    MessageId::SelectionCopiedAsMarkdown,
+    MessageId::McpShowCachedWhileTurnRuns,
+    MessageId::McpShowUnavailableWhileTurnRuns,
+    MessageId::McpLivePoolRefreshDeferredWhileTurnRuns,
+    MessageId::McpRetryDeferredWhileTurnRuns,
 ];
 
 pub fn tr(locale: Locale, id: MessageId) -> Cow<'static, str> {

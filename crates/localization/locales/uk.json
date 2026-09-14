@@ -1068,6 +1068,7 @@
   "ApprovalRiskReview": "ПЕРЕГЛЯД",
   "ApprovalRiskElevated": "СХВАЛЕННЯ",
   "ApprovalRiskDestructive": "РУЙНІВНА",
+  "ApprovalTimedOutDenied": "Запит на схвалення минув - відхилено",
   "ApprovalCategorySafe": "Безпечна",
   "ApprovalCategoryFileWrite": "Запис файлу",
   "ApprovalCategoryShell": "Bash",
@@ -1604,6 +1605,7 @@
   "FleetDestProjectDisabledSave": "Профілі проєкту вимкнено в цьому сеансі (--no-project-config); нічого не збережено. Виберіть «Особистий» або перезапустіть без цього прапорця.",
   "WorkflowStatusWaiting": "очікування",
   "WorkflowStatusDegraded": "частково",
+  "WorkflowRunFailedToast": "Запуск workflow завершився помилкою",
   "WorkflowDebrief": "підсумок: {done}/{total} завершено · {failed} невдало · {cancelled} скасовано · {elapsed}",
   "WorkflowDispatchFailureLine": "збій запуску · {slot}: {message}",
   "WorkflowDispatchFailuresOmitted": "збої запуску: не показано попередніх — {count}",
@@ -2240,5 +2242,10 @@
   "NotificationWebApproved": "Схвалено у вебінтерфейсі.",
   "NotificationWebDenied": "Відхилено у вебінтерфейсі.",
   "NotificationInputSubmitFailed": "Не вдалося надіслати відповідь: {error}. Спробуйте ще раз.",
-  "PagerActionConfirm": "Підтвердити"
+  "PagerActionConfirm": "Підтвердити",
+"SelectionCopiedAsMarkdown": "Виділення скопійовано як Markdown ({count})",
+  "McpShowCachedWhileTurnRuns": "Триває хід; показано останній відомий знімок MCP. Запустіть /mcp знову після завершення ходу, щоб оновити його наживо.",
+  "McpShowUnavailableWhileTurnRuns": "Триває хід, і знімок MCP ще не спостерігався. Запустіть /mcp знову після завершення ходу.",
+  "McpLivePoolRefreshDeferredWhileTurnRuns": "Триває хід; оновлення живого пулу MCP відкладено. Запустіть /mcp reload після завершення ходу.",
+  "McpRetryDeferredWhileTurnRuns": "Триває хід; повторіть /mcp retry {server} після завершення ходу."
 }

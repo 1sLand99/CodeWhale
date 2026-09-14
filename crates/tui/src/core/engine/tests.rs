@@ -2393,7 +2393,7 @@ async fn saturated_goal_controls_run_before_ready_idle_child_completion() {
     assert_eq!(handle.tx_op.capacity(), 0, "fixture must saturate mailbox");
     engine
         .tx_subagent_completion
-        .send(SubAgentCompletion {
+        .try_send(SubAgentCompletion {
             owner_session_id: engine.session.id.clone(),
             agent_id: "agent_ready_during_backpressure".to_string(),
             payload: "ready child completion".to_string(),
@@ -2491,7 +2491,7 @@ async fn unsaturated_goal_control_runs_before_ready_idle_child_completion() {
         .expect("queue unsaturated pause");
     engine
         .tx_subagent_completion
-        .send(SubAgentCompletion {
+        .try_send(SubAgentCompletion {
             owner_session_id: engine.session.id.clone(),
             agent_id: "agent_ready_without_backpressure".to_string(),
             payload: "ready child completion".to_string(),
@@ -4018,7 +4018,7 @@ async fn headless_host_drains_existing_engine_completion_inbox_before_exit() {
         .unwrap();
     engine
         .tx_subagent_completion
-        .send(SubAgentCompletion {
+        .try_send(SubAgentCompletion {
             owner_session_id: engine.session.id.clone(),
             agent_id: "headless-settled-child".into(),
             payload: "bounded local fixture evidence".into(),
@@ -4368,7 +4368,7 @@ async fn host_managed_engine_defers_idle_subagent_completion_to_explicit_turn() 
     let run_task = tokio::spawn(engine.run());
 
     tx_subagent_completion
-        .send(SubAgentCompletion {
+        .try_send(SubAgentCompletion {
             owner_session_id,
             agent_id: "agent_deferred".to_string(),
             payload: "deferred child result".to_string(),
@@ -22362,9 +22362,9 @@ async fn mcp_boot_catalog_refresh_declares_prefix_before_mailbox_delivery() {
     );
 
     engine.session.pending_prefix_change_reason = None;
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
     engine.mcp_boot_rx = Some(rx);
-    tx.send(McpBootUpdate::Progress {
+    tx.try_send(McpBootUpdate::Progress {
         generation: 1,
         authority_errors: Arc::new(HashMap::new()),
         connection_errors: HashMap::new(),
@@ -22379,6 +22379,42 @@ async fn mcp_boot_catalog_refresh_declares_prefix_before_mailbox_delivery() {
 }
 
 #[tokio::test]
+async fn subagent_completion_inbox_is_bounded() {
+    let (engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    let tx = engine.tx_subagent_completion.clone();
+    let completion = SubAgentCompletion {
+        owner_session_id: engine.session.id.clone(),
+        agent_id: "capacity-fixture".to_string(),
+        payload: "bounded inbox fixture".to_string(),
+    };
+
+    let mut accepted = 0usize;
+    while tx.try_send(completion.clone()).is_ok() {
+        accepted += 1;
+        assert!(
+            accepted <= SUBAGENT_COMPLETION_CHANNEL_CAPACITY,
+            "the inbox accepted more than its declared capacity"
+        );
+    }
+
+    assert_eq!(
+        accepted, SUBAGENT_COMPLETION_CHANNEL_CAPACITY,
+        "the completion inbox must be exactly bounded (#6147)"
+    );
+    assert!(
+        matches!(
+            tx.try_send(completion),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+        ),
+        "an over-capacity completion must be refused, not queued without bound"
+    );
+    assert_eq!(
+        engine.rx_subagent_completion.len(),
+        SUBAGENT_COMPLETION_CHANNEL_CAPACITY
+    );
+}
+
+#[tokio::test]
 async fn stale_boot_finished_does_not_clear_a_newer_receiver() {
     let tmp = tempdir().expect("tempdir");
     let engine_config = EngineConfig {
@@ -22386,7 +22422,7 @@ async fn stale_boot_finished_does_not_clear_a_newer_receiver() {
         ..Default::default()
     };
     let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
-    let (_newer_tx, newer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_newer_tx, newer_rx) = tokio::sync::mpsc::channel(16);
     engine.mcp_event_generation = 2;
     engine.mcp_boot_generation = Some(2);
     engine.mcp_boot_in_flight = true;

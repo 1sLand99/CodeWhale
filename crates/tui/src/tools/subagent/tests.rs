@@ -6500,7 +6500,7 @@ async fn model_wait_cancel_fans_in_once_and_preserves_checkpoint() {
         tokio::time::sleep(Duration::from_secs(60)).await;
     }));
 
-    let (completion_tx, mut completion_rx) = mpsc::unbounded_channel::<SubAgentCompletion>();
+    let (completion_tx, mut completion_rx) = mpsc::channel::<SubAgentCompletion>(16);
     let (mailbox, mut mailbox_rx) = Mailbox::new(CancellationToken::new());
     let (event_tx, mut event_rx) = mpsc::channel(8);
     let mut runtime = runtime_with_depth(1, Some(completion_tx));
@@ -6599,7 +6599,7 @@ async fn coordination_interrupt_fans_in_once_and_preserves_checkpoint() {
         tokio::time::sleep(Duration::from_secs(60)).await;
     }));
 
-    let (completion_tx, mut completion_rx) = mpsc::unbounded_channel::<SubAgentCompletion>();
+    let (completion_tx, mut completion_rx) = mpsc::channel::<SubAgentCompletion>(16);
     let (mailbox, mut mailbox_rx) = Mailbox::new(CancellationToken::new());
     let (event_tx, mut event_rx) = mpsc::channel(8);
     let mut runtime = runtime_with_depth(1, Some(completion_tx));
@@ -6791,7 +6791,7 @@ async fn completion_claim_preserves_running_gate_and_excludes_late_cancel() {
         "cancellation after the claim must not steal terminal ownership"
     );
 
-    let (completion_tx, mut completion_rx) = mpsc::unbounded_channel::<SubAgentCompletion>();
+    let (completion_tx, mut completion_rx) = mpsc::channel::<SubAgentCompletion>(16);
     let runtime = runtime_with_depth(1, Some(completion_tx));
     assert!(emit_parent_completion(
         &runtime,
@@ -9893,7 +9893,7 @@ async fn cleanup_auto_cancels_stale_running_agent_and_releases_slot() {
         tokio::time::sleep(Duration::from_secs(60)).await;
     }));
     let agent_id = agent.id.clone();
-    let (completion_tx, mut completion_rx) = mpsc::unbounded_channel::<SubAgentCompletion>();
+    let (completion_tx, mut completion_rx) = mpsc::channel::<SubAgentCompletion>(16);
     let (mailbox, mut mailbox_rx) = Mailbox::new(CancellationToken::new());
     let (event_tx, mut event_rx) = mpsc::channel(8);
     let mut runtime = runtime_with_depth(1, Some(completion_tx));
@@ -14851,7 +14851,7 @@ fn persist_round_trip_preserves_session_and_boot_ownership() {
 
 fn runtime_with_depth(
     spawn_depth: u32,
-    parent_completion_tx: Option<mpsc::UnboundedSender<SubAgentCompletion>>,
+    parent_completion_tx: Option<mpsc::Sender<SubAgentCompletion>>,
 ) -> SubAgentRuntime {
     let mut rt = stub_runtime();
     rt.spawn_depth = spawn_depth;
@@ -14861,7 +14861,7 @@ fn runtime_with_depth(
 
 #[test]
 fn emit_parent_completion_fires_for_direct_child() {
-    let (tx, mut rx) = mpsc::unbounded_channel::<SubAgentCompletion>();
+    let (tx, mut rx) = mpsc::channel::<SubAgentCompletion>(16);
     let runtime = runtime_with_depth(1, Some(tx));
 
     let sent = emit_parent_completion(&runtime, "agent_abc", "summary line\n<sentinel/>");
@@ -14890,7 +14890,7 @@ fn child_runtime_inherits_speech_output_dir() {
 
 #[test]
 fn emit_parent_completion_fires_for_nested_child() {
-    let (tx, mut rx) = mpsc::unbounded_channel::<SubAgentCompletion>();
+    let (tx, mut rx) = mpsc::channel::<SubAgentCompletion>(16);
     let runtime = runtime_with_depth(2, Some(tx));
 
     let sent = emit_parent_completion(&runtime, "agent_grandchild", "nested summary");
@@ -14906,7 +14906,7 @@ fn emit_parent_completion_fires_for_nested_child() {
 fn emit_parent_completion_skips_engine_self() {
     // depth 0 is the engine itself — the engine never spawns a task at
     // depth 0, but defend against accidental misuse.
-    let (tx, mut rx) = mpsc::unbounded_channel::<SubAgentCompletion>();
+    let (tx, mut rx) = mpsc::channel::<SubAgentCompletion>(16);
     let runtime = runtime_with_depth(0, Some(tx));
 
     let sent = emit_parent_completion(&runtime, "agent_root", "ignored");
@@ -14932,7 +14932,7 @@ fn emit_parent_completion_no_channel_is_noop() {
 
 #[test]
 fn emit_parent_completion_dropped_receiver_does_not_panic() {
-    let (tx, rx) = mpsc::unbounded_channel::<SubAgentCompletion>();
+    let (tx, rx) = mpsc::channel::<SubAgentCompletion>(16);
     drop(rx);
     let runtime = runtime_with_depth(1, Some(tx));
 
@@ -15041,7 +15041,7 @@ async fn run_subagent_task_claims_before_delivery_and_then_finalizes() {
     );
     agent.status = SubAgentStatus::Running;
 
-    let (completion_tx, mut completion_rx) = mpsc::unbounded_channel::<SubAgentCompletion>();
+    let (completion_tx, mut completion_rx) = mpsc::channel::<SubAgentCompletion>(16);
     let mut runtime = runtime_with_depth(1, Some(completion_tx));
     runtime.manager = Arc::clone(&manager);
     agent.terminal_delivery = Some(SubAgentTerminalDeliveryContext::from_runtime(&runtime));
@@ -15125,7 +15125,7 @@ async fn cancellation_wins_task_race_but_still_fans_in_exactly_once() {
     );
     agent.status = SubAgentStatus::Running;
 
-    let (completion_tx, mut completion_rx) = mpsc::unbounded_channel::<SubAgentCompletion>();
+    let (completion_tx, mut completion_rx) = mpsc::channel::<SubAgentCompletion>(16);
     let (mailbox, mut mailbox_rx) = Mailbox::new(CancellationToken::new());
     let (event_tx, mut event_rx) = mpsc::channel(8);
     let mut runtime = runtime_with_depth(1, Some(completion_tx));
@@ -15494,7 +15494,7 @@ async fn non_retryable_provider_failure_fans_in_to_every_terminal_sink() {
         "boot_test".to_string(),
     );
 
-    let (completion_tx, mut completion_rx) = mpsc::unbounded_channel::<SubAgentCompletion>();
+    let (completion_tx, mut completion_rx) = mpsc::channel::<SubAgentCompletion>(16);
     let (mailbox, mut mailbox_rx) = Mailbox::new(CancellationToken::new());
     let (event_tx, mut event_rx) = mpsc::channel(8);
     let (client, calls) = always_invalid_request_chat_client().await;
@@ -15616,7 +15616,7 @@ fn child_runtime_propagates_completion_tx_for_gating() {
     // The channel is cloned through `child_runtime()` so descendants carry
     // it. Running sub-agents replace the channel in the runtime handed to
     // their nested tool registry, so this propagation must not strand it.
-    let (tx, _rx) = mpsc::unbounded_channel::<SubAgentCompletion>();
+    let (tx, _rx) = mpsc::channel::<SubAgentCompletion>(16);
     let parent = runtime_with_depth(0, Some(tx));
 
     let child = parent.child_runtime();
@@ -15630,7 +15630,7 @@ fn child_runtime_propagates_completion_tx_for_gating() {
 
 #[test]
 fn nested_tool_runtime_routes_child_completions_to_local_inbox() {
-    let (root_tx, mut root_rx) = mpsc::unbounded_channel::<SubAgentCompletion>();
+    let (root_tx, mut root_rx) = mpsc::channel::<SubAgentCompletion>(16);
     let direct_child_runtime = runtime_with_depth(1, Some(root_tx));
     let fork_context = SubAgentForkContext {
         messages: Vec::new(),

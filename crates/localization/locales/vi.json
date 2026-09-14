@@ -1089,6 +1089,7 @@
   "ApprovalRiskReview": "XEM XÉT",
   "ApprovalRiskElevated": "PHÊ DUYỆT",
   "ApprovalRiskDestructive": "NGUY HẠI",
+  "ApprovalTimedOutDenied": "Yêu cầu phê duyệt quá hạn - bị từ chối",
   "ApprovalCategorySafe": "An toàn",
   "ApprovalCategoryFileWrite": "Ghi Tệp",
   "ApprovalCategoryShell": "Bash",
@@ -1627,6 +1628,7 @@
   "FleetDestProjectDisabledSave": "Hồ sơ dự án đã bị tắt trong phiên này (--no-project-config); chưa lưu gì. Hãy chọn Cá nhân hoặc khởi động lại không có cờ đó.",
   "WorkflowStatusWaiting": "chờ",
   "WorkflowStatusDegraded": "một phần",
+  "WorkflowRunFailedToast": "Chạy Workflow thất bại",
   "WorkflowDebrief": "tổng kết: {done}/{total} đã chốt · {failed} thất bại · {cancelled} đã hủy · {elapsed}",
   "WorkflowDispatchFailureLine": "điều phối thất bại · {slot}: {message}",
   "WorkflowDispatchFailuresOmitted": "lỗi điều phối: {count} lỗi trước đó không hiển thị",
@@ -2240,5 +2242,10 @@
   "NotificationWebApproved": "Đã chấp thuận trên web.",
   "NotificationWebDenied": "Đã từ chối trên web.",
   "NotificationInputSubmitFailed": "Không thể gửi câu trả lời của bạn: {error}. Hãy thử lại.",
-  "PagerActionConfirm": "Xác nhận"
+  "PagerActionConfirm": "Xác nhận",
+"SelectionCopiedAsMarkdown": "Đã sao chép vùng chọn dưới dạng Markdown ({count})",
+  "McpShowCachedWhileTurnRuns": "Đang có một lượt chạy; hiển thị ảnh chụp MCP đã biết gần nhất. Chạy lại /mcp sau khi lượt kết thúc để làm mới trực tiếp.",
+  "McpShowUnavailableWhileTurnRuns": "Đang có một lượt chạy và chưa quan sát được ảnh chụp MCP nào. Chạy lại /mcp sau khi lượt kết thúc.",
+  "McpLivePoolRefreshDeferredWhileTurnRuns": "Đang có một lượt chạy; việc làm mới pool MCP trực tiếp bị hoãn. Chạy /mcp reload sau khi lượt kết thúc.",
+  "McpRetryDeferredWhileTurnRuns": "Đang có một lượt chạy; chạy lại /mcp retry {server} sau khi lượt kết thúc."
 }

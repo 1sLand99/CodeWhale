@@ -2107,7 +2107,7 @@ impl SubAgentCompletion {
 #[derive(Clone)]
 struct SubAgentTerminalDeliveryContext {
     spawn_depth: u32,
-    parent_completion_tx: Option<mpsc::UnboundedSender<SubAgentCompletion>>,
+    parent_completion_tx: Option<mpsc::Sender<SubAgentCompletion>>,
     mailbox: Option<Mailbox>,
     event_tx: Option<mpsc::Sender<Event>>,
     /// Shared session namespace (root session id), cloned down the spawn
@@ -2141,7 +2141,9 @@ impl SubAgentTerminalDeliveryContext {
         if self.spawn_depth > 0
             && let Some(tx) = self.parent_completion_tx.as_ref()
         {
-            let _ = tx.send(completion.clone());
+            // A full inbox drops this wake; the terminal-results synthesis
+            // still delivers the completion at the next explicit turn (#6147).
+            let _ = tx.try_send(completion.clone());
         }
 
         if let Some(mailbox) = self.mailbox.as_ref() {
@@ -2502,7 +2504,7 @@ pub struct SubAgentRuntime {
     /// so nested children report to their orchestrating sub-agent instead of
     /// flooding the root parent. `None` when no consumer is wired (tests /
     /// legacy paths).
-    pub parent_completion_tx: Option<mpsc::UnboundedSender<SubAgentCompletion>>,
+    pub parent_completion_tx: Option<mpsc::Sender<SubAgentCompletion>>,
     /// Snapshot of the request prefix visible to an opt-in forked child.
     pub fork_context: Option<SubAgentForkContext>,
     /// The parent's MCP pool if available.
@@ -2722,10 +2724,7 @@ impl SubAgentRuntime {
     /// the runtime handed to their nested `agent` tool so child completions are
     /// routed back to the sub-agent that spawned them.
     #[must_use]
-    pub fn with_parent_completion_tx(
-        mut self,
-        tx: mpsc::UnboundedSender<SubAgentCompletion>,
-    ) -> Self {
+    pub fn with_parent_completion_tx(mut self, tx: mpsc::Sender<SubAgentCompletion>) -> Self {
         self.parent_completion_tx = Some(tx);
         self
     }
@@ -11606,7 +11605,7 @@ pub(crate) fn emit_parent_completion(
     let Some(tx) = runtime.parent_completion_tx.as_ref() else {
         return false;
     };
-    let _ = tx.send(SubAgentCompletion {
+    let _ = tx.try_send(SubAgentCompletion {
         owner_session_id: runtime.context.state_namespace.clone(),
         agent_id: agent_id.to_string(),
         payload: payload.to_string(),
@@ -12470,13 +12469,17 @@ fn record_agent_progress(
     );
 }
 
+/// Bound on the nested-agent completion inbox (#6147): one completion per
+/// terminated nested child, drained by the parent agent's turn loop.
+const CHILD_COMPLETION_CHANNEL_CAPACITY: usize = 64;
+
 fn runtime_for_nested_agent_tools(
     runtime: &SubAgentRuntime,
     parent_agent_id: &str,
     fork_context: SubAgentForkContext,
-) -> (SubAgentRuntime, mpsc::UnboundedReceiver<SubAgentCompletion>) {
+) -> (SubAgentRuntime, mpsc::Receiver<SubAgentCompletion>) {
     let (child_completion_tx, child_completion_rx) =
-        mpsc::unbounded_channel::<SubAgentCompletion>();
+        mpsc::channel::<SubAgentCompletion>(CHILD_COMPLETION_CHANNEL_CAPACITY);
     let runtime_for_tools = runtime
         .clone()
         .with_parent_completion_tx(child_completion_tx)
@@ -12489,7 +12492,7 @@ fn runtime_for_nested_agent_tools(
 }
 
 fn drain_child_completion_events(
-    child_completion_rx: &mut mpsc::UnboundedReceiver<SubAgentCompletion>,
+    child_completion_rx: &mut mpsc::Receiver<SubAgentCompletion>,
 ) -> Vec<SubAgentCompletion> {
     let mut completions = Vec::new();
     while let Ok(completion) = child_completion_rx.try_recv() {

@@ -1089,6 +1089,7 @@
   "ApprovalRiskReview": "REVISAR",
   "ApprovalRiskElevated": "APROBACIÓN",
   "ApprovalRiskDestructive": "DESTRUCTIVO",
+  "ApprovalTimedOutDenied": "La solicitud de aprobación agotó el tiempo de espera - rechazada",
   "ApprovalCategorySafe": "Seguro",
   "ApprovalCategoryFileWrite": "Escritura de Archivo",
   "ApprovalCategoryShell": "Bash",
@@ -1627,6 +1628,7 @@
   "FleetDestProjectDisabledSave": "Los perfiles de proyecto están desactivados en esta sesión (--no-project-config); no se guardó nada. Elige Personal o reinicia sin la opción.",
   "WorkflowStatusWaiting": "esperando",
   "WorkflowStatusDegraded": "degradado",
+  "WorkflowRunFailedToast": "La ejecución del Workflow falló",
   "WorkflowDebrief": "resumen: {done}/{total} resueltos · {failed} fallidos · {cancelled} cancelados · {elapsed}",
   "WorkflowDispatchFailureLine": "falló el despacho · {slot}: {message}",
   "WorkflowDispatchFailuresOmitted": "fallas de despacho: {count} anteriores sin mostrar",
@@ -2240,5 +2242,10 @@
   "NotificationWebApproved": "Aprobado en la web.",
   "NotificationWebDenied": "Rechazado en la web.",
   "NotificationInputSubmitFailed": "No se pudo enviar tu respuesta: {error}. Inténtalo de nuevo.",
-  "PagerActionConfirm": "Confirmar"
+  "PagerActionConfirm": "Confirmar",
+"SelectionCopiedAsMarkdown": "Selección copiada como Markdown ({count})",
+  "McpShowCachedWhileTurnRuns": "Hay un turno en curso; se muestra la última instantánea MCP conocida. Ejecuta /mcp de nuevo cuando termine el turno para actualizarla en vivo.",
+  "McpShowUnavailableWhileTurnRuns": "Hay un turno en curso y aún no se ha observado ninguna instantánea MCP. Ejecuta /mcp de nuevo cuando termine el turno.",
+  "McpLivePoolRefreshDeferredWhileTurnRuns": "Hay un turno en curso; la actualización del pool MCP en vivo queda aplazada. Ejecuta /mcp reload cuando termine el turno.",
+  "McpRetryDeferredWhileTurnRuns": "Hay un turno en curso; vuelve a ejecutar /mcp retry {server} cuando termine el turno."
 }

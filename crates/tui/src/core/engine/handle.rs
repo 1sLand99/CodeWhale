@@ -360,6 +360,16 @@ impl EngineHandle {
         Ok(())
     }
 
+    /// Deny a pending tool call because its interactive approval card
+    /// expired (#6101). Kept distinct from [`Self::deny_tool_call`] so the
+    /// receipt records a timeout instead of an operator denial.
+    pub async fn deny_tool_call_timed_out(&self, id: impl Into<String>) -> Result<()> {
+        self.tx_approval
+            .send(ApprovalDecision::TimedOut { id: id.into() })
+            .await?;
+        Ok(())
+    }
+
     /// Retry a tool call with an elevated sandbox policy.
     pub async fn retry_tool_with_policy(
         &self,

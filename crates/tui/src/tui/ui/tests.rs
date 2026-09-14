@@ -2225,6 +2225,87 @@ fn workflow_ui_events_apply_only_to_the_active_session_owner() {
 }
 
 #[test]
+fn failed_workflow_run_raises_a_sticky_error() {
+    let mut app = create_test_app();
+    app.current_session_id = Some("session-a".to_string());
+    let started = serde_json::json!({
+        "type": "run_started",
+        "at_ms": 1,
+        "workflow_goal": "Failing workflow"
+    });
+    assert!(apply_owned_workflow_ui_event(
+        &mut app,
+        "session-a",
+        "workflow-fail",
+        &started,
+    ));
+    assert!(
+        app.sticky_status.is_none(),
+        "starting a run must not raise a failure toast"
+    );
+
+    let completed = serde_json::json!({
+        "type": "run_completed",
+        "at_ms": 2,
+        "status": "failed",
+        "error": "task(): invalid options: unknown field `count`"
+    });
+    assert!(apply_owned_workflow_ui_event(
+        &mut app,
+        "session-a",
+        "workflow-fail",
+        &completed,
+    ));
+    let sticky = app
+        .sticky_status
+        .as_ref()
+        .expect("a failed workflow run must be loud (#5528)");
+    assert_eq!(sticky.level, StatusToastLevel::Error);
+    assert_eq!(
+        sticky.ttl_ms,
+        Some(crate::tui::app::App::STICKY_ERROR_TTL_MS)
+    );
+    assert!(
+        sticky.text.contains("Workflow run failed")
+            && sticky.text.contains("unknown field `count`"),
+        "the sticky strip must name the failure and its cause: {:?}",
+        sticky.text
+    );
+}
+
+#[test]
+fn successful_workflow_run_raises_no_failure_toast() {
+    let mut app = create_test_app();
+    app.current_session_id = Some("session-a".to_string());
+    let started = serde_json::json!({
+        "type": "run_started",
+        "at_ms": 1,
+        "workflow_goal": "Healthy workflow"
+    });
+    assert!(apply_owned_workflow_ui_event(
+        &mut app,
+        "session-a",
+        "workflow-ok",
+        &started,
+    ));
+    let succeeded = serde_json::json!({
+        "type": "run_completed",
+        "at_ms": 2,
+        "status": "succeeded"
+    });
+    assert!(apply_owned_workflow_ui_event(
+        &mut app,
+        "session-a",
+        "workflow-ok",
+        &succeeded,
+    ));
+    assert!(
+        app.sticky_status.is_none(),
+        "a successful run must not raise a failure toast"
+    );
+}
+
+#[test]
 fn workflow_panel_plain_letters_return_to_composer() {
     let mut app = create_test_app();
     app.workflow_panel = Some(crate::tui::widgets::workflow_panel::WorkflowPanel::new(
@@ -2459,6 +2540,181 @@ fn plain_mcp_show_refreshes_discovery_counts() {
     assert!(!mcp_ui_action_refreshes_discovery(&McpUiAction::Init {
         force: false,
     }));
+}
+
+#[tokio::test]
+async fn mcp_show_while_turn_running_serves_cached_snapshot_without_engine_roundtrip() {
+    use crate::mcp::{McpManagerSnapshot, McpServerCapabilityMetadata, McpServerSnapshot};
+    use crate::tui::app::McpUiAction;
+
+    let mut app = create_test_app();
+    app.is_loading = true;
+    app.mcp_snapshot = Some(McpManagerSnapshot {
+        config_path: PathBuf::from("mcp.json"),
+        config_exists: true,
+        reload_required: false,
+        servers: vec![McpServerSnapshot {
+            name: "cached".into(),
+            enabled: true,
+            required: false,
+            transport: "stdio".into(),
+            command_or_url: "cached-mcp".into(),
+            connect_timeout: 5,
+            execute_timeout: 5,
+            read_timeout: 5,
+            connected: true,
+            error: None,
+            auth_required: false,
+            capability_metadata: McpServerCapabilityMetadata::LegacyFallback,
+            tools: Vec::new(),
+            resources: Vec::new(),
+            prompts: Vec::new(),
+        }],
+    });
+    let mut mock = mock_engine_handle();
+    tokio::time::timeout(
+        Duration::from_millis(200),
+        handle_mcp_ui_action(
+            &mut app,
+            &mock.handle,
+            &Config::default(),
+            McpUiAction::Show,
+        ),
+    )
+    .await
+    .expect("bare /mcp must return immediately while a turn is in flight (#6159)");
+    assert!(
+        mock.rx_op.try_recv().is_err(),
+        "no engine op may be started while a turn owns the engine loop"
+    );
+    assert_eq!(app.view_stack.top_kind(), Some(ModalKind::Extensions));
+    assert_eq!(app.mcp_configured_count, 1);
+    assert!(
+        app.history.iter().any(|cell| matches!(
+            cell,
+            HistoryCell::System { content }
+                if content.contains("last known MCP snapshot")
+        )),
+        "the receipt must name the cached snapshot the panel is showing"
+    );
+}
+
+#[tokio::test]
+async fn mcp_show_while_turn_running_without_snapshot_fails_closed() {
+    use crate::tui::app::McpUiAction;
+
+    let mut app = create_test_app();
+    app.is_loading = true;
+    assert!(app.mcp_snapshot.is_none());
+    let mut mock = mock_engine_handle();
+    tokio::time::timeout(
+        Duration::from_millis(200),
+        handle_mcp_ui_action(
+            &mut app,
+            &mock.handle,
+            &Config::default(),
+            McpUiAction::Show,
+        ),
+    )
+    .await
+    .expect("bare /mcp must return immediately while a turn is in flight (#6159)");
+    assert!(mock.rx_op.try_recv().is_err());
+    assert_ne!(
+        app.view_stack.top_kind(),
+        Some(ModalKind::Extensions),
+        "without an observed snapshot there is nothing honest to show"
+    );
+    assert!(app.history.iter().any(|cell| matches!(
+        cell,
+        HistoryCell::System { content }
+            if content.contains("no MCP snapshot has been observed")
+    )));
+}
+
+#[tokio::test]
+async fn mcp_mutations_while_turn_running_defer_the_live_pool_refresh() {
+    use crate::tui::app::McpUiAction;
+
+    let temp = tempfile::tempdir().expect("temporary MCP home");
+    let path = temp.path().join("mcp.json");
+    crate::mcp::add_server_config(
+        &path,
+        "fixture".to_string(),
+        Some("fixture-mcp".to_string()),
+        None,
+        Vec::new(),
+        None,
+    )
+    .expect("seed MCP server");
+    crate::mcp::set_server_enabled(&path, "fixture", false).expect("disable MCP server");
+
+    let mut app = create_test_app();
+    app.mcp_config_path = path.clone();
+    app.is_loading = true;
+    let mut mock = mock_engine_handle();
+    tokio::time::timeout(
+        Duration::from_millis(200),
+        handle_mcp_ui_action(
+            &mut app,
+            &mock.handle,
+            &Config::default(),
+            McpUiAction::Enable {
+                name: "fixture".to_string(),
+            },
+        ),
+    )
+    .await
+    .expect("a mutation must not park the UI loop behind the running turn (#6159)");
+    assert!(
+        mock.rx_op.try_recv().is_err(),
+        "the live-pool reload op must not be sent while a turn owns the engine"
+    );
+    assert!(
+        crate::mcp::load_config(&app.mcp_config_path)
+            .expect("persisted MCP config")
+            .servers
+            .get("fixture")
+            .expect("persisted fixture")
+            .is_enabled(),
+        "the durable config still advances while the live pool waits"
+    );
+    assert!(app.mcp_reload_required);
+    assert!(app.history.iter().any(|cell| matches!(
+        cell,
+        HistoryCell::System { content } if content.contains("Enabled MCP server 'fixture'")
+    )));
+    assert!(app.history.iter().any(|cell| matches!(
+        cell,
+        HistoryCell::System { content }
+            if content.contains("live MCP pool refresh is deferred")
+    )));
+}
+
+#[tokio::test]
+async fn mcp_retry_while_turn_running_names_the_deferral_and_never_awaits() {
+    use crate::tui::app::McpUiAction;
+
+    let mut app = create_test_app();
+    app.is_loading = true;
+    let mut mock = mock_engine_handle();
+    tokio::time::timeout(
+        Duration::from_millis(200),
+        handle_mcp_ui_action(
+            &mut app,
+            &mock.handle,
+            &Config::default(),
+            McpUiAction::Retry {
+                name: "flaky".to_string(),
+            },
+        ),
+    )
+    .await
+    .expect("retry must not park the UI loop behind the running turn (#6159)");
+    assert!(mock.rx_op.try_recv().is_err());
+    assert!(app.history.iter().any(|cell| matches!(
+        cell,
+        HistoryCell::System { content } if content.contains("/mcp retry flaky")
+    )));
 }
 
 #[tokio::test]
@@ -2882,6 +3138,28 @@ async fn mcp_reload_failure_keeps_pending_state_and_live_snapshot() {
             if content.contains("live tool pool is unchanged")
                 && content.contains("safe config parse failure")
     )));
+}
+
+#[test]
+fn session_load_failure_is_durable_in_the_transcript() {
+    // #6138: a failed resume must not exist only in the status line, which
+    // the next footer update replaces.
+    let mut app = create_test_app();
+    let before = app.history.len();
+    crate::tui::ui::session_state::surface_session_load_failure(
+        &mut app,
+        "Failed to load session: No session found with prefix: abc".to_string(),
+    );
+    assert_eq!(app.history.len(), before + 1);
+    assert!(matches!(
+        app.history.last(),
+        Some(HistoryCell::Error { message, .. })
+            if message.contains("No session found with prefix")
+    ));
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Failed to load session: No session found with prefix: abc")
+    );
 }
 
 #[test]
@@ -3655,7 +3933,19 @@ fn mouse_selection_autocopies_on_release_without_ctrl_c() {
         },
     );
 
-    assert_eq!(app.status_message.as_deref(), Some("Selection copied"));
+    // Drag-release autocopy now takes the Markdown-source path (#6156): the
+    // clipboard holds canonical cell content and the receipt is a toast
+    // naming the projected cell count, not the legacy status sink.
+    assert!(
+        app.status_message.is_none(),
+        "markdown copy must not touch the legacy status sink"
+    );
+    let toast = app.status_toasts.back().expect("markdown copy toast");
+    assert!(
+        toast.text.contains("(1)"),
+        "toast names the projected cell count, got {:?}",
+        toast.text
+    );
     assert!(
         app.clipboard
             .last_written_text()
@@ -22685,6 +22975,7 @@ fn approval_prompt_uses_event_input_after_message_complete_drain() {
         "approval-key",
         None,
         crate::config::ApprovalDefaultSelection::Deny,
+        None,
     );
 
     let mut view = app.view_stack.pop().expect("approval view");
@@ -22718,6 +23009,7 @@ fn approval_prompt_uses_configured_default_selection() {
         "approval-key",
         None,
         crate::config::ApprovalDefaultSelection::AllowOnce,
+        None,
     );
 
     let mut view = app.view_stack.pop().expect("approval view");
@@ -22753,6 +23045,7 @@ fn patch_approval_modal_does_not_displace_the_active_file_receipt() {
         "approval-key",
         None,
         crate::config::ApprovalDefaultSelection::Deny,
+        None,
     );
 
     assert!(
@@ -22778,6 +23071,41 @@ fn patch_approval_modal_does_not_displace_the_active_file_receipt() {
     assert_eq!(
         cell.receipt.as_ref().map(|receipt| receipt.outcome_label()),
         Some("Updated src/lib.rs".to_string())
+    );
+}
+
+#[tokio::test]
+async fn timed_out_approval_denial_reaches_the_engine_as_a_timeout() {
+    let mut app = create_test_app();
+    let mut config = Config::default();
+    let mut engine = mock_engine_handle();
+
+    apply_approval_decision(
+        &mut app,
+        &mut engine.handle,
+        &mut config,
+        ApprovalDecisionEvent {
+            tool_id: "tool-timeout".to_string(),
+            tool_name: "exec_shell".to_string(),
+            decision: ReviewDecision::Denied,
+            timed_out: true,
+            approval_key: "approval-timeout-key".to_string(),
+            approval_grouping_key: "approval-group".to_string(),
+            persistent_rules: Vec::new(),
+        },
+    )
+    .await;
+
+    assert_eq!(
+        engine.recv_approval_event().await,
+        Some(crate::core::engine::MockApprovalEvent::TimedOut {
+            id: "tool-timeout".to_string()
+        }),
+        "a bound expiry must reach the engine as a timeout, not an operator denial"
+    );
+    assert!(
+        !app.approval_session_denied.contains("approval-timeout-key"),
+        "an expired card must not cache a session denial"
     );
 }
 

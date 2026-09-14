@@ -730,7 +730,14 @@ impl App {
                 line_began_with_slash: false,
                 startup_input_unproven: false,
             },
-            viewport: ViewportState::default(),
+            viewport: ViewportState {
+                selection_copy_markdown: config
+                    .tui
+                    .as_ref()
+                    .and_then(|tui| tui.selection_copy_markdown)
+                    .unwrap_or(true),
+                ..ViewportState::default()
+            },
             pet_watch: crate::tui::pet_watch::PetWatch::default(),
             work_surface: {
                 let mut state = crate::tui::work_surface::WorkSurfaceState::with_layout(

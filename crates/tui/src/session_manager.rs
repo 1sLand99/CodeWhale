@@ -27,10 +27,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use uuid::Uuid;
 
-/// Maximum number of sessions to retain
+/// Maximum number of active (non-archived) transcripts to retain.
+///
+/// A transcript that falls out of this window is archived, never unlinked
+/// (#6136); archived records sit outside the cap until the user prunes them,
+/// and empty auto-created stubs are capped separately (#6137).
 const MAX_SESSIONS: usize = 50;
+/// Maximum empty auto-created stubs ("New Session", zero messages) to keep.
+///
+/// The product writes one per boot; they are junk that must never occupy a
+/// transcript's slot in the cap (#6137).
+const MAX_EMPTY_SESSION_STUBS: usize = 10;
 /// Maximum session title length, in `char`s. Matches the bound the session
 /// picker's rename prompt has always enforced.
 pub const MAX_SESSION_TITLE_CHARS: usize = 100;
@@ -1103,6 +1113,10 @@ fn serialize_saved_session(session: &SavedSession) -> io::Result<String> {
 pub struct SessionManager {
     /// Directory where sessions are stored
     sessions_dir: PathBuf,
+    /// Re-entrancy guard: archiving a record saves it, and every save runs
+    /// retention. Without this, a backlog past the cap would nest one
+    /// cleanup per archived transcript instead of draining in one pass.
+    retention_in_progress: AtomicBool,
 }
 
 /// One interactive editor owns a session's unsent text until its last queued
@@ -1313,7 +1327,10 @@ impl SessionManager {
         let sessions_dir = normalize_managed_dir(sessions_dir)?;
         // Ensure the sessions directory exists
         fs::create_dir_all(&sessions_dir)?;
-        Ok(Self { sessions_dir })
+        Ok(Self {
+            sessions_dir,
+            retention_in_progress: AtomicBool::new(false),
+        })
     }
 
     /// Create a `SessionManager` using the default location.
@@ -2602,30 +2619,93 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Clean up old sessions to stay within `MAX_SESSIONS` limit.
+    /// Clean up old sessions to stay within the active cap.
     pub fn cleanup_old_sessions(&self) -> std::io::Result<()> {
         self.cleanup_old_sessions_keeping(None)
     }
 
-    /// As [`Self::cleanup_old_sessions`], but never deletes `keep` — the
+    /// As [`Self::cleanup_old_sessions`], but never touches `keep` — the
     /// session being resumed at boot. Without this, a background cleanup that
-    /// races session restore can prune the just-resumed session when 50+
+    /// races session restore can retire the just-resumed session when 50+
     /// newer records exist (its `updated_at` is not bumped until first save).
+    ///
+    /// The cap counts *active* transcripts: archived records sit outside it
+    /// until the user prunes them, and empty auto-created stubs get their own
+    /// small cap so they can never push a real transcript out (#6136, #6137).
+    /// A transcript past the cap is archived, never unlinked; the store's
+    /// destructive paths stay the explicit user actions.
     pub fn cleanup_old_sessions_keeping(&self, keep: Option<&str>) -> std::io::Result<()> {
+        // Archiving saves the record, and every save runs retention again.
+        // Drain a backlog in one pass here instead of nesting one cleanup per
+        // archived transcript.
+        if self
+            .retention_in_progress
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Ok(());
+        }
+        let result = self.cleanup_old_sessions_inner(keep);
+        self.retention_in_progress
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        result
+    }
+
+    fn cleanup_old_sessions_inner(&self, keep: Option<&str>) -> std::io::Result<()> {
         let sessions = self.list_sessions()?;
 
-        if sessions.len() > MAX_SESSIONS {
-            for session in sessions.iter().skip(MAX_SESSIONS) {
-                if keep.is_some_and(|id| id == session.id) {
-                    continue;
-                }
-                let _ = self.remove_session(&session.id, SessionRemoval::Retention);
+        // What retention owes each class (#6136/#6137): archived records are
+        // already outside the cap; empty auto-created stubs are junk the
+        // product writes on every boot and are capped apart so they can never
+        // occupy a transcript's slot; everything else carries the
+        // MAX_SESSIONS window.
+        let mut active: Vec<&SessionMetadata> = Vec::new();
+        let mut stubs: Vec<&SessionMetadata> = Vec::new();
+        for session in &sessions {
+            if session.archived {
+                continue;
+            }
+            if is_empty_auto_created_session(session) {
+                stubs.push(session);
+            } else {
+                active.push(session);
             }
         }
+
+        for session in active.iter().skip(MAX_SESSIONS) {
+            if keep.is_some_and(|id| id == session.id) {
+                continue;
+            }
+            // `External` keeps the live-session guard honest: a record
+            // another process is driving is not ours to retire.
+            if let Err(err) = self.set_session_archived(&session.id, true, SessionMutator::External)
+            {
+                tracing::warn!(
+                    target: "session",
+                    session = session.id,
+                    ?err,
+                    "retention could not archive a transcript past the cap; it stays active"
+                );
+            }
+        }
+
+        for session in stubs.iter().skip(MAX_EMPTY_SESSION_STUBS) {
+            if keep.is_some_and(|id| id == session.id) {
+                continue;
+            }
+            if let Err(err) = self.remove_session(&session.id, SessionRemoval::Retention) {
+                tracing::warn!(
+                    target: "session",
+                    session = session.id,
+                    ?err,
+                    "retention could not remove an empty session stub"
+                );
+            }
+        }
+
         // A directory without a top-level session snapshot is not proof of an
         // orphan: runtime threads and automations own independent durable stores,
         // including in other processes and before their first snapshot. Retention
-        // only removes records it listed above; never infer authority to delete
+        // only retires records it listed above; never infer authority to delete
         // other directories from an absent transcript or process-local claim.
 
         Ok(())
@@ -3947,6 +4027,13 @@ mod tests {
                             .expect("age prune"),
                         1
                     );
+                    assert!(
+                        !manager
+                            .validated_session_path(id)
+                            .expect("snapshot path")
+                            .exists(),
+                        "an explicit age prune still unlinks"
+                    );
                 } else {
                     for index in 0..MAX_SESSIONS {
                         write_session_with_updated_at(
@@ -3956,17 +4043,28 @@ mod tests {
                         );
                     }
                     manager.cleanup_old_sessions().expect("size cleanup");
+                    let listed = manager.list_sessions().expect("sessions");
                     assert_eq!(
-                        manager.list_sessions().expect("sessions").len(),
-                        MAX_SESSIONS
+                        listed.len(),
+                        MAX_SESSIONS + 1,
+                        "the archived record stays listed outside the active cap"
+                    );
+                    let retained = listed
+                        .iter()
+                        .find(|session| session.id == id)
+                        .expect("archived record remains on disk");
+                    assert!(
+                        retained.archived,
+                        "a transcript past the cap is archived, never unlinked (#6136)"
+                    );
+                    assert!(
+                        manager
+                            .validated_session_path(id)
+                            .expect("snapshot path")
+                            .exists(),
+                        "the transcript file survives retention"
                     );
                 }
-                assert!(
-                    !manager
-                        .validated_session_path(id)
-                        .expect("snapshot path")
-                        .exists()
-                );
                 let (ledger, _) = manager.late_usage_paths(id).expect("ledger paths");
                 assert!(!SessionManager::late_usage_is_deleted(&ledger).expect("origin retained"));
                 assert!(ledger.exists(), "recovery must retain accounting");
@@ -6981,6 +7079,116 @@ mod tests {
         // metadata block whose `updated_at` matches the requested
         // value.
         write_session_record(manager, id, Path::new("/tmp"), updated_at);
+    }
+
+    #[test]
+    fn retention_archives_past_the_cap_and_never_unlinks_transcripts() {
+        // #6136: the cap retires transcripts into the archive; it must not
+        // delete what the user never asked to delete.
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+        let mut ids = Vec::new();
+        for index in 0..(MAX_SESSIONS + 3) {
+            let id = Uuid::new_v4().to_string();
+            write_session_with_updated_at(
+                &manager,
+                &id,
+                Utc::now() - chrono::Duration::minutes((MAX_SESSIONS + 3 - index) as i64),
+            );
+            ids.push(id);
+        }
+        manager.cleanup_old_sessions().expect("retention");
+
+        let listed = manager.list_sessions().expect("sessions");
+        assert_eq!(listed.len(), MAX_SESSIONS + 3, "nothing is unlinked");
+        let archived: Vec<&str> = listed
+            .iter()
+            .filter(|session| session.archived)
+            .map(|session| session.id.as_str())
+            .collect();
+        assert_eq!(
+            archived.len(),
+            3,
+            "exactly the overflow is archived: {archived:?}"
+        );
+        for id in &ids[..3] {
+            assert!(archived.contains(&id.as_str()), "{id} must be archived");
+            assert!(
+                manager.validated_session_path(id).expect("path").exists(),
+                "the transcript file survives retention"
+            );
+        }
+        for id in &ids[3..] {
+            assert!(
+                !archived.contains(&id.as_str()),
+                "{id} is inside the cap and must stay active"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_stubs_are_capped_apart_and_never_evict_transcripts() {
+        // #6137: auto-created "New Session" stubs must not occupy (or evict
+        // from) the transcript cap.
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+        for index in 0..MAX_SESSIONS {
+            write_session_with_updated_at(
+                &manager,
+                &Uuid::new_v4().to_string(),
+                Utc::now() - chrono::Duration::minutes((MAX_SESSIONS + 20 - index) as i64),
+            );
+        }
+        let mut stub_ids = Vec::new();
+        for index in 0..(MAX_EMPTY_SESSION_STUBS + 4) {
+            let id = Uuid::new_v4().to_string();
+            write_empty_session_record(
+                &manager,
+                &id,
+                Path::new("/tmp"),
+                Utc::now()
+                    - chrono::Duration::minutes((MAX_EMPTY_SESSION_STUBS + 4 - index) as i64),
+            );
+            stub_ids.push(id);
+        }
+        manager.cleanup_old_sessions().expect("retention");
+
+        let listed = manager.list_sessions().expect("sessions");
+        assert_eq!(
+            listed
+                .iter()
+                .filter(|session| !is_empty_auto_created_session(session) && !session.archived)
+                .count(),
+            MAX_SESSIONS,
+            "stubs never push a transcript out of the cap"
+        );
+        assert!(
+            listed
+                .iter()
+                .filter(|session| !is_empty_auto_created_session(session))
+                .all(|session| !session.archived),
+            "no transcript is archived while only stubs are over their cap"
+        );
+        assert_eq!(
+            listed
+                .iter()
+                .filter(|session| is_empty_auto_created_session(session))
+                .count(),
+            MAX_EMPTY_SESSION_STUBS,
+            "stub retention keeps only the newest stubs"
+        );
+        for id in &stub_ids[..4] {
+            assert!(
+                !manager.validated_session_path(id).expect("path").exists(),
+                "{id} is an old stub and must be removed"
+            );
+        }
+        for id in &stub_ids[4..] {
+            assert!(
+                manager.validated_session_path(id).expect("path").exists(),
+                "{id} is among the newest stubs and must stay"
+            );
+        }
     }
 
     #[test]

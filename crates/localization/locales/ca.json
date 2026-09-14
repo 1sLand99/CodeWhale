@@ -1068,6 +1068,7 @@
   "ApprovalRiskReview": "REVISIÓ",
   "ApprovalRiskElevated": "APROVACIÓ",
   "ApprovalRiskDestructive": "DESTRUCTIU",
+  "ApprovalTimedOutDenied": "La sol·licitud d'aprovació ha expirat - denegada",
   "ApprovalCategorySafe": "Segur",
   "ApprovalCategoryFileWrite": "Escriptura de fitxer",
   "ApprovalCategoryShell": "Bash",
@@ -1604,6 +1605,7 @@
   "FleetDestProjectDisabledSave": "Els perfils de projecte estan desactivats en aquesta sessió (--no-project-config); no s'ha desat res. Tria Personal o reinicia sense l'opció.",
   "WorkflowStatusWaiting": "esperant",
   "WorkflowStatusDegraded": "degradat",
+  "WorkflowRunFailedToast": "L'execució del flux de treball ha fallat",
   "WorkflowDebrief": "resum: {done}/{total} resolts · {failed} fallits · {cancelled} cancel·lats · {elapsed}",
   "WorkflowDispatchFailureLine": "ha fallat l'enviament · {slot}: {message}",
   "WorkflowDispatchFailuresOmitted": "errors d'enviament: {count} d'anteriors no es mostren",
@@ -2240,5 +2242,10 @@
   "NotificationWebApproved": "Aprovat al web.",
   "NotificationWebDenied": "Denegat al web.",
   "NotificationInputSubmitFailed": "No s'ha pogut enviar la resposta: {error}. Torna-ho a provar.",
-  "PagerActionConfirm": "Confirma"
+  "PagerActionConfirm": "Confirma",
+"SelectionCopiedAsMarkdown": "Selecció copiada com a Markdown ({count})",
+  "McpShowCachedWhileTurnRuns": "Hi ha un torn en curs; es mostra l'última instantània MCP coneguda. Torna a executar /mcp quan acabi el torn per a una actualització en directe.",
+  "McpShowUnavailableWhileTurnRuns": "Hi ha un torn en curs i encara no s'ha observat cap instantània MCP. Torna a executar /mcp quan acabi el torn.",
+  "McpLivePoolRefreshDeferredWhileTurnRuns": "Hi ha un torn en curs; l'actualització del pool MCP en directe queda ajornada. Executa /mcp reload quan acabi el torn.",
+  "McpRetryDeferredWhileTurnRuns": "Hi ha un torn en curs; torna a executar /mcp retry {server} quan acabi el torn."
 }

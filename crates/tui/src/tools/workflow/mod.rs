@@ -256,7 +256,7 @@ struct WorkflowRunController {
     vm_cancel: WorkflowRunCancel,
     run_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Only detached starts wake the parent; `run` already returns the result.
-    parent_completion_tx: Option<mpsc::UnboundedSender<SubAgentCompletion>>,
+    parent_completion_tx: Option<mpsc::Sender<SubAgentCompletion>>,
 }
 
 impl WorkflowRunController {
@@ -349,7 +349,7 @@ fn finish_workflow_controller(state: &WorkflowWorkspaceState, record: &WorkflowR
         let payload =
             format!("{summary}\n<codewhale:subagent.done>{receipt}</codewhale:subagent.done>");
         debug_assert!(payload.len() <= WORKFLOW_COMPLETION_MAX_BYTES);
-        let _ = tx.send(SubAgentCompletion {
+        let _ = tx.try_send(SubAgentCompletion {
             owner_session_id: controller.driver.owner_session_id.clone(),
             agent_id: record.run_id.clone(),
             payload,
@@ -3710,6 +3710,10 @@ impl RuntimeTaskRecord {
     }
 }
 
+/// Bound on the workflow completion pump inbox (#6147): one completion per
+/// terminated workflow child, drained by the pump task.
+const WORKFLOW_COMPLETION_CHANNEL_CAPACITY: usize = 64;
+
 struct SubAgentWorkflowDriver {
     run_id: String,
     owner_session_id: String,
@@ -3717,7 +3721,7 @@ struct SubAgentWorkflowDriver {
     runtime: SubAgentRuntime,
     parent_cancel_token: CancellationToken,
     state: Arc<WorkflowWorkspaceState>,
-    completion_tx: mpsc::UnboundedSender<SubAgentCompletion>,
+    completion_tx: mpsc::Sender<SubAgentCompletion>,
     completion_state: Arc<Mutex<CompletionState>>,
     child_ids: Arc<Mutex<Vec<String>>>,
     /// Monotonic 0-based child admission counter for `workflow_child_index`.
@@ -3803,7 +3807,7 @@ impl SubAgentWorkflowDriver {
         // caller's token or its unrelated direct children.
         runtime.cancel_token = runtime.cancel_token.child_token();
         runtime.context.cancel_token = Some(runtime.cancel_token.clone());
-        let (completion_tx, completion_rx) = mpsc::unbounded_channel();
+        let (completion_tx, completion_rx) = mpsc::channel(WORKFLOW_COMPLETION_CHANNEL_CAPACITY);
         let mut gate_board = LaneGateBoard::new(run_id.clone());
         gate_board.install_gates(&gate_specs);
         let driver = Arc::new(Self {
@@ -5190,7 +5194,7 @@ fn declarative_node_id(node: &WorkflowNode) -> String {
 
 fn spawn_completion_pump(
     driver: Arc<SubAgentWorkflowDriver>,
-    mut rx: mpsc::UnboundedReceiver<SubAgentCompletion>,
+    mut rx: mpsc::Receiver<SubAgentCompletion>,
 ) {
     spawn_supervised(
         "workflow-completion-pump",
@@ -11709,11 +11713,11 @@ FINAL RECEIPT
     ) -> (
         WorkflowTool,
         ToolContext,
-        mpsc::UnboundedReceiver<SubAgentCompletion>,
+        mpsc::Receiver<SubAgentCompletion>,
     ) {
         let context = ToolContext::new(workspace.to_path_buf());
         let manager = new_shared_subagent_manager(workspace.to_path_buf(), 2);
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(16);
         let runtime = SubAgentRuntime::new(
             stub_client(),
             "deepseek-v4-flash".to_string(),
@@ -11871,7 +11875,7 @@ FINAL RECEIPT
             };
             let context = ToolContext::new(tmp.path().to_path_buf());
             let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
-            let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
+            let (completion_tx, mut completion_rx) = mpsc::channel(16);
             let (event_tx, mut event_rx) = mpsc::channel(128);
             let runtime = SubAgentRuntime::new(
                 DeepSeekClient::new(&config).expect("journal probe client"),
