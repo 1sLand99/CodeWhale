@@ -45,14 +45,14 @@ pub struct RuleSet {
 }
 
 impl ExecPolicyConfig {
-    pub fn from_str(contents: &str) -> Result<Self> {
+    pub fn parse(contents: &str) -> Result<Self> {
         toml::from_str(contents).context("failed to parse execpolicy.toml")
     }
 
     pub fn from_path(path: &Path) -> Result<Self> {
         let contents = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read execpolicy file {}", path.display()))?;
-        Self::from_str(&contents)
+        Self::parse(&contents)
     }
 
     pub fn evaluate(&self, command: &str) -> RuleDecision {
