@@ -2719,10 +2719,12 @@ mod tests {
         // #6040: logout only clears this machine's token; the provider keeps
         // its standing grant, so the login URL must force the consent screen
         // or the same account/workspace is silently re-granted.
-        let auth_url = login.authorization_url();
+        // The URL carries the PKCE challenge and state, so the assertion
+        // message reports only the fact that is being checked, never the URL.
+        let forces_consent = login.authorization_url().contains("prompt=consent");
         assert!(
-            auth_url.contains("prompt=consent"),
-            "an interactive login must force consent: {auth_url}"
+            forces_consent,
+            "an interactive login must force consent (prompt=consent is missing from the authorization URL)"
         );
 
         drop(login);
