@@ -3655,7 +3655,19 @@ fn mouse_selection_autocopies_on_release_without_ctrl_c() {
         },
     );
 
-    assert_eq!(app.status_message.as_deref(), Some("Selection copied"));
+    // Drag-release autocopy now takes the Markdown-source path (#6156): the
+    // clipboard holds canonical cell content and the receipt is a toast
+    // naming the projected cell count, not the legacy status sink.
+    assert!(
+        app.status_message.is_none(),
+        "markdown copy must not touch the legacy status sink"
+    );
+    let toast = app.status_toasts.back().expect("markdown copy toast");
+    assert!(
+        toast.text.contains("(1)"),
+        "toast names the projected cell count, got {:?}",
+        toast.text
+    );
     assert!(
         app.clipboard
             .last_written_text()
