@@ -622,7 +622,7 @@ mod tests {
             .unwrap();
         assert_eq!(prompts.len(), 1);
         let prompt = &prompts[0];
-        let request: serde_json::Value = serde_json::from_str(&prompt).unwrap();
+        let request: serde_json::Value = serde_json::from_str(prompt).unwrap();
         assert_eq!(request["diff"], diff);
         assert_eq!(request["manifest"]["head_sha"], head);
         assert_eq!(request["pull_request"]["title"], view.title);
