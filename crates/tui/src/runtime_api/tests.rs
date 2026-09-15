@@ -16360,6 +16360,11 @@ async fn git_routes_drive_a_real_workspace_repo() -> Result<()> {
     git(&["init", "-b", "main"])?;
     git(&["config", "user.email", "runtime-api@example.test"])?;
     git(&["config", "user.name", "Runtime API Test"])?;
+    // Windows git defaults to core.autocrlf=true, so `git checkout` rewrites
+    // LF to CRLF on restore and the discard assertion below reads back
+    // "v1\r\n" instead of "v1\n". Pin the fixture repo's line endings so the
+    // test measures the route rather than the host's git config.
+    git(&["config", "core.autocrlf", "false"])?;
     fs::write(workspace.join("tracked.txt"), "v1\n")?;
     git(&["add", "tracked.txt"])?;
     git(&["commit", "-m", "initial"])?;
