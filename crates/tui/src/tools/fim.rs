@@ -167,6 +167,10 @@ impl ToolSpec for FimEditTool {
         let generated_len = generated_text.len();
         let new_content = format!("{fim_prompt}{generated_text}{fim_suffix}");
         super::syntax_check::guard_edit(&resolved, path, Some(&content), &new_content)?;
+        // Deliberately not rustfmt-normalized (#6205): this result reports
+        // `prefix_end`/`suffix_start` as byte offsets into the written file,
+        // and reformatting would move them. The syntax gate applies; the
+        // formatting normalization does not.
         crate::utils::write_atomic_workspace(&resolved, new_content.as_bytes()).map_err(|e| {
             ToolError::execution_failed(format!("Failed to write {}: {}", resolved.display(), e))
         })?;

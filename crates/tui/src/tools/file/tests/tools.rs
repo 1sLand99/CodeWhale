@@ -885,6 +885,80 @@ async fn edit_file_tool_preserves_executable_bits() {
     );
 }
 
+/// #6205 — a sloppy edit to a rustfmt-clean file lands normalized, and the
+/// tool result's returned diff matches the bytes on disk, so the model's next
+/// anchor is the real text.
+#[tokio::test]
+async fn edit_file_normalizes_a_sloppy_edit_in_a_rustfmt_clean_file() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    let path = tmp.path().join("clean.rs");
+    fs::write(&path, "fn main() {\n    let x = 1;\n}\n").expect("write");
+    read_before_edit(&ctx, "clean.rs").await;
+
+    let result = EditFileTool
+        .execute(
+            json!({
+                "path": "clean.rs",
+                "search": "    let x = 1;",
+                "replace": "    let x = 1;\n        let y=2;",
+            }),
+            &ctx,
+        )
+        .await
+        .expect("execute");
+
+    // No skip-if-missing branch: rustfmt ships with the pinned toolchain, and a
+    // test that passes vacuously without it proves nothing.
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "fn main() {\n    let x = 1;\n    let y = 2;\n}\n"
+    );
+    assert!(
+        result.content.contains("rustfmt-normalized"),
+        "the result must say the content was normalized: {}",
+        result.content
+    );
+    let diff = result.metadata.as_ref().expect("metadata")["mutation"]["diff"]
+        .as_str()
+        .expect("diff")
+        .to_string();
+    assert!(
+        diff.contains("+    let y = 2;"),
+        "the returned diff must show the normalized text, not what was sent: {diff}"
+    );
+    assert!(!diff.contains("let y=2;"), "{diff}");
+}
+
+/// A file the author formats by hand is never reformatted wholesale.
+#[tokio::test]
+async fn edit_file_leaves_a_hand_formatted_file_alone() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    let path = tmp.path().join("handmade.rs");
+    // Two-space indentation: rustfmt would rewrite every line of this file.
+    fs::write(&path, "fn main() {\n  let x = 1;\n}\n").expect("write");
+    read_before_edit(&ctx, "handmade.rs").await;
+
+    EditFileTool
+        .execute(
+            json!({
+                "path": "handmade.rs",
+                "search": "  let x = 1;",
+                "replace": "  let x = 1;\n  let y = 2;",
+            }),
+            &ctx,
+        )
+        .await
+        .expect("execute");
+
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "fn main() {\n  let x = 1;\n  let y = 2;\n}\n",
+        "unrelated user formatting must survive the edit"
+    );
+}
+
 /// #6206 — a dependency bump that leaves `Cargo.toml` unparseable is refused
 /// at edit time, not discovered by the next `cargo` invocation.
 #[tokio::test]

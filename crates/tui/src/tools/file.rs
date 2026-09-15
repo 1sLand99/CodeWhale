@@ -7,6 +7,7 @@
 //! with path validation to prevent escaping the workspace boundary.
 
 use super::diff_format::make_unified_diff;
+use super::rust_format::{NORMALIZED_NOTE, normalize_edit};
 use super::spec::{
     ApprovalRequirement, RichToolResult, ToolCapability, ToolContext, ToolError, ToolResult,
     ToolSpec, lsp_diagnostics_for_paths, optional_str, optional_u64, required_str,
@@ -1444,13 +1445,18 @@ impl WriteFileTool {
         // Preserve the existing file's line-ending style on overwrite (see
         // `preserve_prior_line_endings`); otherwise a CRLF (Windows) file is
         // silently rewritten with LF line endings.
-        let written = preserve_prior_line_endings(file_content, &prior_contents);
+        let mut written = preserve_prior_line_endings(file_content, &prior_contents);
         guard_edit(
             &file_path,
             path_str,
             existed_before.then(|| prior_contents.as_ref()),
             &written,
         )?;
+        if existed_before
+            && let Some(normalized) = normalize_edit(&file_path, &prior_contents, &written).await
+        {
+            written = normalized;
+        }
         crate::utils::write_atomic_workspace(&file_path, written.as_bytes()).map_err(|error| {
             ToolError::execution_failed(format!("Failed to write {}: {error}", file_path.display()))
         })?;
@@ -1568,7 +1574,7 @@ impl ToolSpec for WriteFileTool {
         // Preserve the existing file's line-ending style on overwrite (see
         // `preserve_prior_line_endings`); a full `write_file` over a CRLF
         // (Windows) file otherwise silently rewrites every line ending to LF.
-        let written = preserve_prior_line_endings(file_content, &prior_contents);
+        let mut written = preserve_prior_line_endings(file_content, &prior_contents);
 
         guard_edit(
             &file_path,
@@ -1576,6 +1582,11 @@ impl ToolSpec for WriteFileTool {
             existed_before.then(|| prior_contents.as_ref()),
             &written,
         )?;
+        if existed_before
+            && let Some(normalized) = normalize_edit(&file_path, &prior_contents, &written).await
+        {
+            written = normalized;
+        }
 
         crate::utils::write_atomic_workspace(&file_path, written.as_bytes()).map_err(|e| {
             ToolError::execution_failed(format!("Failed to write {}: {}", file_path.display(), e))
@@ -2017,8 +2028,11 @@ impl EditFileTool {
         let normalized = normalize_contract_line_endings(without_bom);
         let updated = apply_contract_edits(&normalized, &edits, path_str)?;
         check_file_operation_cancelled(context)?;
-        let final_content = format!("{bom}{}", restore_contract_line_endings(&updated, ending));
+        let mut final_content = format!("{bom}{}", restore_contract_line_endings(&updated, ending));
         guard_edit(&file_path, path_str, Some(&raw), &final_content)?;
+        if let Some(normalized) = normalize_edit(&file_path, &raw, &final_content).await {
+            final_content = normalized;
+        }
 
         crate::utils::write_atomic_workspace(&file_path, final_content.as_bytes()).map_err(
             |error| {
@@ -2261,6 +2275,16 @@ impl ToolSpec for EditFileTool {
 
         guard_edit(&file_path, path_str, Some(&contents), &updated)?;
 
+        // #6205 — normalize after the syntax gate so the next turn's anchors
+        // match the bytes on disk rather than the text the model emitted.
+        let normalized_formatting = match normalize_edit(&file_path, &contents, &updated).await {
+            Some(normalized) => {
+                updated = normalized;
+                true
+            }
+            None => false,
+        };
+
         crate::utils::write_atomic_workspace(&file_path, updated.as_bytes()).map_err(|e| {
             ToolError::execution_failed(format!("Failed to write {}: {}", file_path.display(), e))
         })?;
@@ -2296,7 +2320,12 @@ impl ToolSpec for EditFileTool {
             Some(other) => other,
             None => "",
         };
-        let summary = format!("Replaced 1 occurrence in {display}{fuzz_note}");
+        let format_note = if normalized_formatting {
+            NORMALIZED_NOTE
+        } else {
+            ""
+        };
+        let summary = format!("Replaced 1 occurrence in {display}{fuzz_note}{format_note}");
         let body = if diff.is_empty() {
             format!("{summary}\n(no textual changes)")
         } else {

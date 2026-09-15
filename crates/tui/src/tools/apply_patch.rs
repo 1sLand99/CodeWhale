@@ -16,6 +16,7 @@ use super::diff_format::make_unified_diff;
 use super::file::{
     EXPECTED_HASH_DESCRIPTION, PATCH_PARAMS, PATH_ALIASES, apply_param_aliases, content_hash,
 };
+use super::rust_format::normalize_edit;
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
     lsp_diagnostics_for_paths, optional_bool, optional_str, optional_u64,
@@ -412,8 +413,9 @@ impl ToolSpec for ApplyPatchTool {
             source_field,
         } = normalized
         {
-            let (pending, stats) =
+            let (mut pending, stats) =
                 build_pending_writes_from_replace(entries, source_field, context)?;
+            normalize_pending_rust(&mut pending).await;
             apply_pending_writes(&pending)?;
             // Resolve absolute paths for LSP diagnostics query.
             let abs_paths: Vec<PathBuf> = pending.iter().map(|p| p.path.clone()).collect();
@@ -458,8 +460,10 @@ impl ToolSpec for ApplyPatchTool {
             ApplyPatchPreflightKind::FilePatches(file_patches) => file_patches,
         };
 
-        let (pending, mut stats) = build_pending_writes_from_patches(file_patches, context, fuzz)?;
+        let (mut pending, mut stats) =
+            build_pending_writes_from_patches(file_patches, context, fuzz)?;
         stats.header_path_mismatch = preflight.summary.header_path_mismatch.clone();
+        normalize_pending_rust(&mut pending).await;
         apply_pending_writes(&pending)?;
         // Resolve absolute paths for LSP diagnostics query.
         let abs_paths: Vec<PathBuf> = pending
@@ -1292,6 +1296,21 @@ fn build_pending_writes_from_patches(
     Ok((pending, stats))
 }
 
+/// Normalize the Rust files a patch rewrites (#6205), before the write and
+/// before the result's diff is built, so the rendered diff and the bytes on
+/// disk are the same text and the model's next anchor matches reality.
+async fn normalize_pending_rust(pending: &mut [PendingWrite]) {
+    for entry in pending.iter_mut() {
+        let (Some(content), Some(original)) = (entry.content.as_ref(), entry.original.as_ref())
+        else {
+            continue;
+        };
+        if let Some(normalized) = normalize_edit(&entry.path, original, content).await {
+            entry.content = Some(normalized);
+        }
+    }
+}
+
 fn apply_pending_writes(pending: &[PendingWrite]) -> Result<(), ToolError> {
     // Syntax gate (#6204) ahead of the first write, not per file: a patch is
     // transactional, so one unparseable result must leave every file in the
@@ -1651,6 +1670,34 @@ mod tests {
         assert_eq!(hunks[0].old_count, 3);
         assert_eq!(hunks[0].new_start, 1);
         assert_eq!(hunks[0].new_count, 3);
+    }
+
+    /// #6205 — a patch that lands unformatted Rust in an already-clean file is
+    /// normalized before the write, and the rendered diff shows the normalized
+    /// text, so the model's next patch context matches the bytes on disk.
+    #[tokio::test]
+    async fn patch_normalizes_rust_in_an_already_clean_file() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let file = tmp.path().join("clean.rs");
+        fs::write(&file, "fn main() {\n    let x = 1;\n}\n").expect("write");
+
+        let patch = "--- a/clean.rs\n+++ b/clean.rs\n@@ -1,3 +1,4 @@\n fn main() {\n     let x = 1;\n+        let y=2;\n }\n";
+        let result = ApplyPatchTool
+            .execute(json!({"path": "clean.rs", "patch": patch}), &ctx)
+            .await
+            .expect("execute");
+
+        assert_eq!(
+            fs::read_to_string(&file).expect("read"),
+            "fn main() {\n    let x = 1;\n    let y = 2;\n}\n"
+        );
+        let diff = result.metadata.as_ref().expect("metadata")["mutation"]["diff"]
+            .as_str()
+            .expect("diff")
+            .to_string();
+        assert!(diff.contains("+    let y = 2;"), "{diff}");
+        assert!(!diff.contains("let y=2;"), "{diff}");
     }
 
     /// #6204 — a patch whose result does not parse is refused before any file
