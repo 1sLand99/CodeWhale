@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- File edits are parse-gated before the write lands: Rust goes through
+  `syn::parse_file` for a grammar-exact `line:column`, and `.toml` / `.json`
+  through the parsers already vendored. An edit is refused only when the file
+  parsed *before* and would not parse *after* — repairing an already-broken
+  file is the commonest reason to edit source at all, so pre-existing breakage
+  and new files fail open. The check precedes the write, so a rejection leaves
+  the file untouched and `apply_patch` cannot half-apply (#6204, #6206).
+- Rust files that were already `rustfmt`-clean are re-normalized after an edit,
+  so the next patch's anchors still match. Hand-formatted files are never
+  rewritten, and every failure path skips and lets the edit land (#6205).
 - Native clients can finish provider setup without dropping to the CLI:
   `DELETE /v1/providers/{id}/key` clears a Codewhale-owned credential through
   the same shared owner as `codewhale auth clear`, and `GET /v1/providers`

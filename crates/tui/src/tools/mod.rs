@@ -57,6 +57,7 @@ pub(crate) mod review_pr;
 pub mod rlm;
 pub mod run_tool;
 pub mod runtime_mcp;
+mod rust_format;
 pub mod schema_canonicalize;
 pub mod schema_sanitize;
 pub mod search;
@@ -68,6 +69,7 @@ pub mod skill;
 pub mod spec;
 pub mod speech;
 pub mod subagent;
+mod syntax_check;
 pub mod tasks;
 #[cfg(not(target_env = "ohos"))]
 pub mod terminal_session;

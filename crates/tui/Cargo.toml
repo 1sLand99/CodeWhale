@@ -84,6 +84,13 @@ serde.workspace = true
 serde_json = { workspace = true, features = ["preserve_order", "raw_value"] }
 schemars = { version = "1.2.1", features = ["derive", "preserve_order"] }
 shellexpand = "3"
+# Grammar-exact Rust parsing for the post-edit syntax gate (#6204). `syn` is
+# already in the lockfile as a proc-macro build dependency; this reuses that
+# same version rather than vendoring a second parser (#6151). `span-locations`
+# is what turns a parse failure into the `line:column` the model needs — the
+# feature is inert without it.
+syn = { version = "3.0.3", default-features = false, features = ["full", "parsing"] }
+proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
 toml.workspace = true
 toml_edit.workspace = true
 tokio.workspace = true
