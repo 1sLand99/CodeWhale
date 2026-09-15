@@ -275,7 +275,7 @@ pub(in crate::commands) fn workflow_settings(app: &App) -> CommandResult {
             cfg.max_children, cfg.max_concurrent, cfg.max_depth
         ),
         format!(
-            "default_token_budget = {}  · shared admission hint for a run and its children",
+            "default_token_budget = {}  · shared admission cap for a run and its children (0 = none)",
             cfg.default_token_budget
         ),
         format!(

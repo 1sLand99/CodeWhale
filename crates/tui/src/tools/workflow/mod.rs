@@ -1119,7 +1119,7 @@ impl ToolSpec for WorkflowTool {
                 "token_budget": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Optional shared Workflow admission hint. Usage is reconciled when children report completion; already-running parallel children can take aggregate spent past the hint, while later and descendant spawns are rejected once exhausted."
+                    "description": "Optional shared Workflow admission cap; omit for no cap. Usage is reconciled when children report completion; already-running parallel children can take aggregate spent past the cap, while later and descendant spawns are rejected once exhausted."
                 },
                 "wait": {
                     "type": "boolean",
