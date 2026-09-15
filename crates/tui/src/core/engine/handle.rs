@@ -319,7 +319,6 @@ impl EngineHandle {
 
     /// Check if a request is currently cancelled
     #[must_use]
-    #[allow(dead_code)]
     pub fn is_cancelled(&self) -> bool {
         if let Some(control) = self
             .turn_controls

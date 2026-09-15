@@ -5327,7 +5327,7 @@ impl RuntimeThreadManager {
         ack_rx.await.context("User-input settlement task failed")?
     }
 
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub async fn cancel_user_input(&self, thread_id: &str, input_id: &str) -> Result<bool> {
         let admission = self.config_admission.read().await;
         self.ensure_accepting_execution()?;

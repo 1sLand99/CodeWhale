@@ -113,7 +113,6 @@ mod runtime_threads;
 mod safe_label;
 mod sandbox;
 mod scorecard;
-#[allow(dead_code)]
 mod session_diagnostics;
 // Acceptance matrix for #2934 / #4397. Test-only: the table documents the
 // contract for reviewers and is enforced by the tests beside it, so it does
@@ -124,7 +123,6 @@ mod doctor_loader_tests;
 #[cfg(test)]
 mod session_control_acceptance;
 mod session_export;
-#[allow(dead_code)]
 mod session_manager;
 mod session_peek;
 mod session_projection;

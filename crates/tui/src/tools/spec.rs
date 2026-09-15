@@ -606,12 +606,12 @@ pub struct ToolExecutionState {
     /// Whether to allow paths outside workspace
     pub trust_mode: bool,
     /// Current sandbox policy
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub sandbox_policy: SandboxPolicy,
     /// Path for notes file
     pub notes_path: PathBuf,
     /// MCP configuration path
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub mcp_config_path: PathBuf,
     /// Explicit skills directory used for model-visible skill discovery.
     pub skills_dir: Option<PathBuf>,
@@ -748,7 +748,6 @@ impl ToolContext {
     }
 
     /// Create a `ToolContext` with all settings specified.
-    #[allow(dead_code)]
     pub fn with_options(
         workspace: impl Into<PathBuf>,
         trust_mode: bool,
@@ -936,7 +935,6 @@ impl ToolContext {
 
     /// Attach an external sandbox backend for remote shell execution.
     #[must_use]
-    #[allow(dead_code)]
     pub fn with_sandbox_backend(mut self, backend: std::sync::Arc<dyn SandboxBackend>) -> Self {
         self.sandbox_backend = Some(backend);
         self

@@ -1427,7 +1427,6 @@ impl BackgroundShell {
     }
 
     /// Get a snapshot of the current state
-    #[allow(dead_code)]
     pub fn snapshot(&self) -> Result<ShellResult> {
         let sandboxed = !matches!(self.sandbox_type, SandboxType::None);
         if let Some(snapshot) = self.bounded_output_snapshot(self.status != ShellStatus::Running)? {
@@ -2733,7 +2732,6 @@ impl ShellManager {
     }
 
     /// Get output from a background process
-    #[allow(dead_code)]
     pub fn get_output(
         &mut self,
         task_id: &str,

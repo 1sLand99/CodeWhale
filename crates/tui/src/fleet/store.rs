@@ -583,7 +583,7 @@ fn collect_entries(dir: &Path, scope: FleetScope, out: &mut Vec<FleetEntry>) {
 /// names both origins — the caller (UI) resolves it by asking for a scope.
 /// (Kept for the qualified-name flow and the ambiguity tests; the list/detail
 /// UI resolves by scope via load_fleet_in_scope.)
-#[allow(dead_code)]
+#[cfg_attr(not(test), expect(dead_code))]
 pub fn load_fleet(
     name: &str,
     workspace: &Path,
@@ -658,7 +658,6 @@ pub fn load_fleet_in_scope(
 /// Load a v2 Fleet from a specific path (used by the editor on the currently
 /// open entry, so the saved scope is exact). API surface for the path-based
 /// editor flows; currently exercised by tests.
-#[allow(dead_code)]
 pub fn load_fleet_at(path: &Path) -> Result<(FleetFile, FleetScope), FleetStoreError> {
     let text = fs::read_to_string(path).map_err(|e| FleetStoreError::Io {
         path: path.display().to_string(),

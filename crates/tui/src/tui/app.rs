@@ -914,6 +914,7 @@ impl Default for ComposerState {
 
 /// Compatibility name retained for the first Tideline header slice. New
 /// surfaces register [`crate::tui::tideline::InteractionAction`] directly.
+#[cfg_attr(not(test), expect(dead_code))]
 pub type HeaderActionTarget = crate::tui::tideline::InteractionAction;
 
 /// A header target painted in the latest frame.
@@ -922,6 +923,7 @@ pub type HeaderActionTarget = crate::tui::tideline::InteractionAction;
 /// rectangular target alongside its typed action gives mouse and keyboard
 /// routes one shared destination without a second navigation system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), expect(dead_code))]
 pub struct HeaderHitbox {
     pub area: Rect,
     pub target: HeaderActionTarget,
@@ -1457,7 +1459,6 @@ fn try_persist_route_as_startup_default(
 pub struct App {
     pub mode: AppMode,
     /// Registered hotbar actions available for future slot config/render layers.
-    #[allow(dead_code)]
     pub hotbar_actions: HotbarActionRegistry,
     /// Composer sub-state (input, cursor, history, menus).
     pub composer: ComposerState,
@@ -1754,7 +1755,6 @@ pub struct App {
     /// fast typing or IME commits could otherwise be mis-classified as a
     /// paste burst (#1322 follow-up).
     pub bracketed_paste_seen: bool,
-    #[allow(dead_code)]
     pub system_prompt: Option<SystemPrompt>,
     pub auto_compact: bool,
     pub auto_compact_user_configured: bool,
@@ -1889,7 +1889,6 @@ pub struct App {
     /// Whether the file-tree pane was actually rendered in the last frame.
     /// Set false when the terminal is too narrow to show the tree.
     pub file_tree_visible: bool,
-    #[allow(dead_code)]
     pub compact_threshold: usize,
     pub max_input_history: usize,
     pub allow_shell: bool,
@@ -2009,7 +2008,6 @@ pub struct App {
     /// Lifecycle event outbox (`[lifecycle_outbox]` config). Disabled
     /// (all emits no-ops) when no path is configured.
     pub lifecycle_outbox: codewhale_hooks::LifecycleOutbox,
-    #[allow(dead_code)]
     pub yolo: bool,
     /// One-shot YOLO→Act+Bypass migration notice for this session (#0.8.68 M6).
     yolo_compat_notified: bool,
@@ -2119,10 +2117,9 @@ pub struct App {
     /// token breakdown lives behind `/cost` (spec §3). The field stays so the
     /// config surface keeps parsing; its reader returns with the classic
     /// renderer deletion slice.
-    #[allow(dead_code)]
     pub header_items: Vec<crate::config::HeaderItem>,
     /// Project documentation (AGENTS.md or CLAUDE.md)
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub project_doc: Option<String>,
     /// Plan state for tracking tasks
     pub plan_state: SharedPlanState,

@@ -2063,7 +2063,6 @@ pub struct SubAgentCompletion {
     /// The completing child's agent id. Held for routing/logging — the
     /// engine's turn loop does not currently key on it (it just injects
     /// the payload), but downstream tooling and tests need the field.
-    #[allow(dead_code)]
     pub agent_id: String,
     /// Human summary on line 1, sentinel on line 2. Same payload shape as
     /// `Event::AgentComplete::result`.
@@ -2781,7 +2780,6 @@ impl SubAgentRuntime {
     /// Override the maximum spawn depth (default `DEFAULT_MAX_SPAWN_DEPTH`).
     /// Used by config wiring (`[subagents] max_depth = N`) and tests.
     #[must_use]
-    #[allow(dead_code)]
     pub fn with_max_spawn_depth(mut self, max: u32) -> Self {
         self.max_spawn_depth = max.min(codewhale_config::MAX_SPAWN_DEPTH_CEILING);
         self.worker_profile.max_spawn_depth = self.max_spawn_depth;

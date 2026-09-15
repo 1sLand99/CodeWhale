@@ -281,9 +281,13 @@ pub struct OfflineQueueState {
 #[derive(Debug, Clone)]
 pub struct SessionRecovery {
     pub session: SavedSession,
+    #[cfg_attr(not(test), expect(dead_code))]
     pub changed: bool,
+    #[cfg_attr(not(test), expect(dead_code))]
     pub repaired_call_count: usize,
+    #[cfg_attr(not(test), expect(dead_code))]
     pub duplicate_result_count: usize,
+    #[cfg_attr(not(test), expect(dead_code))]
     pub orphan_result_count: usize,
 }
 
@@ -684,7 +688,6 @@ impl SessionCostSnapshot {
 
 impl SessionMetadata {
     /// Copy cost fields from another metadata (used when forking a session).
-    #[allow(dead_code)]
     pub fn copy_cost_from(&mut self, other: &SessionMetadata) {
         self.cost = other.cost.clone();
     }
@@ -991,6 +994,7 @@ impl SavedSession {
         self.leaf_id = journal.leaf_id.clone();
         self.journal = Some(journal);
     }
+    #[expect(dead_code)]
     pub fn journal_append_message(&mut self, message: Message) -> String {
         self.ensure_journal();
         let journal = self.journal.as_mut().expect("journal ensured");
@@ -1010,6 +1014,7 @@ impl SavedSession {
         self.metadata.updated_at = Utc::now();
         Ok(())
     }
+    #[expect(dead_code)]
     pub fn active_entries(&self) -> Vec<SessionEntry> {
         self.journal
             .as_ref()
@@ -1175,6 +1180,7 @@ pub enum CheckpointSource {
 #[derive(Debug, Clone)]
 pub struct CheckpointRef {
     pub source: CheckpointSource,
+    #[cfg_attr(not(test), expect(dead_code))]
     pub path: PathBuf,
     pub modified: std::time::SystemTime,
 }
@@ -1207,6 +1213,7 @@ impl SessionManager {
 
     /// Reconstruct completed approvals and interrupted unmatched asks for one
     /// session without consulting the model transcript.
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn replay_approvals(&self, session_id: &str) -> io::Result<ApprovalReplay> {
         self.approval_receipt_store().replay(session_id)
     }
@@ -2771,6 +2778,7 @@ impl SessionManager {
     /// timestamp embedded in the JSON, not the filesystem mtime — the
     /// user may have rsynced their `~/.deepseek` between machines and
     /// fs mtimes can lie.
+    #[cfg_attr(not(test), expect(dead_code))]
     pub fn prune_sessions_older_than(
         &self,
         max_age: std::time::Duration,

@@ -192,7 +192,6 @@ fn worker_status_for_terminal_projection(status: &SubAgentStatus) -> AgentWorker
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn reconcile_subagent_activity_state_at(app: &mut App, now: Instant) {
     reconcile_terminal_subagent_card_retention(app, now);
 

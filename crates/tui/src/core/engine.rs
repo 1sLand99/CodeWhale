@@ -643,7 +643,6 @@ impl Default for EngineConfig {
 /// `External`, `Preempted`, and `Internal` are reserved for the
 /// remaining direct cancellation paths tracked in #1541.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum CancelReason {
     /// User-initiated cancel (Esc, `/cancel`, click cancel on modal).
     User,
@@ -653,6 +652,7 @@ pub enum CancelReason {
     /// Cancel triggered when a new turn starts before the previous one
     /// finished — e.g. plain Enter while busy after the queueing path
     /// pre-empts the running turn.
+    #[expect(dead_code)]
     Preempted,
     /// Engine internals tore down the turn (drop, channel close,
     /// shutdown). Rare — surfaced as an internal error.
@@ -6822,7 +6822,7 @@ impl Engine {
     /// Handle a turn using the DeepSeek API.
     #[allow(clippy::too_many_lines)]
     /// Refresh the stable system prompt based on current non-mode context.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(not(test), expect(dead_code))]
     fn refresh_system_prompt(&mut self) {
         self.refresh_system_prompt_with_reason("system");
     }
@@ -7692,7 +7692,7 @@ struct TurnToolBuild {
     mcp: McpToolState,
     /// Route model installed into the child runtime, when sub-agent tools were
     /// available. This is an internal receipt, not a manifest field.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(not(test), expect(dead_code))]
     subagent_runtime_model: Option<String>,
     /// Turn-scoped sub-agent mailbox and its flush barrier, when sub-agent
     /// wiring was live. The engine must seal, flush, and await this before it

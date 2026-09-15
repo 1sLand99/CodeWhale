@@ -20,7 +20,7 @@ use codewhale_palette::ChromeInk;
 // Slice 1 produces Started / Completed / Failed / Mutated (the `/automation
 // run` receipt and the projection's settled-run receipts); Fired / Coalesced
 // / Missed / Expired arrive with their engine-side producers in Slice 4.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(not(test), expect(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutomationCellKind {
     /// The schedule fired and a run was enqueued.

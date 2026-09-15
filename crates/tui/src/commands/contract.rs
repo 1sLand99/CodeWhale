@@ -86,7 +86,7 @@ use codewhale_localization::{MessageId, tr};
 /// Not referenced by production dispatch code — the fail-closed Python gate
 /// (`scripts/check-command-migration-manifest.py`) reads this exact
 /// declaration by source regex and the Rust frontier tests assert it.
-#[allow(dead_code)]
+#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) const PENDING_GROUPS: &[&str] = &["config", "core", "debug", "session"];
 
 // ---------------------------------------------------------------------------

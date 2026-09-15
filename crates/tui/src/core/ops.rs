@@ -264,7 +264,6 @@ pub enum Op {
     FollowUpSubAgent { agent_id: String, text: String },
 
     /// Change the operating mode
-    #[allow(dead_code)]
     ChangeMode {
         mode: AppMode,
         allow_shell: bool,
@@ -275,7 +274,6 @@ pub enum Op {
     },
 
     /// Update the model being used and refresh stable prompt context.
-    #[allow(dead_code)]
     SetModel {
         model: String,
         mode: AppMode,
@@ -380,7 +378,7 @@ pub enum Op {
 
     /// Edit the last user message: remove the last user+assistant exchange
     /// from the session, then re-send with the new content.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     EditLastTurn { new_message: String },
 
     /// Enable or disable the background advisor watcher for this session.

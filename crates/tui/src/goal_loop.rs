@@ -74,7 +74,7 @@ pub enum GoalRunStatus {
     /// verifier confirmed — see `GoalGate`).
     Completed,
     /// The model reported it is blocked and needs the user.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     Blocked,
 }
 
@@ -84,7 +84,6 @@ pub enum StopReason {
     /// Objective achieved.
     Completed,
     /// Model reported blocked.
-    #[allow(dead_code)]
     Blocked,
     /// Continuation circuit-breaker tripped (too many continuations without a
     /// terminal signal).
@@ -116,7 +115,6 @@ pub struct GoalBudget {
 impl GoalBudget {
     /// No token or time cap. Terminal status, user control, and the default
     /// continuation backstop still stop the run.
-    #[allow(dead_code)]
     pub const fn unbounded() -> Self {
         Self {
             token_budget: None,
@@ -126,7 +124,7 @@ impl GoalBudget {
     }
 
     /// A token budget for telemetry/UI. It never pauses an unbounded goal.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub const fn with_token_budget(token_budget: u64) -> Self {
         Self {
             token_budget: Some(token_budget),
@@ -137,7 +135,6 @@ impl GoalBudget {
 
     /// Override the continuation backstop (`0` = unlimited until terminal
     /// status).
-    #[allow(dead_code)]
     #[must_use]
     pub const fn with_max_continuations(mut self, max_continuations: u32) -> Self {
         self.max_continuations = max_continuations;
@@ -280,7 +277,7 @@ pub const fn token_budget_exhausted(_progress: GoalProgress, _budget: GoalBudget
 /// Whether a stop reason represents success (Completed) vs. an early/forced exit.
 /// Useful for the UI/status projection (#2666 token/time visibility).
 #[must_use]
-#[allow(dead_code)]
+#[cfg_attr(not(test), expect(dead_code))]
 pub fn is_success(reason: StopReason) -> bool {
     matches!(reason, StopReason::Completed)
 }

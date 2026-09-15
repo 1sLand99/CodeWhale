@@ -255,6 +255,7 @@ impl ApprovalReceiptStore {
         self.load_unlocked(session_id)
     }
 
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn replay(&self, session_id: &str) -> io::Result<ApprovalReplay> {
         let receipts = self.load(session_id)?;
         ApprovalReplay::from_receipts(&receipts)

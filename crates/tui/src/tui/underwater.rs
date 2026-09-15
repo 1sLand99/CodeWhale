@@ -1036,7 +1036,6 @@ fn compact_tokens(tokens: i64) -> String {
     }
 }
 
-#[allow(dead_code)]
 // classic header/band renderer: superseded by the Tideline shell
 // (topbar + merged footer, spec §3, 2026-08-29); deletion is its own slice.
 /// The context meter is one measured fact: an exact percentage for scanning,
@@ -1067,12 +1066,12 @@ fn header_context_meter(app: &App, tier: ShellTier) -> Option<Span<'static>> {
 /// its visible geometry does not depend on optional git/token facts. The
 /// keyboard route remains `Alt+C`; this gives that same inspectable fact a
 /// mouse route without inventing another context screen or state owner.
-#[allow(dead_code)]
 // classic header/band renderer: superseded by the Tideline shell
 // (topbar + merged footer, spec §3, 2026-08-29); deletion is its own slice.
 // Its posture-floor guard (a hitbox never claims overlapped cells) is the
 // discipline `topbar::context_meter_hitbox` carries forward.
 #[must_use]
+#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) fn header_hitboxes(area: Rect, app: &App) -> Vec<HeaderHitbox> {
     if area.width == 0 || area.height == 0 {
         return Vec::new();
