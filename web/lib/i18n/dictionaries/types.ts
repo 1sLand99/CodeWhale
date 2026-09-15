@@ -48,14 +48,16 @@ export interface ChromeDict {
   navContributeSecondary: string;
 
   /**
-   * The primary strip: Product / Models / Docs. The older six
-   * (Start, Install, FAQ, Community, Contribute) stay in the dictionary for
-   * the compact sheet's second group and the footer.
+   * The primary strip: Product / Models / Plugins / Docs. The
+   * older six (Start, Install, FAQ, Community, Contribute) stay in the
+   * dictionary for the compact sheet's second group and the footer.
    */
   navProduct: string;
   navModels: string;
+  navPlugins: string;
   navProductSecondary: string;
   navModelsSecondary: string;
+  navPluginsSecondary: string;
 
   /**
    * Skip-to-content link rendered before the nav in app/[locale]/layout.tsx.
