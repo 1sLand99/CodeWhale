@@ -5841,6 +5841,21 @@ impl RuntimeThreadManager {
                 );
                 goal.status = codewhale_protocol::ThreadGoalStatus::Paused;
                 goal.updated_at = chrono::Utc::now().timestamp();
+            } else if self.read_config().goal_enforce_token_budget()
+                && goal
+                    .token_budget
+                    .is_some_and(|budget| goal.tokens_used >= budget)
+            {
+                // The engine stops its own continuation at an enforced token
+                // budget (#6013); the host mirrors that as a durable pause so
+                // the cross-turn re-arm does not resurrect the spend.
+                tracing::info!(
+                    "goal for {thread_id} reached its enforced token budget ({}); pausing",
+                    goal.tokens_used
+                );
+                goal.status = codewhale_protocol::ThreadGoalStatus::Paused;
+                goal.pause_reason = Some(codewhale_protocol::GoalPauseReason::BudgetLimit);
+                goal.updated_at = chrono::Utc::now().timestamp();
             } else if !update_goal_available {
                 tracing::info!(
                     "goal for {thread_id} stays parked: the finished turn's catalog lacked update_goal"
@@ -10151,6 +10166,7 @@ impl RuntimeThreadManager {
                 goal_status,
                 goal_max_continuations: cfg.goal_max_continuations(),
                 goal_continuation_delay_seconds: cfg.goal_continuation_delay_seconds(),
+                goal_enforce_token_budget: cfg.goal_enforce_token_budget(),
                 reasoning_only_max_reprompts: cfg.reasoning_only_max_reprompts(),
                 reasoning_only_reprompt_message: Some(
                     cfg.reasoning_only_reprompt_message().to_string(),

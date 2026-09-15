@@ -847,6 +847,7 @@ impl App {
             workspace,
             workflow_config: config.workflow_config(),
             goal_max_continuations: config.goal_max_continuations(),
+            goal_enforce_token_budget: config.goal_enforce_token_budget(),
             goal_continuation_waiting: false,
             configured_sandbox_mode: config.sandbox_mode.clone(),
             configured_sandbox_network: config.sandbox_network_access,

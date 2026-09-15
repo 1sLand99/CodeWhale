@@ -577,6 +577,7 @@ pub(crate) async fn run_exec_agent(
         goal_status: crate::tools::goal::GoalStatus::Active,
         goal_max_continuations: execution_config.goal_max_continuations(),
         goal_continuation_delay_seconds: execution_config.goal_continuation_delay_seconds(),
+        goal_enforce_token_budget: execution_config.goal_enforce_token_budget(),
         reasoning_only_max_reprompts: execution_config.reasoning_only_max_reprompts(),
         reasoning_only_reprompt_message: Some(
             execution_config

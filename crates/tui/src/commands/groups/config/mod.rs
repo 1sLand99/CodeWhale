@@ -293,6 +293,10 @@ pub(in crate::commands) fn workflow_settings(app: &App) -> CommandResult {
             "max_continuations = {}  · automatic continuation passes before a goal pauses; 0 = unlimited (completion, blocked, or you stop it)",
             app.goal_max_continuations
         ),
+        format!(
+            "enforce_token_budget = {}  · true = a goal's token budget is a hard stop; false = advisory telemetry",
+            on(app.goal_enforce_token_budget)
+        ),
     ];
     CommandResult::message(lines.join("\n"))
 }

@@ -9286,6 +9286,7 @@ async fn host_goal_loop_kickoff_arms_one_continuation_and_parks_at_engine_cap() 
             max_continuations: Some(2),
             continuation_delay_seconds: None,
             max_steps: None,
+            enforce_token_budget: None,
         }),
         ..Config::default()
     };
@@ -9708,6 +9709,7 @@ async fn model_created_goal_persists_through_adopted_revision() -> Result<()> {
                 max_continuations: None,
                 continuation_delay_seconds: Some(3600),
                 max_steps: None,
+                enforce_token_budget: None,
             }),
             ..Config::default()
         },

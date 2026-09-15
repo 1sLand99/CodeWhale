@@ -409,6 +409,10 @@ pub struct EngineConfig {
     /// immediately; positive values opt coordinator goals into a cancellable
     /// quiet period (#5508).
     pub goal_continuation_delay_seconds: u64,
+    /// Whether a goal's `token_budget` is a hard stop (`BudgetLimit`) instead
+    /// of advisory telemetry. Resolved from `[goal] enforce_token_budget`;
+    /// default `false` (#6013).
+    pub goal_enforce_token_budget: bool,
     /// Maximum number of automatic re-requests when the model returns only
     /// reasoning without any answer or tool call. Defaults to 2.
     /// Resolved from `[reasoning_only] max_reprompts` in config.toml.
@@ -587,6 +591,7 @@ impl Default for EngineConfig {
             goal_status: GoalStatus::Active,
             goal_max_continuations: crate::goal_loop::DEFAULT_MAX_GOAL_CONTINUATIONS,
             goal_continuation_delay_seconds: 0,
+            goal_enforce_token_budget: false,
             reasoning_only_max_reprompts: crate::config::DEFAULT_REASONING_ONLY_REPROMPTS,
             // `None` means "use the built-in nudge". Storing the default text
             // here instead would make an operator's explicit empty string
@@ -3986,9 +3991,12 @@ impl Engine {
                 continuations: snapshot.continuation_count,
             },
             // Unbounded like grokbuild (agent-call cap) and kimicode swarm
-            // (turnBudget per-task, resumable): token/time are telemetry only,
-            // only Completed/Blocked/ContinuationLimit pause the loop.
+            // (turnBudget per-task, resumable): token/time are telemetry only
+            // unless `[goal] enforce_token_budget` opts a set budget into a
+            // hard stop (#6013); otherwise only Completed/Blocked/
+            // ContinuationLimit pause the loop.
             crate::goal_loop::GoalBudget::unbounded()
+                .with_enforced_token_budget(self.config.goal_enforce_token_budget)
                 .with_max_continuations(self.config.goal_max_continuations),
         );
 
@@ -4017,6 +4025,13 @@ impl Engine {
                             self.config.goal_max_continuations,
                         ),
                         GoalPauseReason::Backoff,
+                    ),
+                    crate::goal_loop::StopReason::BudgetLimit => (
+                        "Goal paused: the goal's token budget was reached and \
+                         [goal] enforce_token_budget makes that a hard stop; \
+                         raise the budget or resume to continue."
+                            .to_string(),
+                        GoalPauseReason::BudgetLimit,
                     ),
                     crate::goal_loop::StopReason::Completed
                     | crate::goal_loop::StopReason::Blocked => {

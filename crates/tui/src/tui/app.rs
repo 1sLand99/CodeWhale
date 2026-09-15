@@ -1673,6 +1673,9 @@ pub struct App {
     pub workflow_config: codewhale_config::WorkflowConfigToml,
     /// Effective `[goal] max_continuations` backstop; `0` means unlimited.
     pub goal_max_continuations: u32,
+    /// Effective `[goal] enforce_token_budget`; `true` makes a goal's token
+    /// budget a hard stop instead of advisory telemetry (#6013).
+    pub goal_enforce_token_budget: bool,
     /// Typed engine lifecycle state for the cancellable between-turn wait.
     pub goal_continuation_waiting: bool,
     /// Effective explicit/managed filesystem scope captured at startup. The
