@@ -885,6 +885,66 @@ async fn edit_file_tool_preserves_executable_bits() {
     );
 }
 
+/// #6206 — a dependency bump that leaves `Cargo.toml` unparseable is refused
+/// at edit time, not discovered by the next `cargo` invocation.
+#[tokio::test]
+async fn edit_file_refuses_an_edit_that_breaks_a_cargo_manifest() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    let path = tmp.path().join("Cargo.toml");
+    let original = "[dependencies]\nserde = \"1.0\"\n";
+    fs::write(&path, original).expect("write");
+    read_before_edit(&ctx, "Cargo.toml").await;
+
+    let error = EditFileTool
+        .execute(
+            json!({
+                "path": "Cargo.toml",
+                "search": "serde = \"1.0\"",
+                // Unterminated string: the classic half-finished version bump.
+                "replace": "serde = \"1.0",
+            }),
+            &ctx,
+        )
+        .await
+        .expect_err("an unparseable manifest must be refused");
+
+    let message = error.to_string();
+    assert!(message.contains("TOML syntax error at line"), "{message}");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        original,
+        "a refused edit must leave the manifest unchanged"
+    );
+}
+
+/// A valid structured-config edit is untouched by the gate.
+#[tokio::test]
+async fn edit_file_applies_a_valid_json_edit() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    let path = tmp.path().join("data.json");
+    fs::write(&path, "{\n  \"port\": 8080\n}\n").expect("write");
+    read_before_edit(&ctx, "data.json").await;
+
+    EditFileTool
+        .execute(
+            json!({
+                "path": "data.json",
+                "search": "8080",
+                "replace": "9090",
+            }),
+            &ctx,
+        )
+        .await
+        .expect("a valid JSON edit must proceed unchanged");
+
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "{\n  \"port\": 9090\n}\n"
+    );
+}
+
 /// #6204 — an edit that takes a parseable Rust file to an unparseable one is
 /// refused before the write, with a `line:column` from `syn`.
 #[tokio::test]
