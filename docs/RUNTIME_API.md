@@ -1177,6 +1177,202 @@ tokens but `0.0` cost. Added in v0.8.10 (#564).
 }
 ```
 
+### Native client routes (GPUI desktop)
+
+These families serve the GPUI desktop client over the same bearer-token
+transport. They reuse the runtime's existing authorities — the engine's shell
+manager, the durable thread store, the workspace confinement layer, the
+config's credential plumbing — and add no second runtime, session store,
+scheduler, or credential store.
+
+**Jobs** (operator-scoped shell jobs; the terminal surface)
+- `GET /v1/jobs` — every live and known-stale job across all threads
+- `GET /v1/threads/{id}/jobs` — jobs owned by one thread's manager:
+  model-launched, subagent-launched, and client-launched together
+- `POST /v1/threads/{id}/jobs` — `{ "command", "cwd"?, "timeout_ms"?,
+  "tty"?, "env"? }` → `201 { "job" }`; runs as a background shell under the
+  thread's projected sandbox policy. `tty: true` merges stderr into stdout
+  and gives the command a terminal (required for interactive programs);
+  background jobs are never killed at `timeout_ms`
+- `GET /v1/threads/{id}/jobs/{job_id}` — one job's status + metadata
+- `GET /v1/threads/{id}/jobs/{job_id}/output?stream=<stdout|stderr>&cursor=
+  <bytes>&max_bytes=<1-512KiB>&wait_ms=<0-30s>&format=<base64|text>` — the
+  resumable byte stream. `{job_id, stream, offset, next_cursor, total,
+  dropped, encoding, data, status, exit_code, done}`: pass `next_cursor`
+  back to continue; `wait_ms` long-polls for new bytes on a running job;
+  `done` means a terminal status and nothing left past the cursor
+- `POST /v1/threads/{id}/jobs/{job_id}/stdin` — `{ "data", "encoding"?,
+  "close"? }`: `data` is UTF-8 text by default or `base64`, `close: true`
+  sends EOF; works for PTY and piped jobs → `204`
+- `POST /v1/threads/{id}/jobs/{job_id}/kill` — bounded SIGTERM → SIGKILL
+  escalation on the process group → `{ "job", "result" }` with the final
+  snapshot
+
+Reads are non-consuming: several clients may hold independent cursors, and
+polling never steals output from the engine's own delta consumer. The
+buffer is bounded with exact drop accounting — a reader whose `cursor`
+falls behind the retained window gets `offset` past it and `dropped > 0`,
+and must re-anchor. Evicted jobs keep a tail snapshot which the output
+route serves as the final retained window. Jobs are scoped to the thread
+that created them and are killed when that thread is removed; the engine's
+background commands use the same per-thread manager, so `GET /v1/jobs` is
+also how a client sees model-spawned work.
+
+**Commands** (typed command catalog, APPS-28)
+- `GET /v1/commands` — `{commands, locale}`: every registered slash command
+  with `name`, `aliases`, `usage`, `description` (localized to the runtime's
+  configured locale — `locale` echoes the resolved pack so a client can
+  detect fallback), `subcommands`, `discovery` (`primary` / `advanced` /
+  `compatibility`), and the composer hints (`requires_argument`,
+  `requires_required_argument`, `composer_wants_trailing_space`,
+  `palette_runs_directly`, `show_in_empty_discovery`, `unlisted`). The same
+  registry the TUI palette reads — a desktop palette cannot drift from the
+  terminal's. User-registered commands are intentionally absent: they are
+  per-session state, not catalog.
+
+**Context** (per-thread context pressure, APPS-90)
+- `GET /v1/threads/{id}/context` — `input_tokens` (the conservative live
+  estimate the visible meter uses), `billed_input_tokens` (last
+  provider-counted prompt size when one exists), `window_tokens`,
+  `output_cap_tokens`, `input_budget_ceiling`, `available_input_tokens`,
+  `compaction_trigger_tokens`, `usage_percent` and `pressure`. Served by the
+  live engine via `Op::GetContextBudget`. Every numeric field is nullable —
+  a route that cannot express a bounded window reports `null` rather than an
+  invented number — and `live: false` marks responses where the engine
+  could not be loaded and only the store-recorded route's static window
+  resolved.
+
+**Git** (workspace repository operations, APPS-106)
+- `GET /v1/git` — status detail: `git_repo`, `branch`, `head`,
+  `ahead`/`behind`, counts, per-file porcelain `files[]`
+  (`{path, index, worktree, staged, status, old_path?}`), `branches`,
+  `remotes`
+- `GET /v1/changes` — the same porcelain `files[]` projection minus repo
+  chrome (branches/remotes): one authority, so the change list can never
+  disagree with the status read
+- `GET /v1/diff?path=` — one file's unified `diff` against `base` (`HEAD`,
+  or the empty tree on an unborn branch — which reads staged adds as new
+  files). Covers staged+unstaged in one patch; `truncated` reports the
+  512 KiB cap. An untracked file answers `untracked: true` with an empty
+  diff — the client reads the file itself rather than mistaking it for
+  unchanged
+- `GET /v1/workspace/diff?limit=` — whole-tree patch (default 256 KiB,
+  max 4 MiB) plus a complete `--numstat` `files[]` inventory
+  (`{path, added, deleted}`) so every changed row renders even when the
+  patch is truncated
+- `GET /v1/git/graph?limit=` — bounded commit rows (`id`, `short`,
+  `parents`, `author`, `timestamp`, `refs`, `subject`); an unborn branch is
+  an empty graph, not an error
+- `POST /v1/git/stage` `{ "paths": [...] }` or `{ "all": true }`;
+  `POST /v1/git/unstage` same; `POST /v1/git/discard` `{ "paths": [...] }`
+  (tracked paths only — no `all`, an untracked path fails closed);
+  `POST /v1/git/commit` `{ "message", "all"? }`; `POST /v1/git/push`
+  `{ "remote"?, "set_upstream"? }`; `POST /v1/git/branch`
+  `{ "name", "create"? }`
+
+Reads run through the hardened review command (filters, fsmonitor, hooks,
+lazy fetches and replace-objects neutralized); writes run through the
+non-interactive command path (`GIT_TERMINAL_PROMPT=0`, BatchMode ssh) so a
+credential or host-key prompt can never hang a request. Path lists are
+workspace-relative under the same confinement as the file routes (traversal
+→ 400, `.git` → 403), passed after `--` with literal pathspecs. Mutations
+answer `{ok, output, status}` with the refreshed status, so a client
+re-reads nothing after an operation. A workspace that is not a repository
+answers `404`.
+
+**Diagnostics** (read-only logs, crashes, process — APPS-103)
+- `GET /v1/logs` → `{sources: [{dir, files: [{name, size, modified}]}]}` —
+  the runtime's log directory plus `audit.log[.1]` from the codewhale home,
+  newest first, capped
+- `GET /v1/logs/{name}?offset=<bytes>&limit=<bytes>&tail=<bytes>` →
+  `{name, size, modified, offset, bytes, truncated, encoding, content}` —
+  one bounded window; `tail` reads from the end and is mutually exclusive
+  with `offset`; `truncated` means bytes remain after the returned window
+  (a tail read at EOF is `false`), `encoding` is `utf-8` or `base64`
+- `GET /v1/crashes`, `GET /v1/crashes/{name}` — the same list/read contract
+  over the crash-dump directories (`~/.codewhale/crashes`, legacy
+  `~/.deepseek/crashes` merged)
+- `GET /v1/process` → `{pid, version, commit, started_at, uptime_seconds,
+  executable, rss_bytes}` — `rss_bytes` only where the platform reports it
+  (Linux `/proc`); absent rather than fabricated elsewhere
+
+These routes package what already exists on disk for a client-side export;
+there is no telemetry upload route and no second log store. Names are
+basename-validated (no separators, no `..`), listings are capped, reads are
+bounded windows, and symlinks are never followed — a client bundles the
+files itself.
+
+**Targets and remote posture** (APPS-50)
+- `GET /v1/targets` → `{targets: [self], remote: {supported: true,
+  attach: "client", probe: "POST /v1/remote/connect"}, ssh: {…},
+  cloud: {…}}` — this runtime's own record as the attachable target plus
+  per-surface ownership; the runtime keeps no persistent target registry,
+  so `POST /v1/targets` and `POST /v1/targets/switch` answer
+  `501 Not Implemented` — target selection is client-owned and a switch
+  must never move a running task server-side
+- `GET /v1/remote` → `{bind_host, port, loopback_only, reachable_from_lan,
+  auth_required, mobile, tls}` — this listener's reachability posture.
+  `tls` is always `false`: the API has no TLS terminator, so non-loopback
+  reachability assumes a verified overlay (VPN/mesh), never plain LAN trust
+- `POST /v1/remote/connect` `{ "endpoint": "http://host:port" }` — probes a
+  candidate remote's unauthenticated `GET /v1/runtime/info` (origin only;
+  any pasted path is discarded). Answers `{ok, remote: {endpoint,
+  runtime_api_version, codewhale_version, auth_required, …}, attach:
+  "client"}` on success, and `{ok: false, reason: "unreachable" |
+  "not a Codewhale runtime" | …}` as data on failure. URLs carrying
+  credentials are refused with 400 — the remote's token is configured
+  client-side, and a connect route that forwarded one would be an
+  exfiltration primitive
+- `GET /v1/ssh`, `GET /v1/cloud` → `{supported: false, owner:
+  "codewhale-control-plane", reason}`; `POST /v1/ssh/connect` and
+  `POST /v1/cloud/attach` → `501`: SSH workspace provisioning and hosted
+  cloud computers belong to the Apps control plane (ASCII Box for Managed
+  Computer), not to a second authority inside Core
+
+A remote Codewhale is a `serve --http` runtime with a token — that is the
+whole attach model. These routes describe and probe it; they never execute
+a remote request on the local machine.
+
+**LSP** (workspace language intelligence, APPS-93)
+- `GET /v1/lsp` — capability: `enabled`, supported `languages` with their
+  server commands, `custom_languages`, operations, poll and diagnostic caps
+- `GET /v1/diagnostics?path=` — file diagnostics
+- `GET /v1/definition?path=&line=&character=` (1-based)
+- `GET /v1/references?path=&line=&character=` (1-based)
+- `GET /v1/symbols?path=&query=` — empty query returns document symbols
+
+One lazily-built workspace-level `LspManager` serves these; engine threads
+keep their own per-thread managers for the post-edit hook, and a server that
+never serves an LSP route never spawns a language server. `path` is
+workspace-relative under the same confinement as the file routes. Normal
+absence is data: no language server, a disabled `[lsp]` config, or a timeout
+answers `200` with `ok: false` and a machine-readable `reason`
+(`no_server`, `lsp_disabled`, `lsp_error`); malformed input is a 400 and a
+missing file a 404.
+
+**Voice** (host dictation, APPS-98)
+- `GET /v1/voice` — capability: `available`, detected `recorder` command,
+  resolved `asr` `{kind, model}`, `modes`, `send_phrases`,
+  `max_record_seconds`
+- `POST /v1/voice/dictate` — record then transcribe → `{ ok, text }`
+- `POST /v1/voice/send` — same capture with the "send it" / 发送/發送
+  suffix contract: `send: true` tells the client to submit (empty `text`
+  with `send: true` means submit the client's current draft)
+- `POST /v1/voice/control` `{ "composer": "draft text" }` — assisted
+  dictation that shows the model the composer text; `assisted: false` in the
+  response means a free ASR backend (local whisper/Groq) handled the audio
+  and the composer context was never seen
+
+The runtime owns the host microphone and the ASR dispatch — the same
+implementation the TUI's `/voice` commands run, headless. Recording is one
+blocking capture per host (requests serialize; the loser gets
+`ok:false`/`no_speech`, not a fought-over device). Provider ASR resolves its
+key lazily so local-whisper and Groq paths work without provider auth.
+Failure is data: `no_recorder`, `no_speech`, `no_provider_auth`,
+`transcription_failed`. `CODEWHALE_DISABLE_VOICE=1` is an operator
+kill-switch — a headless `serve --http` host reports `available: false` and
+every dictate call fails closed.
+
 ## Provider and model selection
 
 These three routes are how a GUI renders a model picker whose contents are true
@@ -1310,6 +1506,36 @@ alongside the selected model. Omit `model_provider_id` when it is null:
 
 This creates one thread on the exact named custom route without changing the
 Runtime's provider or model defaults.
+
+### `PUT /v1/providers/{id}/key` — write-only credential
+
+```json
+// request
+{ "key": "sk-…" }
+
+// response
+{ "provider": "openai-codex", "stored": true, "backend": "keychain",
+  "credentialState": "configured", "configPath": "/…/config.toml" }
+```
+
+Stores a provider API key through the same transactional write as
+`codewhale auth set --provider <id> --api-key-stdin`: the secret store under
+the provider write lock, plus the `[providers.<id>] auth_mode` metadata
+marker persisted to the config document and mirrored into the live runtime
+config so `GET /v1/providers` reports the new state immediately. `backend`
+names which secret backend holds the key and `configPath` which config
+document carries the marker (the user-global file when the ambient config
+is workspace-scoped).
+
+The key is never returned — there is no read route for credential material,
+and neither the key nor its length appears in the response, errors, or
+logs; the response carries only the readiness projection
+(`credentialState`). An unknown provider id, the `deepseek-cn` legacy
+alias, an empty key, a key over 4 KiB, or one containing control characters
+is `400`. `credentialState: "local"` after a successful write is honest
+output for a keyless local route: the key is stored, but the route
+classifies as not needing one. Deleting a key remains a CLI/operator
+action — there is deliberately no `DELETE` here.
 
 ### `POST /v1/providers/{id}/switch`
 

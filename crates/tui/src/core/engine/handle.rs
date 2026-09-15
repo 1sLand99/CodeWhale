@@ -414,6 +414,20 @@ impl EngineHandle {
         Ok(())
     }
 
+    /// Request the live context-window budget for this session's route.
+    /// `None` means the route cannot express a bounded window (e.g. an
+    /// unknown model with no catalog or configured limits) — callers should
+    /// surface "unavailable" rather than inventing a number.
+    pub async fn get_context_budget(
+        &self,
+    ) -> Result<Option<crate::core::ops::SessionContextBudget>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let tx = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
+        self.send(Op::GetContextBudget { tx }).await?;
+        rx.await
+            .map_err(|_| anyhow::anyhow!("Engine dropped context budget oneshot"))
+    }
+
     /// Request a snapshot of the current session state.
     /// Returns the snapshot directly via a oneshot channel, avoiding
     /// competition with the SSE event stream on the mpsc receiver.

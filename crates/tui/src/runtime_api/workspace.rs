@@ -383,7 +383,7 @@ pub(super) fn map_fs_error(error: std::io::Error, what: &str) -> ApiError {
 
 /// A workspace-relative request path. Empty and `.` mean the root, which only
 /// listing accepts. Absolute paths, `..`, backslashes and `.git` are refused.
-fn relative_request_path(raw: &str, allow_root: bool) -> Result<PathBuf, ApiError> {
+pub(super) fn relative_request_path(raw: &str, allow_root: bool) -> Result<PathBuf, ApiError> {
     let trimmed = raw.trim();
     if trimmed.len() > FILE_PATH_MAX_BYTES {
         return Err(ApiError::bad_request(format!(
@@ -419,7 +419,7 @@ fn relative_request_path(raw: &str, allow_root: bool) -> Result<PathBuf, ApiErro
     Ok(path)
 }
 
-fn canonical_workspace(workspace: &FsPath) -> Result<PathBuf, ApiError> {
+pub(super) fn canonical_workspace(workspace: &FsPath) -> Result<PathBuf, ApiError> {
     workspace
         .canonicalize()
         .map_err(|_| ApiError::internal("workspace is unavailable"))
@@ -588,7 +588,7 @@ pub(super) fn read_confined_bytes(
 
 /// Refuse links and non-files before the confined opener runs, so a client
 /// sees a precise status instead of a generic confinement error.
-fn precheck_file_target(
+pub(super) fn precheck_file_target(
     root: &FsPath,
     relative: &FsPath,
 ) -> Result<Option<std::fs::Metadata>, ApiError> {

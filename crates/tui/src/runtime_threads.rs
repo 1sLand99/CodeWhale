@@ -50,6 +50,7 @@ use crate::route_runtime::{
 };
 use crate::runtime_policy::RuntimePolicyProjection;
 use crate::tools::plan::new_shared_plan_state;
+use crate::tools::shell::{SharedShellManager, new_shared_shell_manager};
 use crate::tools::subagent::SubAgentStatus;
 use crate::tools::todo::new_shared_todo_list;
 #[cfg(test)]
@@ -4034,6 +4035,11 @@ struct ActiveThreadState {
 struct ActiveThreads {
     engines: HashMap<String, ActiveThreadState>,
     lru: VecDeque<String>,
+    /// Per-thread shell/job authority shared with the thread's loaded engine.
+    /// Entries outlive engine LRU eviction so background jobs keep running and
+    /// stay reachable through the jobs API; an entry is removed only when the
+    /// thread itself is removed, which drops the manager and kills its jobs.
+    shell_managers: HashMap<String, SharedShellManager>,
 }
 
 pub(crate) struct PreparedThreadFork {
@@ -6935,6 +6941,7 @@ impl RuntimeThreadManager {
             )
             .await
         {
+            self.active.lock().await.shell_managers.remove(&thread.id);
             let _ = self.store.remove_thread(&thread.id);
             return Err(error);
         }
@@ -6942,7 +6949,7 @@ impl RuntimeThreadManager {
     }
 
     pub(crate) async fn discard_empty_thread(&self, thread_id: &str) -> Result<()> {
-        let active = self.active.lock().await;
+        let mut active = self.active.lock().await;
         if active.engines.contains_key(thread_id) {
             bail!("cannot discard a loaded Runtime thread");
         }
@@ -6951,6 +6958,10 @@ impl RuntimeThreadManager {
         if thread.latest_turn_id.is_some() {
             bail!("cannot discard a Runtime thread that owns turns");
         }
+        // Drop the thread's shell authority with it: the manager owns any
+        // API-created jobs, and dropping the last handle kills them.
+        active.shell_managers.remove(thread_id);
+        drop(active);
         self.store.remove_thread(thread_id)
     }
 
@@ -10039,6 +10050,23 @@ impl RuntimeThreadManager {
                     crate::tools::goal::new_shared_goal_state(),
                 ),
             };
+            // One shell/job authority per thread, shared with the engine so
+            // `GET /v1/jobs` sees the same jobs the model sees and background
+            // work survives engine LRU eviction. The engine applies its
+            // per-thread sandbox settings to the manager on construction.
+            let shell_manager = {
+                let mut active = self.active.lock().await;
+                let manager = active
+                    .shell_managers
+                    .entry(thread.id.clone())
+                    .or_insert_with(|| new_shared_shell_manager(thread.workspace.clone()))
+                    .clone();
+                drop(active);
+                if let Ok(mut guard) = manager.lock() {
+                    guard.set_default_workspace(thread.workspace.clone());
+                }
+                manager
+            };
             let engine_cfg = EngineConfig {
                 model: route_model.clone(),
                 active_route_limits: route_limits,
@@ -10100,7 +10128,7 @@ impl RuntimeThreadManager {
                         Some(Arc::new(self.clone()))
                     },
                     work: None,
-                    shell_manager: None,
+                    shell_manager: Some(shell_manager),
                     persist_services_enabled: false,
                     hook_executor: None,
                     handle_store: crate::tools::handle::new_shared_handle_store(),
@@ -10276,6 +10304,74 @@ impl RuntimeThreadManager {
     pub async fn get_engine(&self, thread_id: &str) -> Result<EngineHandle> {
         let thread = self.get_thread(thread_id).await?;
         self.ensure_engine_loaded(&thread).await
+    }
+
+    /// The thread's shared shell/job authority — the same manager its engine
+    /// uses — so `/v1/jobs` and the model see one job set. With `create`, an
+    /// API-created job works before the thread's first engine load; without
+    /// it, `None` means the thread has never run shell work.
+    pub async fn thread_shell_manager(
+        &self,
+        thread_id: &str,
+        create: bool,
+    ) -> Result<Option<SharedShellManager>> {
+        let thread = self.get_thread(thread_id).await?;
+        let mut active = self.active.lock().await;
+        let manager = match active.shell_managers.entry(thread_id.to_string()) {
+            std::collections::hash_map::Entry::Occupied(entry) => Some(entry.get().clone()),
+            std::collections::hash_map::Entry::Vacant(entry) => create.then(|| {
+                entry
+                    .insert(new_shared_shell_manager(thread.workspace.clone()))
+                    .clone()
+            }),
+        };
+        drop(active);
+        if let Some(manager) = &manager
+            && let Ok(mut guard) = manager.lock()
+        {
+            guard.set_default_workspace(thread.workspace.clone());
+        }
+        Ok(manager)
+    }
+
+    /// Every live (thread_id, manager) pair, for the flat `GET /v1/jobs`.
+    pub async fn shell_managers_snapshot(&self) -> Vec<(String, SharedShellManager)> {
+        self.active
+            .lock()
+            .await
+            .shell_managers
+            .iter()
+            .map(|(thread_id, manager)| (thread_id.clone(), manager.clone()))
+            .collect()
+    }
+
+    /// The sandbox policy an API-created job inherits — the same posture
+    /// projection a turn applies to its shell calls, so a client terminal
+    /// cannot run looser than the thread's own tools would.
+    pub(crate) async fn thread_job_sandbox_policy(
+        &self,
+        thread: &ThreadRecord,
+    ) -> crate::sandbox::SandboxPolicy {
+        let policy = RuntimePolicyProjection::from_persisted(
+            &thread.mode,
+            thread.permission_posture.as_deref(),
+            thread.auto_approve,
+        );
+        let authority = crate::core::authority::TurnAuthority::from_effective_fields(
+            policy.mode,
+            thread.allow_shell,
+            thread.trust_mode,
+            policy.auto_approve(),
+            policy.permission,
+        );
+        let config = self.read_config();
+        authority.sandbox_policy(
+            &thread.workspace,
+            config.sandbox_mode.as_deref(),
+            crate::core::authority::SandboxNetworkAccess::from_config(
+                config.sandbox_network_access,
+            ),
+        )
     }
 
     fn restore_thread_messages(&self, thread: &ThreadRecord) -> Result<Vec<Message>> {

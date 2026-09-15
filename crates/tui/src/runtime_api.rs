@@ -93,9 +93,18 @@ use codewhale_protocol::fleet::{
 };
 
 mod auth;
+mod commands;
+mod context;
+mod diagnostics;
+mod git;
+mod jobs;
+mod lsp;
 mod mobile;
 mod plugins;
+mod secrets;
 mod sessions;
+mod targets;
+mod voice;
 mod web;
 mod workspace;
 #[cfg(test)]
@@ -193,6 +202,11 @@ pub struct RuntimeApiState {
     /// lazily-initialized slot; slow per-pool work (connect_all) runs under
     /// the inner handle so it cannot block slot reads.
     mcp_pool: Arc<Mutex<Option<Arc<Mutex<McpPool>>>>>,
+    /// Workspace-level LSP client for the HTTP surface (APPS-93): diagnostics
+    /// and semantic queries on files a client views. Engines keep their own
+    /// per-thread managers; this one serves the file view and is built lazily
+    /// so a server without LSP use never spawns a language server.
+    lsp_manager: Arc<std::sync::OnceLock<Arc<crate::lsp::LspManager>>>,
     #[cfg(test)]
     compat_stream_test_hook: Option<tokio::sync::mpsc::UnboundedSender<CompatStreamTestPoint>>,
 }
@@ -946,6 +960,7 @@ pub async fn run_http_server(
         web,
         fleet_codewhale_binary: configured_codewhale_binary(),
         mcp_pool: Arc::new(Mutex::new(None)),
+        lsp_manager: Arc::new(std::sync::OnceLock::new()),
         #[cfg(test)]
         compat_stream_test_hook: None,
     };
@@ -1077,6 +1092,7 @@ fn fallback_sessions_dir() -> PathBuf {
 }
 
 pub fn build_router(state: RuntimeApiState) -> Router {
+    diagnostics::mark_server_started();
     let api_routes = Router::new()
         .route(
             "/v1/sessions",
@@ -1159,9 +1175,71 @@ pub fn build_router(state: RuntimeApiState) -> Router {
                 codewhale_protocol::runtime::MAX_RUNTIME_IMAGE_BODY_BYTES,
             )),
         )
+        .route("/v1/commands", get(commands::list_commands))
+        .route("/v1/git", get(git::git_status_detail))
+        .route("/v1/changes", get(git::git_changes))
+        .route("/v1/diff", get(git::git_diff))
+        .route("/v1/workspace/diff", get(git::workspace_diff))
+        .route("/v1/git/graph", get(git::git_graph))
+        .route("/v1/git/stage", post(git::git_stage))
+        .route("/v1/git/unstage", post(git::git_unstage))
+        .route("/v1/git/discard", post(git::git_discard))
+        .route("/v1/git/commit", post(git::git_commit))
+        .route("/v1/git/push", post(git::git_push))
+        .route("/v1/git/branch", post(git::git_branch))
+        .route("/v1/logs", get(diagnostics::list_logs))
+        .route("/v1/logs/{name}", get(diagnostics::read_log))
+        .route("/v1/crashes", get(diagnostics::list_crashes))
+        .route("/v1/crashes/{name}", get(diagnostics::read_crash))
+        .route("/v1/process", get(diagnostics::process_info))
+        .route("/v1/jobs", get(jobs::list_jobs))
         .route("/v1/threads", get(list_threads).post(create_thread))
         .route("/v1/threads/summary", get(list_threads_summary))
         .route("/v1/threads/{id}", get(get_thread).patch(update_thread))
+        .route(
+            "/v1/threads/{id}/jobs",
+            get(jobs::list_thread_jobs).post(jobs::create_thread_job),
+        )
+        .route("/v1/threads/{id}/jobs/{job_id}", get(jobs::get_thread_job))
+        .route(
+            "/v1/threads/{id}/jobs/{job_id}/output",
+            get(jobs::get_thread_job_output),
+        )
+        .route(
+            "/v1/threads/{id}/jobs/{job_id}/stdin",
+            post(jobs::write_thread_job_stdin),
+        )
+        .route(
+            "/v1/threads/{id}/jobs/{job_id}/kill",
+            post(jobs::kill_thread_job),
+        )
+        .route("/v1/threads/{id}/context", get(context::get_thread_context))
+        .route(
+            "/v1/targets",
+            get(targets::list_targets).post(targets::create_target),
+        )
+        .route("/v1/targets/switch", post(targets::switch_target))
+        .route("/v1/remote", get(targets::remote_status))
+        .route("/v1/remote/connect", post(targets::remote_connect))
+        .route(
+            "/v1/ssh",
+            get(targets::ssh_status).post(targets::ssh_connect),
+        )
+        .route("/v1/ssh/connect", post(targets::ssh_connect))
+        .route(
+            "/v1/cloud",
+            get(targets::cloud_status).post(targets::cloud_attach),
+        )
+        .route("/v1/cloud/attach", post(targets::cloud_attach))
+        .route("/v1/lsp", get(lsp::lsp_status))
+        .route("/v1/diagnostics", get(lsp::lsp_diagnostics))
+        .route("/v1/definition", get(lsp::lsp_definition))
+        .route("/v1/references", get(lsp::lsp_references))
+        .route("/v1/symbols", get(lsp::lsp_symbols))
+        .route("/v1/voice", get(voice::voice_status))
+        .route("/v1/voice/dictate", post(voice::voice_dictate))
+        .route("/v1/voice/send", post(voice::voice_send))
+        .route("/v1/voice/control", post(voice::voice_control))
         .route("/v1/threads/{id}/resume", post(resume_thread))
         .route("/v1/threads/{id}/fork", post(fork_thread))
         .route("/v1/threads/{id}/undo", post(undo_thread_turn))
@@ -1324,6 +1402,12 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .route("/v1/providers", get(list_providers))
         .route("/v1/providers/{id}/models", get(list_provider_models))
         .route("/v1/providers/{id}/switch", post(switch_provider))
+        .route(
+            "/v1/providers/{id}/key",
+            put(secrets::set_provider_key).layer(DefaultBodyLimit::max(
+                secrets::PROVIDER_KEY_BODY_LIMIT_BYTES,
+            )),
+        )
         .route("/v1/config", get(get_config).post(set_config))
         .route("/v1/config/reload", post(reload_config))
         .route(
@@ -8302,6 +8386,7 @@ base_url = "http://127.0.0.1:9/v1"
             web: None,
             fleet_codewhale_binary: "unused-test-binary".to_string(),
             mcp_pool: Arc::new(Mutex::new(None)),
+            lsp_manager: Arc::new(std::sync::OnceLock::new()),
             compat_stream_test_hook: None,
         };
         let router = build_router(state.clone());

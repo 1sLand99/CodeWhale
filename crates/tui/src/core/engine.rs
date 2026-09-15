@@ -79,8 +79,8 @@ use super::authority::{
 };
 use super::events::{Event, TurnOutcomeStatus, TurnRoute};
 use super::ops::{
-    McpManagerUpdate, Op, ProviderRuntimeStatus, SessionSnapshot, USER_SHELL_TOOL_ID_PREFIX,
-    UserInputProvenance,
+    McpManagerUpdate, Op, ProviderRuntimeStatus, SessionContextBudget, SessionSnapshot,
+    USER_SHELL_TOOL_ID_PREFIX, UserInputProvenance,
 };
 use super::session::Session;
 use super::tool_parser;
@@ -3156,6 +3156,35 @@ impl Engine {
                             system_prompt: self.session.system_prompt.clone(),
                             mode: self.current_mode.as_setting().to_string(),
                         };
+                        if let Some(tx) = tx.lock().ok().and_then(|mut g| g.take()) {
+                            let _ = tx.send(snapshot);
+                        }
+                    }
+                    Op::GetContextBudget { tx } => {
+                        let input_tokens = self.estimated_input_tokens() as u64;
+                        let budget = route_context_budget_for_route(
+                            self.api_provider,
+                            &self.session.model,
+                            self.active_route_limits,
+                            usize::try_from(input_tokens).unwrap_or(usize::MAX),
+                        );
+                        let snapshot = budget.map(|budget| SessionContextBudget {
+                            window_tokens: budget.window_tokens,
+                            input_tokens,
+                            billed_input_tokens: self
+                                .session
+                                .latest_parent_input_tokens
+                                .map(u64::from),
+                            output_cap_tokens: budget.output_cap_tokens,
+                            input_budget_ceiling: budget.input_budget_ceiling,
+                            available_input_tokens: budget.available_input_tokens,
+                            compaction_trigger_tokens: budget.compaction_trigger_tokens,
+                            usage_percent: budget.usage_percent(),
+                            pressure: budget.pressure.label(),
+                            model: self.session.model.clone(),
+                            provider: self.api_provider.as_str().to_string(),
+                            model_provider_id: self.api_provider_id.clone(),
+                        });
                         if let Some(tx) = tx.lock().ok().and_then(|mut g| g.take()) {
                             let _ = tx.send(snapshot);
                         }
