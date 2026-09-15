@@ -2570,6 +2570,13 @@ pub struct McpPool {
     /// healthy. Explicit intent (`retry_connection`, `get_or_connect`, a
     /// config reload) ignores the cooldown.
     connect_backoff: HashMap<String, ConnectBackoff>,
+    /// Servers with a spawned connect in flight right now. `connect_all`,
+    /// the session boot pass, and explicit tool-selection connects all mark
+    /// names here and clear them on resolution, so status surfaces never
+    /// have to infer "connecting" from "enabled but not connected yet"
+    /// (#6033): under lazy boot an unconnected server is one nobody has
+    /// asked for, not one mid-handshake.
+    connecting: HashSet<String>,
 }
 
 /// One server's cooldown: when to try again, and what to say until then.
@@ -2595,6 +2602,21 @@ fn connect_backoff_delay(failures: u32) -> std::time::Duration {
 type McpPendingConnect = (String, McpServerConfig);
 type McpConnectError = (String, anyhow::Error);
 
+/// Whether an explicit tool selection (`tools_always_load`, a turn's
+/// `allowed_tools`) covers `server`: either an exact `mcp_<server>_<tool>`
+/// name or an `mcp_<prefix>*` glob whose prefix reaches the server name.
+/// One definition shared by the lazy boot pass and the per-turn
+/// explicit-connect wait so both agree on what a selection starts (#6033).
+pub(crate) fn tool_selection_covers_server(requested: &[String], server: &str) -> bool {
+    let prefix = format!("mcp_{}_", server.to_ascii_lowercase());
+    requested.iter().any(|name| {
+        name.starts_with(&prefix)
+            || name
+                .strip_suffix('*')
+                .is_some_and(|rule| prefix.starts_with(rule))
+    })
+}
+
 impl McpPool {
     /// Create a new pool with the given configuration
     pub fn new(config: McpConfig) -> Self {
@@ -2612,6 +2634,7 @@ impl McpPool {
             config_hash,
             catalog_generation: AtomicU64::new(1),
             connect_backoff: HashMap::new(),
+            connecting: HashSet::new(),
             last_mtimes: Vec::new(),
             dynamic_servers: Arc::new(RwLock::new(HashMap::new())),
             needs_auth_servers: BTreeSet::new(),
@@ -3098,6 +3121,7 @@ impl McpPool {
         }
         // A successful connect settles the auth question for this server,
         // and the cooldown with it.
+        self.connecting.remove(&name);
         self.connect_backoff.remove(&name);
         if self.needs_auth_servers.remove(&name) {
             self.needs_auth_generation = self.needs_auth_generation.wrapping_add(1);
@@ -3113,6 +3137,7 @@ impl McpPool {
     /// failure replaces the verdict — the state is "the most recent connect
     /// failed auth-required", not "some connect once did".
     pub(crate) fn note_connect_failure(&mut self, name: &str, error: &anyhow::Error) {
+        self.connecting.remove(name);
         if !self.server_allowed(name) {
             return;
         }
@@ -3180,17 +3205,22 @@ impl McpPool {
     /// while bounding peak memory.
     const CONNECT_CONCURRENCY: usize = 8;
 
-    /// Decide which enabled configured servers still need a handshake.
-    /// Dynamic runtime servers stay registered and connect via
-    /// [`Self::get_or_connect`]; `connect_all` has never spawned them.
+    /// Collect the configured servers a connect pass should start. `only`
+    /// scopes the pass to the given names; `None` connects every enabled,
+    /// allowed server (`connect_all`). Dynamic runtime servers stay
+    /// registered and connect via [`Self::get_or_connect`]; connect passes
+    /// have never spawned them. Every emitted name is marked
+    /// [`Self::connecting`] until its spawn resolves.
     pub(crate) fn collect_pending_connects(
         &mut self,
+        only: Option<&HashSet<String>>,
     ) -> (Vec<McpPendingConnect>, Vec<McpConnectError>) {
         let names: Vec<String> = self
             .config
             .servers
             .iter()
             .filter(|(name, server)| server.is_enabled() && self.server_allowed(name))
+            .filter(|(name, _)| only.is_none_or(|set| set.contains(*name)))
             .map(|(name, _)| name.clone())
             .collect();
         let mut pending = Vec::new();
@@ -3230,10 +3260,103 @@ impl McpPool {
                 errors.push((name, anyhow::anyhow!(backoff.last_error.clone())));
                 continue;
             }
+            if self.connecting.contains(&name) {
+                // An earlier pass spawned this connect and it has not
+                // resolved; a second pass must not spawn a duplicate.
+                continue;
+            }
             self.drop_connection(&name, "reconnect");
+            self.connecting.insert(name.clone());
             pending.push((name, server_config));
         }
         (pending, errors)
+    }
+
+    /// Start connects for servers an explicit tool selection named. Unlike a
+    /// boot pass the selection is the intent — cooldowns do not apply — but
+    /// servers already ready or already in flight are left alone, and plugin
+    /// authority is re-validated exactly as in
+    /// [`Self::collect_pending_connects`]. Covers dynamic servers too: a
+    /// selection can name one.
+    pub(crate) fn take_pending_connects_for(
+        &mut self,
+        names: &[String],
+    ) -> (Vec<McpPendingConnect>, Vec<McpConnectError>) {
+        let mut pending = Vec::new();
+        let mut errors = Vec::new();
+        for name in names {
+            let Some(server_config) = self.server_config(name) else {
+                continue;
+            };
+            if !server_config.is_enabled() || !self.server_allowed(name) {
+                continue;
+            }
+            let plugin_source = self
+                .connections
+                .get(name)
+                .and_then(|connection| connection.config().reviewed_plugin.clone())
+                .or_else(|| server_config.reviewed_plugin.clone());
+            if let Some(source) = plugin_source
+                && let Err(error) = source.validate_before_use(name, "use")
+            {
+                self.drop_connection(name, "plugin authority revoked or changed");
+                errors.push((name.clone(), error));
+                continue;
+            }
+            if self
+                .connections
+                .get(name)
+                .is_some_and(McpConnection::is_ready)
+                || !self.connecting.insert(name.clone())
+            {
+                continue;
+            }
+            self.drop_connection(name, "reconnect");
+            pending.push((name.clone(), server_config));
+        }
+        (pending, errors)
+    }
+
+    /// Forget in-flight marks for connects whose spawns were aborted before
+    /// resolution (boot-pass abort on config change, deadline expiry).
+    pub(crate) fn cancel_connecting(&mut self, names: &HashSet<String>) {
+        self.connecting.retain(|name| !names.contains(name));
+    }
+
+    /// Servers with a connect in flight right now — the one honest answer to
+    /// "which servers are connecting" (#6033).
+    pub(crate) fn connecting_servers(&self) -> Vec<String> {
+        self.connecting.iter().cloned().collect()
+    }
+
+    /// Enabled, allowed configured servers the boot pass must still start
+    /// eagerly under lazy boot (#6033): servers marked `required`, plus any
+    /// server the session's explicit tool selections cover.
+    pub(crate) fn eager_boot_server_names(&self, requested: &[String]) -> HashSet<String> {
+        self.config
+            .servers
+            .iter()
+            .filter(|(name, server)| server.is_enabled() && self.server_allowed(name))
+            .filter(|(name, server)| {
+                server.required || tool_selection_covers_server(requested, name)
+            })
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    /// Enabled, allowed servers — configured or dynamic — covered by an
+    /// explicit tool selection (`mcp_<server>_*` names or `mcp_<prefix>*`
+    /// globs). These are the names a turn is allowed to start on demand.
+    pub(crate) fn explicitly_selected_server_names(&self, requested: &[String]) -> Vec<String> {
+        let dynamic = self.dynamic_servers.read();
+        self.config
+            .servers
+            .iter()
+            .chain(dynamic.iter())
+            .filter(|(name, server)| server.is_enabled() && self.server_allowed(name))
+            .filter(|(name, _)| tool_selection_covers_server(requested, name))
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 
     pub(crate) fn push_required_server_errors(&self, errors: &mut Vec<McpConnectError>) {
@@ -3349,7 +3472,7 @@ impl McpPool {
         }
 
         for _pass in 0..2 {
-            let (pending, auth_errors) = self.collect_pending_connects();
+            let (pending, auth_errors) = self.collect_pending_connects(None);
             errors.extend(auth_errors);
             if pending.is_empty() {
                 break;
@@ -4534,7 +4657,6 @@ impl McpPool {
     }
 
     /// Get list of connected server names
-    #[allow(dead_code)] // Public API; the HTTP list endpoint no longer spawns a pool to call it (#3532)
     pub fn connected_servers(&self) -> Vec<&str> {
         self.connections
             .iter()

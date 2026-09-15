@@ -7277,6 +7277,8 @@ fn every_named_role_has_one_complete_capability_based_surface() {
         "request_plugin_install",
         "request_user_input",
         "retrieve_tool_result",
+        "session_get",
+        "session_search",
         "todo_write",
         "tui_help",
         "validate_data",
@@ -7306,6 +7308,8 @@ fn every_named_role_has_one_complete_capability_based_surface() {
         "request_user_input",
         "retrieve_tool_result",
         "review",
+        "session_get",
+        "session_search",
         "todo_write",
         "tui_help",
         "validate_data",
@@ -7339,6 +7343,8 @@ fn every_named_role_has_one_complete_capability_based_surface() {
         "request_user_input",
         "retrieve_tool_result",
         "review",
+        "session_get",
+        "session_search",
         "tasks",
         "todo_write",
         "tui_help",
@@ -7381,6 +7387,8 @@ fn every_named_role_has_one_complete_capability_based_surface() {
         "revert_turn",
         "review",
         "send_later",
+        "session_get",
+        "session_search",
         "speech",
         "task_shell_start",
         "task_shell_wait",
@@ -8377,6 +8385,8 @@ async fn read_only_roles_expose_and_dispatch_lowercase_bash_only() {
             "request_plugin_install",
             "request_user_input",
             "retrieve_tool_result",
+            "session_get",
+            "session_search",
             "todo_write",
             "tui_help",
             "validate_data",
@@ -13417,7 +13427,7 @@ async fn foreground_registration_releases_when_the_child_future_returns_or_unwin
     let registry = Arc::new(ForegroundChildRegistry::new());
 
     let completed = registry
-        .register(CancellationToken::new())
+        .register(CancellationToken::new(), "agent_completed")
         .expect("registry open");
     let result: Result<(), ()> = async move {
         let _registration = completed;
@@ -13427,7 +13437,7 @@ async fn foreground_registration_releases_when_the_child_future_returns_or_unwin
     assert!(result.is_err());
 
     let panicked = registry
-        .register(CancellationToken::new())
+        .register(CancellationToken::new(), "agent_panicked")
         .expect("registry open");
     let task = tokio::spawn(async move {
         let _registration = panicked;
@@ -15470,6 +15480,181 @@ async fn fatal_provider_failure_mid_run_parks_a_continuable_checkpoint() {
     assert_eq!(resumed.result.as_deref(), Some("resumed and finished"));
 }
 
+/// Six responses re-issuing the same role-denied call, then a text report —
+/// the exact stall #6015 guards: three denied rounds trigger the strategy
+/// switch, three held rounds the report-only response.
+async fn denied_call_then_report_chat_client() -> (DeepSeekClient, Arc<AtomicUsize>) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route(
+        "/{*path}",
+        post({
+            let calls = Arc::clone(&calls);
+            move |Json(_body): Json<Value>| {
+                let calls = Arc::clone(&calls);
+                async move {
+                    let attempt = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                    if attempt <= 6 {
+                        Json(json!({
+                            "id": format!("chatcmpl-denied-{attempt}"),
+                            "model": "deepseek-v4-flash",
+                            "choices": [{
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": null,
+                                    "tool_calls": [{
+                                        "id": format!("call_denied_{attempt}"),
+                                        "type": "function",
+                                        "function": {
+                                            "name": "bash",
+                                            "arguments": "{\"command\":\"cargo build\"}"
+                                        }
+                                    }]
+                                },
+                                "finish_reason": "tool_calls"
+                            }],
+                            "usage": {
+                                "prompt_tokens": 10,
+                                "completion_tokens": 5,
+                                "total_tokens": 15
+                            }
+                        }))
+                        .into_response()
+                    } else {
+                        Json(json!({
+                            "id": format!("chatcmpl-report-{attempt}"),
+                            "model": "deepseek-v4-flash",
+                            "choices": [{
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "Partial report: every bash call was denied."
+                                },
+                                "finish_reason": "stop"
+                            }],
+                            "usage": {
+                                "prompt_tokens": 10,
+                                "completion_tokens": 5,
+                                "total_tokens": 15
+                            }
+                        }))
+                        .into_response()
+                    }
+                }
+            }
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test server");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
+
+    let config = crate::config::Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(format!("http://{addr}/v1")),
+        retry: Some(crate::config::RetryConfig {
+            enabled: Some(false),
+            max_retries: Some(0),
+            initial_delay: Some(0.0),
+            max_delay: Some(0.0),
+            exponential_base: Some(1.0),
+        }),
+        ..crate::config::Config::default()
+    };
+    let client = DeepSeekClient::new(&config).expect("denial-stall chat client");
+    (client, calls)
+}
+
+/// #6015: a read-only worker that keeps re-issuing the same denied action
+/// must terminate as `Failed` — typed no-progress — after the shared
+/// FleetDenialGuard's strategy notice and one report-only response, not spin
+/// to the step/token budget and not misreport `BudgetExhausted`.
+#[tokio::test]
+async fn repeated_typed_denials_stop_worker_as_failed_not_budget() {
+    let tmp = tempdir().expect("tempdir");
+    let manager = Arc::new(RwLock::new(SubAgentManager::new(
+        tmp.path().to_path_buf(),
+        2,
+    )));
+    let agent_id = "agent_denial_stall".to_string();
+    let (task_input_tx, task_input_rx) = mpsc::unbounded_channel();
+    let agent = SubAgent::new(
+        agent_id.clone(),
+        FleetRole::Scout,
+        "List the workspace".to_string(),
+        make_assignment(),
+        "deepseek-v4-flash".to_string(),
+        Some("Stall".to_string()),
+        None,
+        task_input_tx,
+        tmp.path().to_path_buf(),
+        "boot_stall".to_string(),
+    );
+    {
+        let mut manager = manager.write().await;
+        manager.agents.insert(agent_id.clone(), agent);
+        manager.register_worker(make_worker_spec(&agent_id, tmp.path().to_path_buf()));
+    }
+
+    let (client, calls) = denied_call_then_report_chat_client().await;
+    let mut runtime =
+        stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
+    runtime.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Scout);
+    seed_read_only_role_deny_list(&mut runtime);
+    runtime.client = client;
+    runtime.manager = Arc::clone(&manager);
+    runtime.context = ToolContext::new(tmp.path());
+
+    run_subagent_task(SubAgentTask {
+        manager_handle: Arc::clone(&manager),
+        runtime,
+        agent_id: agent_id.clone(),
+        agent_type: FleetRole::Scout,
+        prompt: "List the workspace".to_string(),
+        assignment: make_assignment(),
+        allowed_tools: None,
+        fork_context: false,
+        started_at: Instant::now(),
+        max_steps: 20,
+        token_budget: None,
+        wall_time: DEFAULT_CHILD_WALL_TIME,
+        input_rx: task_input_rx,
+        launch_gate: None,
+        _foreground_child_registration: None,
+    })
+    .await;
+
+    // Three denied rounds earn the strategy notice; the held re-issues count
+    // three more; the report-only response is the terminal seventh call.
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        7,
+        "the stall must resolve after one report-only response"
+    );
+    let result = manager
+        .read()
+        .await
+        .get_result(&agent_id)
+        .expect("agent registered");
+    let reason = match &result.status {
+        SubAgentStatus::Failed(reason) => reason.clone(),
+        other => panic!("expected Failed, got {other:?}"),
+    };
+    assert!(
+        reason.contains("repeated permission denials"),
+        "the terminal reason must name the no-progress denial stall: {reason}"
+    );
+    assert_eq!(
+        result.result.as_deref(),
+        Some("Partial report: every bash call was denied."),
+        "the report-only response's text is the recorded result"
+    );
+}
+
 #[tokio::test]
 async fn non_retryable_provider_failure_fans_in_to_every_terminal_sink() {
     use tokio_util::sync::CancellationToken;
@@ -16473,7 +16658,7 @@ async fn queued_turn_owned_child_parks_without_a_false_start_transition() {
 
     let foreground_children = Arc::new(ForegroundChildRegistry::new());
     let registration = foreground_children
-        .register(runtime.cancel_token.clone())
+        .register(runtime.cancel_token.clone(), &agent_id)
         .expect("turn-owned queued child registers before settlement");
     let gate = Arc::new(Semaphore::new(1));
     let held_launch_permit = Arc::clone(&gate)
@@ -20075,9 +20260,10 @@ fn the_launched_authority_is_the_one_the_spawn_boundary_accepts() {
 /// superseded by these tests.
 /// Measured 80,856B on 2026-08-02 (commit body has the receipt); +10%.
 const READ_ONLY_CHILD_ENVELOPE_BYTE_CEILING: usize = 89_000;
-/// Measured 84,804B on 2026-09-13 with the native Workflow plan schema.
-/// Keep the next increase visible instead of adding another broad margin.
-const PARENT_SURFACE_BYTE_CEILING: usize = 85_000;
+/// Measured 85,913B on 2026-09-15 with the always-on session recall tools
+/// (#5715). Keep the next increase visible instead of adding another broad
+/// margin.
+const PARENT_SURFACE_BYTE_CEILING: usize = 86_000;
 
 #[tokio::test]
 async fn read_only_child_envelope_stays_within_measured_ceiling() {

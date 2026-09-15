@@ -2091,6 +2091,14 @@ pub struct GoalConfig {
     /// inside a provider turn.
     #[serde(default)]
     pub continuation_delay_seconds: Option<u64>,
+
+    /// Make a goal's `token_budget` a hard stop instead of advisory telemetry
+    /// (#6013). `false`/`None` preserves current behavior: crossing the budget
+    /// logs and continues. `true` stops the run with `BudgetLimit` once
+    /// `tokens_used >= token_budget`; goals created without a token budget
+    /// stay unbounded either way.
+    #[serde(default)]
+    pub enforce_token_budget: Option<bool>,
 }
 
 /// Reasoning-only recovery controls (`[reasoning_only]` table in config.toml).
@@ -7548,6 +7556,16 @@ impl Config {
                 clamped
             }
         }
+    }
+
+    /// Whether a goal's `token_budget` is a hard stop (#6013). Default `false`
+    /// keeps the advisory/telemetry behavior.
+    #[must_use]
+    pub fn goal_enforce_token_budget(&self) -> bool {
+        self.goal
+            .as_ref()
+            .and_then(|goal| goal.enforce_token_budget)
+            .unwrap_or(false)
     }
 
     /// Quiet period between successful interactive goal turns (#5508).

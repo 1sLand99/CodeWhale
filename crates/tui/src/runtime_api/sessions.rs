@@ -294,8 +294,9 @@ pub(super) async fn resume_session_thread(
     let manager = SessionManager::new(state.sessions_dir.clone())
         .map_err(|e| ApiError::internal(format!("Failed to open sessions dir: {e}")))?;
     let session = manager
-        .load_session(&id)
-        .map_err(|e| map_session_err(&id, e, "read"))?;
+        .resume_session(&id)
+        .map_err(|e| map_session_err(&id, e, "read"))?
+        .session;
 
     // Validate imported image bytes before allocating a Runtime thread. This
     // retains local history's existing bounds; invalid content cannot leave an

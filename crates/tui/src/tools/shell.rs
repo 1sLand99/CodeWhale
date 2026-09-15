@@ -1427,7 +1427,6 @@ impl BackgroundShell {
     }
 
     /// Get a snapshot of the current state
-    #[allow(dead_code)]
     pub fn snapshot(&self) -> Result<ShellResult> {
         let sandboxed = !matches!(self.sandbox_type, SandboxType::None);
         if let Some(snapshot) = self.bounded_output_snapshot(self.status != ShellStatus::Running)? {
@@ -2733,7 +2732,6 @@ impl ShellManager {
     }
 
     /// Get output from a background process
-    #[allow(dead_code)]
     pub fn get_output(
         &mut self,
         task_id: &str,
@@ -3261,7 +3259,7 @@ impl ShellManager {
     }
 
     /// Remember a restart-stale job so the UI can show it instead of hiding it.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn remember_stale_job(
         &mut self,
         id: impl Into<String>,
@@ -3393,7 +3391,6 @@ pub fn new_shared_shell_manager(workspace: PathBuf) -> SharedShellManager {
 
 // === ToolSpec Implementations ===
 
-use crate::execpolicy::{ExecPolicyDecision, load_default_policy};
 use crate::features::Feature;
 use crate::tools::cargo_failure_summary::summarize_cargo_failure;
 use crate::tools::spec::{
@@ -3405,7 +3402,24 @@ use codewhale_execpolicy::command_safety::{
     SafetyLevel, analyze_command, extract_primary_command, is_agent_readonly_shell_command,
     is_github_readonly_command, is_parallel_readonly_command, normalize_windows_command_paths,
 };
+use codewhale_execpolicy::toml_rules::{ExecPolicyConfig, RuleDecision};
 use serde_json::json;
+
+/// The TOML execpolicy file lives in the user config home; the rule engine
+/// itself is `codewhale_execpolicy::toml_rules`.
+fn default_execpolicy_path() -> Option<std::path::PathBuf> {
+    crate::config::effective_home_dir().map(|home| home.join(".deepseek").join("execpolicy.toml"))
+}
+
+fn load_default_policy() -> anyhow::Result<Option<ExecPolicyConfig>> {
+    let Some(path) = default_execpolicy_path() else {
+        return Ok(None);
+    };
+    if !path.exists() {
+        return Ok(None);
+    }
+    ExecPolicyConfig::from_path(&path).map(Some)
+}
 
 const FOREGROUND_TIMEOUT_RECOVERY_HINT: &str = "Foreground Bash is for bounded commands. \
 The timed-out process was killed; rerun long work as Bash action=\"run\" background=true, \
@@ -5020,14 +5034,18 @@ impl ToolSpec for BashTool {
 
         let background = background || tty;
 
-        let mut execpolicy_decision: Option<ExecPolicyDecision> = None;
+        let mut execpolicy_decision: Option<RuleDecision> = None;
         if context.features.enabled(Feature::ExecPolicy)
-            && let Some(policy) = load_default_policy()
+            && let Some(policy) = tokio::task::spawn_blocking(load_default_policy)
+                .await
+                .map_err(|e| {
+                    ToolError::execution_failed(format!("execpolicy load task failed: {e}"))
+                })?
                 .map_err(|e| ToolError::execution_failed(format!("execpolicy load failed: {e}")))?
         {
             let decision = policy.evaluate(command);
             execpolicy_decision = Some(decision.clone());
-            if let ExecPolicyDecision::Deny(reason) = decision {
+            if let RuleDecision::Deny(reason) = decision {
                 return Ok(ToolResult {
                     content: format!("BLOCKED: {reason}"),
                     success: false,
@@ -5542,14 +5560,14 @@ impl ToolSpec for BashTool {
                     "combined_output": combined_output,
                     "canceled": was_cancelled,
                     "execpolicy": execpolicy_decision.as_ref().map(|decision| match decision {
-                        ExecPolicyDecision::Allow => json!({
+                        RuleDecision::Allow => json!({
                             "decision": "allow",
                         }),
-                        ExecPolicyDecision::Deny(reason) => json!({
+                        RuleDecision::Deny(reason) => json!({
                             "decision": "deny",
                             "reason": reason,
                         }),
-                        ExecPolicyDecision::AskUser(reason) => json!({
+                        RuleDecision::AskUser(reason) => json!({
                             "decision": "ask_user",
                             "reason": reason,
                         }),
@@ -6339,21 +6357,26 @@ impl ToolSpec for NoteTool {
     ) -> Result<ToolResult, ToolError> {
         let note_content = required_str(&input, "content")?;
 
-        // Ensure parent directory exists
+        // Ensure parent directory exists. Tool handlers run on the Tokio
+        // runtime, so filesystem calls use tokio::fs (blocking-call
+        // convention, #6149).
         if let Some(parent) = context.notes_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
                 ToolError::execution_failed(format!("Failed to create notes directory: {e}"))
             })?;
         }
 
         // Append to notes file
-        let mut file = std::fs::OpenOptions::new()
+        let mut file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&context.notes_path)
+            .await
             .map_err(|e| ToolError::execution_failed(format!("Failed to open notes file: {e}")))?;
 
-        writeln!(file, "\n---\n{note_content}")
+        use tokio::io::AsyncWriteExt;
+        file.write_all(format!("\n---\n{note_content}\n").as_bytes())
+            .await
             .map_err(|e| ToolError::execution_failed(format!("Failed to write note: {e}")))?;
 
         Ok(ToolResult::success(format!(

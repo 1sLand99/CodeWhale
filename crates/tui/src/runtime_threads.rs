@@ -35,7 +35,7 @@ use crate::core::engine::{
     EngineConfig, EngineHandle, spawn_engine_with_authoritative_route_config,
 };
 use crate::core::events::{Event as EngineEvent, TurnOutcomeStatus};
-use crate::core::ops::Op;
+use crate::core::ops::{Op, TurnSpec};
 use crate::cost_status::{
     EffectiveRouteEnvelope, EffectiveRouteUsage, RouteBillingMode, RuntimeUsageDropRecord,
     RuntimeUsageRecord,
@@ -5327,7 +5327,7 @@ impl RuntimeThreadManager {
         ack_rx.await.context("User-input settlement task failed")?
     }
 
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub async fn cancel_user_input(&self, thread_id: &str, input_id: &str) -> Result<bool> {
         let admission = self.config_admission.read().await;
         self.ensure_accepting_execution()?;
@@ -5457,12 +5457,12 @@ impl RuntimeThreadManager {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn pending_approvals_count(&self) -> usize {
         self.pending_approvals.lock().len()
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn pending_dynamic_tools_count(&self) -> usize {
         self.pending_dynamic_tools.lock().len()
     }
@@ -5840,6 +5840,21 @@ impl RuntimeThreadManager {
                     goal.continuation_count
                 );
                 goal.status = codewhale_protocol::ThreadGoalStatus::Paused;
+                goal.updated_at = chrono::Utc::now().timestamp();
+            } else if self.read_config().goal_enforce_token_budget()
+                && goal
+                    .token_budget
+                    .is_some_and(|budget| goal.tokens_used >= budget)
+            {
+                // The engine stops its own continuation at an enforced token
+                // budget (#6013); the host mirrors that as a durable pause so
+                // the cross-turn re-arm does not resurrect the spend.
+                tracing::info!(
+                    "goal for {thread_id} reached its enforced token budget ({}); pausing",
+                    goal.tokens_used
+                );
+                goal.status = codewhale_protocol::ThreadGoalStatus::Paused;
+                goal.pause_reason = Some(codewhale_protocol::GoalPauseReason::BudgetLimit);
                 goal.updated_at = chrono::Utc::now().timestamp();
             } else if !update_goal_available {
                 tracing::info!(
@@ -9349,7 +9364,7 @@ impl RuntimeThreadManager {
             })
             .unwrap_or(crate::tools::goal::GoalStatus::Active);
 
-        let op = Op::SendMessage {
+        let op = Op::SendMessage (TurnSpec {
             max_output_tokens,
             content: prompt,
             images: req.images,
@@ -9373,7 +9388,7 @@ impl RuntimeThreadManager {
             approval_mode: policy.permission,
             verbosity,
             provenance: input_source.provenance(),
-        };
+        });
 
         // Reserve mailbox capacity before claiming or persisting anything.
         // If the caller is cancelled while capacity is unavailable, no
@@ -10151,6 +10166,7 @@ impl RuntimeThreadManager {
                 goal_status,
                 goal_max_continuations: cfg.goal_max_continuations(),
                 goal_continuation_delay_seconds: cfg.goal_continuation_delay_seconds(),
+                goal_enforce_token_budget: cfg.goal_enforce_token_budget(),
                 reasoning_only_max_reprompts: cfg.reasoning_only_max_reprompts(),
                 reasoning_only_reprompt_message: Some(
                     cfg.reasoning_only_reprompt_message().to_string(),
@@ -10297,7 +10313,7 @@ impl RuntimeThreadManager {
         };
         let session = crate::session_manager::default_sessions_dir()
             .and_then(crate::session_manager::SessionManager::new)
-            .and_then(|manager| manager.load_session(session_id))
+            .and_then(|manager| manager.resume_session(session_id).map(|recovery| recovery.session))
             .with_context(|| format!("Cannot read saved session {session_id}; restore that session file before resuming thread {}", thread.id))?;
         let covered = if let Some(checkpoint) = &thread.saved_session_checkpoint {
             if checkpoint.messages_sha256 != session_messages_sha256(&session.messages)? {
@@ -12559,14 +12575,14 @@ fn tool_kind_for_name(name: &str) -> TurnItemKind {
 /// The helper is the testable contract here — actual TUI wire-up to the
 /// resume flow is a follow-up.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // consumed by #128 follow-up TUI resume wiring; tested here.
+#[cfg(test)] // consumed by #128 follow-up TUI resume wiring; tested here.
 pub struct AgentRebindHint {
     pub agent_id: String,
     pub status: AgentRebindStatus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
+#[cfg(test)]
 pub enum AgentRebindStatus {
     Spawned,
     InProgress,
@@ -12584,7 +12600,7 @@ pub enum AgentRebindStatus {
 /// open to mutation by subsequent live mailbox envelopes (each envelope's
 /// `agent_id` matches one already in the rebind map).
 #[must_use]
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn collect_agent_rebind_hints(events: &[RuntimeEventRecord]) -> Vec<AgentRebindHint> {
     use std::collections::BTreeMap;
     let mut latest: BTreeMap<String, (AgentRebindStatus, u64, bool)> = BTreeMap::new();

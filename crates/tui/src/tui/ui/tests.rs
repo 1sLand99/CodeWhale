@@ -18,6 +18,7 @@ use crate::config::{
     ProviderConfig, ProvidersConfig,
 };
 use crate::core::engine::mock_engine_handle;
+use crate::core::ops::TurnSpec;
 use crate::reasoning_preference::ReasoningEffort;
 use crate::tui::active_cell::ActiveCell;
 use crate::tui::app::ToolDetailRecord;
@@ -10576,11 +10577,11 @@ async fn paused_dispatch_at_compaction_threshold_enqueues_one_atomic_send() {
     .expect("atomic paused dispatch");
 
     match engine.rx_op.recv().await.expect("single send operation") {
-        Op::SendMessage {
+        Op::SendMessage(TurnSpec {
             compaction,
             goal_objective,
             ..
-        } => {
+        }) => {
             assert!(compaction.enabled);
             assert_eq!(goal_objective.as_deref(), Some("finish the paused audit"));
         }
@@ -10899,7 +10900,7 @@ async fn dispatch_uses_app_owned_exact_custom_identity_when_config_selector_drif
     .expect("dispatch exact App-owned route");
 
     match engine.rx_op.recv().await.expect("send message op") {
-        Op::SendMessage { route, .. } => {
+        Op::SendMessage(TurnSpec { route, .. }) => {
             assert_eq!(route.identity.provider, ApiProvider::Custom);
             assert_eq!(route.identity.key, "custom-a");
             assert_eq!(route.identity.exact_id.as_deref(), Some("custom-a"));
@@ -10951,7 +10952,7 @@ async fn dispatch_idless_custom_identity_keeps_legacy_root_over_literal_table() 
     .expect("dispatch idless legacy root route");
 
     match engine.rx_op.recv().await.expect("send message op") {
-        Op::SendMessage { route, .. } => {
+        Op::SendMessage(TurnSpec { route, .. }) => {
             assert_eq!(route.identity.provider, ApiProvider::Custom);
             assert_eq!(route.identity.key, "custom");
             assert_eq!(route.identity.exact_id, None);
@@ -11751,7 +11752,7 @@ async fn lost_strict_message_submit_executor_keeps_dispatch_atomic_and_recoverab
             .expect("production completion mailbox closed");
     apply_dispatch(&mut app, &engine.handle, &Config::default()).expect("apply recovery dispatch");
     match engine.rx_op.recv().await.expect("recovery SendMessage") {
-        crate::core::ops::Op::SendMessage { content, .. } => {
+        crate::core::ops::Op::SendMessage(TurnSpec { content, .. }) => {
             assert_eq!(content, "recover now");
         }
         other => panic!("expected SendMessage, got {other:?}"),
@@ -11797,7 +11798,7 @@ async fn reserved_dispatch_waits_for_ui_acceptance_before_engine_op() {
     assert!(app.pending_turn_route.is_some());
     assert!(matches!(
         engine.rx_op.try_recv(),
-        Ok(crate::core::ops::Op::SendMessage { content, .. })
+        Ok(crate::core::ops::Op::SendMessage (TurnSpec { content, .. }))
             if content == "preserve Engine lifecycle"
     ));
     assert!(engine.rx_op.try_recv().is_err(), "one Engine admission");
@@ -11976,7 +11977,7 @@ async fn reserved_dispatch_cancel_before_acceptance_keeps_prompt_and_next_dispat
             apply(&mut app, &engine.handle, &config).expect("next dispatch");
             assert!(matches!(
                 engine.rx_op.try_recv(),
-                Ok(crate::core::ops::Op::SendMessage { .. })
+                Ok(crate::core::ops::Op::SendMessage(TurnSpec { .. }))
             ));
             assert!(engine.rx_op.try_recv().is_err());
         }
@@ -12159,7 +12160,7 @@ async fn reserved_dispatch_replaced_engine_or_session_leaves_current_state_untou
         };
         assert!(matches!(
             next_op,
-            Ok(crate::core::ops::Op::SendMessage { content, .. })
+            Ok(crate::core::ops::Op::SendMessage (TurnSpec { content, .. }))
                 if content == "new session request"
         ));
     }
@@ -12324,7 +12325,7 @@ printf '%s\n' '{"text":"after timeout"}'
         Some("hook timed out after 1s")
     );
     match engine.rx_op.recv().await.expect("send message op") {
-        crate::core::ops::Op::SendMessage { content, .. } => {
+        crate::core::ops::Op::SendMessage(TurnSpec { content, .. }) => {
             assert_eq!(content, "after timeout");
         }
         other => panic!("expected SendMessage, got {other:?}"),
@@ -12369,7 +12370,7 @@ printf '%s\n' '{"text":"after soft failure"}'
         Some("message_submit hook exited with code 9")
     );
     match engine.rx_op.recv().await.expect("send message op") {
-        crate::core::ops::Op::SendMessage { content, .. } => {
+        crate::core::ops::Op::SendMessage(TurnSpec { content, .. }) => {
             assert_eq!(content, "after soft failure");
         }
         other => panic!("expected SendMessage, got {other:?}"),
@@ -12465,7 +12466,7 @@ printf '%s\n' '{"text":"[hooked] hello"}'
         ContentBlock::Text { text, .. } if text == "[hooked] hello"
     ));
     match engine.rx_op.recv().await.expect("send message op") {
-        crate::core::ops::Op::SendMessage { content, .. } => {
+        crate::core::ops::Op::SendMessage(TurnSpec { content, .. }) => {
             assert_eq!(content, "[hooked] hello");
         }
         other => panic!("expected SendMessage, got {other:?}"),
@@ -12572,11 +12573,11 @@ async fn dispatch_non_resume_message_preserves_paused_command_state() {
     assert!(app.goal.objective.is_none());
     assert!(!engine.handle.is_paused());
     match engine.rx_op.recv().await.expect("send message op") {
-        crate::core::ops::Op::SendMessage {
+        crate::core::ops::Op::SendMessage(TurnSpec {
             content,
             goal_objective,
             ..
-        } => {
+        }) => {
             assert!(goal_objective.is_none());
             assert!(content.contains("Paused custom slash command: Scan nested git repositories"));
             assert!(content.contains("do not continue the paused command"));
@@ -12613,11 +12614,11 @@ async fn dispatch_resume_message_restores_paused_command_goal() {
     );
     assert!(!engine.handle.is_paused());
     match engine.rx_op.recv().await.expect("send message op") {
-        crate::core::ops::Op::SendMessage {
+        crate::core::ops::Op::SendMessage(TurnSpec {
             content,
             goal_objective,
             ..
-        } => {
+        }) => {
             assert_eq!(
                 goal_objective.as_deref(),
                 Some("Scan nested git repositories")
@@ -12662,12 +12663,12 @@ async fn dispatch_user_message_keeps_auto_review_separate_from_bypass() {
         .expect("spawned dispatch should deliver Op within timeout")
         .expect("send message op");
     match op {
-        crate::core::ops::Op::SendMessage {
+        crate::core::ops::Op::SendMessage(TurnSpec {
             mode,
             auto_approve,
             approval_mode,
             ..
-        } => {
+        }) => {
             assert_eq!(mode, AppMode::Agent);
             assert!(!auto_approve);
             assert_eq!(approval_mode, ApprovalMode::Auto);
@@ -16957,7 +16958,7 @@ async fn dispatch_user_message_records_prompt_for_cancel_restore() {
         Some("fix this typo\nthen retry")
     );
     match engine.rx_op.recv().await.expect("send message op") {
-        crate::core::ops::Op::SendMessage { content, .. } => {
+        crate::core::ops::Op::SendMessage(TurnSpec { content, .. }) => {
             assert_eq!(content, "fix this typo\nthen retry");
             assert!(!app.show_thinking, "visibility remains TUI-owned");
         }
@@ -16999,7 +17000,7 @@ async fn startup_prompt_waits_for_onboarding_then_dispatches() {
         Some("阅读项目 and wait")
     );
     match engine.rx_op.recv().await.expect("send message op") {
-        crate::core::ops::Op::SendMessage { content, .. } => {
+        crate::core::ops::Op::SendMessage(TurnSpec { content, .. }) => {
             assert!(content.contains("阅读项目 and wait"));
         }
         other => panic!("expected SendMessage, got {other:?}"),
@@ -17045,7 +17046,9 @@ async fn redaction_gate_preserves_startup_and_external_input_without_dispatch() 
     assert!(!app.auto_submit_initial_input);
     assert!(app.input.is_empty());
     match engine.rx_op.try_recv().unwrap() {
-        Op::SendMessage { content, .. } => assert!(content.contains("review the local fixture")),
+        Op::SendMessage(TurnSpec { content, .. }) => {
+            assert!(content.contains("review the local fixture"))
+        }
         other => panic!("unexpected operation: {other:?}"),
     }
     assert!(engine.rx_op.try_recv().is_err());
@@ -22916,7 +22919,7 @@ fn message_complete_drain_preserves_thinking_when_thinking_complete_lost() {
     app.thinking_started_at = Some(Instant::now());
     app.streaming_state.start_thinking(0);
     app.streaming_state.push_content(0, "deep reasoning text");
-    let _ = app.streaming_state.commit_text(0);
+    let _ = app.streaming_state.commit_text(0, usize::MAX);
     app.reasoning_buffer.push_str("deep reasoning text");
 
     assert!(
@@ -25201,7 +25204,6 @@ mod work_sidebar_projection_tests {
             ended_at,
             duration_ms: ended_at.map(|_| 1_234),
             lifecycle_seq: 1,
-            hunt_verdict: None,
             error: None,
             terminal_reason: None,
             thread_id: None,
@@ -25959,8 +25961,8 @@ fn queued_terminal_events_keep_receipt_gap_for_late_unbracketed_submit() {
     );
 }
 
-#[test]
-fn terminal_input_child_pause_drains_codewhale_events_before_editor_handoff() {
+#[tokio::test]
+async fn terminal_input_child_pause_drains_codewhale_events_before_editor_handoff() {
     let (tx, rx) = std::sync::mpsc::channel();
     tx.send(TerminalInputMessage::Event(ObservedTerminalEvent::new(
         Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
@@ -25990,6 +25992,7 @@ fn terminal_input_child_pause_drains_codewhale_events_before_editor_handoff() {
 
     input
         .pause_for_child_terminal()
+        .await
         .expect("synthetic pump can pause");
     assert!(
         prepare_terminal_input_handoff(&input, &mut pending_terminal_events)
@@ -26010,8 +26013,8 @@ fn terminal_input_child_pause_drains_codewhale_events_before_editor_handoff() {
     assert!(!input.paused_ack.load(std::sync::atomic::Ordering::Acquire));
 }
 
-#[test]
-fn terminal_input_handoff_preserves_pending_cancellation_keys() {
+#[tokio::test]
+async fn terminal_input_handoff_preserves_pending_cancellation_keys() {
     let (tx, rx) = std::sync::mpsc::channel();
     tx.send(TerminalInputMessage::Event(ObservedTerminalEvent::new(
         Event::Key(KeyEvent::new(KeyCode::Char('\u{3}'), KeyModifiers::NONE)),
@@ -26040,6 +26043,7 @@ fn terminal_input_handoff_preserves_pending_cancellation_keys() {
 
     input
         .pause_for_child_terminal()
+        .await
         .expect("synthetic pump can pause");
     assert!(
         !prepare_terminal_input_handoff(&input, &mut pending_terminal_events)

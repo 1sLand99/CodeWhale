@@ -618,6 +618,8 @@ fn goal_max_continuations_loads_from_goal_table() -> Result<()> {
     );
     assert_eq!(config.goal_max_continuations(), 0);
     assert_eq!(config.goal_continuation_delay_seconds(), 0);
+    // enforce_token_budget defaults off: budgets stay advisory (#6013).
+    assert!(!config.goal_enforce_token_budget());
 
     // Explicit backstop override.
     let config: Config = toml::from_str(
@@ -638,6 +640,15 @@ max_continuations = 0
 "#,
     )?;
     assert_eq!(config.goal_max_continuations(), 0);
+
+    // Opt a set token budget into a hard stop (#6013).
+    let config: Config = toml::from_str(
+        r#"
+[goal]
+enforce_token_budget = true
+"#,
+    )?;
+    assert!(config.goal_enforce_token_budget());
     assert_eq!(config.goal_continuation_delay_seconds(), 0);
 
     // Bound accidental giant cadences; this remains a turn loop, not a

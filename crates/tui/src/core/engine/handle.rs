@@ -140,6 +140,15 @@ impl EngineHandle {
     }
 
     /// Send an operation to the engine
+    ///
+    /// This awaits channel capacity, and the engine drains `rx_op` only
+    /// between turns — so on the UI event loop an awaited send into a
+    /// saturated mailbox freezes input for the rest of the turn (#6150).
+    /// Input-path callers instead either `try_send` a droppable op (report
+    /// the rejection) or `try_reserve_owned` before committing UI state and
+    /// hand off with `send_reserved_op`. An awaited `send` remains correct
+    /// only where the operation is part of a committed, ordered transition
+    /// (session/provider reload) whose drop would desync engine and UI.
     pub async fn send(&self, op: Op) -> Result<()> {
         let authority = Self::change_mode_authority(&op);
         let permit = self.tx_op.clone().reserve_owned().await?;
@@ -192,7 +201,7 @@ impl EngineHandle {
             .turn_controls
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if matches!(&op, Op::SendMessage { .. }) {
+        if matches!(&op, Op::SendMessage(_)) {
             let control = controls.fresh();
             controls.pending.push_back(control);
         }
@@ -310,7 +319,6 @@ impl EngineHandle {
 
     /// Check if a request is currently cancelled
     #[must_use]
-    #[allow(dead_code)]
     pub fn is_cancelled(&self) -> bool {
         if let Some(control) = self
             .turn_controls

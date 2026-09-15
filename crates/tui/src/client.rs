@@ -3812,11 +3812,11 @@ struct OpenRouterModelItem {
     id: String,
     // Captured from OpenRouter for future display/deprecation surfaces. The
     // current CatalogOffering shape has no honest fields for these yet.
-    #[allow(dead_code)]
     #[serde(default)]
+    #[expect(dead_code)]
     name: Option<String>,
-    #[allow(dead_code)]
     #[serde(default)]
+    #[expect(dead_code)]
     created: Option<u64>,
     #[serde(default)]
     context_length: Option<u32>,
@@ -3828,8 +3828,8 @@ struct OpenRouterModelItem {
     supported_parameters: Option<Vec<String>>,
     #[serde(default)]
     architecture: Option<OpenRouterArchitecture>,
-    #[allow(dead_code)]
     #[serde(default)]
+    #[expect(dead_code)]
     expiration_date: Option<String>,
 }
 

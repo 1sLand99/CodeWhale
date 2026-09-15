@@ -647,7 +647,7 @@ pub(crate) fn resume_launch_session(app: &mut App, session_id: &str) -> commands
         Ok(manager) => manager,
         Err(err) => return failed(app, &err.to_string()),
     };
-    let saved = match manager.load_session(session_id) {
+    let saved = match manager.load_session_snapshot(session_id) {
         Ok(saved) => saved,
         Err(err) => return failed(app, &err.to_string()),
     };
@@ -659,6 +659,20 @@ pub(crate) fn resume_launch_session(app: &mut App, session_id: &str) -> commands
     }
     app.launch.dissolve_card(app.ambient_clock_ms);
     commands::CommandResult::action(AppAction::LoadSession(path))
+}
+
+/// `LaunchAction::McpRemedy` (#6085): type the remedy the problems row
+/// prints into the composer — `/mcp login <name>` or `/mcp`. Typing beats
+/// copying (no clipboard dependency over SSH), and the user reads the
+/// command before a second Enter sends it.
+pub(crate) fn type_launch_mcp_remedy(app: &mut App) {
+    let Some(command) = crate::tui::underwater::mcp_remedy_command(app) else {
+        return;
+    };
+    app.input = command;
+    app.cursor_position = app.input.chars().count();
+    app.launch.menu_selected = None;
+    app.launch.status = None;
 }
 
 pub(crate) fn begin_launch_session(

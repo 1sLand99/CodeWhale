@@ -428,6 +428,13 @@ jobs:
         # pushes to main, where the number is actually actionable.
         continue-on-error: ${{ github.event_name == 'pull_request' }}
         run: python3 scripts/check-dead-code-budget.py
+      # Ratchet for blocking calls that could park Tokio workers: any new
+      # thread::sleep/std::fs site outside spawn_blocking, dedicated-thread,
+      # or test scopes must be isolated or budgeted (#6149).
+      - name: Check blocking-calls budget
+        if: needs.changes.outputs.heavy == 'true'
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
+        run: python3 scripts/check-blocking-calls-budget.py
       - name: Test runtime-contract measurement harness
         if: needs.changes.outputs.heavy == 'true'
         run: |

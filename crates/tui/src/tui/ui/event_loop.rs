@@ -768,12 +768,16 @@ pub async fn run_tui(
             if session_id == "latest" {
                 // Special case: resume the most recent session in this workspace.
                 match manager.get_latest_session_for_workspace(&options.workspace) {
-                    Ok(Some(meta)) => manager.load_session(&meta.id).map(Some),
+                    Ok(Some(meta)) => manager
+                        .resume_session(&meta.id)
+                        .map(|recovery| Some(recovery.session)),
                     Ok(None) => Ok(None),
                     Err(e) => Err(e),
                 }
             } else {
-                manager.load_session_by_prefix(session_id).map(Some)
+                manager
+                    .resume_session_by_prefix(session_id)
+                    .map(|recovery| Some(recovery.session))
             };
 
         match load_result {
@@ -3200,12 +3204,13 @@ pub(crate) async fn run_event_loop(
                     EngineEvent::PauseEvents { ack } => {
                         if !event_broker.is_paused() {
                             let input_handoff =
-                                terminal_input.pause_for_child_terminal().and_then(|()| {
-                                    prepare_terminal_input_handoff(
+                                match terminal_input.pause_for_child_terminal().await {
+                                    Ok(()) => prepare_terminal_input_handoff(
                                         &terminal_input,
                                         &mut pending_terminal_events,
-                                    )
-                                });
+                                    ),
+                                    Err(err) => Err(err),
+                                };
                             match input_handoff {
                                 Ok(true) => {}
                                 Ok(false) => {
@@ -4780,8 +4785,13 @@ pub(crate) async fn run_event_loop(
                             // A launched command dissolves the card; Esc
                             // out of the picker brings it back.
                             app.launch.dissolve_card(app.ambient_clock_ms);
-                            app.view_stack
-                                .push(SessionPickerView::new(&app.workspace, app.ui_locale));
+                            app.view_stack.push(
+                                SessionPickerView::new(&app.workspace, app.ui_locale)
+                                    .with_current_session(app.current_session_id.as_deref()),
+                            );
+                        }
+                        crate::tui::underwater::LaunchAction::McpRemedy => {
+                            type_launch_mcp_remedy(app);
                         }
                         crate::tui::underwater::LaunchAction::Help => {
                             toggle_help_view(app);
@@ -5461,8 +5471,13 @@ pub(crate) async fn run_event_loop(
                             // A launched command dissolves the card; Esc
                             // out of the picker brings it back.
                             app.launch.dissolve_card(app.ambient_clock_ms);
-                            app.view_stack
-                                .push(SessionPickerView::new(&app.workspace, app.ui_locale));
+                            app.view_stack.push(
+                                SessionPickerView::new(&app.workspace, app.ui_locale)
+                                    .with_current_session(app.current_session_id.as_deref()),
+                            );
+                        }
+                        crate::tui::underwater::LaunchAction::McpRemedy => {
+                            type_launch_mcp_remedy(app);
                         }
                         crate::tui::underwater::LaunchAction::Help => {
                             toggle_help_view(app);
@@ -5918,8 +5933,10 @@ pub(crate) async fn run_event_loop(
                     // never restores a different project's history by
                     // surprise (#1395). Press `a` inside the picker to
                     // broaden to every saved session.
-                    app.view_stack
-                        .push(SessionPickerView::new(&app.workspace, app.ui_locale));
+                    app.view_stack.push(
+                        SessionPickerView::new(&app.workspace, app.ui_locale)
+                            .with_current_session(app.current_session_id.as_deref()),
+                    );
                     continue;
                 }
                 KeyCode::Char('c') | KeyCode::Char('C')
@@ -6515,31 +6532,34 @@ pub(crate) async fn run_event_loop(
                     // shortcut whether or not a model turn is streaming —
                     // editing the buffer never disturbs in-flight work.
                     let seed = app.input.clone();
-                    let editor_result = terminal_input.pause_for_child_terminal().and_then(|()| {
-                        let result = prepare_terminal_input_handoff(
-                            &terminal_input,
-                            &mut pending_terminal_events,
-                        )
-                        .and_then(|ready| {
-                            if ready {
-                                crate::tui::external_editor::spawn_editor_for_input(
-                                    terminal,
-                                    app.use_alt_screen(),
-                                    app.use_mouse_capture,
-                                    app.use_bracketed_paste,
-                                    &seed,
-                                )
-                            } else {
-                                Err(io::Error::new(
-                                    io::ErrorKind::Interrupted,
-                                    "editor handoff cancelled by pending terminal input",
-                                ))
-                            }
-                        });
-                        terminal_input.resume_after_child_terminal();
-                        force_terminal_repaint = true;
-                        result
-                    });
+                    let editor_result = match terminal_input.pause_for_child_terminal().await {
+                        Err(err) => Err(err),
+                        Ok(()) => {
+                            let result = prepare_terminal_input_handoff(
+                                &terminal_input,
+                                &mut pending_terminal_events,
+                            )
+                            .and_then(|ready| {
+                                if ready {
+                                    crate::tui::external_editor::spawn_editor_for_input(
+                                        terminal,
+                                        app.use_alt_screen(),
+                                        app.use_mouse_capture,
+                                        app.use_bracketed_paste,
+                                        &seed,
+                                    )
+                                } else {
+                                    Err(io::Error::new(
+                                        io::ErrorKind::Interrupted,
+                                        "editor handoff cancelled by pending terminal input",
+                                    ))
+                                }
+                            });
+                            terminal_input.resume_after_child_terminal();
+                            force_terminal_repaint = true;
+                            result
+                        }
+                    };
                     match editor_result {
                         Ok(crate::tui::external_editor::EditorOutcome::Edited(new)) => {
                             app.input = new;

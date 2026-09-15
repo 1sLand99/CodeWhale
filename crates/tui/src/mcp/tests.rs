@@ -4490,7 +4490,7 @@ async fn a_failed_server_waits_out_a_cooldown_instead_of_redialing_every_turn() 
     assert_eq!(first.len(), 1, "first pass should dial and fail once");
 
     // Second pass: still reported as failing, but nothing is queued to dial.
-    let (pending, errors) = pool.collect_pending_connects();
+    let (pending, errors) = pool.collect_pending_connects(None);
     assert!(
         pending.is_empty(),
         "a server inside its cooldown must not be re-dialed: {:?}",
@@ -4508,11 +4508,91 @@ async fn a_failed_server_waits_out_a_cooldown_instead_of_redialing_every_turn() 
 
     // Asking for that server by name is explicit intent and lifts the wait.
     assert!(pool.retry_connection("broken").await.is_err());
-    let (pending, _) = pool.collect_pending_connects();
+    let (pending, _) = pool.collect_pending_connects(None);
     assert!(
         pending.is_empty(),
         "the failed retry restarts the ladder rather than clearing it"
     );
+}
+
+/// Lazy boot (#6033): the scoped collect starts only the eager set —
+/// `required` servers plus ones an explicit tool selection covers — and the
+/// pool tracks exactly those names as in-flight, so "connecting" never has
+/// to be inferred from "enabled but unconnected".
+#[test]
+fn lazy_boot_scopes_pending_connects_and_tracks_in_flight() {
+    let mut required_cfg = test_server_config();
+    required_cfg.required = true;
+    let mut pool = McpPool::new(McpConfig {
+        timeouts: McpTimeouts::default(),
+        servers: HashMap::from([
+            ("needed".to_string(), required_cfg),
+            ("selected".to_string(), test_server_config()),
+            ("lazy".to_string(), test_server_config()),
+        ]),
+    });
+    let requested = vec!["mcp_selected_read".to_string()];
+
+    let eager = pool.eager_boot_server_names(&requested);
+    assert_eq!(
+        eager,
+        HashSet::from(["needed".to_string(), "selected".to_string()]),
+        "the eager set is required servers plus selection-covered ones"
+    );
+
+    let (pending, errors) = pool.collect_pending_connects(Some(&eager));
+    assert!(errors.is_empty());
+    let pending_names: HashSet<String> = pending.iter().map(|(name, _)| name.clone()).collect();
+    assert_eq!(pending_names, eager);
+    assert_eq!(
+        pool.connecting_servers()
+            .into_iter()
+            .collect::<HashSet<_>>(),
+        pending_names,
+        "in-flight marks must name exactly the spawned connects"
+    );
+
+    // A lazy server is neither spawned nor reported connecting.
+    let (pending, errors) = pool.collect_pending_connects(Some(&eager));
+    assert!(
+        pending.is_empty() && errors.is_empty(),
+        "an in-flight name is not re-queued by a second scoped pass"
+    );
+
+    // Explicit selection is intent: the lazy server starts on demand and is
+    // marked in-flight while it does.
+    let (pending, errors) = pool.take_pending_connects_for(&["lazy".to_string()]);
+    assert!(errors.is_empty());
+    assert_eq!(pending.len(), 1);
+    assert!(pool.connecting_servers().contains(&"lazy".to_string()));
+
+    // Aborting clears the marks without touching connection state.
+    pool.cancel_connecting(&HashSet::from([
+        "needed".to_string(),
+        "selected".to_string(),
+        "lazy".to_string(),
+    ]));
+    assert!(pool.connecting_servers().is_empty());
+}
+
+/// Selection coverage shared by lazy boot and the per-turn wait: exact
+/// `mcp_<server>_<tool>` names and `mcp_<prefix>*` globs both count.
+#[test]
+fn tool_selection_covers_exact_names_and_globs() {
+    let selected = vec![
+        "mcp_fs_read".to_string(),
+        "mcp_git_*".to_string(),
+        "shell".to_string(),
+    ];
+    assert!(tool_selection_covers_server(&selected, "fs"));
+    assert!(tool_selection_covers_server(&selected, "git_status"));
+    assert!(!tool_selection_covers_server(&selected, "slack"));
+    // A prefix glob reaches every server whose `mcp_<server>_` namespace
+    // starts with it: `mcp_gi*` covers `git` and `gitea` alike.
+    let glob = vec!["mcp_gi*".to_string()];
+    assert!(tool_selection_covers_server(&glob, "git"));
+    assert!(tool_selection_covers_server(&glob, "gitea"));
+    assert!(!tool_selection_covers_server(&glob, "fs"));
 }
 
 #[test]
@@ -7692,7 +7772,7 @@ async fn mcp_ceiling_denied_server_is_absent_across_cached_boot_meta_auth_and_ru
         pool.authenticate_tool_target("mcp_private_a_authenticate")
             .is_none()
     );
-    let (pending, errors) = pool.collect_pending_connects();
+    let (pending, errors) = pool.collect_pending_connects(None);
     assert!(pending.is_empty() && errors.is_empty());
     assert!(
         pool.connect_all().await.is_empty(),
