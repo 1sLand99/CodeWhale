@@ -451,6 +451,9 @@
   "crates/tui/src/tui/ui/provider_setup.rs": {
     "std_fs": 2
   },
+  "crates/tui/src/tui/ui/terminal_input.rs": {
+    "thread_sleep": 1
+  },
   "crates/tui/src/tui/ui/tests.rs": {
     "std_fs": 3,
     "thread_sleep": 1
