@@ -6,6 +6,7 @@
 //! checkpoints, and loop termination.
 
 use super::dispatch::{
+    FLEET_FINAL_REPORT_NOTICE, FLEET_NO_PROGRESS_STOP, FLEET_STRATEGY_SWITCH_NOTICE,
     FleetDenialAction, FleetDenialBatch, FleetDenialGuard, normalize_schema_json_containers,
 };
 use super::*;
@@ -2712,7 +2713,7 @@ impl Engine {
                     )
                 } else {
                     turn.stop_diagnostics.reason = Some(TurnStopReason::NoProgress);
-                    "Fleet worker stopped after repeated permission denials without new evidence. Work and tool results are retained in the transcript; review the blocker before resuming.".to_string()
+                    FLEET_NO_PROGRESS_STOP.to_string()
                 };
                 let _ = self.tx_event.send(Event::status(error.clone())).await;
                 return (TurnOutcomeStatus::Failed, Some(error));
@@ -2724,15 +2725,11 @@ impl Engine {
                             .stop_diagnostics
                             .permission_strategy_switches
                             .saturating_add(1);
-                        Some(
-                            "Fleet strategy switch required: repeated permission denials produced no new evidence. The rejected action is held. Use another permitted tool from the current catalog to make progress, or report completed work and the blocker. Do not work around permissions or request the same approval again.",
-                        )
+                        Some(FLEET_STRATEGY_SWITCH_NOTICE)
                     }
                     FleetDenialAction::FinalReport => {
                         turn.stop_diagnostics.final_report_requested = true;
-                        Some(
-                            "Fleet no-progress final report: permission denials continued after the strategy switch without new evidence. Your next response is report-only; no tools will execute. Report what you completed, exact evidence, the permission blocker and remaining work. This is the last response unless the user changes direction or authority.",
-                        )
+                        Some(FLEET_FINAL_REPORT_NOTICE)
                     }
                 };
                 if let Some(notice) = notice {

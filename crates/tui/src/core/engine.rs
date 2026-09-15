@@ -7873,6 +7873,10 @@ mod tool_preparation;
 mod tool_setup;
 pub(crate) mod turn_budget;
 pub(crate) mod turn_loop;
+pub(crate) use dispatch::{
+    FLEET_FINAL_REPORT_NOTICE, FLEET_NO_PROGRESS_STOP, FLEET_STRATEGY_SWITCH_NOTICE,
+    FleetDenialAction, FleetDenialBatch, FleetDenialGuard,
+};
 pub(crate) use token_estimate_cache::TokenEstimateCache;
 
 pub(super) const MAX_PARALLEL_SHELL_EXEC: usize = 4;

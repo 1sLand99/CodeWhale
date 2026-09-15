@@ -38,6 +38,10 @@ use crate::core::engine::tool_catalog::{
     is_tool_search_tool, remove_evicted_cache_activations, tool_denied,
     touch_cached_tool_after_execution,
 };
+use crate::core::engine::{
+    FLEET_FINAL_REPORT_NOTICE, FLEET_NO_PROGRESS_STOP, FLEET_STRATEGY_SWITCH_NOTICE,
+    FleetDenialAction, FleetDenialBatch, FleetDenialGuard,
+};
 use crate::core::events::{AgentProgressEventMeta, Event};
 use crate::core::session::ToolActivationCache;
 use crate::dependencies::{ExternalTool, Git};
@@ -61,7 +65,7 @@ use crate::tools::registry::{AgentToolSurfaceOptions, ToolRegistry, ToolRegistry
 use crate::tools::shell::SharedShellManager;
 use crate::tools::spec::{
     ApprovalRequirement, RichToolResult, ToolCapability, ToolContext, ToolError, ToolResult,
-    ToolSpec,
+    ToolSpec, ToolTerminalStatus,
 };
 use crate::tools::todo::SharedTodoList;
 #[cfg(test)]
@@ -12890,6 +12894,10 @@ async fn run_subagent(
     // Distinguish a real "the model chose to stop" exit from an explicitly
     // configured step-cap exit. The normal loop is unbounded (max_steps == 0).
     let mut stopped_naturally = false;
+    // #6015: every child worker runs the same typed-denial no-progress guard
+    // as the parent turn — this registry's admission gate reports typed
+    // `ToolError::PermissionDenied` refusals the guard can name.
+    let mut fleet_denial_guard = FleetDenialGuard::default();
 
     // A queued child can be parked before it ever acquires a launch permit.
     // Project that terminal state before emitting Started/Starting so the
@@ -13028,10 +13036,12 @@ async fn run_subagent(
             pending_inputs.push_back(input);
         }
 
+        let accepted_new_direction = !pending_inputs.is_empty();
         append_subagent_inputs_as_user_messages(&mut messages, &mut pending_inputs);
 
         let child_completions = drain_child_completion_events(&mut child_completion_rx);
-        if !child_completions.is_empty() {
+        let has_child_completions = !child_completions.is_empty();
+        if has_child_completions {
             let count = child_completions.len();
             record_agent_progress(
                 runtime,
@@ -13044,6 +13054,11 @@ async fn run_subagent(
             );
             messages.push(child_completion_runtime_message(&child_completions));
         }
+        // User steering or child evidence is a changed direction; the guard
+        // only counts denial rounds since the last such input (#6015).
+        if accepted_new_direction || has_child_completions {
+            fleet_denial_guard.reset();
+        }
 
         let tools = tool_surface.request_tools(
             tool_registry.deferred_catalog_for_model(&agent_type),
@@ -13055,6 +13070,9 @@ async fn run_subagent(
         );
         let request_active_tool_names = tool_surface.active_names.clone();
         let has_tools = !tools.is_empty();
+        // The report-only response keeps the pinned tool catalog but asks the
+        // provider for no calls; admission still holds any it emits (#6015).
+        let fleet_report_response = fleet_denial_guard.report_only();
         // A child sends its stored messages and nothing else. Its To-do state
         // reaches it the same way the parent's does: through the tool results
         // its own `work_update` calls returned, which are already in
@@ -13120,7 +13138,11 @@ async fn run_subagent(
             .expect("bounded to the route output ceiling"),
             system: Some(request_system.clone()),
             tools: has_tools.then(|| tools.clone()),
-            tool_choice: has_tools.then(|| json!({ "type": "auto" })),
+            tool_choice: if has_tools && fleet_report_response {
+                Some(json!("none"))
+            } else {
+                has_tools.then(|| json!({ "type": "auto" }))
+            },
             metadata: None,
             thinking: None,
             reasoning_effort: runtime.reasoning_effort.clone(),
@@ -13422,6 +13444,13 @@ async fn run_subagent(
             break;
         }
 
+        // A worker may cooperate with the strategy notice by reporting its
+        // blocker without another tool call. With no new direction or
+        // evidence, that report is terminal no-progress, not a Completed
+        // stop (#6015).
+        let fleet_no_progress_report = fleet_report_response
+            || tool_uses.is_empty() && fleet_denial_guard.awaiting_strategy_change();
+
         if tool_uses.is_empty() {
             let child_completions = drain_child_completion_events(&mut child_completion_rx);
             if !child_completions.is_empty() {
@@ -13461,6 +13490,7 @@ async fn run_subagent(
                     fork_context_enabled,
                 )
                 .await;
+                fleet_denial_guard.reset();
                 continue;
             }
             while let Ok(input) = input_rx.try_recv() {
@@ -13471,6 +13501,10 @@ async fn run_subagent(
                 pending_inputs.push_back(input);
             }
             if pending_inputs.is_empty() {
+                if fleet_no_progress_report {
+                    terminal_failure_reason = Some(FLEET_NO_PROGRESS_STOP.to_string());
+                    break;
+                }
                 record_agent_progress(
                     runtime,
                     &agent_id,
@@ -13494,6 +13528,7 @@ async fn run_subagent(
             ),
         );
         let mut tool_results: Vec<ContentBlock> = Vec::new();
+        let mut denial_batch = FleetDenialBatch::default();
         for (tool_id, tool_name, tool_input) in tool_uses {
             if work_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 budget_failure_reason = Some("child wall-time budget exhausted during task execution; remaining time is reserved for hand-back".to_string());
@@ -13517,6 +13552,34 @@ async fn run_subagent(
             {
                 budget_failure_reason = Some(detail);
                 break;
+            }
+            // The report-only response and re-denied actions after a strategy
+            // switch are admission-held exactly like the parent turn (#6015).
+            if let Some(blocked) = fleet_denial_guard.admission_error(&tool_name, &tool_input) {
+                let observed: Result<ToolResult, ToolError> = Err(blocked.clone());
+                fleet_denial_guard.observe(
+                    &mut denial_batch,
+                    &tool_name,
+                    &tool_input,
+                    ToolTerminalStatus::Denied,
+                    &observed,
+                    None,
+                );
+                let (result, _) = bound_subagent_tool_result(
+                    &agent_id,
+                    &tool_id,
+                    &tool_name,
+                    &runtime.context.state_namespace,
+                    false,
+                    format!("Error: {blocked}"),
+                );
+                tool_results.push(ContentBlock::ToolResult {
+                    tool_use_id: tool_id,
+                    content: result,
+                    is_error: None,
+                    content_blocks: None,
+                });
+                continue;
             }
             let activity_tool_name = canonical_action_alias(&tool_name, &tool_input).to_string();
             let tool_display_name = subagent_progress_tool_display_name(&activity_tool_name);
@@ -13551,14 +13614,58 @@ async fn run_subagent(
                         &mut tool_surface,
                         &request_active_tool_names,
                         &tool_name,
-                        tool_input,
+                        tool_input.clone(),
                     )
                     .await
             })
             .await
             {
-                Ok(Ok(output)) => output,
-                Ok(Err(e)) => RichToolResult::plain(ToolResult::error(format!("Error: {e}"))),
+                Ok(Ok(output)) => {
+                    let digest = FleetDenialGuard::original_content_digest(
+                        &tool_name,
+                        &tool_input,
+                        &output.result,
+                    );
+                    let observed: Result<ToolResult, ToolError> = Ok(output.result.clone());
+                    fleet_denial_guard.observe(
+                        &mut denial_batch,
+                        &tool_name,
+                        &tool_input,
+                        if output.result.success {
+                            ToolTerminalStatus::Succeeded
+                        } else {
+                            ToolTerminalStatus::Failed
+                        },
+                        &observed,
+                        digest,
+                    );
+                    output
+                }
+                Ok(Err(e)) => {
+                    // Typed denials stay typed for the no-progress guard; an
+                    // opaque anyhow failure is an ordinary execution error.
+                    let typed = match e.downcast::<ToolError>() {
+                        Ok(typed) => typed,
+                        Err(e) => ToolError::execution_failed(e.to_string()),
+                    };
+                    fleet_denial_guard.observe(
+                        &mut denial_batch,
+                        &tool_name,
+                        &tool_input,
+                        match &typed {
+                            ToolError::PermissionDenied { .. } => ToolTerminalStatus::Denied,
+                            ToolError::InvalidInput { .. } | ToolError::MissingField { .. } => {
+                                ToolTerminalStatus::InvalidArguments
+                            }
+                            ToolError::Cancelled { .. } => ToolTerminalStatus::Cancelled,
+                            ToolError::Timeout { .. } => ToolTerminalStatus::TimedOut,
+                            _ => ToolTerminalStatus::Failed,
+                        },
+                        &Err(typed.clone()),
+                        None,
+                    );
+                    RichToolResult::plain(ToolResult::error(format!("Error: {typed}")))
+                }
                 Err(_) => RichToolResult::plain(ToolResult::error(format!(
                     "Error: Tool {tool_name} timed out"
                 ))),
@@ -13659,7 +13766,31 @@ async fn run_subagent(
             )
             .await;
         }
+        // The batch's denials advance the shared no-progress policy: hold the
+        // denied action after the strategy notice, then one report-only
+        // response. Notices are append-only runtime history (#6015).
+        let notice = match fleet_denial_guard.finish_batch(denial_batch) {
+            FleetDenialAction::Continue => None,
+            FleetDenialAction::SwitchStrategy => Some(FLEET_STRATEGY_SWITCH_NOTICE),
+            FleetDenialAction::FinalReport => Some(FLEET_FINAL_REPORT_NOTICE),
+        };
+        if let Some(notice) = notice {
+            messages.push(Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: notice.to_string(),
+                    cache_control: None,
+                }],
+            });
+        }
         if budget_failure_reason.is_some() {
+            break;
+        }
+        if fleet_report_response {
+            // Exactly one accepted report response — text-only, truncated, or
+            // still tooling — is terminal no-progress evidence, not a
+            // completion or a budget outcome.
+            terminal_failure_reason = Some(FLEET_NO_PROGRESS_STOP.to_string());
             break;
         }
     }
@@ -17556,17 +17687,17 @@ impl SubAgentToolRegistry {
         input: Value,
     ) -> Result<RichToolResult> {
         if self.role_blocks_unhardened_process_tool(name) {
-            return Err(anyhow!(
+            return Err(admission_denied(format!(
                 "Tool {name} is not available to this read-only worker because its process path does not share the hardened evidence boundary. Use read/search, classifier-bounded bash reads, or the verifier's bounded Run tool instead."
-            ));
+            )));
         }
         let action = input.get("action").and_then(Value::as_str);
         if matches!(&self.agent_type, FleetRole::Scout | FleetRole::Reviewer)
             && name == "Web"
             && !matches!(action, Some("search" | "fetch"))
         {
-            return Err(anyhow!(
-                "Tool Web is limited to search/fetch in the read-only evidence profile"
+            return Err(admission_denied(
+                "Tool Web is limited to search/fetch in the read-only evidence profile",
             ));
         }
         // Catalog shaping is not authority. `agent` clears both name-keyed
@@ -17577,10 +17708,10 @@ impl SubAgentToolRegistry {
             && matches!(parse_agent_tool_action(&input), Ok(AgentToolAction::Claim))
             && !self.agent_action_permitted("claim")
         {
-            return Err(anyhow!(
+            return Err(admission_denied(format!(
                 "agent action=claim widens an enforced write scope, and the Fleet role `{role}` has no write authority to widen. Use an `implement` or `general` role.",
                 role = self.agent_type.as_str()
-            ));
+            )));
         }
         let family_action_allowed = if !Self::ACTION_ALIASES
             .iter()
@@ -17595,7 +17726,9 @@ impl SubAgentToolRegistry {
                 .is_none_or(|list| list.iter().any(|allowed| allowed == name))
         };
         if !self.is_tool_allowed(name) || !family_action_allowed {
-            return Err(anyhow!("Tool {name} not allowed for this sub-agent"));
+            return Err(admission_denied(format!(
+                "Tool {name} not allowed for this sub-agent"
+            )));
         }
         // #3217: authoritative per-role posture — read-only roles cannot mutate
         // and non-`Full`-shell roles cannot run shell, regardless of whether
@@ -17603,20 +17736,20 @@ impl SubAgentToolRegistry {
         // bypass where a read-only child could quietly write or shell out.
         if !self.posture_permits_tool(name, Some(&input)) {
             if self.allows_bounded_readonly_bash(name) {
-                return Err(anyhow!(
+                return Err(admission_denied(format!(
                     "[shell.readonly.command] Tool {name} input did not match the bounded read-only shell grammar for Fleet role `{role}`. {guidance}",
                     role = self.agent_type.as_str(),
                     guidance = codewhale_execpolicy::command_safety::readonly_command_help()
-                ));
+                )));
             }
-            return Err(anyhow!(
+            return Err(admission_denied(format!(
                 "[role.posture.denied] Tool {name} is not permitted for the read-only Fleet role `{role}`. Use an `implement` or `general` role (or `custom` with an explicit allowed_tools list) to mutate the workspace or run shell commands.",
                 role = self.agent_type.as_str()
-            ));
+            )));
         }
         // Denied network capability cannot be expanded by answering a prompt.
         if self.network_is_denied() {
-            reject_network_reaching_input(name, &input)?;
+            reject_network_reaching_input(name, &input).map_err(as_denied)?;
         }
         // The session's permission posture, applied to this child exactly as
         // it is applied to the parent turn: the deterministic Auto-Review
@@ -17629,11 +17762,12 @@ impl SubAgentToolRegistry {
         if let ChildGateVerdict::Deny(reason) =
             self.gate_held_call(agent_id, tool_id, name, &input).await
         {
-            return Err(anyhow!(reason));
+            return Err(admission_denied(reason));
         }
-        reject_subagent_terminal_takeover(name, &input)?;
+        reject_subagent_terminal_takeover(name, &input).map_err(as_denied)?;
         if self.write_is_denied() {
-            reject_unbounded_verification(name, &input, !self.shell_is_denied())?;
+            reject_unbounded_verification(name, &input, !self.shell_is_denied())
+                .map_err(as_denied)?;
         }
         // The centralized envelope check. Everything above is name- or
         // shape-specific; this one is derived from the tool's real capabilities
@@ -17650,7 +17784,7 @@ impl SubAgentToolRegistry {
                 self.execution_envelope(),
                 self.bounded_readonly_bash_evidence(name, &input),
             )
-            .map_err(|refusal| anyhow!(refusal))?;
+            .map_err(admission_denied)?;
         }
         let scope_aware_write = matches!(
             name,
@@ -17664,14 +17798,14 @@ impl SubAgentToolRegistry {
         if scope_aware_write && self.enforce_write_claim {
             let paths = mutation_paths(name, &input)?;
             if paths.is_empty() {
-                return Err(anyhow!(
+                return Err(admission_denied(format!(
                     "Write tool {name} did not expose a bounded repo-relative target for coordination"
-                ));
+                )));
             }
             let manager = self.coordination_manager.read().await;
             manager
                 .validate_write_scope(&self.owner_agent_id, &paths)
-                .map_err(anyhow::Error::msg)?;
+                .map_err(|error| admission_denied(error.to_string()))?;
         } else if self.enforce_write_claim
             // The typed read-only boundary above already rejected mutation.
             && !self.write_is_denied()
@@ -17712,10 +17846,10 @@ impl SubAgentToolRegistry {
                 let blocking_peers =
                     manager.live_peer_shared_write_claim_owners(&self.owner_agent_id);
                 if !blocking_peers.is_empty() {
-                    return Err(anyhow!(
+                    return Err(admission_denied(format!(
                         "Tool {name} cannot prove a bounded file target or read-only execution while peers are writing in this shared checkout (blocking peers: {}). Use a bounded write tool, a proven read-only command, or bash with read_only=true for analysis under native enforcement. Executable work that needs writes requires worktree isolation. Disjoint write_roots alone do not constrain arbitrary code.",
                         blocking_peers.join(", ")
-                    ));
+                    )));
                 }
             }
         }
@@ -17801,6 +17935,22 @@ impl SubAgentToolRegistry {
             );
         }
         result
+    }
+}
+
+/// A child admission refusal is a typed permission denial, not an opaque
+/// execution error — the worker loop's no-progress guard (#6015) can only
+/// count denials it can name.
+fn admission_denied(message: impl Into<String>) -> anyhow::Error {
+    ToolError::permission_denied(message).into()
+}
+
+/// Convert a gate's refusal into the typed denial, preserving an already-typed
+/// `ToolError` if the helper produced one.
+fn as_denied(error: anyhow::Error) -> anyhow::Error {
+    match error.downcast::<ToolError>() {
+        Ok(typed) => typed.into(),
+        Err(error) => admission_denied(error.to_string()),
     }
 }
 

@@ -15480,6 +15480,181 @@ async fn fatal_provider_failure_mid_run_parks_a_continuable_checkpoint() {
     assert_eq!(resumed.result.as_deref(), Some("resumed and finished"));
 }
 
+/// Six responses re-issuing the same role-denied call, then a text report —
+/// the exact stall #6015 guards: three denied rounds trigger the strategy
+/// switch, three held rounds the report-only response.
+async fn denied_call_then_report_chat_client() -> (DeepSeekClient, Arc<AtomicUsize>) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route(
+        "/{*path}",
+        post({
+            let calls = Arc::clone(&calls);
+            move |Json(_body): Json<Value>| {
+                let calls = Arc::clone(&calls);
+                async move {
+                    let attempt = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                    if attempt <= 6 {
+                        Json(json!({
+                            "id": format!("chatcmpl-denied-{attempt}"),
+                            "model": "deepseek-v4-flash",
+                            "choices": [{
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": null,
+                                    "tool_calls": [{
+                                        "id": format!("call_denied_{attempt}"),
+                                        "type": "function",
+                                        "function": {
+                                            "name": "bash",
+                                            "arguments": "{\"command\":\"cargo build\"}"
+                                        }
+                                    }]
+                                },
+                                "finish_reason": "tool_calls"
+                            }],
+                            "usage": {
+                                "prompt_tokens": 10,
+                                "completion_tokens": 5,
+                                "total_tokens": 15
+                            }
+                        }))
+                        .into_response()
+                    } else {
+                        Json(json!({
+                            "id": format!("chatcmpl-report-{attempt}"),
+                            "model": "deepseek-v4-flash",
+                            "choices": [{
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "Partial report: every bash call was denied."
+                                },
+                                "finish_reason": "stop"
+                            }],
+                            "usage": {
+                                "prompt_tokens": 10,
+                                "completion_tokens": 5,
+                                "total_tokens": 15
+                            }
+                        }))
+                        .into_response()
+                    }
+                }
+            }
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test server");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
+
+    let config = crate::config::Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(format!("http://{addr}/v1")),
+        retry: Some(crate::config::RetryConfig {
+            enabled: Some(false),
+            max_retries: Some(0),
+            initial_delay: Some(0.0),
+            max_delay: Some(0.0),
+            exponential_base: Some(1.0),
+        }),
+        ..crate::config::Config::default()
+    };
+    let client = DeepSeekClient::new(&config).expect("denial-stall chat client");
+    (client, calls)
+}
+
+/// #6015: a read-only worker that keeps re-issuing the same denied action
+/// must terminate as `Failed` — typed no-progress — after the shared
+/// FleetDenialGuard's strategy notice and one report-only response, not spin
+/// to the step/token budget and not misreport `BudgetExhausted`.
+#[tokio::test]
+async fn repeated_typed_denials_stop_worker_as_failed_not_budget() {
+    let tmp = tempdir().expect("tempdir");
+    let manager = Arc::new(RwLock::new(SubAgentManager::new(
+        tmp.path().to_path_buf(),
+        2,
+    )));
+    let agent_id = "agent_denial_stall".to_string();
+    let (task_input_tx, task_input_rx) = mpsc::unbounded_channel();
+    let agent = SubAgent::new(
+        agent_id.clone(),
+        FleetRole::Scout,
+        "List the workspace".to_string(),
+        make_assignment(),
+        "deepseek-v4-flash".to_string(),
+        Some("Stall".to_string()),
+        None,
+        task_input_tx,
+        tmp.path().to_path_buf(),
+        "boot_stall".to_string(),
+    );
+    {
+        let mut manager = manager.write().await;
+        manager.agents.insert(agent_id.clone(), agent);
+        manager.register_worker(make_worker_spec(&agent_id, tmp.path().to_path_buf()));
+    }
+
+    let (client, calls) = denied_call_then_report_chat_client().await;
+    let mut runtime =
+        stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
+    runtime.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Scout);
+    seed_read_only_role_deny_list(&mut runtime);
+    runtime.client = client;
+    runtime.manager = Arc::clone(&manager);
+    runtime.context = ToolContext::new(tmp.path());
+
+    run_subagent_task(SubAgentTask {
+        manager_handle: Arc::clone(&manager),
+        runtime,
+        agent_id: agent_id.clone(),
+        agent_type: FleetRole::Scout,
+        prompt: "List the workspace".to_string(),
+        assignment: make_assignment(),
+        allowed_tools: None,
+        fork_context: false,
+        started_at: Instant::now(),
+        max_steps: 20,
+        token_budget: None,
+        wall_time: DEFAULT_CHILD_WALL_TIME,
+        input_rx: task_input_rx,
+        launch_gate: None,
+        _foreground_child_registration: None,
+    })
+    .await;
+
+    // Three denied rounds earn the strategy notice; the held re-issues count
+    // three more; the report-only response is the terminal seventh call.
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        7,
+        "the stall must resolve after one report-only response"
+    );
+    let result = manager
+        .read()
+        .await
+        .get_result(&agent_id)
+        .expect("agent registered");
+    let reason = match &result.status {
+        SubAgentStatus::Failed(reason) => reason.clone(),
+        other => panic!("expected Failed, got {other:?}"),
+    };
+    assert!(
+        reason.contains("repeated permission denials"),
+        "the terminal reason must name the no-progress denial stall: {reason}"
+    );
+    assert_eq!(
+        result.result.as_deref(),
+        Some("Partial report: every bash call was denied."),
+        "the report-only response's text is the recorded result"
+    );
+}
+
 #[tokio::test]
 async fn non_retryable_provider_failure_fans_in_to_every_terminal_sink() {
     use tokio_util::sync::CancellationToken;
