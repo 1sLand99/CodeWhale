@@ -20,6 +20,26 @@
 //! building API messages or retrying sees the whole receipt regardless of how
 //! much of it is currently visible.
 //!
+//! # Known limitations
+//!
+//! - **Latency is backlog over rate, not a fixed window.** The ceiling caps how
+//!   fast bytes become visible, so a receipt larger than one beat's slice takes
+//!   `backlog / REVEAL_PER_SECOND` to finish. A 4 KiB burst takes about 1.7 s to
+//!   uncover. That is the deliberate trade (even pace over minimum latency) and
+//!   it is not configurable.
+//! - **A receipt over [`MAX_PENDING_BYTES`] is shown whole.** The guard that
+//!   avoids replaying old output after a long pause also bypasses pacing
+//!   entirely, so very large receipts still land in one step.
+//! - **Tool output does not pass through here.** It is unbuffered and has no
+//!   pacing of its own.
+//! - **Catch-up is staged, not wired.** [`CATCH_UP_QUEUE_DEPTH`] and
+//!   [`CATCH_UP_OLDEST_AGE`] exist and are tested, but every production drain
+//!   site calls `note_delta` with a queue depth of 1, so catch-up never fires.
+//!   See the honesty note in `docs/MOTION_CONTRACT.md`.
+//! - **Nothing measures this.** There is no benchmark and no budget for reveal
+//!   throughput or visible latency; the numbers in the commit that introduced
+//!   paced reveal came from a throwaway harness. See the runtime-perf-gate gap.
+//!
 //! Newline-boundary safety (never showing a half-written code fence) is owned
 //! by the incremental markdown parser downstream — see
 //! `ParseState::commit_complete_lines` in `tui/markdown_render.rs`, which
