@@ -9129,6 +9129,179 @@ async fn get_provider_models(
         .expect("GET /v1/providers/{id}/models should return valid JSON")
 }
 
+/// Helper: GET `/v1/settings/schema` and return the parsed response body.
+async fn get_settings_schema(client: &reqwest::Client, addr: &SocketAddr) -> serde_json::Value {
+    client
+        .get(format!("http://{addr}/v1/settings/schema"))
+        .send()
+        .await
+        .expect("GET /v1/settings/schema should not fail at transport level")
+        .error_for_status()
+        .expect("GET /v1/settings/schema should return 200")
+        .json()
+        .await
+        .expect("GET /v1/settings/schema should return valid JSON")
+}
+
+#[tokio::test]
+async fn settings_schema_serves_every_declared_row_with_runtime_state() -> Result<()> {
+    let _lock = lock_test_env();
+    let root = tempfile::tempdir()?;
+    let config_file = root.path().join("config.toml");
+    fs::write(
+        &config_file,
+        "provider = \"deepseek\"\napi_key = \"runtime-api-test-key\"\nbase_url = \"http://127.0.0.1:1/v1\"\ntelemetry = false\n\n[notifications]\ncondition = \"always\"\n",
+    )?;
+    fs::write(root.path().join("settings.toml"), "calm_mode = true\n")?;
+    let _config = EnvVarGuard::set("CODEWHALE_CONFIG_PATH", &config_file);
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_config_path(config_file.clone()).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+    let body = get_settings_schema(&client, &addr).await;
+    handle.abort();
+
+    assert_eq!(body["version"], 1);
+    let tabs = body["tabs"].as_array().expect("tabs array");
+    let tab_ids: Vec<_> = tabs.iter().filter_map(|t| t["id"].as_str()).collect();
+    assert_eq!(
+        tab_ids,
+        codewhale_config::settings_schema::schema_tabs(),
+        "tabs project the schema declaration order"
+    );
+
+    let rows = body["settings"].as_array().expect("settings array");
+    assert_eq!(
+        rows.len(),
+        codewhale_config::settings_schema::schema_rows().count(),
+        "every declared UI row is served"
+    );
+    let row = |key: &str| {
+        rows.iter()
+            .find(|row| row["key"] == key)
+            .unwrap_or_else(|| panic!("schema row {key} missing"))
+    };
+
+    for entry in rows {
+        let kind = entry["kind"].as_str().expect("kind");
+        assert!(
+            matches!(kind, "bool" | "int" | "enum" | "string"),
+            "unknown kind {kind}"
+        );
+        assert!(
+            matches!(
+                entry["row"].as_str(),
+                Some("setting" | "action" | "diagnostic" | "session")
+            ),
+            "unknown row kind for {}",
+            entry["key"]
+        );
+        let label = entry["label"].as_str().expect("label");
+        assert!(
+            !label.is_empty() && !label.starts_with("Config"),
+            "label must be resolved prose, not a message key: {label}"
+        );
+        assert!(entry["visible"].is_boolean());
+        assert!(entry["editable"].is_boolean());
+        if kind == "enum" {
+            assert!(
+                !entry["options"]
+                    .as_array()
+                    .expect("enum options")
+                    .is_empty(),
+                "enum row {} must serve its closed value set",
+                entry["key"]
+            );
+        }
+    }
+
+    // Values resolve from the owning store, not a decorated guess.
+    assert_eq!(row("calm_mode")["value"], "true");
+    assert_eq!(row("calm_mode")["persisted"], true);
+    assert_eq!(row("notifications.condition")["value"], "always");
+    assert_eq!(row("notifications.condition")["persisted"], true);
+    assert_eq!(row("telemetry")["value"], "false");
+
+    // Row kinds and editability agree with the TUI's own semantics:
+    // model/provider open pickers (actions), approval_mode is the
+    // session-scoped writable, endpoint rows are read-only receipts.
+    assert_eq!(row("model")["row"], "action");
+    assert_eq!(row("model")["editable"], false);
+    assert_eq!(row("approval_mode")["row"], "session");
+    assert_eq!(row("approval_mode")["editable"], true);
+    assert_eq!(row("provider_url")["editable"], false);
+    assert_eq!(row("telemetry")["editable"], false);
+    for action in ["provider_templates", "mcp_open", "plugins_open"] {
+        assert_eq!(row(action)["row"], "action");
+        assert_eq!(row(action)["editable"], false);
+    }
+
+    // The conditional triple resolves to exactly one visible member for a
+    // config with no managed policy: the editable TUI posture row.
+    assert_eq!(row("permission_posture")["visible"], true);
+    assert_eq!(row("approval_policy")["visible"], false);
+    assert_eq!(row("managed_approval_policy")["visible"], false);
+    Ok(())
+}
+
+#[tokio::test]
+async fn settings_schema_write_fallthrough_persists_declared_settings_keys() -> Result<()> {
+    let _lock = lock_test_env();
+    let root = tempfile::tempdir()?;
+    let config_file = root.path().join("config.toml");
+    fs::write(
+        &config_file,
+        "provider = \"deepseek\"\napi_key = \"runtime-api-test-key\"\nbase_url = \"http://127.0.0.1:1/v1\"\n",
+    )?;
+    let _config = EnvVarGuard::set("CODEWHALE_CONFIG_PATH", &config_file);
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_config_path(config_file.clone()).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    // A schema-declared settings.toml key outside the curated arm list must
+    // persist through the shared validator rather than 400.
+    let response = client
+        .post(format!("http://{addr}/v1/config"))
+        .json(&json!({"key": "composer_density", "value": "compact", "persist": true}))
+        .send()
+        .await?
+        .error_for_status()
+        .expect("composer_density is a declared settings key")
+        .json::<serde_json::Value>()
+        .await?;
+    assert_eq!(response["persisted"], true);
+    assert_eq!(
+        crate::settings::Settings::load_persisted()?.composer_density,
+        "compact"
+    );
+    let body = get_settings_schema(&client, &addr).await;
+    let row = body["settings"]
+        .as_array()
+        .expect("settings array")
+        .iter()
+        .find(|row| row["key"] == "composer_density")
+        .expect("composer_density row");
+    assert_eq!(row["value"], "compact");
+    assert_eq!(row["persisted"], true);
+
+    // A key the schema does not declare still fails closed.
+    let status = client
+        .post(format!("http://{addr}/v1/config"))
+        .json(&json!({"key": "not_a_real_setting", "value": "x", "persist": true}))
+        .send()
+        .await?
+        .status();
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    handle.abort();
+    Ok(())
+}
+
 #[test]
 fn provider_model_catalog_paginates_all_six_hundred_rows_without_truncation() {
     let models = (0..600)
