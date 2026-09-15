@@ -64,3 +64,60 @@ fn command_catalog_marks_user_shadowing_of_builtin_names_and_aliases() {
         subagents.shadowed_aliases
     );
 }
+
+#[tokio::test]
+async fn get_v1_commands_serves_the_catalog_over_http() -> Result<()> {
+    let _env = lock_test_env();
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("commands-route");
+    let sessions_dir = root.join("sessions");
+    let workspace = root.join("workspace");
+    let commands_dir = workspace.join(".codewhale").join("commands");
+    fs::create_dir_all(&commands_dir)?;
+    fs::write(commands_dir.join("model.md"), "Pick the fast route.\n")?;
+
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_root_token_mobile_workspace(
+            root,
+            sessions_dir,
+            None,
+            false,
+            workspace,
+        )
+        .await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let body: serde_json::Value = client
+        .get(format!("http://{addr}/v1/commands"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let commands = body["commands"].as_array().expect("commands array");
+    assert!(
+        commands
+            .iter()
+            .any(|command| command["kind"] == "builtin" && command["binding"] == "host"),
+        "the route must serve builtins: {commands:?}"
+    );
+
+    // The workspace user command named `model` shadows the builtin: the
+    // builtin reports the shadow and the winning definition is served.
+    let builtin_model = commands
+        .iter()
+        .find(|command| command["name"] == "model" && command["kind"] == "builtin")
+        .expect("builtin model row");
+    assert_eq!(builtin_model["shadowed_by"], "model");
+    let user_model = commands
+        .iter()
+        .find(|command| command["name"] == "model" && command["kind"] == "user")
+        .expect("user model row");
+    assert_eq!(user_model["binding"], "prompt");
+
+    handle.abort();
+    Ok(())
+}

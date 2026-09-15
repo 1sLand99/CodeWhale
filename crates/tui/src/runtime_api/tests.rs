@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 mod command_catalog;
 mod headless_catalog;
+mod workspace_instructions;
 
 /// Scale a wait budget for shared CI runners.
 ///

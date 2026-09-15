@@ -213,6 +213,132 @@ fn current_git_head(workspace: &FsPath) -> Option<String> {
     (!head.is_empty()).then(|| head.to_string())
 }
 
+// ── Effective instruction sources (#6168) ────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub(super) struct WorkspaceInstructionSource {
+    /// `project` | `rule` | `global` | `fragment` | `configured` |
+    /// `constitution` | `ignored`.
+    kind: &'static str,
+    /// `loaded` | `shadowed` | `skipped` | `missing`.
+    status: &'static str,
+    scope_dir: PathBuf,
+    path: PathBuf,
+    /// Workspace-relative spelling when the path sits under the workspace.
+    relative_path: Option<String>,
+    exists: bool,
+    bytes: Option<u64>,
+    warning: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct WorkspaceInstructionsResponse {
+    workspace: PathBuf,
+    sources: Vec<WorkspaceInstructionSource>,
+    /// Foreign instruction formats the operator opted into.
+    foreign_imports: Vec<String>,
+    /// True when no file-based instructions exist anywhere and the
+    /// prompt carries the ephemeral generated context instead.
+    generated_fallback: bool,
+    /// Aggregate byte ceiling applied across instructions and rules at
+    /// render (`project_context::MAX_PROJECT_INSTRUCTION_BYTES`).
+    aggregate_budget_bytes: usize,
+    /// Warnings from the real load pass — includes assembly-level notices
+    /// (unimported foreign formats, ignored WHALE.md, constitution parse)
+    /// alongside what per-source `warning` fields already carry.
+    warnings: Vec<String>,
+}
+
+fn instruction_source_kind_name(
+    kind: crate::project_context::InstructionSourceKind,
+) -> &'static str {
+    use crate::project_context::InstructionSourceKind as Kind;
+    match kind {
+        Kind::Project => "project",
+        Kind::Rule => "rule",
+        Kind::Global => "global",
+        Kind::Fragment => "fragment",
+        Kind::Configured => "configured",
+        Kind::Constitution => "constitution",
+        Kind::Ignored => "ignored",
+    }
+}
+
+fn instruction_source_status_name(
+    status: crate::project_context::InstructionSourceStatus,
+) -> &'static str {
+    use crate::project_context::InstructionSourceStatus as Status;
+    match status {
+        Status::Loaded => "loaded",
+        Status::Shadowed => "shadowed",
+        Status::Skipped => "skipped",
+        Status::Missing => "missing",
+    }
+}
+
+/// Read-only listing of the effective instruction sources for this
+/// workspace (#6168): repository-root → workspace chain candidates, rules
+/// files, the global fallback layer, opted-in foreign fragments, configured
+/// `instructions = [...]` files, and the constitution — each with the status
+/// the prompt loaders give it. Edits go through the workspace file routes.
+pub(super) async fn workspace_instructions(
+    State(state): State<RuntimeApiState>,
+) -> Result<Json<WorkspaceInstructionsResponse>, ApiError> {
+    let workspace = state.workspace.clone();
+    let home = crate::config::effective_home_dir();
+    let configured = state.config.read().instructions_paths();
+
+    let (sources, generated_fallback, warnings) = tokio::task::spawn_blocking(move || {
+        let sources = crate::project_context::project_instruction_sources(
+            &workspace,
+            home.as_deref(),
+            &configured,
+        );
+        // The real load pass supplies assembly-level warnings and tells us
+        // whether the ephemeral generated context is what the prompt
+        // carries. Cached — this is the same call the engine makes.
+        let ctx = crate::project_context::load_project_context_with_parents(&workspace);
+        let generated_fallback = ctx.instructions.is_some() && ctx.source_path.is_none();
+        (sources, generated_fallback, ctx.warnings)
+    })
+    .await
+    .map_err(|_| ApiError::internal("instruction source listing failed"))?;
+
+    // `project_instruction_sources` canonicalizes the workspace (the
+    // `/var` → `/private/var` class of alias), so relative paths must be
+    // computed against the canonical spelling or every strip fails.
+    let workspace_root =
+        std::fs::canonicalize(&state.workspace).unwrap_or_else(|_| state.workspace.clone());
+    Ok(Json(WorkspaceInstructionsResponse {
+        workspace: workspace_root.clone(),
+        sources: sources
+            .into_iter()
+            .map(|source| WorkspaceInstructionSource {
+                kind: instruction_source_kind_name(source.kind),
+                status: instruction_source_status_name(source.status),
+                relative_path: source
+                    .path
+                    .strip_prefix(&workspace_root)
+                    .ok()
+                    .map(|relative| relative.display().to_string()),
+                scope_dir: source.scope_dir,
+                path: source.path,
+                exists: source.exists,
+                bytes: source.bytes,
+                warning: source.warning,
+            })
+            .collect(),
+        foreign_imports: crate::project_context::foreign_instruction_imports()
+            .keys()
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        generated_fallback,
+        aggregate_budget_bytes: crate::project_context::MAX_PROJECT_INSTRUCTION_BYTES,
+        warnings,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
