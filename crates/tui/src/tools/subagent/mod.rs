@@ -308,6 +308,111 @@ fn child_wall_time_exhausted_reason(limit: Duration) -> String {
         limit.as_secs()
     )
 }
+
+/// Render the child's resolved run budgets into its first task message (#6194).
+///
+/// A child that cannot see its limits cannot pace itself: it discovers the
+/// wall clock only when the run is killed mid-request. The block rides inside
+/// the task text — the same channel as the enforced write-scope line appended
+/// at spawn — so the transcript artifact records exactly what the model was
+/// told, and a continuation re-resolves its own values rather than inheriting
+/// a stale copy.
+fn child_runtime_budget_context(
+    runtime: &SubAgentRuntime,
+    max_steps: u32,
+    work_max_steps: u32,
+    handback_reserved: bool,
+    token_allowance: Option<u64>,
+) -> String {
+    let wall = match runtime.worker_profile.wall_deadline_ms {
+        Some(deadline_ms) => {
+            let remaining =
+                crate::elapsed::format_elapsed_ms(deadline_ms.saturating_sub(epoch_millis_now()));
+            match runtime.worker_profile.wall_time_secs {
+                Some(total_secs) => format!(
+                    "task work stops about {remaining} from now (total run budget {}); queue, model, and tool time all count against it",
+                    crate::elapsed::format_elapsed_secs(total_secs)
+                ),
+                None => format!("task work stops about {remaining} from now"),
+            }
+        }
+        None => "no wall-clock limit".to_string(),
+    };
+    let steps = if max_steps == 0 {
+        "no per-run step cap".to_string()
+    } else if handback_reserved && work_max_steps < max_steps {
+        format!(
+            "{work_max_steps} model turns of task work (limit {max_steps}; the last turn stays reserved for a bounded hand-back report)"
+        )
+    } else {
+        format!("{max_steps} model turns")
+    };
+    let tokens = match token_allowance {
+        Some(allowance) => format!(
+            "about {allowance} input+output tokens for the whole run, shared with any descendants"
+        ),
+        None => "no per-run token cap".to_string(),
+    };
+    let stop_note = if handback_reserved {
+        "When a limit is reached, task work stops where it stands and only a small reserved hand-back turn remains to report it."
+    } else {
+        "When a limit is reached, task work stops where it stands."
+    };
+    format!(
+        "Runtime budget (host-enforced; you cannot raise it):\n- wall clock: {wall}.\n- model steps: {steps}.\n- token allowance: {tokens}.\n{stop_note} Commit or checkpoint work-in-progress early rather than holding it, and keep a current partial report ready."
+    )
+}
+
+/// One-shot mid-run notice fired when any enforced budget is roughly
+/// three-quarters consumed (#6194). Returns `None` while every bound still
+/// has headroom or when no bound applies. This is visibility only: it changes
+/// no limit and never interrupts a step.
+fn child_budget_pacing_notice(
+    started_at: Instant,
+    deadline: Option<Instant>,
+    steps: u32,
+    work_max_steps: u32,
+    remaining_tokens: Option<u64>,
+    token_allowance: Option<u64>,
+) -> Option<String> {
+    let mut consumed = Vec::new();
+    if let Some(deadline) = deadline {
+        let total = deadline.saturating_duration_since(started_at);
+        if total > Duration::ZERO && started_at.elapsed() >= total / 4 * 3 {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            consumed.push(format!(
+                "wall clock: ~{} remains of ~{}",
+                crate::elapsed::format_elapsed_ms(
+                    u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX)
+                ),
+                crate::elapsed::format_elapsed_ms(
+                    u64::try_from(total.as_millis()).unwrap_or(u64::MAX)
+                ),
+            ));
+        }
+    }
+    if work_max_steps > 0 && u64::from(steps) * 4 >= u64::from(work_max_steps) * 3 {
+        consumed.push(format!("model steps: {steps} of {work_max_steps} used"));
+    }
+    if let (Some(allowance), Some(remaining)) = (token_allowance, remaining_tokens)
+        && allowance > 0
+        && remaining <= allowance / 4
+    {
+        consumed.push(format!(
+            "token allowance: ~{remaining} of ~{allowance} tokens remain"
+        ));
+    }
+    if consumed.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "<codewhale:runtime_event kind=\"budget_pacing\" visibility=\"internal\">\n\
+This is an internal runtime event, not user input. Roughly three quarters of a run budget is used:\n- {}\n\
+Wrap up now: commit or checkpoint work-in-progress and prepare your final report instead of starting new multi-step work.\n\
+</codewhale:runtime_event>",
+        consumed.join("\n- ")
+    ))
+}
 // Non-streaming sub-agents need enough response budget to carry large tool-call
 // arguments, especially write_file content. The API bills generated tokens, not
 // the requested ceiling.
@@ -12781,6 +12886,41 @@ async fn run_subagent(
         Some(context) => Some(context.with_resolved_state_block().await),
         None => None,
     };
+    let initial_allowance = narrow_optional_limit(
+        runtime
+            .manager
+            .read()
+            .await
+            .remaining_worker_tokens(&agent_id),
+        token_budget,
+    );
+    let handback_allowance = initial_allowance
+        .map(budget_handback::token_reserve)
+        .unwrap_or(budget_handback::MAX_HAND_BACK_TOKENS);
+    let work_max_steps = if handback_allowance > 0 && max_steps >= 2 {
+        max_steps - 1
+    } else {
+        max_steps
+    };
+    let (work_deadline, hard_deadline) = budget_handback::wall_deadlines(runtime);
+    let work_deadline = if handback_allowance > 0 {
+        work_deadline
+    } else {
+        hard_deadline
+    };
+    // #6194: the child sees what it is racing from the first turn — the
+    // resolved budgets ride inside the task text so the transcript artifact
+    // logs exactly what the model was told.
+    let prompt = format!(
+        "{prompt}\n\n{}",
+        child_runtime_budget_context(
+            runtime,
+            max_steps,
+            work_max_steps,
+            handback_allowance > 0,
+            initial_allowance,
+        )
+    );
     let mut messages = build_initial_subagent_messages_with_system(
         &prompt,
         &assignment,
@@ -12869,28 +13009,6 @@ async fn run_subagent(
     let mut budget_failure_reason: Option<String> = None;
     let mut handback_note: Option<String> = None;
     let mut usage_complete = true;
-    let initial_allowance = narrow_optional_limit(
-        runtime
-            .manager
-            .read()
-            .await
-            .remaining_worker_tokens(&agent_id),
-        token_budget,
-    );
-    let handback_allowance = initial_allowance
-        .map(budget_handback::token_reserve)
-        .unwrap_or(budget_handback::MAX_HAND_BACK_TOKENS);
-    let work_max_steps = if handback_allowance > 0 && max_steps >= 2 {
-        max_steps - 1
-    } else {
-        max_steps
-    };
-    let (work_deadline, hard_deadline) = budget_handback::wall_deadlines(runtime);
-    let work_deadline = if handback_allowance > 0 {
-        work_deadline
-    } else {
-        hard_deadline
-    };
     // Distinguish a real "the model chose to stop" exit from an explicitly
     // configured step-cap exit. The normal loop is unbounded (max_steps == 0).
     let mut stopped_naturally = false;
@@ -12898,6 +13016,9 @@ async fn run_subagent(
     // as the parent turn — this registry's admission gate reports typed
     // `ToolError::PermissionDenied` refusals the guard can name.
     let mut fleet_denial_guard = FleetDenialGuard::default();
+    // #6194: the one-shot ~75% pacing notice; once sent it stays sent so a
+    // hovering boundary cannot spam the child's history every step.
+    let mut budget_pacing_notice_sent = false;
 
     // A queued child can be parked before it ever acquires a launch permit.
     // Project that terminal state before emitting Started/Starting so the
@@ -13058,6 +13179,30 @@ async fn run_subagent(
         // only counts denial rounds since the last such input (#6015).
         if accepted_new_direction || has_child_completions {
             fleet_denial_guard.reset();
+        }
+
+        // #6194: once any enforced budget is ~3/4 consumed, tell the child so
+        // it can still commit and report inside the bounds instead of being
+        // killed mid-flight. Visibility only — no limit changes and nothing
+        // is interrupted.
+        if !budget_pacing_notice_sent
+            && let Some(notice) = child_budget_pacing_notice(
+                started_at,
+                work_deadline.or(hard_deadline),
+                steps,
+                work_max_steps,
+                remaining_tokens,
+                initial_allowance,
+            )
+        {
+            messages.push(Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: notice,
+                    cache_control: None,
+                }],
+            });
+            budget_pacing_notice_sent = true;
         }
 
         let tools = tool_surface.request_tools(
