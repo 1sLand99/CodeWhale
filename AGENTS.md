@@ -56,9 +56,11 @@ base prompt". Two more corollaries earned here:
   lane is obsolete, preserve its intent and evidence rather than merging stale
   code mechanically.
 - A small coherent change may be committed directly to `main` when that checkout
-  is current, clean, and owns the affected files. A worktree remains the right
-  safety boundary for conflicting, dirty, stale, or independent work. Local
-  commit permission never implies push, merge, tag, release, or deploy permission.
+  is current, clean, and owns the affected files. Do not create worktrees: work
+  in the checkout that already exists, and when several agents share it,
+  partition by file, stage only the paths your slice touched, and retry a commit
+  that fails on `index.lock`. Local commit permission never implies push, merge,
+  tag, release, or deploy permission.
 - When the task is local-only, stay fully offline: no browsing, GitHub or remote
   Git operations, downloads, dependency installation, provider calls, or
   source/diff transmission. Record the missing external receipt and keep working
