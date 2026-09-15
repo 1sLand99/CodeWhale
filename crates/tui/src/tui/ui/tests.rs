@@ -26061,8 +26061,104 @@ async fn terminal_input_handoff_preserves_pending_cancellation_keys() {
     input.resume_after_child_terminal();
 }
 
+/// `CHILD_TERMINAL_GATE` is process-global — one stdin, one pump. Any test
+/// that publishes or reads it must hold this, including the restart test,
+/// which publishes through `install_parts`.
+static CHILD_TERMINAL_GATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// #6165: `/hooks edit` handed the terminal to `$EDITOR` with the pump still
+/// reading stdin, so `Esc` and `Enter` were eaten by the composer while `:`
+/// and `!` reached `vi`. The pause now lives inside `with_suspended_tui`, so
+/// this pins what that guard must do to the pump: stop it reading for the
+/// whole handoff, and start it again on the way out.
+#[test]
+fn child_terminal_pause_stops_the_pump_reading_and_resumes_it_on_drop() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let _serialized = CHILD_TERMINAL_GATE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let paused = std::sync::Arc::new(AtomicBool::new(false));
+    let paused_ack = std::sync::Arc::new(AtomicBool::new(false));
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let reads = std::sync::Arc::new(AtomicUsize::new(0));
+    // Mirrors the real pump loop's pause handling: acknowledge and stop
+    // reading while paused, read otherwise. Spawning the crossterm pump here
+    // would need an interactive terminal.
+    let worker = {
+        let (paused, paused_ack, stop, reads) = (
+            std::sync::Arc::clone(&paused),
+            std::sync::Arc::clone(&paused_ack),
+            std::sync::Arc::clone(&stop),
+            std::sync::Arc::clone(&reads),
+        );
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Acquire) {
+                if paused.load(Ordering::Acquire) {
+                    paused_ack.store(true, Ordering::Release);
+                } else {
+                    paused_ack.store(false, Ordering::Release);
+                    reads.fetch_add(1, Ordering::Release);
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        })
+    };
+    super::terminal_input::publish_child_terminal_gate(&paused, &paused_ack);
+
+    let guard = pause_terminal_input_for_child().expect("the pump acknowledges the pause");
+    assert!(paused.load(Ordering::Acquire));
+    let while_child_owns_it = reads.load(Ordering::Acquire);
+    std::thread::sleep(Duration::from_millis(30));
+    assert_eq!(
+        reads.load(Ordering::Acquire),
+        while_child_owns_it,
+        "the pump must not read the tty while a child owns the terminal"
+    );
+
+    drop(guard);
+    assert!(!paused.load(Ordering::Acquire));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while reads.load(Ordering::Acquire) == while_child_owns_it {
+        assert!(
+            Instant::now() < deadline,
+            "the pump must read again once the child releases the terminal"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    stop.store(true, Ordering::Release);
+    let _ = worker.join();
+}
+
+/// A pump that will not stop means the handoff would reproduce #6165, so the
+/// editor must not run — and the refusal must leave the pump reading.
+#[test]
+fn child_terminal_pause_refuses_the_handoff_when_the_pump_never_acknowledges() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let _serialized = CHILD_TERMINAL_GATE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let paused = std::sync::Arc::new(AtomicBool::new(false));
+    let paused_ack = std::sync::Arc::new(AtomicBool::new(false));
+    super::terminal_input::publish_child_terminal_gate(&paused, &paused_ack);
+
+    let error = pause_terminal_input_for_child()
+        .err()
+        .expect("an unacknowledged pause must fail the handoff");
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    assert!(
+        !paused.load(Ordering::Acquire),
+        "a refused handoff must leave the pump reading, not wedged paused"
+    );
+}
+
 #[test]
 fn input_pump_restart_detaches_wedged_thread_and_installs_fresh_parts() {
+    let _serialized = CHILD_TERMINAL_GATE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     // A "wedged" pump thread blocked forever on a channel recv stands in for
     // a crossterm `event::read` that never returns (stalled Windows console
     // poll, or a Unix tty that stopped delivering bytes). Joining it would

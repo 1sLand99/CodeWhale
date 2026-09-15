@@ -204,6 +204,17 @@ fn with_suspended_tui(
     use_bracketed_paste: bool,
     body: impl FnOnce() -> io::Result<EditorOutcome>,
 ) -> io::Result<EditorOutcome> {
+    // 0. Stop reading the tty.
+    // #6165: suspending crossterm state is not enough. The input pump runs on
+    // its own thread and keeps calling `event::read()` whatever mode the
+    // terminal is in, so a child launched without this pause competes with
+    // Codewhale for every keystroke — the editor cannot be quit and the
+    // fragments land in the composer. Pausing here, rather than at each call
+    // site, is what makes `/hooks edit` and the composer editor correct by
+    // the same construction. Fail closed: a pump that will not stop means the
+    // handoff would reproduce the defect, so the editor does not run.
+    let input_pause = crate::tui::ui::pause_terminal_input_for_child()?;
+
     // 1. Suspend.
     // Focus reporting is about to be disabled. Fail closed to the quiet state
     // so a stale FocusLost cannot authorize a surprise notification while an
@@ -243,6 +254,9 @@ fn with_suspended_tui(
     // Force a full repaint so a SIGWINCH during the edit doesn't leave the
     // viewport stale.
     let _ = terminal.clear();
+
+    // 4. Take the tty back, after the modes it reads under are restored.
+    drop(input_pause);
 
     result
 }
