@@ -84,18 +84,6 @@ const EVENT_TRANSACTION_LOCK_FILE: &str = "events.lock";
 const RUNTIME_PROCESS_OWNER_LOCK_FILE: &str = "runtime-process.owner.lock";
 const RUNTIME_PROCESS_OWNER_LOCK_HELD: &str = "This runtime is already active in another process. Close the other Codewhale session and try again, or set CODEWHALE_RUNTIME_DIR to a different directory.";
 const AGENT_MAIL_OWNER_FILE: &str = "owner.json";
-/// Every directory `RuntimeThreadStore::open` creates to hold work. Emptiness
-/// across all of them is what lets a switch adopt an existing store (#6207);
-/// `fresh_runtime_store_reports_no_durable_work` pins this list against `open`.
-const RUNTIME_STORE_WORK_DIRS: [&str; 7] = [
-    "threads",
-    "turns",
-    "items",
-    "events",
-    "goals",
-    "agent-mail",
-    "turn-operations",
-];
 const TURN_OPERATION_BINDING_SCHEMA_VERSION: u32 = 1;
 const REQUEST_USER_INPUT_TOOL_NAME: &str = "request_user_input";
 const REDACTED_USER_INPUT_RECEIPT: &str = "User input submitted";
@@ -2898,11 +2886,9 @@ pub struct RuntimeStoreBinding {
 }
 
 impl RuntimeStoreBinding {
-    /// The confinement shared by every store-recovery predicate: the bound
-    /// store must sit at `<state>/sessions/<session-id>/runtime` (or a
-    /// `runtime-recovered-*` sibling) with no symlink on the way down. Wrong
-    /// owner, symlinks and external paths fail closed for all callers.
-    fn is_confined_session_store(&self) -> Result<bool> {
+    /// Only a missing, confined session store can recover from its transcript.
+    /// Existing stores with a wrong owner, symlinks and external paths fail closed.
+    pub(crate) fn is_missing_session_store(&self) -> Result<bool> {
         let sessions = codewhale_config::resolve_state_dir("sessions")?;
         let Some(session_dir) = self.data_dir.parent() else {
             return Ok(false);
@@ -2922,63 +2908,10 @@ impl RuntimeStoreBinding {
         for path in [&sessions, session_dir, &self.data_dir] {
             reject_symlinked_store_dir(path)?;
         }
-        Ok(true)
-    }
-
-    /// Only a missing, confined session store can recover from its transcript.
-    /// Existing stores with a wrong owner, symlinks and external paths fail closed.
-    pub(crate) fn is_missing_session_store(&self) -> Result<bool> {
-        if !self.is_confined_session_store()? {
-            return Ok(false);
-        }
         match fs::symlink_metadata(&self.data_dir) {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(true),
             Err(err) => Err(err.into()),
             Ok(_) => Ok(false),
-        }
-    }
-
-    /// True when a confined store exists but holds nothing a session switch
-    /// could abandon.
-    ///
-    /// The switch path can rebind a conversation but cannot carry a store's
-    /// durable work across — queued tasks, pending approvals, agent mail,
-    /// scope-pinned automations — which is why only a *missing* store was ever
-    /// allowed to recover. A store that exists and is empty is the case that
-    /// policy never covered: there is nothing to abandon, so refusing protects
-    /// nothing, and a force-quit leaves exactly this shape (#6207).
-    ///
-    /// Fails closed: anything unreadable, unconfined, or non-empty is treated
-    /// as work worth keeping.
-    pub(crate) fn has_no_durable_work(&self) -> Result<bool> {
-        if !self.is_confined_session_store()? {
-            return Ok(false);
-        }
-        if !self.data_dir.is_dir() {
-            return Ok(false);
-        }
-        for name in RUNTIME_STORE_WORK_DIRS {
-            match fs::read_dir(self.data_dir.join(name)) {
-                Ok(mut entries) => {
-                    if entries.next().is_some() {
-                        return Ok(false);
-                    }
-                }
-                // A store opened by an older build may predate a directory;
-                // absent is empty.
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                Err(err) => return Err(err.into()),
-            }
-        }
-        // A sequence past its initial value means events were appended, even
-        // if those files have since been pruned.
-        match fs::read_to_string(self.data_dir.join("state.json")) {
-            Ok(raw) => {
-                let state: RuntimeStoreState = serde_json::from_str(&raw)?;
-                Ok(state.next_seq <= 1)
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(true),
-            Err(err) => Err(err.into()),
         }
     }
 
