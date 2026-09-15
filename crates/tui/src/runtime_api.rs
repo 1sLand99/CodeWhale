@@ -1202,6 +1202,7 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .route("/v1/tasks/{id}", get(get_task))
         .route("/v1/tasks/{id}/cancel", post(cancel_task))
         .route("/v1/skills", get(list_skills))
+        .route("/v1/commands", get(list_commands))
         .route(
             "/v1/skills/{name}",
             post(set_skill_enabled).delete(uninstall_skill_api),
@@ -2853,6 +2854,120 @@ fn fleet_event_label(payload: &FleetWorkerEventPayload) -> String {
             .map(|alert_id| format!("escalated channel={channel} alert_id={alert_id}"))
             .unwrap_or_else(|| format!("escalated channel={channel}")),
     }
+}
+
+/// One entry in the served slash-command catalog (`GET /v1/commands`, #6178).
+///
+/// Clients use this to complete and validate input without duplicating the
+/// registry: a `binding: "host"` row must never be submitted as a model
+/// prompt, and a user command shadowing a builtin name wins that spelling.
+#[derive(Debug, Serialize)]
+struct CommandCatalogEntry {
+    name: String,
+    aliases: Vec<String>,
+    /// English source text; localizing is the client's surface.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<String>,
+    /// Literal verbs declared by the usage line (`/goal <block|complete|…>`).
+    subcommands: Vec<String>,
+    takes_arguments: bool,
+    /// `builtin` is registered code; `user` expands a stored template.
+    kind: &'static str,
+    /// `host` runs locally and never reaches the model; `prompt` expands into
+    /// the request the model sees.
+    binding: &'static str,
+    /// `primary` | `advanced` | `compatibility` — builtins only; `hidden`
+    /// covers rows the product does not advertise anywhere.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    discovery: Option<&'static str>,
+    hidden: bool,
+    /// User command holding this builtin's canonical name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shadowed_by: Option<String>,
+    /// Alias spellings of this builtin taken by user commands.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    shadowed_aliases: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CommandsResponse {
+    commands: Vec<CommandCatalogEntry>,
+}
+
+fn command_catalog(
+    user_commands: &crate::commands::user_registry::UserCommandRegistry,
+) -> Vec<CommandCatalogEntry> {
+    let mut commands = Vec::new();
+    for info in crate::commands::command_infos() {
+        let shadowed_by = user_commands
+            .get(info.name)
+            .map(|command| command.name.clone());
+        let shadowed_aliases = info
+            .aliases
+            .iter()
+            .filter(|alias| user_commands.get(**alias).is_some())
+            .map(|alias| (*alias).to_string())
+            .collect();
+        commands.push(CommandCatalogEntry {
+            name: info.name.to_string(),
+            aliases: info
+                .aliases
+                .iter()
+                .map(|alias| (*alias).to_string())
+                .collect(),
+            summary: Some(
+                info.description_for(codewhale_localization::Locale::En)
+                    .into_owned(),
+            ),
+            usage: Some(info.usage.to_string()),
+            subcommands: crate::commands::traits::usage_subcommands(info.usage)
+                .iter()
+                .map(|token| (*token).to_string())
+                .collect(),
+            takes_arguments: crate::commands::user_registry::usage_describes_arguments(
+                info.name, info.usage,
+            ),
+            kind: "builtin",
+            binding: "host",
+            discovery: Some(match info.discovery() {
+                crate::commands::traits::CommandDiscovery::Primary => "primary",
+                crate::commands::traits::CommandDiscovery::Advanced => "advanced",
+                crate::commands::traits::CommandDiscovery::Compatibility => "compatibility",
+            }),
+            hidden: crate::commands::traits::UNLISTED_COMMANDS.contains(&info.name),
+            shadowed_by,
+            shadowed_aliases,
+        });
+    }
+    for command in user_commands.iter() {
+        commands.push(CommandCatalogEntry {
+            name: command.name.clone(),
+            aliases: command.aliases.clone(),
+            summary: command.description.clone(),
+            usage: command.display_usage().map(str::to_string),
+            subcommands: Vec::new(),
+            takes_arguments: command.takes_arguments(),
+            kind: "user",
+            binding: "prompt",
+            discovery: None,
+            hidden: command.hidden,
+            shadowed_by: None,
+            shadowed_aliases: Vec::new(),
+        });
+    }
+    commands
+}
+
+async fn list_commands(
+    State(state): State<RuntimeApiState>,
+) -> Result<Json<CommandsResponse>, ApiError> {
+    let commands = crate::commands::user_registry::with_registry_for_workspace(
+        Some(state.workspace.as_path()),
+        command_catalog,
+    );
+    Ok(Json(CommandsResponse { commands }))
 }
 
 async fn list_skills(

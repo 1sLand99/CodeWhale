@@ -512,7 +512,7 @@ fn normalize_configured_name(name: &str) -> Option<String> {
         .then(|| name.to_ascii_lowercase())
 }
 
-fn usage_describes_arguments(name: &str, usage: &str) -> bool {
+pub(crate) fn usage_describes_arguments(name: &str, usage: &str) -> bool {
     let usage = usage.trim();
     if usage.is_empty() {
         return false;

@@ -14,6 +14,7 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::time::sleep;
 use uuid::Uuid;
 
+mod command_catalog;
 mod headless_catalog;
 
 /// Scale a wait budget for shared CI runners.
