@@ -1095,10 +1095,14 @@ impl CommandSessionControlContext for SessionControlAdapter<'_> {
             Ok(m) => m,
             Err(e) => return Err(format!("could not open sessions directory: {e}")),
         };
-        match manager
-            .load_session(raw)
-            .or_else(|_| manager.load_session_by_prefix(raw))
-        {
+        // Resolution only needs durable identity — the resume that follows
+        // runs and persists the repair, so probe the snapshot instead of
+        // running (and logging) an in-memory repair here.
+        match manager.load_session_snapshot(raw).or_else(|_| {
+            manager
+                .resolve_session_id_prefix(raw)
+                .and_then(|id| manager.load_session_snapshot(&id))
+        }) {
             Ok(sess) => {
                 let path = manager
                     .sessions_dir()

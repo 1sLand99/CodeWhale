@@ -281,7 +281,6 @@ pub struct OfflineQueueState {
 #[derive(Debug, Clone)]
 pub struct SessionRecovery {
     pub session: SavedSession,
-    #[cfg_attr(not(test), expect(dead_code))]
     pub changed: bool,
     #[cfg_attr(not(test), expect(dead_code))]
     pub repaired_call_count: usize,
@@ -1111,6 +1110,31 @@ fn serialize_saved_session(session: &SavedSession) -> io::Result<String> {
     let compatible = session.storage_compatible_copy();
     serde_json::to_string_pretty(compatible.as_ref().unwrap_or(session))
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+/// Repair dangling tool-call/result pairs in an already-loaded session and
+/// rebranch its journal to the repaired messages. Returns the repair receipt;
+/// callers decide whether the result gets persisted (`SessionManager::resume_*`
+/// does, foreign `/load` files do not).
+pub(crate) fn repair_recovered_session(
+    session: &mut SavedSession,
+) -> crate::tool_history_repair::ToolRepairReceipt {
+    let repair = crate::tool_history_repair::repair_tool_call_pairs(&mut session.messages);
+    if !repair.is_empty() {
+        if let Some(journal) = session.journal.as_mut() {
+            journal.rebranch_active_messages(&session.messages);
+            session.leaf_id = journal.leaf_id.clone();
+        }
+        session.metadata.message_count = session.messages.len();
+        tracing::warn!(
+            session_id = %session.metadata.id,
+            repaired_call_ids = ?repair.repaired_call_ids,
+            duplicate_result_ids = ?repair.duplicate_result_ids,
+            orphan_result_ids = ?repair.orphan_result_ids,
+            "repaired persisted tool call/result history"
+        );
+    }
+    repair
 }
 
 /// Manager for session persistence operations
@@ -2345,31 +2369,54 @@ impl SessionManager {
     /// serialize recovery with their own transcript mutation lock.
     pub fn recover_session_for_resume(&self, id: &str) -> std::io::Result<SessionRecovery> {
         let mut session = self.load_session_snapshot(id)?;
-
-        let repair = crate::tool_history_repair::repair_tool_call_pairs(&mut session.messages);
-        let changed = !repair.is_empty();
-        if changed {
-            if let Some(journal) = session.journal.as_mut() {
-                journal.rebranch_active_messages(&session.messages);
-                session.leaf_id = journal.leaf_id.clone();
-            }
-            session.metadata.message_count = session.messages.len();
-            tracing::warn!(
-                session_id = %session.metadata.id,
-                repaired_call_ids = ?repair.repaired_call_ids,
-                duplicate_result_ids = ?repair.duplicate_result_ids,
-                orphan_result_ids = ?repair.orphan_result_ids,
-                "repaired persisted tool call/result history"
-            );
-        }
+        let repair = repair_recovered_session(&mut session);
 
         Ok(SessionRecovery {
             session,
-            changed,
+            changed: !repair.is_empty(),
             repaired_call_count: repair.repaired_call_ids.len(),
             duplicate_result_count: repair.duplicate_result_ids.len(),
             orphan_result_count: repair.orphan_result_ids.len(),
         })
+    }
+
+    /// Load, repair, and durably persist a session being resumed.
+    ///
+    /// Resume is where a crash-repaired history becomes durable: the repaired
+    /// record replaces the interrupted one so the same repair does not re-run
+    /// on every later load. A persist failure is logged and the repaired
+    /// in-memory session is still returned — a failed write-back must not
+    /// strand the resume.
+    pub fn resume_session(&self, id: &str) -> std::io::Result<SessionRecovery> {
+        let recovery = self.recover_session_for_resume(id)?;
+        if recovery.changed
+            && let Err(error) = self.save_session(&recovery.session)
+        {
+            tracing::warn!(
+                session_id = %recovery.session.metadata.id,
+                %error,
+                "repaired session history could not be persisted; the repair will re-run on the next load"
+            );
+        }
+        Ok(recovery)
+    }
+
+    /// [`Self::resume_session`] with a partial-ID prefix.
+    pub fn resume_session_by_prefix(&self, prefix: &str) -> std::io::Result<SessionRecovery> {
+        self.resume_session(&self.resolve_session_id_prefix(prefix)?)
+    }
+
+    /// True when `path` is this store's durable record for `id`. File-based
+    /// session loads use it to decide whether a repair may be written back in
+    /// place or must stay in memory (a foreign file is not ours to rewrite).
+    pub(crate) fn owns_session_path(&self, id: &str, path: &Path) -> bool {
+        let Ok(managed) = self.validated_session_path(id) else {
+            return false;
+        };
+        managed == path
+            || managed
+                .canonicalize()
+                .is_ok_and(|managed| path.canonicalize().is_ok_and(|path| managed == path))
     }
 
     /// Load a session by ID for the standalone CodeWhale resume flow.
@@ -5417,6 +5464,36 @@ mod tests {
         assert!(!second.changed);
         assert_eq!(second.repaired_call_count, 0);
         assert_eq!(second.session.messages, recovered.session.messages);
+    }
+
+    #[test]
+    fn resume_session_persists_repair_once() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("new");
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call-crashed".to_string(),
+                name: "read_file".to_string(),
+                input: serde_json::json!({"path": "README.md"}),
+                caller: None,
+                thought_signature: None,
+            }],
+        }];
+        let session = create_saved_session(&messages, "test-model", tmp.path(), 0, None);
+        let session_id = session.metadata.id.clone();
+        manager.save_session(&session).expect("save");
+
+        let first = manager.resume_session(&session_id).expect("first resume");
+        assert!(first.changed);
+        assert_eq!(first.repaired_call_count, 1);
+
+        // The repair is already durable: a second resume finds a clean record
+        // instead of re-running and re-logging the same repair on every load.
+        let second = manager.resume_session(&session_id).expect("second resume");
+        assert!(!second.changed);
+        assert_eq!(second.repaired_call_count, 0);
+        assert_eq!(second.session.messages, first.session.messages);
     }
 
     #[test]

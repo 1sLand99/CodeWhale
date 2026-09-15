@@ -1313,7 +1313,7 @@ pub(crate) async fn apply_command_result(
                 // Session files can be large; this is the UI action path, so
                 // the read must not park a Tokio worker (blocking-call
                 // convention, #6149).
-                let session: SavedSession = match tokio::fs::read_to_string(&path)
+                let parsed: SavedSession = match tokio::fs::read_to_string(&path)
                     .await
                     .map_err(|err| err.to_string())
                     .and_then(|raw| serde_json::from_str(&raw).map_err(|err| err.to_string()))
@@ -1325,6 +1325,30 @@ pub(crate) async fn apply_command_result(
                             format!("Failed to load session from {}: {err}", path.display()),
                         );
                         return Ok(false);
+                    }
+                };
+                // A managed record resumes through the manager so its repair is
+                // hydrated, applied, and persisted in place. A foreign `/load`
+                // file is not ours to rewrite: hydrate its journal projection
+                // and repair in memory only.
+                let session = match SessionManager::default_location() {
+                    Ok(manager) if manager.owns_session_path(&parsed.metadata.id, &path) => {
+                        match manager.resume_session(&parsed.metadata.id) {
+                            Ok(recovery) => recovery.session,
+                            Err(err) => {
+                                crate::tui::ui::session_state::surface_session_load_failure(
+                                    app,
+                                    format!("Failed to resume session {}: {err}", path.display()),
+                                );
+                                return Ok(false);
+                            }
+                        }
+                    }
+                    _ => {
+                        let mut session = parsed;
+                        session.ensure_journal();
+                        crate::session_manager::repair_recovered_session(&mut session);
+                        session
                     }
                 };
                 let fresh_config =

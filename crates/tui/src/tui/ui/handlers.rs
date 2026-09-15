@@ -1430,8 +1430,9 @@ pub(crate) async fn handle_view_events(
                     }
                 };
 
-                match manager.load_session(&session_id) {
-                    Ok(session) => {
+                match manager.resume_session(&session_id) {
+                    Ok(recovery) => {
+                        let session = recovery.session;
                         let next_config = config.clone();
                         let respawn = match apply_loaded_session_config_snapshot(
                             app,

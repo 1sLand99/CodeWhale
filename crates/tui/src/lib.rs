@@ -974,7 +974,8 @@ fn load_exec_resume_session(session_id: &str) -> Result<session_manager::SavedSe
     let session_ref = exec_stream_session_ref(session_id);
     SessionManager::default_location()
         .context("could not open session manager for resume")?
-        .load_session_by_prefix(session_id)
+        .resume_session_by_prefix(session_id)
+        .map(|recovery| recovery.session)
         .with_context(|| format!("could not load session {session_ref}"))
 }
 

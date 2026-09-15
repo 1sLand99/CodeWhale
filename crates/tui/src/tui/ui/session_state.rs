@@ -647,7 +647,7 @@ pub(crate) fn resume_launch_session(app: &mut App, session_id: &str) -> commands
         Ok(manager) => manager,
         Err(err) => return failed(app, &err.to_string()),
     };
-    let saved = match manager.load_session(session_id) {
+    let saved = match manager.load_session_snapshot(session_id) {
         Ok(saved) => saved,
         Err(err) => return failed(app, &err.to_string()),
     };

@@ -10313,7 +10313,7 @@ impl RuntimeThreadManager {
         };
         let session = crate::session_manager::default_sessions_dir()
             .and_then(crate::session_manager::SessionManager::new)
-            .and_then(|manager| manager.load_session(session_id))
+            .and_then(|manager| manager.resume_session(session_id).map(|recovery| recovery.session))
             .with_context(|| format!("Cannot read saved session {session_id}; restore that session file before resuming thread {}", thread.id))?;
         let covered = if let Some(checkpoint) = &thread.saved_session_checkpoint {
             if checkpoint.messages_sha256 != session_messages_sha256(&session.messages)? {

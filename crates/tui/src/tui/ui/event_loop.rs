@@ -768,12 +768,16 @@ pub async fn run_tui(
             if session_id == "latest" {
                 // Special case: resume the most recent session in this workspace.
                 match manager.get_latest_session_for_workspace(&options.workspace) {
-                    Ok(Some(meta)) => manager.load_session(&meta.id).map(Some),
+                    Ok(Some(meta)) => manager
+                        .resume_session(&meta.id)
+                        .map(|recovery| Some(recovery.session)),
                     Ok(None) => Ok(None),
                     Err(e) => Err(e),
                 }
             } else {
-                manager.load_session_by_prefix(session_id).map(Some)
+                manager
+                    .resume_session_by_prefix(session_id)
+                    .map(|recovery| Some(recovery.session))
             };
 
         match load_result {

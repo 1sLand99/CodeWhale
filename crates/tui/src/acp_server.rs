@@ -1586,10 +1586,11 @@ impl AcpServer {
         let manager = Self::session_manager()
             .ok_or_else(|| AcpError::internal("no Codewhale session store is available"))?;
         let saved = manager
-            .load_session_by_prefix(&session_id)
+            .resume_session_by_prefix(&session_id)
             .map_err(|error| {
                 AcpError::invalid_params(format!("could not load session {session_id}: {error}"))
-            })?;
+            })?
+            .session;
 
         let cwd = saved.metadata.workspace.clone();
         let tool_registry = Arc::new(build_acp_tool_registry(
