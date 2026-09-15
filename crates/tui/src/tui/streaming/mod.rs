@@ -27,9 +27,11 @@
 //!   `backlog / REVEAL_PER_SECOND` to finish. A 4 KiB burst takes about 1.7 s to
 //!   uncover. That is the deliberate trade (even pace over minimum latency) and
 //!   it is not configurable.
-//! - **A receipt over [`MAX_PENDING_BYTES`] is shown whole.** The guard that
-//!   avoids replaying old output after a long pause also bypasses pacing
-//!   entirely, so very large receipts still land in one step.
+//! - **A receipt that lands after a long pause is shown whole.** A pause
+//!   longer than the beat interval leaves the next beat due immediately, and
+//!   finalization takes a [`StreamDisplayClock::flush_now`] forced beat that
+//!   drains everything buffered, bypassing pacing entirely — so very large
+//!   receipts still land in one step.
 //! - **Tool output does not pass through here.** It is unbuffered and has no
 //!   pacing of its own.
 //! - **Catch-up is staged, not wired.** [`CATCH_UP_QUEUE_DEPTH`] and
