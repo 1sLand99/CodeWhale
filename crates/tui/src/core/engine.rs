@@ -79,8 +79,8 @@ use super::authority::{
 };
 use super::events::{Event, TurnOutcomeStatus, TurnRoute};
 use super::ops::{
-    McpManagerUpdate, Op, ProviderRuntimeStatus, SessionSnapshot, USER_SHELL_TOOL_ID_PREFIX,
-    UserInputProvenance,
+    McpManagerUpdate, Op, ProviderRuntimeStatus, SessionSnapshot, TurnSpec,
+    USER_SHELL_TOOL_ID_PREFIX, UserInputProvenance,
 };
 use super::session::Session;
 use super::tool_parser;
@@ -2516,32 +2516,33 @@ impl Engine {
             ))
             .await;
         let _ = self
-            .handle_send_message(
-                "[runtime] A background shell task finished; its completion evidence follows."
-                    .to_string(),
-                self.current_mode,
-                route,
-                self.config.compaction.clone(),
-                crate::cost_status::RuntimeUsageBatch::default(),
-                self.config.goal_objective.clone(),
-                self.config.goal_token_budget,
-                self.config.goal_status,
-                self.session.reasoning_effort.clone(),
-                self.session.reasoning_effort_auto,
-                self.session.auto_model,
-                self.session.allow_shell,
-                self.session.trust_mode,
-                self.session.auto_approve,
-                self.session.approval_mode,
-                self.config.translation_enabled,
-                self.config.allowed_tools.clone(),
-                Vec::new(),
-                self.config.hook_executor.clone(),
-                self.config.verbosity.clone(),
-                UserInputProvenance::Runtime,
-                Vec::new(),
-                None,
-            )
+            .handle_send_message(TurnSpec {
+                content:
+                    "[runtime] A background shell task finished; its completion evidence follows."
+                        .to_string(),
+                mode: self.current_mode,
+                route: Box::new(route),
+                compaction: Box::new(self.config.compaction.clone()),
+                initial_routed_usage: Box::new(crate::cost_status::RuntimeUsageBatch::default()),
+                goal_objective: self.config.goal_objective.clone(),
+                goal_token_budget: self.config.goal_token_budget,
+                goal_status: self.config.goal_status,
+                reasoning_effort: self.session.reasoning_effort.clone(),
+                reasoning_effort_auto: self.session.reasoning_effort_auto,
+                auto_model: self.session.auto_model,
+                allow_shell: self.session.allow_shell,
+                trust_mode: self.session.trust_mode,
+                auto_approve: self.session.auto_approve,
+                approval_mode: self.session.approval_mode,
+                translation_enabled: self.config.translation_enabled,
+                allowed_tools: self.config.allowed_tools.clone(),
+                dynamic_tools: Vec::new(),
+                hook_executor: self.config.hook_executor.clone(),
+                verbosity: self.config.verbosity.clone(),
+                provenance: UserInputProvenance::Runtime,
+                images: Vec::new(),
+                max_output_tokens: None,
+            })
             .await;
     }
 
@@ -2589,31 +2590,7 @@ impl Engine {
                     self.handle_idle_shell_completion_wake().await;
                 }
                 EngineRunInput::Operation(op) => match *op {
-                    Op::SendMessage {
-                        max_output_tokens,
-                        content,
-                        images,
-                        mode,
-                        route,
-                        compaction,
-                        initial_routed_usage,
-                        goal_objective,
-                        goal_token_budget,
-                        goal_status,
-                        reasoning_effort,
-                        reasoning_effort_auto,
-                        auto_model,
-                        allow_shell,
-                        trust_mode,
-                        auto_approve,
-                        approval_mode,
-                        translation_enabled,
-                        allowed_tools,
-                        dynamic_tools,
-                        hook_executor,
-                        verbosity,
-                        provenance,
-                    } => {
+                    Op::SendMessage(spec) => {
                         self.admitted_turn_control = {
                             let mut controls = self
                                 .turn_controls
@@ -2625,32 +2602,7 @@ impl Engine {
                         };
                         // Keep the send-message state machine out of this
                         // event-loop future's stack frame.
-                        Box::pin(self.handle_send_message(
-                            content,
-                            mode,
-                            *route,
-                            *compaction,
-                            *initial_routed_usage,
-                            goal_objective,
-                            goal_token_budget,
-                            goal_status,
-                            reasoning_effort,
-                            reasoning_effort_auto,
-                            auto_model,
-                            allow_shell,
-                            trust_mode,
-                            auto_approve,
-                            approval_mode,
-                            translation_enabled,
-                            allowed_tools,
-                            dynamic_tools,
-                            hook_executor,
-                            verbosity,
-                            provenance,
-                            images,
-                            max_output_tokens,
-                        ))
-                        .await;
+                        Box::pin(self.handle_send_message(spec)).await;
                     }
                     Op::ContinueGoal {
                         dynamic_tools,
@@ -2732,31 +2684,33 @@ impl Engine {
                         };
 
                         let _ = self
-                            .handle_send_message(
+                            .handle_send_message(TurnSpec {
                                 content,
-                                self.current_mode,
-                                route,
-                                self.config.compaction.clone(),
-                                crate::cost_status::RuntimeUsageBatch::default(),
-                                goal_snapshot.objective,
-                                goal_snapshot.token_budget,
-                                GoalStatus::Active,
-                                self.session.reasoning_effort.clone(),
-                                self.session.reasoning_effort_auto,
-                                self.session.auto_model,
-                                self.session.allow_shell,
-                                self.session.trust_mode,
-                                self.session.auto_approve,
-                                self.session.approval_mode,
-                                self.config.translation_enabled,
-                                self.config.allowed_tools.clone(),
+                                mode: self.current_mode,
+                                route: Box::new(route),
+                                compaction: Box::new(self.config.compaction.clone()),
+                                initial_routed_usage: Box::new(
+                                    crate::cost_status::RuntimeUsageBatch::default(),
+                                ),
+                                goal_objective: goal_snapshot.objective,
+                                goal_token_budget: goal_snapshot.token_budget,
+                                goal_status: GoalStatus::Active,
+                                reasoning_effort: self.session.reasoning_effort.clone(),
+                                reasoning_effort_auto: self.session.reasoning_effort_auto,
+                                auto_model: self.session.auto_model,
+                                allow_shell: self.session.allow_shell,
+                                trust_mode: self.session.trust_mode,
+                                auto_approve: self.session.auto_approve,
+                                approval_mode: self.session.approval_mode,
+                                translation_enabled: self.config.translation_enabled,
+                                allowed_tools: self.config.allowed_tools.clone(),
                                 dynamic_tools,
-                                self.config.hook_executor.clone(),
-                                self.config.verbosity.clone(),
-                                UserInputProvenance::Runtime,
-                                Vec::new(),
-                                None,
-                            )
+                                hook_executor: self.config.hook_executor.clone(),
+                                verbosity: self.config.verbosity.clone(),
+                                provenance: UserInputProvenance::Runtime,
+                                images: Vec::new(),
+                                max_output_tokens: None,
+                            })
                             .await;
                     }
                     Op::RunShellCommand {
@@ -3289,31 +3243,33 @@ impl Engine {
                         // Now dispatch the new message as a normal send,
                         // reusing the engine's stored mode/model config.
                         let mode = self.current_mode;
-                        self.handle_send_message(
-                            new_message.clone(),
+                        self.handle_send_message(TurnSpec {
+                            content: new_message.clone(),
                             mode,
-                            route,
-                            self.config.compaction.clone(),
-                            crate::cost_status::RuntimeUsageBatch::default(),
-                            self.config.goal_objective.clone(),
-                            self.config.goal_token_budget,
-                            self.config.goal_status,
-                            self.session.reasoning_effort.clone(),
-                            self.session.reasoning_effort_auto,
-                            self.session.auto_model,
-                            self.session.allow_shell,
-                            self.session.trust_mode,
-                            self.session.auto_approve,
-                            self.session.approval_mode,
-                            self.config.translation_enabled,
-                            self.config.allowed_tools.clone(),
-                            Vec::new(),
-                            self.config.hook_executor.clone(),
-                            self.config.verbosity.clone(),
-                            UserInputProvenance::ExternalUser,
-                            Vec::new(),
-                            None,
-                        )
+                            route: Box::new(route),
+                            compaction: Box::new(self.config.compaction.clone()),
+                            initial_routed_usage: Box::new(
+                                crate::cost_status::RuntimeUsageBatch::default(),
+                            ),
+                            goal_objective: self.config.goal_objective.clone(),
+                            goal_token_budget: self.config.goal_token_budget,
+                            goal_status: self.config.goal_status,
+                            reasoning_effort: self.session.reasoning_effort.clone(),
+                            reasoning_effort_auto: self.session.reasoning_effort_auto,
+                            auto_model: self.session.auto_model,
+                            allow_shell: self.session.allow_shell,
+                            trust_mode: self.session.trust_mode,
+                            auto_approve: self.session.auto_approve,
+                            approval_mode: self.session.approval_mode,
+                            translation_enabled: self.config.translation_enabled,
+                            allowed_tools: self.config.allowed_tools.clone(),
+                            dynamic_tools: Vec::new(),
+                            hook_executor: self.config.hook_executor.clone(),
+                            verbosity: self.config.verbosity.clone(),
+                            provenance: UserInputProvenance::ExternalUser,
+                            images: Vec::new(),
+                            max_output_tokens: None,
+                        })
                         .await;
                     }
                     Op::SetAdvisorEnabled { enabled } => {
@@ -3949,31 +3905,31 @@ impl Engine {
             .await;
 
         let outcome = self
-            .handle_send_message(
+            .handle_send_message(TurnSpec {
                 content,
-                self.current_mode,
-                route,
-                self.config.compaction.clone(),
-                crate::cost_status::RuntimeUsageBatch::default(),
-                self.config.goal_objective.clone(),
-                self.config.goal_token_budget,
-                self.config.goal_status,
-                self.session.reasoning_effort.clone(),
-                self.session.reasoning_effort_auto,
-                self.session.auto_model,
-                self.session.allow_shell,
-                self.session.trust_mode,
-                self.session.auto_approve,
-                self.session.approval_mode,
-                self.config.translation_enabled,
-                self.config.allowed_tools.clone(),
-                Vec::new(),
-                self.config.hook_executor.clone(),
-                self.config.verbosity.clone(),
-                UserInputProvenance::SubAgentHandoff,
-                Vec::new(),
-                None,
-            )
+                mode: self.current_mode,
+                route: Box::new(route),
+                compaction: Box::new(self.config.compaction.clone()),
+                initial_routed_usage: Box::new(crate::cost_status::RuntimeUsageBatch::default()),
+                goal_objective: self.config.goal_objective.clone(),
+                goal_token_budget: self.config.goal_token_budget,
+                goal_status: self.config.goal_status,
+                reasoning_effort: self.session.reasoning_effort.clone(),
+                reasoning_effort_auto: self.session.reasoning_effort_auto,
+                auto_model: self.session.auto_model,
+                allow_shell: self.session.allow_shell,
+                trust_mode: self.session.trust_mode,
+                auto_approve: self.session.auto_approve,
+                approval_mode: self.session.approval_mode,
+                translation_enabled: self.config.translation_enabled,
+                allowed_tools: self.config.allowed_tools.clone(),
+                dynamic_tools: Vec::new(),
+                hook_executor: self.config.hook_executor.clone(),
+                verbosity: self.config.verbosity.clone(),
+                provenance: UserInputProvenance::SubAgentHandoff,
+                images: Vec::new(),
+                max_output_tokens: None,
+            })
             .await;
         if !outcome.started() {
             for agent_id in claimed_ids {
@@ -4737,33 +4693,35 @@ impl Engine {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn handle_send_message(
-        &mut self,
-        content: String,
-        mode: AppMode,
-        route: ResolvedRuntimeRoute,
-        compaction: CompactionConfig,
-        initial_routed_usage: crate::cost_status::RuntimeUsageBatch,
-        goal_objective: Option<String>,
-        goal_token_budget: Option<u32>,
-        goal_status: GoalStatus,
-        reasoning_effort: Option<String>,
-        reasoning_effort_auto: bool,
-        auto_model: bool,
-        allow_shell: bool,
-        trust_mode: bool,
-        auto_approve: bool,
-        approval_mode: ApprovalMode,
-        translation_enabled: bool,
-        allowed_tools: Option<Vec<String>>,
-        dynamic_tools: Vec<DynamicToolSpec>,
-        hook_executor: Option<std::sync::Arc<crate::hooks::HookExecutor>>,
-        verbosity: Option<String>,
-        provenance: UserInputProvenance,
-        images: Vec<codewhale_protocol::runtime::RuntimeImageInput>,
-        max_output_tokens: Option<std::num::NonZeroU32>,
-    ) -> SendMessageOutcome {
+    async fn handle_send_message(&mut self, spec: TurnSpec) -> SendMessageOutcome {
+        let TurnSpec {
+            max_output_tokens,
+            content,
+            images,
+            mode,
+            route,
+            compaction,
+            initial_routed_usage,
+            goal_objective,
+            goal_token_budget,
+            goal_status,
+            reasoning_effort,
+            reasoning_effort_auto,
+            auto_model,
+            allow_shell,
+            trust_mode,
+            auto_approve,
+            approval_mode,
+            translation_enabled,
+            allowed_tools,
+            dynamic_tools,
+            hook_executor,
+            verbosity,
+            provenance,
+        } = spec;
+        let route = *route;
+        let compaction = *compaction;
+        let initial_routed_usage = *initial_routed_usage;
         // All surfaces reuse the same bounded validator. Runtime already checks
         // before admission; this also protects direct in-process operations.
         let images = match crate::image_attach::prepare_stored_images(&images) {

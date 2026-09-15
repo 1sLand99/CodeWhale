@@ -1,6 +1,6 @@
 use super::*;
 use crate::core::events::{Event as EngineEvent, TurnOutcomeStatus};
-use crate::core::ops::Op;
+use crate::core::ops::{Op, TurnSpec};
 use crate::runtime_threads::RuntimeEventRecord;
 use crate::test_support::{EnvVarGuard, lock_test_env};
 use anyhow::{Context, bail};
@@ -2856,7 +2856,7 @@ async fn compatibility_stream_closes_losslessly_across_replay_live_handoff() -> 
     let (release_overlap, wait_for_overlap_release) = oneshot::channel();
     let (release_terminal, wait_for_terminal_release) = oneshot::channel();
     let engine_task = tokio::spawn(async move {
-        if !matches!(rx_op.recv().await, Some(Op::SendMessage { .. })) {
+        if !matches!(rx_op.recv().await, Some(Op::SendMessage(TurnSpec { .. }))) {
             return;
         }
         let _ = wait_for_overlap_release.await;
@@ -3059,7 +3059,10 @@ async fn compatibility_stream_exposes_and_resolves_user_input_without_answer_ech
     let (submission_tx, submission_rx) = oneshot::channel();
     let (release_completion, wait_for_completion_release) = oneshot::channel();
     let engine_task = tokio::spawn(async move {
-        if !matches!(harness.rx_op.recv().await, Some(Op::SendMessage { .. })) {
+        if !matches!(
+            harness.rx_op.recv().await,
+            Some(Op::SendMessage(TurnSpec { .. }))
+        ) {
             bail!("compatibility interaction engine did not receive a prompt");
         }
         harness
@@ -3479,7 +3482,7 @@ async fn thread_endpoints_expose_lifecycle_contract() -> Result<()> {
     tokio::spawn(async move {
         while let Some(op) = rx_op.recv().await {
             match op {
-                Op::SendMessage { .. } => {
+                Op::SendMessage(TurnSpec { .. }) => {
                     let _ = tx_event
                         .send(EngineEvent::TurnStarted {
                             turn_id: "mock_lifecycle".to_string(),
@@ -3658,7 +3661,7 @@ async fn turn_endpoint_operation_key_returns_original_and_conflicts_on_mismatch(
     let tx_event = harness.tx_event.clone();
     tokio::spawn(async move {
         while let Some(op) = harness.rx_op.recv().await {
-            if !matches!(op, Op::SendMessage { .. }) {
+            if !matches!(op, Op::SendMessage(TurnSpec { .. })) {
                 continue;
             }
             counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -3797,7 +3800,7 @@ async fn turn_operation_lookup_is_authenticated_read_only_and_survives_restart()
         tokio::time::timeout(ci_scaled(Duration::from_secs(2)), engine.rx_op.recv())
             .await?
             .context("accepted mock Engine operation")?,
-        Op::SendMessage { .. }
+        Op::SendMessage(TurnSpec { .. })
     ));
 
     let endpoint = format!(
@@ -3975,7 +3978,7 @@ async fn events_endpoint_respects_since_seq_cursor() -> Result<()> {
     let mut rx_op = harness.rx_op;
     let tx_event = harness.tx_event;
     tokio::spawn(async move {
-        if !matches!(rx_op.recv().await, Some(Op::SendMessage { .. })) {
+        if !matches!(rx_op.recv().await, Some(Op::SendMessage(TurnSpec { .. }))) {
             return;
         }
         let _ = tx_event
@@ -4388,7 +4391,7 @@ async fn steer_and_interrupt_endpoints_work_on_active_turn() -> Result<()> {
     let tx_event = harness.tx_event;
     let cancel_token = harness.cancel_token;
     tokio::spawn(async move {
-        if !matches!(rx_op.recv().await, Some(Op::SendMessage { .. })) {
+        if !matches!(rx_op.recv().await, Some(Op::SendMessage(TurnSpec { .. }))) {
             return;
         }
         let _ = tx_event
@@ -4851,7 +4854,7 @@ async fn stream_endpoint_remains_backward_compatible() -> Result<()> {
     let mut rx_op = harness.rx_op;
     let tx_event = harness.tx_event;
     tokio::spawn(async move {
-        if !matches!(rx_op.recv().await, Some(Op::SendMessage { .. })) {
+        if !matches!(rx_op.recv().await, Some(Op::SendMessage(TurnSpec { .. }))) {
             return;
         }
         let _ = tx_event
@@ -6066,7 +6069,7 @@ async fn session_create_from_thread_rejects_active_turn() -> Result<()> {
     let (active_tx, active_rx) = oneshot::channel();
     let (finish_tx, finish_rx) = oneshot::channel();
     tokio::spawn(async move {
-        if !matches!(rx_op.recv().await, Some(Op::SendMessage { .. })) {
+        if !matches!(rx_op.recv().await, Some(Op::SendMessage(TurnSpec { .. }))) {
             return;
         }
         let _ = tx_event
@@ -14453,7 +14456,7 @@ async fn runtime_image_http_rejects_before_dispatch_and_accepts_large_canonical_
     let response = client.post(&url).json(&body).send().await?;
     assert_eq!(response.status(), StatusCode::CREATED);
     let accepted: Value = response.json().await?;
-    let Op::SendMessage { images, .. } =
+    let Op::SendMessage(TurnSpec { images, .. }) =
         harness.rx_op.recv().await.context("accepted Engine op")?
     else {
         bail!("expected SendMessage");

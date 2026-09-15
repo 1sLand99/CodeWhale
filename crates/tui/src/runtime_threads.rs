@@ -35,7 +35,7 @@ use crate::core::engine::{
     EngineConfig, EngineHandle, spawn_engine_with_authoritative_route_config,
 };
 use crate::core::events::{Event as EngineEvent, TurnOutcomeStatus};
-use crate::core::ops::Op;
+use crate::core::ops::{Op, TurnSpec};
 use crate::cost_status::{
     EffectiveRouteEnvelope, EffectiveRouteUsage, RouteBillingMode, RuntimeUsageDropRecord,
     RuntimeUsageRecord,
@@ -9349,7 +9349,7 @@ impl RuntimeThreadManager {
             })
             .unwrap_or(crate::tools::goal::GoalStatus::Active);
 
-        let op = Op::SendMessage {
+        let op = Op::SendMessage (TurnSpec {
             max_output_tokens,
             content: prompt,
             images: req.images,
@@ -9373,7 +9373,7 @@ impl RuntimeThreadManager {
             approval_mode: policy.permission,
             verbosity,
             provenance: input_source.provenance(),
-        };
+        });
 
         // Reserve mailbox capacity before claiming or persisting anything.
         // If the caller is cancelled while capacity is unavailable, no

@@ -8,6 +8,7 @@
 //! keeps the dispatch site and tests resolving unchanged.
 
 use super::*;
+use crate::core::ops::TurnSpec;
 
 /// Resolve the headless `exec` model-step ceiling.
 ///
@@ -682,7 +683,7 @@ pub(crate) async fn run_exec_agent(
     let exec_turn_started_at = Instant::now();
 
     engine_handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
             max_output_tokens: None,
             content: prompt.to_string(),
             images: Vec::new(),
@@ -714,7 +715,7 @@ pub(crate) async fn run_exec_agent(
             },
             verbosity: execution_config.verbosity.clone(),
             provenance: crate::core::ops::UserInputProvenance::ExternalUser,
-        })
+        }))
         .await?;
 
     // Lifecycle outbox: the clean headless turn-start boundary. `exec` has

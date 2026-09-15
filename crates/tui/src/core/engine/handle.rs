@@ -201,7 +201,7 @@ impl EngineHandle {
             .turn_controls
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if matches!(&op, Op::SendMessage { .. }) {
+        if matches!(&op, Op::SendMessage(_)) {
             let control = controls.fresh();
             controls.pending.push_back(control);
         }

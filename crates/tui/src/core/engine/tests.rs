@@ -599,7 +599,7 @@ async fn exact_turn_snapshot_restores_custom_endpoint_and_turn_receipt_after_bui
 
     let run_task = tokio::spawn(engine.run());
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
             max_output_tokens: None,
             content: "verify exact route".to_string(),
             images: Vec::new(),
@@ -626,7 +626,7 @@ async fn exact_turn_snapshot_restores_custom_endpoint_and_turn_receipt_after_bui
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send exact custom turn");
 
@@ -975,7 +975,7 @@ async fn goal_continuation_preserves_goal_and_resolves_updated_authoritative_rou
     let goal_state = engine.config.goal_state.clone();
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
             max_output_tokens: None,
             content: "first turn".to_string(),
             images: Vec::new(),
@@ -999,7 +999,7 @@ async fn goal_continuation_preserves_goal_and_resolves_updated_authoritative_rou
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send first goal turn");
 
@@ -1257,7 +1257,7 @@ async fn saturated_mailbox_does_not_deadlock_goal_continuation_self_dispatch() {
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
             max_output_tokens: None,
             content: "start the saturated goal turn".to_string(),
             images: Vec::new(),
@@ -1281,7 +1281,7 @@ async fn saturated_mailbox_does_not_deadlock_goal_continuation_self_dispatch() {
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send saturated goal turn");
     tokio::time::timeout(model_turn_event_timeout(), request_entered.notified())
@@ -1388,30 +1388,32 @@ async fn queued_ordinary_turn_does_not_multiply_engine_goal_continuations() {
     let (engine, handle) = Engine::new_with_model_client(engine_config, &config, client);
     let goal_state = engine.config.goal_state.clone();
     let run_task = tokio::spawn(engine.run());
-    let send_message = |content: &str| Op::SendMessage {
-        max_output_tokens: None,
-        content: content.to_string(),
-        images: Vec::new(),
-        mode: AppMode::Agent,
-        route: resolved_route_for_test(&config, "local-model"),
-        compaction: Box::new(CompactionConfig::default()),
-        initial_routed_usage: Box::default(),
-        goal_objective: Some("coalesce queued goal turns".to_string()),
-        goal_token_budget: None,
-        goal_status: crate::tools::goal::GoalStatus::Active,
-        reasoning_effort: None,
-        reasoning_effort_auto: false,
-        auto_model: false,
-        allow_shell: false,
-        trust_mode: false,
-        auto_approve: false,
-        approval_mode: ApprovalMode::Suggest,
-        translation_enabled: false,
-        allowed_tools: None,
-        dynamic_tools: Vec::new(),
-        hook_executor: None,
-        verbosity: None,
-        provenance: UserInputProvenance::ExternalUser,
+    let send_message = |content: &str| {
+        Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
+            content: content.to_string(),
+            images: Vec::new(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&config, "local-model"),
+            compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
+            goal_objective: Some("coalesce queued goal turns".to_string()),
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+        })
     };
 
     handle
@@ -2588,7 +2590,7 @@ async fn cross_turn_token_budget_exhaustion_does_not_pause_goal() {
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
             max_output_tokens: None,
             content: "start budgeted goal".to_string(),
             images: Vec::new(),
@@ -2612,7 +2614,7 @@ async fn cross_turn_token_budget_exhaustion_does_not_pause_goal() {
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send budgeted goal turn");
 
@@ -3048,7 +3050,7 @@ async fn explicit_natural_goal_activates_before_provider_request() {
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
             max_output_tokens: None,
             content: "hello - take over and make it your /goal to solve navier stokes".to_string(),
             images: Vec::new(),
@@ -3072,7 +3074,7 @@ async fn explicit_natural_goal_activates_before_provider_request() {
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send explicit natural goal turn");
 
@@ -3161,7 +3163,7 @@ async fn operate_goal_probe(mode: AppMode, prompt: &str) -> (Option<String>, boo
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
             max_output_tokens: None,
             content: prompt.to_string(),
             images: Vec::new(),
@@ -3185,7 +3187,7 @@ async fn operate_goal_probe(mode: AppMode, prompt: &str) -> (Option<String>, boo
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send probe turn");
 
@@ -3337,30 +3339,32 @@ async fn operate_contract_is_appended_once_and_an_existing_goal_is_never_replace
     let goal_state = engine.config.goal_state.clone();
     let run_task = tokio::spawn(engine.run());
 
-    let send = |content: &str, goal_objective: Option<String>, goal_status| Op::SendMessage {
-        max_output_tokens: None,
-        content: content.to_string(),
-        images: Vec::new(),
-        mode: AppMode::Operate,
-        route: resolved_route_for_test(&config, "local-model"),
-        compaction: Box::new(CompactionConfig::default()),
-        initial_routed_usage: Box::default(),
-        goal_objective,
-        goal_token_budget: None,
-        goal_status,
-        reasoning_effort: None,
-        reasoning_effort_auto: false,
-        auto_model: false,
-        allow_shell: false,
-        trust_mode: false,
-        auto_approve: false,
-        approval_mode: ApprovalMode::Suggest,
-        translation_enabled: false,
-        allowed_tools: None,
-        dynamic_tools: Vec::new(),
-        hook_executor: None,
-        verbosity: None,
-        provenance: UserInputProvenance::ExternalUser,
+    let send = |content: &str, goal_objective: Option<String>, goal_status| {
+        Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
+            content: content.to_string(),
+            images: Vec::new(),
+            mode: AppMode::Operate,
+            route: resolved_route_for_test(&config, "local-model"),
+            compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
+            goal_objective,
+            goal_token_budget: None,
+            goal_status,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+        })
     };
 
     let first =
@@ -4108,7 +4112,7 @@ async fn host_managed_engine_does_not_self_dispatch_goal_continuation() {
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
             max_output_tokens: None,
             content: "one host-owned turn".to_string(),
             images: Vec::new(),
@@ -4132,7 +4136,7 @@ async fn host_managed_engine_does_not_self_dispatch_goal_continuation() {
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send host-owned goal turn");
 
@@ -4384,7 +4388,7 @@ async fn host_managed_engine_defers_idle_subagent_completion_to_explicit_turn() 
     );
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
             max_output_tokens: None,
             content: "claim the next turn".to_string(),
             images: Vec::new(),
@@ -4408,7 +4412,7 @@ async fn host_managed_engine_defers_idle_subagent_completion_to_explicit_turn() 
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send explicit host turn");
 
@@ -5806,7 +5810,7 @@ fn active_goal_message_op(
     objective: &str,
     token_budget: Option<u32>,
 ) -> Op {
-    Op::SendMessage {
+    Op::SendMessage(TurnSpec {
         max_output_tokens: None,
         content: content.to_string(),
         images: Vec::new(),
@@ -5830,7 +5834,7 @@ fn active_goal_message_op(
         hook_executor: None,
         verbosity: None,
         provenance: UserInputProvenance::ExternalUser,
-    }
+    })
 }
 
 fn system_prompt_text(prompt: SystemPrompt) -> String {
@@ -5845,7 +5849,7 @@ fn system_prompt_text(prompt: SystemPrompt) -> String {
 }
 
 fn external_user_message_op(content: &str, mode: AppMode, config: &Config) -> Op {
-    Op::SendMessage {
+    Op::SendMessage(TurnSpec {
         max_output_tokens: None,
         content: content.to_string(),
         images: Vec::new(),
@@ -5869,11 +5873,11 @@ fn external_user_message_op(content: &str, mode: AppMode, config: &Config) -> Op
         hook_executor: None,
         verbosity: None,
         provenance: UserInputProvenance::ExternalUser,
-    }
+    })
 }
 
 fn auto_review_message_op(content: &str, config: &Config) -> Op {
-    Op::SendMessage {
+    Op::SendMessage(TurnSpec {
         max_output_tokens: None,
         content: content.to_string(),
         images: Vec::new(),
@@ -5897,7 +5901,7 @@ fn auto_review_message_op(content: &str, config: &Config) -> Op {
         hook_executor: None,
         verbosity: None,
         provenance: UserInputProvenance::ExternalUser,
-    }
+    })
 }
 
 struct DropSignal(std::sync::Arc<std::sync::atomic::AtomicBool>);
@@ -6706,11 +6710,11 @@ async fn automatic_compaction_continues_one_task_and_suppresses_failed_passes() 
             AppMode::Agent,
             &config,
         );
-        if let Op::SendMessage {
+        if let Op::SendMessage(TurnSpec {
             compaction,
             auto_approve,
             ..
-        } = &mut op
+        }) = &mut op
         {
             compaction.token_threshold = 40_000;
             *auto_approve = true;
@@ -6828,10 +6832,10 @@ async fn initial_routed_usage_is_total_only_emitted_once_and_keeps_parent_route_
     let task = tokio::spawn(engine.run());
 
     let mut op = external_user_message_op("account for classifier", AppMode::Agent, &api_config);
-    let Op::SendMessage {
+    let Op::SendMessage(TurnSpec {
         initial_routed_usage,
         ..
-    } = &mut op
+    }) = &mut op
     else {
         unreachable!("external_user_message_op always builds SendMessage");
     };
@@ -7258,11 +7262,11 @@ async fn sandbox_escalation_fails_closed_when_the_posture_cannot_prompt() {
             AppMode::Agent,
             &config,
         );
-        let Op::SendMessage {
+        let Op::SendMessage(TurnSpec {
             approval_mode: op_approval_mode,
             auto_approve: op_auto_approve,
             ..
-        } = &mut op
+        }) = &mut op
         else {
             panic!("user message op")
         };
@@ -12296,7 +12300,7 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
             max_output_tokens: None,
             content: "write the requested local fixture".to_string(),
             images: Vec::new(),
@@ -12320,7 +12324,7 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send Operate model turn");
 
@@ -12465,7 +12469,7 @@ async fn full_access_subagent_handoff_keeps_model_shell_free_of_approval_prompts
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
             max_output_tokens: None,
             content: "continue from the completed child".to_string(),
             images: Vec::new(),
@@ -12491,7 +12495,7 @@ async fn full_access_subagent_handoff_keeps_model_shell_free_of_approval_prompts
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::SubAgentHandoff,
-        })
+        }))
         .await
         .expect("send model turn");
 
@@ -12604,7 +12608,7 @@ async fn assert_full_access_model_tool_batch_is_blocked(
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
             max_output_tokens: None,
             content: "exercise the Full Access execution boundary".to_string(),
             images: Vec::new(),
@@ -12628,7 +12632,7 @@ async fn assert_full_access_model_tool_batch_is_blocked(
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send Full Access model turn");
 
@@ -12812,7 +12816,7 @@ async fn assert_full_access_model_tool_batch_runs(
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
             max_output_tokens: None,
             content: "exercise the Full Access auto-approval boundary".to_string(),
             images: Vec::new(),
@@ -12836,7 +12840,7 @@ async fn assert_full_access_model_tool_batch_runs(
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send Full Access model turn");
 
@@ -13091,7 +13095,7 @@ async fn auto_review_auto_resolves_hallucinated_question_without_prompting() {
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
             max_output_tokens: None,
             content: "continue autonomously".to_string(),
             images: Vec::new(),
@@ -13115,7 +13119,7 @@ async fn auto_review_auto_resolves_hallucinated_question_without_prompting() {
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send Auto-Review model turn");
 
@@ -13280,7 +13284,7 @@ async fn full_access_permission_allow_cannot_bypass_background_catastrophic_floo
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
             max_output_tokens: None,
             content: "please run a background shell".to_string(),
             images: Vec::new(),
@@ -13304,7 +13308,7 @@ async fn full_access_permission_allow_cannot_bypass_background_catastrophic_floo
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send model turn");
 
@@ -13423,7 +13427,7 @@ async fn yolo_mode_does_not_prompt_for_background_shell() {
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
             max_output_tokens: None,
             content: "please run a background shell".to_string(),
             images: Vec::new(),
@@ -13447,7 +13451,7 @@ async fn yolo_mode_does_not_prompt_for_background_shell() {
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send model turn");
 
@@ -13562,7 +13566,7 @@ async fn yolo_mode_executes_publish_like_shell_without_prompt() {
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
             max_output_tokens: None,
             content: "please publish this crate".to_string(),
             images: Vec::new(),
@@ -13586,7 +13590,7 @@ async fn yolo_mode_executes_publish_like_shell_without_prompt() {
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send model turn");
 
@@ -13705,7 +13709,7 @@ async fn yolo_mode_does_not_prompt_for_mcp_action() {
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
             max_output_tokens: None,
             content: "please open the PR".to_string(),
             images: Vec::new(),
@@ -13729,7 +13733,7 @@ async fn yolo_mode_does_not_prompt_for_mcp_action() {
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send model turn");
 
@@ -20150,7 +20154,7 @@ async fn run_headless_turn_with_flaky_network(
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
             max_output_tokens: None,
             content: "solve the task".to_string(),
             images: Vec::new(),
@@ -20174,7 +20178,7 @@ async fn run_headless_turn_with_flaky_network(
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send flaky-network turn");
 
@@ -20331,7 +20335,7 @@ async fn terminal_output_limit_followed_by_stream_error_is_charged_and_not_retri
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
             max_output_tokens: None,
             content: "solve the task".to_string(),
             images: Vec::new(),
@@ -20355,7 +20359,7 @@ async fn terminal_output_limit_followed_by_stream_error_is_charged_and_not_retri
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send terminal-then-drop turn");
 
@@ -20438,7 +20442,7 @@ async fn midstream_error_frame_stops_the_stream_and_drops_trailing_deltas() {
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
             max_output_tokens: None,
             content: "solve the task".to_string(),
             images: Vec::new(),
@@ -20462,7 +20466,7 @@ async fn midstream_error_frame_stops_the_stream_and_drops_trailing_deltas() {
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send midstream-error turn");
 
@@ -20689,7 +20693,7 @@ async fn run_interactive_turn_with_flaky_network(
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
             max_output_tokens: None,
             content: "solve the task".to_string(),
             images: Vec::new(),
@@ -20713,7 +20717,7 @@ async fn run_interactive_turn_with_flaky_network(
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send interactive flaky-network turn");
 
@@ -20920,7 +20924,7 @@ async fn interactive_thinking_only_drop_preserves_nothing_and_never_claims_it_di
     let run_task = tokio::spawn(engine.run());
 
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
             max_output_tokens: None,
             content: "solve the task".to_string(),
             images: Vec::new(),
@@ -20944,7 +20948,7 @@ async fn interactive_thinking_only_drop_preserves_nothing_and_never_claims_it_di
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send thinking-only drop turn");
 
@@ -21150,7 +21154,7 @@ async fn run_reasoning_only_turn_with_reprompts(
     let (engine, handle) = Engine::new_with_model_client(engine_config, &config, client);
     let run_task = tokio::spawn(engine.run());
     handle
-        .send(Op::SendMessage {
+        .send(Op::SendMessage(TurnSpec {
             max_output_tokens: None,
             content: "solve the task".to_string(),
             images: Vec::new(),
@@ -21174,7 +21178,7 @@ async fn run_reasoning_only_turn_with_reprompts(
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
-        })
+        }))
         .await
         .expect("send reasoning-only turn");
     let mut events = Vec::new();

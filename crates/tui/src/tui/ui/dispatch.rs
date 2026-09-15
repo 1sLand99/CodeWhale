@@ -4,6 +4,7 @@
 //! Moved verbatim out of `ui.rs`.
 
 use super::*;
+use crate::core::ops::TurnSpec;
 use codewhale_models::Role;
 
 pub(crate) fn dispatch_hotbar_slot(
@@ -812,7 +813,7 @@ pub(crate) async fn spawned_dispatch_inner(
         scope: prepare.cost_scope,
         batch: Some(initial_routed_usage.clone()),
     };
-    let op = Op::SendMessage {
+    let op = Op::SendMessage(TurnSpec {
         max_output_tokens: None,
         content: prepare.content.clone(),
         images: Vec::new(),
@@ -836,7 +837,7 @@ pub(crate) async fn spawned_dispatch_inner(
         hook_executor: prepare.hook_executor.clone(),
         verbosity: prepare.verbosity.clone(),
         provenance: prepare.provenance,
-    };
+    });
     // Reserve capacity off the render thread, but do not let Engine start
     // until the completion callback has installed the UI's acceptance state.
     // Separate completion/event mailboxes otherwise allow TurnStarted (or
@@ -1356,18 +1357,24 @@ pub(crate) async fn dispatch_composer_message(
             .tr(codewhale_localization::MessageId::AgentFocusFollowUpQueued)
             .replace("{agent}", &label);
         app.push_history_cell(crate::tui::history::HistoryCell::System { content: receipt });
-        if engine_handle
-            .send(crate::core::ops::Op::FollowUpSubAgent {
-                agent_id: agent_id.clone(),
-                text,
-            })
-            .await
-            .is_err()
-        {
+        // #6150: the input path never awaits a full op channel. The follow-up
+        // is retryable; a rejected send surfaces immediately.
+        if let Err(err) = engine_handle.try_send(crate::core::ops::Op::FollowUpSubAgent {
+            agent_id: agent_id.clone(),
+            text,
+        }) {
+            let reason = if err
+                .downcast_ref::<tokio::sync::mpsc::error::TrySendError<crate::core::ops::Op>>()
+                .is_some_and(|e| matches!(e, tokio::sync::mpsc::error::TrySendError::Full(_)))
+            {
+                "engine busy"
+            } else {
+                "engine unavailable"
+            };
             let failed = app
                 .tr(codewhale_localization::MessageId::AgentFocusFollowUpFailed)
                 .replace("{agent}", &label)
-                .replace("{reason}", "engine unavailable");
+                .replace("{reason}", reason);
             app.status_message = Some(failed.clone());
             app.push_status_toast(failed, StatusToastLevel::Warning, Some(5_000));
         }
