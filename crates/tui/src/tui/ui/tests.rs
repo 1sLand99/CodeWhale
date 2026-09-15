@@ -25204,7 +25204,6 @@ mod work_sidebar_projection_tests {
             ended_at,
             duration_ms: ended_at.map(|_| 1_234),
             lifecycle_seq: 1,
-            hunt_verdict: None,
             error: None,
             terminal_reason: None,
             thread_id: None,
