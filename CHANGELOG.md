@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Native clients can finish provider setup without dropping to the CLI:
+  `DELETE /v1/providers/{id}/key` clears a Codewhale-owned credential through
+  the same shared owner as `codewhale auth clear`, and `GET /v1/providers`
+  now carries `credentialSource` / `credentialWritable` (plus a reason) so a
+  client disables its control with a truthful explanation instead of letting
+  a write fail late. A credential Codewhale does not own — a literal key in a
+  config file, or an active external consent — refuses both verbs with `409`
+  rather than appearing to succeed against a source that still wins at
+  request time (#6179).
 - The interactive approval card can be bounded: `[approval] timeout_seconds`
   resolves an unanswered card to **deny** when the window elapses — the same
   fail-closed decision the external approval path takes — and the transcript

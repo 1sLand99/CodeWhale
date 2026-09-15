@@ -1534,8 +1534,47 @@ logs; the response carries only the readiness projection
 alias, an empty key, a key over 4 KiB, or one containing control characters
 is `400`. `credentialState: "local"` after a successful write is honest
 output for a keyless local route: the key is stored, but the route
-classifies as not needing one. Deleting a key remains a CLI/operator
-action — there is deliberately no `DELETE` here.
+classifies as not needing one.
+
+### `DELETE /v1/providers/{id}/key` — clear a Codewhale-owned credential
+
+```json
+// response
+{ "provider": "openai", "cleared": true, "credentialState": "missing" }
+```
+
+Clears the credential through the same shared owner as
+`codewhale auth clear`: the config document is snapshotted and restored if
+its save fails, the secret store is only touched once that save has landed,
+and the cleared markers are mirrored into the live runtime config so
+`GET /v1/providers` reports `missing` on the next read rather than after a
+restart.
+
+Clearing an already-clear route returns `cleared: true` — a client retrying
+a revoke must not be told something went wrong. If the config entry is
+cleared but the secret backend refuses the delete, the route answers `500`
+and names the slot: reporting success while the key is still in the keyring
+would be a lie about a security action.
+
+### Credential ownership: `credentialSource` and `credentialWritable`
+
+Both credential verbs refuse a route whose credential Codewhale does not
+own, and `GET /v1/providers` carries the same classification so a client can
+disable its control *before* submitting instead of failing late:
+
+| `credentialSource` | `credentialWritable` | Meaning |
+| --- | --- | --- |
+| `secret_store` | `true` | Codewhale's own durable backend. The only writable source. |
+| `config` | `false` | A literal key in a config file, which still wins at request time. |
+| `external_auth` | `false` | An active external consent (OAuth) owns the credential. |
+| `none` | `false` | The route sends no credential, or has no credential slot. |
+
+When `credentialWritable` is `false`, `credentialWritableReason` carries
+user-facing copy naming the owner, and both `PUT` and `DELETE` answer `409`
+with that same reason. The classification is structural: it reads declared
+auth mode, consent state and the *kind* of any configured `api_key` value,
+and never resolves a secret, an environment value, or an auth command. It is
+a class and never a value, a path, or an environment variable name.
 
 ### `POST /v1/providers/{id}/switch`
 

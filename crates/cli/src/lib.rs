@@ -2655,20 +2655,17 @@ fn clear_auth_provider(
     if provider == ProviderKind::Antigravity {
         return clear_legacy_antigravity_config(store, secrets);
     }
-    let slot = provider_slot(provider);
-    let original_config = store.config.clone();
-    clear_provider_api_key_from_config(store, provider);
-    if provider == ProviderKind::Xai {
-        let xai = store.config.providers.for_provider_mut(provider);
-        xai.oauth_credential_generation = None;
-        xai.auth_mode = None;
-        xai.external_credentials = None;
+    let outcome = codewhale_config::credentials::clear_provider_api_key(store, secrets, provider)?;
+    let slot = outcome.slot;
+    // The secret-store leg used to fail silently here, which meant `auth clear`
+    // could print success while the key was still in the keyring. Say so
+    // instead; the config no longer advertises a key the backend may hold.
+    if let Some(error) = &outcome.secret_store_error {
+        println!(
+            "cleared API key for {slot} from config, but the secret store refused the delete: {error}"
+        );
+        return Ok(());
     }
-    if let Err(error) = store.save() {
-        store.config = original_config;
-        return Err(error);
-    }
-    clear_provider_api_key_from_keyring(secrets, provider);
     if provider == ProviderKind::Xai {
         println!("cleared xAI credentials from config, secret store, and owned OAuth storage");
     } else {
@@ -2860,10 +2857,6 @@ fn provider_keyring_api_key(secrets: &Secrets, provider: ProviderKind) -> Option
 
 fn provider_keyring_set(secrets: &Secrets, provider: ProviderKind) -> bool {
     provider_keyring_api_key(secrets, provider).is_some()
-}
-
-fn clear_provider_api_key_from_keyring(secrets: &Secrets, provider: ProviderKind) {
-    let _ = secrets.delete(provider_slot(provider));
 }
 
 /// Delete the keyring credential of every provider that has one stored.

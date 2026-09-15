@@ -16609,3 +16609,133 @@ async fn git_routes_drive_a_real_workspace_repo() -> Result<()> {
     handle.abort();
     Ok(())
 }
+
+/// The half of #6179 the credential route was missing: clear, the metadata a
+/// client needs to decide whether to offer the control at all, and the refusal
+/// for a credential Codewhale does not own.
+#[tokio::test]
+async fn provider_key_clear_round_trips_and_reports_writability() -> Result<()> {
+    let _env_lock = crate::test_support::lock_test_env();
+    let tmp = tempfile::tempdir()?;
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", tmp.path().join("cwhome"));
+    let _backend = crate::test_support::EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+    fs::create_dir_all(tmp.path().join("cwhome"))?;
+    let workspace = tmp.path().join("workspace");
+    fs::create_dir_all(&workspace)?;
+
+    let (addr, _runtime_threads, handle) = spawn_test_server_with_root_token_mobile_workspace(
+        tmp.path().join("runtime"),
+        tmp.path().join("sessions"),
+        Some("clear-token".to_string()),
+        false,
+        workspace.clone(),
+    )
+    .await?
+    .context("secrets test requires a loopback listener")?;
+    let client = crate::tls::reqwest_client();
+    let base = format!("http://{addr}");
+
+    // Clearing is a credential operation: it authenticates like the write.
+    let status = client
+        .delete(format!("{base}/v1/providers/openai/key"))
+        .send()
+        .await?
+        .status();
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Same id validation as the write, so a client cannot discover providers
+    // through one verb that the other rejects.
+    for (id, want) in [
+        ("not-a-provider", StatusCode::BAD_REQUEST),
+        ("deepseek-cn", StatusCode::BAD_REQUEST),
+    ] {
+        let status = client
+            .delete(format!("{base}/v1/providers/{id}/key"))
+            .bearer_auth("clear-token")
+            .send()
+            .await?
+            .status();
+        assert_eq!(status, want, "{id}");
+    }
+
+    client
+        .put(format!("{base}/v1/providers/openai/key"))
+        .bearer_auth("clear-token")
+        .json(&json!({ "key": "sk-key-that-will-be-cleared" }))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    // Before the clear the catalog says the control is live and names the
+    // source it would write — this is what lets a client enable the control.
+    let providers: Value = client
+        .get(format!("{base}/v1/providers"))
+        .bearer_auth("clear-token")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let openai = providers["providers"]
+        .as_array()
+        .context("providers array")?
+        .iter()
+        .find(|entry| entry["id"] == "openai")
+        .context("openai entry")?
+        .clone();
+    assert_eq!(openai["credentialState"], "configured");
+    assert_eq!(openai["credentialSource"], "secret_store");
+    assert_eq!(openai["credentialWritable"], true);
+    // A writable route carries no refusal reason to render.
+    assert!(openai["credentialWritableReason"].is_null());
+
+    let receipt: Value = client
+        .delete(format!("{base}/v1/providers/openai/key"))
+        .bearer_auth("clear-token")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(receipt["provider"], "openai");
+    assert_eq!(receipt["cleared"], true);
+    // A clear receipt echoes no more than a write receipt does.
+    assert!(!receipt.to_string().contains("sk-key-that-will-be-cleared"));
+    assert_eq!(receipt["credentialState"], "missing");
+
+    // And the catalog agrees on the next read, through the live config mirror
+    // rather than only after a restart.
+    let providers: Value = client
+        .get(format!("{base}/v1/providers"))
+        .bearer_auth("clear-token")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let openai = providers["providers"]
+        .as_array()
+        .context("providers array")?
+        .iter()
+        .find(|entry| entry["id"] == "openai")
+        .context("openai entry")?
+        .clone();
+    assert_eq!(openai["credentialState"], "missing");
+    // Still writable: the key is gone, the control is not.
+    assert_eq!(openai["credentialWritable"], true);
+
+    // Clearing an already-clear route is not an error — a client retrying a
+    // revoke must not be told something went wrong.
+    let receipt: Value = client
+        .delete(format!("{base}/v1/providers/openai/key"))
+        .bearer_auth("clear-token")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(receipt["cleared"], true);
+
+    handle.abort();
+    Ok(())
+}

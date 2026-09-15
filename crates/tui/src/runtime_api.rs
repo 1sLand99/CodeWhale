@@ -1404,9 +1404,11 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .route("/v1/providers/{id}/switch", post(switch_provider))
         .route(
             "/v1/providers/{id}/key",
-            put(secrets::set_provider_key).layer(DefaultBodyLimit::max(
-                secrets::PROVIDER_KEY_BODY_LIMIT_BYTES,
-            )),
+            put(secrets::set_provider_key)
+                .delete(secrets::clear_provider_key)
+                .layer(DefaultBodyLimit::max(
+                    secrets::PROVIDER_KEY_BODY_LIMIT_BYTES,
+                )),
         )
         .route("/v1/config", get(get_config).post(set_config))
         .route("/v1/config/reload", post(reload_config))
@@ -6596,6 +6598,24 @@ struct ProviderEntry {
     /// variable, consent-source, or token metadata.
     #[serde(rename = "credentialState")]
     credential_state: ProviderCredentialState,
+    /// Which *class* of source owns this route's credential (#6179). A class,
+    /// never a value, a path, or an environment variable name — the guarantee
+    /// above still holds. Clients need it to tell "you have no key" apart from
+    /// "your key is owned elsewhere and this control cannot change it".
+    #[serde(rename = "credentialSource")]
+    credential_source: secrets::ProviderCredentialSource,
+    /// Whether `PUT`/`DELETE /v1/providers/{id}/key` will act on this route.
+    /// False means the write would be refused, so the control should be
+    /// disabled rather than allowed to fail late.
+    #[serde(rename = "credentialWritable")]
+    credential_writable: bool,
+    /// Why a write is refused, as user-facing copy. Present only when
+    /// `credentialWritable` is false.
+    #[serde(
+        rename = "credentialWritableReason",
+        skip_serializing_if = "Option::is_none"
+    )]
+    credential_writable_reason: Option<&'static str>,
 }
 
 /// Stable, non-secret wire projection of provider readiness.
@@ -7170,6 +7190,7 @@ async fn list_providers(
             &base_url,
         )
         .is_empty();
+        let writeability = secrets::credential_writeability(&config, api_provider);
         providers.push(ProviderEntry {
             id: api_provider.as_str().to_string(),
             model_provider_id: (api_provider == active_provider)
@@ -7183,6 +7204,9 @@ async fn list_providers(
                 api_provider,
             )
             .into(),
+            credential_source: writeability.source,
+            credential_writable: writeability.writable,
+            credential_writable_reason: writeability.reason,
         });
     }
     Ok(Json(ProvidersResponse { current, providers }))

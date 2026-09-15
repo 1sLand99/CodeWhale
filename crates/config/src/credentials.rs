@@ -147,3 +147,68 @@ fn set_provider_api_key_unlocked(
         .context("failed to scrub plaintext API keys from config backup")?;
     Ok(secret_store_saved)
 }
+
+/// What a credential clear actually accomplished.
+///
+/// The secret-store leg can fail after the config leg has already been
+/// persisted. Reporting that separately is the point: a caller that prints
+/// "cleared" while the key is still sitting in the keyring has lied about a
+/// security-relevant action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClearOutcome {
+    /// The secret-store slot the clear targeted.
+    pub slot: &'static str,
+    /// `None` when the secret store accepted the delete; otherwise the backend
+    /// error, already stringified so it carries no credential material.
+    pub secret_store_error: Option<String>,
+}
+
+impl ClearOutcome {
+    /// True only when both the config and the secret store were cleared.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.secret_store_error.is_none()
+    }
+}
+
+/// Remove a provider credential from config and the durable secret store.
+///
+/// Shared by `codewhale auth clear` and the runtime API's credential route so
+/// both get the same ordering and the same rollback: the config document is
+/// snapshotted and restored if its save fails, and the secret store is only
+/// touched once the config write has landed. A secret-store failure is
+/// returned rather than swallowed, because the config no longer advertises a
+/// key that the backend may still hold.
+///
+/// This deliberately does not clear external-consent or environment-sourced
+/// credentials: Codewhale does not own those, and a caller must refuse the
+/// request instead of implying it revoked something it cannot reach.
+pub fn clear_provider_api_key(
+    store: &mut ConfigStore,
+    secrets: &Secrets,
+    provider: ProviderKind,
+) -> Result<ClearOutcome> {
+    let slot = provider_slot(provider);
+    let original_config = store.config.clone();
+    clear_provider_api_key_from_config(store, provider);
+    // Only xAI carries OAuth generation and consent state alongside the key,
+    // and `codewhale auth clear` has always cleared those three together. Every
+    // other provider keeps its `auth_mode` marker deliberately: the route is
+    // still an API-key route, it simply has no key now, which is exactly the
+    // `missing` credential state a client needs to see.
+    if provider == ProviderKind::Xai {
+        let xai = store.config.providers.for_provider_mut(provider);
+        xai.oauth_credential_generation = None;
+        xai.auth_mode = None;
+        xai.external_credentials = None;
+    }
+    if let Err(error) = store.save() {
+        store.config = original_config;
+        return Err(error);
+    }
+    let secret_store_error = secrets.delete(slot).err().map(|error| error.to_string());
+    Ok(ClearOutcome {
+        slot,
+        secret_store_error,
+    })
+}
