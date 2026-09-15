@@ -552,3 +552,79 @@ async fn picker_recovers_missing_store_into_the_idle_host_and_persists_before_re
     tasks.shutdown_and_wait().await?;
     Ok(())
 }
+
+/// #6207: a store that exists but is empty holds nothing a session switch could
+/// abandon. A force-quit leaves exactly that shape — the directory is on disk,
+/// ownerless, with zero events — and refusing it left the session unopenable
+/// while protecting nothing.
+#[test]
+fn empty_existing_runtime_store_reports_no_durable_work() -> anyhow::Result<()> {
+    let _environment = crate::test_support::lock_test_env();
+    let root = tempfile::tempdir()?;
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path());
+    let _runtime = crate::test_support::EnvVarGuard::remove("CODEWHALE_RUNTIME_DIR");
+    let _legacy = crate::test_support::EnvVarGuard::remove("DEEPSEEK_RUNTIME_DIR");
+
+    let store_dir = root.path().join("sessions/interrupted/runtime");
+    // Open a real store, so the layout under test is the product's rather than
+    // the test's idea of it.
+    drop(crate::runtime_threads::RuntimeThreadStore::open(
+        store_dir.clone(),
+    )?);
+
+    let binding = crate::runtime_threads::RuntimeStoreBinding {
+        data_dir: store_dir.clone(),
+        execution_scope: "0".repeat(64),
+    };
+    assert!(
+        !binding.is_missing_session_store()?,
+        "the store exists, so the old predicate cannot recover it"
+    );
+    assert!(
+        binding.has_no_durable_work()?,
+        "a freshly opened store holds nothing to abandon"
+    );
+
+    // Each work directory must be load-bearing on its own. If `open` gains a
+    // directory that RUNTIME_STORE_WORK_DIRS misses, this is the assertion that
+    // notices, instead of the miss silently widening what a switch will adopt.
+    for dir in [
+        "threads",
+        "turns",
+        "items",
+        "events",
+        "goals",
+        "agent-mail",
+        "turn-operations",
+    ] {
+        let marker = store_dir.join(dir).join("work.json");
+        std::fs::write(&marker, "{}")?;
+        assert!(
+            !binding.has_no_durable_work()?,
+            "{dir} holds work; the store must not be adopted"
+        );
+        std::fs::remove_file(&marker)?;
+        assert!(binding.has_no_durable_work()?, "{dir} is empty again");
+    }
+
+    // Events can be appended and later pruned; the sequence still remembers.
+    let state_path = store_dir.join("state.json");
+    let original = std::fs::read_to_string(&state_path)?;
+    std::fs::write(&state_path, r#"{"next_seq":5}"#)?;
+    assert!(
+        !binding.has_no_durable_work()?,
+        "an advanced sequence means events were appended"
+    );
+    std::fs::write(&state_path, &original)?;
+
+    // Confinement still governs: an unconfined path fails closed either way.
+    let foreign = crate::runtime_threads::RuntimeStoreBinding {
+        data_dir: root.path().join("elsewhere/runtime"),
+        execution_scope: "0".repeat(64),
+    };
+    assert!(
+        !foreign.has_no_durable_work()?,
+        "a store outside the sessions tree must never be adopted"
+    );
+    Ok(())
+}
