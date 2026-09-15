@@ -1219,16 +1219,21 @@ background commands use the same per-thread manager, so `GET /v1/jobs` is
 also how a client sees model-spawned work.
 
 **Commands** (typed command catalog, APPS-28)
-- `GET /v1/commands` — `{commands, locale}`: every registered slash command
-  with `name`, `aliases`, `usage`, `description` (localized to the runtime's
-  configured locale — `locale` echoes the resolved pack so a client can
-  detect fallback), `subcommands`, `discovery` (`primary` / `advanced` /
-  `compatibility`), and the composer hints (`requires_argument`,
-  `requires_required_argument`, `composer_wants_trailing_space`,
-  `palette_runs_directly`, `show_in_empty_discovery`, `unlisted`). The same
-  registry the TUI palette reads — a desktop palette cannot drift from the
-  terminal's. User-registered commands are intentionally absent: they are
-  per-session state, not catalog.
+- `GET /v1/commands` — `{commands: [...]}`: every registered slash command,
+  builtin and user, as the TUI's own registry holds it. Per entry: `name`,
+  `aliases`, `summary` and `usage` (English source text — localizing is the
+  client's surface), `subcommands` (the literal verbs the usage line
+  declares), `takes_arguments`, `kind` (`builtin` registered code, or `user`
+  expanding a stored template), `binding` (`host` runs locally and never
+  reaches the model; `prompt` expands into the request the model sees),
+  `discovery` (`primary` / `advanced` / `compatibility`, builtins only),
+  `hidden` for rows the product does not advertise, and `shadowed_by` /
+  `shadowed_aliases` where a user command has taken a builtin's spelling.
+
+  The same registry the TUI palette reads, so a desktop palette can be
+  checked against it instead of drifting from it. Two rules a client must
+  respect: a `binding: "host"` row is never submitted as a model prompt, and
+  a user command shadowing a builtin name wins that spelling.
 
 **Context** (per-thread context pressure, APPS-90)
 - `GET /v1/threads/{id}/context` — `input_tokens` (the conservative live
