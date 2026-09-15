@@ -11,6 +11,7 @@ use super::spec::{
     ApprovalRequirement, RichToolResult, ToolCapability, ToolContext, ToolError, ToolResult,
     ToolSpec, lsp_diagnostics_for_paths, optional_str, optional_u64, required_str,
 };
+use super::syntax_check::guard_edit;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::borrow::Cow;
@@ -1444,6 +1445,12 @@ impl WriteFileTool {
         // `preserve_prior_line_endings`); otherwise a CRLF (Windows) file is
         // silently rewritten with LF line endings.
         let written = preserve_prior_line_endings(file_content, &prior_contents);
+        guard_edit(
+            &file_path,
+            path_str,
+            existed_before.then(|| prior_contents.as_ref()),
+            &written,
+        )?;
         crate::utils::write_atomic_workspace(&file_path, written.as_bytes()).map_err(|error| {
             ToolError::execution_failed(format!("Failed to write {}: {error}", file_path.display()))
         })?;
@@ -1562,6 +1569,13 @@ impl ToolSpec for WriteFileTool {
         // `preserve_prior_line_endings`); a full `write_file` over a CRLF
         // (Windows) file otherwise silently rewrites every line ending to LF.
         let written = preserve_prior_line_endings(file_content, &prior_contents);
+
+        guard_edit(
+            &file_path,
+            path_str,
+            existed_before.then(|| prior_contents.as_ref()),
+            &written,
+        )?;
 
         crate::utils::write_atomic_workspace(&file_path, written.as_bytes()).map_err(|e| {
             ToolError::execution_failed(format!("Failed to write {}: {}", file_path.display(), e))
@@ -2004,6 +2018,7 @@ impl EditFileTool {
         let updated = apply_contract_edits(&normalized, &edits, path_str)?;
         check_file_operation_cancelled(context)?;
         let final_content = format!("{bom}{}", restore_contract_line_endings(&updated, ending));
+        guard_edit(&file_path, path_str, Some(&raw), &final_content)?;
 
         crate::utils::write_atomic_workspace(&file_path, final_content.as_bytes()).map_err(
             |error| {
@@ -2243,6 +2258,8 @@ impl ToolSpec for EditFileTool {
                 "edit_file internal fidelity check failed: replace text missing from updated buffer — refusing write",
             ));
         }
+
+        guard_edit(&file_path, path_str, Some(&contents), &updated)?;
 
         crate::utils::write_atomic_workspace(&file_path, updated.as_bytes()).map_err(|e| {
             ToolError::execution_failed(format!("Failed to write {}: {}", file_path.display(), e))

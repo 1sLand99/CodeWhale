@@ -885,6 +885,69 @@ async fn edit_file_tool_preserves_executable_bits() {
     );
 }
 
+/// #6204 — an edit that takes a parseable Rust file to an unparseable one is
+/// refused before the write, with a `line:column` from `syn`.
+#[tokio::test]
+async fn edit_file_refuses_an_edit_that_breaks_rust_syntax() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    let path = tmp.path().join("main.rs");
+    let original = "fn main() {\n    println!(\"hi\");\n}\n";
+    fs::write(&path, original).expect("write");
+    read_before_edit(&ctx, "main.rs").await;
+
+    let error = EditFileTool
+        .execute(
+            json!({
+                "path": "main.rs",
+                // Same brace balance, so the payload-corruption heuristic has
+                // no objection; the parenthesis is what breaks the grammar.
+                "search": "fn main() {",
+                "replace": "fn main( {",
+            }),
+            &ctx,
+        )
+        .await
+        .expect_err("an edit that breaks Rust syntax must be refused");
+
+    let message = error.to_string();
+    assert!(message.contains("Rust syntax error at line"), "{message}");
+    assert!(message.contains("Nothing was written"), "{message}");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        original,
+        "a refused edit must leave the file byte-for-byte unchanged"
+    );
+}
+
+/// The gate catches the edit that *introduces* breakage, never the one that
+/// repairs it: a file that already fails to parse stays editable.
+#[tokio::test]
+async fn edit_file_still_repairs_an_already_broken_rust_file() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    let path = tmp.path().join("broken.rs");
+    fs::write(&path, "fn main( {\n    println!(\"hi\");\n}\n").expect("write");
+    read_before_edit(&ctx, "broken.rs").await;
+
+    EditFileTool
+        .execute(
+            json!({
+                "path": "broken.rs",
+                "search": "fn main( {",
+                "replace": "fn main() {",
+            }),
+            &ctx,
+        )
+        .await
+        .expect("repairing a broken file must not be gated");
+
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "fn main() {\n    println!(\"hi\");\n}\n"
+    );
+}
+
 #[tokio::test]
 async fn edit_file_refuses_brace_collapsed_match_arm_payload() {
     let tmp = tempdir().expect("tempdir");

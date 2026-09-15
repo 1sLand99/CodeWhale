@@ -20,6 +20,7 @@ use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
     lsp_diagnostics_for_paths, optional_bool, optional_str, optional_u64,
 };
+use super::syntax_check::guard_edit;
 
 /// Maximum lines of context for fuzzy matching (increased for better tolerance)
 const MAX_FUZZ: usize = 50;
@@ -1292,6 +1293,16 @@ fn build_pending_writes_from_patches(
 }
 
 fn apply_pending_writes(pending: &[PendingWrite]) -> Result<(), ToolError> {
+    // Syntax gate (#6204) ahead of the first write, not per file: a patch is
+    // transactional, so one unparseable result must leave every file in the
+    // patch untouched rather than half-applied and rolled back.
+    for entry in pending {
+        if let Some(content) = entry.content.as_ref() {
+            let display = entry.path.display().to_string();
+            guard_edit(&entry.path, &display, entry.original.as_deref(), content)?;
+        }
+    }
+
     let mut applied = Vec::new();
 
     for entry in pending {
@@ -1640,6 +1651,31 @@ mod tests {
         assert_eq!(hunks[0].old_count, 3);
         assert_eq!(hunks[0].new_start, 1);
         assert_eq!(hunks[0].new_count, 3);
+    }
+
+    /// #6204 — a patch whose result does not parse is refused before any file
+    /// is written, so a multi-file patch cannot land half-applied.
+    #[tokio::test]
+    async fn patch_refuses_a_hunk_that_breaks_rust_syntax() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let file = tmp.path().join("main.rs");
+        let original = "fn main() {\n    println!(\"hi\");\n}\n";
+        fs::write(&file, original).expect("write");
+
+        let patch = "--- a/main.rs\n+++ b/main.rs\n@@ -1,3 +1,2 @@\n fn main() {\n     println!(\"hi\");\n-}\n";
+        let error = ApplyPatchTool
+            .execute(json!({"path": "main.rs", "patch": patch}), &ctx)
+            .await
+            .expect_err("a patch that breaks Rust syntax must be refused");
+
+        let message = error.to_string();
+        assert!(message.contains("Rust syntax error at line"), "{message}");
+        assert_eq!(
+            fs::read_to_string(&file).expect("read"),
+            original,
+            "a refused patch must leave the file untouched"
+        );
     }
 
     #[test]

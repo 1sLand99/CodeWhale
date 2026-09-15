@@ -68,6 +68,7 @@ pub mod skill;
 pub mod spec;
 pub mod speech;
 pub mod subagent;
+mod syntax_check;
 pub mod tasks;
 #[cfg(not(target_env = "ohos"))]
 pub mod terminal_session;
