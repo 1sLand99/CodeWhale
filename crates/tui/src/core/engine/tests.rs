@@ -211,7 +211,9 @@ async fn terminal_barrier_keeps_healthy_child_and_late_completion_alive() {
     let (mailbox, _receiver) = Mailbox::new(turn_token.clone());
     let children = Arc::new(ForegroundChildRegistry::new());
     let child_token = turn_token.child_token();
-    let registration = children.register(child_token.clone()).unwrap();
+    let registration = children
+        .register(child_token.clone(), "agent_healthy")
+        .unwrap();
     let parking = registration.parking_signal();
     let (complete_tx, mut complete_rx) = tokio::sync::mpsc::unbounded_channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -231,6 +233,7 @@ async fn terminal_barrier_keeps_healthy_child_and_late_completion_alive() {
         foreground_children: Arc::clone(&children),
         flush_tx,
         drain_handle,
+        settle_grace: Duration::from_secs(1),
     };
     tokio::time::timeout(Duration::from_secs(1), barrier.continue_and_flush())
         .await
@@ -250,7 +253,9 @@ async fn terminal_barrier_explicit_cancel_still_joins_owned_child() {
     let (mailbox, _receiver) = Mailbox::new(turn_token.clone());
     let children = Arc::new(ForegroundChildRegistry::new());
     let child_token = turn_token.child_token();
-    let registration = children.register(child_token.clone()).unwrap();
+    let registration = children
+        .register(child_token.clone(), "agent_owned")
+        .unwrap();
     let child = tokio::spawn(async move {
         child_token.cancelled().await;
         drop(registration);
@@ -265,12 +270,96 @@ async fn terminal_barrier_explicit_cancel_still_joins_owned_child() {
         foreground_children: Arc::clone(&children),
         flush_tx,
         drain_handle,
+        settle_grace: Duration::from_secs(1),
     };
-    tokio::time::timeout(Duration::from_secs(1), barrier.cancel_and_flush())
+    let unsettled = tokio::time::timeout(Duration::from_secs(1), barrier.cancel_and_flush())
         .await
         .unwrap();
+    assert!(unsettled.is_empty(), "cooperative children join cleanly");
     child.await.unwrap();
     assert_eq!(children.active_count(), 0);
+}
+
+/// Regression for #6184: a foreground child parked on an await that never
+/// observes its cancel token must not withhold the terminal turn event. The
+/// join gives up at `settle_grace` and names the child it left behind.
+#[tokio::test]
+async fn terminal_barrier_cancel_names_child_that_ignores_cancellation() {
+    let turn_token = CancellationToken::new();
+    let (mailbox, _receiver) = Mailbox::new(turn_token.clone());
+    let children = Arc::new(ForegroundChildRegistry::new());
+    let child_token = turn_token.child_token();
+    // The fake child keeps its registration for the whole test — it never
+    // observes the cancel token, like a task parked on a blocking await.
+    let registration = children
+        .register(child_token.clone(), "agent_stuck")
+        .unwrap();
+    let (flush_tx, flush_rx) = tokio::sync::oneshot::channel();
+    let drain_handle = tokio::spawn(async {
+        let _ = flush_rx.await;
+    });
+    let barrier = TurnMailboxBarrier {
+        mailbox,
+        cancel_token: turn_token.clone(),
+        foreground_children: Arc::clone(&children),
+        flush_tx,
+        drain_handle,
+        settle_grace: Duration::from_millis(50),
+    };
+    // Esc latches the turn token before the barrier runs, so the grace
+    // window — not the token — is the bound under test.
+    turn_token.cancel();
+    let unsettled = tokio::time::timeout(Duration::from_secs(1), barrier.cancel_and_flush())
+        .await
+        .expect("the bounded join must not wait on a parked child");
+    assert_eq!(unsettled, vec!["agent_stuck".to_string()]);
+    assert!(
+        child_token.is_cancelled(),
+        "the bounded join still cancels the child's token"
+    );
+    assert_eq!(
+        children.active_count(),
+        1,
+        "the stuck child is left registered — leaked, not awaited"
+    );
+    drop(registration);
+    assert_eq!(children.active_count(), 0);
+}
+
+/// A turn that fails without user cancellation runs the same barrier with a
+/// live turn token: Esc during the join must still break it rather than sit
+/// out the whole grace period (#6184).
+#[tokio::test]
+async fn terminal_barrier_cancel_join_breaks_on_fresh_esc() {
+    let turn_token = CancellationToken::new();
+    let (mailbox, _receiver) = Mailbox::new(turn_token.clone());
+    let children = Arc::new(ForegroundChildRegistry::new());
+    let registration = children
+        .register(turn_token.child_token(), "agent_stuck")
+        .unwrap();
+    let (flush_tx, flush_rx) = tokio::sync::oneshot::channel();
+    let drain_handle = tokio::spawn(async {
+        let _ = flush_rx.await;
+    });
+    let barrier = TurnMailboxBarrier {
+        mailbox,
+        cancel_token: turn_token.clone(),
+        foreground_children: Arc::clone(&children),
+        flush_tx,
+        drain_handle,
+        settle_grace: Duration::from_secs(30),
+    };
+    let esc = turn_token.clone();
+    let esc_task = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        esc.cancel();
+    });
+    let unsettled = tokio::time::timeout(Duration::from_secs(1), barrier.cancel_and_flush())
+        .await
+        .expect("a fresh Esc must break the join before its grace expires");
+    assert_eq!(unsettled, vec!["agent_stuck".to_string()]);
+    esc_task.await.unwrap();
+    drop(registration);
 }
 
 mod compaction;
@@ -5079,7 +5168,7 @@ async fn healthy_owned_children_do_not_force_another_parent_model_turn() {
         let children = Arc::new(ForegroundChildRegistry::new());
         let child_cancel = CancellationToken::new();
         let registration = children
-            .register(child_cancel.clone())
+            .register(child_cancel.clone(), "agent_child")
             .expect("child registered");
         let mut turn = crate::core::turn::TurnContext::new(max_steps);
 
@@ -5149,7 +5238,7 @@ async fn user_steer_during_parent_answer_still_gets_a_reply_with_healthy_childre
     let children = Arc::new(ForegroundChildRegistry::new());
     let child_cancel = CancellationToken::new();
     let registration = children
-        .register(child_cancel.clone())
+        .register(child_cancel.clone(), "agent_child")
         .expect("child registered");
     let mut turn = crate::core::turn::TurnContext::new(8);
 

@@ -4521,6 +4521,7 @@ impl Engine {
                 foreground_children,
                 flush_tx,
                 drain_handle,
+                settle_grace: FOREGROUND_CHILD_SETTLE_GRACE,
             })
         } else {
             None
@@ -5391,7 +5392,19 @@ impl Engine {
             if status == TurnOutcomeStatus::Completed && !turn.budget_exhausted_final_report {
                 barrier.continue_and_flush().await;
             } else {
-                barrier.cancel_and_flush().await;
+                // The join is deadline-bounded: a child that never observes
+                // its cancel token is named and left shutting down rather
+                // than withholding `TurnComplete` forever (#6184).
+                let unsettled = barrier.cancel_and_flush().await;
+                if !unsettled.is_empty() {
+                    let _ = self
+                        .tx_event
+                        .send(Event::status(format!(
+                            "Turn ended while sub-agent(s) were still shutting down: {}. Their late receipts were dropped.",
+                            unsettled.join(", ")
+                        )))
+                        .await;
+                }
             }
         }
         // The advisor is dispatched after TurnComplete, but its usage still
@@ -7651,7 +7664,14 @@ impl NextTurnPromptContext {
     }
 }
 
-/// Result of one turn tool-catalog build.
+/// Grace period for cancelled turn-owned children to release their barrier
+/// registration before the terminal turn event is emitted anyway (#6184).
+/// Cooperative children settle in milliseconds; the bound exists so a child
+/// parked on an await that never observes its cancel token cannot withhold
+/// `TurnComplete` — a child still shutting down is strictly less harmful
+/// than a turn that silently never finishes.
+const FOREGROUND_CHILD_SETTLE_GRACE: Duration = Duration::from_secs(5);
+
 /// Turn-scoped mailbox handle plus the machinery needed to close it exactly
 /// once. Held by the engine (never by the child runtime) so the flush barrier
 /// is owned by the same code that emits the terminal turn event.
@@ -7661,6 +7681,8 @@ pub(crate) struct TurnMailboxBarrier {
     pub(crate) foreground_children: Arc<ForegroundChildRegistry>,
     pub(crate) flush_tx: tokio::sync::oneshot::Sender<()>,
     pub(crate) drain_handle: tokio::task::JoinHandle<()>,
+    /// Bound on the cancelled-child join inside `cancel_and_flush` (#6184).
+    pub(crate) settle_grace: Duration,
 }
 
 fn terminal_turn_status_at_settlement(
@@ -7678,9 +7700,16 @@ impl TurnMailboxBarrier {
     /// Settle the foreground subtree before closing the turn's mailbox. The
     /// ordering is intentional: a terminal turn event must never be emitted
     /// while an owned child can still publish into this turn's shared state.
-    pub(crate) async fn cancel_and_flush(self) {
-        self.foreground_children.cancel_and_wait().await;
+    ///
+    /// The join is best-effort and bounded by `settle_grace` (#6184): a
+    /// child parked on an await that never observes its cancel token must
+    /// not withhold `TurnComplete`. Returns the labels of any children
+    /// still registered when the join gave up — empty on a clean settle —
+    /// so the caller can name them in the terminal turn event.
+    pub(crate) async fn cancel_and_flush(self) -> Vec<String> {
+        let unsettled = self.join_foreground_children().await;
         self.flush().await;
+        unsettled
     }
 
     /// A normal answer closes this turn's UI mailbox without cancelling
@@ -7691,6 +7720,33 @@ impl TurnMailboxBarrier {
         self.flush().await;
     }
 
+    /// Wait for cancelled foreground children to release their
+    /// registration, giving up at `settle_grace` or when a *new*
+    /// cancellation lands mid-wait. The Esc path reaches this barrier with
+    /// the turn token already cancelled, so the early-exit arm is only
+    /// armed when it is not — otherwise every interrupted turn's receipt
+    /// window would collapse to zero instead of merely being bounded.
+    async fn join_foreground_children(&self) -> Vec<String> {
+        let join = self.foreground_children.cancel_and_wait();
+        tokio::pin!(join);
+        let fresh_cancel = !self.cancel_token.is_cancelled();
+        let gave_up = tokio::select! {
+            biased;
+            () = &mut join => false,
+            () = self.cancel_token.cancelled(), if fresh_cancel => true,
+            () = tokio::time::sleep(self.settle_grace) => true,
+        };
+        if !gave_up {
+            return Vec::new();
+        }
+        let labels = self.foreground_children.unsettled_labels();
+        tracing::warn!(
+            unsettled_children = ?labels,
+            "foreground child join exceeded its bound; sealing the turn mailbox with children still registered"
+        );
+        labels
+    }
+
     async fn flush(self) {
         self.mailbox.seal();
         let _ = self.flush_tx.send(());
@@ -7698,6 +7754,7 @@ impl TurnMailboxBarrier {
     }
 }
 
+/// Result of one turn tool-catalog build.
 struct TurnToolBuild {
     /// One authority for executable, searchable, and initially active tools.
     surface: ToolSurfacePolicy,

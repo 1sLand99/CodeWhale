@@ -2378,6 +2378,9 @@ pub(crate) enum ForegroundSettlement {
 #[derive(Debug)]
 struct ForegroundChildEntry {
     token: CancellationToken,
+    /// Model-facing child id (`agent_*`) kept so a bounded join can name the
+    /// children it gives up on (#6184).
+    label: String,
     parking_requested: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -2407,6 +2410,7 @@ impl ForegroundChildRegistry {
     pub(crate) fn register(
         self: &Arc<Self>,
         token: CancellationToken,
+        label: &str,
     ) -> Result<ForegroundChildRegistration, ForegroundSettlement> {
         let mut state = self
             .state
@@ -2423,6 +2427,7 @@ impl ForegroundChildRegistry {
             id,
             ForegroundChildEntry {
                 token,
+                label: label.to_string(),
                 parking_requested: Arc::clone(&parking_requested),
             },
         );
@@ -2452,11 +2457,33 @@ impl ForegroundChildRegistry {
         }
     }
 
+    /// Labels of children still holding their registration — the unsettled
+    /// set a bounded join leaves behind. Diagnostic only: the caller names
+    /// them in the terminal turn event rather than waiting forever (#6184).
+    pub(crate) fn unsettled_labels(&self) -> Vec<String> {
+        let mut labels = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .children
+            .values()
+            .map(|entry| entry.label.clone())
+            .collect::<Vec<_>>();
+        labels.sort();
+        labels
+    }
+
     /// Cancel every currently-owned child and wait until each task has
     /// released its registration. Multiple terminal paths share this barrier:
     /// only the first call issues cancellation, while all callers await the
     /// same settled set. A child registered after cancellation observes the
     /// latched state and is cancelled before it can reach a provider request.
+    ///
+    /// The wait itself is unbounded and does not observe any cancellation
+    /// token: a child parked on an await that ignores its token would park
+    /// the caller forever. Production callers must bound it —
+    /// `TurnMailboxBarrier::cancel_and_flush` races this join against the
+    /// turn's settle grace and a fresh cancellation (#6184).
     pub(crate) async fn cancel_and_wait(&self) {
         self.settle_and_wait(ForegroundSettlement::Cancel).await;
     }
@@ -2956,7 +2983,7 @@ impl SubAgentRuntime {
             return Ok(None);
         };
         registry
-            .register(self.cancel_token.clone())
+            .register(self.cancel_token.clone(), agent_id)
             .map(Some)
             .map_err(|settlement| {
                 anyhow!(

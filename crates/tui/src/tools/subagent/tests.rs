@@ -13427,7 +13427,7 @@ async fn foreground_registration_releases_when_the_child_future_returns_or_unwin
     let registry = Arc::new(ForegroundChildRegistry::new());
 
     let completed = registry
-        .register(CancellationToken::new())
+        .register(CancellationToken::new(), "agent_completed")
         .expect("registry open");
     let result: Result<(), ()> = async move {
         let _registration = completed;
@@ -13437,7 +13437,7 @@ async fn foreground_registration_releases_when_the_child_future_returns_or_unwin
     assert!(result.is_err());
 
     let panicked = registry
-        .register(CancellationToken::new())
+        .register(CancellationToken::new(), "agent_panicked")
         .expect("registry open");
     let task = tokio::spawn(async move {
         let _registration = panicked;
@@ -16658,7 +16658,7 @@ async fn queued_turn_owned_child_parks_without_a_false_start_transition() {
 
     let foreground_children = Arc::new(ForegroundChildRegistry::new());
     let registration = foreground_children
-        .register(runtime.cancel_token.clone())
+        .register(runtime.cancel_token.clone(), &agent_id)
         .expect("turn-owned queued child registers before settlement");
     let gate = Arc::new(Semaphore::new(1));
     let held_launch_permit = Arc::clone(&gate)
