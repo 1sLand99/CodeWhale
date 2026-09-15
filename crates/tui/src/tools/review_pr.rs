@@ -678,13 +678,18 @@ mod tests {
         assert!(bounded["repository_context"].is_null());
     }
 
-    // `*` cannot appear in a Windows filename, so the literal-glob path this
-    // guards is unrepresentable there.
-    #[cfg(unix)]
     #[test]
     fn source_context_is_bounded_line_exact_and_uses_literal_paths() {
         let dir = repository();
-        let path = "[literal]*.rs";
+        // Glob-special but Windows-legal. The original `[literal]*.rs` could
+        // not exist on Windows at all — `*` is a reserved NTFS filename
+        // character, so the `std::fs::write` below failed with InvalidFilename
+        // (os 123) before any assertion ran. This spelling proves the same
+        // property on every platform: read literally it names this file, and
+        // read as a glob `[l]` matches the single character `l`, resolving to
+        // the `literal-other.rs` decoy created two lines down — so the
+        // "wrong glob match" assertion still fires if anything globs.
+        let path = "[l]iteral-other.rs";
         let source = format!(
             "{}\n{}\n{}\nchanged\n{}\n",
             "module declaration",
