@@ -371,6 +371,35 @@ pub struct ShellDeltaResult {
     pub stderr_total_len: usize,
 }
 
+/// Which of a job's raw output streams to read. Stderr is a separate stream
+/// only for piped jobs; PTY and merged modes fold it into stdout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellOutputStream {
+    Stdout,
+    Stderr,
+}
+
+/// A non-consuming window of a job's raw output stream at absolute byte
+/// offsets. Unlike [`ShellManager::get_output_delta`], reading a chunk never
+/// advances anyone else's cursor, so several HTTP clients can follow the same
+/// job without splitting the stream.
+pub struct ShellOutputChunk {
+    /// Absolute offset of `bytes[0]`. Exceeds the requested cursor when the
+    /// bounded buffer already discarded that prefix — the gap is reported via
+    /// `dropped`, never silently re-sent.
+    pub offset: usize,
+    /// Raw stream bytes. Output is arbitrary bytes, not guaranteed UTF-8.
+    pub bytes: Vec<u8>,
+    /// Absolute offset just past the last returned byte; the next cursor.
+    pub next_offset: usize,
+    /// Total bytes this stream has produced, including discarded bytes.
+    pub total: usize,
+    /// Leading bytes permanently discarded by the in-flight bound.
+    pub dropped: usize,
+    pub status: ShellStatus,
+    pub exit_code: Option<i64>,
+}
+
 enum ShellChild {
     Process(Child),
     #[cfg(not(target_env = "ohos"))]
@@ -1847,6 +1876,13 @@ impl ShellManager {
         self.sandbox_manager.set_prefer_bwrap(prefer);
     }
 
+    /// Move the fallback working directory. Callers that pass an explicit
+    /// `working_dir` are unaffected; this only keeps `None` honest when a
+    /// thread's workspace changes while its jobs are still tracked here.
+    pub fn set_default_workspace(&mut self, workspace: PathBuf) {
+        self.default_workspace = workspace;
+    }
+
     /// Set user-configured bwrap mount extensions (#5410): extra read-only
     /// roots and writable device nodes such as `/dev/null`.
     pub fn set_bwrap_extensions(&mut self, extensions: crate::sandbox::BwrapMountExtensions) {
@@ -3049,6 +3085,92 @@ impl ShellManager {
     ) -> Result<ShellDeltaResult> {
         self.require_session_owner(task_id, active_session_id)?;
         self.get_output_delta(task_id, wait, timeout_ms)
+    }
+
+    /// Read a job's raw stream at an absolute byte offset without consuming
+    /// anything. This is the `/v1/jobs` byte-stream contract: HTTP clients hold
+    /// the cursor, so reads must not disturb the engine's own delta consumer.
+    ///
+    /// `cursor` is a byte offset into the stream's lifetime output (matching
+    /// `total`). When the bounded buffer has already discarded `[0, dropped)`,
+    /// the window starts at `dropped` instead and the caller sees the gap in
+    /// the response rather than a replayed tail. With `wait_ms > 0` on a
+    /// running job, polls up to that bound for new bytes past `cursor` before
+    /// answering — long-poll instead of a hot loop.
+    pub fn read_output_chunk(
+        &mut self,
+        task_id: &str,
+        stream: ShellOutputStream,
+        cursor: usize,
+        max_bytes: usize,
+        wait_ms: u64,
+    ) -> Result<ShellOutputChunk> {
+        let Some(shell) = self.processes.get_mut(task_id) else {
+            // Evicted jobs retain only their snapshot tails. Serve that tail as
+            // the final retained window so a late reader still gets the ending
+            // of the stream instead of a bare not-found.
+            let snapshot = self
+                .stale_jobs
+                .get(task_id)
+                .ok_or_else(|| anyhow!("Job {task_id} not found"))?;
+            let (tail, total) = match stream {
+                ShellOutputStream::Stdout => (&snapshot.stdout_tail, snapshot.stdout_len),
+                ShellOutputStream::Stderr => (&snapshot.stderr_tail, snapshot.stderr_len),
+            };
+            let tail_start = total.saturating_sub(tail.len());
+            let offset = cursor.max(tail_start).min(total);
+            let next_offset = offset.saturating_add(max_bytes).min(total);
+            return Ok(ShellOutputChunk {
+                offset,
+                bytes: tail.as_bytes()[offset - tail_start..next_offset - tail_start].to_vec(),
+                next_offset,
+                total,
+                dropped: tail_start,
+                status: snapshot.status.clone(),
+                exit_code: snapshot.exit_code,
+            });
+        };
+        let buffer = match stream {
+            ShellOutputStream::Stdout => shell.stdout_buffer.clone(),
+            ShellOutputStream::Stderr => shell
+                .stderr_buffer
+                .clone()
+                .ok_or_else(|| anyhow!("Job {task_id} merges stderr into stdout"))?,
+        };
+
+        let wait_deadline = (wait_ms > 0 && shell.status == ShellStatus::Running)
+            .then(|| Instant::now() + Duration::from_millis(wait_ms.clamp(50, 30_000)));
+        loop {
+            shell.poll();
+            let total = buffer.lock().map(|guard| guard.total_len()).unwrap_or(0);
+            let done_waiting = total > cursor
+                || shell.status != ShellStatus::Running
+                || wait_deadline.is_none_or(|deadline| Instant::now() >= deadline);
+            if done_waiting {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        let (bytes, offset, next_offset, total, dropped) = {
+            let guard = buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let total = guard.total_len();
+            let dropped = guard.dropped();
+            let offset = cursor.max(dropped).min(total);
+            let next_offset = offset.saturating_add(max_bytes).min(total);
+            let retained = guard.retained();
+            let bytes = retained[offset - dropped..next_offset - dropped].to_vec();
+            (bytes, offset, next_offset, total, dropped)
+        };
+        Ok(ShellOutputChunk {
+            offset,
+            bytes,
+            next_offset,
+            total,
+            dropped,
+            status: shell.status.clone(),
+            exit_code: shell.exit_code,
+        })
     }
 
     /// Attach durable task context to a live shell job.

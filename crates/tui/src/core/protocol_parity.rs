@@ -1139,6 +1139,7 @@ pub fn op_to_protocol(op: &Op) -> wire_op::Op {
         Op::CancelCompaction { id } => wire_op::Op::CancelCompaction { id: id.clone() },
         // Reply channels never cross the wire: the answer is a frame.
         Op::GetSessionSnapshot { tx: _ } => wire_op::Op::GetSessionSnapshot,
+        Op::GetContextBudget { tx: _ } => wire_op::Op::GetContextBudget,
         Op::GetProviderRuntimeStatus { tx: _ } => wire_op::Op::GetProviderRuntimeStatus,
         Op::BootstrapMcp { tx: _ } => wire_op::Op::BootstrapMcp,
         Op::RetryMcpServer { name, tx: _ } => wire_op::Op::RetryMcpServer { name: name.clone() },
@@ -1535,6 +1536,9 @@ mod tests {
             },
             Op::CancelCompaction { id: "cmp".into() },
             Op::GetSessionSnapshot {
+                tx: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            },
+            Op::GetContextBudget {
                 tx: std::sync::Arc::new(std::sync::Mutex::new(None)),
             },
             Op::GetProviderRuntimeStatus {

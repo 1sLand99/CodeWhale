@@ -4,6 +4,7 @@ pub mod auto_model;
 pub mod catalog;
 pub mod cloud_facts;
 mod config_document;
+pub mod credentials;
 pub mod descriptors;
 pub mod device_code;
 pub mod external_credentials;

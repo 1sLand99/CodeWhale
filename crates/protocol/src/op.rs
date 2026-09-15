@@ -16,7 +16,7 @@
 //! What is deliberately stripped at this boundary:
 //!
 //! - `mpsc` / `oneshot` reply channels (`GetSubAgentSettlement`, `GetSessionSnapshot`,
-//!   `GetProviderRuntimeStatus`, `BootstrapMcp`, `RetryMcpServer`,
+//!   `GetContextBudget`, `GetProviderRuntimeStatus`, `BootstrapMcp`, `RetryMcpServer`,
 //!   `ReloadMcp`). Over the wire the reply is an `EventMsg` or a response
 //!   frame, not a channel.
 //! - `Arc<HookExecutor>` on `SendMessage`: hooks are host configuration, not
@@ -396,6 +396,9 @@ pub enum Op {
 
     /// Request a session snapshot; the reply travels out-of-band.
     GetSessionSnapshot,
+    /// Request the live context-window budget for the session's route; the
+    /// reply travels out-of-band.
+    GetContextBudget,
     /// Request provider concurrency state; the reply travels out-of-band.
     GetProviderRuntimeStatus,
     /// Populate the engine-owned MCP pool once at boot; reply out-of-band.
@@ -459,6 +462,7 @@ pub const OP_KINDS: &[&str] = &[
     "compact_context",
     "cancel_compaction",
     "get_session_snapshot",
+    "get_context_budget",
     "get_provider_runtime_status",
     "bootstrap_mcp",
     "retry_mcp_server",
@@ -502,6 +506,7 @@ impl Op {
             Self::CompactContext { .. } => "compact_context",
             Self::CancelCompaction { .. } => "cancel_compaction",
             Self::GetSessionSnapshot => "get_session_snapshot",
+            Self::GetContextBudget => "get_context_budget",
             Self::GetProviderRuntimeStatus => "get_provider_runtime_status",
             Self::BootstrapMcp => "bootstrap_mcp",
             Self::RetryMcpServer { .. } => "retry_mcp_server",
@@ -683,6 +688,7 @@ mod tests {
             },
             Op::CancelCompaction { id: "cmp-1".into() },
             Op::GetSessionSnapshot,
+            Op::GetContextBudget,
             Op::GetProviderRuntimeStatus,
             Op::BootstrapMcp,
             Op::RetryMcpServer { name: "fs".into() },

@@ -11860,12 +11860,12 @@ fn plaintext_credential_fallback_refused(
 /// isolated `CODEWHALE_HOME` and an explicit backend, so unit tests can never
 /// touch the developer's real credential store.
 #[cfg(not(test))]
-fn credential_secret_store() -> Option<codewhale_secrets::Secrets> {
+pub(crate) fn credential_secret_store() -> Option<codewhale_secrets::Secrets> {
     Some(codewhale_secrets::Secrets::auto_detect())
 }
 
 #[cfg(test)]
-fn credential_secret_store() -> Option<codewhale_secrets::Secrets> {
+pub(crate) fn credential_secret_store() -> Option<codewhale_secrets::Secrets> {
     let isolated_home = codewhale_paths::codewhale_home_is_explicit();
     let explicit_backend = std::env::var_os("CODEWHALE_SECRET_BACKEND")
         .or_else(|| std::env::var_os("DEEPSEEK_SECRET_BACKEND"))

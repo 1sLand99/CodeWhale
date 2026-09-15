@@ -93,9 +93,17 @@ use codewhale_protocol::fleet::{
 };
 
 mod auth;
+mod context;
+mod diagnostics;
+mod git;
+mod jobs;
+mod lsp;
 mod mobile;
 mod plugins;
+mod secrets;
 mod sessions;
+mod targets;
+mod voice;
 mod web;
 mod workspace;
 #[cfg(test)]
@@ -105,15 +113,17 @@ use self::auth::{
     runtime_request_is_authorized,
 };
 use self::sessions::{
-    create_session_from_thread, delete_session, get_session, list_sessions, list_sessions_summary,
-    patch_session, resume_session_thread, save_current_session,
+    create_session_from_thread, delete_session, get_session, list_session_artifacts, list_sessions,
+    list_sessions_summary, patch_session, read_session_artifact, resume_session_thread,
+    save_current_session,
 };
 #[cfg(test)]
 use self::sessions::{messages_from_thread_detail, session_to_detail};
 #[cfg(test)]
 use self::workspace::collect_workspace_status;
 use self::workspace::{
-    collect_workspace_git_metadata, workspace_file_search, workspace_instructions, workspace_status,
+    collect_workspace_git_metadata, workspace_file_read, workspace_file_search,
+    workspace_file_write, workspace_files_list, workspace_instructions, workspace_status,
 };
 
 const RUNTIME_TOKEN_ENV: &str = "CODEWHALE_RUNTIME_TOKEN";
@@ -191,6 +201,11 @@ pub struct RuntimeApiState {
     /// lazily-initialized slot; slow per-pool work (connect_all) runs under
     /// the inner handle so it cannot block slot reads.
     mcp_pool: Arc<Mutex<Option<Arc<Mutex<McpPool>>>>>,
+    /// Workspace-level LSP client for the HTTP surface (APPS-93): diagnostics
+    /// and semantic queries on files a client views. Engines keep their own
+    /// per-thread managers; this one serves the file view and is built lazily
+    /// so a server without LSP use never spawns a language server.
+    lsp_manager: Arc<std::sync::OnceLock<Arc<crate::lsp::LspManager>>>,
     #[cfg(test)]
     compat_stream_test_hook: Option<tokio::sync::mpsc::UnboundedSender<CompatStreamTestPoint>>,
 }
@@ -944,6 +959,7 @@ pub async fn run_http_server(
         web,
         fleet_codewhale_binary: configured_codewhale_binary(),
         mcp_pool: Arc::new(Mutex::new(None)),
+        lsp_manager: Arc::new(std::sync::OnceLock::new()),
         #[cfg(test)]
         compat_stream_test_hook: None,
     };
@@ -1075,6 +1091,7 @@ fn fallback_sessions_dir() -> PathBuf {
 }
 
 pub fn build_router(state: RuntimeApiState) -> Router {
+    diagnostics::mark_server_started();
     let api_routes = Router::new()
         .route(
             "/v1/sessions",
@@ -1091,8 +1108,22 @@ pub fn build_router(state: RuntimeApiState) -> Router {
             "/v1/sessions/{id}/resume-thread",
             post(resume_session_thread),
         )
+        .route("/v1/sessions/{id}/artifacts", get(list_session_artifacts))
+        .route(
+            "/v1/sessions/{id}/artifacts/{artifact_id}",
+            get(read_session_artifact),
+        )
         .route("/v1/workspace/status", get(workspace_status))
         .route("/v1/workspace/files/search", get(workspace_file_search))
+        .route(
+            "/v1/workspace/files",
+            get(workspace_files_list)
+                .put(workspace_file_write)
+                .layer(DefaultBodyLimit::max(
+                    self::workspace::FILE_WRITE_BODY_LIMIT_BYTES,
+                )),
+        )
+        .route("/v1/workspace/files/read", get(workspace_file_read))
         .route("/v1/workspace/instructions", get(workspace_instructions))
         .route("/v1/agent-runs", get(list_agent_runs))
         .route("/v1/agent-runs/{run_id}", get(get_agent_run))
@@ -1144,9 +1175,70 @@ pub fn build_router(state: RuntimeApiState) -> Router {
                 codewhale_protocol::runtime::MAX_RUNTIME_IMAGE_BODY_BYTES,
             )),
         )
+        .route("/v1/git", get(git::git_status_detail))
+        .route("/v1/changes", get(git::git_changes))
+        .route("/v1/diff", get(git::git_diff))
+        .route("/v1/workspace/diff", get(git::workspace_diff))
+        .route("/v1/git/graph", get(git::git_graph))
+        .route("/v1/git/stage", post(git::git_stage))
+        .route("/v1/git/unstage", post(git::git_unstage))
+        .route("/v1/git/discard", post(git::git_discard))
+        .route("/v1/git/commit", post(git::git_commit))
+        .route("/v1/git/push", post(git::git_push))
+        .route("/v1/git/branch", post(git::git_branch))
+        .route("/v1/logs", get(diagnostics::list_logs))
+        .route("/v1/logs/{name}", get(diagnostics::read_log))
+        .route("/v1/crashes", get(diagnostics::list_crashes))
+        .route("/v1/crashes/{name}", get(diagnostics::read_crash))
+        .route("/v1/process", get(diagnostics::process_info))
+        .route("/v1/jobs", get(jobs::list_jobs))
         .route("/v1/threads", get(list_threads).post(create_thread))
         .route("/v1/threads/summary", get(list_threads_summary))
         .route("/v1/threads/{id}", get(get_thread).patch(update_thread))
+        .route(
+            "/v1/threads/{id}/jobs",
+            get(jobs::list_thread_jobs).post(jobs::create_thread_job),
+        )
+        .route("/v1/threads/{id}/jobs/{job_id}", get(jobs::get_thread_job))
+        .route(
+            "/v1/threads/{id}/jobs/{job_id}/output",
+            get(jobs::get_thread_job_output),
+        )
+        .route(
+            "/v1/threads/{id}/jobs/{job_id}/stdin",
+            post(jobs::write_thread_job_stdin),
+        )
+        .route(
+            "/v1/threads/{id}/jobs/{job_id}/kill",
+            post(jobs::kill_thread_job),
+        )
+        .route("/v1/threads/{id}/context", get(context::get_thread_context))
+        .route(
+            "/v1/targets",
+            get(targets::list_targets).post(targets::create_target),
+        )
+        .route("/v1/targets/switch", post(targets::switch_target))
+        .route("/v1/remote", get(targets::remote_status))
+        .route("/v1/remote/connect", post(targets::remote_connect))
+        .route(
+            "/v1/ssh",
+            get(targets::ssh_status).post(targets::ssh_connect),
+        )
+        .route("/v1/ssh/connect", post(targets::ssh_connect))
+        .route(
+            "/v1/cloud",
+            get(targets::cloud_status).post(targets::cloud_attach),
+        )
+        .route("/v1/cloud/attach", post(targets::cloud_attach))
+        .route("/v1/lsp", get(lsp::lsp_status))
+        .route("/v1/diagnostics", get(lsp::lsp_diagnostics))
+        .route("/v1/definition", get(lsp::lsp_definition))
+        .route("/v1/references", get(lsp::lsp_references))
+        .route("/v1/symbols", get(lsp::lsp_symbols))
+        .route("/v1/voice", get(voice::voice_status))
+        .route("/v1/voice/dictate", post(voice::voice_dictate))
+        .route("/v1/voice/send", post(voice::voice_send))
+        .route("/v1/voice/control", post(voice::voice_control))
         .route("/v1/threads/{id}/resume", post(resume_thread))
         .route("/v1/threads/{id}/fork", post(fork_thread))
         .route("/v1/threads/{id}/undo", post(undo_thread_turn))
@@ -1310,6 +1402,14 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .route("/v1/providers", get(list_providers))
         .route("/v1/providers/{id}/models", get(list_provider_models))
         .route("/v1/providers/{id}/switch", post(switch_provider))
+        .route(
+            "/v1/providers/{id}/key",
+            put(secrets::set_provider_key)
+                .delete(secrets::clear_provider_key)
+                .layer(DefaultBodyLimit::max(
+                    secrets::PROVIDER_KEY_BODY_LIMIT_BYTES,
+                )),
+        )
         .route("/v1/config", get(get_config).post(set_config))
         .route("/v1/config/reload", post(reload_config))
         .route(
@@ -6498,6 +6598,24 @@ struct ProviderEntry {
     /// variable, consent-source, or token metadata.
     #[serde(rename = "credentialState")]
     credential_state: ProviderCredentialState,
+    /// Which *class* of source owns this route's credential (#6179). A class,
+    /// never a value, a path, or an environment variable name — the guarantee
+    /// above still holds. Clients need it to tell "you have no key" apart from
+    /// "your key is owned elsewhere and this control cannot change it".
+    #[serde(rename = "credentialSource")]
+    credential_source: secrets::ProviderCredentialSource,
+    /// Whether `PUT`/`DELETE /v1/providers/{id}/key` will act on this route.
+    /// False means the write would be refused, so the control should be
+    /// disabled rather than allowed to fail late.
+    #[serde(rename = "credentialWritable")]
+    credential_writable: bool,
+    /// Why a write is refused, as user-facing copy. Present only when
+    /// `credentialWritable` is false.
+    #[serde(
+        rename = "credentialWritableReason",
+        skip_serializing_if = "Option::is_none"
+    )]
+    credential_writable_reason: Option<&'static str>,
 }
 
 /// Stable, non-secret wire projection of provider readiness.
@@ -7072,6 +7190,7 @@ async fn list_providers(
             &base_url,
         )
         .is_empty();
+        let writeability = secrets::credential_writeability(&config, api_provider);
         providers.push(ProviderEntry {
             id: api_provider.as_str().to_string(),
             model_provider_id: (api_provider == active_provider)
@@ -7085,6 +7204,9 @@ async fn list_providers(
                 api_provider,
             )
             .into(),
+            credential_source: writeability.source,
+            credential_writable: writeability.writable,
+            credential_writable_reason: writeability.reason,
         });
     }
     Ok(Json(ProvidersResponse { current, providers }))
@@ -8264,6 +8386,13 @@ impl ApiError {
             message: message.into(),
         }
     }
+
+    fn payload_too_large(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            message: message.into(),
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -8395,6 +8524,7 @@ base_url = "http://127.0.0.1:9/v1"
             web: None,
             fleet_codewhale_binary: "unused-test-binary".to_string(),
             mcp_pool: Arc::new(Mutex::new(None)),
+            lsp_manager: Arc::new(std::sync::OnceLock::new()),
             compat_stream_test_hook: None,
         };
         let router = build_router(state.clone());

@@ -32,6 +32,41 @@ pub struct SessionSnapshot {
     pub mode: String,
 }
 
+/// Live context-window posture for one thread, computed where the session
+/// state actually lives. Returned by `Op::GetContextBudget` via a oneshot
+/// channel so HTTP clients (GPUI usage panel) never re-derive the engine's
+/// token math or route limits at the API boundary.
+#[derive(Debug, Clone)]
+pub struct SessionContextBudget {
+    /// Total context window for the active route (input + output), in tokens.
+    pub window_tokens: u64,
+    /// Estimated input tokens on the same basis the visible context meter
+    /// uses (`estimate_input_tokens_conservative`, including its safety
+    /// inflation). This is the number a "context filling up" indicator shows.
+    pub input_tokens: u64,
+    /// Provider-billed prompt tokens from the most recent parent-route
+    /// request that still describes the live message list. `None` when no
+    /// provider count exists yet (fresh session) — never a fabricated zero.
+    pub billed_input_tokens: Option<u64>,
+    /// Output tokens reserved for the turn after route clamps.
+    pub output_cap_tokens: u64,
+    /// Spendable input ceiling (`window - output_cap - headroom`, intersected
+    /// with any provider-published hard input limit).
+    pub input_budget_ceiling: u64,
+    /// Input tokens still available before the reserved boundary.
+    pub available_input_tokens: u64,
+    /// Input level at which compaction is suggested.
+    pub compaction_trigger_tokens: u64,
+    /// `input_tokens / window_tokens` as a percentage (0..=100).
+    pub usage_percent: f64,
+    /// Coarse pressure label (`low`/`moderate`/`high`/`critical`).
+    pub pressure: &'static str,
+    /// Route identity the budget was computed for.
+    pub model: String,
+    pub provider: String,
+    pub model_provider_id: Option<String>,
+}
+
 /// Provider request runtime state surfaced by `/provider`.
 /// Returned by `Op::GetProviderRuntimeStatus` via a oneshot channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -338,6 +373,15 @@ pub enum Op {
     /// the caller doesn't have to compete with the SSE event stream.
     GetSessionSnapshot {
         tx: std::sync::Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<SessionSnapshot>>>>,
+    },
+
+    /// Get the live context-window budget for this session's route. Computed
+    /// on the engine so `active_route_limits`, the memoized token estimate,
+    /// and the last billed prompt size all come from one authority.
+    GetContextBudget {
+        tx: std::sync::Arc<
+            std::sync::Mutex<Option<tokio::sync::oneshot::Sender<Option<SessionContextBudget>>>>,
+        >,
     },
 
     /// Get active provider request concurrency state for readiness surfaces.
