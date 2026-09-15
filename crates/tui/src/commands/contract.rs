@@ -764,6 +764,7 @@ impl CommandSessionLifecycleContext for SessionLifecycleAdapter<'_> {
         // `RefCell` borrow of `App` is not simultaneously mutable and shared.
         let workspace = app.workspace.clone();
         let ui_locale = app.ui_locale;
+        let current_id = app.current_session_id.clone();
         match preselected {
             Some(session_id) => {
                 app.view_stack.push(
@@ -771,14 +772,15 @@ impl CommandSessionLifecycleContext for SessionLifecycleAdapter<'_> {
                         &workspace,
                         ui_locale,
                         &session_id,
-                    ),
+                    )
+                    .with_current_session(current_id.as_deref()),
                 );
             }
             None => {
-                app.view_stack
-                    .push(crate::tui::session_picker::SessionPickerView::new(
-                        &workspace, ui_locale,
-                    ));
+                app.view_stack.push(
+                    crate::tui::session_picker::SessionPickerView::new(&workspace, ui_locale)
+                        .with_current_session(current_id.as_deref()),
+                );
             }
         }
     }
@@ -1069,7 +1071,8 @@ impl CommandSessionControlContext for SessionControlAdapter<'_> {
     fn open_resume_picker(&mut self) {
         let mut app = self.host.app.borrow_mut();
         let picker =
-            crate::tui::session_picker::SessionPickerView::new(&app.workspace, app.ui_locale);
+            crate::tui::session_picker::SessionPickerView::new(&app.workspace, app.ui_locale)
+                .with_current_session(app.current_session_id.as_deref());
         app.view_stack.push(picker);
     }
 
@@ -1464,7 +1467,8 @@ fn import_session_container(
         &app.workspace,
         app.ui_locale,
         &new_id,
-    );
+    )
+    .with_current_session(app.current_session_id.as_deref());
     app.view_stack.push(picker);
     Ok(ResumeImportReceipt {
         truncated_id: crate::session_manager::truncate_id(&new_id).to_string(),

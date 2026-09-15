@@ -4781,8 +4781,10 @@ pub(crate) async fn run_event_loop(
                             // A launched command dissolves the card; Esc
                             // out of the picker brings it back.
                             app.launch.dissolve_card(app.ambient_clock_ms);
-                            app.view_stack
-                                .push(SessionPickerView::new(&app.workspace, app.ui_locale));
+                            app.view_stack.push(
+                                SessionPickerView::new(&app.workspace, app.ui_locale)
+                                    .with_current_session(app.current_session_id.as_deref()),
+                            );
                         }
                         crate::tui::underwater::LaunchAction::Help => {
                             toggle_help_view(app);
@@ -5462,8 +5464,10 @@ pub(crate) async fn run_event_loop(
                             // A launched command dissolves the card; Esc
                             // out of the picker brings it back.
                             app.launch.dissolve_card(app.ambient_clock_ms);
-                            app.view_stack
-                                .push(SessionPickerView::new(&app.workspace, app.ui_locale));
+                            app.view_stack.push(
+                                SessionPickerView::new(&app.workspace, app.ui_locale)
+                                    .with_current_session(app.current_session_id.as_deref()),
+                            );
                         }
                         crate::tui::underwater::LaunchAction::Help => {
                             toggle_help_view(app);
@@ -5919,8 +5923,10 @@ pub(crate) async fn run_event_loop(
                     // never restores a different project's history by
                     // surprise (#1395). Press `a` inside the picker to
                     // broaden to every saved session.
-                    app.view_stack
-                        .push(SessionPickerView::new(&app.workspace, app.ui_locale));
+                    app.view_stack.push(
+                        SessionPickerView::new(&app.workspace, app.ui_locale)
+                            .with_current_session(app.current_session_id.as_deref()),
+                    );
                     continue;
                 }
                 KeyCode::Char('c') | KeyCode::Char('C')
