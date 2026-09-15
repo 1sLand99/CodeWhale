@@ -1425,9 +1425,7 @@ impl ThemeId {
         match self {
             Self::System => "Follow terminal background (COLORFGBG / macOS appearance)",
             Self::Terminal => "Inherit terminal colors fully (transparent surfaces, ANSI accents)",
-            Self::Shoreline => {
-                "Warm charcoal, one restrained blue — the desktop client's palette"
-            }
+            Self::Shoreline => "Warm charcoal, one restrained blue — the desktop client's palette",
             Self::ShorelineLight => "Shoreline on warm paper — the desktop client's light mode",
             Self::Underwater => "The painted ocean field: ombre water, ambient life, the whale",
             Self::UnderwaterRetro => "Flat phosphor-teal ocean: the legacy deepsea look, no ombre",
