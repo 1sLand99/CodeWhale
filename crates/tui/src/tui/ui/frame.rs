@@ -1278,16 +1278,24 @@ pub(crate) fn commit_streaming_display_tick(
         return false;
     }
 
+    // Reveal a bounded slice per beat rather than everything received. The
+    // budget is sized from the beat and the backlog, so the displayed pace is a
+    // function of the clock instead of the provider's chunking.
+    let interval = stream_display_clock.interval();
     let mut updated = false;
     if let Some(index) = app.streaming_message_index {
-        let committed = app.streaming_state.commit_text(0);
+        let budget =
+            crate::tui::streaming::reveal_budget(interval, app.streaming_state.pending_len(0));
+        let committed = app.streaming_state.commit_text(0, budget);
         if !committed.is_empty() {
             append_streaming_text(app, index, &committed);
             accrue_streaming_token_estimate(app, &committed);
             updated = true;
         }
     } else if let Some(entry_idx) = app.streaming_thinking_active_entry {
-        let committed = app.streaming_state.commit_text(0);
+        let budget =
+            crate::tui::streaming::reveal_budget(interval, app.streaming_state.pending_len(0));
+        let committed = app.streaming_state.commit_text(0, budget);
         if !committed.is_empty() {
             if app.translation_enabled {
                 streaming_thinking::set_placeholder(app, entry_idx);

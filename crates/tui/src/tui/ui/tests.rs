@@ -22919,7 +22919,7 @@ fn message_complete_drain_preserves_thinking_when_thinking_complete_lost() {
     app.thinking_started_at = Some(Instant::now());
     app.streaming_state.start_thinking(0);
     app.streaming_state.push_content(0, "deep reasoning text");
-    let _ = app.streaming_state.commit_text(0);
+    let _ = app.streaming_state.commit_text(0, usize::MAX);
     app.reasoning_buffer.push_str("deep reasoning text");
 
     assert!(
