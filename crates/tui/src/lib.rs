@@ -2547,7 +2547,7 @@ async fn run_async_main_dispatch(
                     args.acp,
                 )?;
                 if args.mcp {
-                    tokio::task::block_in_place(|| mcp_server::run_mcp_server(workspace))
+                    mcp_server::run_mcp_server(workspace).await
                 } else if http_selected {
                     let (mut config, config_profile) =
                         load_config_from_cli_with_effective_profile(&cli)?;
