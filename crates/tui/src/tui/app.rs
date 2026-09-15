@@ -70,9 +70,9 @@ pub(crate) enum RedactionGateNotice {
 }
 pub use types::{
     AppAction, AppModeUi, AutomationAction, ComposerDensity, ComposerSubmitAction,
-    ComposerSubmitChord, InitialInput, McpUiAction, QueuedMessage, ScreenMode, SettingSelection,
-    ShellJobAction, SubmitDisposition, TaskPanelEntry, TaskPanelEntryKind, ToolCollapseMode,
-    ToolDetailRecord, TranscriptSpacing, TuiOptions, VimMode,
+    ComposerSubmitChord, InflightSteer, InitialInput, McpUiAction, QueuedMessage, ScreenMode,
+    SettingSelection, ShellJobAction, SubmitDisposition, TaskPanelEntry, TaskPanelEntryKind,
+    ToolCollapseMode, ToolDetailRecord, TranscriptSpacing, TuiOptions, VimMode,
 };
 pub(crate) use types::{
     CacheReplayTarget, GoalControlIntent, PendingGoalControl, WORKFLOW_DRAFT_INSTRUCTION_PREFIX,
@@ -2275,6 +2275,12 @@ pub struct App {
     /// channel and the bucket renders with a rejected-steer label when
     /// populated.
     pub rejected_steers: VecDeque<String>,
+    /// Steers accepted by the steer channel but not yet seen in the engine's
+    /// record. Rendered through the same "sending into turn" preview bucket as
+    /// `pending_steers`; promoted to a transcript cell by
+    /// `apply_engine_session_projection`, or moved to `rejected_steers` by
+    /// `TurnComplete` when the turn ended without them (#6190).
+    pub inflight_steers: VecDeque<InflightSteer>,
     /// Legacy resend flag for pending steer recovery.
     pub submit_pending_steers_after_interrupt: bool,
     /// Start time for current turn

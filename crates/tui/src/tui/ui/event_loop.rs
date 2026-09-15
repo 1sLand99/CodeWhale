@@ -61,6 +61,11 @@ pub(super) fn apply_engine_session_projection(
     }
     app.context_token_cache.borrow_mut().clear();
     app.set_api_messages(messages);
+    // #6190: the projection is the engine's own record, so it is where a
+    // steer's acceptance becomes observable — and the only place the steer's
+    // real message index is known. Promote before anything else reads the
+    // transcript, so live order equals record order by construction.
+    crate::tui::ui::dispatch::settle_accepted_steers(app);
     app.system_prompt = system_prompt;
     if app.auto_model {
         app.last_effective_model = Some(model);
@@ -2434,6 +2439,10 @@ pub(crate) async fn run_event_loop(
                         if flush_gate_receipts_for(app, None) {
                             transcript_batch_updated = true;
                         }
+                        // A steer the turn never accepted was dropped by the
+                        // engine. Report it instead of leaving it "sending"
+                        // (#6190).
+                        crate::tui::ui::dispatch::settle_unaccepted_steers_at_turn_end(app);
                         let completed_turn = app.active_turn.take();
                         // The in-flight provisional estimate hands off to the
                         // authoritative cumulative price accrued below; the

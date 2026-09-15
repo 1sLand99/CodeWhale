@@ -284,6 +284,32 @@ pub struct QueuedMessage {
     pub history_echoed: bool,
 }
 
+/// A steer handed to the engine that the engine has not yet recorded.
+///
+/// Live-only, and deliberately not in `api_messages`: `EngineHandle::steer`
+/// succeeding means the channel took the text, not that a turn accepted it.
+/// The engine commits a steer at a step boundary and drops one whose turn has
+/// already moved on, so painting a settled transcript cell at send time
+/// produced a cell that could sit above the work it followed, or survive
+/// forever for a steer the model never saw (#6190). It becomes a real cell
+/// when the engine's own record shows it, and a "could not send" receipt when
+/// the turn ends without it.
+#[derive(Debug, Clone)]
+pub struct InflightSteer {
+    /// The composed message, carried so acceptance can paint the same cell
+    /// (including the queue-time echo it may already own).
+    pub message: QueuedMessage,
+    /// Exactly what was handed to `EngineHandle::steer`. The engine records
+    /// this as the first text block of the accepted user message, which is
+    /// what acceptance matches on.
+    pub content: String,
+    /// `api_messages.len()` when the steer was sent — the lower bound for the
+    /// acceptance search, so an identical earlier message cannot claim it.
+    pub sent_after_index: usize,
+    /// Held until acceptance knows the message index to anchor them to.
+    pub references: Vec<codewhale_core::ContextReference>,
+}
+
 /// Prefix for the bounded, tool-less model turn produced by `/workflow`.
 ///
 /// The marker travels with the queued message so a draft that waits behind an

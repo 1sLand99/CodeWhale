@@ -279,6 +279,19 @@ pub struct DeepSeekClient {
     /// this list closes the gap for bare provider tokens with no recognizable
     /// prefix (for example token-plan and provider-specific keys).
     model_bound_secret_values: Arc<Vec<String>>,
+    /// Exact values a catalog endpoint could echo back at us: the active API
+    /// key and every user-configured HTTP header value, plus everything in
+    /// `model_bound_secret_values`.
+    ///
+    /// Deliberately a second, wider list rather than a widening of that one:
+    /// they answer different questions at different trust boundaries. That
+    /// list is "what must never reach a *model*", which is why it covers only
+    /// auth-shaped headers and values of at least
+    /// `MIN_EXACT_SECRET_CHARS`. This one is "what must never come back out
+    /// of an endpoint the user typed during setup" (#6173), where a
+    /// three-character key is still a key and a custom header the user
+    /// configured is still theirs.
+    catalog_error_secret_values: Arc<Vec<String>>,
     /// Whether credential-shaped tool output is masked before it is sent to an
     /// upstream model. The safe default is `true`; it is `false` only after the
     /// user disabled `[redaction] model_bound` and confirmed the opt-out on the
@@ -577,6 +590,7 @@ impl Clone for DeepSeekClient {
             http1_client: self.http1_client.clone(),
             api_key: self.api_key.clone(),
             model_bound_secret_values: Arc::clone(&self.model_bound_secret_values),
+            catalog_error_secret_values: Arc::clone(&self.catalog_error_secret_values),
             model_bound_masking: self.model_bound_masking,
             base_url: self.base_url.clone(),
             api_provider: self.api_provider,
@@ -754,6 +768,58 @@ fn configured_model_bound_secret_values(config: &Config, active_api_key: &str) -
     values
 }
 
+/// Everything a catalog probe could have sent that must not come back.
+///
+/// Longest first, so a value that contains another is masked whole.
+fn catalog_error_secret_values(
+    active_api_key: &str,
+    http_headers: &HashMap<String, String>,
+    model_bound: &[String],
+) -> Vec<String> {
+    let mut values: Vec<String> = Vec::new();
+    let mut push = |value: &str| {
+        let value = value.trim();
+        if !value.is_empty() && !values.iter().any(|existing| existing == value) {
+            values.push(value.to_string());
+        }
+    };
+    // No length floor here, unlike `push_model_bound_secret`: a short key
+    // echoed back by an untrusted endpoint is still a leaked key. The cost of
+    // being wrong is a suppressed message, which is what this path did before.
+    push(active_api_key);
+    for value in http_headers.values() {
+        push(value);
+    }
+    for value in model_bound {
+        push(value);
+    }
+    values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    values
+}
+
+/// The opaque values in a request's URL query — the pagination cursor.
+///
+/// Collected in both forms: decoded, as a provider that parsed the cursor
+/// would echo it, and raw, as one that quoted the URL back would.
+fn request_query_secret_values(url: &reqwest::Url) -> Vec<String> {
+    let mut values: Vec<String> = Vec::new();
+    let mut push = |value: String| {
+        if !value.trim().is_empty() && !values.contains(&value) {
+            values.push(value);
+        }
+    };
+    for (_, value) in url.query_pairs() {
+        push(value.into_owned());
+    }
+    for pair in url.query().unwrap_or_default().split('&') {
+        if let Some((_, value)) = pair.split_once('=') {
+            push(value.to_string());
+        }
+    }
+    values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    values
+}
+
 fn redact_model_bound_text(text: &str, exact_secret_values: &[String]) -> String {
     let mut redacted = text.to_string();
     for secret in exact_secret_values {
@@ -769,6 +835,24 @@ fn redact_model_bound_text(text: &str, exact_secret_values: &[String]) -> String
 
 /// Maximum bytes to read from an error response body (64 KB).
 pub(super) const ERROR_BODY_MAX_BYTES: usize = 64 * 1024;
+
+/// How much of a provider's HTTP error body may be shown to the user.
+///
+/// The catalog probe is the one request that contacts a `base_url` the user
+/// typed during setup, and its URL carries an opaque pagination cursor, so a
+/// provider — or anything answering at that URL — can echo a key, a custom
+/// header value or the cursor back inside an error body. #3385 answered that
+/// by discarding the body entirely, and the cost of the blunt version was
+/// #6173: Gemini's real reason ("User location is not supported for the API
+/// use") reached the user as `Invalid request (400): ` with nothing after the
+/// colon, so a geo-block, a bad key and a wrong endpoint were indistinguishable.
+pub(super) enum ErrorBodyDisclosure {
+    /// The endpoint is already established. Surface the provider's message.
+    Full,
+    /// Untrusted endpoint. Surface only what survives redaction — and nothing
+    /// at all if a known secret is still in the result.
+    Guarded { request_secrets: Vec<String> },
+}
 
 /// Read/overall timeout for the shared client's non-streaming requests
 /// (`/models` listing, catalog refresh, health probes). Streaming requests
@@ -1568,12 +1652,18 @@ impl DeepSeekClient {
         )?
         .build()?;
 
+        let catalog_error_secret_values = Arc::new(catalog_error_secret_values(
+            &api_key,
+            &http_headers,
+            &model_bound_secret_values,
+        ));
         Ok(Self {
             http_client,
             models_http_client,
             http1_client,
             api_key,
             model_bound_secret_values,
+            catalog_error_secret_values,
             model_bound_masking,
             base_url,
             api_provider,
@@ -2910,10 +3000,18 @@ impl DeepSeekClient {
                         .timeout(NON_STREAMING_HTTP_TIMEOUT)
                 };
                 let response = match mode {
-                    ModelsRequestMode::Interactive => self
-                        .send_with_retry_error_body(build, false)
-                        .await
-                        .map_err(ModelsFetchError::Interactive)?,
+                    // #6173: the provider's own words, minus this client's
+                    // secrets and this request's cursor. The endpoint is not
+                    // established here — it is whatever the user typed during
+                    // setup — so the body is guarded rather than trusted.
+                    ModelsRequestMode::Interactive => {
+                        let disclosure = ErrorBodyDisclosure::Guarded {
+                            request_secrets: request_query_secret_values(&url),
+                        };
+                        self.send_with_retry_error_body(build, &disclosure)
+                            .await
+                            .map_err(ModelsFetchError::Interactive)?
+                    }
                     ModelsRequestMode::Refresh => build()
                         .send()
                         .await
@@ -3399,28 +3497,67 @@ impl DeepSeekClient {
         }
     }
 
+    /// Apply `disclosure` to one provider error body.
+    ///
+    /// Redaction runs on the raw bytes, *before* `sanitize_http_error_body`
+    /// truncates them, so a secret can never be split across the truncation
+    /// boundary and survive as a fragment. The result is then checked against
+    /// every value this client knows is secret; if one is still there the
+    /// whole body is dropped, which is exactly the behaviour this path had
+    /// before #6173. The fallback is the old contract, not a weaker one.
+    ///
+    /// Known limitation: this removes what the *client* knows is secret. A
+    /// credential the user configured outside Codewhale — in a proxy, say —
+    /// is not in that set and would pass through, the same limit
+    /// `redact_model_bound_text` has.
+    fn disclosed_http_error_body(
+        &self,
+        disclosure: &ErrorBodyDisclosure,
+        status: u16,
+        raw: &str,
+    ) -> String {
+        let provider = Some(self.api_provider.display_name());
+        let ErrorBodyDisclosure::Guarded { request_secrets } = disclosure else {
+            return sanitize_http_error_body(provider, status, raw);
+        };
+        let mut redacted = raw.to_string();
+        for secret in self
+            .catalog_error_secret_values
+            .iter()
+            .chain(request_secrets.iter())
+        {
+            redacted = redacted.replace(secret.as_str(), codewhale_config::persistence::REDACTED);
+        }
+        let message = sanitize_http_error_body(provider, status, &redacted);
+        let leaked = self
+            .catalog_error_secret_values
+            .iter()
+            .chain(request_secrets.iter())
+            .any(|secret| message.contains(secret.as_str()));
+        if leaked { String::new() } else { message }
+    }
+
     pub(super) async fn send_with_retry<F>(&self, build: F) -> Result<reqwest::Response>
     where
         F: FnMut() -> reqwest::RequestBuilder,
     {
-        self.send_with_retry_error_body(build, true).await
+        self.send_with_retry_error_body(build, &ErrorBodyDisclosure::Full)
+            .await
     }
 
-    // Model-list errors can echo opaque cursors or credentials. Keep status and
-    // Retry-After classification, but suppress their bodies before retry logs
-    // and state updates. Other requests retain their existing error details.
+    /// Model-list errors can echo opaque cursors or credentials. Keep status
+    /// and Retry-After classification either way; `disclosure` decides how
+    /// much of the body reaches retry logs, state updates and the user.
     async fn send_with_retry_error_body<F>(
         &self,
         mut build: F,
-        include_error_body: bool,
+        disclosure: &ErrorBodyDisclosure,
     ) -> Result<reqwest::Response>
     where
         F: FnMut() -> reqwest::RequestBuilder,
     {
         if self.isolated_request_state {
-            return self
-                .send_with_isolated_retry(build, include_error_body)
-                .await;
+            return self.send_with_isolated_retry(build, disclosure).await;
         }
         let retry_cfg: LlmRetryConfig = self.retry.clone().into();
         let request_result = with_retry(
@@ -3446,16 +3583,8 @@ impl DeepSeekClient {
                         return Ok(response);
                     }
                     let retry_after = extract_retry_after(response.headers());
-                    let body = if include_error_body {
-                        let body = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
-                        sanitize_http_error_body(
-                            Some(self.api_provider.display_name()),
-                            status.as_u16(),
-                            &body,
-                        )
-                    } else {
-                        String::new()
-                    };
+                    let raw = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
+                    let body = self.disclosed_http_error_body(disclosure, status.as_u16(), &raw);
                     Err(LlmError::from_http_response_with_retry_after(
                         status.as_u16(),
                         &body,
@@ -3514,7 +3643,7 @@ impl DeepSeekClient {
     async fn send_with_isolated_retry<F>(
         &self,
         mut build: F,
-        include_error_body: bool,
+        disclosure: &ErrorBodyDisclosure,
     ) -> Result<reqwest::Response>
     where
         F: FnMut() -> reqwest::RequestBuilder,
@@ -3535,16 +3664,8 @@ impl DeepSeekClient {
                         return Ok(response);
                     }
                     let retry_after = extract_retry_after(response.headers());
-                    let body = if include_error_body {
-                        let body = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
-                        sanitize_http_error_body(
-                            Some(self.api_provider.display_name()),
-                            status.as_u16(),
-                            &body,
-                        )
-                    } else {
-                        String::new()
-                    };
+                    let raw = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
+                    let body = self.disclosed_http_error_body(disclosure, status.as_u16(), &raw);
                     Err(LlmError::from_http_response_with_retry_after(
                         status.as_u16(),
                         &body,
