@@ -212,6 +212,16 @@ fn crash_dirs() -> Vec<PathBuf> {
 // ---------------------------------------------------------------------------
 
 pub(super) async fn list_logs(State(_state): State<RuntimeApiState>) -> Json<Value> {
+    // Directory walks and per-file stats are blocking syscalls, and a
+    // diagnostics read must never park a Tokio worker — least of all while
+    // the thing being diagnosed is the runtime's responsiveness (#6149).
+    let sources = tokio::task::spawn_blocking(list_log_sources)
+        .await
+        .unwrap_or_default();
+    Json(json!({ "sources": sources }))
+}
+
+fn list_log_sources() -> Vec<Value> {
     let mut sources = Vec::new();
     for (dir, singles) in log_sources() {
         let mut entries = list_files(&dir, LOG_LIST_CAP);
@@ -239,7 +249,7 @@ pub(super) async fn list_logs(State(_state): State<RuntimeApiState>) -> Json<Val
             "files": entries,
         }));
     }
-    Json(json!({ "sources": sources }))
+    sources
 }
 
 pub(super) async fn read_log(
@@ -266,6 +276,14 @@ pub(super) async fn read_log(
 }
 
 pub(super) async fn list_crashes(State(_state): State<RuntimeApiState>) -> Json<Value> {
+    // Same reason as `list_logs`: `list_files` stats every entry.
+    let sources = tokio::task::spawn_blocking(list_crash_sources)
+        .await
+        .unwrap_or_default();
+    Json(json!({ "sources": sources }))
+}
+
+fn list_crash_sources() -> Vec<Value> {
     let mut sources = Vec::new();
     for dir in crash_dirs() {
         sources.push(json!({
@@ -273,7 +291,7 @@ pub(super) async fn list_crashes(State(_state): State<RuntimeApiState>) -> Json<
             "files": list_files(&dir, CRASH_LIST_CAP),
         }));
     }
-    Json(json!({ "sources": sources }))
+    sources
 }
 
 pub(super) async fn read_crash(
@@ -317,6 +335,12 @@ fn rss_bytes() -> Option<u64> {
 }
 
 pub(super) async fn process_info(State(_state): State<RuntimeApiState>) -> Json<Value> {
+    // `rss_bytes` reads /proc on Linux and `current_exe` hits the filesystem;
+    // both are blocking, and this route is polled for live health.
+    let (executable, rss) =
+        tokio::task::spawn_blocking(|| (std::env::current_exe().ok(), rss_bytes()))
+            .await
+            .unwrap_or((None, None));
     let (started_at, uptime_secs) = match SERVER_STARTED.get() {
         Some((system, instant)) => (Some(rfc3339(*system)), Some(instant.elapsed().as_secs())),
         None => (None, None),
@@ -327,7 +351,7 @@ pub(super) async fn process_info(State(_state): State<RuntimeApiState>) -> Json<
         "commit": option_env!("CODEWHALE_BUILD_COMMIT").unwrap_or("unknown"),
         "started_at": started_at,
         "uptime_seconds": uptime_secs,
-        "executable": std::env::current_exe().ok(),
-        "rss_bytes": rss_bytes(),
+        "executable": executable,
+        "rss_bytes": rss,
     }))
 }

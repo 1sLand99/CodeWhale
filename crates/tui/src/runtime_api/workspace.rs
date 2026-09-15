@@ -811,27 +811,30 @@ pub(super) async fn workspace_instructions(
     let home = crate::config::effective_home_dir();
     let configured = state.config.read().instructions_paths();
 
-    let (sources, generated_fallback, warnings) = tokio::task::spawn_blocking(move || {
-        let sources = crate::project_context::project_instruction_sources(
-            &workspace,
-            home.as_deref(),
-            &configured,
-        );
-        // The real load pass supplies assembly-level warnings and tells us
-        // whether the ephemeral generated context is what the prompt
-        // carries. Cached — this is the same call the engine makes.
-        let ctx = crate::project_context::load_project_context_with_parents(&workspace);
-        let generated_fallback = ctx.instructions.is_some() && ctx.source_path.is_none();
-        (sources, generated_fallback, ctx.warnings)
-    })
-    .await
-    .map_err(|_| ApiError::internal("instruction source listing failed"))?;
-
-    // `project_instruction_sources` canonicalizes the workspace (the
-    // `/var` → `/private/var` class of alias), so relative paths must be
-    // computed against the canonical spelling or every strip fails.
-    let workspace_root =
-        std::fs::canonicalize(&state.workspace).unwrap_or_else(|_| state.workspace.clone());
+    let (sources, generated_fallback, warnings, workspace_root) =
+        tokio::task::spawn_blocking(move || {
+            let sources = crate::project_context::project_instruction_sources(
+                &workspace,
+                home.as_deref(),
+                &configured,
+            );
+            // The real load pass supplies assembly-level warnings and tells us
+            // whether the ephemeral generated context is what the prompt
+            // carries. Cached — this is the same call the engine makes.
+            let ctx = crate::project_context::load_project_context_with_parents(&workspace);
+            let generated_fallback = ctx.instructions.is_some() && ctx.source_path.is_none();
+            // `project_instruction_sources` canonicalizes the workspace (the
+            // `/var` → `/private/var` class of alias), so relative paths must
+            // be computed against the canonical spelling or every strip fails.
+            // It rides this closure rather than the async body because
+            // `canonicalize` is a blocking syscall, and one on a Tokio worker
+            // is one too many (#6149).
+            let workspace_root =
+                std::fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
+            (sources, generated_fallback, ctx.warnings, workspace_root)
+        })
+        .await
+        .map_err(|_| ApiError::internal("instruction source listing failed"))?;
     Ok(Json(WorkspaceInstructionsResponse {
         workspace: workspace_root.clone(),
         sources: sources

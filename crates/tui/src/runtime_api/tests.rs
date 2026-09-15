@@ -10139,8 +10139,19 @@ model = "local-model"
         );
         assert_eq!(custom["credentialState"], expected_state);
 
+        // An allow-list, not a snapshot: a new field here has to be argued for
+        // in this test before it can reach the wire. `credentialSource` and
+        // `credentialWritable` (#6179) are admissible because they are a
+        // *class* and a boolean — the source is one of four fixed enum
+        // spellings and can never interpolate a value, a path, or an
+        // environment variable name. `credentialWritableReason` is
+        // `skip_serializing_if = Option::is_none`, so it is absent for every
+        // writable route and is asserted separately below when present.
         let allowed_fields: std::collections::BTreeSet<_> = [
+            "credentialSource",
             "credentialState",
+            "credentialWritable",
+            "credentialWritableReason",
             "default_model",
             "display_name",
             "has_model_catalog",
@@ -10149,20 +10160,28 @@ model = "local-model"
         ]
         .into_iter()
         .collect();
+        const CREDENTIAL_SOURCES: [&str; 4] = ["secret_store", "config", "external_auth", "none"];
         for entry in providers["providers"]
             .as_array()
             .context("providers array")?
         {
-            let actual_fields: std::collections::BTreeSet<_> = entry
-                .as_object()
-                .context("provider entry object")?
-                .keys()
-                .map(String::as_str)
-                .collect();
-            assert_eq!(
-                actual_fields, allowed_fields,
-                "provider catalog must remain a non-secret projection"
+            let object = entry.as_object().context("provider entry object")?;
+            let actual_fields: std::collections::BTreeSet<_> =
+                object.keys().map(String::as_str).collect();
+            assert!(
+                actual_fields.is_subset(&allowed_fields),
+                "provider catalog must remain a non-secret projection: {actual_fields:?}"
             );
+            // The source is a closed vocabulary. If it ever stops being one,
+            // it has become a place a value can hide.
+            let source = object["credentialSource"]
+                .as_str()
+                .context("credentialSource must be a string")?;
+            assert!(
+                CREDENTIAL_SOURCES.contains(&source),
+                "credentialSource must stay a fixed class, got {source:?}"
+            );
+            assert!(object["credentialWritable"].is_boolean());
         }
 
         let serialized = serde_json::to_string(&providers)?;

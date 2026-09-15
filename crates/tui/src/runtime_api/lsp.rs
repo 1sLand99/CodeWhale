@@ -71,11 +71,24 @@ fn lsp_manager(state: &RuntimeApiState) -> Result<Arc<LspManager>, ApiError> {
 /// Resolve a workspace-relative `path` to an absolute file inside the
 /// workspace, refusing traversal, `.git`, links, and missing files — the same
 /// confinement the file routes apply.
-fn resolve_workspace_file(state: &RuntimeApiState, raw: &str) -> Result<PathBuf, ApiError> {
+///
+/// Async because the confinement it applies is filesystem work:
+/// `canonical_workspace` canonicalizes and `precheck_file_target` stats every
+/// component. Both are blocking syscalls, so they ride `spawn_blocking` rather
+/// than the caller's Tokio worker (#6149). The blocking-calls budget cannot
+/// see this — the `std::fs` calls live in `workspace.rs`, so a handler calling
+/// straight through to them is invisible to a per-file scanner.
+async fn resolve_workspace_file(state: &RuntimeApiState, raw: &str) -> Result<PathBuf, ApiError> {
     let relative = relative_request_path(raw, false)?;
-    let root = canonical_workspace(&state.workspace)?;
-    precheck_file_target(&root, &relative)?.ok_or_else(|| ApiError::not_found("file not found"))?;
-    Ok(root.join(&relative))
+    let workspace = state.workspace.clone();
+    tokio::task::spawn_blocking(move || {
+        let root = canonical_workspace(&workspace)?;
+        precheck_file_target(&root, &relative)?
+            .ok_or_else(|| ApiError::not_found("file not found"))?;
+        Ok(root.join(&relative))
+    })
+    .await
+    .map_err(|_| ApiError::internal("workspace file resolution failed"))?
 }
 
 /// `intelligence` reports ordinary states (disabled, no server) as error
@@ -183,7 +196,7 @@ pub(super) async fn lsp_diagnostics(
     State(state): State<RuntimeApiState>,
     Query(query): Query<LspFileQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let file = resolve_workspace_file(&state, &query.path)?;
+    let file = resolve_workspace_file(&state, &query.path).await?;
     run_intelligence(&state, "diagnostics", file, None, None, None).await
 }
 
@@ -194,7 +207,7 @@ pub(super) async fn lsp_definition(
     let line = query
         .line
         .ok_or_else(|| ApiError::bad_request("definition requires line (1-based)"))?;
-    let file = resolve_workspace_file(&state, &query.path)?;
+    let file = resolve_workspace_file(&state, &query.path).await?;
     run_intelligence(
         &state,
         "definition",
@@ -213,7 +226,7 @@ pub(super) async fn lsp_references(
     let line = query
         .line
         .ok_or_else(|| ApiError::bad_request("references requires line (1-based)"))?;
-    let file = resolve_workspace_file(&state, &query.path)?;
+    let file = resolve_workspace_file(&state, &query.path).await?;
     run_intelligence(
         &state,
         "references",
@@ -229,6 +242,6 @@ pub(super) async fn lsp_symbols(
     State(state): State<RuntimeApiState>,
     Query(query): Query<LspSymbolsQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let file = resolve_workspace_file(&state, &query.path)?;
+    let file = resolve_workspace_file(&state, &query.path).await?;
     run_intelligence(&state, "symbols", file, None, None, query.query).await
 }
