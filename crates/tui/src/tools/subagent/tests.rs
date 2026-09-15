@@ -7277,6 +7277,8 @@ fn every_named_role_has_one_complete_capability_based_surface() {
         "request_plugin_install",
         "request_user_input",
         "retrieve_tool_result",
+        "session_get",
+        "session_search",
         "todo_write",
         "tui_help",
         "validate_data",
@@ -7306,6 +7308,8 @@ fn every_named_role_has_one_complete_capability_based_surface() {
         "request_user_input",
         "retrieve_tool_result",
         "review",
+        "session_get",
+        "session_search",
         "todo_write",
         "tui_help",
         "validate_data",
@@ -7339,6 +7343,8 @@ fn every_named_role_has_one_complete_capability_based_surface() {
         "request_user_input",
         "retrieve_tool_result",
         "review",
+        "session_get",
+        "session_search",
         "tasks",
         "todo_write",
         "tui_help",
@@ -7381,6 +7387,8 @@ fn every_named_role_has_one_complete_capability_based_surface() {
         "revert_turn",
         "review",
         "send_later",
+        "session_get",
+        "session_search",
         "speech",
         "task_shell_start",
         "task_shell_wait",
@@ -8377,6 +8385,8 @@ async fn read_only_roles_expose_and_dispatch_lowercase_bash_only() {
             "request_plugin_install",
             "request_user_input",
             "retrieve_tool_result",
+            "session_get",
+            "session_search",
             "todo_write",
             "tui_help",
             "validate_data",
@@ -20075,9 +20085,10 @@ fn the_launched_authority_is_the_one_the_spawn_boundary_accepts() {
 /// superseded by these tests.
 /// Measured 80,856B on 2026-08-02 (commit body has the receipt); +10%.
 const READ_ONLY_CHILD_ENVELOPE_BYTE_CEILING: usize = 89_000;
-/// Measured 84,804B on 2026-09-13 with the native Workflow plan schema.
-/// Keep the next increase visible instead of adding another broad margin.
-const PARENT_SURFACE_BYTE_CEILING: usize = 85_000;
+/// Measured 85,913B on 2026-09-15 with the always-on session recall tools
+/// (#5715). Keep the next increase visible instead of adding another broad
+/// margin.
+const PARENT_SURFACE_BYTE_CEILING: usize = 86_000;
 
 #[tokio::test]
 async fn read_only_child_envelope_stays_within_measured_ceiling() {
