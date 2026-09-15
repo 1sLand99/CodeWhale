@@ -316,11 +316,23 @@ pub(super) async fn workspace_instructions(
             .map(|source| WorkspaceInstructionSource {
                 kind: instruction_source_kind_name(source.kind),
                 status: instruction_source_status_name(source.status),
+                // Forward slashes on every platform. `display()` emits the
+                // native separator, which would make a wire field describing a
+                // repo-relative path differ between a Windows and a Unix host
+                // and force every client to branch on the server's OS. The
+                // absolute `path` below stays native, because that one is only
+                // meaningful on the machine that produced it.
                 relative_path: source
                     .path
                     .strip_prefix(&workspace_root)
                     .ok()
-                    .map(|relative| relative.display().to_string()),
+                    .map(|relative| {
+                        relative
+                            .components()
+                            .map(|part| part.as_os_str().to_string_lossy())
+                            .collect::<Vec<_>>()
+                            .join("/")
+                    }),
                 scope_dir: source.scope_dir,
                 path: source.path,
                 exists: source.exists,

@@ -70,7 +70,10 @@ async fn get_v1_workspace_instructions_lists_effective_sources() -> Result<()> {
         .find(|source| {
             source["path"]
                 .as_str()
-                .is_some_and(|p| p.ends_with(".codewhale/instructions.md"))
+                // `path` is the native absolute path, so it is backslashed on
+                // Windows; compare separator-agnostically rather than against
+                // one platform's spelling.
+                .is_some_and(|p| p.replace('\\', "/").ends_with(".codewhale/instructions.md"))
         })
         .expect("shadowed workspace instructions row");
     assert_eq!(shadowed["status"], "shadowed");
