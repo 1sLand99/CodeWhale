@@ -1397,6 +1397,16 @@ pub trait McpTransport: Send + Sync {
     async fn send(&mut self, msg: Vec<u8>) -> Result<()>;
     async fn recv(&mut self) -> Result<Vec<u8>>;
 
+    /// Synchronous, best-effort liveness probe consulted by
+    /// [`McpConnection::is_ready`] so a crashed stdio child stops reading
+    /// as "ready" before the next call fails (#6187). Must never block and
+    /// never spawn — a contended lock reads as alive; the next call observes
+    /// the death. HTTP/SSE transports have no child to observe, so the
+    /// default is "alive".
+    fn probe_dead(&self) -> bool {
+        false
+    }
+
     /// Graceful shutdown — stdio transports send SIGTERM to the child and
     /// give it a brief window to exit before tokio's `kill_on_drop` fires
     /// SIGKILL as the backstop. Default is a no-op for non-stdio transports
@@ -2252,7 +2262,12 @@ impl McpConnection {
 
     /// Check if connection is ready
     pub fn is_ready(&self) -> bool {
-        self.state == ConnectionState::Ready && self.catalog_authorized()
+        // The Ready flag alone can't see a stdio child that exited between
+        // calls; the probe closes that gap so the pool rebuilds the
+        // connection instead of handing a dead transport back (#6187).
+        self.state == ConnectionState::Ready
+            && self.catalog_authorized()
+            && !self.transport.probe_dead()
     }
 
     /// Get server config
@@ -3004,7 +3019,19 @@ impl McpPool {
                 .ok_or_else(|| anyhow::anyhow!("MCP connection disappeared for {server_name}"));
         }
 
-        self.drop_connection(server_name, "reconnect");
+        // Take (don't drop) the stale connection: if the reconnect attempt
+        // below fails, the previous connection is restored so its last-good
+        // tool catalog stays model-visible during the outage instead of
+        // disappearing with a dropped transport (#6187).
+        let previous_connection = self.connections.remove(server_name);
+        if previous_connection.is_some() {
+            tracing::debug!(
+                target: "mcp",
+                server = %server_name,
+                reason = "reconnect",
+                "detached MCP connection for reconnect"
+            );
+        }
 
         // Check static config first, then dynamic servers
         let server_config = self
@@ -3030,6 +3057,14 @@ impl McpPool {
             Ok(connection) => connection,
             Err(error) => {
                 self.note_connect_failure(server_name, &error);
+                if let Some(previous) = previous_connection {
+                    tracing::debug!(
+                        target: "mcp",
+                        server = %server_name,
+                        "reconnect failed; restored the previous MCP connection and its last-good catalog"
+                    );
+                    self.connections.insert(server_name.to_string(), previous);
+                }
                 return Err(error);
             }
         };
