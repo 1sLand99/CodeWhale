@@ -3970,9 +3970,10 @@ mod tests {
         // text on every tick. Reports the cost per 250 appends so growth with
         // message size is visible.
         use std::time::Instant;
-        let words: Vec<&str> = "the quick brown fox jumps over a lazy dog and then keeps going for a while"
-            .split(' ')
-            .collect();
+        let words: Vec<&str> =
+            "the quick brown fox jumps over a lazy dog and then keeps going for a while"
+                .split(' ')
+                .collect();
         let mut doc = String::new();
         let width = 100u16;
         let mut window_start = Instant::now();
