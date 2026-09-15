@@ -71,6 +71,16 @@ base prompt". Two more corollaries earned here:
 - Keep providers and models first-class and provider-neutral.
 - Never rewrite published history, retag a release, force-push a shared ref, or
   publish without explicit authorization. Preserve human contributor credit.
+- **Model-visible means logged.** Anything that reaches a model request must be
+  reconstructable from the session log, and a new model-visible input needs a
+  session event. Live presentation and the persisted record must agree; when they
+  disagree the record is right.
+- **Misconfiguration fails loud**, at load when it is self-contained, otherwise
+  at the earliest point it can be resolved. Never silently skip a missing
+  referent.
+- **Write down what a design does not do**, beside the behaviour it owns — a
+  short known-limitations note in the owning module. A stated limit stops the
+  next reader from assuming a capability that was never built.
 
 ## Landing other people's work
 
@@ -122,6 +132,10 @@ because they did anything wrong. Treat their time as more expensive than ours.
 - Audit any harness before trusting its score. `ok = ok and X or True` parses
   as `(ok and X) or True` and silently reported twelve unevaluated rows as
   passing.
+- Match the evidence to the surface. Run the tests that cover the change, not the
+  whole suite, and do not repeat a check that already passed in order to commit.
+  CI owns exhaustive coverage; a full local run is for CI diagnosis or for an
+  irreducibly repository-wide change.
 
 ## Current contracts
 
