@@ -4786,6 +4786,9 @@ pub(crate) async fn run_event_loop(
                                     .with_current_session(app.current_session_id.as_deref()),
                             );
                         }
+                        crate::tui::underwater::LaunchAction::McpRemedy => {
+                            type_launch_mcp_remedy(app);
+                        }
                         crate::tui::underwater::LaunchAction::Help => {
                             toggle_help_view(app);
                         }
@@ -5468,6 +5471,9 @@ pub(crate) async fn run_event_loop(
                                 SessionPickerView::new(&app.workspace, app.ui_locale)
                                     .with_current_session(app.current_session_id.as_deref()),
                             );
+                        }
+                        crate::tui::underwater::LaunchAction::McpRemedy => {
+                            type_launch_mcp_remedy(app);
                         }
                         crate::tui::underwater::LaunchAction::Help => {
                             toggle_help_view(app);

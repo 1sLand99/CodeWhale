@@ -589,6 +589,10 @@ pub enum LaunchRowId {
     NewSession,
     Recent(String),
     SeeAll,
+    /// The MCP problems row: Enter/click types the remedy command into the
+    /// composer (`/mcp login <name>` or `/mcp`) instead of making the user
+    /// retype what the card printed (#6085).
+    McpRemedy,
 }
 
 /// How many recent sessions the startup card lists inline before the
