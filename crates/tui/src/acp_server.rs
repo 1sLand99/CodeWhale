@@ -1498,7 +1498,12 @@ impl AcpServer {
             .and_then(Value::as_str)
             .map(PathBuf::from)
             .unwrap_or_else(|| self.default_cwd.clone());
-        let session_id = format!("codewhale-{}", uuid::Uuid::new_v4());
+        // A bare uuid, the same shape `create_saved_session` produces and the
+        // same shape `session/list` advertises. The old `codewhale-` prefix put
+        // this id in a namespace no other method understood, so a client that
+        // replayed it into `session/load` — the normal thing to do — got
+        // `-32602` for an id we had just handed it (#6174).
+        let session_id = uuid::Uuid::new_v4().to_string();
         let tool_registry = Arc::new(build_acp_tool_registry(
             &self.config,
             &cwd,
@@ -1583,13 +1588,22 @@ impl AcpServer {
             .and_then(Value::as_str)
             .ok_or_else(|| AcpError::invalid_params("session/load requires sessionId"))?
             .to_string();
+        // Sessions this connection already holds resolve from memory. `session/new`
+        // sessions live only here — nothing on the ACP path writes them to the
+        // durable store — so consulting the store first would fail every id we
+        // minted ourselves. This also makes reloading an already-loaded durable
+        // session cheap and free of store side effects.
+        if self.sessions.contains_key(&session_id) {
+            return Ok(self.session_configuration(&session_id));
+        }
         let manager = Self::session_manager()
             .ok_or_else(|| AcpError::internal("no Codewhale session store is available"))?;
         let saved = manager
-            .load_session_by_prefix(&session_id)
+            .resume_session_by_prefix(&session_id)
             .map_err(|error| {
                 AcpError::invalid_params(format!("could not load session {session_id}: {error}"))
-            })?;
+            })?
+            .session;
 
         let cwd = saved.metadata.workspace.clone();
         let tool_registry = Arc::new(build_acp_tool_registry(
@@ -2056,6 +2070,7 @@ fn build_acp_system_prompt(
             verbosity: config.verbosity.as_deref(),
             skills_scan_codewhale_only: config.skills_config().scan_codewhale_only(),
             plugin_registry: None,
+            recovery_hint: None,
             mode: acp_mode(config),
         },
         crate::prompts::PromptHost::Headless,
@@ -3129,6 +3144,60 @@ mod tests {
         let session_id = result["sessionId"].as_str().expect("session id");
         let session = server.sessions.get(session_id).expect("session exists");
         assert!(session.messages.is_empty());
+    }
+
+    /// #6174: an ACP client has no id for a session it just created other than
+    /// the one `session/new` returned, so that id must be loadable. It used to
+    /// come back `codewhale-<uuid>` — a namespace `session/load` did not
+    /// understand and the durable store never held — and replaying it, which is
+    /// the normal client behaviour, failed with `-32602`.
+    #[test]
+    fn session_new_returns_an_id_that_session_load_resolves() {
+        let mut server = AcpServer::new(
+            Config::default(),
+            "test-model".to_string(),
+            PathBuf::from("/tmp"),
+        );
+        let created = server
+            .new_session(json!({ "cwd": "/tmp" }))
+            .expect("new session");
+        let session_id = created["sessionId"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+
+        // The id is in the one namespace every method understands: the bare
+        // uuid shape `session/list` advertises for durable sessions.
+        assert!(
+            !session_id.starts_with("codewhale-"),
+            "session/new must not mint a prefixed id, got {session_id}"
+        );
+        uuid::Uuid::parse_str(&session_id)
+            .unwrap_or_else(|e| panic!("session/new must mint a bare uuid, got {session_id}: {e}"));
+
+        // Replaying that exact id resolves, and resolves to the same session.
+        let loaded = server
+            .load_session(json!({ "sessionId": session_id }))
+            .expect("session/load must resolve an id session/new returned");
+        assert_eq!(loaded["sessionId"].as_str(), Some(session_id.as_str()));
+    }
+
+    /// The memory hit must not paper over a genuinely unknown id: that still
+    /// has to reach the durable store and fail there.
+    #[test]
+    fn session_load_still_rejects_an_id_no_one_minted() {
+        let mut server = AcpServer::new(
+            Config::default(),
+            "test-model".to_string(),
+            PathBuf::from("/tmp"),
+        );
+        let unknown = uuid::Uuid::new_v4().to_string();
+        assert!(
+            server
+                .load_session(json!({ "sessionId": unknown }))
+                .is_err(),
+            "an id from no namespace must not resolve"
+        );
     }
 
     #[test]

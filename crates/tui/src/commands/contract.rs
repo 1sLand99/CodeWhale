@@ -86,7 +86,7 @@ use codewhale_localization::{MessageId, tr};
 /// Not referenced by production dispatch code — the fail-closed Python gate
 /// (`scripts/check-command-migration-manifest.py`) reads this exact
 /// declaration by source regex and the Rust frontier tests assert it.
-#[allow(dead_code)]
+#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) const PENDING_GROUPS: &[&str] = &["config", "core", "debug", "session"];
 
 // ---------------------------------------------------------------------------
@@ -764,6 +764,7 @@ impl CommandSessionLifecycleContext for SessionLifecycleAdapter<'_> {
         // `RefCell` borrow of `App` is not simultaneously mutable and shared.
         let workspace = app.workspace.clone();
         let ui_locale = app.ui_locale;
+        let current_id = app.current_session_id.clone();
         match preselected {
             Some(session_id) => {
                 app.view_stack.push(
@@ -771,14 +772,15 @@ impl CommandSessionLifecycleContext for SessionLifecycleAdapter<'_> {
                         &workspace,
                         ui_locale,
                         &session_id,
-                    ),
+                    )
+                    .with_current_session(current_id.as_deref()),
                 );
             }
             None => {
-                app.view_stack
-                    .push(crate::tui::session_picker::SessionPickerView::new(
-                        &workspace, ui_locale,
-                    ));
+                app.view_stack.push(
+                    crate::tui::session_picker::SessionPickerView::new(&workspace, ui_locale)
+                        .with_current_session(current_id.as_deref()),
+                );
             }
         }
     }
@@ -1069,7 +1071,8 @@ impl CommandSessionControlContext for SessionControlAdapter<'_> {
     fn open_resume_picker(&mut self) {
         let mut app = self.host.app.borrow_mut();
         let picker =
-            crate::tui::session_picker::SessionPickerView::new(&app.workspace, app.ui_locale);
+            crate::tui::session_picker::SessionPickerView::new(&app.workspace, app.ui_locale)
+                .with_current_session(app.current_session_id.as_deref());
         app.view_stack.push(picker);
     }
 
@@ -1092,10 +1095,14 @@ impl CommandSessionControlContext for SessionControlAdapter<'_> {
             Ok(m) => m,
             Err(e) => return Err(format!("could not open sessions directory: {e}")),
         };
-        match manager
-            .load_session(raw)
-            .or_else(|_| manager.load_session_by_prefix(raw))
-        {
+        // Resolution only needs durable identity — the resume that follows
+        // runs and persists the repair, so probe the snapshot instead of
+        // running (and logging) an in-memory repair here.
+        match manager.load_session_snapshot(raw).or_else(|_| {
+            manager
+                .resolve_session_id_prefix(raw)
+                .and_then(|id| manager.load_session_snapshot(&id))
+        }) {
             Ok(sess) => {
                 let path = manager
                     .sessions_dir()
@@ -1464,7 +1471,8 @@ fn import_session_container(
         &app.workspace,
         app.ui_locale,
         &new_id,
-    );
+    )
+    .with_current_session(app.current_session_id.as_deref());
     app.view_stack.push(picker);
     Ok(ResumeImportReceipt {
         truncated_id: crate::session_manager::truncate_id(&new_id).to_string(),

@@ -232,6 +232,7 @@ Common forwarded flags:
   --session-id <SESSION_ID>        Resume a previous session by ID or prefix
   --continue                       Continue the most recent session for this workspace
   --output-format <FORMAT>         Output format: text or stream-json
+  --hooks                          Opt in to configured hooks (tool_call_before, shell_env)
 
 Plain `codewhale exec` is a one-shot model response. Use `--auto` for
 non-interactive filesystem/shell tool use, matching the supported automation
@@ -299,6 +300,10 @@ lifecycle generation you observed.
     Eval(TuiPassthroughArgs),
     /// Manage MCP servers.
     Mcp(TuiPassthroughArgs),
+    /// Run the shared ambient pet owner (`pet serve`). Internal: spawned
+    /// lazily by clients when no owner is running.
+    #[command(name = "pet", hide = true)]
+    Pet(TuiPassthroughArgs),
     /// Inspect feature flags.
     Features(TuiPassthroughArgs),
     /// Connect third-party harnesses through Codewhale (e.g. `integrations dsh status`).
@@ -2116,6 +2121,19 @@ fn run() -> Result<()> {
         Some(Commands::Mcp(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
             run_tui_in_process(&cli, &resolved_runtime, tui_args("mcp", args))
+        }
+        Some(Commands::Pet(args)) => {
+            // `pet` must reach run_with_args at argv[1]; the TUI passthrough
+            // builder would inject global flags ahead of it and the trailing
+            // PROMPT positional would otherwise swallow `pet serve`.
+            let mut argv = vec!["codewhale".to_string(), "pet".to_string()];
+            argv.extend(args.args);
+            let code = codewhale_tui::run(argv);
+            std::process::exit(if code == std::process::ExitCode::SUCCESS {
+                0
+            } else {
+                1
+            });
         }
         Some(Commands::Integrations(args)) => {
             // Integrations only need route *identity*. Do not recover or

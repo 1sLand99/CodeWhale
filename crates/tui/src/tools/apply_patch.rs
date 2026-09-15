@@ -119,11 +119,11 @@ pub struct ApplyPatchPreflight {
 #[derive(Debug, Clone)]
 pub struct Hunk {
     pub old_start: usize,
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub old_count: usize,
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub new_start: usize,
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub new_count: usize,
     pub lines: Vec<HunkLine>,
 }

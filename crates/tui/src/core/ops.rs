@@ -156,58 +156,64 @@ impl UserInputProvenance {
     }
 }
 
+/// Per-turn authority payload carried by [`Op::SendMessage`]. Extracted from
+/// the enum arm so new per-turn fields accrete here instead of widening the
+/// variant; the serializable twin is `codewhale_protocol::op::TurnSpec`.
+#[derive(Debug)]
+pub struct TurnSpec {
+    /// Admitted allowance for this turn only; never changes session settings.
+    pub max_output_tokens: Option<std::num::NonZeroU32>,
+    pub content: String,
+    /// Inline image bytes validated by Runtime admission; no file references.
+    pub images: Vec<codewhale_protocol::runtime::RuntimeImageInput>,
+    pub mode: AppMode,
+    /// Exact, structurally resolved route authority for this turn. The
+    /// engine activates its client before mutating turn state; injected
+    /// engines may use their already-supplied client with the same receipt.
+    pub route: Box<ResolvedRuntimeRoute>,
+    /// Compaction policy derived from the same provider route. Carrying it
+    /// atomically avoids a model/limit mismatch before `SendMessage`.
+    pub compaction: Box<CompactionConfig>,
+    /// Auxiliary provider calls completed while planning this exact turn
+    /// (currently Auto's classifier), bounded and paired with their own
+    /// immutable routes. The engine folds their tokens into total usage
+    /// only; they never enter the parent route's billing aggregate.
+    pub initial_routed_usage: Box<crate::cost_status::RuntimeUsageBatch>,
+    pub goal_objective: Option<String>,
+    pub goal_token_budget: Option<u32>,
+    pub goal_status: GoalStatus,
+    /// Reasoning-effort tier: `"off" | "low" | "medium" | "high" | "max"`.
+    /// `None` lets the provider apply its default.
+    pub reasoning_effort: Option<String>,
+    /// True when the user selected auto thinking, even though the UI sends
+    /// a concrete per-turn value to the model API.
+    pub reasoning_effort_auto: bool,
+    /// True when the user selected auto model routing.
+    pub auto_model: bool,
+    pub allow_shell: bool,
+    pub trust_mode: bool,
+    pub auto_approve: bool,
+    pub approval_mode: ApprovalMode,
+    pub translation_enabled: bool,
+    /// Tool restriction from custom slash command frontmatter.
+    /// `None` means the current turn may use the normal tool set.
+    pub allowed_tools: Option<Vec<String>>,
+    /// Runtime-supplied tools available only for this turn.
+    pub dynamic_tools: Vec<DynamicToolSpec>,
+    /// Hook executor for control-plane hooks.
+    /// `ToolCallBefore` hooks may deny a tool call with exit code 2.
+    pub hook_executor: Option<std::sync::Arc<crate::hooks::HookExecutor>>,
+    pub verbosity: Option<String>,
+    /// Structural input origin. This gates whether the turn may inherit
+    /// YOLO/auto-approval authority; user-shaped text is not enough.
+    pub provenance: UserInputProvenance,
+}
+
 /// Operations that can be submitted to the engine.
 #[derive(Debug)]
 pub enum Op {
     /// Send a message to the AI
-    SendMessage {
-        /// Admitted allowance for this turn only; never changes session settings.
-        max_output_tokens: Option<std::num::NonZeroU32>,
-        content: String,
-        /// Inline image bytes validated by Runtime admission; no file references.
-        images: Vec<codewhale_protocol::runtime::RuntimeImageInput>,
-        mode: AppMode,
-        /// Exact, structurally resolved route authority for this turn. The
-        /// engine activates its client before mutating turn state; injected
-        /// engines may use their already-supplied client with the same receipt.
-        route: Box<ResolvedRuntimeRoute>,
-        /// Compaction policy derived from the same provider route. Carrying it
-        /// atomically avoids a model/limit mismatch before `SendMessage`.
-        compaction: Box<CompactionConfig>,
-        /// Auxiliary provider calls completed while planning this exact turn
-        /// (currently Auto's classifier), bounded and paired with their own
-        /// immutable routes. The engine folds their tokens into total usage
-        /// only; they never enter the parent route's billing aggregate.
-        initial_routed_usage: Box<crate::cost_status::RuntimeUsageBatch>,
-        goal_objective: Option<String>,
-        goal_token_budget: Option<u32>,
-        goal_status: GoalStatus,
-        /// Reasoning-effort tier: `"off" | "low" | "medium" | "high" | "max"`.
-        /// `None` lets the provider apply its default.
-        reasoning_effort: Option<String>,
-        /// True when the user selected auto thinking, even though the UI sends
-        /// a concrete per-turn value to the model API.
-        reasoning_effort_auto: bool,
-        /// True when the user selected auto model routing.
-        auto_model: bool,
-        allow_shell: bool,
-        trust_mode: bool,
-        auto_approve: bool,
-        approval_mode: ApprovalMode,
-        translation_enabled: bool,
-        /// Tool restriction from custom slash command frontmatter.
-        /// `None` means the current turn may use the normal tool set.
-        allowed_tools: Option<Vec<String>>,
-        /// Runtime-supplied tools available only for this turn.
-        dynamic_tools: Vec<DynamicToolSpec>,
-        /// Hook executor for control-plane hooks.
-        /// `ToolCallBefore` hooks may deny a tool call with exit code 2.
-        hook_executor: Option<std::sync::Arc<crate::hooks::HookExecutor>>,
-        verbosity: Option<String>,
-        /// Structural input origin. This gates whether the turn may inherit
-        /// YOLO/auto-approval authority; user-shaped text is not enough.
-        provenance: UserInputProvenance,
-    },
+    SendMessage(TurnSpec),
 
     /// Re-check and dispatch an interactive goal continuation when this
     /// operation reaches the front of the engine queue. Keeping this distinct
@@ -293,7 +299,6 @@ pub enum Op {
     FollowUpSubAgent { agent_id: String, text: String },
 
     /// Change the operating mode
-    #[allow(dead_code)]
     ChangeMode {
         mode: AppMode,
         allow_shell: bool,
@@ -304,7 +309,6 @@ pub enum Op {
     },
 
     /// Update the model being used and refresh stable prompt context.
-    #[allow(dead_code)]
     SetModel {
         model: String,
         mode: AppMode,
@@ -418,7 +422,7 @@ pub enum Op {
 
     /// Edit the last user message: remove the last user+assistant exchange
     /// from the session, then re-send with the new content.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     EditLastTurn { new_message: String },
 
     /// Enable or disable the background advisor watcher for this session.

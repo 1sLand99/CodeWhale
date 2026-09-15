@@ -673,10 +673,31 @@ impl App {
                 plugin_registry.as_ref(),
             )
             .map(|cfg| {
+                // Boot is lazy (#6033): the pre-event "connecting" prediction
+                // is the eager set — `required` servers plus ones the user's
+                // `tools.always_load` selection covers — not every enabled
+                // server. The engine's first boot event replaces this with
+                // the real in-flight set.
+                let requested = config
+                    .tools
+                    .as_ref()
+                    .map(|tools| {
+                        tools
+                            .always_load
+                            .iter()
+                            .map(|name| name.trim().to_ascii_lowercase())
+                            .filter(|name| name.starts_with("mcp_"))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
                 let mut connecting = cfg
                     .servers
                     .iter()
                     .filter(|(_, server)| server.is_enabled())
+                    .filter(|(name, server)| {
+                        server.required
+                            || crate::mcp::tool_selection_covers_server(&requested, name)
+                    })
                     .map(|(name, _)| name.clone())
                     .collect::<Vec<_>>();
                 connecting.sort();
@@ -826,6 +847,7 @@ impl App {
             workspace,
             workflow_config: config.workflow_config(),
             goal_max_continuations: config.goal_max_continuations(),
+            goal_enforce_token_budget: config.goal_enforce_token_budget(),
             goal_continuation_waiting: false,
             configured_sandbox_mode: config.sandbox_mode.clone(),
             configured_sandbox_network: config.sandbox_network_access,

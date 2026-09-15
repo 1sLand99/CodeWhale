@@ -207,15 +207,11 @@ pub struct TuiOptions {
     pub use_bracketed_paste: bool,
     /// Maximum number of concurrent sub-agents.
     pub max_subagents: usize,
-    #[allow(dead_code)]
     pub skills_dir: PathBuf,
-    #[allow(dead_code)]
     pub memory_path: PathBuf,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub notes_path: PathBuf,
-    #[allow(dead_code)]
     pub mcp_config_path: PathBuf,
-    #[allow(dead_code)]
     pub use_memory: bool,
     /// Start in agent mode (defaults to agent; --yolo starts in YOLO)
     pub start_in_agent_mode: bool,
@@ -308,7 +304,7 @@ pub enum SubmitDisposition {
     Steer,
     /// Park on `queued_messages` for dispatch after TurnComplete.
     /// Legacy path; #382 unified busy states under `Queue`.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     QueueFollowUp,
 }
 

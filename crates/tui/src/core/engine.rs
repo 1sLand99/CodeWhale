@@ -79,7 +79,7 @@ use super::authority::{
 };
 use super::events::{Event, TurnOutcomeStatus, TurnRoute};
 use super::ops::{
-    McpManagerUpdate, Op, ProviderRuntimeStatus, SessionContextBudget, SessionSnapshot,
+    McpManagerUpdate, Op, ProviderRuntimeStatus, SessionContextBudget, SessionSnapshot, TurnSpec,
     USER_SHELL_TOOL_ID_PREFIX, UserInputProvenance,
 };
 use super::session::Session;
@@ -409,6 +409,10 @@ pub struct EngineConfig {
     /// immediately; positive values opt coordinator goals into a cancellable
     /// quiet period (#5508).
     pub goal_continuation_delay_seconds: u64,
+    /// Whether a goal's `token_budget` is a hard stop (`BudgetLimit`) instead
+    /// of advisory telemetry. Resolved from `[goal] enforce_token_budget`;
+    /// default `false` (#6013).
+    pub goal_enforce_token_budget: bool,
     /// Maximum number of automatic re-requests when the model returns only
     /// reasoning without any answer or tool call. Defaults to 2.
     /// Resolved from `[reasoning_only] max_reprompts` in config.toml.
@@ -587,6 +591,7 @@ impl Default for EngineConfig {
             goal_status: GoalStatus::Active,
             goal_max_continuations: crate::goal_loop::DEFAULT_MAX_GOAL_CONTINUATIONS,
             goal_continuation_delay_seconds: 0,
+            goal_enforce_token_budget: false,
             reasoning_only_max_reprompts: crate::config::DEFAULT_REASONING_ONLY_REPROMPTS,
             // `None` means "use the built-in nudge". Storing the default text
             // here instead would make an operator's explicit empty string
@@ -643,7 +648,6 @@ impl Default for EngineConfig {
 /// `External`, `Preempted`, and `Internal` are reserved for the
 /// remaining direct cancellation paths tracked in #1541.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum CancelReason {
     /// User-initiated cancel (Esc, `/cancel`, click cancel on modal).
     User,
@@ -653,6 +657,7 @@ pub enum CancelReason {
     /// Cancel triggered when a new turn starts before the previous one
     /// finished — e.g. plain Enter while busy after the queueing path
     /// pre-empts the running turn.
+    #[expect(dead_code)]
     Preempted,
     /// Engine internals tore down the turn (drop, channel close,
     /// shutdown). Rare — surfaced as an internal error.
@@ -794,6 +799,19 @@ enum McpBootUpdate {
         authority_errors: Arc<HashMap<String, String>>,
         connection_errors: HashMap<String, String>,
     },
+}
+
+type ExplicitConnectJoin =
+    Result<(String, Result<crate::mcp::McpConnection, anyhow::Error>), tokio::task::JoinError>;
+
+/// In-flight connects a turn started because its explicit tool selection
+/// named them (#6033). `names` tracks the still-unresolved servers so an
+/// abort can clear their `connecting` marks in the pool; the catalog
+/// generation pins the authority the batch was spawned under.
+struct ExplicitMcpConnects {
+    connects: tokio::task::JoinSet<(String, Result<crate::mcp::McpConnection, anyhow::Error>)>,
+    names: HashSet<String>,
+    catalog_generation: u64,
 }
 
 /// The core engine that processes operations and emits events
@@ -1516,6 +1534,13 @@ impl Engine {
         );
         let prompt_goal_objective =
             goal_objective_for_prompt(config.goal_objective.as_deref(), &config.goal_state);
+        // #5715: name a prior workspace session that ended mid-turn so the
+        // model can offer recovery without being asked. Frozen-prefix
+        // contributor — computed once here, identical for every turn.
+        let recovery_hint = crate::session_manager::session_recovery_hint(
+            &config.workspace,
+            Some(session.id.as_str()),
+        );
         let prompt_host = if config.terminal_chrome_enabled {
             prompts::PromptHost::Interactive
         } else {
@@ -1544,6 +1569,7 @@ impl Engine {
                         ),
                     ),
                     verbosity: config.verbosity.as_deref(),
+                    recovery_hint: recovery_hint.as_deref(),
                     skills_scan_codewhale_only: config.skills_scan_codewhale_only,
                     plugin_registry: Some(plugin_registry.as_ref()),
                     // Matches `current_mode`'s initial value below; a later
@@ -2495,32 +2521,33 @@ impl Engine {
             ))
             .await;
         let _ = self
-            .handle_send_message(
-                "[runtime] A background shell task finished; its completion evidence follows."
-                    .to_string(),
-                self.current_mode,
-                route,
-                self.config.compaction.clone(),
-                crate::cost_status::RuntimeUsageBatch::default(),
-                self.config.goal_objective.clone(),
-                self.config.goal_token_budget,
-                self.config.goal_status,
-                self.session.reasoning_effort.clone(),
-                self.session.reasoning_effort_auto,
-                self.session.auto_model,
-                self.session.allow_shell,
-                self.session.trust_mode,
-                self.session.auto_approve,
-                self.session.approval_mode,
-                self.config.translation_enabled,
-                self.config.allowed_tools.clone(),
-                Vec::new(),
-                self.config.hook_executor.clone(),
-                self.config.verbosity.clone(),
-                UserInputProvenance::Runtime,
-                Vec::new(),
-                None,
-            )
+            .handle_send_message(TurnSpec {
+                content:
+                    "[runtime] A background shell task finished; its completion evidence follows."
+                        .to_string(),
+                mode: self.current_mode,
+                route: Box::new(route),
+                compaction: Box::new(self.config.compaction.clone()),
+                initial_routed_usage: Box::new(crate::cost_status::RuntimeUsageBatch::default()),
+                goal_objective: self.config.goal_objective.clone(),
+                goal_token_budget: self.config.goal_token_budget,
+                goal_status: self.config.goal_status,
+                reasoning_effort: self.session.reasoning_effort.clone(),
+                reasoning_effort_auto: self.session.reasoning_effort_auto,
+                auto_model: self.session.auto_model,
+                allow_shell: self.session.allow_shell,
+                trust_mode: self.session.trust_mode,
+                auto_approve: self.session.auto_approve,
+                approval_mode: self.session.approval_mode,
+                translation_enabled: self.config.translation_enabled,
+                allowed_tools: self.config.allowed_tools.clone(),
+                dynamic_tools: Vec::new(),
+                hook_executor: self.config.hook_executor.clone(),
+                verbosity: self.config.verbosity.clone(),
+                provenance: UserInputProvenance::Runtime,
+                images: Vec::new(),
+                max_output_tokens: None,
+            })
             .await;
     }
 
@@ -2568,31 +2595,7 @@ impl Engine {
                     self.handle_idle_shell_completion_wake().await;
                 }
                 EngineRunInput::Operation(op) => match *op {
-                    Op::SendMessage {
-                        max_output_tokens,
-                        content,
-                        images,
-                        mode,
-                        route,
-                        compaction,
-                        initial_routed_usage,
-                        goal_objective,
-                        goal_token_budget,
-                        goal_status,
-                        reasoning_effort,
-                        reasoning_effort_auto,
-                        auto_model,
-                        allow_shell,
-                        trust_mode,
-                        auto_approve,
-                        approval_mode,
-                        translation_enabled,
-                        allowed_tools,
-                        dynamic_tools,
-                        hook_executor,
-                        verbosity,
-                        provenance,
-                    } => {
+                    Op::SendMessage(spec) => {
                         self.admitted_turn_control = {
                             let mut controls = self
                                 .turn_controls
@@ -2604,32 +2607,7 @@ impl Engine {
                         };
                         // Keep the send-message state machine out of this
                         // event-loop future's stack frame.
-                        Box::pin(self.handle_send_message(
-                            content,
-                            mode,
-                            *route,
-                            *compaction,
-                            *initial_routed_usage,
-                            goal_objective,
-                            goal_token_budget,
-                            goal_status,
-                            reasoning_effort,
-                            reasoning_effort_auto,
-                            auto_model,
-                            allow_shell,
-                            trust_mode,
-                            auto_approve,
-                            approval_mode,
-                            translation_enabled,
-                            allowed_tools,
-                            dynamic_tools,
-                            hook_executor,
-                            verbosity,
-                            provenance,
-                            images,
-                            max_output_tokens,
-                        ))
-                        .await;
+                        Box::pin(self.handle_send_message(spec)).await;
                     }
                     Op::ContinueGoal {
                         dynamic_tools,
@@ -2711,31 +2689,33 @@ impl Engine {
                         };
 
                         let _ = self
-                            .handle_send_message(
+                            .handle_send_message(TurnSpec {
                                 content,
-                                self.current_mode,
-                                route,
-                                self.config.compaction.clone(),
-                                crate::cost_status::RuntimeUsageBatch::default(),
-                                goal_snapshot.objective,
-                                goal_snapshot.token_budget,
-                                GoalStatus::Active,
-                                self.session.reasoning_effort.clone(),
-                                self.session.reasoning_effort_auto,
-                                self.session.auto_model,
-                                self.session.allow_shell,
-                                self.session.trust_mode,
-                                self.session.auto_approve,
-                                self.session.approval_mode,
-                                self.config.translation_enabled,
-                                self.config.allowed_tools.clone(),
+                                mode: self.current_mode,
+                                route: Box::new(route),
+                                compaction: Box::new(self.config.compaction.clone()),
+                                initial_routed_usage: Box::new(
+                                    crate::cost_status::RuntimeUsageBatch::default(),
+                                ),
+                                goal_objective: goal_snapshot.objective,
+                                goal_token_budget: goal_snapshot.token_budget,
+                                goal_status: GoalStatus::Active,
+                                reasoning_effort: self.session.reasoning_effort.clone(),
+                                reasoning_effort_auto: self.session.reasoning_effort_auto,
+                                auto_model: self.session.auto_model,
+                                allow_shell: self.session.allow_shell,
+                                trust_mode: self.session.trust_mode,
+                                auto_approve: self.session.auto_approve,
+                                approval_mode: self.session.approval_mode,
+                                translation_enabled: self.config.translation_enabled,
+                                allowed_tools: self.config.allowed_tools.clone(),
                                 dynamic_tools,
-                                self.config.hook_executor.clone(),
-                                self.config.verbosity.clone(),
-                                UserInputProvenance::Runtime,
-                                Vec::new(),
-                                None,
-                            )
+                                hook_executor: self.config.hook_executor.clone(),
+                                verbosity: self.config.verbosity.clone(),
+                                provenance: UserInputProvenance::Runtime,
+                                images: Vec::new(),
+                                max_output_tokens: None,
+                            })
                             .await;
                     }
                     Op::RunShellCommand {
@@ -3297,31 +3277,33 @@ impl Engine {
                         // Now dispatch the new message as a normal send,
                         // reusing the engine's stored mode/model config.
                         let mode = self.current_mode;
-                        self.handle_send_message(
-                            new_message.clone(),
+                        self.handle_send_message(TurnSpec {
+                            content: new_message.clone(),
                             mode,
-                            route,
-                            self.config.compaction.clone(),
-                            crate::cost_status::RuntimeUsageBatch::default(),
-                            self.config.goal_objective.clone(),
-                            self.config.goal_token_budget,
-                            self.config.goal_status,
-                            self.session.reasoning_effort.clone(),
-                            self.session.reasoning_effort_auto,
-                            self.session.auto_model,
-                            self.session.allow_shell,
-                            self.session.trust_mode,
-                            self.session.auto_approve,
-                            self.session.approval_mode,
-                            self.config.translation_enabled,
-                            self.config.allowed_tools.clone(),
-                            Vec::new(),
-                            self.config.hook_executor.clone(),
-                            self.config.verbosity.clone(),
-                            UserInputProvenance::ExternalUser,
-                            Vec::new(),
-                            None,
-                        )
+                            route: Box::new(route),
+                            compaction: Box::new(self.config.compaction.clone()),
+                            initial_routed_usage: Box::new(
+                                crate::cost_status::RuntimeUsageBatch::default(),
+                            ),
+                            goal_objective: self.config.goal_objective.clone(),
+                            goal_token_budget: self.config.goal_token_budget,
+                            goal_status: self.config.goal_status,
+                            reasoning_effort: self.session.reasoning_effort.clone(),
+                            reasoning_effort_auto: self.session.reasoning_effort_auto,
+                            auto_model: self.session.auto_model,
+                            allow_shell: self.session.allow_shell,
+                            trust_mode: self.session.trust_mode,
+                            auto_approve: self.session.auto_approve,
+                            approval_mode: self.session.approval_mode,
+                            translation_enabled: self.config.translation_enabled,
+                            allowed_tools: self.config.allowed_tools.clone(),
+                            dynamic_tools: Vec::new(),
+                            hook_executor: self.config.hook_executor.clone(),
+                            verbosity: self.config.verbosity.clone(),
+                            provenance: UserInputProvenance::ExternalUser,
+                            images: Vec::new(),
+                            max_output_tokens: None,
+                        })
                         .await;
                     }
                     Op::SetAdvisorEnabled { enabled } => {
@@ -3957,31 +3939,31 @@ impl Engine {
             .await;
 
         let outcome = self
-            .handle_send_message(
+            .handle_send_message(TurnSpec {
                 content,
-                self.current_mode,
-                route,
-                self.config.compaction.clone(),
-                crate::cost_status::RuntimeUsageBatch::default(),
-                self.config.goal_objective.clone(),
-                self.config.goal_token_budget,
-                self.config.goal_status,
-                self.session.reasoning_effort.clone(),
-                self.session.reasoning_effort_auto,
-                self.session.auto_model,
-                self.session.allow_shell,
-                self.session.trust_mode,
-                self.session.auto_approve,
-                self.session.approval_mode,
-                self.config.translation_enabled,
-                self.config.allowed_tools.clone(),
-                Vec::new(),
-                self.config.hook_executor.clone(),
-                self.config.verbosity.clone(),
-                UserInputProvenance::SubAgentHandoff,
-                Vec::new(),
-                None,
-            )
+                mode: self.current_mode,
+                route: Box::new(route),
+                compaction: Box::new(self.config.compaction.clone()),
+                initial_routed_usage: Box::new(crate::cost_status::RuntimeUsageBatch::default()),
+                goal_objective: self.config.goal_objective.clone(),
+                goal_token_budget: self.config.goal_token_budget,
+                goal_status: self.config.goal_status,
+                reasoning_effort: self.session.reasoning_effort.clone(),
+                reasoning_effort_auto: self.session.reasoning_effort_auto,
+                auto_model: self.session.auto_model,
+                allow_shell: self.session.allow_shell,
+                trust_mode: self.session.trust_mode,
+                auto_approve: self.session.auto_approve,
+                approval_mode: self.session.approval_mode,
+                translation_enabled: self.config.translation_enabled,
+                allowed_tools: self.config.allowed_tools.clone(),
+                dynamic_tools: Vec::new(),
+                hook_executor: self.config.hook_executor.clone(),
+                verbosity: self.config.verbosity.clone(),
+                provenance: UserInputProvenance::SubAgentHandoff,
+                images: Vec::new(),
+                max_output_tokens: None,
+            })
             .await;
         if !outcome.started() {
             for agent_id in claimed_ids {
@@ -4038,9 +4020,12 @@ impl Engine {
                 continuations: snapshot.continuation_count,
             },
             // Unbounded like grokbuild (agent-call cap) and kimicode swarm
-            // (turnBudget per-task, resumable): token/time are telemetry only,
-            // only Completed/Blocked/ContinuationLimit pause the loop.
+            // (turnBudget per-task, resumable): token/time are telemetry only
+            // unless `[goal] enforce_token_budget` opts a set budget into a
+            // hard stop (#6013); otherwise only Completed/Blocked/
+            // ContinuationLimit pause the loop.
             crate::goal_loop::GoalBudget::unbounded()
+                .with_enforced_token_budget(self.config.goal_enforce_token_budget)
                 .with_max_continuations(self.config.goal_max_continuations),
         );
 
@@ -4069,6 +4054,13 @@ impl Engine {
                             self.config.goal_max_continuations,
                         ),
                         GoalPauseReason::Backoff,
+                    ),
+                    crate::goal_loop::StopReason::BudgetLimit => (
+                        "Goal paused: the goal's token budget was reached and \
+                         [goal] enforce_token_budget makes that a hard stop; \
+                         raise the budget or resume to continue."
+                            .to_string(),
+                        GoalPauseReason::BudgetLimit,
                     ),
                     crate::goal_loop::StopReason::Completed
                     | crate::goal_loop::StopReason::Blocked => {
@@ -4558,6 +4550,7 @@ impl Engine {
                 foreground_children,
                 flush_tx,
                 drain_handle,
+                settle_grace: FOREGROUND_CHILD_SETTLE_GRACE,
             })
         } else {
             None
@@ -4745,33 +4738,35 @@ impl Engine {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn handle_send_message(
-        &mut self,
-        content: String,
-        mode: AppMode,
-        route: ResolvedRuntimeRoute,
-        compaction: CompactionConfig,
-        initial_routed_usage: crate::cost_status::RuntimeUsageBatch,
-        goal_objective: Option<String>,
-        goal_token_budget: Option<u32>,
-        goal_status: GoalStatus,
-        reasoning_effort: Option<String>,
-        reasoning_effort_auto: bool,
-        auto_model: bool,
-        allow_shell: bool,
-        trust_mode: bool,
-        auto_approve: bool,
-        approval_mode: ApprovalMode,
-        translation_enabled: bool,
-        allowed_tools: Option<Vec<String>>,
-        dynamic_tools: Vec<DynamicToolSpec>,
-        hook_executor: Option<std::sync::Arc<crate::hooks::HookExecutor>>,
-        verbosity: Option<String>,
-        provenance: UserInputProvenance,
-        images: Vec<codewhale_protocol::runtime::RuntimeImageInput>,
-        max_output_tokens: Option<std::num::NonZeroU32>,
-    ) -> SendMessageOutcome {
+    async fn handle_send_message(&mut self, spec: TurnSpec) -> SendMessageOutcome {
+        let TurnSpec {
+            max_output_tokens,
+            content,
+            images,
+            mode,
+            route,
+            compaction,
+            initial_routed_usage,
+            goal_objective,
+            goal_token_budget,
+            goal_status,
+            reasoning_effort,
+            reasoning_effort_auto,
+            auto_model,
+            allow_shell,
+            trust_mode,
+            auto_approve,
+            approval_mode,
+            translation_enabled,
+            allowed_tools,
+            dynamic_tools,
+            hook_executor,
+            verbosity,
+            provenance,
+        } = spec;
+        let route = *route;
+        let compaction = *compaction;
+        let initial_routed_usage = *initial_routed_usage;
         // All surfaces reuse the same bounded validator. Runtime already checks
         // before admission; this also protects direct in-process operations.
         let images = match crate::image_attach::prepare_stored_images(&images) {
@@ -5426,7 +5421,19 @@ impl Engine {
             if status == TurnOutcomeStatus::Completed && !turn.budget_exhausted_final_report {
                 barrier.continue_and_flush().await;
             } else {
-                barrier.cancel_and_flush().await;
+                // The join is deadline-bounded: a child that never observes
+                // its cancel token is named and left shutting down rather
+                // than withholding `TurnComplete` forever (#6184).
+                let unsettled = barrier.cancel_and_flush().await;
+                if !unsettled.is_empty() {
+                    let _ = self
+                        .tx_event
+                        .send(Event::status(format!(
+                            "Turn ended while sub-agent(s) were still shutting down: {}. Their late receipts were dropped.",
+                            unsettled.join(", ")
+                        )))
+                        .await;
+                }
             }
         }
         // The advisor is dispatched after TurnComplete, but its usage still
@@ -6184,10 +6191,12 @@ impl Engine {
     }
 
     fn mcp_connecting_names(pool: &McpPool, errors: &HashMap<String, String>) -> Vec<String> {
-        let connected = pool.connected_servers();
-        pool.enabled_server_names()
+        // The pool tracks spawned-but-unresolved connects (#6033). Inferring
+        // "connecting" from enabled-minus-connected mislabels every lazy —
+        // configured but never-started — server as mid-handshake.
+        pool.connecting_servers()
             .into_iter()
-            .filter(|name| !connected.contains(&name.as_str()) && !errors.contains_key(name))
+            .filter(|name| !errors.contains_key(name))
             .collect()
     }
 
@@ -6378,18 +6387,24 @@ impl Engine {
         self.drain_mcp_boot_updates().await;
     }
 
-    /// Explicit MCP tool selections need their schemas on the first request.
-    /// Keep unrelated optional servers in the background, using the existing
-    /// bounded connection pass and its authority-checked progress updates.
-    async fn wait_for_explicit_mcp_boot(&mut self, allowed_tools: Option<&[String]>) {
-        let requested = self
-            .config
+    /// `tools_always_load` plus a turn's `allowed_tools`, normalized to the
+    /// lowercase `mcp_*` names the selection grammar uses.
+    fn explicit_mcp_tool_names(&self, allowed_tools: Option<&[String]>) -> Vec<String> {
+        self.config
             .tools_always_load
             .iter()
             .chain(allowed_tools.into_iter().flatten())
             .map(|name| name.trim().to_ascii_lowercase())
             .filter(|name| name.starts_with("mcp_"))
-            .collect::<Vec<_>>();
+            .collect()
+    }
+
+    /// Explicit MCP tool selections need their schemas on the first request.
+    /// Under lazy boot a selected server may never have been started, so this
+    /// begins those connects itself — off the mailbox — and then waits on the
+    /// boot pass and the explicit connects together under the one deadline.
+    async fn wait_for_explicit_mcp_boot(&mut self, allowed_tools: Option<&[String]>) {
+        let requested = self.explicit_mcp_tool_names(allowed_tools);
         if requested.is_empty() {
             return;
         }
@@ -6397,10 +6412,19 @@ impl Engine {
         // unreachable or un-authenticated MCP server is an ordinary state, not
         // an exceptional one, so waiting without a deadline here turned one bad
         // row in the config into an unresponsive session. Past the deadline the
-        // turn proceeds with the tools that are ready; the boot keeps running,
-        // and the missing server's tools become available on a later turn.
+        // turn proceeds with the tools that are ready; the connects keep
+        // running, and the missing server's tools become available on a later
+        // turn.
         let deadline = tokio::time::Instant::now() + Self::MCP_BOOT_UI_WAIT;
-        while self.mcp_boot_in_flight {
+        let mut explicit = self.start_explicit_mcp_connects(&requested).await;
+        let started_explicit = !explicit.names.is_empty();
+        if started_explicit {
+            // The connects are in flight now — surfaces should show the
+            // selected servers as connecting, not configured.
+            let generation = self.next_mcp_event_generation();
+            self.emit_mcp_session_boot(generation, false).await;
+        }
+        while self.mcp_boot_in_flight || !explicit.connects.is_empty() {
             if tokio::time::Instant::now() >= deadline {
                 tracing::info!(
                     waited_secs = Self::MCP_BOOT_UI_WAIT.as_secs(),
@@ -6412,35 +6436,158 @@ impl Engine {
             let Some(pool) = self.mcp_pool.as_ref() else {
                 break;
             };
-            let pending =
+            let connecting =
                 Self::mcp_connecting_names(&*pool.lock().await, &self.mcp_connection_errors);
-            let needs_schema = pending.iter().any(|server| {
-                let prefix = format!("mcp_{}_", server.to_ascii_lowercase());
-                requested.iter().any(|name| {
-                    name.starts_with(&prefix)
-                        || name
-                            .strip_suffix('*')
-                            .is_some_and(|rule| prefix.starts_with(rule))
-                })
-            });
+            let needs_schema = connecting
+                .iter()
+                .any(|server| crate::mcp::tool_selection_covers_server(&requested, server));
             if !needs_schema {
                 break;
             }
-            let Some(rx) = self.mcp_boot_rx.as_mut() else {
-                break;
-            };
             // The deadline has to cover this await too: a server that accepts
             // the connection and then goes quiet sends no progress update at
             // all, so checking only at the top of the loop would still park the
             // turn here indefinitely.
-            let update = tokio::select! {
-                _ = self.cancel_token.cancelled() => None,
-                () = tokio::time::sleep_until(deadline) => None,
-                update = rx.recv() => update,
+            enum WaitOutcome {
+                Cancel,
+                Deadline,
+                Boot(Option<McpBootUpdate>),
+                Connect(Option<Box<ExplicitConnectJoin>>),
+            }
+            let outcome = tokio::select! {
+                _ = self.cancel_token.cancelled() => WaitOutcome::Cancel,
+                () = tokio::time::sleep_until(deadline) => WaitOutcome::Deadline,
+                update = async {
+                    match self.mcp_boot_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => WaitOutcome::Boot(update),
+                joined = explicit.connects.join_next(), if !explicit.connects.is_empty() => {
+                    WaitOutcome::Connect(joined.map(Box::new))
+                }
             };
-            let Some(update) = update else { break };
-            self.apply_mcp_boot_update(update).await;
+            match outcome {
+                WaitOutcome::Cancel | WaitOutcome::Deadline => break,
+                WaitOutcome::Boot(Some(update)) => self.apply_mcp_boot_update(update).await,
+                // The boot channel closing means the pass ended without a
+                // Finished update; explicit connects may still be running.
+                WaitOutcome::Boot(None) => {
+                    if let Some(generation) = self.mcp_boot_generation {
+                        self.finish_mcp_boot_generation(generation);
+                    }
+                }
+                WaitOutcome::Connect(Some(joined)) => {
+                    self.store_explicit_connect_result(&mut explicit, *joined)
+                        .await;
+                }
+                WaitOutcome::Connect(None) => {}
+            }
         }
+        if !explicit.connects.is_empty() {
+            explicit.connects.abort_all();
+            if let Some(pool) = self.mcp_pool.as_ref() {
+                pool.lock().await.cancel_connecting(&explicit.names);
+            }
+        }
+        if started_explicit {
+            // Close out the in-flight marks: a deadline-aborted server must
+            // stop reading "connecting" on the next paint.
+            let generation = self.next_mcp_event_generation();
+            self.emit_mcp_session_boot(generation, !self.mcp_boot_in_flight)
+                .await;
+        }
+    }
+
+    /// Start connects for servers an explicit tool selection covers but the
+    /// boot pass left lazy (#6033). Selection is intent: cooldowns do not
+    /// apply, but enabled/allowed/plugin authority checks do.
+    async fn start_explicit_mcp_connects(&mut self, requested: &[String]) -> ExplicitMcpConnects {
+        let mut state = ExplicitMcpConnects {
+            connects: tokio::task::JoinSet::new(),
+            names: HashSet::new(),
+            catalog_generation: 0,
+        };
+        let Some(pool) = self.mcp_pool.as_ref() else {
+            return state;
+        };
+        let (pending, errors, timeouts, network_policy, generation) = {
+            let mut pool = pool.lock().await;
+            let names = pool.explicitly_selected_server_names(requested);
+            let (pending, errors) = pool.take_pending_connects_for(&names);
+            (
+                pending,
+                errors,
+                pool.connect_timeouts(),
+                pool.cloned_network_policy(),
+                pool.current_catalog_generation(),
+            )
+        };
+        for (name, error) in errors {
+            self.mcp_connection_errors
+                .insert(name, crate::mcp::format_mcp_error_for_display(&error));
+        }
+        state.catalog_generation = generation;
+        state.names = pending.iter().map(|(name, _)| name.clone()).collect();
+        state.connects =
+            McpPool::spawn_pending_connects(pending, timeouts, network_policy, generation);
+        state
+    }
+
+    /// Store one resolved explicit connect under the same authority
+    /// discipline as the boot pass: a config reload mid-handshake invalidates
+    /// the rest of the batch instead of letting old-authority results land.
+    async fn store_explicit_connect_result(
+        &mut self,
+        explicit: &mut ExplicitMcpConnects,
+        joined: ExplicitConnectJoin,
+    ) {
+        let (name, result) =
+            joined.unwrap_or_else(|error| ("connection task".to_string(), Err(error.into())));
+        explicit.names.remove(&name);
+        let Some(pool) = self.mcp_pool.as_ref() else {
+            return;
+        };
+        {
+            let mut pool = pool.lock().await;
+            let reload = pool.reload_if_config_changed().await;
+            if reload.is_err() || pool.current_catalog_generation() != explicit.catalog_generation {
+                explicit.connects.abort_all();
+                // `name` already left `names` above — its mark dies with the
+                // aborted batch too.
+                explicit.names.insert(name);
+                pool.cancel_connecting(&explicit.names);
+                explicit.names.clear();
+                if let Err(error) = reload {
+                    self.mcp_connection_errors.insert(
+                        "configuration".to_string(),
+                        crate::mcp::format_mcp_error_for_display(&error),
+                    );
+                }
+                return;
+            }
+            let result =
+                result.and_then(|connection| pool.store_ready_connection(name.clone(), connection));
+            match result {
+                Ok(()) => {
+                    self.mcp_connection_errors.remove(&name);
+                }
+                Err(error) => {
+                    pool.note_connect_failure(&name, &error);
+                    self.mcp_connection_errors
+                        .insert(name, crate::mcp::format_mcp_error_for_display(&error));
+                }
+            }
+        }
+        self.session.pending_prefix_change_reason = Some("mcp-session-boot".to_string());
+        // A resolved selection connect refreshes the server surfaces the
+        // same way a `/mcp` retry does, without waiting for the boot pass.
+        let generation = self.next_mcp_event_generation();
+        self.emit_mcp_session_boot(
+            generation,
+            !self.mcp_boot_in_flight && explicit.connects.is_empty(),
+        )
+        .await;
     }
 
     /// Start the concurrent connect pass without occupying the engine mailbox.
@@ -6470,6 +6617,12 @@ impl Engine {
             }
         };
 
+        // Boot is lazy (#6033): a configured server nobody asked for is not
+        // spawned at session start. The eager set is `required` servers plus
+        // whatever the session's explicit tool selections cover; everything
+        // else connects on demand — a selected turn, a `/mcp` connect, or a
+        // lazy tool-name resolution.
+        let requested = self.explicit_mcp_tool_names(self.config.allowed_tools.as_deref());
         let (pending, auth_errors, timeouts, network_policy, catalog_generation) = {
             let mut pool = pool.lock().await;
             match refresh {
@@ -6485,7 +6638,8 @@ impl Engine {
                 // so a failed explicit reload leaves the live pool intact.
                 McpConnectRefresh::Force => pool.force_reload_config_sources()?,
             }
-            let (pending, auth_errors) = pool.collect_pending_connects();
+            let eager = pool.eager_boot_server_names(&requested);
+            let (pending, auth_errors) = pool.collect_pending_connects(Some(&eager));
             (
                 pending,
                 auth_errors,
@@ -6524,7 +6678,7 @@ impl Engine {
             "mcp-session-boot",
             std::panic::Location::caller(),
             async move {
-                let mut remaining: Vec<String> =
+                let mut remaining: HashSet<String> =
                     pending.iter().map(|(name, _)| name.clone()).collect();
                 let mut connects = McpPool::spawn_pending_connects(
                     pending,
@@ -6536,8 +6690,8 @@ impl Engine {
                 while let Some(joined) = connects.join_next().await {
                     let (name, result) = joined
                         .unwrap_or_else(|error| ("connection task".to_string(), Err(error.into())));
-                    remaining.retain(|pending_name| pending_name != &name);
-                    {
+                    remaining.remove(&name);
+                    let connecting = {
                         let mut pool = pool_for_task.lock().await;
                         // A turn may have reloaded the pool while these handshakes
                         // were in flight. Never let their old authority or failures
@@ -6547,6 +6701,10 @@ impl Engine {
                             || pool.current_catalog_generation() != catalog_generation
                         {
                             connects.abort_all();
+                            // `name` already left `remaining` above — its
+                            // mark dies with the aborted pass too.
+                            remaining.insert(name.clone());
+                            pool.cancel_connecting(&remaining);
                             connection_errors.clear();
                             if let Err(error) = reload {
                                 connection_errors.insert(
@@ -6564,12 +6722,16 @@ impl Engine {
                             connection_errors
                                 .insert(name, crate::mcp::format_mcp_error_for_display(&error));
                         }
-                    }
+                        // The pool's in-flight set also names connects a turn
+                        // started on an explicit selection while this pass was
+                        // running — report what is actually connecting.
+                        pool.connecting_servers()
+                    };
                     let _ = progress_tx.try_send(McpBootUpdate::Progress {
                         generation,
                         authority_errors: Arc::clone(&authority_errors),
                         connection_errors: connection_errors.clone(),
-                        connecting: remaining.clone(),
+                        connecting,
                     });
                 }
                 {
@@ -6689,28 +6851,35 @@ impl Engine {
             return pool.lock().await.to_api_tools();
         }
 
-        let mut pool = pool.lock().await;
-        let errors = pool.connect_all().await;
-        self.mcp_connection_errors = errors
-            .into_iter()
-            .map(|(server, error)| (server, crate::mcp::format_mcp_error_for_display(&error)))
-            .collect();
-        // Failures stay on the session-boot snapshot, not as Status toasts.
-        drop(pool);
-        let generation = self.next_mcp_event_generation();
-        self.emit_mcp_session_boot(generation, true).await;
-        self.mcp_pool
-            .as_ref()
-            .expect("pool exists")
-            .lock()
-            .await
-            .to_api_tools()
+        // Boot is lazy (#6033): unselected servers stay unconnected on
+        // purpose, so there is no per-turn sweep here. A `required` server
+        // that never got an attempt still owes the session an honest error
+        // row — `push_required_server_errors` only fills gaps a real
+        // diagnosis did not already cover.
+        let mut gaps = Vec::new();
+        {
+            let pool = pool.lock().await;
+            pool.push_required_server_errors(&mut gaps);
+        }
+        let mut inserted = false;
+        for (name, error) in gaps {
+            self.mcp_connection_errors.entry(name).or_insert_with(|| {
+                inserted = true;
+                crate::mcp::format_mcp_error_for_display(&error)
+            });
+        }
+        if inserted {
+            // Failures stay on the session-boot snapshot, not as Status toasts.
+            let generation = self.next_mcp_event_generation();
+            self.emit_mcp_session_boot(generation, true).await;
+        }
+        pool.lock().await.to_api_tools()
     }
 
     /// Handle a turn using the DeepSeek API.
     #[allow(clippy::too_many_lines)]
     /// Refresh the stable system prompt based on current non-mode context.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(not(test), expect(dead_code))]
     fn refresh_system_prompt(&mut self) {
         self.refresh_system_prompt_with_reason("system");
     }
@@ -6830,6 +6999,12 @@ impl Engine {
         } else {
             prompts::PromptHost::Headless
         };
+        // Recomputed on each refresh (#5715): the prior session's checkpoint
+        // may have settled or been resumed since construction.
+        let recovery_hint = crate::session_manager::session_recovery_hint(
+            &self.config.workspace,
+            Some(self.session.id.as_str()),
+        );
         let base =
             prompts::system_prompt_for_mode_with_context_skills_session_and_approval_for_host(
                 &self.config.workspace,
@@ -6851,6 +7026,7 @@ impl Engine {
                         ),
                     ),
                     verbosity: context.verbosity.as_deref(),
+                    recovery_hint: recovery_hint.as_deref(),
                     skills_scan_codewhale_only: self.config.skills_scan_codewhale_only,
                     plugin_registry: Some(self.plugin_registry.as_ref()),
                     mode: context.mode,
@@ -7517,7 +7693,14 @@ impl NextTurnPromptContext {
     }
 }
 
-/// Result of one turn tool-catalog build.
+/// Grace period for cancelled turn-owned children to release their barrier
+/// registration before the terminal turn event is emitted anyway (#6184).
+/// Cooperative children settle in milliseconds; the bound exists so a child
+/// parked on an await that never observes its cancel token cannot withhold
+/// `TurnComplete` — a child still shutting down is strictly less harmful
+/// than a turn that silently never finishes.
+const FOREGROUND_CHILD_SETTLE_GRACE: Duration = Duration::from_secs(5);
+
 /// Turn-scoped mailbox handle plus the machinery needed to close it exactly
 /// once. Held by the engine (never by the child runtime) so the flush barrier
 /// is owned by the same code that emits the terminal turn event.
@@ -7527,6 +7710,8 @@ pub(crate) struct TurnMailboxBarrier {
     pub(crate) foreground_children: Arc<ForegroundChildRegistry>,
     pub(crate) flush_tx: tokio::sync::oneshot::Sender<()>,
     pub(crate) drain_handle: tokio::task::JoinHandle<()>,
+    /// Bound on the cancelled-child join inside `cancel_and_flush` (#6184).
+    pub(crate) settle_grace: Duration,
 }
 
 fn terminal_turn_status_at_settlement(
@@ -7544,9 +7729,16 @@ impl TurnMailboxBarrier {
     /// Settle the foreground subtree before closing the turn's mailbox. The
     /// ordering is intentional: a terminal turn event must never be emitted
     /// while an owned child can still publish into this turn's shared state.
-    pub(crate) async fn cancel_and_flush(self) {
-        self.foreground_children.cancel_and_wait().await;
+    ///
+    /// The join is best-effort and bounded by `settle_grace` (#6184): a
+    /// child parked on an await that never observes its cancel token must
+    /// not withhold `TurnComplete`. Returns the labels of any children
+    /// still registered when the join gave up — empty on a clean settle —
+    /// so the caller can name them in the terminal turn event.
+    pub(crate) async fn cancel_and_flush(self) -> Vec<String> {
+        let unsettled = self.join_foreground_children().await;
         self.flush().await;
+        unsettled
     }
 
     /// A normal answer closes this turn's UI mailbox without cancelling
@@ -7557,6 +7749,33 @@ impl TurnMailboxBarrier {
         self.flush().await;
     }
 
+    /// Wait for cancelled foreground children to release their
+    /// registration, giving up at `settle_grace` or when a *new*
+    /// cancellation lands mid-wait. The Esc path reaches this barrier with
+    /// the turn token already cancelled, so the early-exit arm is only
+    /// armed when it is not — otherwise every interrupted turn's receipt
+    /// window would collapse to zero instead of merely being bounded.
+    async fn join_foreground_children(&self) -> Vec<String> {
+        let join = self.foreground_children.cancel_and_wait();
+        tokio::pin!(join);
+        let fresh_cancel = !self.cancel_token.is_cancelled();
+        let gave_up = tokio::select! {
+            biased;
+            () = &mut join => false,
+            () = self.cancel_token.cancelled(), if fresh_cancel => true,
+            () = tokio::time::sleep(self.settle_grace) => true,
+        };
+        if !gave_up {
+            return Vec::new();
+        }
+        let labels = self.foreground_children.unsettled_labels();
+        tracing::warn!(
+            unsettled_children = ?labels,
+            "foreground child join exceeded its bound; sealing the turn mailbox with children still registered"
+        );
+        labels
+    }
+
     async fn flush(self) {
         self.mailbox.seal();
         let _ = self.flush_tx.send(());
@@ -7564,6 +7783,7 @@ impl TurnMailboxBarrier {
     }
 }
 
+/// Result of one turn tool-catalog build.
 struct TurnToolBuild {
     /// One authority for executable, searchable, and initially active tools.
     surface: ToolSurfacePolicy,
@@ -7573,7 +7793,7 @@ struct TurnToolBuild {
     mcp: McpToolState,
     /// Route model installed into the child runtime, when sub-agent tools were
     /// available. This is an internal receipt, not a manifest field.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(not(test), expect(dead_code))]
     subagent_runtime_model: Option<String>,
     /// Turn-scoped sub-agent mailbox and its flush barrier, when sub-agent
     /// wiring was live. The engine must seal, flush, and await this before it
@@ -7754,6 +7974,10 @@ mod tool_preparation;
 mod tool_setup;
 pub(crate) mod turn_budget;
 pub(crate) mod turn_loop;
+pub(crate) use dispatch::{
+    FLEET_FINAL_REPORT_NOTICE, FLEET_NO_PROGRESS_STOP, FLEET_STRATEGY_SWITCH_NOTICE,
+    FleetDenialAction, FleetDenialBatch, FleetDenialGuard,
+};
 pub(crate) use token_estimate_cache::TokenEstimateCache;
 
 pub(super) const MAX_PARALLEL_SHELL_EXEC: usize = 4;

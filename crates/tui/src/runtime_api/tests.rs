@@ -1,6 +1,6 @@
 use super::*;
 use crate::core::events::{Event as EngineEvent, TurnOutcomeStatus};
-use crate::core::ops::Op;
+use crate::core::ops::{Op, TurnSpec};
 use crate::runtime_threads::RuntimeEventRecord;
 use crate::test_support::{EnvVarGuard, lock_test_env};
 use anyhow::{Context, bail};
@@ -14,7 +14,9 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::time::sleep;
 use uuid::Uuid;
 
+mod command_catalog;
 mod headless_catalog;
+mod workspace_instructions;
 
 /// Scale a wait budget for shared CI runners.
 ///
@@ -2865,7 +2867,7 @@ async fn compatibility_stream_closes_losslessly_across_replay_live_handoff() -> 
     let (release_overlap, wait_for_overlap_release) = oneshot::channel();
     let (release_terminal, wait_for_terminal_release) = oneshot::channel();
     let engine_task = tokio::spawn(async move {
-        if !matches!(rx_op.recv().await, Some(Op::SendMessage { .. })) {
+        if !matches!(rx_op.recv().await, Some(Op::SendMessage(TurnSpec { .. }))) {
             return;
         }
         let _ = wait_for_overlap_release.await;
@@ -3068,7 +3070,10 @@ async fn compatibility_stream_exposes_and_resolves_user_input_without_answer_ech
     let (submission_tx, submission_rx) = oneshot::channel();
     let (release_completion, wait_for_completion_release) = oneshot::channel();
     let engine_task = tokio::spawn(async move {
-        if !matches!(harness.rx_op.recv().await, Some(Op::SendMessage { .. })) {
+        if !matches!(
+            harness.rx_op.recv().await,
+            Some(Op::SendMessage(TurnSpec { .. }))
+        ) {
             bail!("compatibility interaction engine did not receive a prompt");
         }
         harness
@@ -3488,7 +3493,7 @@ async fn thread_endpoints_expose_lifecycle_contract() -> Result<()> {
     tokio::spawn(async move {
         while let Some(op) = rx_op.recv().await {
             match op {
-                Op::SendMessage { .. } => {
+                Op::SendMessage(TurnSpec { .. }) => {
                     let _ = tx_event
                         .send(EngineEvent::TurnStarted {
                             turn_id: "mock_lifecycle".to_string(),
@@ -3667,7 +3672,7 @@ async fn turn_endpoint_operation_key_returns_original_and_conflicts_on_mismatch(
     let tx_event = harness.tx_event.clone();
     tokio::spawn(async move {
         while let Some(op) = harness.rx_op.recv().await {
-            if !matches!(op, Op::SendMessage { .. }) {
+            if !matches!(op, Op::SendMessage(TurnSpec { .. })) {
                 continue;
             }
             counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -3806,7 +3811,7 @@ async fn turn_operation_lookup_is_authenticated_read_only_and_survives_restart()
         tokio::time::timeout(ci_scaled(Duration::from_secs(2)), engine.rx_op.recv())
             .await?
             .context("accepted mock Engine operation")?,
-        Op::SendMessage { .. }
+        Op::SendMessage(TurnSpec { .. })
     ));
 
     let endpoint = format!(
@@ -3984,7 +3989,7 @@ async fn events_endpoint_respects_since_seq_cursor() -> Result<()> {
     let mut rx_op = harness.rx_op;
     let tx_event = harness.tx_event;
     tokio::spawn(async move {
-        if !matches!(rx_op.recv().await, Some(Op::SendMessage { .. })) {
+        if !matches!(rx_op.recv().await, Some(Op::SendMessage(TurnSpec { .. }))) {
             return;
         }
         let _ = tx_event
@@ -4397,7 +4402,7 @@ async fn steer_and_interrupt_endpoints_work_on_active_turn() -> Result<()> {
     let tx_event = harness.tx_event;
     let cancel_token = harness.cancel_token;
     tokio::spawn(async move {
-        if !matches!(rx_op.recv().await, Some(Op::SendMessage { .. })) {
+        if !matches!(rx_op.recv().await, Some(Op::SendMessage(TurnSpec { .. }))) {
             return;
         }
         let _ = tx_event
@@ -4860,7 +4865,7 @@ async fn stream_endpoint_remains_backward_compatible() -> Result<()> {
     let mut rx_op = harness.rx_op;
     let tx_event = harness.tx_event;
     tokio::spawn(async move {
-        if !matches!(rx_op.recv().await, Some(Op::SendMessage { .. })) {
+        if !matches!(rx_op.recv().await, Some(Op::SendMessage(TurnSpec { .. }))) {
             return;
         }
         let _ = tx_event
@@ -6075,7 +6080,7 @@ async fn session_create_from_thread_rejects_active_turn() -> Result<()> {
     let (active_tx, active_rx) = oneshot::channel();
     let (finish_tx, finish_rx) = oneshot::channel();
     tokio::spawn(async move {
-        if !matches!(rx_op.recv().await, Some(Op::SendMessage { .. })) {
+        if !matches!(rx_op.recv().await, Some(Op::SendMessage(TurnSpec { .. }))) {
             return;
         }
         let _ = tx_event
@@ -14462,7 +14467,7 @@ async fn runtime_image_http_rejects_before_dispatch_and_accepts_large_canonical_
     let response = client.post(&url).json(&body).send().await?;
     assert_eq!(response.status(), StatusCode::CREATED);
     let accepted: Value = response.json().await?;
-    let Op::SendMessage { images, .. } =
+    let Op::SendMessage(TurnSpec { images, .. }) =
         harness.rx_op.recv().await.context("accepted Engine op")?
     else {
         bail!("expected SendMessage");
@@ -15659,75 +15664,6 @@ async fn jobs_api_lists_creates_streams_stdin_and_kills() -> Result<()> {
 }
 
 #[tokio::test]
-async fn commands_catalog_projects_registry_with_discovery_and_argument_hints() -> Result<()> {
-    let tmp = tempfile::tempdir()?;
-    let workspace = tmp.path().join("workspace");
-    fs::create_dir_all(&workspace)?;
-    let (addr, _runtime_threads, handle) = spawn_test_server_with_root_token_mobile_workspace(
-        tmp.path().join("runtime"),
-        tmp.path().join("sessions"),
-        Some("commands-token".to_string()),
-        false,
-        workspace.clone(),
-    )
-    .await?
-    .context("commands test requires a loopback listener")?;
-    let client = crate::tls::reqwest_client();
-    let base = format!("http://{addr}");
-
-    let status = client
-        .get(format!("{base}/v1/commands"))
-        .send()
-        .await?
-        .status();
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
-
-    let catalog: Value = client
-        .get(format!("{base}/v1/commands"))
-        .bearer_auth("commands-token")
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    let commands = catalog["commands"].as_array().unwrap();
-    assert!(commands.len() > 20, "catalog should cover the registry");
-
-    // Every row carries the typed shape the composer needs — no stringly
-    // discovery or re-parsed usage lines on the client.
-    for command in commands {
-        assert!(command["name"].as_str().is_some_and(|n| !n.is_empty()));
-        assert!(command["usage"].as_str().is_some());
-        assert!(command["description"].as_str().is_some());
-        assert!(command["aliases"].is_array());
-        assert!(command["subcommands"].is_array());
-        assert!(matches!(
-            command["discovery"].as_str(),
-            Some("primary" | "advanced" | "compatibility")
-        ));
-        assert!(command["requires_argument"].is_boolean());
-        assert!(command["requires_required_argument"].is_boolean());
-        assert!(command["composer_wants_trailing_space"].is_boolean());
-        assert!(command["palette_runs_directly"].is_boolean());
-        assert!(command["show_in_empty_discovery"].is_boolean());
-        assert!(command["unlisted"].is_boolean());
-    }
-
-    // Argument hints must distinguish a mandatory-argument command from a
-    // bare one rather than flattening them.
-    let by_name = |name: &str| commands.iter().find(|c| c["name"] == name);
-    let profile = by_name("profile").expect("profile is a registered command");
-    assert_eq!(profile["requires_required_argument"], true);
-    assert_eq!(profile["palette_runs_directly"], false);
-    let clear = by_name("clear").expect("clear is a registered command");
-    assert_eq!(clear["requires_argument"], false);
-    assert_eq!(clear["palette_runs_directly"], true);
-
-    handle.abort();
-    Ok(())
-}
-
-#[tokio::test]
 async fn thread_context_reports_live_budget_from_the_engine() -> Result<()> {
     let tmp = tempfile::tempdir()?;
     let workspace = tmp.path().join("workspace");
@@ -16369,7 +16305,7 @@ async fn voice_routes_report_capability_and_fail_closed_without_a_recorder() -> 
         .await?;
     assert_eq!(status["available"], false);
     assert!(status["recorder"].is_null());
-    assert_eq!(status["asr"]["kind"].as_str().unwrap().is_empty(), false);
+    assert!(!status["asr"]["kind"].as_str().unwrap().is_empty());
     assert_eq!(status["modes"].as_array().unwrap().len(), 3);
     assert!(status["send_phrases"].as_array().unwrap().len() >= 3);
     assert_eq!(status["max_record_seconds"], 10);

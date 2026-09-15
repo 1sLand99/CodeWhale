@@ -3179,6 +3179,7 @@ mod tests;
 // click path (`work_surface` row rects) is reused at the landing slice;
 // not wired into `ui/frame.rs` (#5698 gate).
 
+#[cfg(test)]
 pub use tideline_stream::{TidelineStream, render_tideline_stream};
 
 /// Full export alias for the Tideline components that compose the stream

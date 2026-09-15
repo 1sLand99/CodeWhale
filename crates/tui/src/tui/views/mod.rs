@@ -4272,6 +4272,7 @@ const CONFIG_SHELL_DETAIL_MIN_WIDTH: u16 = 100;
 /// Groups column width (the active tab's `ui.group` names).
 const CONFIG_SHELL_GROUPS_WIDTH: u16 = 18;
 /// Category rail width of the Tideline settings stage scaffold.
+#[cfg(test)]
 const CONFIG_SHELL_RAIL_WIDTH: u16 = 20;
 
 /// Pane geometry for one render of the settings shell.
@@ -4402,6 +4403,7 @@ pub(crate) struct CategoryNavStyle {
 
 /// Paint the vertical rail: one row per category with the selected one
 /// marked. Returns the painted rect of every category (spec §6 parity).
+#[cfg(test)]
 pub(crate) fn render_settings_category_rail(
     area: Rect,
     buf: &mut Buffer,
@@ -11274,18 +11276,19 @@ context_window = 262144
 // the shared rail/strip painters above, so there is exactly one category set.
 
 #[allow(dead_code)] // Tideline settings rail + preview (spec §5a)
+#[cfg(test)]
 pub mod tideline_preview;
 
 /// The seven settings categories in rail order (Appearance → Advanced),
 /// exactly as `ConfigView` paints them.
 #[must_use]
-#[allow(dead_code)] // stage scaffolding: composed by the landing slice
+#[cfg(test)] // stage scaffolding: composed by the landing slice
 pub fn tideline_settings_categories(locale: Locale) -> [Cow<'static, str>; 7] {
     ConfigCategory::ALL.map(|category| category.label(locale))
 }
 
 /// What the caller owes the settings rail.
-#[allow(dead_code)] // stage scaffolding: composed by the landing slice
+#[cfg(test)] // stage scaffolding: composed by the landing slice
 pub struct TidelineSettingsRail<'a> {
     pub theme: &'a codewhale_palette::UiTheme,
     /// Index into [`ConfigCategory::ALL`].
@@ -11294,7 +11297,7 @@ pub struct TidelineSettingsRail<'a> {
     pub locale: Locale,
 }
 
-#[allow(dead_code)] // stage scaffolding: composed by the landing slice
+#[cfg(test)] // stage scaffolding: composed by the landing slice
 impl TidelineSettingsRail<'_> {
     fn category(&self) -> ConfigCategory {
         ConfigCategory::ALL[self.selected.min(ConfigCategory::ALL.len() - 1)]
@@ -11311,14 +11314,14 @@ impl TidelineSettingsRail<'_> {
     }
 }
 
-#[allow(dead_code)] // stage scaffolding: composed by the landing slice
+#[cfg(test)] // stage scaffolding: composed by the landing slice
 fn srail_put(buf: &mut Buffer, x: u16, y: u16, text: &str, style: Style) {
     buf.set_stringn(x, y, text, text.width(), style);
 }
 
 /// Paint the settings rail: the shared category rail with the selected `▸`,
 /// then the meta rows (help / file issue / feedback).
-#[allow(dead_code)] // stage scaffolding: composed by the landing slice
+#[cfg(test)] // stage scaffolding: composed by the landing slice
 pub fn render_tideline_settings_rail(
     area: Rect,
     buf: &mut Buffer,
@@ -11362,7 +11365,7 @@ pub fn render_tideline_settings_rail(
 
 /// Category rects for the rail (spec §6: keyboard + mouse parity).
 #[must_use]
-#[allow(dead_code)] // stage scaffolding: composed by the landing slice
+#[cfg(test)] // stage scaffolding: composed by the landing slice
 pub fn tideline_settings_rail_hitboxes(area: Rect, _rail: &TidelineSettingsRail<'_>) -> Vec<Rect> {
     let mut out = Vec::new();
     if area.width < 4 || area.height < 4 {
@@ -11385,7 +11388,7 @@ pub fn tideline_settings_rail_hitboxes(area: Rect, _rail: &TidelineSettingsRail<
 
 /// Paint the narrow-width category strip for the stage and return the
 /// painted rect of every visible category.
-#[allow(dead_code)] // stage scaffolding: composed by the landing slice
+#[cfg(test)] // stage scaffolding: composed by the landing slice
 pub fn render_tideline_settings_strip(
     area: Rect,
     buf: &mut Buffer,
@@ -11408,12 +11411,13 @@ pub fn render_tideline_settings_strip(
     .collect()
 }
 
+#[cfg(test)]
 use ratatui::layout::{Constraint, Layout};
 
 /// The settings stage composite (spec §5b): `nav │ form │ preview` at
 /// ≥100 columns; below that the category strip sits over the form and the
 /// preview pane sheds.
-#[allow(dead_code)] // stage scaffolding: composed by the landing slice
+#[cfg(test)] // stage scaffolding: composed by the landing slice
 pub struct TidelineSettingsStage<'a> {
     pub rail: TidelineSettingsRail<'a>,
     pub theme_list: crate::tui::theme_picker::TidelineThemeList<'a>,
@@ -11421,7 +11425,7 @@ pub struct TidelineSettingsStage<'a> {
 }
 
 /// Paint the settings stage.
-#[allow(dead_code)] // stage scaffolding: composed by the landing slice
+#[cfg(test)] // stage scaffolding: composed by the landing slice
 pub fn render_tideline_settings_stage(
     area: Rect,
     buf: &mut Buffer,

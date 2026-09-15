@@ -489,10 +489,20 @@ fn detect_free_asr() -> &'static str {
 }
 
 /// Transcribe via local whisper.cpp (free, offline, cross-platform).
+///
+/// The whole body is synchronous — temp-file I/O plus `Command::output()`,
+/// which blocks for the entire subprocess run — so it runs on the blocking
+/// pool rather than a Tokio worker (blocking-call convention, #6149).
 async fn transcribe_local_whisper(audio_samples: &[i16]) -> Result<String, String> {
     let wav = encode_wav(audio_samples);
+    tokio::task::spawn_blocking(move || transcribe_local_whisper_blocking(&wav))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn transcribe_local_whisper_blocking(wav: &[u8]) -> Result<String, String> {
     let tmp = std::env::temp_dir().join(format!("cw-voice-{}.wav", std::process::id()));
-    std::fs::write(&tmp, &wav).map_err(|e| e.to_string())?;
+    std::fs::write(&tmp, wav).map_err(|e| e.to_string())?;
     // Try each local binary until one succeeds; whisper.cpp outputs to stdout or file.
     for bin in LOCAL_WHISPER_BINS {
         let output = Command::new(bin)

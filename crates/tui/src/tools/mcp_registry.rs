@@ -858,14 +858,22 @@ async fn sync_once(path: &Path) -> Result<(), ToolError> {
         servers,
         synced_at: Some(now),
     };
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| ToolError::execution_failed(format!("Create cache dir: {e}")))?;
-    }
+    // Blocking filesystem work (including `write_atomic`'s publish-retry)
+    // runs on the blocking pool — tool handlers execute on the Tokio
+    // runtime (blocking-call convention, #6149).
     let json_str = serde_json::to_string_pretty(&index)
         .map_err(|e| ToolError::execution_failed(format!("Serialize: {e}")))?;
-    write_atomic(path, json_str.as_bytes())
-        .map_err(|e| ToolError::execution_failed(format!("Write cache: {e}")))?;
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| ToolError::execution_failed(format!("Create cache dir: {e}")))?;
+        }
+        write_atomic(&path, json_str.as_bytes())
+            .map_err(|e| ToolError::execution_failed(format!("Write cache: {e}")))
+    })
+    .await
+    .map_err(|e| ToolError::execution_failed(format!("Write cache task: {e}")))??;
     Ok(())
 }
 
