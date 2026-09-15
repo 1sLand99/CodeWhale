@@ -678,6 +678,9 @@ mod tests {
         assert!(bounded["repository_context"].is_null());
     }
 
+    // `*` cannot appear in a Windows filename, so the literal-glob path this
+    // guards is unrepresentable there.
+    #[cfg(unix)]
     #[test]
     fn source_context_is_bounded_line_exact_and_uses_literal_paths() {
         let dir = repository();
