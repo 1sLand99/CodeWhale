@@ -11639,10 +11639,146 @@ async fn live_steer_crosses_message_submit_transform_exactly_once() {
         Some("transformed steer")
     );
     assert_eq!(std::fs::read_to_string(count).expect("hook count"), "x");
-    assert!(app.api_messages.iter().any(|message| matches!(
-        &message.content[0],
-        ContentBlock::Text { text, .. } if text == "transformed steer"
-    )));
+    // #6190: the transform's output is what the engine was handed, and it is
+    // held as in-flight until the engine's own record shows it. Pushing it
+    // into `api_messages` at send time was the reorder this fix removes.
+    assert_eq!(
+        app.inflight_steers
+            .iter()
+            .map(|steer| steer.content.as_str())
+            .collect::<Vec<_>>(),
+        vec!["transformed steer"]
+    );
+    assert!(
+        !app.api_messages.iter().any(|message| matches!(
+            &message.content[0],
+            ContentBlock::Text { text, .. } if text == "transformed steer"
+        )),
+        "a steer the engine has not recorded yet must not be in the local transcript"
+    );
+}
+
+/// #6190: steering did not place the steer as the newest transcript entry —
+/// it was painted at send time, so it sat above assistant work the engine's
+/// record places before it, and the live transcript disagreed with the
+/// replayed one. The steer now becomes a cell when, and where, the engine
+/// records it.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn steer_becomes_the_newest_transcript_entry_only_when_the_engine_records_it() {
+    let _environment = crate::test_support::lock_test_env();
+    let mut app = create_test_app();
+    let session = super::event_loop::ensure_runtime_session_id(&mut app);
+    app.api_messages = vec![text_message("user", "original request")];
+    app.add_message(HistoryCell::Assistant {
+        content: "work produced before the steer arrived".to_string(),
+        streaming: false,
+    });
+    app.is_loading = true;
+    let mut engine = crate::core::engine::mock_engine_handle();
+
+    attempt_steer_with_queue_fallback(
+        &mut app,
+        &Config::default(),
+        &engine.handle,
+        QueuedMessage::new("actually use the other file".to_string(), None),
+        DispatchRecovery::Immediate,
+    )
+    .await;
+    assert_eq!(
+        engine.rx_steer.recv().await.as_deref(),
+        Some("actually use the other file")
+    );
+
+    // The channel took it; the turn has not. Nothing is settled yet.
+    assert!(
+        !app.history
+            .iter()
+            .any(|cell| matches!(cell, HistoryCell::User { .. })),
+        "a steer must not own a transcript cell before the engine records it"
+    );
+    assert_eq!(app.api_messages.len(), 1);
+    assert_eq!(
+        build_pending_input_preview(&app).pending_steers,
+        vec!["actually use the other file".to_string()],
+        "an unaccepted steer is shown as still sending, not as transcript"
+    );
+
+    // The engine commits the steer at its step boundary, after the assistant
+    // message it followed. `is_loading` is cleared first only because the
+    // mid-turn checkpoint branch of the projection is not what this pins.
+    app.is_loading = false;
+    let model = app.model.clone();
+    let workspace = app.workspace.clone();
+    assert!(super::event_loop::apply_engine_session_projection(
+        &mut app,
+        &Config::default(),
+        EngineEvent::SessionUpdated {
+            session_id: session,
+            messages: vec![
+                text_message("user", "original request"),
+                text_message("assistant", "work produced before the steer arrived"),
+                text_message("user", "actually use the other file"),
+            ],
+            system_prompt: None,
+            model,
+            workspace,
+        }
+    ));
+
+    assert!(app.inflight_steers.is_empty(), "the steer was accepted");
+    assert!(build_pending_input_preview(&app).pending_steers.is_empty());
+    assert!(
+        matches!(
+            app.history.last(),
+            Some(HistoryCell::User { content }) if content == "+ actually use the other file"
+        ),
+        "the steer must be the newest transcript entry: {:?}",
+        app.history.last()
+    );
+}
+
+/// #6190 case D: `next_turn_steer` drains and *discards* a steer stamped with
+/// a turn that has already moved on. The toast said "sent into turn" and the
+/// cell stayed in history forever, for input the model never received. The
+/// steer now settles as a "could not send" receipt instead.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn steer_the_turn_never_accepted_is_reported_not_left_in_the_transcript() {
+    let mut app = create_test_app();
+    app.is_loading = true;
+    let mut engine = crate::core::engine::mock_engine_handle();
+
+    attempt_steer_with_queue_fallback(
+        &mut app,
+        &Config::default(),
+        &engine.handle,
+        QueuedMessage::new("too late to matter".to_string(), None),
+        DispatchRecovery::Immediate,
+    )
+    .await;
+    assert_eq!(
+        engine.rx_steer.recv().await.as_deref(),
+        Some("too late to matter")
+    );
+
+    // The turn ends without the engine ever recording it.
+    super::dispatch::settle_unaccepted_steers_at_turn_end(&mut app);
+
+    assert!(app.inflight_steers.is_empty());
+    assert!(
+        !app.history
+            .iter()
+            .any(|cell| matches!(cell, HistoryCell::User { .. })),
+        "a dropped steer must not leave a transcript cell the record never had"
+    );
+    assert!(app.api_messages.is_empty());
+    let preview = build_pending_input_preview(&app);
+    assert!(preview.pending_steers.is_empty());
+    assert_eq!(
+        preview.rejected_steers,
+        vec!["too late to matter".to_string()]
+    );
 }
 
 #[cfg(not(windows))]

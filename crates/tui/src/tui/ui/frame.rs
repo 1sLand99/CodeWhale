@@ -1399,9 +1399,13 @@ pub(crate) fn build_pending_input_preview(app: &App) -> PendingInputPreview {
             }
         })
         .collect();
+    // #6190: a steer the engine has not recorded yet is exactly what this
+    // bucket's "sending into turn" label describes, so it shares it rather
+    // than growing a fourth bucket and a fifteenth locale string.
     preview.pending_steers = app
         .pending_steers
         .iter()
+        .chain(app.inflight_steers.iter().map(|steer| &steer.message))
         .map(|m| m.display.clone())
         .collect();
     preview.rejected_steers = app.rejected_steers.iter().cloned().collect();
