@@ -3962,4 +3962,36 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn probe_incremental_stream_cost() {
+        // Faithful to one streaming message: the document grows a word at a
+        // time and the render path re-parses and re-renders the whole visible
+        // text on every tick. Reports the cost per 250 appends so growth with
+        // message size is visible.
+        use std::time::Instant;
+        let words: Vec<&str> = "the quick brown fox jumps over a lazy dog and then keeps going for a while"
+            .split(' ')
+            .collect();
+        let mut doc = String::new();
+        let width = 100u16;
+        let mut window_start = Instant::now();
+        for i in 0..2000usize {
+            doc.push_str(words[i % words.len()]);
+            doc.push(' ');
+            let parsed = parse(&doc);
+            let lines = render_parsed(&parsed, width, Style::default());
+            std::hint::black_box(&lines);
+            if (i + 1) % 250 == 0 {
+                let elapsed = window_start.elapsed();
+                println!(
+                    "PROBE bytes={} per_append={:?} total={:?}",
+                    doc.len(),
+                    elapsed / 250,
+                    elapsed
+                );
+                window_start = Instant::now();
+            }
+        }
+    }
 }
