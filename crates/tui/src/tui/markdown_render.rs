@@ -3963,6 +3963,11 @@ mod tests {
         }
     }
 
+    // A deliberate measurement probe, not an assertion: run it with
+    // `--nocapture` to read the per-append cost. Printing is the whole point,
+    // so the module-wide stdout ban is lifted here the same way
+    // `core/engine/tests.rs` lifts it for its probes.
+    #[allow(clippy::print_stdout)]
     #[test]
     fn probe_incremental_stream_cost() {
         // Faithful to one streaming message: the document grows a word at a

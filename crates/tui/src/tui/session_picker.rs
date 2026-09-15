@@ -1158,11 +1158,10 @@ fn format_session_line(session: &SessionMetadata, is_current: bool, locale: Loca
 }
 
 fn build_preview_lines(session: &SavedSession, locale: Locale) -> Vec<String> {
-    let mut out = Vec::new();
-    out.push(
+    let mut out = vec![
         tr(locale, MessageId::SessionsPreviewTitle)
             .replace("{title}", extract_title(&session.metadata.title)),
-    );
+    ];
     // The full id is the handle `codewhale exec --session` and `/resume`
     // need — the list row only has room for the truncated form (#6014).
     out.push(tr(locale, MessageId::SessionsPreviewId).replace("{id}", &session.metadata.id));

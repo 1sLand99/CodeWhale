@@ -2910,7 +2910,7 @@ fn command_catalog(
         let shadowed_aliases = info
             .aliases
             .iter()
-            .filter(|alias| user_commands.get(**alias).is_some())
+            .filter(|alias| user_commands.get(alias).is_some())
             .map(|alias| (*alias).to_string())
             .collect();
         commands.push(CommandCatalogEntry {

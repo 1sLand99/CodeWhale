@@ -298,7 +298,7 @@ mod tests {
         let home = tmp.path().join("home");
         let _home = crate::test_support::EnvVarGuard::set("HOME", &home);
         let _codewhale_home =
-            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home.join("codewhale"));
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.join("codewhale"));
         let manager = SessionManager::default_location().expect("default manager");
 
         let workspace = tmp.path().join("ws");
@@ -349,7 +349,7 @@ mod tests {
         let home = tmp.path().join("home");
         let _home = crate::test_support::EnvVarGuard::set("HOME", &home);
         let _codewhale_home =
-            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home.join("codewhale"));
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.join("codewhale"));
         let manager = SessionManager::default_location().expect("default manager");
 
         let workspace = tmp.path().join("ws");
@@ -401,7 +401,7 @@ mod tests {
         let home = tmp.path().join("home");
         let _home = crate::test_support::EnvVarGuard::set("HOME", &home);
         let _codewhale_home =
-            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home.join("codewhale"));
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.join("codewhale"));
         let manager = SessionManager::default_location().expect("default manager");
 
         let workspace = tmp.path().join("ws");
