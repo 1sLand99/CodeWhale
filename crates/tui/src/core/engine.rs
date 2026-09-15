@@ -1529,6 +1529,13 @@ impl Engine {
         );
         let prompt_goal_objective =
             goal_objective_for_prompt(config.goal_objective.as_deref(), &config.goal_state);
+        // #5715: name a prior workspace session that ended mid-turn so the
+        // model can offer recovery without being asked. Frozen-prefix
+        // contributor — computed once here, identical for every turn.
+        let recovery_hint = crate::session_manager::session_recovery_hint(
+            &config.workspace,
+            Some(session.id.as_str()),
+        );
         let prompt_host = if config.terminal_chrome_enabled {
             prompts::PromptHost::Interactive
         } else {
@@ -1557,6 +1564,7 @@ impl Engine {
                         ),
                     ),
                     verbosity: config.verbosity.as_deref(),
+                    recovery_hint: recovery_hint.as_deref(),
                     skills_scan_codewhale_only: config.skills_scan_codewhale_only,
                     plugin_registry: Some(plugin_registry.as_ref()),
                     // Matches `current_mode`'s initial value below; a later
@@ -6976,6 +6984,12 @@ impl Engine {
         } else {
             prompts::PromptHost::Headless
         };
+        // Recomputed on each refresh (#5715): the prior session's checkpoint
+        // may have settled or been resumed since construction.
+        let recovery_hint = crate::session_manager::session_recovery_hint(
+            &self.config.workspace,
+            Some(self.session.id.as_str()),
+        );
         let base =
             prompts::system_prompt_for_mode_with_context_skills_session_and_approval_for_host(
                 &self.config.workspace,
@@ -6997,6 +7011,7 @@ impl Engine {
                         ),
                     ),
                     verbosity: context.verbosity.as_deref(),
+                    recovery_hint: recovery_hint.as_deref(),
                     skills_scan_codewhale_only: self.config.skills_scan_codewhale_only,
                     plugin_registry: Some(self.plugin_registry.as_ref()),
                     mode: context.mode,

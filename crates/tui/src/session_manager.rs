@@ -2088,6 +2088,49 @@ impl SessionManager {
         Ok(refs)
     }
 
+    /// Does `session_id` still hold a crash-recovery checkpoint — the
+    /// durable sign the session ended mid-turn (#5715)?
+    #[must_use]
+    pub fn session_has_checkpoint(&self, session_id: &str) -> bool {
+        self.validated_checkpoint_path(session_id)
+            .is_ok_and(|path| path.exists())
+    }
+
+    /// The most recent workspace-scoped session that still holds a
+    /// crash-recovery checkpoint — durable evidence a prior session in this
+    /// workspace ended mid-turn (#5715). Metadata only; the transcript is
+    /// never read. `exclude` is the live session's own id: its in-flight
+    /// checkpoint is current work, not prior work, and engine respawns
+    /// inside one session must not report the session's own checkpoint.
+    /// Sessions this process instance created are likewise excluded.
+    pub fn interrupted_workspace_session(
+        &self,
+        workspace: &Path,
+        exclude: Option<&str>,
+    ) -> Option<SessionMetadata> {
+        // Newest-first already; a checkpoint file only survives a session
+        // that never reached a settled save.
+        for checkpoint in self.list_checkpoints().ok()? {
+            let CheckpointSource::Session(id) = checkpoint.source else {
+                continue;
+            };
+            if Some(id.as_str()) == exclude || !self.session_from_prior_instance(&id) {
+                continue;
+            }
+            // One malformed id or unreadable record must not hide a later
+            // valid checkpoint — skip and keep scanning.
+            let Ok(path) = self.validated_session_path(&id) else {
+                continue;
+            };
+            if let Ok(meta) = Self::load_session_metadata(&path)
+                && workspace_scope_matches(&meta.workspace, workspace)
+            {
+                return Some(meta);
+            }
+        }
+        None
+    }
+
     /// Migrate a session recovered from the legacy single-slot checkpoint to
     /// a per-session checkpoint file. Never overwrites an existing
     /// per-session file and leaves the legacy file in place (older binaries
@@ -2814,6 +2857,24 @@ pub(crate) fn is_title_format_char(ch: char) -> bool {
             | '\u{2066}'..='\u{2069}'
             | '\u{feff}'
     )
+}
+
+/// One-line notice that a prior session in `workspace` ended mid-turn
+/// (#5715), for the session-pinned prompt prefix. `current_session_id` is
+/// excluded: an in-flight checkpoint of the live session is current work,
+/// not prior work. Returns `None` when no interrupted session exists.
+pub(crate) fn session_recovery_hint(
+    workspace: &Path,
+    current_session_id: Option<&str>,
+) -> Option<String> {
+    let manager = SessionManager::default_location().ok()?;
+    let meta = manager.interrupted_workspace_session(workspace, current_session_id)?;
+    Some(format!(
+        "A previous Codewhale session in this workspace (\"{}\", id {}, last active {}) has a recovery checkpoint — it likely ended mid-task. Use session_search/session_get to inspect it and offer to summarize or continue the work; resuming is the user's decision (e.g. /resume).",
+        meta.title,
+        truncate_id(&meta.id),
+        meta.updated_at.format("%Y-%m-%d %H:%M UTC"),
+    ))
 }
 
 /// Drop control and bidi/zero-width format characters from a title.
@@ -6583,6 +6644,140 @@ mod tests {
                 .any(|r| r.source == CheckpointSource::Session(session.metadata.id.clone()))
         );
         assert!(refs.iter().any(|r| r.source == CheckpointSource::Legacy));
+    }
+
+    /// A session owned by a *prior* process instance with a crash-recovery
+    /// checkpoint on disk: the foreign boot-owner stamp keeps
+    /// `session_from_prior_instance` true (the save keeps the original
+    /// owner), and the checkpoint is the durable interrupted sign.
+    fn write_prior_interrupted_session(
+        manager: &SessionManager,
+        id: &str,
+        workspace: &Path,
+    ) -> SavedSession {
+        let mut session = create_saved_session(
+            &[make_test_message("user", "still working")],
+            "test-model",
+            workspace,
+            0,
+            None,
+        );
+        session.metadata.id = id.to_string();
+        session.metadata.title = format!("prior-{id}");
+        manager
+            .record_session_boot_owner(id, "boot_other_instance")
+            .expect("stamp foreign owner");
+        manager.save_session(&session).expect("save session");
+        manager.save_checkpoint(&session).expect("save checkpoint");
+        session
+    }
+
+    #[test]
+    fn interrupted_workspace_session_returns_newest_prior_checkpoint() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+        let workspace = tmp.path().join("ws");
+        fs::create_dir_all(&workspace).expect("workspace");
+
+        write_prior_interrupted_session(&manager, "sess-old", &workspace);
+        // Distinct checkpoint mtimes make newest-first deterministic.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_prior_interrupted_session(&manager, "sess-new", &workspace);
+
+        // A checkpointed session this instance created is current work, not
+        // prior work: `save_session` stamps the current boot id, and the
+        // checkpoint write keeps it because the record already exists.
+        let own = create_saved_session(
+            &[make_test_message("user", "mine")],
+            "test-model",
+            &workspace,
+            0,
+            None,
+        );
+        manager.save_session(&own).expect("save own");
+        manager.save_checkpoint(&own).expect("checkpoint own");
+
+        // A checkpointed session in another workspace stays invisible.
+        let other_workspace = tmp.path().join("other-ws");
+        fs::create_dir_all(&other_workspace).expect("other workspace");
+        write_prior_interrupted_session(&manager, "sess-elsewhere", &other_workspace);
+
+        assert_eq!(
+            manager
+                .interrupted_workspace_session(&workspace, Some(own.metadata.id.as_str()))
+                .map(|meta| meta.id),
+            Some("sess-new".to_string())
+        );
+        // Excluding the newest surfaces the next interrupted session.
+        assert_eq!(
+            manager
+                .interrupted_workspace_session(&workspace, Some("sess-new"))
+                .map(|meta| meta.id),
+            Some("sess-old".to_string())
+        );
+        assert_eq!(
+            manager
+                .interrupted_workspace_session(&other_workspace, None)
+                .map(|meta| meta.id),
+            Some("sess-elsewhere".to_string())
+        );
+    }
+
+    #[test]
+    fn interrupted_workspace_session_ignores_settled_sessions() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+        let workspace = tmp.path().join("ws");
+        fs::create_dir_all(&workspace).expect("workspace");
+
+        // Prior-instance session that settled cleanly: no checkpoint, so it
+        // is not interrupted even though it is prior work.
+        manager
+            .record_session_boot_owner("sess-done", "boot_other_instance")
+            .expect("stamp foreign owner");
+        write_session_record(&manager, "sess-done", &workspace, Utc::now());
+
+        assert!(
+            manager
+                .interrupted_workspace_session(&workspace, None)
+                .is_none()
+        );
+
+        // Excluding the only interrupted session leaves nothing to report.
+        write_prior_interrupted_session(&manager, "sess-prior", &workspace);
+        assert!(
+            manager
+                .interrupted_workspace_session(&workspace, Some("sess-prior"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn session_recovery_hint_names_the_interrupted_prior_session() {
+        let _lock = crate::test_support::lock_test_env();
+        let tmp = tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let _home = crate::test_support::EnvVarGuard::set("HOME", &home);
+        let _codewhale_home =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home.join("codewhale"));
+        let workspace = tmp.path().join("ws");
+        fs::create_dir_all(&workspace).expect("workspace");
+
+        let manager = SessionManager::default_location().expect("default manager");
+        assert!(
+            session_recovery_hint(&workspace, None).is_none(),
+            "clean store must leave the prompt untouched"
+        );
+
+        write_prior_interrupted_session(&manager, "sess-prior", &workspace);
+        let hint = session_recovery_hint(&workspace, Some("sess-live"))
+            .expect("hint for interrupted prior session");
+        assert!(hint.contains("prior-sess-prior"), "{hint}");
+        assert!(hint.contains("session_search"), "{hint}");
+        assert!(hint.contains("/resume"), "{hint}");
+
+        // The live session's own checkpoint is never reported as prior work.
+        assert!(session_recovery_hint(&workspace, Some("sess-prior")).is_none());
     }
 
     #[test]

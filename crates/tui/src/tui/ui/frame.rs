@@ -1029,6 +1029,13 @@ pub(crate) fn build_app_system_prompt_with_goal(
         &config.memory_path(),
         &app.workspace,
     );
+    // Keep the previewed/rebuilt prompt identical to the engine's: the
+    // recovery hint is part of the prefix when a prior workspace session
+    // ended mid-turn (#5715).
+    let recovery_hint = crate::session_manager::session_recovery_hint(
+        &app.workspace,
+        app.current_session_id.as_deref(),
+    );
     prompts::system_prompt_for_mode_with_context_skills_and_session(
         &app.workspace,
         None,
@@ -1047,6 +1054,7 @@ pub(crate) fn build_app_system_prompt_with_goal(
                 app.active_route_limits,
             )),
             verbosity: app.verbosity.as_deref(),
+            recovery_hint: recovery_hint.as_deref(),
             skills_scan_codewhale_only: app.skills_scan_codewhale_only,
             plugin_registry: Some(app.plugin_registry.as_ref()),
             mode: app.mode,

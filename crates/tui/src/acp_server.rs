@@ -2056,6 +2056,7 @@ fn build_acp_system_prompt(
             verbosity: config.verbosity.as_deref(),
             skills_scan_codewhale_only: config.skills_config().scan_codewhale_only(),
             plugin_registry: None,
+            recovery_hint: None,
             mode: acp_mode(config),
         },
         crate::prompts::PromptHost::Headless,

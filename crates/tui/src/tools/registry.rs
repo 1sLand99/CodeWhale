@@ -1156,6 +1156,15 @@ impl ToolRegistryBuilder {
             .with_tool(Arc::new(MemoryGetTool))
     }
 
+    /// Include the prior-session recall tools (#5715). Always-on: they are
+    /// read-only and workspace-scoped, so there is no opt-in to honor.
+    #[must_use]
+    pub fn with_session_recall_tools(self) -> Self {
+        use super::session::{SessionGetTool, SessionSearchTool};
+        self.with_tool(Arc::new(SessionSearchTool))
+            .with_tool(Arc::new(SessionGetTool))
+    }
+
     /// Include the model-facing LSP intelligence tools. They reuse the
     /// session [`crate::lsp::LspManager`] attached to `ToolContext` and never
     /// spawn a second server lifecycle.
@@ -1345,6 +1354,7 @@ impl ToolRegistryBuilder {
         builder
             .with_notify_tool()
             .with_request_plugin_install_tool()
+            .with_session_recall_tools()
     }
 
     /// Include the full child-inherited Agent surface under resolved
