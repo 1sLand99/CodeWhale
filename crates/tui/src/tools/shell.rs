@@ -3534,13 +3534,40 @@ fn default_execpolicy_path() -> Option<std::path::PathBuf> {
 }
 
 fn load_default_policy() -> anyhow::Result<Option<ExecPolicyConfig>> {
+    /// A parsed rules file, tagged with the identity it was parsed from.
+    type PolicyKey = (std::path::PathBuf, u64, Option<std::time::SystemTime>);
+
     let Some(path) = default_execpolicy_path() else {
         return Ok(None);
     };
-    if !path.exists() {
+    // An unreadable or missing file (including a permissions error, which
+    // `exists()` also swallows) means "no file rules" — the same answer as
+    // before, just reached with one `stat` instead of an existence check plus a
+    // full read.
+    let Ok(metadata) = std::fs::metadata(&path) else {
         return Ok(None);
+    };
+    let key: PolicyKey = (path.clone(), metadata.len(), metadata.modified().ok());
+
+    // #6208: this runs on every shell execution, so the read and TOML parse
+    // happen only when the file's identity changes. Length joins the timestamp
+    // because a coarse-mtime filesystem can hand back the same instant for two
+    // different revisions.
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<(PolicyKey, ExecPolicyConfig)>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((cached_key, config)) = cache.as_ref()
+        && *cached_key == key
+    {
+        return Ok(Some(config.clone()));
     }
-    ExecPolicyConfig::from_path(&path).map(Some)
+
+    let config = ExecPolicyConfig::from_path(&path)?;
+    *cache = Some((key, config.clone()));
+    Ok(Some(config))
 }
 
 const FOREGROUND_TIMEOUT_RECOVERY_HINT: &str = "Foreground Bash is for bounded commands. \
