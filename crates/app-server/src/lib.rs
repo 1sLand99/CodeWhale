@@ -3080,6 +3080,125 @@ mod tests {
         );
     }
 
+    /// A stub runtime that records which thread ids turns ran on and how
+    /// many threads it was asked to mint.
+    #[derive(Clone)]
+    struct RecordingRuntime {
+        created: Arc<std::sync::atomic::AtomicUsize>,
+        turn_threads: Arc<Mutex<Vec<String>>>,
+    }
+
+    async fn spawn_recording_runtime() -> (String, RecordingRuntime, tokio::task::JoinHandle<()>) {
+        async fn create_thread(State(f): State<RecordingRuntime>) -> Json<Value> {
+            f.created.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Json(json!({ "id": "thr_minted" }))
+        }
+        async fn create_turn(
+            State(f): State<RecordingRuntime>,
+            AxumPath(thread_id): AxumPath<String>,
+        ) -> Json<Value> {
+            f.turn_threads.lock().await.push(thread_id);
+            Json(json!({ "turn": { "id": "turn_recorded" } }))
+        }
+        async fn thread_events(
+            AxumPath(_thread_id): AxumPath<String>,
+        ) -> ([(header::HeaderName, &'static str); 1], String) {
+            (
+                [(header::CONTENT_TYPE, "text/event-stream")],
+                sse_frame(
+                    "turn.completed",
+                    json!({
+                        "seq": 1,
+                        "turn_id": "turn_recorded",
+                        "payload": { "turn": { "status": "completed" } }
+                    }),
+                ),
+            )
+        }
+
+        let fixture = RecordingRuntime {
+            created: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            turn_threads: Arc::new(Mutex::new(Vec::new())),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind recording runtime");
+        let addr = listener.local_addr().expect("listener addr");
+        let app = Router::new()
+            .route("/v1/threads", post(create_thread))
+            .route("/v1/threads/{id}/turns", post(create_turn))
+            .route("/v1/threads/{id}/events", get(thread_events))
+            .with_state(fixture.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve recording runtime");
+        });
+        (format!("http://{addr}"), fixture, server)
+    }
+
+    #[tokio::test]
+    async fn config_update_keeps_the_stdio_thread_mapping() {
+        crate::install_test_crypto_provider();
+        // #6246: `apply_config_update` rebuilds the bridge child, but runtime
+        // threads are durable — the fresh child resolves the same ids. The
+        // bug dropped the stdio→runtime map with the old bridge, so the next
+        // `thread/message` silently minted a new runtime thread instead of
+        // resuming the mapped one.
+        let (base_url, fixture, server) = spawn_recording_runtime().await;
+        let (state, _tmp) = capability_test_state();
+        state
+            .runtime_thread_map
+            .lock()
+            .await
+            .insert("stdio-keep".to_string(), "thr_keep".to_string());
+        seed_bridge_at(&state, base_url.clone()).await;
+
+        // An unrelated config snapshot still rebuilds the bridge child.
+        let snapshot = state.config.read().await.clone();
+        apply_config_update(&state, snapshot, None, false).await;
+        assert!(
+            state.runtime_bridge.lock().await.is_none(),
+            "config update must drop the cached bridge",
+        );
+        assert_eq!(
+            state
+                .runtime_thread_map
+                .lock()
+                .await
+                .get("stdio-keep")
+                .map(String::as_str),
+            Some("thr_keep"),
+            "the thread mapping must survive the bridge rebuild",
+        );
+
+        // The fresh child (seeded here in place of `RuntimeBridge::start`,
+        // which cannot spawn in-process) must resume the mapped thread.
+        seed_bridge_at(&state, base_url).await;
+        let result = dispatch_stdio_request(
+            &state,
+            "thread/message",
+            json!({ "thread_id": "stdio-keep", "input": "next" }),
+        )
+        .await
+        .expect("thread/message on the mapped thread");
+
+        assert_eq!(result.result["status"], json!("accepted"));
+        assert_eq!(
+            fixture.turn_threads.lock().await.as_slice(),
+            ["thr_keep".to_string()],
+            "the turn must run on the pre-existing runtime thread",
+        );
+        assert_eq!(
+            fixture.created.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no new runtime thread may be minted for a mapped stdio thread",
+        );
+
+        server.abort();
+        let _ = server.await;
+    }
+
     #[tokio::test]
     async fn config_unset_propagates_to_runtime_config() {
         let tmp = tempfile::tempdir().expect("tempdir");
