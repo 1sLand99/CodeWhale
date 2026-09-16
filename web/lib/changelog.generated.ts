@@ -52,12 +52,13 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Changed",
         "items": [
+          "MCP protocol negotiation: every surface advertised the original 2024-11-05 revision and the stdio client required an exact match, so newer servers could not connect. The server and both clients now advertise 2025-06-18 and negotiate over the supported set (2025-06-18, 2025-03-26, 2024-11-05) — the server echoes the client's revision when it is supported and answers with the latest otherwise, the stdio client accepts any supported revision, and streamable HTTP sends the…",
           "Configured MCP servers now connect lazily instead of all at session boot. The pool owns a connecting set marked at spawn and cleared on resolution or abort, so \"connecting\" is no longer inferred as enabled-minus-connected. The boot pass scopes to the eager set — required servers plus those covered by tools.always_load / allowed_tools — and a turn naming an unstarted server spawns its connects alongside, under the existing five-second deadline. A configured-but-unstarted…",
           "The launch card's MCP problems row runs its own remedy. It already printed /mcp login <name> or /mcp; it now joins the shared paint/click/keyboard ordering, so Up/Down lands on it and Enter or a click types the printed command into the composer for you to send. Typing beats copying: no clipboard dependency over SSH, and you see the command before a second Enter runs it (#6085).",
           "Computer Use is the only computer-use product in Extensions and /mcp recommendations. Cua is no longer suggested as a parallel desktop-control MCP; enable the first-party computer-use plugin instead. The bundled plugin is 0.4.0: Return/Enter from type, filtered and paginated get_app_state, focus/get_value, and strategy:\"app\" window-scoped clicks. Shared-desktop pointer gestures stay gated.",
           "The bundled first-party catalog pins marketplace revision ca6be22, so installing Computer Use from the Extensions listing fetches the same 0.4.0 source and the published notarized 0.4.0 Mac app."
         ],
-        "itemCount": 4
+        "itemCount": 5
       },
       {
         "heading": "Fixed",

@@ -85,6 +85,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- MCP protocol negotiation: every surface advertised the original 2024-11-05
+  revision and the stdio client required an exact match, so newer servers
+  could not connect. The server and both clients now advertise 2025-06-18
+  and negotiate over the supported set (2025-06-18, 2025-03-26, 2024-11-05)
+  — the server echoes the client's revision when it is supported and answers
+  with the latest otherwise, the stdio client accepts any supported revision,
+  and streamable HTTP sends the required `MCP-Protocol-Version` header on
+  every post-initialize request (#6280, first half).
 - Configured MCP servers now connect lazily instead of all at session boot. The
   pool owns a `connecting` set marked at spawn and cleared on resolution or
   abort, so "connecting" is no longer inferred as enabled-minus-connected. The

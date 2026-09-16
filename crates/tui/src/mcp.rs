@@ -45,6 +45,14 @@ use crate::utils::write_atomic;
 /// Bytes of a non-2xx response body to surface in connection errors.
 const ERROR_BODY_PREVIEW_BYTES: usize = 200;
 
+/// Newest dated MCP protocol revision Codewhale advertises at `initialize` and
+/// answers as an MCP server. Matches the shared MCP crate (`crates/mcp`).
+pub(crate) const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+/// Dated MCP revisions accepted during negotiation, newest first. A peer
+/// answering or requesting any of these continues the handshake.
+pub(crate) const MCP_SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
+    &[MCP_PROTOCOL_VERSION, "2025-03-26", "2024-11-05"];
+
 fn validate_mcp_config_path(path: &Path) -> Result<()> {
     if path.as_os_str().is_empty() {
         anyhow::bail!("MCP config path cannot be empty");
@@ -1425,6 +1433,12 @@ pub trait McpTransport: Send + Sync {
     async fn send(&mut self, msg: Vec<u8>) -> Result<()>;
     async fn recv(&mut self) -> Result<Vec<u8>>;
 
+    /// Record the protocol revision negotiated at `initialize`. Only the
+    /// Streamable HTTP transport uses it (the `MCP-Protocol-Version` header on
+    /// subsequent requests); stdio and legacy SSE have no header channel, so
+    /// the default is a no-op.
+    fn set_protocol_version(&mut self, _version: &str) {}
+
     /// Synchronous, best-effort liveness probe consulted by
     /// [`McpConnection::is_ready`] so a crashed stdio child stops reading
     /// as "ready" before the next call fails (#6187). Must never block and
@@ -1831,7 +1845,7 @@ impl McpConnection {
             "id": &init_id,
             "method": "initialize",
             "params": {
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": MCP_PROTOCOL_VERSION,
                 "clientInfo": {
                     "name": "codewhale-tui",
                     "version": env!("CARGO_PKG_VERSION")
@@ -1846,11 +1860,30 @@ impl McpConnection {
         .await?;
 
         let response = self.recv(init_id).await?;
-        response_result(
+        let result = response_result(
             &response,
             "initialize",
             self.config.reviewed_plugin.is_some(),
         )?;
+        // Per spec, a server that cannot speak the advertised revision answers
+        // with one it does support. Accept any dated revision we still
+        // implement; anything else ends the handshake.
+        let negotiated = result
+            .and_then(|result| result.get("protocolVersion"))
+            .and_then(|version| version.as_str())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "MCP server '{}' initialize result omitted protocolVersion",
+                    self.name
+                )
+            })?;
+        anyhow::ensure!(
+            MCP_SUPPORTED_PROTOCOL_VERSIONS.contains(&negotiated),
+            "MCP server '{}' negotiated unsupported protocol version '{negotiated}' (supported: {})",
+            self.name,
+            MCP_SUPPORTED_PROTOCOL_VERSIONS.join(", ")
+        );
+        self.transport.set_protocol_version(negotiated);
         self.server_capabilities = McpServerCapabilities::from_initialize_response(&response);
 
         // Send initialized notification (no id, no response expected)
