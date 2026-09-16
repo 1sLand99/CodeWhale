@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Approving an `apply_patch` "for the session" is now scoped to the file you
+  approved. The grouping key that scopes a session grant was built by a second,
+  weaker patch parser that read only `+++ b/` headers and the `replace` array:
+  it saw no target at all for the documented `apply_patch{path, patch}`
+  override, for `--no-prefix` diffs, or for delete-only diffs, and collapsed
+  every one of them to a single shared key. One approval therefore pre-approved
+  every later patch of that shape, to any file, with no card and no notice. The
+  key now comes from the same resolver the executor and the permission path
+  already use, and an input that cannot be resolved gets its own key rather
+  than a shared one (#6247).
+
 ### Added
 
 - File edits are parse-gated before the write lands: Rust goes through

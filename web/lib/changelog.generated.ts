@@ -28,6 +28,13 @@ export const CHANGELOG: ChangelogRelease[] = [
     "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.9.12...HEAD",
     "sections": [
       {
+        "heading": "Security",
+        "items": [
+          "Approving an apply_patch \"for the session\" is now scoped to the file you approved. The grouping key that scopes a session grant was built by a second, weaker patch parser that read only +++ b/ headers and the replace array: it saw no target at all for the documented apply_patch{path, patch} override, for --no-prefix diffs, or for delete-only diffs, and collapsed every one of them to a single shared key. One approval therefore pre-approved every later patch of that shape, to…"
+        ],
+        "itemCount": 1
+      },
+      {
         "heading": "Added",
         "items": [
           "File edits are parse-gated before the write lands: Rust goes through syn::parse_file for a grammar-exact line:column, and .toml / .json through the parsers already vendored. An edit is refused only when the file parsed *before* and would not parse *after* — repairing an already-broken file is the commonest reason to edit source at all, so pre-existing breakage and new files fail open. The check precedes the write, so a rejection leaves the file untouched and apply_patch…",
