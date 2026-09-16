@@ -1957,14 +1957,7 @@ pub(crate) struct MemoryAdapter<'a> {
 /// Derive the authoritative native-memory store from the resolved user-memory
 /// file path, mirroring the pre-migration `/memory` handler exactly.
 fn native_store_from_memory_path(memory_path: &Path) -> crate::native_memory::NativeMemoryStore {
-    if let Some(store) = crate::native_memory::NativeMemoryStore::from_global_path(memory_path) {
-        return store;
-    }
-    let root = memory_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("memory");
-    crate::native_memory::NativeMemoryStore::new(root)
+    crate::native_memory::NativeMemoryStore::from_memory_anchor(memory_path)
 }
 
 /// Convert a TUI-owned native hit into the portable contract hit. Only the
@@ -2042,7 +2035,7 @@ impl CommandMemoryContext for MemoryAdapter<'_> {
                 Some(workspace_id),
             ),
         };
-        match store.remember(scope, workspace_id.as_deref(), note) {
+        match store.remember_reviewed(scope, workspace_id.as_deref(), note) {
             Ok(hit) => Ok(MemoryRemembered {
                 source: hit.source,
                 line_start: hit.line_start,
@@ -4637,7 +4630,7 @@ mod tests {
         );
         assert_eq!(
             status.index,
-            tmp.path().join("memory").join("index.sqlite3")
+            tmp.path().join("memory").join("store.sqlite3")
         );
         assert_eq!(memory.path().expect("path"), tmp.path().join("memory"));
     }
@@ -4824,7 +4817,9 @@ mod tests {
             .remember(MemoryRememberTarget::Global, "alpha note")
             .expect("remember global");
         assert!(remembered.source.ends_with("global/MEMORY.md"));
-        assert_eq!(remembered.line_start, 2);
+        // Structured records have no line position; the anchor is the scope's
+        // compatibility MEMORY.md path, not a byte offset into it.
+        assert_eq!(remembered.line_start, 0);
 
         // Workspace remember targets the workspace scope with the typed id.
         git_origin(tmp.path());
@@ -4848,7 +4843,7 @@ mod tests {
             .expect("search");
         assert_eq!(hits.len(), 1);
         assert!(hits[0].text.contains("workspace-only note"));
-        assert_eq!(hits[0].line_start, 2);
+        assert_eq!(hits[0].line_start, 0);
         // Empty results stay a typed empty vec, never an error.
         assert!(
             memory

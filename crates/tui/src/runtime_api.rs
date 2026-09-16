@@ -98,6 +98,7 @@ mod diagnostics;
 mod git;
 mod jobs;
 mod lsp;
+mod memory_lens;
 mod mobile;
 mod plugins;
 mod secrets;
@@ -1423,6 +1424,7 @@ pub fn build_router(state: RuntimeApiState) -> Router {
                 .delete(clear_memory),
         )
         .route("/v1/memory/{id}", get(get_memory_entry))
+        .merge(memory_lens::routes())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_runtime_token,
@@ -8019,14 +8021,7 @@ struct ClearMemoryQuery {
 /// Mirrors `native_store()` in `commands/groups/memory/memory.rs`.
 fn native_store_for_state(state: &RuntimeApiState) -> crate::native_memory::NativeMemoryStore {
     let memory_path = state.config.read().memory_path();
-    if let Some(store) = crate::native_memory::NativeMemoryStore::from_global_path(&memory_path) {
-        return store;
-    }
-    let root = memory_path
-        .parent()
-        .unwrap_or_else(|| FsPath::new("."))
-        .join("memory");
-    crate::native_memory::NativeMemoryStore::new(root)
+    crate::native_memory::NativeMemoryStore::from_memory_anchor(&memory_path)
 }
 
 /// Derive a scope label from a source path relative to the store root.
@@ -8211,8 +8206,11 @@ async fn create_memory_entry(
     };
     let store = native_store_for_state(&state);
     let root = store.root().to_path_buf();
+    // This endpoint is an authenticated operator surface: the explicit request
+    // is the review, so the entry lands active — matching the Lens remember
+    // action. Model-reachable capture stays candidate-only.
     let hit = store
-        .remember(scope, workspace_id.as_deref(), &req.text)
+        .remember_reviewed(scope, workspace_id.as_deref(), &req.text)
         .map_err(|e| ApiError::bad_request(format!("memory create error: {e}")))?;
     let entry = memory_hit_to_record(hit, &root);
     Ok((StatusCode::CREATED, Json(json!({ "entry": entry }))))

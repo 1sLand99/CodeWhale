@@ -2487,16 +2487,18 @@ mod tests {
 
         let path = execute("/memory path", &mut app);
         assert!(!path.is_error, "{path:?}");
+        // The native store root is a directory; memory.md is only the legacy
+        // import anchor, no longer the authoritative path.
         assert_eq!(
             path.message.as_deref(),
-            Some(tmpdir.path().join("memory.md").to_str().unwrap())
+            Some(tmpdir.path().join("memory").to_str().unwrap())
         );
 
         // Native status reaches the real adapter through the public seam.
         let status = execute("/memory native status", &mut app);
         assert!(!status.is_error, "{status:?}");
         let msg = status.message.expect("status message");
-        assert!(msg.contains("native memory:"), "{msg}");
+        assert!(msg.contains("Native memory root:"), "{msg}");
 
         let info = registry().get_info("memory").expect("memory info");
         assert_eq!(

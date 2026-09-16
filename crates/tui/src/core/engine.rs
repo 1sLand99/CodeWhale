@@ -1541,10 +1541,31 @@ impl Engine {
         // Set up stable system prompt with project context (default to agent mode).
         // Per-turn working-set metadata is injected into the latest user
         // message at request time so file churn does not rewrite this prefix.
-        let user_memory_block = crate::native_memory::native_prompt_block(
+        // Session start boundary: reconcile this session's interrupted memory
+        // contexts (prepared but never dispatch-acknowledged — e.g. the process
+        // died mid-turn), then prepare this session's prompt packet through the
+        // durable receipt path so the Context Lens can show what was assembled
+        // for it. Both are inert when memory is disabled — no store I/O.
+        if config.memory_enabled
+            && let Some(store) =
+                crate::native_memory::NativeMemoryStore::from_global_path(&config.memory_path)
+        {
+            match store.session_start(&config.workspace, &session.id) {
+                Ok(0) => {}
+                Ok(interrupted) => tracing::info!(
+                    interrupted,
+                    "memory contexts from this session never completed dispatch"
+                ),
+                Err(error) => {
+                    tracing::warn!(%error, "memory session-start reconcile failed")
+                }
+            }
+        }
+        let user_memory_block = crate::native_memory::native_prompt_block_traced(
             config.memory_enabled,
             &config.memory_path,
             &config.workspace,
+            &session.id,
         );
         let prompt_goal_objective =
             goal_objective_for_prompt(config.goal_objective.as_deref(), &config.goal_state);
@@ -7037,10 +7058,11 @@ impl Engine {
         if self.api_config.runtime_chat_isolated {
             return Some(SystemPrompt::Text(ISOLATED_CHAT_ENGINE_PROMPT.to_string()));
         }
-        let user_memory_block = crate::native_memory::native_prompt_block(
+        let user_memory_block = crate::native_memory::native_prompt_block_traced(
             self.config.memory_enabled,
             &self.config.memory_path,
             &self.config.workspace,
+            &self.session.id,
         );
         let prompt_host = if self.config.terminal_chrome_enabled {
             prompts::PromptHost::Interactive
