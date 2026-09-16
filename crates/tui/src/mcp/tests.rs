@@ -1946,6 +1946,51 @@ async fn plugin_stdio_does_not_surface_reviewed_child_stderr() {
     assert!(!error.contains("ARBITRARY_PLUGIN_CREDENTIAL"));
 }
 
+/// #6187: a crashed stdio child must stop reading as "ready" before any
+/// call is in flight — `is_ready` probes the child, so the pool rebuilds
+/// the connection on the next use instead of handing the dead transport
+/// back.
+#[cfg(unix)]
+#[tokio::test]
+async fn dead_stdio_child_stops_reading_ready_without_a_call_in_flight() {
+    let mut config = test_server_config();
+    config.command = Some("sh".to_string());
+    config.args = vec!["-c".to_string(), "while :; do sleep 1; done".to_string()];
+    let transport = StdioTransport::spawn(
+        "idle",
+        "sh",
+        &config,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .unwrap();
+    let child = Arc::clone(&transport.child);
+    let connection = test_connection(Box::new(transport));
+
+    // Alive child: the Ready state flag is the whole answer.
+    assert!(
+        connection.is_ready(),
+        "a live stdio child must not be probed dead"
+    );
+
+    child.lock().await.start_kill().unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if child.lock().await.try_wait().unwrap().is_some() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "killed stdio child was never reaped"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    assert!(
+        !connection.is_ready(),
+        "a reaped stdio child must fail is_ready without a call in flight"
+    );
+}
+
 #[tokio::test]
 async fn revoked_plugin_mcp_denies_catalog_tool_resource_and_prompt_operations() {
     let dir = tempfile::tempdir().unwrap();
@@ -3231,6 +3276,76 @@ async fn pool_stops_advertising_a_server_whose_write_side_died() {
     );
 }
 
+/// #6187: a failed reconnect must not erase the previous connection — the
+/// last-good tool catalog stays registered (model-visible, since catalog
+/// aggregation filters on authority, not liveness) for the whole outage,
+/// while the restored connection stays non-ready so `get_or_connect`
+/// keeps retrying per the backoff.
+#[tokio::test]
+async fn failed_reconnect_restores_last_good_catalog() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mcp.json");
+    fs::write(
+        &path,
+        r#"{
+            "mcpServers": {
+                "mock": {
+                    "command": "codewhale-tui-test-this-binary-does-not-exist-9f8e7d6c5b4a",
+                    "args": []
+                }
+            }
+        }"#,
+    )
+    .unwrap();
+    let mut pool = McpPool::from_config_path(&path).unwrap();
+    let mut conn = test_connection(Box::new(HangingValueTransport {
+        sent: Arc::new(Mutex::new(Vec::new())),
+    }));
+    conn.name = "mock".to_string();
+    conn.config = pool.config.servers.get("mock").unwrap().clone();
+    conn.catalog_generation = pool.current_catalog_generation();
+    // The shape a crashed server leaves behind: not ready, but its
+    // last-good catalog is still discovered on the connection.
+    conn.state = ConnectionState::Disconnected;
+    conn.tools.push(McpTool {
+        name: "echo".to_string(),
+        description: None,
+        input_schema: serde_json::json!({"type": "object"}),
+    });
+    pool.connections.insert("mock".to_string(), conn);
+
+    // `&mut McpConnection` is not `Debug`, so mirror the sibling test's
+    // match instead of `expect_err`.
+    let error = match pool.get_or_connect("mock").await {
+        Ok(_) => panic!("reconnect against a missing binary must fail"),
+        Err(error) => error,
+    };
+    assert!(
+        format!("{error:#}").contains("spawn failed"),
+        "unexpected error: {error:#}"
+    );
+
+    let restored = pool
+        .connections
+        .get("mock")
+        .expect("failed reconnect must restore the previous connection");
+    assert!(
+        !restored.is_ready(),
+        "the restored connection must stay non-ready so the pool keeps retrying"
+    );
+    assert!(
+        pool.all_tools()
+            .iter()
+            .any(|(name, _)| name == "mcp_mock_echo"),
+        "the model-visible tool surface must survive the failed reconnect"
+    );
+    assert_eq!(
+        restored.tools.len(),
+        1,
+        "the restored connection must keep its last-good catalog"
+    );
+}
+
 #[tokio::test]
 async fn test_mcp_pool_empty_config() {
     let pool = McpPool::new(McpConfig::default());
@@ -4175,6 +4290,15 @@ fn sse_transport_closed_is_retryable() {
     assert!(
         is_mcp_stale_session_error(&err),
         "closed SSE stream should force reconnect before retry"
+    );
+}
+
+#[test]
+fn stdio_transport_closed_is_retryable() {
+    let err = anyhow::anyhow!("Stdio transport closed (exit status: 1)");
+    assert!(
+        is_mcp_stale_session_error(&err),
+        "dead stdio child should force reconnect before retry"
     );
 }
 
