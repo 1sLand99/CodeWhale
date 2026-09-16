@@ -4245,8 +4245,8 @@ impl SubAgentManager {
     }
 
     /// The live peers whose shared-checkout write claims gate `owner` — the
-    /// names the contention refusal must surface so a refused child knows
-    /// what it is waiting on and what to cancel or release.
+    /// names the peer gate must surface so a refused child knows
+    /// what it is waiting on and what to cancel.
     ///
     /// Liveness is the load-bearing part. Claims outlive the agents that
     /// registered them, so a workspace accumulates one per builder that ever
@@ -5891,7 +5891,7 @@ impl SubAgentManager {
     /// end, or one waiting on an answer the parent has now decided not to give
     /// (#5906).
     ///
-    /// Cancel is the release path the contention refusal names, and before
+    /// Cancel is the path that actually clears a live owner's claim, and before
     /// this it was a no-op on exactly the records that leak: `cancel_agent`
     /// returned the snapshot untouched because the agent was no longer
     /// `Running`, so the non-terminal worker record kept the write claim
@@ -9577,7 +9577,7 @@ impl ToolSpec for AgentTool {
                 "action": {
                     "type": "string",
                     "enum": ["start", "roster", "status", "peek", "message", "followup", "interrupt", "wait", "claim", "release", "cancel"],
-                    "description": "start launches a worker and returns immediately. Healthy workers continue after an ordinary parent response. roster lists roles with their resolved routes and capability/cost evidence. status/peek inspect running or retained workers. message queues a note without waking a running child. followup delivers notes to a running child or continues an interrupted child from its checkpoint; use the returned agent_id for subsequent waits/messages. Retrying followup on the original interrupted id reuses its successor. Bulk targets return individual continuation mappings and errors. interrupt stops the current turn while preserving the child checkpoint. wait only observes; see until. claim widens your own enforced write scope (see write_roots). release clears write claims whose owner is no longer running — the remediation a write-scope contention refusal names; pass agent_id to clear one, omit it to sweep. cancel permanently cancels a running child."
+                    "description": "start launches a worker and returns immediately. Healthy workers continue after an ordinary parent response. roster lists roles with their resolved routes and capability/cost evidence. status/peek inspect running or retained workers. message queues a note without waking a running child. followup delivers notes to a running child or continues an interrupted child from its checkpoint; use the returned agent_id for subsequent waits/messages. Retrying followup on the original interrupted id reuses its successor. Bulk targets return individual continuation mappings and errors. interrupt stops the current turn while preserving the child checkpoint. wait only observes; see until. claim widens your own enforced write scope (see write_roots). release clears write claims whose owner is no longer running; pass agent_id to clear one, omit it to sweep. cancel permanently cancels a running child."
                 },
                 "until": {
                     "type": "string",
