@@ -873,6 +873,12 @@ pub struct Engine {
     mcp_event_generation: u64,
     /// Workspace-scoped immutable plugin catalogue and authority receipts.
     plugin_registry: Arc<crate::plugins::PluginRegistry>,
+    /// Keeps the append-only `<recommended_plugins>` fragment once-per-
+    /// Engine-lifetime per plugin id, and suppresses plugins whose name a
+    /// catalogue skill already covers (#6274). The skill-name snapshot is
+    /// taken at construction from the same catalogue the system prompt
+    /// indexes (see the gate's known-limitations note).
+    recommended_plugin_gate: StdMutex<crate::plugins::recommend::RecommendedPluginGate>,
     api_provider: ApiProvider,
     /// Exact configured route key. Named custom providers share the `Custom`
     /// enum, so the enum alone cannot prove that the active client is current.
@@ -1674,6 +1680,28 @@ impl Engine {
         // `run_turn` restarts it per turn; this initial value only matters
         // for hosts that inspect the engine before the first turn.
         let turn_wall_clock_budget = config.turn_wall_clock;
+        // Skill-name snapshot for the plugin-suggestion gate (#6274): the
+        // SAME catalogue the system prompt indexes (prompts.rs skills block —
+        // workspace roots + configured skills_dir + plugin-sourced skills),
+        // so suppression sees everything the session actually has.
+        let gate_skill_names: std::collections::BTreeSet<String> =
+            crate::skills::discover_for_workspace_and_dir_with_mode_and_plugins(
+                &config.workspace,
+                &config.skills_dir,
+                crate::skills::SkillDiscoveryMode::from_codewhale_only(
+                    config.skills_scan_codewhale_only,
+                ),
+                Some(plugin_registry.as_ref()),
+            )
+            .list()
+            .iter()
+            .flat_map(|skill| {
+                std::iter::once(skill.name.clone()).chain(skill.aliases.iter().cloned())
+            })
+            .map(|name| name.trim().to_ascii_lowercase())
+            .filter(|name| !name.is_empty())
+            .collect();
+
         let engine = Engine {
             config,
             api_config: api_config.clone(),
@@ -1698,6 +1726,11 @@ impl Engine {
             mcp_boot_generation: None,
             mcp_event_generation: 0,
             plugin_registry,
+            recommended_plugin_gate: StdMutex::new(
+                crate::plugins::recommend::RecommendedPluginGate::with_skill_names(
+                    gate_skill_names,
+                ),
+            ),
             api_provider,
             api_provider_identity,
             api_provider_id,
@@ -3708,13 +3741,20 @@ impl Engine {
                 cache_control: None,
             }];
         }
-        let recommended_plugins = crate::plugins::recommend::recommended_plugins_user_fragment(
-            &text,
-            self.plugin_registry.as_ref(),
-            &crate::plugins::recommend::load_marketplace_candidates(
-                self.plugin_registry.state_path(),
-            ),
-        );
+        let recommended_plugins = {
+            let mut recommended_plugin_gate = self
+                .recommended_plugin_gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            crate::plugins::recommend::recommended_plugins_user_fragment(
+                &text,
+                self.plugin_registry.as_ref(),
+                &crate::plugins::recommend::load_marketplace_candidates(
+                    self.plugin_registry.state_path(),
+                ),
+                &mut recommended_plugin_gate,
+            )
+        };
         let expanded = crate::image_attach::expand_attachment_blocks(&text);
         let mut content = Vec::with_capacity(3 + expanded.blocks.len());
         content.push(ContentBlock::Text {
