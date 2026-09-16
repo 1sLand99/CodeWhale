@@ -101,6 +101,16 @@ tag, packages, checksums and release assets exist.
 
 ### Changed
 
+- Menu navigation is starting to mean the same thing everywhere. `menu_style`
+  already single-sourced how a selected row *looks*; what a key *does* was still
+  reinvented per surface — `h`/`l` in the provider picker against `Left`/`Right`
+  in the model picker one screen later, `Home`/`End` in one of seven pickers, and
+  no paging at all in Fleet's detail view. `list_nav`, which already owned the
+  wrap arithmetic, now owns the vocabulary too: one vertical axis, one
+  horizontal axis, and two entry points so a picker with a live filter never has
+  a letter stolen out of its query. Fleet's detail view adopts it first and
+  gains PageUp/PageDown and Home/End in both its lists (#6290).
+
 - Reviewed plugin bundles are no longer re-hashed four times per MCP dispatch.
   `verify_plugin_authority` walks and hashes both the reviewed source and the
   runtime snapshot, and four separate authority checks ran per `tools/call` —
