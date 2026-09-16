@@ -13,6 +13,7 @@ members = [
     "crates/lane",
     "crates/localization",
     "crates/mcp",
+    "crates/memory",
     "crates/models",
     "crates/palette",
     "crates/paths",
