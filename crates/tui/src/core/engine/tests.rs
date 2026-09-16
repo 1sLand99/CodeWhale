@@ -5217,6 +5217,7 @@ async fn user_steer_during_parent_answer_still_gets_a_reply_with_healthy_childre
             .try_send(handle::SteerInput {
                 turn_id,
                 content: "Also read state.txt and include its evidence.".to_string(),
+                outcome: None,
             })
             .expect("steer channel open");
         canned::simple_text_turn("The workflow is still running.")

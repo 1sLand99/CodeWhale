@@ -8311,6 +8311,10 @@ fn map_thread_err(err: anyhow::Error) -> ApiError {
     } else if message.contains("already has an active turn")
         || message.contains("No active turn")
         || message.contains("is not active")
+        // A steer the engine dropped: the turn moved on before the model saw
+        // it. 409 lets a client keep the text and resend rather than trust a
+        // delivery that never happened (#6276).
+        || message.contains("moved on before the steer")
         || lower.contains("operation_key is already bound")
         || lower.contains("operation_key binding is incomplete")
         || lower.contains("operation_key binding does not match")

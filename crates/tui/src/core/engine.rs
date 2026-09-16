@@ -1288,7 +1288,15 @@ impl Engine {
         }
     }
 
-    fn next_turn_steer(&mut self) -> Option<String> {
+    /// Take the next steer belonging to the active turn.
+    ///
+    /// Steers addressed to a turn that has already moved on are discarded
+    /// here; dropping their [`handle::SteerInput`] reports
+    /// [`handle::SteerOutcome::Dropped`] to the sender, so a discard is never
+    /// silent (#6276). The returned [`handle::PendingSteer`] is unsettled:
+    /// the caller must `commit()` it once the text is in the turn's record,
+    /// and dropping it otherwise reports `Dropped` too.
+    fn next_turn_steer(&mut self) -> Option<handle::PendingSteer> {
         let active_id = self
             .turn_controls
             .lock()
@@ -1298,7 +1306,7 @@ impl Engine {
             .map(|control| control.id);
         while let Ok(steer) = self.rx_steer.try_recv() {
             if steer.turn_id == active_id {
-                return Some(steer.content);
+                return Some(steer.into_pending());
             }
         }
         None
@@ -7985,7 +7993,7 @@ impl SubAgentWiring {
 mod approval;
 mod compaction;
 mod context;
-mod handle;
+pub(crate) mod handle;
 pub mod preview;
 use crate::compaction::estimate_input_tokens_conservative;
 #[cfg(test)]

@@ -11,7 +11,7 @@
 use anyhow::Result;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex as StdMutex};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use codewhale_config::AppMode;
@@ -80,6 +80,77 @@ impl Drop for TurnControlGuard {
 pub(crate) struct SteerInput {
     pub(super) turn_id: Option<u64>,
     pub(crate) content: String,
+    pub(super) outcome: Option<oneshot::Sender<SteerOutcome>>,
+}
+
+/// The engine's verdict on one steer. A steer whose turn had already moved
+/// on is discarded by `next_turn_steer`; the verdict tells the sender which
+/// happened, because "the channel accepted the text" is not "the model saw
+/// it" (#6276).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SteerOutcome {
+    /// The steer's text was committed into the session record inside the
+    /// turn it was sent to; the model received it.
+    Accepted,
+    /// The turn had already moved on (or ended) before the steer reached a
+    /// commit boundary. The model never saw the text.
+    Dropped,
+}
+
+/// A steer the engine has taken ownership of. Committing it reports
+/// [`SteerOutcome::Accepted`]; any other exit — interrupt, failure, early
+/// return, silent drop of the pending queue — reports `Dropped` from `Drop`,
+/// so no path can lose a verdict.
+pub(crate) struct PendingSteer {
+    pub(crate) content: String,
+    outcome: Option<oneshot::Sender<SteerOutcome>>,
+}
+
+impl PendingSteer {
+    pub(crate) fn new(content: String, outcome: Option<oneshot::Sender<SteerOutcome>>) -> Self {
+        Self { content, outcome }
+    }
+
+    /// Commit the steer into the turn's record: report `Accepted`, then hand
+    /// back the text. Consuming `self` without calling this reports
+    /// `Dropped` via `Drop`.
+    pub(crate) fn commit(mut self) -> String {
+        if let Some(outcome) = self.outcome.take() {
+            let _ = outcome.send(SteerOutcome::Accepted);
+        }
+        // `Drop` runs after this returns and finds `outcome` already taken,
+        // so the verdict stays exactly one `Accepted`.
+        std::mem::take(&mut self.content)
+    }
+}
+
+impl Drop for PendingSteer {
+    fn drop(&mut self) {
+        if let Some(outcome) = self.outcome.take() {
+            let _ = outcome.send(SteerOutcome::Dropped);
+        }
+    }
+}
+
+impl SteerInput {
+    /// Take ownership of this steer as an unsettled [`PendingSteer`].
+    ///
+    /// This is the only way to claim a steer off the channel. Whatever the
+    /// claimant then does — `commit()` or drop — settles it exactly once, so
+    /// there is one settlement mechanism rather than two (#6276).
+    pub(crate) fn into_pending(mut self) -> PendingSteer {
+        // Both fields are taken, so the `Drop` below finds nothing left to
+        // settle and the verdict travels with the `PendingSteer`.
+        PendingSteer::new(std::mem::take(&mut self.content), self.outcome.take())
+    }
+}
+
+impl Drop for SteerInput {
+    fn drop(&mut self) {
+        if let Some(outcome) = self.outcome.take() {
+            let _ = outcome.send(SteerOutcome::Dropped);
+        }
+    }
 }
 
 impl std::ops::Deref for SteerInput {
@@ -105,7 +176,23 @@ impl SteerPermit {
         self.permit.send(SteerInput {
             turn_id: self.turn_id,
             content,
+            outcome: None,
         });
+    }
+
+    /// Send a steer and receive the engine's verdict on it. The receiver
+    /// resolves to [`SteerOutcome::Accepted`] when the turn commits the text
+    /// into its record, [`SteerOutcome::Dropped`] when the turn moved on
+    /// first, and closes without a verdict only if the engine itself is gone
+    /// (#6276).
+    pub(crate) fn send_with_outcome(self, content: String) -> oneshot::Receiver<SteerOutcome> {
+        let (outcome_tx, outcome_rx) = oneshot::channel();
+        self.permit.send(SteerInput {
+            turn_id: self.turn_id,
+            content,
+            outcome: Some(outcome_tx),
+        });
+        outcome_rx
     }
 }
 

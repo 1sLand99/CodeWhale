@@ -122,6 +122,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A steer the engine never delivered is no longer reported as sent. The runtime
+  API persisted the steer item as already-`Completed` and emitted
+  `turn.steered` + `item.completed` the moment the text entered the engine's
+  mailbox — before the engine decided anything. The engine discards a steer
+  whose turn has moved on, and an interrupted or failed turn drops whatever it
+  had queued, so a GUI could show "Guidance sent", clear the composer, and lose
+  the user's words. The engine now returns a verdict for every steer on every
+  exit path, the item settles `completed` or `canceled` to match, a dropped
+  steer emits `turn.steer_dropped` and answers `409` so a client can resend,
+  and `steer_count` counts steers the model actually received (#6276).
 - `<recommended_plugins>` suggestions stop nagging: a plugin id is now
   injected at most once per engine lifetime, and a plugin whose name a
   loaded skill already covers is never suggested — the local skill owns

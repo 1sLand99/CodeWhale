@@ -45,7 +45,11 @@ struct StreamOutcome {
     pending_message_complete: bool,
     last_text_index: Option<usize>,
     stream_errors: u32,
-    pending_steers: Vec<String>,
+    /// Unsettled steers queued mid-stream. Each is committed into the turn's
+    /// record at a step boundary, or dropped — and dropping one reports
+    /// `SteerOutcome::Dropped` to its sender, so an interrupted or failed
+    /// turn cannot silently swallow user guidance (#6276).
+    pending_steers: Vec<handle::PendingSteer>,
     /// Typed, engine-internal drop-recovery state. `Option` + consume-once
     /// means one drop schedules exactly one resume; see [`StreamResume`].
     pending_resume: Option<StreamResume>,
@@ -806,11 +810,12 @@ impl Engine {
             }
 
             let mut accepted_steer = false;
-            while let Some(steer) = self.next_turn_steer() {
-                let steer = steer.trim().to_string();
-                if steer.is_empty() {
+            while let Some(pending) = self.next_turn_steer() {
+                if pending.content.trim().is_empty() {
+                    // Nothing to deliver; dropping `pending` settles it.
                     continue;
                 }
+                let steer = pending.commit().trim().to_string();
                 accepted_steer = true;
                 self.session
                     .working_set
@@ -2077,7 +2082,8 @@ impl Engine {
                         turn.stop_diagnostics
                             .permission_denial_rounds_without_progress = 0;
                     }
-                    for steer in pending_steers.drain(..) {
+                    for pending in pending_steers.drain(..) {
+                        let steer = pending.commit().trim().to_string();
                         self.session
                             .working_set
                             .observe_user_message(&steer, &self.session.workspace);
@@ -2681,7 +2687,8 @@ impl Engine {
 
             let accepted_steer_after_tools = !pending_steers.is_empty();
             if !pending_steers.is_empty() {
-                for steer in pending_steers.drain(..) {
+                for pending in pending_steers.drain(..) {
+                    let steer = pending.commit().trim().to_string();
                     self.session
                         .working_set
                         .observe_user_message(&steer, &self.session.workspace);
@@ -4672,7 +4679,7 @@ impl Engine {
         // content-block delta delivered to the consumer).
         let mut any_content_received = false;
         let mut transparent_stream_retries = 0u32;
-        let mut pending_steers: Vec<String> = Vec::new();
+        let mut pending_steers: Vec<handle::PendingSteer> = Vec::new();
         // `stream_start` is reset on a transparent retry so the wall-clock
         // budget restarts with the fresh stream.
         let mut stream_start = Instant::now();
@@ -4729,18 +4736,16 @@ impl Engine {
             let Some(event_result) = poll_outcome else {
                 break;
             };
-            while let Some(steer) = self.next_turn_steer() {
-                let steer = steer.trim().to_string();
-                if steer.is_empty() {
+            while let Some(pending) = self.next_turn_steer() {
+                if pending.content.trim().is_empty() {
+                    // Nothing to deliver; dropping `pending` settles it.
                     continue;
                 }
-                pending_steers.push(steer.clone());
+                let preview = summarize_text(pending.content.trim(), 120);
+                pending_steers.push(pending);
                 let _ = self
                     .tx_event
-                    .send(Event::status(format!(
-                        "Steer input queued: {}",
-                        summarize_text(&steer, 120)
-                    )))
+                    .send(Event::status(format!("Steer input queued: {preview}")))
                     .await;
             }
 

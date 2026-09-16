@@ -31,6 +31,7 @@ use crate::compaction::CompactionConfig;
 #[cfg(test)]
 use crate::config::DEFAULT_TEXT_MODEL;
 use crate::config::{ApiProvider, Config, MAX_SUBAGENTS, ProviderIdentity};
+use crate::core::engine::handle::SteerOutcome;
 use crate::core::engine::{
     EngineConfig, EngineHandle, spawn_engine_with_authoritative_route_config,
 };
@@ -79,6 +80,14 @@ const MAX_PENDING_DYNAMIC_TOOL_CALLS: usize = 128;
 const SUMMARY_LIMIT: usize = 280;
 const STREAM_DELTA_BATCH_MAX_LATENCY: Duration = Duration::from_millis(32);
 const STREAM_DELTA_BATCH_MAX_BYTES: usize = 16 * 1024;
+/// How long `steer_turn` observes the engine's verdict before answering with
+/// the honest `Queued` receipt instead. A steer sent into a streaming turn
+/// settles in milliseconds; one sent behind a long tool call cannot, and an
+/// API request must not hang for the length of a tool call (#6276).
+const STEER_SETTLE_WAIT: Duration = Duration::from_secs(2);
+/// Why a steer never reached the model, in the words a client can show.
+const STEER_DROPPED_REASON: &str =
+    "the turn moved on before the engine committed it, so the model never saw it — resend it";
 const EVENT_TRANSACTION_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 const EVENT_TRANSACTION_LOCK_POLL: Duration = Duration::from_millis(5);
 const EVENT_TRANSACTION_LOCK_FILE: &str = "events.lock";
@@ -8887,58 +8896,133 @@ impl RuntimeThreadManager {
         acceptance_rx
     }
 
-    fn spawn_steer_receipts(
+    /// Settle one steer against the engine's real verdict.
+    ///
+    /// The detached worker — not the API caller — owns `outcome_rx`, so a
+    /// cancelled request or a timed-out caller can never orphan the verdict
+    /// and strand the item in `Queued` (#6276). Exactly one of two
+    /// settlements is written, record first and events after:
+    ///
+    /// - `Accepted`: the item flips to `Completed`, `steer_count` rises, and
+    ///   `turn.steered` + `item.completed` are emitted — the happy path
+    ///   clients already know.
+    /// - `Dropped` (including a closed channel, which means the engine is
+    ///   gone): the item flips to `Canceled` and `turn.steer_dropped` carries
+    ///   the settled item, so a client can requeue the text it was told had
+    ///   been delivered.
+    fn spawn_steer_settlement(
         &self,
         turn: TurnRecord,
         item: TurnItemRecord,
         prompt: String,
-    ) -> oneshot::Receiver<TurnRecord> {
-        let (receipt_tx, receipt_rx) = oneshot::channel();
+        outcome_rx: oneshot::Receiver<SteerOutcome>,
+    ) -> oneshot::Receiver<(SteerOutcome, TurnRecord)> {
+        let (settle_tx, settle_rx) = oneshot::channel();
         let manager = Arc::new(self.clone());
         let worker = tokio::spawn(async move {
             use futures_util::FutureExt;
-            let receipts = std::panic::AssertUnwindSafe(async {
-                if let Err(err) = manager
-                    .emit_event(
-                        &turn.thread_id,
-                        Some(&turn.id),
-                        Some(&item.id),
-                        "turn.steered",
-                        json!({
-                            "thread_id": turn.thread_id.clone(),
-                            "turn_id": turn.id.clone(),
-                            "input": prompt,
-                        }),
-                    )
-                    .await
-                {
-                    tracing::warn!("Failed to persist turn.steered after engine acceptance: {err}");
+            // The engine sends exactly one verdict on every exit path. A
+            // closed channel means the engine itself went away without one,
+            // which is a drop by any honest reading.
+            let outcome = outcome_rx.await.unwrap_or(SteerOutcome::Dropped);
+            let mut item = item;
+            item.status = match outcome {
+                SteerOutcome::Accepted => TurnItemLifecycleStatus::Completed,
+                SteerOutcome::Dropped => TurnItemLifecycleStatus::Canceled,
+            };
+            item.ended_at = Some(Utc::now());
+            let settled_turn = std::panic::AssertUnwindSafe(async {
+                let persisted = {
+                    let _turn_mutation = manager.store.turn_mutation.lock();
+                    (|| -> Result<TurnRecord> {
+                        manager.store.save_item(&item)?;
+                        let mut turn = manager.store.load_turn(&item.turn_id)?;
+                        if outcome == SteerOutcome::Accepted {
+                            turn.steer_count = turn.steer_count.saturating_add(1);
+                        }
+                        manager.store.save_turn(&turn)?;
+                        Ok(turn)
+                    })()
+                };
+                let settled_turn = match persisted {
+                    Ok(turn) => turn,
+                    Err(err) => {
+                        tracing::error!("Failed to settle steer item {}: {err}", item.id);
+                        turn.clone()
+                    }
+                };
+                match outcome {
+                    SteerOutcome::Accepted => {
+                        if let Err(err) = manager
+                            .emit_event(
+                                &turn.thread_id,
+                                Some(&turn.id),
+                                Some(&item.id),
+                                "turn.steered",
+                                json!({
+                                    "thread_id": turn.thread_id.clone(),
+                                    "turn_id": turn.id.clone(),
+                                    "input": prompt,
+                                }),
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                "Failed to persist turn.steered after engine acceptance: {err}"
+                            );
+                        }
+                        if let Err(err) = manager
+                            .emit_event(
+                                &turn.thread_id,
+                                Some(&turn.id),
+                                Some(&item.id),
+                                "item.completed",
+                                json!({ "item": item }),
+                            )
+                            .await
+                        {
+                            tracing::warn!("Failed to persist steer item.completed: {err}");
+                        }
+                    }
+                    SteerOutcome::Dropped => {
+                        if let Err(err) = manager
+                            .emit_event(
+                                &turn.thread_id,
+                                Some(&turn.id),
+                                Some(&item.id),
+                                "turn.steer_dropped",
+                                json!({
+                                    "thread_id": turn.thread_id.clone(),
+                                    "turn_id": turn.id.clone(),
+                                    "input": prompt,
+                                    "reason": STEER_DROPPED_REASON,
+                                    "item": item,
+                                }),
+                            )
+                            .await
+                        {
+                            tracing::warn!("Failed to persist turn.steer_dropped: {err}");
+                        }
+                    }
                 }
-                if let Err(err) = manager
-                    .emit_event(
-                        &turn.thread_id,
-                        Some(&turn.id),
-                        Some(&item.id),
-                        "item.completed",
-                        json!({ "item": item }),
-                    )
-                    .await
-                {
-                    tracing::warn!("Failed to persist steer item.completed: {err}");
-                }
+                settled_turn
             })
             .catch_unwind()
             .await;
-            if let Err(payload) = receipts {
-                tracing::error!(
-                    "Steer receipt task panicked after engine acceptance: {}",
-                    panic_payload_message(&*payload)
-                );
-            }
-            let _ = receipt_tx.send(turn);
+            let settled_turn = match settled_turn {
+                Ok(turn) => turn,
+                Err(payload) => {
+                    tracing::error!(
+                        "Steer settlement task panicked: {}",
+                        panic_payload_message(&*payload)
+                    );
+                    turn
+                }
+            };
+            let _ = settle_tx.send((outcome, settled_turn));
         });
         self.track_receipt_worker(worker);
-        receipt_rx
+        settle_rx
     }
 
     pub async fn start_turn(&self, thread_id: &str, req: StartTurnRequest) -> Result<TurnRecord> {
@@ -9612,20 +9696,24 @@ impl RuntimeThreadManager {
             .map_err(|error| anyhow!("Failed to steer turn: {error}"))?;
 
         let now = Utc::now();
+        let queued_turn;
         let item = TurnItemRecord {
             schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
             id: format!("item_{}", &Uuid::new_v4().to_string()[..8]),
             turn_id: turn_id.to_string(),
             kind: TurnItemKind::UserMessage,
-            status: TurnItemLifecycleStatus::Completed,
+            // Queued, not Completed: the text is in the engine's mailbox, not
+            // yet in the turn's record. `spawn_steer_settlement` flips it once
+            // the engine reports what actually happened (#6276).
+            status: TurnItemLifecycleStatus::Queued,
             summary: summarize_text(&prompt, SUMMARY_LIMIT),
             detail: Some(prompt.clone()),
             metadata: None,
             artifact_refs: Vec::new(),
             started_at: Some(now),
-            ended_at: Some(now),
+            ended_at: None,
         };
-        let receipt_rx = {
+        let settle_rx = {
             let mut active = self.active.lock().await;
             let Some(active_thread) = active.engines.get(thread_id) else {
                 bail!("Thread is not loaded");
@@ -9649,7 +9737,8 @@ impl RuntimeThreadManager {
                     bail!("Turn {turn_id} is no longer in progress and cannot be steered");
                 }
                 self.store.save_item(&item)?;
-                turn.steer_count = turn.steer_count.saturating_add(1);
+                // `steer_count` counts steers the model actually received, so
+                // it rises in the settlement path, not here.
                 if !turn.item_ids.iter().any(|id| id == &item.id) {
                     turn.item_ids.push(item.id.clone());
                 }
@@ -9670,13 +9759,26 @@ impl RuntimeThreadManager {
             };
             // The reserved send has no await/failure point. From here the
             // engine and durable record agree even if the API caller drops.
-            permit.send(prompt.clone());
+            let outcome_rx = permit.send_with_outcome(prompt.clone());
             touch_lru(&mut active.lru, thread_id);
-            self.spawn_steer_receipts(turn, item, prompt)
+            queued_turn = turn.clone();
+            self.spawn_steer_settlement(turn, item, prompt, outcome_rx)
         };
-        receipt_rx
-            .await
-            .map_err(|_| anyhow!("Steer receipt task ended before acknowledgement"))
+
+        // The settler owns the verdict; this is only an observation of it.
+        // Steering a streaming turn settles in milliseconds, so the caller
+        // almost always gets the truth in-band. Behind a long tool call the
+        // engine will not look at its mailbox for minutes, and an API request
+        // must not hang that long — so the wait is bounded and the caller
+        // falls back to the honest `Queued` receipt it already has.
+        match tokio::time::timeout(STEER_SETTLE_WAIT, settle_rx).await {
+            Ok(Ok((SteerOutcome::Accepted, turn))) => Ok(turn),
+            Ok(Ok((SteerOutcome::Dropped, _))) => bail!(
+                "Turn {turn_id} moved on before the steer reached the model; {STEER_DROPPED_REASON}"
+            ),
+            Ok(Err(_)) => bail!("Steer settlement task ended before acknowledgement"),
+            Err(_) => Ok(queued_turn),
+        }
     }
 
     pub async fn compact_thread(
@@ -10508,6 +10610,17 @@ impl RuntimeThreadManager {
             for item in items {
                 match item.kind {
                     TurnItemKind::UserMessage => {
+                        // A steer the engine never committed is recorded
+                        // `queued` or `canceled` precisely because the model
+                        // never saw it. Replaying it here would put words into
+                        // the context that the record says were not delivered
+                        // — the record is right, so it stays out (#6276).
+                        if matches!(
+                            item.status,
+                            TurnItemLifecycleStatus::Queued | TurnItemLifecycleStatus::Canceled
+                        ) {
+                            continue;
+                        }
                         flush_assistant(&mut assistant_blocks, &mut messages);
                         user_blocks.extend(item.user_content()?);
                     }

@@ -4415,7 +4415,10 @@ async fn steer_and_interrupt_endpoints_work_on_active_turn() -> Result<()> {
         let _ = tx_event
             .send(EngineEvent::MessageStarted { index: 0 })
             .await;
-        if let Some(steer_text) = rx_steer.recv().await {
+        if let Some(steer) = rx_steer.recv().await {
+            // An engine that uses the steer has committed it; `commit()` is
+            // what reports that acceptance back to `steer_turn`.
+            let steer_text = steer.into_pending().commit();
             let _ = tx_event
                 .send(EngineEvent::MessageDelta {
                     index: 0,
