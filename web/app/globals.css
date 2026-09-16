@@ -1391,6 +1391,59 @@ a.body-link:hover { background-size: 100% 6px; color: var(--ink); }
   text-underline-offset: 0.25rem;
 }
 
+/* Sortable model table — quiet column-header buttons; the active column
+   carries a direction mark instead of a color change. */
+.models-sort {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-mute);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.models-sort:hover {
+  color: var(--ink);
+}
+
+.models-sort.is-active {
+  color: var(--indigo-deep);
+}
+
+.models-sort-mark {
+  font-size: 0.72em;
+  color: var(--ink-mute);
+}
+
+.models-sort.is-active .models-sort-mark {
+  color: var(--indigo-deep);
+}
+
+.models-sort:focus-visible {
+  outline: 2px solid var(--indigo);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+.models-reasoning {
+  display: inline-block;
+  margin-left: 0.5rem;
+  padding: 0.05rem 0.4rem;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  color: var(--ink-mute);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
 .portal-doc-groups {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

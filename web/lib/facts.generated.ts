@@ -4,6 +4,15 @@
 
 export interface ProviderFact { id: string; label: string; env: string }
 
+export interface ModelFact {
+  id: string;
+  provider: string | null;
+  contextWindow: number | null;
+  maxOutput: number | null;
+  reasoning: boolean;
+  addedAt: string | null;
+}
+
 export interface PublishedReleaseFact {
   tag: string;
   version: string;
@@ -19,6 +28,7 @@ export interface RepoFacts {
   crates: string[];
   sandboxBackends: string[];
   providers: ProviderFact[];
+  models: ModelFact[];
   defaultModel: string | null;
   nodeEngines: string | null;
   toolCount: number | null;
@@ -27,7 +37,7 @@ export interface RepoFacts {
 }
 
 export const FACTS: RepoFacts = {
-  "generatedAt": "2026-09-15T09:47:08.239Z",
+  "generatedAt": "2026-09-16T08:47:49.969Z",
   "sourceRevision": null,
   "sourceCommittedAt": null,
   "version": "0.9.13",
@@ -297,6 +307,600 @@ export const FACTS: RepoFacts = {
       "id": "modelstudio-coding-plan-anthropic",
       "label": "Model Studio Coding Plan (Anthropic-compatible)",
       "env": "MODELSTUDIO_API_KEY"
+    }
+  ],
+  "models": [
+    {
+      "id": "qwen3.5-flash",
+      "provider": "Qwen",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": true,
+      "addedAt": "2026-09-09"
+    },
+    {
+      "id": "claude-fable-5",
+      "provider": "Anthropic",
+      "contextWindow": 1000000,
+      "maxOutput": 128000,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "claude-haiku-4-5",
+      "provider": "Anthropic",
+      "contextWindow": 200000,
+      "maxOutput": 64000,
+      "reasoning": false,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "claude-opus-4-8",
+      "provider": "Anthropic",
+      "contextWindow": 1000000,
+      "maxOutput": 128000,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "claude-opus-5",
+      "provider": "Anthropic",
+      "contextWindow": 1000000,
+      "maxOutput": 128000,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "claude-sonnet-4-6",
+      "provider": "Anthropic",
+      "contextWindow": 1000000,
+      "maxOutput": 128000,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "claude-sonnet-5",
+      "provider": "Anthropic",
+      "contextWindow": 1000000,
+      "maxOutput": 128000,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "deepseek-coder:1.3b",
+      "provider": "DeepSeek",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": false,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "deepseek-flash",
+      "provider": "DeepSeek",
+      "contextWindow": 1000000,
+      "maxOutput": 384000,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "deepseek-reasoner",
+      "provider": "DeepSeek",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": false,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "deepseek-v4-flash",
+      "provider": "DeepSeek",
+      "contextWindow": 1000000,
+      "maxOutput": 384000,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "deepseek-v4-flash-vision-exp",
+      "provider": "DeepSeek",
+      "contextWindow": 1000000,
+      "maxOutput": 384000,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "deepseek-v4-pro",
+      "provider": "DeepSeek",
+      "contextWindow": 1000000,
+      "maxOutput": 384000,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "fugu-ultra",
+      "provider": null,
+      "contextWindow": 1000000,
+      "maxOutput": 131000,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "fugu-ultra-20260615",
+      "provider": null,
+      "contextWindow": 1000000,
+      "maxOutput": 131000,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "gemini-2.5-flash",
+      "provider": "Google",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": false,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "gemini-2.5-pro",
+      "provider": "Google",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": false,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "gemini-3-pro-preview",
+      "provider": "Google",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": false,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "gemini-3.1-pro-preview",
+      "provider": "Google",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": false,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "gemini-3.5-flash",
+      "provider": "Google",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": false,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "gemini-3.5-flash-lite",
+      "provider": "Google",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": false,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "gemini-3.6-flash",
+      "provider": "Google",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": false,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "gemini-3.7-flash",
+      "provider": "Google",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": false,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "glm-5.1",
+      "provider": "Z.ai",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": false,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "glm-5.2",
+      "provider": "Z.ai",
+      "contextWindow": 1000000,
+      "maxOutput": 131072,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "glm-5.3",
+      "provider": "Z.ai",
+      "contextWindow": 1000000,
+      "maxOutput": 131072,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "glm-5.3-flash",
+      "provider": "Z.ai",
+      "contextWindow": 1000000,
+      "maxOutput": 131072,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "gpt-5-codex",
+      "provider": "OpenAI Codex",
+      "contextWindow": 400000,
+      "maxOutput": 128000,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "gpt-5.3-codex",
+      "provider": "OpenAI",
+      "contextWindow": 400000,
+      "maxOutput": 128000,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "gpt-5.5",
+      "provider": "OpenAI",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": false,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "gpt-5.5-pro",
+      "provider": "OpenAI",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": false,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "gpt-5.6",
+      "provider": "OpenAI",
+      "contextWindow": 1050000,
+      "maxOutput": 128000,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "gpt-5.6-luna",
+      "provider": "OpenAI",
+      "contextWindow": 1050000,
+      "maxOutput": 128000,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "gpt-5.6-sol",
+      "provider": "OpenAI",
+      "contextWindow": 1050000,
+      "maxOutput": 128000,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "gpt-5.6-terra",
+      "provider": "OpenAI",
+      "contextWindow": 1050000,
+      "maxOutput": 128000,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "grok-4.20-0309-non-reasoning",
+      "provider": "xAI",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": false,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "grok-4.20-0309-reasoning",
+      "provider": "xAI",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": false,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "grok-4.3",
+      "provider": "xAI",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": false,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "grok-4.5",
+      "provider": "xAI",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": false,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "grok-4.6",
+      "provider": "xAI",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": false,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "grok-build",
+      "provider": "xAI",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": false,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "grok-composer-2.5-fast",
+      "provider": "xAI",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": false,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "kimi-for-coding",
+      "provider": "Moonshot/Kimi",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "kimi-for-coding-highspeed",
+      "provider": "Moonshot/Kimi",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "kimi-k2.5",
+      "provider": "Moonshot/Kimi",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "kimi-k2.6",
+      "provider": "Moonshot/Kimi",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "kimi-k2.7-code",
+      "provider": "Moonshot/Kimi",
+      "contextWindow": 262144,
+      "maxOutput": 32768,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "kimi-k2.7-code-highspeed",
+      "provider": "Moonshot/Kimi",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": false,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "kimi-k3",
+      "provider": "Moonshot/Kimi",
+      "contextWindow": 1048576,
+      "maxOutput": 131072,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "mimo-v2.5",
+      "provider": "Xiaomi MiMo",
+      "contextWindow": 1000000,
+      "maxOutput": 131072,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "mimo-v2.5-pro",
+      "provider": "Xiaomi MiMo",
+      "contextWindow": 1000000,
+      "maxOutput": 131072,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "mimo-v2.5-pro-ultraspeed",
+      "provider": "Xiaomi MiMo",
+      "contextWindow": 1000000,
+      "maxOutput": 131072,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "minimax-m2.7",
+      "provider": "MiniMax",
+      "contextWindow": 204800,
+      "maxOutput": 131072,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "minimax-m3",
+      "provider": "MiniMax",
+      "contextWindow": 1000000,
+      "maxOutput": 524288,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "mistral-code-latest",
+      "provider": "Mistral",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": false,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "mistral-large-latest",
+      "provider": "Mistral",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": false,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "mistral-medium-latest",
+      "provider": "Mistral",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": false,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "mistral-small-latest",
+      "provider": "Mistral",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": false,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "muse-spark-1.1",
+      "provider": "Meta",
+      "contextWindow": 1000000,
+      "maxOutput": 32000,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "muse-spark-1.2",
+      "provider": "Meta",
+      "contextWindow": 1000000,
+      "maxOutput": 32000,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "muse-spark-1.2-contributor",
+      "provider": "Meta",
+      "contextWindow": 1000000,
+      "maxOutput": 32000,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "qwen3.5-plus",
+      "provider": "Qwen",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "qwen3.6-35b-a3b",
+      "provider": "Qwen",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": false,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "qwen3.6-flash",
+      "provider": "Qwen",
+      "contextWindow": 1000000,
+      "maxOutput": 65536,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "qwen3.6-plus",
+      "provider": "Qwen",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "qwen3.7-max",
+      "provider": "Qwen",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "qwen3.7-plus",
+      "provider": "Qwen",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "qwen3.8-flash",
+      "provider": "Qwen",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "qwen3.8-max",
+      "provider": "Qwen",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "qwen3.8-max-preview",
+      "provider": "Qwen",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "step-3.7-flash",
+      "provider": null,
+      "contextWindow": 256000,
+      "maxOutput": 256000,
+      "reasoning": false,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "thinkingmachines/inkling",
+      "provider": "Together",
+      "contextWindow": null,
+      "maxOutput": null,
+      "reasoning": false,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "trinity-large-thinking",
+      "provider": "Arcee",
+      "contextWindow": 262144,
+      "maxOutput": 262144,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
+    },
+    {
+      "id": "trinity-mini",
+      "provider": "Arcee",
+      "contextWindow": 128000,
+      "maxOutput": null,
+      "reasoning": true,
+      "addedAt": "2026-08-30"
     }
   ],
   "defaultModel": "deepseek-flash",

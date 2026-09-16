@@ -63,6 +63,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Fixed",
         "items": [
+          "A steer the engine never delivered is no longer reported as sent. The runtime API persisted the steer item as already-Completed and emitted turn.steered + item.completed the moment the text entered the engine's mailbox — before the engine decided anything. The engine discards a steer whose turn has moved on, and an interrupted or failed turn drops whatever it had queued, so a GUI could show \"Guidance sent\", clear the composer, and lose the user's words. The engine now…",
           "<recommended_plugins> suggestions stop nagging: a plugin id is now injected at most once per engine lifetime, and a plugin whose name a loaded skill already covers is never suggested — the local skill owns the domain, so the nudge was noise. Dismissals still apply, and the fragment stays append-only on the user turn (#6274).",
           "A canceled automation run now settles with a transcript receipt that names the cancellation (by request, cancel timeout, or shutdown) instead of vanishing from the live band silently. The receipt wears attention ink and never lights the failure demand; the run record keeps the cancellation reason as its error detail. (#6162)",
           "A failed workflow run no longer settles silently: its terminal failure raises a sticky error toast naming the cause (dispatch, schema, or script errors), alongside the existing panel state (#5528).",
@@ -75,7 +76,7 @@ export const CHANGELOG: ChangelogRelease[] = [
           "/mcp no longer freezes the console while a turn is running: the panel opens immediately from the last known MCP snapshot with a receipt naming the wait, and live-pool mutations say their refresh is deferred instead of parking the UI event loop behind the running turn (#6159).",
           "MCP OAuth login no longer fails with \"Authorization server response missing required issuer\" against servers that implement RFC 9207, such as Cloudflare's mcp.cloudflare.com. The local callback listener now keeps the iss parameter from the redirect and hands it to the token exchange so the callback binds to the discovered issuer; servers that do not send iss keep working unchanged. (#6157)"
         ],
-        "itemCount": 11
+        "itemCount": 12
       }
     ]
   },
