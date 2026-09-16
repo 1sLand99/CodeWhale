@@ -30,13 +30,13 @@ pub enum RuleDecision {
     AskUser(String),
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct ExecPolicyConfig {
     #[serde(default)]
     pub rules: BTreeMap<String, RuleSet>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct RuleSet {
     #[serde(default)]
     pub allow: Vec<String>,
