@@ -29,6 +29,7 @@ export const RELEASE_CONTRIBUTORS: string[] = [
  */
 export const RELEASE_HELPERS: string[] = [
   "@7jrxt42BxFZo4iAnN4CX",
+  "@BX166",
   "@Lstarsky0",
   "@Lujc0523",
   "@Statter",
