@@ -4133,8 +4133,9 @@ fn apply_provider_model_cutline(
 /// The account control plane returns the OpenAI list shape, but every row
 /// carries a `codewhale` block naming the wire protocol Codewhale will use for
 /// that model (`chat-completions` → `{base}/chat/completions`,
-/// `anthropic-messages` → `{base}/messages`). That block is the whole reason
-/// this route is model-aware, so the protocol is read from the response rather
+/// `anthropic-messages` → `{base}/messages`, `responses` →
+/// `{base}/responses`). That block is the whole reason this route is
+/// model-aware, so the protocol is read from the response rather
 /// than inferred — the namespace inference in
 /// [`codewhale_config::route::codewhale_endpoint_key_for_model`] is only the
 /// offline fallback for a row this listing did not describe.
@@ -4179,7 +4180,8 @@ fn codewhale_catalog_offerings_from_body(
         }
         // An unstated or unknown protocol falls back to the namespace rule
         // rather than being dropped: the account already proved it serves this
-        // model by listing it.
+        // model by listing it, and a protocol label this build predates must
+        // not make the row unreachable.
         let endpoint_key = match row
             .codewhale
             .as_ref()
@@ -4188,6 +4190,7 @@ fn codewhale_catalog_offerings_from_body(
         {
             Some("anthropic-messages") => "messages",
             Some("chat-completions") => "chat",
+            Some("responses") => "responses",
             _ => codewhale_config::route::codewhale_endpoint_key_for_model(&id),
         };
         offerings.push(CatalogOffering {
@@ -7832,6 +7835,83 @@ mod tests {
         );
     }
 
+    /// A catalog row stating `codewhale.protocol = "responses"` must dispatch
+    /// to the account API's Responses surface — `{base}/responses` — not the
+    /// Chat Completions default its `openai/` namespace alone would imply.
+    #[tokio::test]
+    async fn codewhale_responses_catalog_row_dispatches_to_responses_endpoint() {
+        let _env = crate::test_support::lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let home = tempfile::tempdir().expect("home");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "text/event-stream")
+                    .set_body_string(concat!(
+                        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"",
+                        ",\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n\n",
+                        "data: [DONE]\n\n"
+                    )),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // Seed the account catalog through the same refresh seam the runtime
+        // uses, so the wire choice comes from the row's stated protocol.
+        let fingerprint = base_url_fingerprint(&server.uri());
+        let offerings = codewhale_catalog_offerings_from_body(
+            r#"{"object":"list","data":[
+                {"id":"openai/gpt-5.6","object":"model","owned_by":"openai",
+                 "codewhale":{"provider":"openai","model":"gpt-5.6",
+                              "protocol":"responses","endpoint":"/v1/responses",
+                              "default":true,"usable":true}}
+            ]}"#,
+            "codewhale",
+            &fingerprint,
+            now_unix(),
+        )
+        .expect("fixture catalog parses");
+        crate::provider_catalog_live::record_success(ProviderCatalogDelta {
+            provider: "codewhale".to_string(),
+            base_url_fingerprint: fingerprint,
+            fetched_at: now_unix(),
+            offerings,
+        });
+
+        let mut client = codewhale_client(&server, "openai/gpt-5.6");
+        assert_eq!(client.wire_format, WireFormat::Responses);
+        client.retry.enabled = false;
+        let response = client
+            .create_message(minimal_zen_request("openai/gpt-5.6"))
+            .await
+            .expect("Codewhale responses request should succeed");
+
+        // Responses usage arrives on the terminal `response.completed` event —
+        // the dialect's equivalent of chat's `stream_options.include_usage`.
+        assert_eq!(response.usage.input_tokens, 3);
+        assert_eq!(response.usage.output_tokens, 1);
+        let requests = server.received_requests().await.expect("recorded request");
+        assert_eq!(requests.len(), 1);
+        assert_codewhale_bearer(&requests[0]);
+        let body: Value = serde_json::from_slice(&requests[0].body).expect("responses JSON body");
+        assert_eq!(
+            body.get("model").and_then(Value::as_str),
+            Some("openai/gpt-5.6")
+        );
+        assert!(body.get("input").is_some(), "Responses body: {body}");
+        assert!(body.get("messages").is_none(), "Responses body: {body}");
+
+        crate::provider_catalog_live::reset_cache_for_test();
+        crate::provider_lake::clear_live_snapshot();
+    }
+
     fn opencode_zen_client(server: &MockServer, model: &str) -> DeepSeekClient {
         let config = Config {
             provider: Some("opencode-zen".to_string()),
@@ -9627,11 +9707,15 @@ mod tests {
     }
 
     #[test]
-    fn codewhale_authenticates_both_protocols_with_bearer_never_x_api_key() {
+    fn codewhale_authenticates_every_protocol_with_bearer_never_x_api_key() {
         // The Codewhale API is a passthrough: it authenticates the account key
         // with `Authorization: Bearer` on the Anthropic Messages route too, so
         // the usual Messages `x-api-key` default must not apply here.
-        for wire in [WireFormat::ChatCompletions, WireFormat::AnthropicMessages] {
+        for wire in [
+            WireFormat::ChatCompletions,
+            WireFormat::AnthropicMessages,
+            WireFormat::Responses,
+        ] {
             let headers = build_default_headers(
                 "cwc_key_test",
                 &HashMap::new(),
@@ -11798,6 +11882,13 @@ mod tests {
                  "codewhale": {"provider": "anthropic", "model": "claude-sonnet-5",
                                "protocol": "anthropic-messages",
                                "endpoint": "/v1/messages", "usable": true}},
+                {"id": "openai/gpt-5.6", "object": "model", "owned_by": "openai",
+                 "codewhale": {"provider": "openai", "model": "gpt-5.6",
+                               "protocol": "responses",
+                               "endpoint": "/v1/responses", "usable": true}},
+                {"id": "xai/grok-4.6", "object": "model", "owned_by": "xai",
+                 "codewhale": {"provider": "xai", "model": "grok-4.6",
+                               "protocol": "some-future-wire", "usable": true}},
                 {"id": "deepseek/deepseek-v4-pro", "object": "model"},
                 {"id": "   ", "object": "model"},
                 {"id": "anthropic/claude-opus-4-8", "object": "model"}
@@ -11810,12 +11901,17 @@ mod tests {
             .iter()
             .map(|row| (row.wire_model_id.as_str(), row))
             .collect();
-        assert_eq!(rows.len(), 3, "blank and duplicate ids are dropped");
+        assert_eq!(rows.len(), 5, "blank and duplicate ids are dropped");
         // The protocol comes from the response, not from a compiled roster.
         assert_eq!(by_id["deepseek/deepseek-v4-pro"].endpoint_key, "chat");
         assert!(by_id["deepseek/deepseek-v4-pro"].default_for_provider);
         assert_eq!(by_id["anthropic/claude-sonnet-5"].endpoint_key, "messages");
         assert!(!by_id["anthropic/claude-sonnet-5"].default_for_provider);
+        assert_eq!(by_id["openai/gpt-5.6"].endpoint_key, "responses");
+        // A protocol label this build predates is not an error: the row falls
+        // back to the namespace rule so a forward-compatible catalog stays
+        // reachable.
+        assert_eq!(by_id["xai/grok-4.6"].endpoint_key, "chat");
         // A row with no `codewhale` block still resolves through the namespace
         // rule rather than being dropped: the account listed it.
         assert_eq!(by_id["anthropic/claude-opus-4-8"].endpoint_key, "messages");

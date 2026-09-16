@@ -21,7 +21,7 @@
 # `api_key` / `base_url` are
 # still read as DeepSeek defaults when `[providers.deepseek]` is absent
 # (backward compatibility).
-provider = "deepseek" # deepseek | deepseek-cn | deepseek-anthropic | nvidia-nim | openai | atlascloud | wanjie-ark | volcengine | openrouter | orcarouter | xiaomi-mimo | novita | fireworks | siliconflow | siliconflow-CN | arcee | moonshot | zai | stepfun | minimax | sglang | vllm | ollama | huggingface | together | qianfan | openai-codex | anthropic | openmodel | deepinfra | sakana | longcat | opencode-go | opencode-zen | meta | xai | modelstudio-token-plan | modelstudio-coding-plan
+provider = "deepseek" # deepseek | deepseek-cn | deepseek-anthropic | nvidia-nim | openai | atlascloud | wanjie-ark | volcengine | openrouter | orcarouter | xiaomi-mimo | novita | fireworks | siliconflow | siliconflow-CN | arcee | moonshot | zai | stepfun | minimax | sglang | vllm | ollama | huggingface | together | qianfan | openai-codex | anthropic | openmodel | deepinfra | sakana | longcat | opencode-go | opencode-zen | meta | xai | modelstudio-token-plan | modelstudio-coding-plan | codewhale
 api_key = "YOUR_DEEPSEEK_API_KEY" # must be non-empty
 base_url = "https://api.deepseek.com/beta"
 # provider = "deepseek-cn"                       # legacy alias (official host is still https://api.deepseek.com)
@@ -995,6 +995,21 @@ max_subagents = 10 # optional (default 64, clamped to 1-128)
 # api_key = "om-..."
 # base_url = "https://api.openmodel.ai"
 # model = "deepseek-v4-flash"
+
+# Codewhale API (https://app.codewhale.net/settings?section=api)
+# Account-backed model access over the provider keys connected to the
+# customer's Codewhale account. The account's authenticated `GET /v1/models`
+# listing is the catalog authority: each `provider/model` row states its wire
+# (`chat-completions` → `/v1/chat/completions`, `anthropic-messages` →
+# `/v1/messages`, `responses` → `/v1/responses`). Every protocol authenticates
+# the account key with `Authorization: Bearer`, never `x-api-key`.
+# Provider aliases: codewhale-api, cw-api, codewhale-cloud
+# Env vars: CODEWHALE_API_KEY, CODEWHALE_API_BASE (HTTPS except loopback);
+#           the generic CODEWHALE_MODEL override also applies.
+[providers.codewhale]
+# api_key = "cwc_key_..."                   # or `codewhale account api-keys create --name <name> --use`
+# base_url = "https://api.codewhale.net/v1"
+# model = "deepseek/deepseek-v4-pro"        # provider/model exactly as the account catalog returns it
 
 # ─────────────────────────────────────────────────────────────────────────────────
 # Web Search Provider
