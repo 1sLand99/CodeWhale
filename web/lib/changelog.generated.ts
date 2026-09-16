@@ -73,6 +73,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Changed",
         "items": [
+          "The terminal opens on Shoreline, the same palette the GPUI client already uses: warm charcoal field #211F23, a raised plate for panels and the composer, one blue for action and selection #90B9FF, and the whale's ivory #F2ECE5 for body text, with 4.5:1 floors on every muted step. The old saturated navy gradient is not gone — underwater is a named theme now rather than the ground the product opens on. Existing installs keep whatever theme they have saved; /theme switches…",
           "Menu navigation is starting to mean the same thing everywhere. menu_style already single-sourced how a selected row *looks*; what a key *does* was still reinvented per surface — h/l in the provider picker against Left/Right in the model picker one screen later, Home/End in one of seven pickers, and no paging at all in Fleet's detail view. list_nav, which already owned the wrap arithmetic, now owns the vocabulary too: one vertical axis, one horizontal axis, and two entry…",
           "Reviewed plugin bundles are no longer re-hashed four times per MCP dispatch. verify_plugin_authority walks and hashes both the reviewed source and the runtime snapshot, and four separate authority checks ran per tools/call — eight tree walks. Three of them sat one statement after a validate_before_use on the same source, so is_ready re-verified what had just been verified; readiness and authority are now separate, and only the callers with no preceding check still pay for…",
           "A sub-agent's completion is read from the manager once instead of polled. The workflow pump re-read it up to fifty times, sleeping 20ms between attempts, waiting for a terminal status that was already committed — every publisher commits the status inside the same &mut self call that wakes the pump, so the write guard spans both and the first read always sees it. A child the manager had no record of cost a full second of head-of-line blocking before failing; it now fails…",
@@ -82,7 +83,7 @@ export const CHANGELOG: ChangelogRelease[] = [
           "Computer Use is the only computer-use product in Extensions and /mcp recommendations. Cua is no longer suggested as a parallel desktop-control MCP; enable the first-party computer-use plugin instead. The bundled plugin is 0.4.0: Return/Enter from type, filtered and paginated get_app_state, focus/get_value, and strategy:\"app\" window-scoped clicks. Shared-desktop pointer gestures stay gated.",
           "The bundled first-party catalog pins marketplace revision ca6be22, so installing Computer Use from the Extensions listing fetches the same 0.4.0 source and the published notarized 0.4.0 Mac app."
         ],
-        "itemCount": 8
+        "itemCount": 9
       },
       {
         "heading": "Fixed",

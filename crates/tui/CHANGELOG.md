@@ -101,6 +101,14 @@ tag, packages, checksums and release assets exist.
 
 ### Changed
 
+- The terminal opens on **Shoreline**, the same palette the GPUI client already
+  uses: warm charcoal field `#211F23`, a raised plate for panels and the
+  composer, one blue for action and selection `#90B9FF`, and the whale's ivory
+  `#F2ECE5` for body text, with 4.5:1 floors on every muted step. The old
+  saturated navy gradient is not gone — `underwater` is a named theme now
+  rather than the ground the product opens on. Existing installs keep whatever
+  theme they have saved; `/theme` switches (#6222).
+
 - Menu navigation is starting to mean the same thing everywhere. `menu_style`
   already single-sourced how a selected row *looks*; what a key *does* was still
   reinvented per surface — `h`/`l` in the provider picker against `Left`/`Right`
