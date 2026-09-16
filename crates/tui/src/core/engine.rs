@@ -873,6 +873,12 @@ pub struct Engine {
     mcp_event_generation: u64,
     /// Workspace-scoped immutable plugin catalogue and authority receipts.
     plugin_registry: Arc<crate::plugins::PluginRegistry>,
+    /// Keeps the append-only `<recommended_plugins>` fragment once-per-
+    /// Engine-lifetime per plugin id, and suppresses plugins whose name a
+    /// catalogue skill already covers (#6274). The skill-name snapshot is
+    /// taken at construction from the same catalogue the system prompt
+    /// indexes (see the gate's known-limitations note).
+    recommended_plugin_gate: StdMutex<crate::plugins::recommend::RecommendedPluginGate>,
     api_provider: ApiProvider,
     /// Exact configured route key. Named custom providers share the `Custom`
     /// enum, so the enum alone cannot prove that the active client is current.
@@ -1282,7 +1288,15 @@ impl Engine {
         }
     }
 
-    fn next_turn_steer(&mut self) -> Option<String> {
+    /// Take the next steer belonging to the active turn.
+    ///
+    /// Steers addressed to a turn that has already moved on are discarded
+    /// here; dropping their [`handle::SteerInput`] reports
+    /// [`handle::SteerOutcome::Dropped`] to the sender, so a discard is never
+    /// silent (#6276). The returned [`handle::PendingSteer`] is unsettled:
+    /// the caller must `commit()` it once the text is in the turn's record,
+    /// and dropping it otherwise reports `Dropped` too.
+    fn next_turn_steer(&mut self) -> Option<handle::PendingSteer> {
         let active_id = self
             .turn_controls
             .lock()
@@ -1292,7 +1306,7 @@ impl Engine {
             .map(|control| control.id);
         while let Ok(steer) = self.rx_steer.try_recv() {
             if steer.turn_id == active_id {
-                return Some(steer.content);
+                return Some(steer.into_pending());
             }
         }
         None
@@ -1527,10 +1541,31 @@ impl Engine {
         // Set up stable system prompt with project context (default to agent mode).
         // Per-turn working-set metadata is injected into the latest user
         // message at request time so file churn does not rewrite this prefix.
-        let user_memory_block = crate::native_memory::native_prompt_block(
+        // Session start boundary: reconcile this session's interrupted memory
+        // contexts (prepared but never dispatch-acknowledged — e.g. the process
+        // died mid-turn), then prepare this session's prompt packet through the
+        // durable receipt path so the Context Lens can show what was assembled
+        // for it. Both are inert when memory is disabled — no store I/O.
+        if config.memory_enabled
+            && let Some(store) =
+                crate::native_memory::NativeMemoryStore::from_global_path(&config.memory_path)
+        {
+            match store.session_start(&config.workspace, &session.id) {
+                Ok(0) => {}
+                Ok(interrupted) => tracing::info!(
+                    interrupted,
+                    "memory contexts from this session never completed dispatch"
+                ),
+                Err(error) => {
+                    tracing::warn!(%error, "memory session-start reconcile failed")
+                }
+            }
+        }
+        let user_memory_block = crate::native_memory::native_prompt_block_traced(
             config.memory_enabled,
             &config.memory_path,
             &config.workspace,
+            &session.id,
         );
         let prompt_goal_objective =
             goal_objective_for_prompt(config.goal_objective.as_deref(), &config.goal_state);
@@ -1674,6 +1709,28 @@ impl Engine {
         // `run_turn` restarts it per turn; this initial value only matters
         // for hosts that inspect the engine before the first turn.
         let turn_wall_clock_budget = config.turn_wall_clock;
+        // Skill-name snapshot for the plugin-suggestion gate (#6274): the
+        // SAME catalogue the system prompt indexes (prompts.rs skills block —
+        // workspace roots + configured skills_dir + plugin-sourced skills),
+        // so suppression sees everything the session actually has.
+        let gate_skill_names: std::collections::BTreeSet<String> =
+            crate::skills::discover_for_workspace_and_dir_with_mode_and_plugins(
+                &config.workspace,
+                &config.skills_dir,
+                crate::skills::SkillDiscoveryMode::from_codewhale_only(
+                    config.skills_scan_codewhale_only,
+                ),
+                Some(plugin_registry.as_ref()),
+            )
+            .list()
+            .iter()
+            .flat_map(|skill| {
+                std::iter::once(skill.name.clone()).chain(skill.aliases.iter().cloned())
+            })
+            .map(|name| name.trim().to_ascii_lowercase())
+            .filter(|name| !name.is_empty())
+            .collect();
+
         let engine = Engine {
             config,
             api_config: api_config.clone(),
@@ -1698,6 +1755,11 @@ impl Engine {
             mcp_boot_generation: None,
             mcp_event_generation: 0,
             plugin_registry,
+            recommended_plugin_gate: StdMutex::new(
+                crate::plugins::recommend::RecommendedPluginGate::with_skill_names(
+                    gate_skill_names,
+                ),
+            ),
             api_provider,
             api_provider_identity,
             api_provider_id,
@@ -3704,13 +3766,20 @@ impl Engine {
                 cache_control: None,
             }];
         }
-        let recommended_plugins = crate::plugins::recommend::recommended_plugins_user_fragment(
-            &text,
-            self.plugin_registry.as_ref(),
-            &crate::plugins::recommend::load_marketplace_candidates(
-                self.plugin_registry.state_path(),
-            ),
-        );
+        let recommended_plugins = {
+            let mut recommended_plugin_gate = self
+                .recommended_plugin_gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            crate::plugins::recommend::recommended_plugins_user_fragment(
+                &text,
+                self.plugin_registry.as_ref(),
+                &crate::plugins::recommend::load_marketplace_candidates(
+                    self.plugin_registry.state_path(),
+                ),
+                &mut recommended_plugin_gate,
+            )
+        };
         let expanded = crate::image_attach::expand_attachment_blocks(&text);
         let mut content = Vec::with_capacity(3 + expanded.blocks.len());
         content.push(ContentBlock::Text {
@@ -6985,10 +7054,11 @@ impl Engine {
         if self.api_config.runtime_chat_isolated {
             return Some(SystemPrompt::Text(ISOLATED_CHAT_ENGINE_PROMPT.to_string()));
         }
-        let user_memory_block = crate::native_memory::native_prompt_block(
+        let user_memory_block = crate::native_memory::native_prompt_block_traced(
             self.config.memory_enabled,
             &self.config.memory_path,
             &self.config.workspace,
+            &self.session.id,
         );
         let prompt_host = if self.config.terminal_chrome_enabled {
             prompts::PromptHost::Interactive
@@ -7941,7 +8011,7 @@ impl SubAgentWiring {
 mod approval;
 mod compaction;
 mod context;
-mod handle;
+pub(crate) mod handle;
 pub mod preview;
 use crate::compaction::estimate_input_tokens_conservative;
 #[cfg(test)]

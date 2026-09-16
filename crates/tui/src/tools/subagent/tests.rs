@@ -12536,9 +12536,9 @@ async fn panicked_child_task_terminalizes_and_stops_gating_peers() {
 
 /// A headless fleet worker (a worker record with no paired agent entry) that
 /// reaches `WaitingForUser` can never be answered — nothing will resume or
-/// finalize it — so it must not count as a live coordination owner, and the
-/// `agents/coordinate action=release` remediation the gate names must be able
-/// to clear its claim. A *paired* child waiting on the user is untouched.
+/// finalize it — so it must not count as a live coordination owner, and a
+/// claim leaked by a settled headless worker must still be sweepable by
+/// `release`. A *paired* child waiting on the user is untouched.
 #[test]
 fn waiting_for_user_headless_worker_is_not_a_live_coordination_owner() {
     let tmp = tempdir().expect("tempdir");
@@ -12574,7 +12574,7 @@ fn waiting_for_user_headless_worker_is_not_a_live_coordination_owner() {
     assert_eq!(
         released,
         vec!["worker-waiting".to_string()],
-        "the remediation the gate names must actually clear the leaked claim"
+        "release must actually clear the claim a settled headless worker leaks"
     );
 
     // The interactive case is preserved: a paired child waiting on the user

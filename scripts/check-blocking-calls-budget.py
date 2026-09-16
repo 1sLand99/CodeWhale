@@ -240,9 +240,41 @@ def file_counts(path: Path) -> dict[str, int]:
     return {k: v for k, v in counts.items() if v}
 
 
+CFG_TEST_MOD = re.compile(
+    r"#\[cfg\(test\)\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;"
+)
+
+
+def cfg_test_module_files() -> set[Path]:
+    """Files that are entire `#[cfg(test)]` modules declared by another file.
+
+    The per-file scanner recognises test scope it can see *inside* a file —
+    `#[test]`, `mod tests`, `fn test_*`. It cannot see that a whole file is
+    test-only, because that fact lives in the parent's `#[cfg(test)] mod
+    foo;` declaration. Extracting a test suite into its own file therefore
+    made an untouched call site look new (#6209 follow-up: PR #6096's
+    `session_export_*_tests.rs`). Excluding these keeps the ratchet's stated
+    contract — "not ... test code" — instead of taxing the extraction.
+    """
+    excluded: set[Path] = set()
+    for path in CRATES.rglob("*.rs"):
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for name in CFG_TEST_MOD.findall(text):
+            for candidate in (path.parent / f"{name}.rs", path.parent / name / "mod.rs"):
+                if candidate.is_file():
+                    excluded.add(candidate.resolve())
+    return excluded
+
+
 def collect_current() -> dict[str, dict[str, int]]:
     budget: dict[str, dict[str, int]] = {}
+    test_only = cfg_test_module_files()
     for path in sorted(CRATES.rglob("*.rs")):
+        if path.resolve() in test_only:
+            continue
         try:
             counts = file_counts(path)
         except OSError:

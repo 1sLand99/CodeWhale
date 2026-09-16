@@ -11357,6 +11357,108 @@ async fn terminal_turn_cancels_pending_user_input_and_clears_snapshot() -> Resul
 }
 
 #[tokio::test]
+async fn interrupted_turn_cancels_pending_user_input_and_clears_snapshot() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let mut harness = install_mock_engine(&manager, &thread.id).await;
+    let turn = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "needs input before interruption".to_string(),
+                ..StartTurnRequest::default()
+            },
+        )
+        .await?;
+    assert!(matches!(
+        harness.rx_op.recv().await,
+        Some(Op::SendMessage(TurnSpec { .. }))
+    ));
+    harness
+        .tx_event
+        .send(EngineEvent::UserInputRequired {
+            id: "input_interrupt".to_string(),
+            request: crate::tools::user_input::UserInputRequest {
+                questions: vec![crate::tools::user_input::UserInputQuestion {
+                    header: "Continue".to_string(),
+                    id: "continue".to_string(),
+                    question: "Continue?".to_string(),
+                    options: vec![crate::tools::user_input::UserInputOption {
+                        label: "Yes".to_string(),
+                        description: "Continue now".to_string(),
+                    }],
+                    allow_free_text: false,
+                    multi_select: false,
+                }],
+            },
+        })
+        .await?;
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if !manager
+            .get_thread_detail(&thread.id)
+            .await?
+            .pending_user_inputs
+            .is_empty()
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            bail!("pending user input did not reach the canonical snapshot");
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+
+    // The user pressed Esc: the engine lands the interrupt as a terminal
+    // turn outcome, not a failure. An unanswered prompt must not outlive it.
+    harness
+        .tx_event
+        .send(EngineEvent::TurnComplete {
+            usage: Usage::default(),
+            parent_route_usage: Usage::default(),
+            routed_usage_dropped_records: 0,
+            status: TurnOutcomeStatus::Interrupted,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        })
+        .await?;
+    let canceled = tokio::time::timeout(
+        Duration::from_secs(2),
+        harness.recv_user_input_cancellation(),
+    )
+    .await
+    .expect("interrupted user-input cancellation timed out");
+    assert_eq!(canceled.as_deref(), Some("input_interrupt"));
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let detail = manager.get_thread_detail(&thread.id).await?;
+        if detail.pending_user_inputs.is_empty()
+            && manager.events_since(&thread.id, None)?.iter().any(|event| {
+                event.event == "user_input.canceled"
+                    && event.turn_id.as_deref() == Some(turn.id.as_str())
+                    && event.payload.get("input_id").and_then(Value::as_str)
+                        == Some("input_interrupt")
+                    && event.payload.get("terminal").and_then(Value::as_bool) == Some(true)
+            })
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "interrupted user input was not cleared from the snapshot with a cancellation event"
+            );
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn dynamic_tool_result_settles_snapshot_and_emits_one_safe_resolution() -> Result<()> {
     use crate::tools::spec::DynamicToolExecutor;
 
@@ -13437,7 +13539,9 @@ async fn steer_turn_on_active_turn_records_item_and_event() -> Result<()> {
                 })
                 .await;
             if let Some(steer) = rx_steer.recv().await {
-                let _ = steer_seen_tx.send(steer.content);
+                // Model an engine that commits the steer into its record;
+                // `commit()` is what reports acceptance back to `steer_turn`.
+                let _ = steer_seen_tx.send(steer.into_pending().commit());
             }
             let _ = tx_event
                 .send(EngineEvent::MessageStarted { index: 0 })
@@ -13568,7 +13672,7 @@ async fn steer_receipts_outlive_caller_cancellation_after_engine_acceptance() ->
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(2), rx_steer.recv())
             .await?
-            .map(|steer| steer.content),
+            .map(|steer| steer.into_pending().commit()),
         Some("keep the accepted steer".to_string())
     );
     steer_task.abort();
@@ -13618,6 +13722,121 @@ async fn steer_receipts_outlive_caller_cancellation_after_engine_acceptance() ->
         .send(EngineEvent::MessageDelta {
             index: 0,
             content: "accepted steer completed".to_string(),
+        })
+        .await?;
+    tx_event
+        .send(EngineEvent::MessageComplete { index: 0 })
+        .await?;
+    tx_event
+        .send(EngineEvent::TurnComplete {
+            usage: Usage::default(),
+            parent_route_usage: Usage::default(),
+            routed_usage_dropped_records: 0,
+            status: TurnOutcomeStatus::Completed,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        })
+        .await?;
+    let terminal = wait_for_terminal_turn(&manager, &turn.id).await?;
+    assert_eq!(terminal.status, RuntimeTurnStatus::Completed);
+    Ok(())
+}
+
+#[tokio::test]
+async fn steer_dropped_by_the_engine_is_reported_as_undelivered() -> Result<()> {
+    // #6276: the channel accepting the text is not the model seeing it. An
+    // engine that takes a steer and never commits it — the turn moved on, was
+    // interrupted, or failed — must not produce a delivery receipt.
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let harness = install_mock_engine(&manager, &thread.id).await;
+    let mut rx_op = harness.rx_op;
+    let mut rx_steer = harness.rx_steer;
+    let tx_event = harness.tx_event;
+
+    let turn = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "initial".to_string(),
+                ..Default::default()
+            },
+        )
+        .await?;
+    assert!(matches!(
+        rx_op.recv().await,
+        Some(Op::SendMessage(TurnSpec { .. }))
+    ));
+
+    // The engine receives the steer and drops it without committing, exactly
+    // as `next_turn_steer` does for a turn that has already moved on.
+    let drop_driver = tokio::spawn(async move {
+        let steer = rx_steer.recv().await;
+        drop(steer);
+        rx_steer
+    });
+
+    let error = manager
+        .steer_turn(
+            &thread.id,
+            &turn.id,
+            SteerTurnRequest {
+                prompt: "never reaches the model".to_string(),
+            },
+        )
+        .await
+        .expect_err("a dropped steer must not report delivery");
+    assert!(
+        error.to_string().contains("moved on before the steer"),
+        "drop error must name the cause, got: {error}"
+    );
+    let _rx_steer = drop_driver.await?;
+
+    // The durable record agrees: canceled item, no delivery count.
+    let items = manager.store.list_items_for_turn(&turn.id)?;
+    let steer_item = items
+        .iter()
+        .find(|item| item.detail.as_deref() == Some("never reaches the model"))
+        .context("the attempted steer must stay on the record")?;
+    assert_eq!(steer_item.status, TurnItemLifecycleStatus::Canceled);
+    assert_eq!(manager.store.load_turn(&turn.id)?.steer_count, 0);
+
+    let events = manager.events_since(&thread.id, None)?;
+    let dropped = events
+        .iter()
+        .find(|ev| ev.event == "turn.steer_dropped")
+        .context("a dropped steer must be announced so a client can requeue")?;
+    assert_eq!(
+        dropped.payload.get("input").and_then(Value::as_str),
+        Some("never reaches the model")
+    );
+    assert!(
+        !events.iter().any(|ev| ev.event == "turn.steered"),
+        "a dropped steer must not emit turn.steered"
+    );
+    assert!(
+        !events.iter().any(|ev| {
+            ev.event == "item.completed"
+                && ev
+                    .payload
+                    .get("item")
+                    .and_then(|item| item.get("detail"))
+                    .and_then(Value::as_str)
+                    == Some("never reaches the model")
+        }),
+        "a dropped steer must not emit item.completed"
+    );
+
+    tx_event
+        .send(EngineEvent::MessageStarted { index: 0 })
+        .await?;
+    tx_event
+        .send(EngineEvent::MessageDelta {
+            index: 0,
+            content: "unsteered response".to_string(),
         })
         .await?;
     tx_event
@@ -15349,6 +15568,101 @@ fn restart_rebuild_keeps_in_flight_tool_call_identity() -> Result<()> {
         }
         other => panic!("expected in-flight tool call identity, got {other:?}"),
     }
+
+    let _ = std::fs::remove_dir_all(dir);
+    Ok(())
+}
+
+/// A steer the engine never committed is recorded `canceled`/`queued` exactly
+/// because the model never saw it. Rebuilding history must honour that: #6276
+/// made the receipt honest, and replaying the text here would put it back into
+/// the context the receipt says it never reached.
+#[test]
+fn restart_rebuild_skips_steers_the_engine_never_delivered() -> Result<()> {
+    let dir = test_runtime_dir();
+    let manager = test_manager(dir.clone())?;
+    let thread = sample_thread("thr_rebuild_6276");
+    manager.store.save_thread(&thread)?;
+
+    let now = Utc::now();
+    let turn_id = "turn_6276_rebuild".to_string();
+    let item = |id: &str, text: &str, status: TurnItemLifecycleStatus| TurnItemRecord {
+        schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
+        id: id.to_string(),
+        turn_id: turn_id.clone(),
+        kind: TurnItemKind::UserMessage,
+        status,
+        summary: text.to_string(),
+        detail: Some(text.to_string()),
+        metadata: None,
+        artifact_refs: Vec::new(),
+        started_at: Some(now),
+        ended_at: Some(now),
+    };
+    let delivered = item("item_6276_ok", "hello", TurnItemLifecycleStatus::Completed);
+    let dropped = item(
+        "item_6276_drop",
+        "never seen by the model",
+        TurnItemLifecycleStatus::Canceled,
+    );
+    let pending = item(
+        "item_6276_queue",
+        "not settled yet",
+        TurnItemLifecycleStatus::Queued,
+    );
+    manager.store.save_item(&delivered)?;
+    manager.store.save_item(&dropped)?;
+    manager.store.save_item(&pending)?;
+    manager.store.save_turn(&TurnRecord {
+        max_output_tokens: None,
+        schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
+        id: turn_id.clone(),
+        thread_id: thread.id.clone(),
+        status: RuntimeTurnStatus::Completed,
+        input_summary: "hello".to_string(),
+        created_at: now,
+        started_at: Some(now),
+        ended_at: Some(now),
+        duration_ms: None,
+        usage: None,
+        routing_settlement: false,
+        effective_route_usage: None,
+        permission_posture: None,
+        effective_provider: None,
+        effective_provider_id: None,
+        effective_openrouter_vendor: None,
+        effective_billing_surface: None,
+        effective_endpoint_fingerprint: None,
+        effective_provider_live_pricing: None,
+        effective_billing_mode: None,
+        effective_dispatched_at: None,
+        effective_model: None,
+        routed_usage: Vec::new(),
+        routed_usage_drop_records: Vec::new(),
+        routed_usage_source_ids: Vec::new(),
+        routed_usage_dropped_records: 0,
+        model_request_diagnostics: None,
+        error: None,
+        item_ids: vec![delivered.id.clone(), dropped.id.clone(), pending.id.clone()],
+        steer_count: 0,
+        agent_mail_message_id: None,
+    })?;
+
+    let turns = manager.store.list_turns_for_thread(&thread.id)?;
+    let messages = manager.reconstruct_messages_from_turns(&turns)?;
+    let replayed: Vec<String> = messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        replayed,
+        vec!["hello".to_string()],
+        "only the delivered user message may be rebuilt"
+    );
 
     let _ = std::fs::remove_dir_all(dir);
     Ok(())

@@ -762,7 +762,7 @@ accept an empty string to clear a previously-set value. Added in v0.8.10 (#562):
 
 **Turns** (within a thread)
 - `POST /v1/threads/{id}/turns`
-- `POST /v1/threads/{id}/turns/{turn_id}/steer`
+- `POST /v1/threads/{id}/turns/{turn_id}/steer` - inject guidance into the running turn. The response is a receipt for what actually happened, not for what was attempted; see [Steer delivery](#steer-delivery).
 - `POST /v1/threads/{id}/turns/{turn_id}/interrupt`
 - `POST /v1/threads/{id}/compact` (manual compaction)
 - `POST /v1/threads/{id}/undo` - fork the thread with the last N turns removed (`{"depth": N}`, default 0 = last turn only); returns the forked thread plus `original_user_text` so a GUI can pre-populate the input box
@@ -1697,8 +1697,32 @@ Compatibility notes:
   is an equivalent alias for clients that use `created_at` naming elsewhere; do
   not require both fields to be present.
 
+### Steer delivery
+
+Putting a steer into the engine's mailbox is not the same as the model reading
+it. The engine discards a steer whose turn has already moved on, and an
+interrupted or failed turn drops whatever it had queued. The API reports the
+engine's real verdict rather than the attempt:
+
+- The item is persisted `queued` when the steer is accepted into the mailbox.
+- **Delivered.** The engine committed the text into the turn's record: the item
+  becomes `completed`, `steer_count` rises, and `turn.steered` + `item.completed`
+  are emitted. `POST .../steer` returns `200` with that turn.
+- **Not delivered.** The turn moved on, was interrupted, or failed first: the
+  item becomes `canceled`, `steer_count` does not rise, and `turn.steer_dropped`
+  is emitted carrying `input`, `reason`, and the settled `item`. `POST .../steer`
+  returns `409`, so a client can keep the user's text and resend it rather than
+  clearing a composer over guidance that was never seen.
+- **Still pending.** A steer sent while the engine is inside a long tool call
+  cannot settle until that call returns, and the request does not hang for it.
+  After a short wait `POST .../steer` returns `200` with the item still `queued`;
+  the eventual `turn.steered` or `turn.steer_dropped` event carries the verdict.
+
+A client that treats `200` as "the model saw it" is therefore wrong in the third
+case: read the item's status, or wait for the event.
+
 Common event names: `thread.started`, `thread.forked`, `turn.started`,
-`turn.lifecycle`, `turn.steered`, `turn.interrupt_requested`,
+`turn.lifecycle`, `turn.steered`, `turn.steer_dropped`, `turn.interrupt_requested`,
 `turn.completed`, `item.started`, `item.delta`, `item.completed`,
 `item.failed`, `item.interrupted`, `approval.required`, `approval.decided`,
 `approval.timeout`, `user_input.required`, `user_input.answered`,

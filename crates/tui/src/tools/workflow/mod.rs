@@ -5219,68 +5219,88 @@ fn spawn_completion_pump(
     );
 }
 
+/// Resolve a child's terminal completion from the manager, reading it exactly
+/// once.
+///
+/// Every production path that publishes a child's completion does so inside
+/// `SubAgentManager::finish_terminal_result`, which calls
+/// `SubAgentTerminalDeliveryContext::deliver` (`subagent/mod.rs:2241`; the
+/// `try_send` that wakes this pump is at `:2254`) and then commits the terminal
+/// status through `update_from_result_with_persist` — both within the same
+/// `&mut self` call, so its caller holds the write guard on this same
+/// `Arc<RwLock<_>>` across the pair. See the six call sites at
+/// `subagent/mod.rs:4761`, `:5883`, `:6592`, `:8025`, `:11453` (the panic path,
+/// guarded at `:11442`) and `:11734` (guarded at `:11705`). A reader therefore
+/// cannot acquire the lock between the wake and the commit, so the first read
+/// after a completion arrives already observes the terminal status. Polling for
+/// it bought nothing and cost the serial pump up to a second of head-of-line
+/// blocking per child (#6211).
+///
+/// Known limitation: this does not cover ids the manager never records —
+/// notably the workflow `run_id` that `finish_workflow_controller` sends for a
+/// detached nested workflow. Those fail closed here rather than being waited
+/// on.
 async fn completion_from_manager(
     manager: SharedSubAgentManager,
     agent_id: &str,
     fallback_payload: String,
 ) -> (TaskCompletion, Option<WorkflowTaskUsage>) {
-    for _ in 0..50 {
-        let snapshot_and_usage = {
-            let manager = manager.read().await;
-            let snapshot = manager.get_result(agent_id).ok();
-            let usage = snapshot
-                .as_ref()
-                .filter(|snapshot| snapshot.status != SubAgentStatus::Running)
-                .map(|snapshot| task_usage_from_manager(&manager, agent_id, snapshot));
-            let verification = manager
-                .get_worker_record(agent_id)
-                .map(|record| record.verification);
-            (snapshot, usage, verification)
-        };
-        if let (Some(snapshot), usage, verification) = snapshot_and_usage
-            && snapshot.status != SubAgentStatus::Running
-        {
-            let completion = match snapshot.status {
-                SubAgentStatus::Completed
-                    if verification.as_ref().is_some_and(|receipt| {
-                        matches!(
-                            receipt.status.as_str(),
-                            "deliverable_missing" | "claim_mismatch"
+    let snapshot_and_usage = {
+        let manager = manager.read().await;
+        let snapshot = manager.get_result(agent_id).ok();
+        let usage = snapshot
+            .as_ref()
+            .filter(|snapshot| snapshot.status != SubAgentStatus::Running)
+            .map(|snapshot| task_usage_from_manager(&manager, agent_id, snapshot));
+        let verification = manager
+            .get_worker_record(agent_id)
+            .map(|record| record.verification);
+        (snapshot, usage, verification)
+    };
+    if let (Some(snapshot), usage, verification) = snapshot_and_usage
+        && snapshot.status != SubAgentStatus::Running
+    {
+        let completion = match snapshot.status {
+            SubAgentStatus::Completed
+                if verification.as_ref().is_some_and(|receipt| {
+                    matches!(
+                        receipt.status.as_str(),
+                        "deliverable_missing" | "claim_mismatch"
+                    )
+                }) =>
+            {
+                TaskCompletion::Failed {
+                    message: format!(
+                        "Sub-agent delivery verification failed: {}",
+                        truncate_chars(
+                            &verification.expect("matched failed receipt").summary,
+                            1_000
                         )
-                    }) =>
-                {
-                    TaskCompletion::Failed {
-                        message: format!(
-                            "Sub-agent delivery verification failed: {}",
-                            truncate_chars(
-                                &verification.expect("matched failed receipt").summary,
-                                1_000
-                            )
-                        ),
-                    }
+                    ),
                 }
-                SubAgentStatus::Completed => TaskCompletion::Completed {
-                    text: snapshot.result.clone().unwrap_or(fallback_payload),
-                },
-                SubAgentStatus::Failed(ref message) => TaskCompletion::Failed {
-                    message: message.clone(),
-                },
-                SubAgentStatus::Interrupted(ref message) => TaskCompletion::Failed {
-                    message: message.clone(),
-                },
-                SubAgentStatus::Cancelled => TaskCompletion::Cancelled,
-                SubAgentStatus::BudgetExhausted => TaskCompletion::BudgetExhausted {
-                    message: "sub-agent budget exhausted".to_string(),
-                },
-                SubAgentStatus::Running => unreachable!("guarded above"),
-            };
-            return (completion, usage);
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            SubAgentStatus::Completed => TaskCompletion::Completed {
+                text: snapshot.result.clone().unwrap_or(fallback_payload),
+            },
+            SubAgentStatus::Failed(ref message) => TaskCompletion::Failed {
+                message: message.clone(),
+            },
+            SubAgentStatus::Interrupted(ref message) => TaskCompletion::Failed {
+                message: message.clone(),
+            },
+            SubAgentStatus::Cancelled => TaskCompletion::Cancelled,
+            SubAgentStatus::BudgetExhausted => TaskCompletion::BudgetExhausted {
+                message: "sub-agent budget exhausted".to_string(),
+            },
+            SubAgentStatus::Running => unreachable!("guarded above"),
+        };
+        return (completion, usage);
     }
     (
         TaskCompletion::Failed {
-            message: format!("sub-agent '{agent_id}' did not report a terminal status within 1s"),
+            message: format!(
+                "sub-agent '{agent_id}' had no terminal manager record when its completion was delivered"
+            ),
         },
         None,
     )
@@ -10888,22 +10908,28 @@ FINAL RECEIPT
         assert!(terminal_completed_receipt, "{events:#?}");
     }
 
+    /// The deadline is the point of this test: an id the manager never records
+    /// must fail closed on the first read. With the old retry loop the body
+    /// slept 50 x 20ms before answering, and this timeout fires. A plain
+    /// `#[tokio::test]` is deliberate — `start_paused = true` auto-advances
+    /// time and would let the polling version pass (#6211).
     #[tokio::test]
-    async fn completion_from_manager_fails_closed_when_status_stays_running() {
+    async fn completion_from_manager_fails_closed_without_polling() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
 
-        let (completion, usage) =
-            completion_from_manager(manager, "missing_agent", "fallback".to_string()).await;
+        let (completion, usage) = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            completion_from_manager(manager, "missing_agent", "fallback".to_string()),
+        )
+        .await
+        .expect("completion_from_manager must answer from one read, not by polling");
         assert!(usage.is_none(), "fail-closed path carries no telemetry");
         match completion {
             TaskCompletion::Failed { message } => {
-                assert!(
-                    message.contains("did not report a terminal status"),
-                    "{message}"
-                );
+                assert!(message.contains("no terminal manager record"), "{message}");
             }
-            other => panic!("expected timeout failure, got {other:?}"),
+            other => panic!("expected a fail-closed failure, got {other:?}"),
         }
     }
 

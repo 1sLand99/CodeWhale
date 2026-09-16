@@ -45,6 +45,14 @@ use crate::utils::write_atomic;
 /// Bytes of a non-2xx response body to surface in connection errors.
 const ERROR_BODY_PREVIEW_BYTES: usize = 200;
 
+/// Newest dated MCP protocol revision Codewhale advertises at `initialize` and
+/// answers as an MCP server. Matches the shared MCP crate (`crates/mcp`).
+pub(crate) const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+/// Dated MCP revisions accepted during negotiation, newest first. A peer
+/// answering or requesting any of these continues the handshake.
+pub(crate) const MCP_SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
+    &[MCP_PROTOCOL_VERSION, "2025-03-26", "2024-11-05"];
+
 fn validate_mcp_config_path(path: &Path) -> Result<()> {
     if path.as_os_str().is_empty() {
         anyhow::bail!("MCP config path cannot be empty");
@@ -1425,6 +1433,12 @@ pub trait McpTransport: Send + Sync {
     async fn send(&mut self, msg: Vec<u8>) -> Result<()>;
     async fn recv(&mut self) -> Result<Vec<u8>>;
 
+    /// Record the protocol revision negotiated at `initialize`. Only the
+    /// Streamable HTTP transport uses it (the `MCP-Protocol-Version` header on
+    /// subsequent requests); stdio and legacy SSE have no header channel, so
+    /// the default is a no-op.
+    fn set_protocol_version(&mut self, _version: &str) {}
+
     /// Synchronous, best-effort liveness probe consulted by
     /// [`McpConnection::is_ready`] so a crashed stdio child stops reading
     /// as "ready" before the next call fails (#6187). Must never block and
@@ -1831,7 +1845,7 @@ impl McpConnection {
             "id": &init_id,
             "method": "initialize",
             "params": {
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": MCP_PROTOCOL_VERSION,
                 "clientInfo": {
                     "name": "codewhale-tui",
                     "version": env!("CARGO_PKG_VERSION")
@@ -1846,11 +1860,30 @@ impl McpConnection {
         .await?;
 
         let response = self.recv(init_id).await?;
-        response_result(
+        let result = response_result(
             &response,
             "initialize",
             self.config.reviewed_plugin.is_some(),
         )?;
+        // Per spec, a server that cannot speak the advertised revision answers
+        // with one it does support. Accept any dated revision we still
+        // implement; anything else ends the handshake.
+        let negotiated = result
+            .and_then(|result| result.get("protocolVersion"))
+            .and_then(|version| version.as_str())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "MCP server '{}' initialize result omitted protocolVersion",
+                    self.name
+                )
+            })?;
+        anyhow::ensure!(
+            MCP_SUPPORTED_PROTOCOL_VERSIONS.contains(&negotiated),
+            "MCP server '{}' negotiated unsupported protocol version '{negotiated}' (supported: {})",
+            self.name,
+            MCP_SUPPORTED_PROTOCOL_VERSIONS.join(", ")
+        );
+        self.transport.set_protocol_version(negotiated);
         self.server_capabilities = McpServerCapabilities::from_initialize_response(&response);
 
         // Send initialized notification (no id, no response expected)
@@ -2288,14 +2321,25 @@ impl McpConnection {
         &self.name
     }
 
-    /// Check if connection is ready
+    /// Ready to dispatch: the transport is live **and** the plugin bundle
+    /// backing it still carries the authority it was reviewed with.
     pub fn is_ready(&self) -> bool {
-        // The Ready flag alone can't see a stdio child that exited between
-        // calls; the probe closes that gap so the pool rebuilds the
-        // connection instead of handing a dead transport back (#6187).
-        self.state == ConnectionState::Ready
-            && self.catalog_authorized()
-            && !self.transport.probe_dead()
+        self.is_transport_ready() && self.catalog_authorized()
+    }
+
+    /// Liveness only — no authority check.
+    ///
+    /// The Ready flag alone can't see a stdio child that exited between
+    /// calls; the probe closes that gap so the pool rebuilds the connection
+    /// instead of handing a dead transport back (#6187).
+    ///
+    /// Only for callers that have just run `validate_before_use` on this same
+    /// source, where `is_ready`'s authority half would re-walk and re-hash the
+    /// plugin bundle it already verified one statement earlier (#6209). Every
+    /// other caller must use `is_ready`: dropping the authority half without
+    /// a preceding check silently dispatches to a revoked or altered bundle.
+    pub(crate) fn is_transport_ready(&self) -> bool {
+        self.state == ConnectionState::Ready && !self.transport.probe_dead()
     }
 
     /// Get server config
@@ -3035,10 +3079,12 @@ impl McpPool {
             return Err(error);
         }
 
+        // Authority was just validated above for this same source; checking
+        // it again here would re-hash the bundle within one dispatch (#6209).
         let is_ready = self
             .connections
             .get(server_name)
-            .map(|conn| conn.is_ready())
+            .map(McpConnection::is_transport_ready)
             .unwrap_or(false);
         if is_ready {
             return self
@@ -3306,10 +3352,11 @@ impl McpPool {
                 continue;
             }
 
+            // Authority validated immediately above for this same source.
             if self
                 .connections
                 .get(&name)
-                .is_some_and(McpConnection::is_ready)
+                .is_some_and(McpConnection::is_transport_ready)
             {
                 continue;
             }
@@ -3366,10 +3413,11 @@ impl McpPool {
                 errors.push((name.clone(), error));
                 continue;
             }
+            // Authority validated immediately above for this same source.
             if self
                 .connections
                 .get(name)
-                .is_some_and(McpConnection::is_ready)
+                .is_some_and(McpConnection::is_transport_ready)
                 || !self.connecting.insert(name.clone())
             {
                 continue;
@@ -4221,12 +4269,18 @@ impl McpPool {
     /// uses this universe to REPLACE the pool's slice of the tool catalog
     /// instead of additively merging it — the synthetic entry must leave
     /// after a login, and dead real tools must leave after a live 401.
-    pub fn model_tool_names(&self) -> std::collections::HashSet<String> {
-        let mut names: std::collections::HashSet<String> = self
-            .to_api_tools()
-            .into_iter()
-            .map(|tool| tool.name)
-            .collect();
+    /// The model-visible tool-name universe for an already-built catalog.
+    ///
+    /// Takes the catalog rather than rebuilding it: `to_api_tools` re-verifies
+    /// every reviewed plugin bundle, so calling both meant hashing each bundle
+    /// twice per turn to produce two views of one thing — and the two could
+    /// disagree if authority drifted between them (#6209).
+    pub fn model_tool_names(
+        &self,
+        api_tools: &[codewhale_models::Tool],
+    ) -> std::collections::HashSet<String> {
+        let mut names: std::collections::HashSet<String> =
+            api_tools.iter().map(|tool| tool.name.clone()).collect();
         let dynamic = self.dynamic_servers.read();
         for (server, config) in self.config.servers.iter().chain(dynamic.iter()) {
             if self.server_allowed(server)

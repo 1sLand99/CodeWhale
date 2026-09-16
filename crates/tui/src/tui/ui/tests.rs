@@ -1761,7 +1761,12 @@ fn bottom_prompts_keep_transcript_tail_visible_through_resize_and_navigation() {
         let config = Config::default();
         for (width, height) in [(141, 38), (80, 24), (40, 12), (80, 24), (141, 38)] {
             let surface = render_test_app(&mut app, &config, width, height);
-            let prompt = app.viewport.last_prompt_area.expect("painted prompt");
+            let prompt = app.viewport.last_prompt_area.unwrap_or_else(|| {
+                panic!(
+                    "{kind:?} at {width}x{height}: no prompt area painted (onboarding={:?}, redaction_gate={}, top_kind={:?})",
+                    app.onboarding, app.redaction_gate, app.view_stack.top_kind()
+                )
+            });
             let transcript = app
                 .viewport
                 .last_transcript_area

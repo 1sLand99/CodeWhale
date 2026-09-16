@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.14] - Unreleased candidate
+
+The v0.9.14 source candidate. Nothing below is published until the matching
+tag, packages, checksums and release assets exist.
+
+### Contributors
+
+- **[@aboimpinto](https://github.com/aboimpinto)** — moved the TUI session-export slice onto shared command contracts (FEAT-025): a session-export contract facet with one shared sanitizer, `/export` routed through the facet, pinned with baseline-captured goldens and gates ([#6096](https://github.com/Hmbown/Codewhale/pull/6096)).
+- **[@7jrxt42BxFZo4iAnN4CX](https://github.com/7jrxt42BxFZo4iAnN4CX)** — reported the session-retention defects behind archive-past-the-cap and empty-session cap occupancy ([#6136](https://github.com/Hmbown/Codewhale/issues/6136), [#6137](https://github.com/Hmbown/Codewhale/issues/6137)), the resume-failure design behind durable transcript errors ([#6138](https://github.com/Hmbown/Codewhale/issues/6138)), and the gaps behind the opt-in approval timeout ([#6101](https://github.com/Hmbown/Codewhale/issues/6101)), `codewhale exec --hooks` ([#6099](https://github.com/Hmbown/Codewhale/issues/6099)), Markdown drag-copy ([#6156](https://github.com/Hmbown/Codewhale/issues/6156)), and the browsable, current-aware session picker ([#6014](https://github.com/Hmbown/Codewhale/issues/6014)); the goal token-budget hard stop ([#6013](https://github.com/Hmbown/Codewhale/issues/6013)) and the fleet no-progress guard shared with child workers ([#6015](https://github.com/Hmbown/Codewhale/issues/6015)) landed as first slices of two larger proposals, and the runtime-store session refusal ([#6207](https://github.com/Hmbown/Codewhale/issues/6207)) stays open after the first fix was reverted on a race.
+- **[@Lstarsky0](https://github.com/Lstarsky0)** — reported TUI tests reading machine state instead of hermetic fixtures; the `lock_test_env` remedy from that report shaped two more hermetic fixes, for the shared UI fixtures and the compaction budget test ([#5359](https://github.com/Hmbown/Codewhale/issues/5359)).
+- **[@Lujc0523](https://github.com/Lujc0523)** — reported `/hooks edit` splitting keystrokes between the editor and the composer, fixed by pausing the TUI input pump inside the editor handoff ([#6165](https://github.com/Hmbown/Codewhale/issues/6165)).
+- **[@Statter](https://github.com/Statter)** — reported the Gemini `/models` failure that now surfaces the provider's reason instead of an empty error ([#6173](https://github.com/Hmbown/Codewhale/issues/6173)).
+- **[@sequico](https://github.com/sequico)** — reported the ACP `session/new` ids that `session/load` could not resolve, fixed by minting resolvable session ids ([#6174](https://github.com/Hmbown/Codewhale/issues/6174)).
+- **[@bevis-wong](https://github.com/bevis-wong)** — reported the mid-run engine freeze behind the bounded turn-end foreground-child join, and the resume path that re-ran identical tool-call repair on every load instead of persisting it ([#6184](https://github.com/Hmbown/Codewhale/issues/6184), [#6185](https://github.com/Hmbown/Codewhale/issues/6185)).
+
 ### Security
 
 - Approving an `apply_patch` "for the session" is now scoped to the file you
@@ -85,6 +100,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reviewed plugin bundles are no longer re-hashed four times per MCP dispatch.
+  `verify_plugin_authority` walks and hashes both the reviewed source and the
+  runtime snapshot, and four separate authority checks ran per `tools/call` —
+  eight tree walks. Three of them sat one statement after a
+  `validate_before_use` on the same source, so `is_ready` re-verified what had
+  just been verified; readiness and authority are now separate, and only the
+  callers with no preceding check still pay for both. The tool catalog is built
+  once per turn instead of twice, which also removes a case where the two
+  assemblies could disagree if authority drifted between them. The digest is
+  deliberately **not** cached on `(path, mtime, len)`: the reviewed tree is
+  user-writable and `utimensat(2)` lets a same-uid process restore an mtime
+  after an equal-length rewrite, so a stat-keyed cache would serve a pre-tamper
+  digest (#6209).
+- A sub-agent's completion is read from the manager once instead of polled. The
+  workflow pump re-read it up to fifty times, sleeping 20ms between attempts,
+  waiting for a terminal status that was already committed — every publisher
+  commits the status inside the same `&mut self` call that wakes the pump, so
+  the write guard spans both and the first read always sees it. A child the
+  manager had no record of cost a full second of head-of-line blocking before
+  failing; it now fails immediately, and says what actually happened instead of
+  claiming the child "did not report a terminal status within 1s" (#6211).
+
+- MCP protocol negotiation: every surface advertised the original 2024-11-05
+  revision and the stdio client required an exact match, so newer servers
+  could not connect. The server and both clients now advertise 2025-06-18
+  and negotiate over the supported set (2025-06-18, 2025-03-26, 2024-11-05)
+  — the server echoes the client's revision when it is supported and answers
+  with the latest otherwise, the stdio client accepts any supported revision,
+  and streamable HTTP sends the required `MCP-Protocol-Version` header on
+  every post-initialize request (#6280, first half).
 - Configured MCP servers now connect lazily instead of all at session boot. The
   pool owns a `connecting` set marked at spawn and cleared on resolution or
   abort, so "connecting" is no longer inferred as enabled-minus-connected. The
@@ -114,6 +159,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Plain agent spawns could not resolve. `built_in_members()` seeded both
+  `general` and `worker`, and the role parse boundary migrates `worker` to
+  `general`, so both canonicalized to the same role — and `role:general`, the
+  selector the roster advertises for the default posture, matched two members
+  and raised `Ambiguous` every time, permanently. The duplicate built-in is
+  gone. The legacy name still resolves: `general`, `member:general`,
+  `role:general` and `default` all land on the `worker` posture through the
+  identity selector rather than through a second member, which is what allowed
+  the duplicate to be removed (#6244).
+- Clicking a `path:line` in tool output no longer spawns `$EDITOR` detached
+  while the TUI still owns the terminal, and no longer spawns one editor per
+  matching line. The launch goes through the single terminal-handoff path, and
+  a click is one request to open one file (#6235).
+- A write-scope contention refusal now names a remedy that works. The `agent`
+  tool's description claimed `release` was "the remediation a write-scope
+  contention refusal names"; the refusal did not name it, and pointing back at
+  it would have been worse, because `release` only clears claims whose owner is
+  no longer running while a contention refusal names a live one. The refusal
+  itself now says to wait for that owner to settle or cancel it (#6272).
+
+- A steer the engine never delivered is no longer reported as sent. The runtime
+  API persisted the steer item as already-`Completed` and emitted
+  `turn.steered` + `item.completed` the moment the text entered the engine's
+  mailbox — before the engine decided anything. The engine discards a steer
+  whose turn has moved on, and an interrupted or failed turn drops whatever it
+  had queued, so a GUI could show "Guidance sent", clear the composer, and lose
+  the user's words. The engine now returns a verdict for every steer on every
+  exit path, the item settles `completed` or `canceled` to match, a dropped
+  steer emits `turn.steer_dropped` and answers `409` so a client can resend,
+  and `steer_count` counts steers the model actually received (#6276).
+- `<recommended_plugins>` suggestions stop nagging: a plugin id is now
+  injected at most once per engine lifetime, and a plugin whose name a
+  loaded skill already covers is never suggested — the local skill owns
+  the domain, so the nudge was noise. Dismissals still apply, and the
+  fragment stays append-only on the user turn (#6274).
 - A canceled automation run now settles with a transcript receipt that names
   the cancellation (by request, cancel timeout, or shutdown) instead of
   vanishing from the live band silently. The receipt wears attention ink and
@@ -8786,6 +8866,7 @@ overflow report and `/theme` picker edge-wrapping patch in #1814.
 Older releases (v0.8.39 and earlier) are archived in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).
 
 [Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.13...HEAD
+[0.9.14]: https://github.com/Hmbown/CodeWhale/compare/v0.9.13...v0.9.14
 [0.9.13]: https://github.com/Hmbown/CodeWhale/compare/v0.9.12...v0.9.13
 [0.9.12]: https://github.com/Hmbown/CodeWhale/compare/v0.9.11...v0.9.12
 [0.9.11]: https://github.com/Hmbown/CodeWhale/compare/v0.9.10...v0.9.11

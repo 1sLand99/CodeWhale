@@ -143,7 +143,14 @@ impl McpServer {
         let id = message.get("id").cloned();
 
         match method {
-            "initialize" => respond(id.as_ref(), initialize_response()),
+            "initialize" => respond(
+                id.as_ref(),
+                initialize_response(
+                    message
+                        .pointer("/params/protocolVersion")
+                        .and_then(Value::as_str),
+                ),
+            ),
             "tools/list" => respond(id.as_ref(), self.list_tools_response()),
             "tools/call" => {
                 let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
@@ -312,9 +319,15 @@ fn tool_result_to_mcp(result: Result<ToolResult, ToolError>) -> Value {
     }
 }
 
-fn initialize_response() -> Value {
+fn initialize_response(requested: Option<&str>) -> Value {
+    // Per spec, echo the requested revision when we support it; otherwise
+    // answer with the newest revision we do support and let the client decide.
+    let negotiated = match requested {
+        Some(version) if crate::mcp::MCP_SUPPORTED_PROTOCOL_VERSIONS.contains(&version) => version,
+        _ => crate::mcp::MCP_PROTOCOL_VERSION,
+    };
     json!({
-        "protocolVersion": "2024-11-05",
+        "protocolVersion": negotiated,
         "serverInfo": {
             "name": "codewhale-mcp-server",
             "version": env!("CARGO_PKG_VERSION"),
@@ -445,10 +458,30 @@ mod tests {
 
     #[test]
     fn initialize_uses_standard_mcp_shape_and_codewhale_identity() {
-        let response = initialize_response();
-        assert_eq!(response["protocolVersion"], "2024-11-05");
+        let response = initialize_response(Some(crate::mcp::MCP_PROTOCOL_VERSION));
+        assert_eq!(
+            response["protocolVersion"],
+            crate::mcp::MCP_PROTOCOL_VERSION
+        );
         assert_eq!(response["serverInfo"]["name"], "codewhale-mcp-server");
         assert_eq!(response["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
         assert!(response["capabilities"]["tools"].is_object());
+    }
+
+    #[test]
+    fn initialize_negotiates_supported_revisions() {
+        // A client asking for an older dated revision gets it echoed back;
+        // an unknown or missing revision answers with the newest supported.
+        for requested in ["2025-03-26", "2024-11-05"] {
+            let response = initialize_response(Some(requested));
+            assert_eq!(response["protocolVersion"], requested);
+        }
+        for requested in [Some("2099-01-01"), None] {
+            let response = initialize_response(requested);
+            assert_eq!(
+                response["protocolVersion"],
+                crate::mcp::MCP_PROTOCOL_VERSION
+            );
+        }
     }
 }

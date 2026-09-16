@@ -5217,6 +5217,7 @@ async fn user_steer_during_parent_answer_still_gets_a_reply_with_healthy_childre
             .try_send(handle::SteerInput {
                 turn_id,
                 content: "Also read state.txt and include its evidence.".to_string(),
+                outcome: None,
             })
             .expect("steer channel open");
         canned::simple_text_turn("The workflow is still running.")
@@ -6749,142 +6750,160 @@ fn deterministic_engine_config(workspace: &Path) -> EngineConfig {
     }
 }
 
-#[tokio::test]
-async fn automatic_compaction_continues_one_task_and_suppresses_failed_passes() {
-    use crate::llm_client::mock::{MockLlmClient, canned};
-    for fail_summary in [false, true] {
-        let workspace = tempdir().unwrap();
-        fs::write(
-            workspace.path().join("README.md"),
-            "verified fixture evidence",
-        )
+/// The compaction budget is measured against the real system prompt, and the
+/// skills block in that prompt is discovered from the developer's home as well
+/// as from the workspace. Left ambient, this test counts whatever skills the
+/// machine happens to have installed into its token budget: 39 of them trip a
+/// seventh compaction pass on a developer box while CI, with an empty home,
+/// sees six and passes. That is the #5359 leak class, and the isolated home is
+/// what makes `deterministic_engine_config` actually deterministic here.
+#[test]
+fn automatic_compaction_continues_one_task_and_suppresses_failed_passes() {
+    let _env = lock_test_env();
+    let home = tempdir().unwrap();
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+    let _user_home = EnvVarGuard::set("HOME", home.path());
+    let _user_profile = EnvVarGuard::set("USERPROFILE", home.path());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
         .unwrap();
-        let mock = std::sync::Arc::new(MockLlmClient::new(Vec::new()));
-        for step in 0..16 {
-            mock.push_turn(vec![
-                canned::message_start(&format!("response-{step}")),
-                canned::text_block_start(0),
-                canned::text_delta(0, &format!("Step {step}: {}", "x".repeat(32_000))),
-                canned::block_stop(0),
-                canned::tool_use_block_start(1, &format!("read-{step}"), "File"),
-                canned::tool_input_delta(1, r#"{"action":"read","path":"README.md"}"#),
-                canned::block_stop(1),
-                canned::message_delta("tool_use", None),
-                canned::message_stop(),
-            ]);
-        }
-        mock.push_turn(canned::simple_text_turn(
-            "All sixteen reads verified; task complete.",
-        ));
-        for checkpoint in 0..8 {
-            let content = if fail_summary {
-                json!([{"type":"tool_use","id":"unexpected","name":"File","input":{}}])
-            } else {
-                json!([{"type":"text","text":format!("Current objective: complete all sixteen reads. Checkpoint {checkpoint}: earlier reads verified. Preserve the user's no-publication constraint. Continue the remaining File reads, then report the observed evidence.")}])
-            };
-            mock.push_message_response(serde_json::from_value(json!({
-                "id":format!("summary-{checkpoint}"), "type":"message", "role":"assistant",
-                "content":content, "model":"mock-model", "usage":{"input_tokens":0,"output_tokens":0}
-            })).unwrap());
-        }
-        let config = Config::default();
-        let (engine, handle) = Engine::new_with_model_client(
-            deterministic_engine_config(workspace.path()),
-            &config,
-            mock.clone(),
-        );
-        let task = tokio::spawn(engine.run());
-        let mut op = external_user_message_op(
-            "Complete all sixteen reads; do not publish.",
-            AppMode::Agent,
-            &config,
-        );
-        if let Op::SendMessage(TurnSpec {
-            compaction,
-            auto_approve,
-            ..
-        }) = &mut op
-        {
-            compaction.token_threshold = 40_000;
-            *auto_approve = true;
-        }
-        handle.send(op).await.unwrap();
-        let mut completed = 0;
-        let mut failed = 0;
-        {
-            let mut rx = handle.rx_event.write().await;
-            loop {
-                match tokio::time::timeout(Duration::from_secs(30), rx.recv())
-                    .await
-                    .unwrap()
-                    .unwrap()
-                {
-                    Event::CompactionCompleted { auto: true, .. } => completed += 1,
-                    Event::CompactionFailed { auto: true, .. } => failed += 1,
-                    Event::TurnComplete { status, error, .. } => {
-                        assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
-                        break;
-                    }
-                    _ => {}
-                }
+    runtime.block_on(async {
+        use crate::llm_client::mock::{MockLlmClient, canned};
+        for fail_summary in [false, true] {
+            let workspace = tempdir().unwrap();
+            fs::write(
+                workspace.path().join("README.md"),
+                "verified fixture evidence",
+            )
+            .unwrap();
+            let mock = std::sync::Arc::new(MockLlmClient::new(Vec::new()));
+            for step in 0..16 {
+                mock.push_turn(vec![
+                    canned::message_start(&format!("response-{step}")),
+                    canned::text_block_start(0),
+                    canned::text_delta(0, &format!("Step {step}: {}", "x".repeat(32_000))),
+                    canned::block_stop(0),
+                    canned::tool_use_block_start(1, &format!("read-{step}"), "File"),
+                    canned::tool_input_delta(1, r#"{"action":"read","path":"README.md"}"#),
+                    canned::block_stop(1),
+                    canned::message_delta("tool_use", None),
+                    canned::message_stop(),
+                ]);
             }
-        }
-        let requests = mock.captured_requests();
-        let streaming = requests
-            .iter()
-            .filter(|r| r.stream == Some(true))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            streaming.len(),
-            17,
-            "one user request must continue through all tool steps"
-        );
-        if fail_summary {
-            assert_eq!(
-                (completed, failed),
-                (0, 1),
-                "failed compaction must not loop at every tool boundary"
-            );
-        } else {
-            assert!(
-                (2..=6).contains(&completed),
-                "expected repeated useful compaction: {completed}"
-            );
-            assert_eq!(failed, 0);
-        }
-        for request in &requests {
-            assert_eq!(
-                request.system, streaming[0].system,
-                "the stable system prefix must survive every pass"
-            );
-            assert_eq!(
-                request.tools, streaming[0].tools,
-                "summarizing must reuse the tool prefix"
-            );
-            if request.stream == Some(false) {
-                assert_eq!(request.tool_choice, Some(json!("none")));
+            mock.push_turn(canned::simple_text_turn(
+                "All sixteen reads verified; task complete.",
+            ));
+            for checkpoint in 0..8 {
+                let content = if fail_summary {
+                    json!([{"type":"tool_use","id":"unexpected","name":"File","input":{}}])
+                } else {
+                    json!([{"type":"text","text":format!("Current objective: complete all sixteen reads. Checkpoint {checkpoint}: earlier reads verified. Preserve the user's no-publication constraint. Continue the remaining File reads, then report the observed evidence.")}])
+                };
+                mock.push_message_response(serde_json::from_value(json!({
+                    "id":format!("summary-{checkpoint}"), "type":"message", "role":"assistant",
+                    "content":content, "model":"mock-model", "usage":{"input_tokens":0,"output_tokens":0}
+                })).unwrap());
             }
-            let mut calls = HashSet::new();
-            for message in &request.messages {
-                for block in &message.content {
-                    match block {
-                        ContentBlock::ToolUse { id, .. } => {
-                            calls.insert(id);
+            let config = Config::default();
+            let (engine, handle) = Engine::new_with_model_client(
+                deterministic_engine_config(workspace.path()),
+                &config,
+                mock.clone(),
+            );
+            let task = tokio::spawn(engine.run());
+            let mut op = external_user_message_op(
+                "Complete all sixteen reads; do not publish.",
+                AppMode::Agent,
+                &config,
+            );
+            if let Op::SendMessage(TurnSpec {
+                compaction,
+                auto_approve,
+                ..
+            }) = &mut op
+            {
+                compaction.token_threshold = 40_000;
+                *auto_approve = true;
+            }
+            handle.send(op).await.unwrap();
+            let mut completed = 0;
+            let mut failed = 0;
+            {
+                let mut rx = handle.rx_event.write().await;
+                loop {
+                    match tokio::time::timeout(Duration::from_secs(30), rx.recv())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                    {
+                        Event::CompactionCompleted { auto: true, .. } => completed += 1,
+                        Event::CompactionFailed { auto: true, .. } => failed += 1,
+                        Event::TurnComplete { status, error, .. } => {
+                            assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                            break;
                         }
-                        ContentBlock::ToolResult { tool_use_id, .. } => assert!(
-                            calls.contains(tool_use_id),
-                            "orphan tool result after compaction"
-                        ),
                         _ => {}
                     }
                 }
             }
+            let requests = mock.captured_requests();
+            let streaming = requests
+                .iter()
+                .filter(|r| r.stream == Some(true))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                streaming.len(),
+                17,
+                "one user request must continue through all tool steps"
+            );
+            if fail_summary {
+                assert_eq!(
+                    (completed, failed),
+                    (0, 1),
+                    "failed compaction must not loop at every tool boundary"
+                );
+            } else {
+                assert!(
+                    (2..=6).contains(&completed),
+                    "expected repeated useful compaction: {completed}"
+                );
+                assert_eq!(failed, 0);
+            }
+            for request in &requests {
+                assert_eq!(
+                    request.system, streaming[0].system,
+                    "the stable system prefix must survive every pass"
+                );
+                assert_eq!(
+                    request.tools, streaming[0].tools,
+                    "summarizing must reuse the tool prefix"
+                );
+                if request.stream == Some(false) {
+                    assert_eq!(request.tool_choice, Some(json!("none")));
+                }
+                let mut calls = HashSet::new();
+                for message in &request.messages {
+                    for block in &message.content {
+                        match block {
+                            ContentBlock::ToolUse { id, .. } => {
+                                calls.insert(id);
+                            }
+                            ContentBlock::ToolResult { tool_use_id, .. } => assert!(
+                                calls.contains(tool_use_id),
+                                "orphan tool result after compaction"
+                            ),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            let snapshot = handle.get_session_snapshot().await.unwrap();
+            assert!(snapshot.messages.iter().any(|m| m.content.iter().any(|b| matches!(b, ContentBlock::Text {text,..} if text.contains("All sixteen reads verified")))));
+            handle.send(Op::Shutdown).await.unwrap();
+            task.await.unwrap();
         }
-        let snapshot = handle.get_session_snapshot().await.unwrap();
-        assert!(snapshot.messages.iter().any(|m| m.content.iter().any(|b| matches!(b, ContentBlock::Text {text,..} if text.contains("All sixteen reads verified")))));
-        handle.send(Op::Shutdown).await.unwrap();
-        task.await.unwrap();
-    }
+    });
 }
 
 #[tokio::test]

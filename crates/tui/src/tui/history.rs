@@ -2926,12 +2926,6 @@ fn tool_value_style() -> Style {
     Style::default().fg(palette::TEXT_MUTED)
 }
 
-/// Parse `path:line` patterns from `text` and open the file at the given line
-/// in the user's preferred editor (`$VISUAL` / `$EDITOR` / `vim`).
-///
-/// Scans lines of `text` for patterns like `src/main.rs:42`. Resolves the path
-/// relative to `workspace` (if not absolute) and opens the editor. Returns
-/// `true` if at least one file was opened successfully.
 /// Find the first `path:line` reference in a rendered cell.
 ///
 /// Pure: it resolves and stats candidate paths but never launches anything.
