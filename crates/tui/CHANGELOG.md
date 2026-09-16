@@ -85,6 +85,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reviewed plugin bundles are no longer re-hashed four times per MCP dispatch.
+  `verify_plugin_authority` walks and hashes both the reviewed source and the
+  runtime snapshot, and four separate authority checks ran per `tools/call` —
+  eight tree walks. Three of them sat one statement after a
+  `validate_before_use` on the same source, so `is_ready` re-verified what had
+  just been verified; readiness and authority are now separate, and only the
+  callers with no preceding check still pay for both. The tool catalog is built
+  once per turn instead of twice, which also removes a case where the two
+  assemblies could disagree if authority drifted between them. The digest is
+  deliberately **not** cached on `(path, mtime, len)`: the reviewed tree is
+  user-writable and `utimensat(2)` lets a same-uid process restore an mtime
+  after an equal-length rewrite, so a stat-keyed cache would serve a pre-tamper
+  digest (#6209).
+- A sub-agent's completion is read from the manager once instead of polled. The
+  workflow pump re-read it up to fifty times, sleeping 20ms between attempts,
+  waiting for a terminal status that was already committed — every publisher
+  commits the status inside the same `&mut self` call that wakes the pump, so
+  the write guard spans both and the first read always sees it. A child the
+  manager had no record of cost a full second of head-of-line blocking before
+  failing; it now fails immediately, and says what actually happened instead of
+  claiming the child "did not report a terminal status within 1s" (#6211).
+
 - MCP protocol negotiation: every surface advertised the original 2024-11-05
   revision and the stdio client required an exact match, so newer servers
   could not connect. The server and both clients now advertise 2025-06-18
@@ -122,6 +144,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Plain agent spawns could not resolve. `built_in_members()` seeded both
+  `general` and `worker`, and the role parse boundary migrates `worker` to
+  `general`, so both canonicalized to the same role — and `role:general`, the
+  selector the roster advertises for the default posture, matched two members
+  and raised `Ambiguous` every time, permanently. The duplicate built-in is
+  gone. The legacy name still resolves: `general`, `member:general`,
+  `role:general` and `default` all land on the `worker` posture through the
+  identity selector rather than through a second member, which is what allowed
+  the duplicate to be removed (#6244).
+- Clicking a `path:line` in tool output no longer spawns `$EDITOR` detached
+  while the TUI still owns the terminal, and no longer spawns one editor per
+  matching line. The launch goes through the single terminal-handoff path, and
+  a click is one request to open one file (#6235).
+- A write-scope contention refusal now names a remedy that works. The `agent`
+  tool's description claimed `release` was "the remediation a write-scope
+  contention refusal names"; the refusal did not name it, and pointing back at
+  it would have been worse, because `release` only clears claims whose owner is
+  no longer running while a contention refusal names a live one. The refusal
+  itself now says to wait for that owner to settle or cancel it (#6272).
+
+- A steer the engine never delivered is no longer reported as sent. The runtime
+  API persisted the steer item as already-`Completed` and emitted
+  `turn.steered` + `item.completed` the moment the text entered the engine's
+  mailbox — before the engine decided anything. The engine discards a steer
+  whose turn has moved on, and an interrupted or failed turn drops whatever it
+  had queued, so a GUI could show "Guidance sent", clear the composer, and lose
+  the user's words. The engine now returns a verdict for every steer on every
+  exit path, the item settles `completed` or `canceled` to match, a dropped
+  steer emits `turn.steer_dropped` and answers `409` so a client can resend,
+  and `steer_count` counts steers the model actually received (#6276).
 - `<recommended_plugins>` suggestions stop nagging: a plugin id is now
   injected at most once per engine lifetime, and a plugin whose name a
   loaded skill already covers is never suggested — the local skill owns
