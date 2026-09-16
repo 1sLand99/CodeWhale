@@ -8,6 +8,11 @@
 
 use std::path::PathBuf;
 
+/// Rows a PageUp/PageDown travels. Both lists here are modal and short, so a
+/// page is a readable jump rather than a screenful measured at paint time.
+const DETAIL_PAGE: usize = 10;
+const ROUTE_PICK_PAGE: usize = 10;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
@@ -225,10 +230,6 @@ impl FleetDetailView {
     fn selected_member(&self) -> Option<&FleetMember> {
         self.selected_member_idx()
             .and_then(|idx| self.fleet.members.get(idx))
-    }
-
-    fn move_row(&mut self, delta: isize) {
-        self.selected = crate::tui::list_nav::wrap_index(self.selected, self.row_count(), delta);
     }
 
     fn start_rename(&mut self) {
@@ -726,18 +727,22 @@ impl ModalView for FleetDetailView {
                     self.step = DetailStep::Overview;
                     ViewAction::None
                 }
-                KeyCode::Up => {
-                    let len = self.filtered_routes().len();
-                    if len > 0 {
-                        self.pick_row = crate::tui::list_nav::wrap_index(self.pick_row, len, -1);
-                    }
-                    ViewAction::None
-                }
-                KeyCode::Down => {
-                    let len = self.filtered_routes().len();
-                    if len > 0 {
-                        self.pick_row = crate::tui::list_nav::wrap_index(self.pick_row, len, 1);
-                    }
+                // Typing-safe set only: this step feeds `Char(c)` into
+                // `pick_query`, so a letter alias would eat the query (#6290).
+                _ if crate::tui::list_nav::motion_while_typing(&key)
+                    .and_then(|m| {
+                        crate::tui::list_nav::apply(
+                            self.pick_row,
+                            self.filtered_routes().len(),
+                            ROUTE_PICK_PAGE,
+                            m,
+                        )
+                    })
+                    .is_some_and(|row| {
+                        self.pick_row = row;
+                        true
+                    }) =>
+                {
                     ViewAction::None
                 }
                 KeyCode::Enter => self.apply_route_pick().unwrap_or(ViewAction::None),
@@ -789,12 +794,20 @@ impl ModalView for FleetDetailView {
                 }
                 match key.code {
                     KeyCode::Esc | KeyCode::Char('q') => ViewAction::Close,
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        self.move_row(-1);
-                        ViewAction::None
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        self.move_row(1);
+                    _ if crate::tui::list_nav::motion(&key)
+                        .and_then(|m| {
+                            crate::tui::list_nav::apply(
+                                self.selected,
+                                self.row_count(),
+                                DETAIL_PAGE,
+                                m,
+                            )
+                        })
+                        .is_some_and(|row| {
+                            self.selected = row;
+                            true
+                        }) =>
+                    {
                         ViewAction::None
                     }
                     // Enter opens the standard `/model` picker for the row —
