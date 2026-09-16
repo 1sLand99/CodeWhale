@@ -1304,6 +1304,7 @@ pub(crate) fn retained_user_messages(messages: &[Message], max_tokens: usize) ->
             break;
         }
         if msg.role != Role::User
+            || crate::runtime_handoff::is_runtime_owned_user_message(msg)
             || (user_text_of(msg).is_none()
                 && !msg
                     .content

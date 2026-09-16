@@ -1103,7 +1103,7 @@ pub(crate) fn edit_last_turn_target(messages: &[Message]) -> EditLastTurnTarget 
 /// user-authored. Runtime authority is accepted only from the engine-owned
 /// structural `<turn_meta>` block, never from arbitrary user text that happens
 /// to resemble a runtime envelope or metadata marker.
-fn is_runtime_owned_user_message(message: &Message) -> bool {
+pub(crate) fn is_runtime_owned_user_message(message: &Message) -> bool {
     restored_subagent_checkpoint_display(message).is_some()
         || has_non_authoritative_turn_provenance(message)
 }

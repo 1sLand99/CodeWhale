@@ -120,7 +120,15 @@ pub fn pinned_anchors_text(workspace: Option<&std::path::Path>) -> Option<String
 }
 
 fn is_plain_user_text(message: &Message) -> bool {
-    !is_compaction_checkpoint_message(message) && user_text_of(message).is_some()
+    !is_compaction_checkpoint_message(message)
+        && !crate::runtime_handoff::is_runtime_owned_user_message(message)
+        && user_text_of(message).is_some()
+}
+
+fn user_prompt_text_of(message: &Message) -> Option<String> {
+    is_plain_user_text(message)
+        .then(|| user_text_of(message))
+        .flatten()
 }
 
 fn last_plain_user_index(messages: &[Message], end: usize) -> Option<usize> {
@@ -342,8 +350,8 @@ pub(crate) fn validate_last_round_coverage(
     // tool-bearing turn, so the round routinely spans two user messages -- and
     // checking only the earliest let a rewrite drop the *latest* one, which is
     // the turn this whole contract exists to keep.
-    for text in last_round.iter().copied().filter_map(user_text_of) {
-        if !survives(&text, replacement, user_text_of) {
+    for text in last_round.iter().copied().filter_map(user_prompt_text_of) {
+        if !survives(&text, replacement, user_prompt_text_of) {
             anyhow::bail!(
                 "Compaction coverage floor: a last-round user message was dropped; history was not replaced."
             );
@@ -669,6 +677,88 @@ mod tests {
                 )
             })
         }));
+    }
+
+    #[test]
+    fn second_compaction_keeps_long_user_question_and_tool_pair_past_retention_budget() {
+        const PRODUCTION_MIN_RETAINED_TOKENS: usize = 2_000;
+        let long_question = format!(
+            "{}?",
+            "Analyze every step of this case carefully. ".repeat(400)
+        );
+        assert!(long_question.len() > PRODUCTION_MIN_RETAINED_TOKENS * 3);
+        let original = vec![
+            msg("user", &long_question),
+            tool_use("call_1", "Bash", json!({"command": "echo ready"})),
+            tool_result("call_1", "ready"),
+        ];
+        let first_summary =
+            crate::compaction::build_compaction_summary_block_text("First pass complete", "");
+        let mut first = build_replacement_history(
+            &original,
+            &first_summary,
+            None,
+            PRODUCTION_MIN_RETAINED_TOKENS,
+        )
+        .expect("first compaction");
+        crate::runtime_handoff::replace_agent_topology_checkpoint(&mut first, &[]);
+        assert_eq!(last_round_start(&first), 0);
+        let topology = first
+            .iter()
+            .find(|message| crate::runtime_handoff::is_agent_topology_checkpoint(message))
+            .expect("first compaction topology checkpoint")
+            .clone();
+        assert!(
+            crate::compaction::retained_user_messages(
+                std::slice::from_ref(&topology),
+                PRODUCTION_MIN_RETAINED_TOKENS,
+            )
+            .is_empty(),
+            "runtime topology must not consume the older-user retention budget"
+        );
+
+        let second_summary =
+            crate::compaction::build_compaction_summary_block_text("Second pass complete", "");
+        let second = build_replacement_history(
+            &first,
+            &second_summary,
+            None,
+            PRODUCTION_MIN_RETAINED_TOKENS,
+        )
+        .expect("second compaction");
+        assert!(
+            second.iter().any(|message| {
+                user_text_of(message).as_deref() == Some(long_question.as_str())
+            })
+        );
+        assert!(
+            second
+                .iter()
+                .any(|message| has_tool_use_id(message, "call_1"))
+        );
+        assert!(
+            second
+                .iter()
+                .any(|message| has_tool_result_id(message, "call_1"))
+        );
+        let without_question = second
+            .iter()
+            .filter(|message| user_text_of(message).as_deref() != Some(long_question.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(validate_last_round_coverage(&first, &without_question).is_err());
+    }
+
+    #[test]
+    fn runtime_text_cannot_satisfy_real_user_coverage() {
+        let runtime = crate::runtime_handoff::operate_contract_runtime_message();
+        let copied_text = user_text_of(&runtime).expect("runtime text");
+        let original = vec![msg("user", &copied_text), msg("assistant", "Acknowledged")];
+        let replacement = vec![runtime, msg("assistant", "Acknowledged")];
+        assert!(
+            validate_last_round_coverage(&original, &replacement).is_err(),
+            "runtime-owned text must not stand in for the user's actual prompt"
+        );
     }
 
     #[test]
