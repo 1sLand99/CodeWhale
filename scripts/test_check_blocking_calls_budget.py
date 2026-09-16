@@ -113,5 +113,60 @@ class BlockingCallScopeTests(unittest.TestCase):
         )
 
 
+class CfgTestModuleExclusion(unittest.TestCase):
+    """A file that is wholly a `#[cfg(test)]` module is test code (#6149).
+
+    The per-file scanner only sees test scope declared *inside* a file, so an
+    extracted test suite looked like brand-new unprotected call sites even
+    though nothing moved onto an async path. PR #6096's
+    `session_export_*_tests.rs` reddened `main` this way.
+    """
+
+    def _crates(self, tmp: Path, files: dict[str, str]) -> Path:
+        crates = tmp / "crates" / "demo" / "src"
+        crates.mkdir(parents=True)
+        for name, body in files.items():
+            (crates / name).write_text(body, encoding="utf-8")
+        return tmp / "crates"
+
+    def test_whole_file_cfg_test_module_is_excluded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            crates = self._crates(
+                root,
+                {
+                    "lib.rs": "#[cfg(test)]\nmod suite;\n",
+                    "suite.rs": "fn helper() { let _ = std::fs::read_to_string(p); }\n",
+                },
+            )
+            original = mod.CRATES
+            try:
+                mod.CRATES = crates
+                excluded = mod.cfg_test_module_files()
+            finally:
+                mod.CRATES = original
+            self.assertIn((crates / "demo" / "src" / "suite.rs").resolve(), excluded)
+
+    def test_plain_mod_declaration_is_not_excluded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            crates = self._crates(
+                root,
+                {
+                    "lib.rs": "mod production;\n",
+                    "production.rs": "fn helper() { let _ = std::fs::read_to_string(p); }\n",
+                },
+            )
+            original = mod.CRATES
+            try:
+                mod.CRATES = crates
+                excluded = mod.cfg_test_module_files()
+            finally:
+                mod.CRATES = original
+            self.assertNotIn(
+                (crates / "demo" / "src" / "production.rs").resolve(), excluded
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

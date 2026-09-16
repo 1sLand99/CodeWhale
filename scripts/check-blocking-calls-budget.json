@@ -64,6 +64,9 @@
   "crates/mcp/src/test_support.rs": {
     "std_fs": 3
   },
+  "crates/memory/src/main.rs": {
+    "std_fs": 1
+  },
   "crates/models/src/model_catalog.rs": {
     "std_fs": 1
   },
@@ -75,9 +78,6 @@
   },
   "crates/telemetry/src/envelope.rs": {
     "std_fs": 2
-  },
-  "crates/telemetry/src/tests.rs": {
-    "std_fs": 3
   },
   "crates/tui/examples/zz_perf_probe.rs": {
     "std_fs": 1
@@ -115,11 +115,11 @@
   "crates/tui/src/commands/groups/project/init.rs": {
     "std_fs": 13
   },
-  "crates/tui/src/commands/groups/session/export.rs": {
-    "std_fs": 4
-  },
   "crates/tui/src/commands/session_acceptance.rs": {
     "std_fs": 6
+  },
+  "crates/tui/src/commands/session_export_host.rs": {
+    "std_fs": 4
   },
   "crates/tui/src/commands/user_commands.rs": {
     "std_fs": 5
@@ -216,9 +216,6 @@
   "crates/tui/src/integrations/dsh/receipt.rs": {
     "std_fs": 5
   },
-  "crates/tui/src/integrations/dsh/tests.rs": {
-    "std_fs": 13
-  },
   "crates/tui/src/lib.rs": {
     "std_fs": 44
   },
@@ -304,17 +301,11 @@
   "crates/tui/src/shell_dispatcher.rs": {
     "std_fs": 4
   },
-  "crates/tui/src/skills/tests.rs": {
-    "std_fs": 4
-  },
   "crates/tui/src/snapshot/paths.rs": {
     "std_fs": 1
   },
   "crates/tui/src/snapshot/repo.rs": {
     "std_fs": 16
-  },
-  "crates/tui/src/test_support.rs": {
-    "std_fs": 2
   },
   "crates/tui/src/tools/file_tool/tests.rs": {
     "std_fs": 1
@@ -360,9 +351,6 @@
   "crates/tui/src/tools/subagent/mod.rs": {
     "std_fs": 4
   },
-  "crates/tui/src/tools/subagent/tests.rs": {
-    "std_fs": 2
-  },
   "crates/tui/src/tools/subagent/tests/roster_routes.rs": {
     "std_fs": 1
   },
@@ -405,9 +393,6 @@
   },
   "crates/tui/src/tui/file_tree.rs": {
     "std_fs": 1
-  },
-  "crates/tui/src/tui/golden_harness.rs": {
-    "std_fs": 3
   },
   "crates/tui/src/tui/infoline/tests.rs": {
     "std_fs": 3
