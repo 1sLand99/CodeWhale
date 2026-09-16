@@ -1236,14 +1236,15 @@ pub struct McpResourceTemplate {
 /// simple (`{id}`), and reserved (`{+path}`) expansions cover the common MCP
 /// resource templates. More elaborate operators remain listable but are not
 /// callable until their expansion semantics are implemented exactly.
-fn resource_uri_matches_template(uri: &str, template: &str) -> bool {
+///
+/// `None` is the fail-closed answer: a template this subset cannot express
+/// matches nothing.
+fn resource_template_pattern(template: &str) -> Option<String> {
     let mut pattern = String::from("^");
     let mut rest = template;
     while let Some(start) = rest.find('{') {
         pattern.push_str(&regex::escape(&rest[..start]));
-        let Some(end) = rest[start + 1..].find('}') else {
-            return false;
-        };
+        let end = rest[start + 1..].find('}')?;
         let expression = &rest[start + 1..start + 1 + end];
         let (reserved, variables) = match expression.strip_prefix('+') {
             Some(variables) => (true, variables),
@@ -1257,7 +1258,7 @@ fn resource_uri_matches_template(uri: &str, template: &str) -> bool {
                         .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
             })
         {
-            return false;
+            return None;
         }
         let atom = if reserved { ".+" } else { "[^/?#]+" };
         for (index, _) in variables.split(',').enumerate() {
@@ -1269,11 +1270,38 @@ fn resource_uri_matches_template(uri: &str, template: &str) -> bool {
         rest = &rest[start + end + 2..];
     }
     if rest.contains('}') {
-        return false;
+        return None;
     }
     pattern.push_str(&regex::escape(rest));
     pattern.push('$');
-    regex::Regex::new(&pattern).is_ok_and(|regex| regex.is_match(uri))
+    Some(pattern)
+}
+
+/// `template`'s anchored pattern, compiled once and reused.
+///
+/// This runs per URI per advertised template, while the template itself is
+/// fixed by the server's listing, so compiling it on every call was pure
+/// repetition. `None` still means "matches nothing" (#6213 T7).
+fn compiled_resource_template(template: &str) -> Option<Arc<regex::Regex>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<String, Option<Arc<regex::Regex>>>>,
+    > = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache
+        .entry(template.to_string())
+        .or_insert_with(|| {
+            resource_template_pattern(template)
+                .and_then(|pattern| regex::Regex::new(&pattern).ok())
+                .map(Arc::new)
+        })
+        .clone()
+}
+
+fn resource_uri_matches_template(uri: &str, template: &str) -> bool {
+    compiled_resource_template(template).is_some_and(|regex| regex.is_match(uri))
 }
 
 /// Prompt discovered from an MCP server

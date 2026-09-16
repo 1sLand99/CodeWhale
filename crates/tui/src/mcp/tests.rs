@@ -8149,3 +8149,43 @@ async fn mcp_ceiling_preserves_ordinary_tool_result_tools_field() {
         }
     }
 }
+
+/// #6213 T7: the resource-URI template check is an authorization decision that
+/// runs per URI per advertised template. Pin what it accepts, what it refuses,
+/// and that the anchored pattern is compiled once rather than per call.
+#[test]
+fn resource_uri_template_matching_is_anchored_and_fail_closed() {
+    // Literal templates are anchored: no suffix may sneak past.
+    assert!(resource_uri_matches_template(
+        "file:///readme",
+        "file:///readme"
+    ));
+    assert!(!resource_uri_matches_template(
+        "file:///readme/extra",
+        "file:///readme"
+    ));
+
+    // `{id}` is a simple expansion, so it must not cross a path separator.
+    assert!(resource_uri_matches_template("file:///a", "file:///{id}"));
+    assert!(!resource_uri_matches_template(
+        "file:///a/b",
+        "file:///{id}"
+    ));
+
+    // `{+path}` is a reserved expansion, so it may.
+    assert!(resource_uri_matches_template(
+        "file:///a/b/c",
+        "file:///{+path}"
+    ));
+
+    // An operator this subset does not implement, and a template that never
+    // closes its expression, both stay uncallable rather than over-matching.
+    assert!(!resource_uri_matches_template("x", "x{?query}"));
+    assert!(!resource_uri_matches_template("x", "x{id"));
+
+    // The compile happens once per template and is reused.
+    let first = compiled_resource_template("file:///{path}").expect("template compiles");
+    let second = compiled_resource_template("file:///{path}").expect("template compiles");
+    assert!(Arc::ptr_eq(&first, &second));
+    assert!(compiled_resource_template("x{?query}").is_none());
+}
