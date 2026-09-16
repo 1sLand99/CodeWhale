@@ -10,10 +10,10 @@ If you just want the short version, see the
 [main README](../README.md#install) or
 [简体中文 README](../README.zh-CN.md#安装).
 
-This branch describes the **current source tree**. Install commands that use
-`latest` resolve to the latest published package or GitHub Release, which may
-trail the source tree. Source changes are not a published install until the
-matching package, tag, checksums, and release assets exist.
+This branch describes the **v0.9.14 source candidate**. Install commands that
+use `latest` resolve to the latest published package or GitHub Release, which
+may trail the source candidate. A candidate is not a published install until
+the matching package, tag, checksums, and release assets exist.
 
 Computer Use is included in the current source and becomes available after
 plugin review and enablement. Its CLI server needs **Node.js 20 or newer on

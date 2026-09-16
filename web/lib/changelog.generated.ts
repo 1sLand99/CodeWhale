@@ -25,15 +25,28 @@ export const CHANGELOG: ChangelogRelease[] = [
     "version": "Unreleased",
     "date": null,
     "unreleased": true,
-    "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.9.14...HEAD",
+    "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.9.13...HEAD",
     "sections": []
   },
   {
     "version": "0.9.14",
-    "date": "2026-09-16",
+    "date": null,
     "unreleased": false,
     "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.9.13...v0.9.14",
     "sections": [
+      {
+        "heading": "Contributors",
+        "items": [
+          "@aboimpinto — moved the TUI session-export slice onto shared command contracts (FEAT-025): a session-export contract facet with one shared sanitizer, /export routed through the facet, pinned with baseline-captured goldens and gates (#6096).",
+          "@7jrxt42BxFZo4iAnN4CX — reported the session-retention defects behind archive-past-the-cap and empty-session cap occupancy (#6136, #6137), the resume-failure design behind durable transcript errors (#6138), and the gaps behind the opt-in approval timeout (#6101), codewhale exec --hooks (#6099), Markdown drag-copy (#6156), and the browsable, current-aware session picker (#6014); the goal token-budget hard stop (#6013) and the fleet no-progress guard shared with child workers…",
+          "@Lstarsky0 — reported TUI tests reading machine state instead of hermetic fixtures; the lock_test_env remedy from that report shaped two more hermetic fixes, for the shared UI fixtures and the compaction budget test (#5359).",
+          "@Lujc0523 — reported /hooks edit splitting keystrokes between the editor and the composer, fixed by pausing the TUI input pump inside the editor handoff (#6165).",
+          "@Statter — reported the Gemini /models failure that now surfaces the provider's reason instead of an empty error (#6173).",
+          "@sequico — reported the ACP session/new ids that session/load could not resolve, fixed by minting resolvable session ids (#6174).",
+          "@bevis-wong — reported the mid-run engine freeze behind the bounded turn-end foreground-child join, and the resume path that re-ran identical tool-call repair on every load instead of persisting it (#6184, #6185)."
+        ],
+        "itemCount": 7
+      },
       {
         "heading": "Security",
         "items": [
