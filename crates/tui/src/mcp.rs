@@ -2321,14 +2321,25 @@ impl McpConnection {
         &self.name
     }
 
-    /// Check if connection is ready
+    /// Ready to dispatch: the transport is live **and** the plugin bundle
+    /// backing it still carries the authority it was reviewed with.
     pub fn is_ready(&self) -> bool {
-        // The Ready flag alone can't see a stdio child that exited between
-        // calls; the probe closes that gap so the pool rebuilds the
-        // connection instead of handing a dead transport back (#6187).
-        self.state == ConnectionState::Ready
-            && self.catalog_authorized()
-            && !self.transport.probe_dead()
+        self.is_transport_ready() && self.catalog_authorized()
+    }
+
+    /// Liveness only — no authority check.
+    ///
+    /// The Ready flag alone can't see a stdio child that exited between
+    /// calls; the probe closes that gap so the pool rebuilds the connection
+    /// instead of handing a dead transport back (#6187).
+    ///
+    /// Only for callers that have just run `validate_before_use` on this same
+    /// source, where `is_ready`'s authority half would re-walk and re-hash the
+    /// plugin bundle it already verified one statement earlier (#6209). Every
+    /// other caller must use `is_ready`: dropping the authority half without
+    /// a preceding check silently dispatches to a revoked or altered bundle.
+    pub(crate) fn is_transport_ready(&self) -> bool {
+        self.state == ConnectionState::Ready && !self.transport.probe_dead()
     }
 
     /// Get server config
@@ -3068,10 +3079,12 @@ impl McpPool {
             return Err(error);
         }
 
+        // Authority was just validated above for this same source; checking
+        // it again here would re-hash the bundle within one dispatch (#6209).
         let is_ready = self
             .connections
             .get(server_name)
-            .map(|conn| conn.is_ready())
+            .map(McpConnection::is_transport_ready)
             .unwrap_or(false);
         if is_ready {
             return self
@@ -3339,10 +3352,11 @@ impl McpPool {
                 continue;
             }
 
+            // Authority validated immediately above for this same source.
             if self
                 .connections
                 .get(&name)
-                .is_some_and(McpConnection::is_ready)
+                .is_some_and(McpConnection::is_transport_ready)
             {
                 continue;
             }
@@ -3399,10 +3413,11 @@ impl McpPool {
                 errors.push((name.clone(), error));
                 continue;
             }
+            // Authority validated immediately above for this same source.
             if self
                 .connections
                 .get(name)
-                .is_some_and(McpConnection::is_ready)
+                .is_some_and(McpConnection::is_transport_ready)
                 || !self.connecting.insert(name.clone())
             {
                 continue;
@@ -4254,12 +4269,18 @@ impl McpPool {
     /// uses this universe to REPLACE the pool's slice of the tool catalog
     /// instead of additively merging it — the synthetic entry must leave
     /// after a login, and dead real tools must leave after a live 401.
-    pub fn model_tool_names(&self) -> std::collections::HashSet<String> {
-        let mut names: std::collections::HashSet<String> = self
-            .to_api_tools()
-            .into_iter()
-            .map(|tool| tool.name)
-            .collect();
+    /// The model-visible tool-name universe for an already-built catalog.
+    ///
+    /// Takes the catalog rather than rebuilding it: `to_api_tools` re-verifies
+    /// every reviewed plugin bundle, so calling both meant hashing each bundle
+    /// twice per turn to produce two views of one thing — and the two could
+    /// disagree if authority drifted between them (#6209).
+    pub fn model_tool_names(
+        &self,
+        api_tools: &[codewhale_models::Tool],
+    ) -> std::collections::HashSet<String> {
+        let mut names: std::collections::HashSet<String> =
+            api_tools.iter().map(|tool| tool.name.clone()).collect();
         let dynamic = self.dynamic_servers.read();
         for (server, config) in self.config.servers.iter().chain(dynamic.iter()) {
             if self.server_allowed(server)

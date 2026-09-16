@@ -7887,7 +7887,7 @@ async fn mcp_ceiling_denied_server_is_absent_across_cached_boot_meta_auth_and_ru
     assert!(pool.all_prompts().is_empty());
     assert!(pool.resolved_tool_servers().is_empty());
     assert!(pool.to_api_tools().is_empty());
-    assert!(pool.model_tool_names().is_empty());
+    assert!(pool.model_tool_names(&pool.to_api_tools()).is_empty());
     assert!(pool.enabled_server_names().is_empty());
     assert!(pool.server_names().is_empty());
     assert!(pool.connected_servers().is_empty());

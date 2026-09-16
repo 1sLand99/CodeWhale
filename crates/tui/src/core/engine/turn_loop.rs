@@ -396,7 +396,8 @@ impl Engine {
         };
         let (mut universe, mut refreshed) = {
             let pool = pool.lock().await;
-            (pool.model_tool_names(), pool.to_api_tools())
+            let refreshed = pool.to_api_tools();
+            (pool.model_tool_names(&refreshed), refreshed)
         };
         // A config/authority change during handshake can remove a server;
         // its previous names must also leave this turn's catalog.
@@ -4470,7 +4471,8 @@ impl Engine {
                     if mcp_catalog_changed && let Some(pool) = self.mcp_pool.as_ref().cloned() {
                         let (universe, refreshed) = {
                             let pool = pool.lock().await;
-                            (pool.model_tool_names(), pool.to_api_tools())
+                            let refreshed = pool.to_api_tools();
+                            (pool.model_tool_names(&refreshed), refreshed)
                         };
                         let surface_budget = self
                             .turn_tool_surface_budget
