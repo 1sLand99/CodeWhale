@@ -250,6 +250,22 @@ pub(super) fn replacement_messages(
         .cloned()
         .collect::<Vec<_>>();
     retained.extend(bound_last_round(&round));
+    // The Operate contract applies to the current tool loop as well as later
+    // turns. It must survive compaction even when old-user retention is full.
+    let current_contract = messages
+        .iter()
+        .rev()
+        .find(|message| crate::runtime_handoff::is_current_operate_contract_message(message));
+    let contract = current_contract.or_else(|| {
+        messages
+            .iter()
+            .rev()
+            .find(|message| crate::runtime_handoff::is_operate_contract_message(message))
+    });
+    if let Some(contract) = contract {
+        retained.retain(|message| !crate::runtime_handoff::is_operate_contract_message(message));
+        retained.insert(0, contract.clone());
+    }
     retained
 }
 
@@ -758,6 +774,61 @@ mod tests {
         assert!(
             validate_last_round_coverage(&original, &replacement).is_err(),
             "runtime-owned text must not stand in for the user's actual prompt"
+        );
+    }
+
+    #[test]
+    fn operate_contract_survives_compaction_without_spending_user_budget() {
+        let contract = crate::runtime_handoff::operate_contract_runtime_message();
+        let original = vec![
+            contract.clone(),
+            msg("user", "First task"),
+            msg("assistant", "Working"),
+            msg("user", "Continue the same task"),
+            msg("assistant", "Continuing"),
+        ];
+        let replaced = build_replacement_history(
+            &original,
+            &format!("{COMPACTION_SUMMARY_MARKER}: work continues"),
+            None,
+            1,
+        )
+        .expect("compaction must retain the active Operate contract");
+        assert_eq!(replaced.first(), Some(&contract));
+        assert_eq!(
+            replaced
+                .iter()
+                .filter(|message| **message == contract)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn compaction_prefers_current_operate_contract_over_legacy() {
+        let legacy = crate::runtime_handoff::legacy_operate_contract_runtime_message();
+        let current = crate::runtime_handoff::operate_contract_runtime_message();
+        let original = vec![
+            legacy.clone(),
+            current.clone(),
+            msg("user", "Continue"),
+            msg("assistant", "Working"),
+        ];
+        let replaced = build_replacement_history(
+            &original,
+            &format!("{COMPACTION_SUMMARY_MARKER}: work continues"),
+            None,
+            1,
+        )
+        .expect("current contract must survive compaction");
+        assert_eq!(replaced.first(), Some(&current));
+        assert!(!replaced.contains(&legacy));
+        assert_eq!(
+            replaced
+                .iter()
+                .filter(|message| crate::runtime_handoff::is_operate_contract_message(message))
+                .count(),
+            1
         );
     }
 

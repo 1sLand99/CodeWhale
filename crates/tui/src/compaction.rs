@@ -2365,10 +2365,13 @@ mod tests {
             })
         }));
         assert!(is_compaction_checkpoint_message(retained.last().unwrap()));
-        assert_eq!(
-            user_text_of(retained.last().unwrap()).as_deref(),
-            Some(text.as_str())
-        );
+        assert!(is_wire_compaction_checkpoint_message(
+            retained.last().unwrap()
+        ));
+        assert!(matches!(
+            &retained.last().unwrap().content[0],
+            ContentBlock::Text { text: checkpoint, .. } if checkpoint == text
+        ));
         last_round::validate_last_round_coverage(&messages, &retained[..retained.len() - 1])
             .unwrap();
     }

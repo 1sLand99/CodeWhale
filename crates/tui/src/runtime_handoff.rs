@@ -145,6 +145,11 @@ pub(crate) fn operate_contract_runtime_message() -> Message {
     runtime_handoff_message_with_meta(OPERATE_CONTRACT_EVENT.to_string(), RUNTIME_TURN_META)
 }
 
+#[cfg(test)]
+pub(crate) fn legacy_operate_contract_runtime_message() -> Message {
+    runtime_handoff_message_with_meta(LEGACY_OPERATE_CONTRACT_EVENT.to_string(), RUNTIME_TURN_META)
+}
+
 /// True when `message` is the runtime-owned Operate contract. Recognition is
 /// structural (exact envelope text plus the runtime provenance line) so a
 /// person quoting the envelope is never matched.
