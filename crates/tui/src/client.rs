@@ -2118,13 +2118,33 @@ fn build_default_headers(
     // identify the app, never the user, and a user-configured header of the
     // same name below still wins (the extra-header loop overwrites).
     if api_provider == ApiProvider::Openrouter {
+        // `HTTP-Referer` is the only required header: it is the app's unique
+        // identifier, and without it OpenRouter creates no app page at all.
         headers.insert(
             HeaderName::from_static("http-referer"),
             HeaderValue::from_static("https://codewhale.net"),
         );
+        // `X-OpenRouter-Title` is the current display-name header. `X-Title`
+        // is only kept for backwards compatibility — OpenRouter still honours
+        // it, and a base-URL override can point this provider at an
+        // OpenRouter-compatible gateway that knows the old name and not the
+        // new one. Two bytes of redundancy is cheaper than losing attribution.
+        headers.insert(
+            HeaderName::from_static("x-openrouter-title"),
+            HeaderValue::from_static("Codewhale"),
+        );
         headers.insert(
             HeaderName::from_static("x-title"),
             HeaderValue::from_static("Codewhale"),
+        );
+        // Marketplace categories, at most two per request. These place the app
+        // under Coding → CLI Agents and Productivity → Personal Agents on
+        // openrouter.ai/apps, which is how the rankings page groups entries.
+        // Unrecognised values are dropped silently, so these must stay exactly
+        // as OpenRouter spells them.
+        headers.insert(
+            HeaderName::from_static("x-openrouter-categories"),
+            HeaderValue::from_static("cli-agent,personal-agent"),
         );
     }
     // OpenCode Go / OpenCode Zen gateways (https://opencode.ai/docs/go/)
@@ -5306,7 +5326,7 @@ mod tests {
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    /// OpenRouter app attribution: the two headers that put an app on
+    /// OpenRouter app attribution: the headers that put an app on
     /// openrouter.ai's rankings are sent for OpenRouter routes only, and a
     /// user-configured header of the same name wins.
     #[test]
@@ -5327,6 +5347,22 @@ mod tests {
         assert_eq!(
             headers.get("x-title").and_then(|v| v.to_str().ok()),
             Some("Codewhale")
+        );
+        // The current display-name header, alongside the legacy one.
+        assert_eq!(
+            headers
+                .get("x-openrouter-title")
+                .and_then(|v| v.to_str().ok()),
+            Some("Codewhale")
+        );
+        // Marketplace categories must match OpenRouter's spelling exactly:
+        // unrecognised values are dropped silently, so a typo here is
+        // invisible in production and only shows up as a missing listing.
+        assert_eq!(
+            headers
+                .get("x-openrouter-categories")
+                .and_then(|v| v.to_str().ok()),
+            Some("cli-agent,personal-agent")
         );
 
         // Attribution identifies this app to OpenRouter's rankings and has
