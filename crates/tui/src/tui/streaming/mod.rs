@@ -711,3 +711,8 @@ mod tests {
         assert!(!buffer.has_pending());
     }
 }
+
+/// Runtime performance gate for the reveal path (#6193 first slice).
+#[cfg(test)]
+#[path = "tests/perf_gate.rs"]
+mod perf_gate;
