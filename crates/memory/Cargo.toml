@@ -1,8 +1,8 @@
 [package]
 name = "codewhale-memory"
-version = "0.2.0"
+version.workspace = true
 edition = "2024"
-rust-version = "1.88"
+rust-version.workspace = true
 description = "Local, scoped, provenance-bearing memory and resumable state for CodeWhale"
 license = "MIT"
 publish = false
