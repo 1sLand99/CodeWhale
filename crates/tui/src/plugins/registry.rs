@@ -524,13 +524,23 @@ fn load_state(path: &Path) -> Result<PluginStateFile, String> {
     load_state_unlocked(path)
 }
 
+/// Maximum bytes read from the plugin state file.
+const MAX_PLUGIN_STATE_BYTES: u64 = 1024 * 1024;
+
 fn load_state_unlocked(path: &Path) -> Result<PluginStateFile, String> {
-    let Some(mut file) = open_existing_regular_file(path, false)? else {
+    let Some(file) = open_existing_regular_file(path, false)? else {
         return Ok(PluginStateFile::default());
     };
     let mut raw = String::new();
-    file.read_to_string(&mut raw)
+    file.take(MAX_PLUGIN_STATE_BYTES + 1)
+        .read_to_string(&mut raw)
         .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    if raw.len() as u64 > MAX_PLUGIN_STATE_BYTES {
+        return Err(format!(
+            "plugin state {} exceeds the 1 MiB limit",
+            path.display()
+        ));
+    }
     let state: PluginStateFile = serde_json::from_str(&raw)
         .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
     if state.schema_version != STATE_SCHEMA_VERSION {

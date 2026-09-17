@@ -114,13 +114,23 @@ impl MarketplaceStore {
         Ok(state)
     }
 
+    /// Maximum bytes read from the marketplace state file.
+    const MAX_STATE_BYTES: u64 = 1024 * 1024;
+
     fn load_unlocked(&self) -> Result<MarketplaceState, String> {
-        let Some(mut file) = open_existing_regular_file(&self.path, false)? else {
+        let Some(file) = open_existing_regular_file(&self.path, false)? else {
             return Ok(MarketplaceState::default());
         };
         let mut raw = String::new();
-        file.read_to_string(&mut raw)
+        file.take(Self::MAX_STATE_BYTES + 1)
+            .read_to_string(&mut raw)
             .map_err(|e| format!("failed to read {}: {e}", self.path.display()))?;
+        if raw.len() as u64 > Self::MAX_STATE_BYTES {
+            return Err(format!(
+                "marketplace state {} exceeds the 1 MiB limit",
+                self.path.display()
+            ));
+        }
         let state: MarketplaceState = serde_json::from_str(&raw)
             .map_err(|e| format!("failed to parse {}: {e}", self.path.display()))?;
         if state.schema_version != MARKETPLACE_SCHEMA_VERSION {

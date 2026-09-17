@@ -5516,11 +5516,19 @@ fn run_metrics_command(args: MetricsArgs) -> Result<()> {
     })
 }
 
+/// Maximum bytes read for an API key on stdin. Keys are short; anything
+/// larger is a piped file, not a key.
+const MAX_STDIN_API_KEY_BYTES: u64 = 8 * 1024;
+
 fn read_api_key_from_stdin() -> Result<String> {
     let mut input = String::new();
     io::stdin()
+        .take(MAX_STDIN_API_KEY_BYTES + 1)
         .read_to_string(&mut input)
         .context("failed to read api key from stdin")?;
+    if input.len() as u64 > MAX_STDIN_API_KEY_BYTES {
+        bail!("API key on stdin exceeds the 8 KiB limit");
+    }
     let key = input.trim().to_string();
     if key.is_empty() {
         bail!("empty API key provided");

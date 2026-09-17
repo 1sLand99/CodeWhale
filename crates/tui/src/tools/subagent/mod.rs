@@ -8774,6 +8774,10 @@ fn reject_root_relative_symlinks(root: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Maximum bytes read from a sub-agent state or transcript artifact file.
+/// Generous for long session histories; anything larger is corrupt.
+const MAX_SUBAGENT_STATE_BYTES: u64 = 16 * 1024 * 1024;
+
 fn read_subagent_state_file(state_root: &Path, path: &Path) -> Result<String> {
     let state_root = normalize_subagent_workspace(state_root);
     reject_root_relative_symlinks(&state_root, path)?;
@@ -8786,9 +8790,16 @@ fn read_subagent_state_file(state_root: &Path, path: &Path) -> Result<String> {
         ));
     }
 
-    let mut file = open_subagent_state_file(path)?;
+    let file = open_subagent_state_file(path)?;
     let mut raw = String::new();
-    file.read_to_string(&mut raw)?;
+    file.take(MAX_SUBAGENT_STATE_BYTES + 1)
+        .read_to_string(&mut raw)?;
+    if raw.len() as u64 > MAX_SUBAGENT_STATE_BYTES {
+        return Err(anyhow!(
+            "sub-agent state file {} exceeds the 16 MiB limit",
+            path.display()
+        ));
+    }
     Ok(raw)
 }
 
