@@ -18,7 +18,6 @@ pub mod pricing;
 pub mod provider;
 mod provider_defaults;
 mod provider_kind;
-pub mod provider_templates;
 pub mod redaction;
 pub mod resolve;
 pub mod route;
@@ -33,14 +32,6 @@ pub use config_document::{
 pub use model_reference::{Modality, ModelReferenceCard, ModelReferenceDatabase};
 pub(crate) use provider_defaults::*;
 pub use provider_kind::ProviderKind;
-pub use provider_templates::{
-    AGNES_TEMPLATE_ID, BASETEN_API_KEY_ENV, BASETEN_BASE_URL, BASETEN_DEFAULT_MODEL,
-    BASETEN_TEMPLATE_ID, CEREBRAS_API_KEY_ENV, CEREBRAS_BASE_URL, CEREBRAS_DEFAULT_MODEL,
-    CEREBRAS_TEMPLATE_ID, COMMAND_CODE_TEMPLATE_ID, GROQ_API_KEY_ENV, GROQ_BASE_URL,
-    GROQ_DEFAULT_MODEL, GROQ_TEMPLATE_ID, ProviderSetupApply, ProviderSetupTemplate,
-    SENSENOVA_API_KEY_ENV, SENSENOVA_BASE_URL, SENSENOVA_DEFAULT_MODEL, SENSENOVA_TEMPLATE_ID,
-    compatible_provider_setup_templates, provider_setup_template, provider_setup_templates,
-};
 pub use settings_schema::{
     SETTINGS_SCHEMA, SettingDef, SettingKind, SettingOption, SettingUi, schema_groups, schema_rows,
     schema_tabs, setting, setting_index,

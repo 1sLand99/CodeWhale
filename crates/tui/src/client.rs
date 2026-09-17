@@ -4483,7 +4483,7 @@ fn baseten_to_catalog_offering(
         endpoint_key: "chat".to_string(),
         default_for_provider: item
             .id
-            .eq_ignore_ascii_case(codewhale_config::BASETEN_DEFAULT_MODEL),
+            .eq_ignore_ascii_case(codewhale_config::catalog::BASETEN_DEFAULT_MODEL),
         family: None,
         limit,
         cost,
@@ -5311,7 +5311,7 @@ mod tests {
         assert_eq!(offering.provider, "baseten");
         assert_eq!(
             offering.wire_model_id,
-            codewhale_config::BASETEN_DEFAULT_MODEL
+            codewhale_config::catalog::BASETEN_DEFAULT_MODEL
         );
         assert!(offering.default_for_provider);
         let limit = offering.limit.expect("published limits");

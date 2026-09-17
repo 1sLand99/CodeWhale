@@ -1622,39 +1622,42 @@ mod tests {
         reset_cache_for_test();
         crate::provider_lake::clear_live_snapshot();
 
-        let base_url = codewhale_config::BASETEN_BASE_URL;
+        let base_url = codewhale_config::catalog::BASETEN_BASE_URL;
         let fingerprint = base_url_fingerprint(base_url);
         record_success(delta(
-            codewhale_config::BASETEN_TEMPLATE_ID,
+            codewhale_config::catalog::BASETEN_PROVIDER_ID,
             &fingerprint,
             &["workspace-a-only-model"],
         ));
         assert!(
             crate::provider_lake::all_catalog_models_for_provider_identity(
                 ApiProvider::Custom,
-                Some(codewhale_config::BASETEN_TEMPLATE_ID),
+                Some(codewhale_config::catalog::BASETEN_PROVIDER_ID),
             )
             .contains(&"workspace-a-only-model".to_string())
         );
         assert!(
             load_from_disk().is_none_or(|cache| cache
-                .get(&scope(codewhale_config::BASETEN_TEMPLATE_ID), &fingerprint)
+                .get(
+                    &scope(codewhale_config::catalog::BASETEN_PROVIDER_ID),
+                    &fingerprint
+                )
                 .is_none()),
             "an account-scoped Baseten roster must never be durable without a safe account id"
         );
 
         let mut custom = std::collections::HashMap::new();
         custom.insert(
-            codewhale_config::BASETEN_TEMPLATE_ID.to_string(),
+            codewhale_config::catalog::BASETEN_PROVIDER_ID.to_string(),
             ProviderConfig {
                 kind: Some("openai-compatible".to_string()),
                 base_url: Some(base_url.to_string()),
-                model: Some(codewhale_config::BASETEN_DEFAULT_MODEL.to_string()),
+                model: Some(codewhale_config::catalog::BASETEN_DEFAULT_MODEL.to_string()),
                 ..ProviderConfig::default()
             },
         );
         let config = Config {
-            provider: Some(codewhale_config::BASETEN_TEMPLATE_ID.to_string()),
+            provider: Some(codewhale_config::catalog::BASETEN_PROVIDER_ID.to_string()),
             providers: Some(ProvidersConfig {
                 custom,
                 ..ProvidersConfig::default()
@@ -1663,13 +1666,13 @@ mod tests {
         };
         assert_eq!(maybe_load_persisted_cache_for_config(&config), 0);
         assert!(matches!(
-            status_for_scope(codewhale_config::BASETEN_TEMPLATE_ID, base_url),
+            status_for_scope(codewhale_config::catalog::BASETEN_PROVIDER_ID, base_url),
             CatalogStatus::Unknown
         ));
         assert!(
             !crate::provider_lake::all_catalog_models_for_provider_identity(
                 ApiProvider::Custom,
-                Some(codewhale_config::BASETEN_TEMPLATE_ID),
+                Some(codewhale_config::catalog::BASETEN_PROVIDER_ID),
             )
             .contains(&"workspace-a-only-model".to_string()),
             "a new credential attempt must not see the previous workspace roster"
@@ -1971,7 +1974,7 @@ mod tests {
         crate::provider_lake::clear_live_snapshot();
 
         let alias = "base-ten";
-        let fingerprint = base_url_fingerprint(codewhale_config::BASETEN_BASE_URL);
+        let fingerprint = base_url_fingerprint(codewhale_config::catalog::BASETEN_BASE_URL);
         record_success(delta(alias, &fingerprint, &["alias-workspace-model"]));
 
         assert!(
@@ -1984,7 +1987,7 @@ mod tests {
         assert!(
             !crate::provider_lake::all_catalog_models_for_provider_identity(
                 ApiProvider::Custom,
-                Some(codewhale_config::BASETEN_TEMPLATE_ID),
+                Some(codewhale_config::catalog::BASETEN_PROVIDER_ID),
             )
             .contains(&"alias-workspace-model".to_string()),
             "a reviewed schema alias must not collapse distinct exact table ownership"
@@ -2253,7 +2256,7 @@ mod tests {
         let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
         reset_cache_for_test();
         crate::provider_lake::clear_live_snapshot();
-        let endpoint = codewhale_config::BASETEN_BASE_URL;
+        let endpoint = codewhale_config::catalog::BASETEN_BASE_URL;
         let ticket = begin_refresh_for_identity(ApiProvider::Custom, "TeamServing", endpoint);
         assert_eq!(
             record_success_if_current(

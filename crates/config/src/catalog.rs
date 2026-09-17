@@ -852,6 +852,13 @@ pub fn base_url_fingerprint(base_url: &str) -> String {
     out
 }
 
+/// The conventional provider-table id for the Baseten known-good host.
+///
+/// Baseten is an ordinary named `[providers.baseten]` row (#6289); this
+/// string is the identity the live-catalog path serves, not a wire-fact
+/// switch — every runtime behavior keys off [`endpoint_is_baseten`].
+pub const BASETEN_PROVIDER_ID: &str = "baseten";
+
 /// Baseten Model APIs endpoint: the one hosted Chat Completions host whose
 /// wire facts differ from the generic shape (#6289).
 ///
@@ -862,6 +869,11 @@ pub fn base_url_fingerprint(base_url: &str) -> String {
 /// named the `[providers.<name>]` table — so renames and aliases cannot
 /// change wire handling.
 pub const BASETEN_BASE_URL: &str = "https://inference.baseten.co/v1";
+
+/// The documented default model for the Baseten known-good host
+/// (`docs/PROVIDERS.md`). The live-catalog offering builder marks a
+/// discovered row with this wire id as the provider default.
+pub const BASETEN_DEFAULT_MODEL: &str = "deepseek-ai/DeepSeek-V4-Pro";
 
 /// Whether `base_url` is Baseten's Model APIs endpoint.
 ///

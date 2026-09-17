@@ -5078,22 +5078,23 @@ mod tests {
         assert!(
             provider_catalog_model_ids(
                 ApiProvider::Custom,
-                codewhale_config::BASETEN_TEMPLATE_ID,
-                codewhale_config::BASETEN_BASE_URL,
+                codewhale_config::catalog::BASETEN_PROVIDER_ID,
+                codewhale_config::catalog::BASETEN_BASE_URL,
             )
             .is_empty()
         );
 
-        let fingerprint =
-            codewhale_config::catalog::base_url_fingerprint(codewhale_config::BASETEN_BASE_URL);
+        let fingerprint = codewhale_config::catalog::base_url_fingerprint(
+            codewhale_config::catalog::BASETEN_BASE_URL,
+        );
         crate::provider_catalog_live::record_success(
             codewhale_config::catalog::ProviderCatalogDelta {
-                provider: codewhale_config::BASETEN_TEMPLATE_ID.to_string(),
+                provider: codewhale_config::catalog::BASETEN_PROVIDER_ID.to_string(),
                 base_url_fingerprint: fingerprint.clone(),
                 fetched_at: 1,
                 offerings: vec![codewhale_config::catalog::CatalogOffering {
-                    provider: codewhale_config::BASETEN_TEMPLATE_ID.to_string(),
-                    wire_model_id: codewhale_config::BASETEN_DEFAULT_MODEL.to_string(),
+                    provider: codewhale_config::catalog::BASETEN_PROVIDER_ID.to_string(),
+                    wire_model_id: codewhale_config::catalog::BASETEN_DEFAULT_MODEL.to_string(),
                     endpoint_key: "chat".to_string(),
                     source: CatalogSource::Live {
                         base_url_fingerprint: fingerprint,
@@ -5106,18 +5107,18 @@ mod tests {
 
         let models = provider_catalog_model_ids(
             ApiProvider::Custom,
-            codewhale_config::BASETEN_TEMPLATE_ID,
-            codewhale_config::BASETEN_BASE_URL,
+            codewhale_config::catalog::BASETEN_PROVIDER_ID,
+            codewhale_config::catalog::BASETEN_BASE_URL,
         );
         assert_eq!(
             models,
-            vec![codewhale_config::BASETEN_DEFAULT_MODEL.to_string()]
+            vec![codewhale_config::catalog::BASETEN_DEFAULT_MODEL.to_string()]
         );
 
         let row = ModelPickerRow {
-            id: codewhale_config::BASETEN_DEFAULT_MODEL.to_string(),
+            id: codewhale_config::catalog::BASETEN_DEFAULT_MODEL.to_string(),
             provider: Some(ApiProvider::Custom),
-            provider_identity: Some(codewhale_config::BASETEN_TEMPLATE_ID.to_string()),
+            provider_identity: Some(codewhale_config::catalog::BASETEN_PROVIDER_ID.to_string()),
             hint: String::new(),
             metadata: EffectivePickerMetadata::default(),
             selectable: true,

@@ -3903,14 +3903,15 @@ fn turn_record_round_trips_frozen_provider_live_pricing_and_drops_hostile_quotes
     let dispatched_at = Utc::now();
     let fetched_at = u64::try_from(dispatched_at.timestamp()).expect("timestamp");
     let model = "synthetic-baseten-turn-record";
-    let fingerprint =
-        codewhale_config::catalog::base_url_fingerprint(codewhale_config::BASETEN_BASE_URL);
+    let fingerprint = codewhale_config::catalog::base_url_fingerprint(
+        codewhale_config::catalog::BASETEN_BASE_URL,
+    );
     let priced_delta = |input: f64, output: f64| codewhale_config::catalog::ProviderCatalogDelta {
-        provider: codewhale_config::BASETEN_TEMPLATE_ID.to_string(),
+        provider: codewhale_config::catalog::BASETEN_PROVIDER_ID.to_string(),
         base_url_fingerprint: fingerprint.clone(),
         fetched_at,
         offerings: vec![codewhale_config::catalog::CatalogOffering {
-            provider: codewhale_config::BASETEN_TEMPLATE_ID.to_string(),
+            provider: codewhale_config::catalog::BASETEN_PROVIDER_ID.to_string(),
             wire_model_id: model.to_string(),
             endpoint_key: "chat".to_string(),
             cost: Some(codewhale_config::models_dev::ModelsDevCost {
@@ -3926,9 +3927,9 @@ fn turn_record_round_trips_frozen_provider_live_pricing_and_drops_hostile_quotes
     let route = crate::cost_status::EffectiveRouteEnvelope::capture(
         None,
         ApiProvider::Custom,
-        codewhale_config::BASETEN_TEMPLATE_ID,
+        codewhale_config::catalog::BASETEN_PROVIDER_ID,
         model,
-        Some(codewhale_config::BASETEN_BASE_URL),
+        Some(codewhale_config::catalog::BASETEN_BASE_URL),
         dispatched_at,
     );
     let valid_quote = route
@@ -3939,7 +3940,11 @@ fn turn_record_round_trips_frozen_provider_live_pricing_and_drops_hostile_quotes
     let mut turn = sample_turn("thr_quote", "turn_quote", RuntimeTurnStatus::Completed);
     turn.persist_effective_route(&route);
     let serialized = serde_json::to_string(&turn).expect("serialize quoted turn");
-    for raw_secret in [codewhale_config::BASETEN_BASE_URL, "api_key", "Bearer "] {
+    for raw_secret in [
+        codewhale_config::catalog::BASETEN_BASE_URL,
+        "api_key",
+        "Bearer ",
+    ] {
         // The assertion message must not itself log the credential fragment it
         // checks for — name the check, not the secret.
         assert!(
