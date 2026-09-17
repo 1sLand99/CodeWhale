@@ -558,8 +558,8 @@ fn auto_reasoning_change_invalidates_the_previous_route_and_receipt() {
         },
         scope: crate::model_routing::AutoRouteScope::ResolvedProvider,
         data_path: crate::model_routing::AutoRouteDataPath::LocalHeuristic,
-        reason: crate::model_routing::AutoRouteReason::LocalHeuristic(
-            crate::model_routing::AutoRouteHeuristicReason::ComplexRequest,
+        reason: crate::model_routing::AutoRouteReason::LocalFallback(
+            crate::model_routing::AutoRouteHeuristicReason::DeclaredDefault,
         ),
     });
     app.last_effective_reasoning_effort =

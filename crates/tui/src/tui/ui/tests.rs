@@ -16004,8 +16004,8 @@ fn turn_started_route_is_captured_before_cancel_suppression() {
         },
         scope: crate::model_routing::AutoRouteScope::ResolvedProvider,
         data_path: crate::model_routing::AutoRouteDataPath::LocalHeuristic,
-        reason: crate::model_routing::AutoRouteReason::LocalHeuristic(
-            crate::model_routing::AutoRouteHeuristicReason::ShortRequest,
+        reason: crate::model_routing::AutoRouteReason::LocalFallback(
+            crate::model_routing::AutoRouteHeuristicReason::DeclaredDefault,
         ),
     });
     let created_at = chrono::Utc::now();
@@ -20950,7 +20950,7 @@ fn auto_route_receipt_survives_session_snapshot_and_restore() {
         },
         scope: crate::model_routing::AutoRouteScope::ResolvedProvider,
         data_path: crate::model_routing::AutoRouteDataPath::LocalHeuristic,
-        reason: crate::model_routing::AutoRouteReason::LocalHeuristic(
+        reason: crate::model_routing::AutoRouteReason::LocalFallback(
             crate::model_routing::AutoRouteHeuristicReason::ComplexRequest,
         ),
     };

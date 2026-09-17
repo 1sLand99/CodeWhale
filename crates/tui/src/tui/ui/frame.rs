@@ -837,7 +837,6 @@ pub(crate) async fn build_preview_request_inputs(
         reasoning_effort: app.reasoning_effort,
         mode: app.mode,
         content: &content,
-        display_text: &prompt,
         auto_router_context: &auto_router::recent_auto_router_context(&app.api_messages),
         should_auto_resolve: false,
         allow_auto_router_response_cache: false,

@@ -1584,10 +1584,10 @@ pub struct App {
     pub configured_models: Vec<codewhale_config::catalog::configured::ConfiguredModel>,
     /// Exact provider/model pins loaded from settings, in user order.
     pub pinned_models: Vec<crate::settings::PinnedModel>,
-    /// When true, the model is auto-selected based on request complexity
-    /// rather than using a fixed model. The `/model auto` command sets this.
-    /// `dispatch_user_message` calls `auto_model_heuristic` to resolve the
-    /// effective model for each outbound message.
+    /// When true, the model is auto-selected rather than using a fixed
+    /// model. The `/model auto` command sets this. The flash classifier
+    /// picks the per-turn model when available; otherwise the configured
+    /// default model is used (no request-content signal).
     pub auto_model: bool,
     /// Last concrete model chosen while `auto_model` is active.
     pub last_effective_model: Option<String>,

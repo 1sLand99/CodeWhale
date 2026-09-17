@@ -4754,7 +4754,7 @@ impl Config {
 
     /// Return `true` only when `[auto] cross_provider = true` is persisted in
     /// config (#4411). Auto mode otherwise stays on the active provider: the
-    /// classifier never sees other providers' routes, and the local heuristic
+    /// classifier never sees other providers' routes, and the local fallback
     /// never selects one. There is no interactive toggle — enabling
     /// cross-provider Auto is an explicit, durable config edit.
     #[must_use]

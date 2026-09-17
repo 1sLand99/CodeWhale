@@ -792,7 +792,6 @@ async fn plan_with_reasoning(
         reasoning_effort,
         mode: AppMode::Agent,
         content: prompt,
-        display_text: prompt,
         auto_router_context: "",
         should_auto_resolve: auto_model,
         allow_auto_router_response_cache: false,

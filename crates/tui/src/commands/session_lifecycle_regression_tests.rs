@@ -115,8 +115,8 @@ fn save_preserves_latest_auto_route_receipt() {
         },
         scope: crate::model_routing::AutoRouteScope::ResolvedProvider,
         data_path: crate::model_routing::AutoRouteDataPath::LocalHeuristic,
-        reason: crate::model_routing::AutoRouteReason::LocalHeuristic(
-            crate::model_routing::AutoRouteHeuristicReason::ShortRequest,
+        reason: crate::model_routing::AutoRouteReason::LocalFallback(
+            crate::model_routing::AutoRouteHeuristicReason::DeclaredDefault,
         ),
     };
     app.set_model_selection("auto".to_string());

@@ -765,7 +765,6 @@ pub(crate) async fn spawned_dispatch_inner(
         reasoning_effort: prepare.reasoning_effort,
         mode: prepare.mode,
         content: &prepare.content,
-        display_text: &prepare.message.display,
         auto_router_context: &prepare.auto_router_context,
         should_auto_resolve: prepare.should_auto_resolve,
         allow_auto_router_response_cache: true,
