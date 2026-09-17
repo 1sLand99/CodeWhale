@@ -212,6 +212,11 @@ tag, packages, checksums and release assets exist.
   and leave older ones queued; a failed steer restores the failed message
   plus everything unattempted in original order, so nothing is lost or
   reordered.
+- Only the most recently sent prompt carries the elevated-surface background
+  now; every older prompt renders on the bare ground. The fill used to sit
+  behind every user row (striping), then behind none; newest-only keeps the
+  eye on the turn in play. Sending a new prompt moves the highlight and
+  un-highlights its predecessor.
 
 - A steer the engine never delivered is no longer reported as sent. The runtime
   API persisted the steer item as already-`Completed` and emitted

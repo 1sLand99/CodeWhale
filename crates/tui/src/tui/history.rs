@@ -220,6 +220,10 @@ pub struct TranscriptRenderOptions {
     /// transcript; the full card stays in the transcript overlay and in the
     /// tool detail record, because the receipt that the tool ran is evidence.
     pub(crate) superseded_work_receipt: bool,
+    /// This cell is the newest user turn in the transcript. Only it carries
+    /// the elevated-surface background; every older prompt renders on the
+    /// bare ground, so the eye lands on the turn in play.
+    pub(crate) newest_user_turn: bool,
     /// Extra raw reasoning body rows available to the newest transcript cell.
     /// The transcript cache derives this from genuinely unused viewport rows;
     /// non-layout-aware renderers and historical cells retain the compact
@@ -235,6 +239,7 @@ impl Default for TranscriptRenderOptions {
     fn default() -> Self {
         Self {
             superseded_work_receipt: false,
+            newest_user_turn: false,
             locale: Locale::En,
             show_thinking: true,
             thinking_highlight: true,
@@ -365,7 +370,7 @@ impl HistoryCell {
     /// `transcript_lines`.
     pub fn lines(&self, width: u16) -> Vec<Line<'static>> {
         match self {
-            HistoryCell::User { content } => render_user_message(content, width),
+            HistoryCell::User { content } => render_user_message(content, width, false),
             HistoryCell::Assistant { content, streaming } => render_message(
                 ASSISTANT_GLYPH,
                 assistant_label_style_for(*streaming, /*low_motion*/ false),
@@ -507,7 +512,9 @@ impl HistoryCell {
             HistoryCell::Tool(cell) => {
                 cell.lines_with_motion_and_locale(width, options.low_motion, options.locale)
             }
-            HistoryCell::User { content } => render_user_message(content, width),
+            HistoryCell::User { content } => {
+                render_user_message(content, width, options.newest_user_turn)
+            }
             HistoryCell::Assistant { content, streaming } => {
                 let mut lines: Vec<Line<'static>> = render_message_with_copy_metadata_for_palette(
                     ASSISTANT_GLYPH,
@@ -571,9 +578,11 @@ impl HistoryCell {
             return (hard_break_copy_lines(lines), action);
         }
         let lines = match self {
-            HistoryCell::User { content } => {
-                hard_break_copy_lines(render_user_message(content, options.prose_width(width)))
-            }
+            HistoryCell::User { content } => hard_break_copy_lines(render_user_message(
+                content,
+                options.prose_width(width),
+                options.newest_user_turn,
+            )),
             HistoryCell::Assistant { content, streaming } => {
                 let width = options.prose_width(width);
                 let mut rendered = render_message_with_copy_metadata_for_palette(

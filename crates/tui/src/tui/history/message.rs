@@ -272,18 +272,42 @@ pub(super) fn render_plain_message(
     lines
 }
 
-/// A user turn is marked by its `▎` rail and the adaptive `USER_BODY` ink —
-/// never by a painted background block. Elevated surfaces are for selectable
-/// rows (menus, pickers), where a fill is the focus cue; a transcript line is
-/// not selectable, so the fill only read as striping on every theme.
-pub(super) fn render_user_message(content: &str, width: u16) -> Vec<Line<'static>> {
-    render_plain_message(
+/// A user turn is marked by its `▎` rail and the adaptive `USER_BODY` ink.
+/// Only the newest one also carries the elevated-surface background, so the
+/// eye lands on the turn in play; every older prompt renders on the bare
+/// ground. (A fill behind *every* user row read as striping on every theme,
+/// which is why the block is newest-only rather than per-role.)
+pub(super) fn render_user_message(
+    content: &str,
+    width: u16,
+    highlight: bool,
+) -> Vec<Line<'static>> {
+    let lines = render_plain_message(
         USER_GLYPH,
         user_label_style(),
         user_body_style(),
         content,
         width,
-    )
+    );
+    if !highlight {
+        return lines;
+    }
+    let bg = palette::SURFACE_ELEVATED;
+    lines
+        .into_iter()
+        .map(|mut line| {
+            line.style = line.style.bg(bg);
+            let target_width = usize::from(width);
+            let line_width = line.width();
+            if line_width < target_width {
+                line.spans.push(Span::styled(
+                    " ".repeat(target_width - line_width),
+                    Style::default().bg(bg),
+                ));
+            }
+            line
+        })
+        .collect()
 }
 
 pub(super) fn user_label_style() -> Style {
