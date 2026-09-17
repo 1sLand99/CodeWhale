@@ -901,6 +901,10 @@ mod dispatch;
 mod dispatch_prepare;
 pub(crate) use dispatch_prepare::*;
 pub(crate) mod fatal_signal_guard;
+// #6169: runtime half of the foreground-ownership contract — restore on stop,
+// rebuild on continue. Sits next to the fatal guard because both write the same
+// teardown table.
+pub(crate) mod job_control_guard;
 mod motion;
 mod observer_hooks;
 mod provider_setup;

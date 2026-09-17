@@ -632,6 +632,13 @@ pub async fn run_tui(
     require_interactive_terminal(io::stdin().is_terminal(), io::stdout().is_terminal())?;
     require_foreground_terminal_owner()?;
 
+    // #6169: install the suspend/resume handshake here — after the
+    // foreground-ownership check (the termios snapshot needs the still-cooked
+    // tty) and before raw mode, so every mode enabled below has a handler that
+    // can undo it. Not in `lib.rs`: this must not run for the non-TUI
+    // subcommands.
+    job_control_guard::install_job_control_guard();
+
     // This sets local terminal attributes; it is not a terminal-response probe.
     // Do it on the owning thread, as on resume, so blocking-pool scheduling
     // cannot abort startup or leave a detached worker enabling raw mode later.
@@ -1520,6 +1527,40 @@ pub(crate) async fn run_event_loop(
     let mut pending_subagent_list_refresh = false;
 
     loop {
+        // #6169: first statement of every iteration. The job-control handler can
+        // stop this process mid-turn (SIGTSTP, or SIGTTIN once the group is
+        // backgrounded) after restoring the terminal from inside the handler.
+        // SIGCONT only records that the stop happened; the rebuild happens here,
+        // in normal context, where crossterm is safe to call.
+        //
+        // Two deferrals, both deliberate: a child owning the tty is handled by
+        // the pause/resume block further down (it rebuilds the modes itself), and
+        // a group that is still background (a plain `bg`) must not touch the
+        // terminal at all — re-entering raw mode and the alternate screen would
+        // steal the shell's tty. The state is left pending either way, so the
+        // rebuild still runs on the iteration after `fg`.
+        if job_control_guard::take_resume()
+            && !event_broker.is_paused()
+            && require_foreground_terminal_owner().is_ok()
+        {
+            job_control_guard::mark_resumed();
+            resume_terminal(
+                terminal,
+                app.use_alt_screen(),
+                app.use_mouse_capture,
+                app.use_bracketed_paste,
+                app.synchronized_output_enabled,
+            )?;
+            event_broker.resume_events();
+            // The input pump is deliberately not told about this: it is only
+            // ever gated by `pause_terminal_input_for_child` /
+            // `resume_after_child_terminal`, and calling the latter here would
+            // falsely clear a child's gate.
+            app.status_message = Some("Resumed after suspend".to_string());
+            app.needs_redraw = true;
+            force_terminal_repaint = true;
+        }
+
         if app.onboarding == OnboardingState::None && pending_telemetry_notice.take().is_some() {
             let receipt = app.tr(MessageId::TelemetryNoticeDefaultOn);
             app.push_status_toast(receipt.into_owned(), StatusToastLevel::Info, Some(12_000));

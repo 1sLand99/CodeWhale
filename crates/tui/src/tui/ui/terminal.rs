@@ -669,6 +669,11 @@ pub(crate) fn enable_windows_ime_console_mode() {
 /// flag at startup or in `resume_terminal`, add it here too — `FocusGained`
 /// recovery calls this and will silently fall behind otherwise.
 ///
+/// There are three callers, and they must stay in step: `resume_terminal`
+/// (after a child hands the terminal back, and after a job-control suspend),
+/// and the `FocusGained` recovery path. A mode enabled in only one of them is a
+/// mode that leaks into the shell on the other two paths (#6169).
+///
 /// Excluded by design: raw mode and the alternate screen — those persist
 /// across focus events and are only re-established by `resume_terminal`
 /// after a suspension, which always runs a separate path.
