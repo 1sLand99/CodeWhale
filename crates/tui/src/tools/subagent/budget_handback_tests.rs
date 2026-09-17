@@ -988,7 +988,7 @@ fn fallback_partial_text_prefers_last_assistant_text() {
             },
         ]),
     ];
-    assert_eq!(fallback_partial_text(&messages), "second");
+    assert_eq!(budget_handback::fallback_partial_text(&messages), "second");
 }
 
 #[test]
@@ -1005,7 +1005,7 @@ fn fallback_partial_text_digests_thinking_and_tool_calls_without_text() {
             json!({"pattern": "slot", "path": "ring.rs"}),
         )]),
     ];
-    let digest = fallback_partial_text(&messages);
+    let digest = budget_handback::fallback_partial_text(&messages);
     assert!(digest.contains("Tool calls (newest first)"), "{digest}");
     assert!(digest.contains("- Grep ring.rs"), "{digest}");
     assert!(digest.contains("- Read ring.rs"), "{digest}");
@@ -1030,7 +1030,7 @@ fn fallback_partial_text_caps_tool_entries_and_reports_overflow() {
             )])
         })
         .collect();
-    let digest = fallback_partial_text(&messages);
+    let digest = budget_handback::fallback_partial_text(&messages);
     assert!(digest.contains("...and 2 more"), "{digest}");
     assert!(!digest.contains("file_0.rs"), "{digest}");
     assert!(digest.contains("file_13.rs"), "{digest}");
@@ -1038,7 +1038,7 @@ fn fallback_partial_text_caps_tool_entries_and_reports_overflow() {
 
 #[test]
 fn fallback_partial_text_is_silent_only_when_nothing_was_recorded() {
-    assert!(fallback_partial_text(&[]).contains("No assistant text was recorded"));
+    assert!(budget_handback::fallback_partial_text(&[]).contains("No assistant text was recorded"));
     let user_only = vec![Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
@@ -1046,5 +1046,8 @@ fn fallback_partial_text_is_silent_only_when_nothing_was_recorded() {
             cache_control: None,
         }],
     }];
-    assert!(fallback_partial_text(&user_only).contains("No assistant text was recorded"));
+    assert!(
+        budget_handback::fallback_partial_text(&user_only)
+            .contains("No assistant text was recorded")
+    );
 }
