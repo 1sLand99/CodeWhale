@@ -98,6 +98,7 @@ struct RunVerifiersInput {
     max_python_files: usize,
     commands: Vec<CustomVerifierInput>,
     background: bool,
+    cwd: Option<String>,
 }
 
 impl Default for RunVerifiersInput {
@@ -108,6 +109,7 @@ impl Default for RunVerifiersInput {
             max_python_files: DEFAULT_MAX_PYTHON_FILES,
             commands: Vec::new(),
             background: false,
+            cwd: None,
         }
     }
 }
@@ -287,6 +289,10 @@ impl ToolSpec for RunVerifiersTool {
                     "type": "boolean",
                     "default": false,
                     "description": "Start verifier gates as background shell jobs and return task_ids immediately. Use for long build/test/lint gates; completion is tracked in task/status state, and `Bash` with action 'wait' / task_shell_wait are only for early output, final output, or true dependency barriers."
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "Optional working directory, relative to the workspace, to detect projects and run gates in. Per-command cwd stays relative to it. Must exist inside the workspace."
                 }
             },
             "additionalProperties": false
@@ -309,6 +315,24 @@ impl ToolSpec for RunVerifiersTool {
         crate::core::engine::tool_catalog::enforce_tool_denial(context, self.name(), &input)?;
         let input: RunVerifiersInput = serde_json::from_value(input)
             .map_err(|err| ToolError::invalid_input(err.to_string()))?;
+        // `cwd` scopes the whole call — project detection, gate roots, and
+        // reported paths — to an existing in-workspace subdirectory.
+        let scoped;
+        let context = match input
+            .cwd
+            .as_deref()
+            .map(str::trim)
+            .filter(|cwd| !cwd.is_empty())
+        {
+            None => context,
+            Some(raw) => {
+                let root = context.resolve_existing_dir(raw, "cwd")?;
+                let mut narrowed = context.clone();
+                narrowed.workspace = root;
+                scoped = narrowed;
+                &scoped
+            }
+        };
         let profile = VerifierProfile::parse(input.profile.as_str())?;
         let level = VerifierLevel::parse(input.level.as_str())?;
         if input.max_python_files == 0 || input.max_python_files > 1000 {
@@ -1444,6 +1468,37 @@ mod tests {
             .await
             .expect("execute failing verifier");
         assert_verdict(&fail, "fail");
+    }
+
+    #[tokio::test]
+    async fn run_verifiers_cwd_scopes_detection_to_subdir() {
+        let tmp = tempdir().expect("tempdir");
+        let sub = tmp.path().join("nested");
+        std::fs::create_dir(&sub).expect("subdir");
+        let ctx = ToolContext::new(tmp.path());
+
+        // Empty subdir: no gates detected, and the reported workspace is the
+        // scoped root rather than the parent workspace.
+        let result = RunVerifiersTool
+            .execute(json!({"profile": "auto", "cwd": "nested"}), &ctx)
+            .await
+            .expect("cwd-scoped execute");
+        let parsed: RunVerifiersOutput =
+            serde_json::from_str(&result.content).expect("verifier output json");
+        assert_eq!(parsed.gate_count, 0);
+        assert_eq!(
+            parsed.workspace,
+            sub.canonicalize().expect("canonical").display().to_string()
+        );
+
+        // Missing dir: refused with the fallback named.
+        let err = RunVerifiersTool
+            .execute(json!({"profile": "auto", "cwd": "no-such-dir"}), &ctx)
+            .await
+            .expect_err("missing dir must be refused");
+        let message = err.to_string();
+        assert!(message.contains("not an existing directory"), "{message}");
+        assert!(message.contains("drop `cwd`"), "{message}");
     }
 
     fn assert_verdict(result: &ToolResult, verifier: &str) {

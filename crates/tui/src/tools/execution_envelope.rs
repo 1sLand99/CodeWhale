@@ -567,6 +567,25 @@ mod tests {
         assert!(error.contains("arbitrary execution"), "{error}");
     }
 
+    /// `cwd` scopes *where* the workspace's own checks run; it cannot name a
+    /// program or redirect what runs, so the Default/Filter bound — and the
+    /// shell authority it costs — is unchanged by it.
+    #[test]
+    fn run_cwd_does_not_change_the_verification_bound() {
+        assert_eq!(
+            classify_verification("run_tests", &json!({"cwd": "crates/tui"})),
+            Some(VerificationBound::Default)
+        );
+        assert_eq!(
+            classify_verification("run_tests", &json!({"args": "-p tui", "cwd": "crates/tui"})),
+            Some(VerificationBound::Filter)
+        );
+        assert_eq!(
+            classify_verification("run_verifiers", &json!({"cwd": "crates/tui"})),
+            Some(VerificationBound::Default)
+        );
+    }
+
     /// The other side of the same rule: the shipped `verifier`/`tester` preset
     /// is `write = false, shell = "full"`, and that is exactly the ceiling that
     /// keeps the verification surface. The typed role, not the tool name, is

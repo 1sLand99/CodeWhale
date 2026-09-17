@@ -1132,6 +1132,24 @@ impl ToolContext {
         self.resolve_nonexistent_path(candidate, &workspace_canonical)
     }
 
+    /// Resolve `raw` against the workspace and require an existing directory.
+    ///
+    /// Tools that scope execution to a subdirectory (Run `cwd`) resolve
+    /// through here so containment, existence, and the refusal wording have
+    /// one owner. A workspace escape keeps the typed `PathEscape`; a missing
+    /// or non-directory path names the fallback (drop the field to run in
+    /// the workspace root).
+    pub fn resolve_existing_dir(&self, raw: &str, field: &str) -> Result<PathBuf, ToolError> {
+        let resolved = self.resolve_path(raw)?;
+        if resolved.is_dir() {
+            Ok(resolved)
+        } else {
+            Err(ToolError::invalid_input(format!(
+                "{field} '{raw}' is not an existing directory inside the workspace; drop `{field}` to run in the workspace root"
+            )))
+        }
+    }
+
     /// Resolve a non-existent path by canonicalizing its deepest existing
     /// ancestor and validating the result is under the workspace or a
     /// trusted external path.
