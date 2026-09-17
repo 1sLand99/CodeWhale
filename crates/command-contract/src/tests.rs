@@ -35,9 +35,6 @@ impl CommandModelContext for Model {
         true
     }
     fn set_model_selection(&mut self, _model: String, _provider: Option<CommandProviderId>) {}
-    fn reasoning_effort(&self) -> CommandReasoningEffort {
-        CommandReasoningEffort::Auto
-    }
     fn provider_identity(&self) -> Option<CommandProviderId> {
         None
     }

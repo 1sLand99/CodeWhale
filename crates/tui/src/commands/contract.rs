@@ -63,7 +63,7 @@ use codewhale_command_contract::facets::{
 use codewhale_command_contract::handler::ContextParts;
 use codewhale_command_contract::handler::{CommandCapabilities, CommandContexts};
 use codewhale_command_contract::types::{
-    CommandApprovalMode, CommandCurrency, CommandMode, CommandProviderId, CommandReasoningEffort,
+    CommandApprovalMode, CommandCurrency, CommandMode, CommandProviderId,
 };
 use codewhale_config::AppMode;
 use codewhale_core::request::{ContentBlock, Message, SystemPrompt};
@@ -74,7 +74,6 @@ use crate::commands::groups::plugins::plugin_network_policy;
 use crate::dependencies::ExternalTool as _;
 use crate::network_policy::NetworkPolicy;
 use crate::pricing::CostCurrency;
-use crate::reasoning_preference::ReasoningEffort;
 use crate::tui::app::App;
 use crate::tui::history::HistoryCell;
 use codewhale_localization::{MessageId, tr};
@@ -122,21 +121,6 @@ pub(crate) fn to_command_approval(mode: ApprovalMode) -> CommandApprovalMode {
         ApprovalMode::Bypass => CommandApprovalMode::Bypass,
         ApprovalMode::Suggest => CommandApprovalMode::Suggest,
         ApprovalMode::Never => CommandApprovalMode::Never,
-    }
-}
-
-/// Map the TUI reasoning-effort tier onto the portable command boundary value.
-pub(crate) fn to_command_effort(effort: ReasoningEffort) -> CommandReasoningEffort {
-    match effort {
-        ReasoningEffort::Off => CommandReasoningEffort::Off,
-        ReasoningEffort::Minimal => CommandReasoningEffort::Minimal,
-        ReasoningEffort::Low => CommandReasoningEffort::Low,
-        ReasoningEffort::Medium => CommandReasoningEffort::Medium,
-        ReasoningEffort::High => CommandReasoningEffort::High,
-        ReasoningEffort::XHigh => CommandReasoningEffort::XHigh,
-        ReasoningEffort::Ultra => CommandReasoningEffort::Ultra,
-        ReasoningEffort::Auto => CommandReasoningEffort::Auto,
-        ReasoningEffort::Max => CommandReasoningEffort::Max,
     }
 }
 
@@ -1860,10 +1844,6 @@ impl CommandModelContext for ModelAdapter<'_> {
             app.set_provider_identity(provider, identity);
         }
         app.set_model_selection(model);
-    }
-
-    fn reasoning_effort(&self) -> CommandReasoningEffort {
-        to_command_effort(self.host.app.borrow().reasoning_effort)
     }
 
     fn provider_identity(&self) -> Option<CommandProviderId> {
@@ -4439,19 +4419,6 @@ mod tests {
             ApprovalMode::Never,
         ] {
             let _ = to_command_approval(approval);
-        }
-        for effort in [
-            ReasoningEffort::Off,
-            ReasoningEffort::Minimal,
-            ReasoningEffort::Low,
-            ReasoningEffort::Medium,
-            ReasoningEffort::High,
-            ReasoningEffort::XHigh,
-            ReasoningEffort::Ultra,
-            ReasoningEffort::Auto,
-            ReasoningEffort::Max,
-        ] {
-            let _ = to_command_effort(effort);
         }
         for currency in [CostCurrency::Usd, CostCurrency::Cny] {
             let command = to_command_currency(currency);

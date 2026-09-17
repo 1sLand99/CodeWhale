@@ -3962,7 +3962,11 @@ mod tests {
             ("xhigh", "xhigh"),
             ("ultracode", "ultra"),
             ("maximum", "max"),
-            ("minimal", "low"),
+            // Slice 4, D3: `minimal` is a real rung with its own spelling, so it
+            // round-trips instead of being folded onto `low`.
+            ("minimal", "minimal"),
+            ("minimum", "low"),
+            ("light", "low"),
         ] {
             settings
                 .set("reasoning_effort", input)

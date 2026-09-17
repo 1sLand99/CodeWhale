@@ -33,10 +33,12 @@
 //! order they are first declared within a tab, and rows in declaration order
 //! within a group.
 //!
-//! Three settings take their values from a runtime registry rather than this
-//! table (`theme` from the shipped palettes, `locale` from the shipped packs,
-//! `reasoning_effort` from the active route's efforts). They are declared
-//! `String`; the surface supplies the live value list.
+//! Two settings take their values from a runtime registry rather than this
+//! table (`theme` from the shipped palettes, `locale` from the shipped packs).
+//! They are declared `String`; the surface supplies the live value list.
+//! `reasoning_effort` declares the canonical nine-spelling effort vocabulary
+//! here so `/config` and `/effort` cannot disagree; the live settings screen
+//! still narrows that list to the active route's rungs.
 
 /// One selectable value of a [`SettingKind::Enum`] (or a boolean override).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -313,6 +315,26 @@ const SYNCHRONIZED_OUTPUT: &[SettingOption] = &[
 const COST_CURRENCY: &[SettingOption] = &[
     SettingOption::new("usd", "", ""),
     SettingOption::new("cny", "", ""),
+];
+
+/// The canonical `ReasoningEffort::as_setting` spellings, in the order
+/// `auto, off, minimal, low, medium, high, xhigh, ultra, max`.
+///
+/// This is the same vocabulary `codewhale_tui::reasoning_preference::
+/// ReasoningEffort::parse_strict` accepts (`/effort`), so the settings schema
+/// and the command cannot drift. Labels stay empty: an undeclared label means
+/// "show the raw value", and a capitalized literal would also have to be
+/// localized in every shipped locale to satisfy the schema message-key check.
+const REASONING_EFFORT: &[SettingOption] = &[
+    SettingOption::new("auto", "", ""),
+    SettingOption::new("off", "", ""),
+    SettingOption::new("minimal", "", ""),
+    SettingOption::new("low", "", ""),
+    SettingOption::new("medium", "", ""),
+    SettingOption::new("high", "", ""),
+    SettingOption::new("xhigh", "", ""),
+    SettingOption::new("ultra", "", ""),
+    SettingOption::new("max", "", ""),
 ];
 
 const DENSITY: &[SettingOption] = &[
@@ -691,7 +713,7 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
     ),
     def(
         "reasoning_effort",
-        SettingKind::String,
+        SettingKind::Enum(REASONING_EFFORT),
         "",
         ui(
             TAB_MODELS,

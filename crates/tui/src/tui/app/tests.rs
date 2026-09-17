@@ -1296,9 +1296,15 @@ fn reasoning_effort_uses_one_strict_alias_table_and_legacy_fallback() {
     for raw in ["off", "none", "disabled", "false"] {
         assert_eq!(ReasoningEffort::parse_strict(raw), Ok(ReasoningEffort::Off));
     }
-    for raw in ["low", "minimum", "minimal", "light"] {
+    for raw in ["low", "minimum", "light"] {
         assert_eq!(ReasoningEffort::parse_strict(raw), Ok(ReasoningEffort::Low));
     }
+    // `minimal` is its own rung: `parse_strict(as_setting(Minimal))` must not
+    // lose the variant by collapsing it onto `Low` (Slice 4, D3).
+    assert_eq!(
+        ReasoningEffort::parse_strict("minimal"),
+        Ok(ReasoningEffort::Minimal)
+    );
     for raw in ["medium", "mid"] {
         assert_eq!(
             ReasoningEffort::parse_strict(raw),

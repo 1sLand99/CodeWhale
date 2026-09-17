@@ -544,18 +544,18 @@ fn parse_auto_route_reasoning_effort(effort: &str) -> Option<ReasoningEffort> {
     ReasoningEffort::parse_strict(effort).ok()
 }
 
+/// Normalize an Auto-route effort when only the provider is known.
+///
+/// This delegates to the one authoritative normalizer,
+/// [`ReasoningEffort::normalize_for_route`], with an unresolved route (empty
+/// endpoint and wire model), so the Auto path cannot carry a second copy of
+/// the historic `low | medium -> high` provider collapse (Slice 4, D2).
 #[must_use]
 pub(crate) fn normalize_auto_route_effort_for_provider(
     provider: ApiProvider,
     effort: ReasoningEffort,
 ) -> ReasoningEffort {
-    if provider == ApiProvider::OpenaiCodex {
-        return effort.normalize_for_provider(provider);
-    }
-    match effort {
-        ReasoningEffort::Low | ReasoningEffort::Medium => ReasoningEffort::High,
-        other => other,
-    }
+    effort.normalize_for_route(provider, "", "")
 }
 
 /// Select the reasoning request that accompanies an Auto-model route.
@@ -1860,9 +1860,13 @@ mod tests {
 
     #[test]
     fn auto_route_effort_normalization_is_provider_aware() {
+        // Slice 4, D2: the Auto path delegates to the canonical route
+        // normalizer with an unresolved route. Two providers where the deleted
+        // local copy disagreed with the authority are pinned explicitly.
         assert_eq!(
             normalize_auto_route_effort_for_provider(ApiProvider::Deepseek, ReasoningEffort::Low),
-            ReasoningEffort::High
+            ReasoningEffort::Low,
+            "first-party DeepSeek documents low|high|max, so the canonical normalizer keeps low"
         );
         assert_eq!(
             normalize_auto_route_effort_for_provider(
@@ -1871,6 +1875,35 @@ mod tests {
             ),
             ReasoningEffort::High
         );
+        assert_eq!(
+            normalize_auto_route_effort_for_provider(
+                ApiProvider::OllamaCloud,
+                ReasoningEffort::Minimal
+            ),
+            ReasoningEffort::Low,
+            "OllamaCloud folds the Codewhale-only `minimal` spelling onto low"
+        );
+        assert_eq!(
+            normalize_auto_route_effort_for_provider(
+                ApiProvider::OllamaCloud,
+                ReasoningEffort::Ultra
+            ),
+            ReasoningEffort::Max
+        );
+        // A provider with no exact-route rule keeps the historic collapse.
+        assert_eq!(
+            normalize_auto_route_effort_for_provider(ApiProvider::Moonshot, ReasoningEffort::Low),
+            ReasoningEffort::High
+        );
+        assert_eq!(
+            normalize_auto_route_effort_for_provider(ApiProvider::Moonshot, ReasoningEffort::Auto),
+            ReasoningEffort::Auto
+        );
+        assert_eq!(
+            normalize_auto_route_effort_for_provider(ApiProvider::Moonshot, ReasoningEffort::Max),
+            ReasoningEffort::Max
+        );
+        // Codex keeps its provider-level mapping (off -> low, auto -> medium).
         assert_eq!(
             normalize_auto_route_effort_for_provider(
                 ApiProvider::OpenaiCodex,

@@ -10,9 +10,7 @@ use std::path::{Path, PathBuf};
 use codewhale_core::request::{Message, SystemPrompt};
 use serde_json::Value;
 
-use crate::types::{
-    CommandApprovalMode, CommandCurrency, CommandMode, CommandProviderId, CommandReasoningEffort,
-};
+use crate::types::{CommandApprovalMode, CommandCurrency, CommandMode, CommandProviderId};
 
 /// Session identity, messages, queue operations, and token totals.
 pub trait CommandSessionContext {
@@ -24,12 +22,15 @@ pub trait CommandSessionContext {
     fn total_tokens(&self) -> u64;
 }
 
-/// Model selection, provider identity, effort, and fallback chain.
+/// Model selection, provider identity, and fallback chain.
+///
+/// Slice 4 dropped the `reasoning_effort()` facet: reasoning preference is
+/// owned by `codewhale_tui::reasoning_preference::ReasoningEffort` and no
+/// command group consumed the duplicated boundary enum.
 pub trait CommandModelContext {
     fn current_model(&self) -> String;
     fn auto_model(&self) -> bool;
     fn set_model_selection(&mut self, model: String, provider: Option<CommandProviderId>);
-    fn reasoning_effort(&self) -> CommandReasoningEffort;
     fn provider_identity(&self) -> Option<CommandProviderId>;
     fn fallback_chain(&self) -> Vec<CommandProviderId>;
 }
