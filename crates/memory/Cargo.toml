@@ -5,7 +5,7 @@ edition = "2024"
 rust-version.workspace = true
 description = "Local, scoped, provenance-bearing memory and resumable state for CodeWhale"
 license = "MIT"
-publish = false
+repository.workspace = true
 
 [lib]
 name = "codewhale_memory"
