@@ -8359,6 +8359,127 @@ async fn children_cannot_reach_machine_control_tools() {
     }
 }
 
+/// Visibility is the grant: the verifier's catalog carries `Git{fetch}` (it
+/// holds shell plus network). Shell-narrowed inspection roles never had the
+/// Git family on their catalog — they inspect through classifier-bounded bash
+/// — and a smuggled fetch is still refused by the envelope with the shell
+/// rule named (#6298).
+#[test]
+fn git_fetch_is_visible_only_where_the_grant_holds_it() {
+    for role in [FleetRole::Verifier, FleetRole::Builder, FleetRole::Worker] {
+        let tmp = tempdir().expect("tempdir");
+        let mut runtime =
+            stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
+        runtime.context = ToolContext::new(tmp.path().to_path_buf());
+        runtime.worker_profile = WorkerRuntimeProfile::for_role(role.clone());
+        if matches!(role, FleetRole::Verifier) {
+            seed_read_only_role_deny_list(&mut runtime);
+        }
+        let registry = SubAgentToolRegistry::new(
+            runtime,
+            role.clone(),
+            None,
+            crate::tools::todo::new_shared_todo_list(),
+            crate::tools::plan::new_shared_plan_state(),
+        );
+
+        let tools = registry.tools_for_model(&role);
+        let git = tools
+            .iter()
+            .find(|tool| tool.name == "Git")
+            .unwrap_or_else(|| panic!("{role:?} must see Git"));
+        let actions = git.input_schema["properties"]["action"]["enum"]
+            .as_array()
+            .expect("Git action enum")
+            .iter()
+            .filter_map(|action| action.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            actions.contains(&"fetch"),
+            "{role:?} must see the bounded fetch: {actions:?}"
+        );
+        assert!(
+            actions.contains(&"merge_tree"),
+            "{role:?} must keep the pure-read merge_tree: {actions:?}"
+        );
+        assert!(
+            registry
+                .envelope_refusal("Git", &serde_json::json!({"action": "fetch"}))
+                .is_none(),
+            "{role:?} envelope must permit the bounded fetch"
+        );
+    }
+
+    // Planner and consultant keep the Git family (pre-existing: neither is
+    // on the scout/reviewer hardened-evidence profile) but their narrowed
+    // shell cannot hold a fetch — the action pruner removes exactly that
+    // action while the pure-read merge_tree stays.
+    for role in [FleetRole::Planner, FleetRole::Consultant] {
+        let tmp = tempdir().expect("tempdir");
+        let mut runtime =
+            stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
+        runtime.context = ToolContext::new(tmp.path().to_path_buf());
+        runtime.worker_profile = WorkerRuntimeProfile::for_role(role.clone());
+        seed_read_only_role_deny_list(&mut runtime);
+        let registry = SubAgentToolRegistry::new(
+            runtime,
+            role.clone(),
+            None,
+            crate::tools::todo::new_shared_todo_list(),
+            crate::tools::plan::new_shared_plan_state(),
+        );
+
+        let tools = registry.tools_for_model(&role);
+        let git = tools
+            .iter()
+            .find(|tool| tool.name == "Git")
+            .unwrap_or_else(|| panic!("{role:?} keeps the Git family"));
+        let actions = git.input_schema["properties"]["action"]["enum"]
+            .as_array()
+            .expect("Git action enum")
+            .iter()
+            .filter_map(|action| action.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            !actions.contains(&"fetch"),
+            "{role:?} must lose fetch to the shell rule: {actions:?}"
+        );
+        assert!(
+            actions.contains(&"merge_tree"),
+            "{role:?} must keep the pure-read merge_tree: {actions:?}"
+        );
+    }
+
+    for role in [FleetRole::Scout, FleetRole::Reviewer] {
+        let tmp = tempdir().expect("tempdir");
+        let mut runtime =
+            stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
+        runtime.context = ToolContext::new(tmp.path().to_path_buf());
+        runtime.worker_profile = WorkerRuntimeProfile::for_role(role.clone());
+        seed_read_only_role_deny_list(&mut runtime);
+        let registry = SubAgentToolRegistry::new(
+            runtime,
+            role.clone(),
+            None,
+            crate::tools::todo::new_shared_todo_list(),
+            crate::tools::plan::new_shared_plan_state(),
+        );
+
+        let tools = registry.tools_for_model(&role);
+        assert!(
+            tools.iter().all(|tool| tool.name != "Git"),
+            "{role:?} keeps the pre-existing no-Git catalog"
+        );
+        let refusal = registry
+            .envelope_refusal("Git", &serde_json::json!({"action": "fetch"}))
+            .expect("a smuggled fetch must still be refused");
+        assert!(
+            refusal.contains("[execution_envelope.fetch.shell_denied]"),
+            "{role:?} refusal did not identify its failed rule: {refusal}"
+        );
+    }
+}
+
 /// Read-only text filters may transform stdout, but they must not reach their
 /// file-output or helper-program forms through the same bounded bash carve-out.
 #[tokio::test]
