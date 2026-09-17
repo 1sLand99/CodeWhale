@@ -2129,6 +2129,14 @@ pub(crate) fn transcript_scroll_percent(top: usize, visible: usize, total: usize
 }
 
 pub(crate) fn estimated_context_tokens(app: &App) -> Option<i64> {
+    // ONE estimator: this is `compaction::estimate_input_tokens_for_pressure`
+    // over the same message list (per-message cache, framing included) —
+    // deliberately not the 1.5x conservative variant. The meter, the >=80%
+    // depth warning, and the auto-compact gate must agree about where the
+    // threshold is: the inflated estimate used to show "ctx 82%" while the
+    // gate read ~55% and correctly refused to compact (#6297). The 1.5x
+    // inflation stays where it belongs — request-overflow protection
+    // (`estimate_input_tokens_conservative`).
     let message_count = app.api_messages.len();
     let mut cache = app.context_token_cache.borrow_mut();
     if cache.message_tokens.len() > message_count {
@@ -2146,13 +2154,7 @@ pub(crate) fn estimated_context_tokens(app: &App) -> Option<i64> {
         let last = message_count - 1;
         cache.message_tokens[last] = estimate_tokens(&app.api_messages[last..=last]);
     }
-    let message_tokens = cache
-        .message_tokens
-        .iter()
-        .copied()
-        .sum::<usize>()
-        .saturating_mul(3)
-        .div_ceil(2);
+    let message_tokens = cache.message_tokens.iter().copied().sum::<usize>();
     let system_tokens =
         estimate_input_tokens_conservative(&[], app.system_prompt.as_ref()).saturating_sub(48);
     let estimated = message_tokens

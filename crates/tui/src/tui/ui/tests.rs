@@ -15645,6 +15645,43 @@ fn context_usage_snapshot_prefers_live_estimate_while_loading() {
     assert!(percent > 0.0);
 }
 
+/// #6297: the meter the user reads and the gate that decides to compact must
+/// be one truth. Before this test, the meter multiplied message tokens by
+/// 1.5 while the gate used the non-inflated estimator — so a session could
+/// show "ctx 82%" next to "surface soon — /compact" while auto-compaction
+/// correctly refused, and the user saw a broken feature.
+#[test]
+fn context_meter_and_compaction_gate_share_one_estimator() {
+    let mut app = create_test_app();
+    app.api_messages = vec![
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "context ".repeat(2_000),
+                cache_control: None,
+            }],
+        },
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "answer ".repeat(500),
+                cache_control: None,
+            }],
+        },
+    ];
+
+    let meter = estimated_context_tokens(&app).expect("context meter");
+    let gate = i64::try_from(crate::compaction::estimate_input_tokens_for_pressure(
+        &app.api_messages,
+        app.system_prompt.as_ref(),
+    ))
+    .expect("fits i64");
+    assert_eq!(
+        meter, gate,
+        "the meter and the compaction gate must read the same estimate"
+    );
+}
+
 #[test]
 fn automatic_compaction_does_not_warn_at_its_threshold() {
     let mut app = create_test_app();
@@ -15676,7 +15713,10 @@ fn context_pressure_warning_survives_later_status_and_can_be_dismissed() {
     app.api_messages = vec![Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
-            text: "context ".repeat(240_000),
+            // Sized for the honest (non-inflated) meter: ~66% of a 1M window,
+            // past the >=60% suggestion even with the meter and gate sharing
+            // one estimator (#6297).
+            text: "context ".repeat(330_000),
             cache_control: None,
         }],
     }];
@@ -15718,7 +15758,8 @@ fn context_pressure_warning_clears_when_compaction_starts() {
     app.api_messages = vec![Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
-            text: "context ".repeat(240_000),
+            // ~66% of a 1M window under the honest (non-inflated) estimator.
+            text: "context ".repeat(330_000),
             cache_control: None,
         }],
     }];
