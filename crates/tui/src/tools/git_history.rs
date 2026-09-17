@@ -807,7 +807,7 @@ async fn require_configured_remote(working_dir: &Path, remote: &str) -> Result<(
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .collect();
-    if configured.iter().any(|name| *name == remote) {
+    if configured.contains(&remote) {
         Ok(())
     } else {
         Err(ToolError::invalid_input(format!(

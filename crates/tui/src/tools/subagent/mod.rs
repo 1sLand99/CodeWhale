@@ -10841,7 +10841,7 @@ async fn spawn_subagent_from_input(
             token_budget: spawn_request.token_budget,
             max_output_tokens: spawn_request
                 .max_output_tokens
-                .and_then(|n| std::num::NonZeroU32::new(n)),
+                .and_then(std::num::NonZeroU32::new),
             workflow_budget_scope: workflow_identity.and_then(|identity| {
                 identity
                     .shared_token_budget

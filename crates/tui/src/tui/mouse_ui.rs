@@ -1918,7 +1918,7 @@ fn selection_covers_cells_fully(
     let Some(first_cell) = edge_cells.next() else {
         return false;
     };
-    let last_cell = edge_cells.last().unwrap_or(first_cell);
+    let last_cell = edge_cells.next_back().unwrap_or(first_cell);
     [first_cell, last_cell].into_iter().all(|cell| {
         let mut span = line_meta
             .iter()
@@ -1928,7 +1928,7 @@ fn selection_covers_cells_fully(
                     .filter(|(cell_index, _)| *cell_index == cell)
                     .map(|_| line_index)
             });
-        match (span.next(), span.last()) {
+        match (span.next(), span.next_back()) {
             (Some(cell_first), Some(cell_last)) => {
                 cell_first >= start_index && cell_last <= end_index
             }
