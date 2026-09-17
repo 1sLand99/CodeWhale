@@ -648,6 +648,7 @@ fn persist_plugin_state(mut temporary: tempfile::TempPath, path: &Path) -> Resul
     // NamedTempFile marks the source as temporary. Clear only that temporary
     // caching hint before publication, matching tempfile's own persistence
     // contract while retaining the owner-only DACL applied above.
+    // SAFETY: `temporary_wide` is NUL-terminated and live.
     unsafe {
         SetFileAttributesW(
             PCWSTR::from_raw(temporary_wide.as_ptr()),
@@ -658,6 +659,7 @@ fn persist_plugin_state(mut temporary: tempfile::TempPath, path: &Path) -> Resul
         format!("failed to prepare private plugin state temp file for publication: {error}")
     })?;
 
+    // SAFETY: both paths are NUL-terminated and live.
     if let Err(error) = unsafe {
         MoveFileExW(
             PCWSTR::from_raw(temporary_wide.as_ptr()),
@@ -667,6 +669,7 @@ fn persist_plugin_state(mut temporary: tempfile::TempPath, path: &Path) -> Resul
     } {
         // Restore tempfile's cleanup hint on the still-private source. The
         // stable state path remains untouched when MoveFileExW fails.
+        // SAFETY: `temporary_wide` is NUL-terminated and live.
         let _ = unsafe {
             SetFileAttributesW(
                 PCWSTR::from_raw(temporary_wide.as_ptr()),
@@ -1755,6 +1758,7 @@ fn apply_windows_owner_only_acl(
     let result = (|| {
         let mut required = 0_u32;
         // The first call intentionally obtains the required byte count.
+        // SAFETY: null buffer queries size; `required` is live.
         let _ = unsafe { GetTokenInformation(token, TokenUser, None, 0, &mut required) };
         if required < size_of::<TOKEN_USER>() as u32 {
             return Err("Windows token did not expose a current-user SID".to_string());
@@ -1897,6 +1901,7 @@ fn ensure_windows_plugin_target_owner(
             status.0
         ));
     }
+    // SAFETY: `owner` is non-null from GetSecurityInfo; `expected_owner` is the caller's SID.
     let owner_matches = !owner.0.is_null() && unsafe { EqualSid(owner, expected_owner) }.is_ok();
     if !descriptor.0.is_null() {
         // SAFETY: the successful GetSecurityInfo allocation is released only

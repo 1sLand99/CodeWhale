@@ -178,6 +178,7 @@ fn configure_windows_console_utf8() {
     use windows::Win32::System::Console::{SetConsoleCP, SetConsoleOutputCP};
 
     const CP_UTF8: u32 = 65001;
+    // SAFETY: integer argument only; failures discarded.
     unsafe {
         let _ = SetConsoleCP(CP_UTF8);
         let _ = SetConsoleOutputCP(CP_UTF8);
@@ -1711,6 +1712,7 @@ fn run_with_args(args: Vec<String>) -> Result<()> {
     // Match the dispatcher entrypoint: Unix shells and supervisors may inherit
     // SIGPIPE ignored, which turns short pipelines such as `codewhale doctor |
     // head` into BrokenPipe panics once this delegated TUI binary prints.
+    // SAFETY: first call at startup; no threads or handlers yet.
     #[cfg(unix)]
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);

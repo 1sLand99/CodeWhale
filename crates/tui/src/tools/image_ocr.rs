@@ -198,6 +198,7 @@ mod macos_vision {
         let request = new_object(request_class, "VNRecognizeTextRequest")?;
         // VNRequestTextRecognitionLevelAccurate is 0. Use accurate mode for
         // screenshots and receipts; the tool is user-facing, not latency-critical.
+        // SAFETY: selectors and signatures match VNRecognizeTextRequest.
         unsafe {
             let _: () = msg_send![&*request, setRecognitionLevel: 0usize];
             let _: () = msg_send![&*request, setUsesLanguageCorrection: true];
@@ -207,13 +208,16 @@ mod macos_vision {
         let options: Retained<NSDictionary<NSString, AnyObject>> = NSDictionary::new();
 
         let handler_alloc = alloc_object(handler_class, "VNImageRequestHandler")?;
+        // SAFETY: selector and signature match VNImageRequestHandler; consumes the alloc.
         let handler_raw: *mut AnyObject =
             unsafe { msg_send![handler_alloc, initWithURL: &*url, options: &*options] };
+        // SAFETY: init returns +1; from_raw is null-checked.
         let handler = unsafe { Retained::from_raw(handler_raw) }.ok_or_else(|| {
             ToolError::execution_failed("image_ocr: failed to initialize Vision image handler")
         })?;
 
         let mut error: *mut NSError = ptr::null_mut();
+        // SAFETY: selector and signature match VNImageRequestHandler.
         let ok: bool =
             unsafe { msg_send![&*handler, performRequests: &*requests, error: &mut error] };
         if !ok {
@@ -227,13 +231,16 @@ mod macos_vision {
     }
 
     fn new_object(class: &AnyClass, label: &str) -> Result<Retained<AnyObject>, ToolError> {
+        // SAFETY: +1 or null; null handled by from_raw below.
         let raw: *mut AnyObject = unsafe { msg_send![class, new] };
+        // SAFETY: takes the +1 from `new`; null maps to Err.
         unsafe { Retained::from_raw(raw) }.ok_or_else(|| {
             ToolError::execution_failed(format!("image_ocr: failed to create {label}"))
         })
     }
 
     fn alloc_object(class: &AnyClass, label: &str) -> Result<*mut AnyObject, ToolError> {
+        // SAFETY: +1 or null; null checked below.
         let raw: *mut AnyObject = unsafe { msg_send![class, alloc] };
         if raw.is_null() {
             Err(ToolError::execution_failed(format!(
@@ -245,35 +252,43 @@ mod macos_vision {
     }
 
     fn collect_recognized_text(request: &AnyObject) -> Result<String, ToolError> {
+        // SAFETY: autoreleased return; used synchronously, never stored.
         let results: *mut AnyObject = unsafe { msg_send![request, results] };
         if results.is_null() {
             return Ok(String::new());
         }
 
+        // SAFETY: selector and signature match NSArray.
         let count: usize = unsafe { msg_send![results, count] };
         let mut lines = Vec::new();
         for idx in 0..count {
+            // SAFETY: idx < count.
             let observation: *mut AnyObject = unsafe { msg_send![results, objectAtIndex: idx] };
             if observation.is_null() {
                 continue;
             }
+            // SAFETY: selector and signature match VNRecognizedTextObservation.
             let candidates: *mut AnyObject =
                 unsafe { msg_send![observation, topCandidates: 1usize] };
             if candidates.is_null() {
                 continue;
             }
+            // SAFETY: selector and signature match NSArray.
             let candidate_count: usize = unsafe { msg_send![candidates, count] };
             if candidate_count == 0 {
                 continue;
             }
+            // SAFETY: count > 0 checked above.
             let candidate: *mut AnyObject = unsafe { msg_send![candidates, objectAtIndex: 0usize] };
             if candidate.is_null() {
                 continue;
             }
+            // SAFETY: selector and signature match VNRecognizedText.
             let text: *mut NSString = unsafe { msg_send![candidate, string] };
             if text.is_null() {
                 continue;
             }
+            // SAFETY: `text` is non-null; used synchronously.
             let line = unsafe { &*text }.to_string();
             let trimmed = line.trim();
             if !trimmed.is_empty() {
@@ -288,10 +303,12 @@ mod macos_vision {
         if error.is_null() {
             return String::new();
         }
+        // SAFETY: selector and signature match NSError.
         let description: *mut NSString = unsafe { msg_send![error, localizedDescription] };
         if description.is_null() {
             String::new()
         } else {
+            // SAFETY: `description` is non-null; used synchronously.
             format!(": {}", unsafe { &*description })
         }
     }
