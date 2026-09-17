@@ -18,30 +18,32 @@ routes, generic OpenAI-compatible endpoints, the OpenAI Codex/ChatGPT route,
 native Anthropic, and local runtimes all run the same terminal harness against
 the selected provider/model/base URL.
 
-Beginner setup templates (`crates/config/src/provider_templates.rs`) are the
-supported path for hosted OpenAI-compatible backends. A host reached over plain
-Chat Completions is a template row, not a `ProviderKind`: enum variants are
-reserved for distinct *wires* (Anthropic Messages, Codex Responses, Google
-thought signatures), and a template's offerings come from live
-`GET /v1/models` plus the Codewhale catalog rather than a compiled roster
-(#5350). So a provider being a template is not a lesser form of support — it is
-where every Chat Completions host belongs.
+A host reached over plain Chat Completions is an ordinary named provider,
+not a `ProviderKind`: enum variants are reserved for distinct *wires*
+(Anthropic Messages, Codex Responses, Google thought signatures). Any such
+host is a `[providers.<name>]` table with a base URL, a model, and a key env
+(`docs/CONFIGURATION.md`); `/provider` and `/setup` keep a "paste a Base URL
+and a key" path for exactly this. Offerings come from live `GET /v1/models`
+plus the Codewhale catalog rather than a compiled roster (#5350, #6289).
 
-| Template | Apply | Base URL | Default model | API key env |
-| --- | --- | --- | --- | --- |
-| OpenCode Zen | first-class | reuses the Zen route below | — | — |
-| OpenCode Go | first-class | reuses the Go route below | — | — |
-| SenseNova | compatible | `https://token.sensenova.cn/v1` | `deepseek-v4-flash` | `SENSENOVA_API_KEY` |
-| Baseten | compatible | `https://inference.baseten.co/v1` | `deepseek-ai/DeepSeek-V4-Pro` | `BASETEN_API_KEY` |
-| Groq | compatible | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` | `GROQ_API_KEY` |
-| Cerebras | compatible | `https://api.cerebras.ai/v1` | `llama-3.3-70b` | `CEREBRAS_API_KEY` |
-| Command Code | compatible | `https://api.commandcode.ai/provider/v1` | `deepseek/deepseek-v4-flash` | `COMMAND_CODE_API_KEY` |
-| Agnes | unpublished | none in this repository | — | — |
+Known-good hosts (documentation, not compiled rows — verify against the
+vendor's own docs before trusting any value here):
 
-Agnes has no published URL here, so it is catalogued as unpublished rather than
-inventing a host. `/provider` `P` opens the template list; `S` still fills
-SenseNova; `T` probes `/models` and records reachability only (a 2xx is not
-model-ready).
+| Host | Base URL | Example models | API key env |
+| --- | --- | --- | --- |
+| SenseNova | `https://token.sensenova.cn/v1` | `deepseek-v4-flash` | `SENSENOVA_API_KEY` |
+| Baseten | `https://inference.baseten.co/v1` | `deepseek-ai/DeepSeek-V4-Pro` | `BASETEN_API_KEY` |
+| Groq | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` | `GROQ_API_KEY` |
+| Cerebras | `https://api.cerebras.ai/v1` | `llama-3.3-70b` | `CEREBRAS_API_KEY` |
+| Command Code | `https://api.commandcode.ai/provider/v1` | `deepseek/deepseek-v4-flash` | `COMMAND_CODE_API_KEY` |
+| AICraft | `https://aicraftapi.com/v1` | DeepSeek / Qwen / GLM / MiniMax / Doubao families | `AICRAFT_API_KEY` |
+
+AICraft advertises DeepSeek, Qwen, GLM, MiniMax and Doubao and lists no
+Anthropic models — pick a model from their roster, not from this table.
+OpenCode Zen and OpenCode Go are first-class provider routes, configured like
+any other provider below; they are not part of this table. `/provider` `P`
+opens the template list; `S` still fills SenseNova; `T` probes `/models` and
+records reachability only (a 2xx is not model-ready).
 
 Sources to keep in sync:
 
