@@ -8783,7 +8783,7 @@ Provide findings ordered by severity with file references, then open questions, 
             let reserve_clause = if review_reserve_percent == 0 {
                 "no reasoning reserve was needed for this model".to_string()
             } else {
-                format!("the pass's reasoning level was capped to fit that reserve")
+                "the pass's reasoning level was capped to fit that reserve".to_string()
             };
             return report_failure(
                 &usage,
