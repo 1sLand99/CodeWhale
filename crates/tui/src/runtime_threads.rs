@@ -9456,7 +9456,7 @@ impl RuntimeThreadManager {
             );
             let selected_reasoning = reasoning_preference.map(|effort| {
                 if effort == crate::reasoning_preference::ReasoningEffort::Auto {
-                    crate::auto_reasoning::select(false, &prompt)
+                    crate::auto_reasoning::select()
                 } else {
                     effort
                 }

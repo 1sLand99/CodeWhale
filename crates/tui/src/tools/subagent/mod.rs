@@ -10246,7 +10246,6 @@ async fn spawn_subagent_from_input(
         &mut child_runtime,
         &spawn_request,
         profile_member.as_ref(),
-        &effective_prompt,
         true,
     )
     .await?;
@@ -14997,7 +14996,6 @@ async fn bind_spawn_model_route(
     runtime: &mut SubAgentRuntime,
     request: &SpawnRequest,
     member: Option<&crate::fleet::profile::AgentProfile>,
-    prompt: &str,
     apply_role_pins: bool,
 ) -> Result<(ModelRoute, SpawnRouteSource), ToolError> {
     bind_profile_provider(runtime, member)?;
@@ -15078,7 +15076,6 @@ async fn bind_spawn_model_route(
     let route = resolve_subagent_assignment_route(
         runtime,
         None,
-        prompt,
         &request.agent_type,
         selection.model_route,
         request.thinking,
@@ -15218,7 +15215,7 @@ async fn resolved_spawn_roster_entry(
     let mut child = runtime.child_runtime();
     let resolved = match request {
         Ok((request, member)) => {
-            bind_spawn_model_route(&mut child, &request, member.as_ref(), "", apply_role_pins).await
+            bind_spawn_model_route(&mut child, &request, member.as_ref(), apply_role_pins).await
         }
         Err(error) => Err(error),
     };
@@ -15717,19 +15714,12 @@ impl SubAgentResolvedRoute {
 pub(crate) async fn resolve_subagent_assignment_route(
     runtime: &SubAgentRuntime,
     configured_model: Option<String>,
-    prompt: &str,
     agent_type: &FleetRole,
     requested_model_route: ModelRoute,
     requested_thinking: SubAgentThinking,
 ) -> SubAgentResolvedRoute {
     let model_route = assignment_model_route(configured_model.as_deref(), requested_model_route);
-    worker_profile_subagent_assignment_route(
-        runtime,
-        &model_route,
-        requested_thinking,
-        prompt,
-        agent_type,
-    )
+    worker_profile_subagent_assignment_route(runtime, &model_route, requested_thinking, agent_type)
 }
 
 fn assignment_model_route(
@@ -15765,14 +15755,12 @@ fn fallback_subagent_assignment_route(
     configured_model: Option<String>,
     requested_model_route: ModelRoute,
     requested_thinking: SubAgentThinking,
-    prompt: &str,
 ) -> SubAgentResolvedRoute {
     let model_route = assignment_model_route(configured_model.as_deref(), requested_model_route);
     worker_profile_subagent_assignment_route(
         runtime,
         &model_route,
         requested_thinking,
-        prompt,
         &FleetRole::Worker,
     )
 }
@@ -15826,7 +15814,6 @@ fn worker_profile_subagent_assignment_route(
     runtime: &SubAgentRuntime,
     model_route: &ModelRoute,
     requested_thinking: SubAgentThinking,
-    prompt: &str,
     agent_type: &FleetRole,
 ) -> SubAgentResolvedRoute {
     let candidates = subagent_router_candidates(runtime);
@@ -15848,7 +15835,6 @@ fn worker_profile_subagent_assignment_route(
     let reasoning_effort = subagent_reasoning_effort_for_request(
         runtime,
         &model,
-        prompt,
         requested_fast_lane,
         requested_thinking,
         role_reasoning_default.as_deref(),
@@ -15860,7 +15846,6 @@ fn worker_profile_subagent_assignment_route(
 fn subagent_reasoning_effort_for_request(
     runtime: &SubAgentRuntime,
     model: &str,
-    prompt: &str,
     requested_fast_lane: bool,
     requested_thinking: SubAgentThinking,
     role_reasoning_default: Option<&str>,
@@ -15875,7 +15860,7 @@ fn subagent_reasoning_effort_for_request(
     match requested_thinking {
         SubAgentThinking::Effort(effort) => Some(normalize(effort).as_setting().to_string()),
         SubAgentThinking::Auto => Some(
-            normalize(auto_subagent_reasoning_effort(prompt))
+            normalize(auto_subagent_reasoning_effort())
                 .as_setting()
                 .to_string(),
         ),
@@ -15901,15 +15886,11 @@ fn subagent_reasoning_effort_for_request(
             };
             Some(normalize(effort).as_setting().to_string())
         }
-        SubAgentThinking::Inherit => fallback_subagent_reasoning_effort(runtime, model, prompt),
+        SubAgentThinking::Inherit => fallback_subagent_reasoning_effort(runtime, model),
     }
 }
 
-fn fallback_subagent_reasoning_effort(
-    runtime: &SubAgentRuntime,
-    model: &str,
-    prompt: &str,
-) -> Option<String> {
+fn fallback_subagent_reasoning_effort(runtime: &SubAgentRuntime, model: &str) -> Option<String> {
     let normalize = |effort: ReasoningEffort| {
         effort.normalize_for_route(
             runtime.client.api_provider(),
@@ -15928,7 +15909,7 @@ fn fallback_subagent_reasoning_effort(
             .is_some_and(|effort| ReasoningEffort::from_setting(effort) == ReasoningEffort::Auto);
     if requested_auto {
         Some(
-            normalize(auto_subagent_reasoning_effort(prompt))
+            normalize(auto_subagent_reasoning_effort())
                 .as_setting()
                 .to_string(),
         )
@@ -15942,8 +15923,8 @@ fn fallback_subagent_reasoning_effort(
     }
 }
 
-fn auto_subagent_reasoning_effort(prompt: &str) -> ReasoningEffort {
-    crate::auto_reasoning::select(false, prompt)
+fn auto_subagent_reasoning_effort() -> ReasoningEffort {
+    crate::auto_reasoning::select()
 }
 
 fn parse_optional_subagent_model(input: &Value, key: &str) -> Result<Option<String>, ToolError> {
@@ -18509,7 +18490,6 @@ async fn configured_model_subagent_full_bind_preserves_task_profile_and_role_ids
                 &mut runtime,
                 &request,
                 (source == "profile").then_some(&member),
-                "",
                 true,
             )
             .await
@@ -18668,7 +18648,7 @@ mod declared_shortlist_tests {
                         &json!({"prompt":"fixture", "type":"reviewer", "model":requested}),
                     )
                     .unwrap();
-                    let (route, _) = bind_spawn_model_route(&mut runtime, &request, None, "", true)
+                    let (route, _) = bind_spawn_model_route(&mut runtime, &request, None, true)
                         .await
                         .unwrap();
                     assert_eq!(route, ModelRoute::Fixed(model.into()));
@@ -18732,7 +18712,6 @@ mod declared_shortlist_tests {
                         &mut runtime,
                         &request,
                         (source == "profile").then_some(&member),
-                        "",
                         true,
                     )
                     .await;
@@ -18757,7 +18736,7 @@ mod declared_shortlist_tests {
         )
         .unwrap();
         assert!(
-            bind_spawn_model_route(&mut runtime, &request, None, "", true)
+            bind_spawn_model_route(&mut runtime, &request, None, true)
                 .await
                 .unwrap_err()
                 .to_string()
@@ -18783,7 +18762,7 @@ mod declared_shortlist_tests {
             parse_spawn_request(&json!({"prompt":"fixture", "type":"reviewer", "model":lower}))
                 .unwrap();
         assert!(
-            bind_spawn_model_route(&mut runtime, &request, None, "", true)
+            bind_spawn_model_route(&mut runtime, &request, None, true)
                 .await
                 .is_err()
         );
@@ -18795,7 +18774,7 @@ mod declared_shortlist_tests {
         )
         .unwrap();
         assert_eq!(
-            bind_spawn_model_route(&mut runtime, &request, None, "", true)
+            bind_spawn_model_route(&mut runtime, &request, None, true)
                 .await
                 .unwrap()
                 .0,

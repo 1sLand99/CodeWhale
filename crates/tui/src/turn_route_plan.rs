@@ -275,7 +275,7 @@ pub(crate) async fn plan_turn_route(
             auto_selection
                 .as_ref()
                 .and_then(|selection| selection.reasoning_effort)
-                .unwrap_or_else(|| crate::auto_reasoning::select(false, request.display_text)),
+                .unwrap_or_else(crate::auto_reasoning::select),
         )
     } else {
         None

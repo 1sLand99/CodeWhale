@@ -3644,7 +3644,6 @@ fn direct_consultant_aliases_apply_role_reasoning_default_after_inheritance() {
                 &runtime,
                 &ModelRoute::Inherit,
                 request.thinking,
-                &request.prompt,
                 &request.agent_type,
             );
             assert_eq!(
@@ -3665,7 +3664,6 @@ fn direct_consultant_aliases_apply_role_reasoning_default_after_inheritance() {
         &stub_runtime(),
         &ModelRoute::Inherit,
         request.thinking,
-        &request.prompt,
         &request.agent_type,
     );
     assert_eq!(
@@ -3674,6 +3672,8 @@ fn direct_consultant_aliases_apply_role_reasoning_default_after_inheritance() {
         "explicit child reasoning must override the role default"
     );
 
+    // #6290: explicit auto no longer classifies the child prompt — the debug
+    // wording below resolves the same declared default as any other wording.
     let request = parse_spawn_request(&json!({
         "prompt": "debug this release failure",
         "type": "consultant",
@@ -3684,13 +3684,12 @@ fn direct_consultant_aliases_apply_role_reasoning_default_after_inheritance() {
         &stub_runtime(),
         &ModelRoute::Inherit,
         request.thinking,
-        &request.prompt,
         &request.agent_type,
     );
     assert_eq!(
         route.reasoning_effort.as_deref(),
-        Some("max"),
-        "explicit auto must resolve from the child prompt instead of using the consultant high default"
+        Some("high"),
+        "explicit auto resolves the declared default instead of classifying the child prompt"
     );
 
     let request = parse_spawn_request(&json!({
@@ -3703,7 +3702,6 @@ fn direct_consultant_aliases_apply_role_reasoning_default_after_inheritance() {
         &stub_runtime(),
         &ModelRoute::Inherit,
         request.thinking,
-        &request.prompt,
         &request.agent_type,
     );
     assert_eq!(
@@ -4423,7 +4421,7 @@ async fn manual_config_role_pin_refuses_task_model_and_strength_before_binding()
             selection.model_route,
             ModelRoute::Fixed("deepseek-v4-flash".into())
         );
-        let error = bind_spawn_model_route(&mut runtime, &request, None, "", true)
+        let error = bind_spawn_model_route(&mut runtime, &request, None, true)
             .await
             .expect_err("task choices cannot replace a current Config pin");
         let message = error.to_string();
@@ -4452,7 +4450,7 @@ async fn manual_role_pin_accepts_only_its_exact_qualified_provider_selector() {
         let request =
             parse_spawn_request(&json!({"prompt":"review", "type":"reviewer", "model":model}))
                 .unwrap();
-        let (route, source) = bind_spawn_model_route(&mut runtime, &request, None, "", true)
+        let (route, source) = bind_spawn_model_route(&mut runtime, &request, None, true)
             .await
             .expect("the task may restate the same exact route");
         assert_eq!(route, ModelRoute::Fixed("deepseek-v4-flash".into()));
@@ -4463,7 +4461,7 @@ async fn manual_role_pin_accepts_only_its_exact_qualified_provider_selector() {
         "prompt":"review", "type":"reviewer", "model":"moonshot/deepseek-v4-flash"
     }))
     .unwrap();
-    let error = bind_spawn_model_route(&mut runtime, &request, None, "", true)
+    let error = bind_spawn_model_route(&mut runtime, &request, None, true)
         .await
         .expect_err("a provider prefix cannot retarget the saved pin");
     assert!(error.to_string().contains("conflicts"), "{error}");
@@ -4490,7 +4488,7 @@ async fn structured_role_pin_rejects_incomplete_auto_and_unknown_provider_pairs(
             .unwrap(),
         );
         let request = parse_spawn_request(&json!({"prompt":"review", "type":"reviewer"})).unwrap();
-        let error = bind_spawn_model_route(&mut runtime, &request, None, "", true)
+        let error = bind_spawn_model_route(&mut runtime, &request, None, true)
             .await
             .expect_err("an invalid explicit route cannot inherit a usable default");
         assert!(!error.to_string().is_empty(), "{value:?}: {error}");
@@ -4557,7 +4555,7 @@ async fn manual_role_pin_keeps_case_distinct_custom_provider_identity() {
             "prompt":"review", "type":"reviewer", "model":selector
         }))
         .unwrap();
-        let result = bind_spawn_model_route(&mut runtime, &request, None, "", true).await;
+        let result = bind_spawn_model_route(&mut runtime, &request, None, true).await;
         if succeeds {
             assert_eq!(result.unwrap().1, SpawnRouteSource::RolePin);
         } else {
@@ -4599,7 +4597,7 @@ async fn foreign_manual_role_pin_is_not_downgraded_to_an_implicit_default() {
     assert!(error.to_string().contains("moonshot"), "{error}");
     assert_eq!(selected.source, SpawnRouteSource::RolePin);
     assert!(matches!(selected.model_route, ModelRoute::Fixed(_)));
-    bind_spawn_model_route(&mut runtime, &request, None, "", true)
+    bind_spawn_model_route(&mut runtime, &request, None, true)
         .await
         .expect_err("the actual bind must keep the same known-foreign refusal");
     assert_eq!(runtime.model, "kimi-k2.6");
@@ -4656,7 +4654,7 @@ async fn structured_custom_pin_refuses_named_provider_migration_but_accepts_lite
             "prompt":"review", "type":"reviewer", "model":"custom/model-x"
         }))
         .unwrap();
-        let result = bind_spawn_model_route(&mut runtime, &request, None, "", true).await;
+        let result = bind_spawn_model_route(&mut runtime, &request, None, true).await;
         if should_bind {
             assert_eq!(result.unwrap().1, SpawnRouteSource::RolePin);
             assert_eq!(runtime.model, "model-x");
@@ -5004,7 +5002,6 @@ fn test_explicit_spawn_thinking_reaches_the_request() {
         None,
         ModelRoute::Inherit,
         request.thinking,
-        "review this",
     );
     assert_eq!(route.reasoning_effort.as_deref(), Some("off"));
 }
@@ -5120,7 +5117,6 @@ fn fixed_model_runtime_with_a_raw_auto_tier_resolves_instead_of_staying_raw() {
         Some("deepseek-v4-pro".to_string()),
         ModelRoute::Inherit,
         SubAgentThinking::Inherit,
-        "debug this release failure",
     );
 
     assert_eq!(
@@ -5134,8 +5130,10 @@ fn fixed_model_runtime_with_a_raw_auto_tier_resolves_instead_of_staying_raw() {
         Some("auto"),
         "the raw auto sentinel must never reach the wire"
     );
-    assert_eq!(route.reasoning_effort.as_deref(), Some("max"));
-    assert_eq!(route.tuning.reasoning_effort, Some(ReasoningEffort::Max));
+    // #6290: `auto` resolves the declared default (High); the prompt no
+    // longer classifies the tier.
+    assert_eq!(route.reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(route.tuning.reasoning_effort, Some(ReasoningEffort::High));
 }
 
 #[test]
@@ -5147,7 +5145,6 @@ fn a_concrete_runtime_tier_is_not_mistaken_for_auto() {
         None,
         ModelRoute::Inherit,
         SubAgentThinking::Inherit,
-        "debug this release failure",
     );
 
     assert_eq!(route.reasoning_effort.as_deref(), Some("off"));
@@ -7036,17 +7033,14 @@ fn subagent_model_strength_defaults_to_parent_even_when_parent_auto_model() {
     let mut runtime = stub_runtime().with_auto_model(true);
     runtime.model = "deepseek-v4-pro".to_string();
 
-    for prompt in ["implement the release fix", "say hello"] {
-        let route = fallback_subagent_assignment_route(
-            &runtime,
-            None,
-            ModelRoute::Inherit,
-            SubAgentThinking::Inherit,
-            prompt,
-        );
-        assert_eq!(route.model_route, ModelRoute::Inherit);
-        assert_eq!(route.model, "deepseek-v4-pro", "prompt {prompt:?}");
-    }
+    let route = fallback_subagent_assignment_route(
+        &runtime,
+        None,
+        ModelRoute::Inherit,
+        SubAgentThinking::Inherit,
+    );
+    assert_eq!(route.model_route, ModelRoute::Inherit);
+    assert_eq!(route.model, "deepseek-v4-pro");
 }
 
 #[test]
@@ -7059,7 +7053,6 @@ fn subagent_model_strength_faster_uses_known_family_sibling() {
         None,
         ModelRoute::Faster,
         SubAgentThinking::Inherit,
-        "inspect one file",
     );
     assert_eq!(route.model_route, ModelRoute::Faster);
     assert_eq!(route.model, "deepseek-v4-flash");
@@ -7075,7 +7068,6 @@ fn subagent_model_strength_explicit_model_wins_over_faster() {
         Some("deepseek-v4-pro".to_string()),
         ModelRoute::Faster,
         SubAgentThinking::Inherit,
-        "inspect one file",
     );
     assert_eq!(
         route.model_route,
@@ -7094,7 +7086,6 @@ fn explicit_child_thinking_overrides_faster_default_off() {
         None,
         ModelRoute::Faster,
         SubAgentThinking::Effort(ReasoningEffort::High),
-        "inspect one file",
     );
     assert_eq!(route.model, "deepseek-v4-flash");
     assert_eq!(route.reasoning_effort.as_deref(), Some("high"));
@@ -7102,7 +7093,7 @@ fn explicit_child_thinking_overrides_faster_default_off() {
 }
 
 #[test]
-fn explicit_child_auto_thinking_resolves_from_child_prompt() {
+fn explicit_child_auto_thinking_resolves_to_the_declared_default() {
     let runtime = stub_runtime().with_reasoning_effort(Some("off".to_string()), false);
 
     let route = fallback_subagent_assignment_route(
@@ -7110,9 +7101,8 @@ fn explicit_child_auto_thinking_resolves_from_child_prompt() {
         None,
         ModelRoute::Inherit,
         SubAgentThinking::Auto,
-        "debug this release failure",
     );
-    assert_eq!(route.reasoning_effort.as_deref(), Some("max"));
+    assert_eq!(route.reasoning_effort.as_deref(), Some("high"));
 }
 
 #[tokio::test]
@@ -7126,7 +7116,6 @@ async fn route_resolution_matrix_uses_explicit_model_strength_routes() {
         agent_type: FleetRole,
         configured_model: Option<&'static str>,
         requested_route: ModelRoute,
-        prompt: &'static str,
         expected_route: ModelRoute,
         expected_model: &'static str,
         expected_reasoning: Option<&'static str>,
@@ -7138,7 +7127,6 @@ async fn route_resolution_matrix_uses_explicit_model_strength_routes() {
             agent_type: FleetRole::Scout,
             configured_model: None,
             requested_route: ModelRoute::Inherit,
-            prompt: "inspect the parser and report what changed",
             expected_route: ModelRoute::Inherit,
             expected_model: "deepseek-v4-pro",
             expected_reasoning: Some("max"),
@@ -7148,7 +7136,6 @@ async fn route_resolution_matrix_uses_explicit_model_strength_routes() {
             agent_type: FleetRole::Scout,
             configured_model: None,
             requested_route: ModelRoute::Faster,
-            prompt: "inspect the parser and report what changed",
             expected_route: ModelRoute::Faster,
             expected_model: "deepseek-v4-flash",
             expected_reasoning: Some("off"),
@@ -7158,7 +7145,6 @@ async fn route_resolution_matrix_uses_explicit_model_strength_routes() {
             agent_type: FleetRole::Worker,
             configured_model: None,
             requested_route: ModelRoute::Inherit,
-            prompt: "synthesize the release blocker fix",
             expected_route: ModelRoute::Inherit,
             expected_model: "deepseek-v4-pro",
             expected_reasoning: Some("max"),
@@ -7168,7 +7154,6 @@ async fn route_resolution_matrix_uses_explicit_model_strength_routes() {
             agent_type: FleetRole::Builder,
             configured_model: Some("deepseek-v4-flash"),
             requested_route: ModelRoute::Inherit,
-            prompt: "apply the narrow code edit",
             expected_route: ModelRoute::Fixed("deepseek-v4-flash".to_string()),
             expected_model: "deepseek-v4-flash",
             expected_reasoning: Some("max"),
@@ -7180,7 +7165,6 @@ async fn route_resolution_matrix_uses_explicit_model_strength_routes() {
         let route = resolve_subagent_assignment_route(
             &runtime,
             case.configured_model.map(str::to_string),
-            case.prompt,
             &case.agent_type,
             case.requested_route.clone(),
             SubAgentThinking::Inherit,
@@ -7212,7 +7196,10 @@ async fn route_resolution_matrix_uses_explicit_model_strength_routes() {
 }
 
 #[test]
-fn subagent_auto_reasoning_resolves_to_distinct_v4_tiers() {
+fn subagent_auto_reasoning_resolves_to_the_declared_default() {
+    // #6290: a raw `auto` runtime tier used to classify the prompt (Low for
+    // lookup wording, Max for debug wording). Both wordings are gone with the
+    // classifier — the declared default is the only resolution.
     let runtime = stub_runtime().with_reasoning_effort(Some("high".to_string()), true);
 
     assert_eq!(
@@ -7221,21 +7208,9 @@ fn subagent_auto_reasoning_resolves_to_distinct_v4_tiers() {
             None,
             ModelRoute::Inherit,
             SubAgentThinking::Inherit,
-            "quick lookup",
         )
         .reasoning_effort,
-        Some("low".to_string())
-    );
-    assert_eq!(
-        fallback_subagent_assignment_route(
-            &runtime,
-            None,
-            ModelRoute::Inherit,
-            SubAgentThinking::Inherit,
-            "debug this release failure"
-        )
-        .reasoning_effort,
-        Some("max".to_string())
+        Some("high".to_string())
     );
 }
 
@@ -16305,17 +16280,16 @@ async fn faster_route_on_provider_without_known_sibling_stays_on_parent_model() 
     let mut runtime = stub_runtime_for_provider("ollama").with_auto_model(true);
     runtime.model = "qwen3:32b".to_string();
 
-    for prompt in ["hi", "please refactor the whole auth module for security"] {
+    {
         let route = resolve_subagent_assignment_route(
             &runtime,
             None,
-            prompt,
             &FleetRole::Worker,
             ModelRoute::Faster,
             SubAgentThinking::Inherit,
         )
         .await;
-        assert_eq!(route.model, "qwen3:32b", "prompt {prompt:?}");
+        assert_eq!(route.model, "qwen3:32b");
         assert!(
             !route.model.contains("deepseek"),
             "no DeepSeek id may be fabricated: {route:?}"
@@ -16332,7 +16306,6 @@ fn faster_route_uses_known_deepseek_and_glm_family_siblings() {
         None,
         ModelRoute::Faster,
         SubAgentThinking::Inherit,
-        "inspect one file",
     );
     assert_eq!(route.model, "deepseek-v4-flash");
 
@@ -16343,7 +16316,6 @@ fn faster_route_uses_known_deepseek_and_glm_family_siblings() {
         None,
         ModelRoute::Faster,
         SubAgentThinking::Inherit,
-        "inspect docs",
     );
     // GLM-5.2 faster/explore children route to GLM-5-Turbo (same-family fast
     // sibling), not down to GLM-5.1.
@@ -16357,7 +16329,6 @@ fn faster_route_uses_known_deepseek_and_glm_family_siblings() {
         None,
         ModelRoute::Faster,
         SubAgentThinking::Inherit,
-        "inspect docs",
     );
     assert_eq!(route.model, "z-ai/glm-5-turbo");
     assert_ne!(route.model, "z-ai/glm-5.1");
@@ -16373,7 +16344,6 @@ fn inherit_route_remaps_stale_deepseek_model_for_sakana_provider() {
         None,
         ModelRoute::Inherit,
         SubAgentThinking::Inherit,
-        "summarize the repo layout",
     );
     assert_eq!(route.model, "deepseek-v4-flash");
 
@@ -16396,7 +16366,6 @@ fn faster_route_remaps_stale_deepseek_model_for_sakana_provider() {
         None,
         ModelRoute::Faster,
         SubAgentThinking::Inherit,
-        "quick scan",
     );
     let validated = ensure_subagent_model_for_provider(&runtime, &route.model_route, route.model)
         .expect("faster should remap to operator route");
@@ -16461,7 +16430,6 @@ fn gpt55_faster_route_stays_on_gpt55_with_low_reasoning() {
         None,
         ModelRoute::Faster,
         SubAgentThinking::Inherit,
-        "inspect one file",
     );
     assert_eq!(route.model, "gpt-5.5");
     assert!(

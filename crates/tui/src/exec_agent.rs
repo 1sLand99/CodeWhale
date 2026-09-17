@@ -383,7 +383,7 @@ pub(crate) async fn run_exec_agent(
     // `run_one_shot`/`run_one_shot_json` and the interactive launch path do,
     // so the tier the engine (and the receipt below) sees is concrete.
     let effective_reasoning_effort = route.reasoning_effort.and_then(|effort| {
-        cli_reasoning_effort_value_for_prompt(&execution_config, &effective_model, effort, prompt)
+        cli_reasoning_effort_value_for_prompt(&execution_config, &effective_model, effort)
     });
 
     let settings = crate::settings::Settings::load().unwrap_or_default();

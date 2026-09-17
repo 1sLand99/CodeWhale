@@ -1247,7 +1247,6 @@ impl Engine {
             // Resolve `auto` reasoning_effort to a concrete tier (#663).
             let effective_reasoning_effort = resolve_auto_effort(
                 self.session.reasoning_effort.as_deref(),
-                &self.session.messages,
                 self.api_provider,
                 &self.api_config.deepseek_base_url(),
                 &self.config.model,
@@ -6267,65 +6266,33 @@ pub(super) const REASONING_EFFORT_AUTO: &str = "auto";
 
 /// Resolve an `"auto"` reasoning-effort tier to a concrete value.
 ///
-/// When the configured effort is `"auto"`, inspects the last user message
-/// and calls [`crate::auto_reasoning::select`] to pick the actual tier.
-/// Non-`"auto"` values pass through unchanged.
+/// When the configured effort is `"auto"`, calls
+/// [`crate::auto_reasoning::select`] for the declared policy tier. The message
+/// is no longer inspected: the keyword classifier was deleted with the #6290
+/// rework, and `auto` now means the declared default rather than a guess from
+/// the user's wording. Non-`"auto"` values pass through unchanged.
 pub(super) fn resolve_auto_effort(
     reasoning_effort: Option<&str>,
-    messages: &[Message],
     provider: crate::config::ApiProvider,
     base_url: &str,
     wire_model: &str,
 ) -> Option<String> {
     match reasoning_effort {
         Some(effort) if effort == REASONING_EFFORT_AUTO => {
-            // Find the last user message in the conversation.
-            let last_msg = messages
-                .iter()
-                .rev()
-                .find(|m| m.role == "user")
-                .map(|m| {
-                    m.content
-                        .iter()
-                        .filter_map(|block| {
-                            if let ContentBlock::Text { text, .. } = block {
-                                if is_turn_metadata_text(text) {
-                                    None
-                                } else {
-                                    Some(text.as_str())
-                                }
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<&str>>()
-                        .join(" ")
-                })
-                .unwrap_or_default();
-
-            // is_subagent is false here — run_turn runs in the
-            // main engine (not a sub-agent's inner loop). Sub-agents have
-            // their own turn pass and can pass is_subagent=true when they
-            // call this function directly.
-            let tier = crate::auto_reasoning::select(false, &last_msg);
+            let tier = crate::auto_reasoning::select();
             let resolved = tier
                 .normalize_for_route(provider, base_url, wire_model)
                 .as_setting()
                 .to_string();
             tracing::debug!(
                 reasoning_effort = %resolved,
-                is_subagent = false,
-                "auto_reasoning: resolved auto tier from user message"
+                "auto_reasoning: resolved auto tier from declared policy"
             );
             Some(resolved)
         }
         Some(other) => Some(other.to_string()),
         None => None,
     }
-}
-
-fn is_turn_metadata_text(text: &str) -> bool {
-    text.trim_start().starts_with("<turn_meta>")
 }
 
 #[cfg(test)]
@@ -6792,47 +6759,26 @@ mod tests {
     }
 
     #[test]
-    fn resolve_auto_effort_ignores_stored_turn_metadata() {
-        let messages = vec![Message {
-            role: Role::User,
-            content: vec![
-                ContentBlock::Text {
-                    text: "<turn_meta>\nRecent errors: src/failing.rs\n</turn_meta>".to_string(),
-                    cache_control: None,
-                },
-                ContentBlock::Text {
-                    text: "hello".to_string(),
-                    cache_control: None,
-                },
-            ],
-        }];
-
+    fn resolve_auto_effort_is_content_blind() {
+        // #6290 rework: the resolved tier no longer depends on message text
+        // at all — stored metadata, questions, and work prompts alike take
+        // the declared default.
         assert_eq!(
             resolve_auto_effort(
                 Some("auto"),
-                &messages,
                 crate::config::ApiProvider::Deepseek,
                 crate::config::DEFAULT_DEEPSEEK_BASE_URL,
                 "deepseek-v4-pro",
             ),
             Some("high".to_string()),
-            "auto thinking should classify the user request, not stored metadata"
+            "auto resolves the declared default"
         );
     }
 
     #[test]
     fn resolve_auto_effort_selects_a_concrete_kimi_code_tier() {
-        let messages = vec![Message {
-            role: Role::User,
-            content: vec![ContentBlock::Text {
-                text: "inspect this repository and fix the failing tests".to_string(),
-                cache_control: None,
-            }],
-        }];
-
         let resolved = resolve_auto_effort(
             Some("auto"),
-            &messages,
             crate::config::ApiProvider::Moonshot,
             crate::config::DEFAULT_KIMI_CODE_BASE_URL,
             crate::config::KIMI_CODE_K3_MODEL,
@@ -6846,7 +6792,6 @@ mod tests {
         assert_eq!(
             resolve_auto_effort(
                 None,
-                &messages,
                 crate::config::ApiProvider::Moonshot,
                 crate::config::DEFAULT_KIMI_CODE_BASE_URL,
                 crate::config::KIMI_CODE_K3_MODEL,

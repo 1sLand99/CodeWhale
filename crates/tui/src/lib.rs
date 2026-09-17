@@ -8733,7 +8733,6 @@ Provide findings ordered by severity with file references, then open questions, 
                 &model,
                 effort,
                 review_reserve_percent,
-                &user_prompt,
             )
         });
         let request = MessageRequest {
@@ -11562,10 +11561,9 @@ fn cli_reasoning_effort_value_for_prompt(
     config: &Config,
     model: &str,
     effort: crate::reasoning_preference::ReasoningEffort,
-    prompt: &str,
 ) -> Option<String> {
     let resolved = if effort == crate::reasoning_preference::ReasoningEffort::Auto {
-        crate::auto_reasoning::select(false, prompt)
+        crate::auto_reasoning::select()
     } else {
         effort
     };
@@ -11580,10 +11578,9 @@ fn review_reasoning_effort_value_for_prompt(
     model: &str,
     effort: crate::reasoning_preference::ReasoningEffort,
     reserve_percent: u32,
-    prompt: &str,
 ) -> Option<String> {
     let resolved = if effort == crate::reasoning_preference::ReasoningEffort::Auto {
-        crate::auto_reasoning::select(false, prompt)
+        crate::auto_reasoning::select()
     } else {
         effort
     };
@@ -11746,7 +11743,7 @@ async fn run_one_shot(
     let execution_config = config_for_cli_route(config, &route);
     let client = DeepSeekClient::new(&execution_config)?;
     let reasoning_effort = route.reasoning_effort.and_then(|effort| {
-        cli_reasoning_effort_value_for_prompt(&execution_config, &route.model, effort, prompt)
+        cli_reasoning_effort_value_for_prompt(&execution_config, &route.model, effort)
     });
     let model = route.model;
     let request_route = client.effective_route_envelope(&model, chrono::Utc::now());
@@ -11809,7 +11806,7 @@ async fn run_one_shot_json(
     let client = DeepSeekClient::new(&execution_config)?;
     let model = route.model.clone();
     let reasoning_effort = route.reasoning_effort.and_then(|effort| {
-        cli_reasoning_effort_value_for_prompt(&execution_config, &model, effort, prompt)
+        cli_reasoning_effort_value_for_prompt(&execution_config, &model, effort)
     });
     let request_route = client.effective_route_envelope(&model, chrono::Utc::now());
     let request = MessageRequest {
@@ -17382,7 +17379,7 @@ api_key = "test-only-key"
     }
 
     #[test]
-    fn cli_prompt_paths_resolve_auto_before_k3_route_normalization() {
+    fn cli_auto_resolves_to_the_declared_default_before_k3_route_normalization() {
         let config = Config {
             provider: Some("moonshot".to_string()),
             providers: Some(crate::config::ProvidersConfig {
@@ -17396,30 +17393,24 @@ api_key = "test-only-key"
             ..Default::default()
         };
 
-        for (prompt, expected) in [
-            ("lookup the public docs", "low"),
-            ("debug this error", "max"),
-            ("review this ordinary change", "high"),
-        ] {
-            assert_eq!(
-                cli_reasoning_effort_value_for_prompt(
-                    &config,
-                    crate::config::KIMI_CODE_K3_MODEL,
-                    crate::reasoning_preference::ReasoningEffort::Auto,
-                    prompt,
-                )
-                .as_deref(),
-                Some(expected),
-                "prompt selector must resolve Auto for `{prompt}`"
-            );
-        }
+        // #6290 rework: Auto no longer classifies the prompt. Any wording
+        // resolves the declared policy tier, normalized for the K3 route.
+        assert_eq!(
+            cli_reasoning_effort_value_for_prompt(
+                &config,
+                crate::config::KIMI_CODE_K3_MODEL,
+                crate::reasoning_preference::ReasoningEffort::Auto,
+            )
+            .as_deref(),
+            Some("high"),
+            "Auto resolves the declared default, not a classification"
+        );
 
         assert_eq!(
             cli_reasoning_effort_value_for_prompt(
                 &config,
                 crate::config::KIMI_CODE_K3_MODEL,
                 crate::reasoning_preference::ReasoningEffort::Off,
-                "debug must not override an explicit effort",
             )
             .as_deref(),
             Some("low"),
@@ -17483,7 +17474,6 @@ api_key = "test-only-key"
             &config,
             crate::config::ZAI_GLM_5_2_MODEL,
             crate::reasoning_preference::ReasoningEffort::Auto,
-            "debug this failing integration test",
         )
         .expect("Auto must resolve to a concrete tier");
 
