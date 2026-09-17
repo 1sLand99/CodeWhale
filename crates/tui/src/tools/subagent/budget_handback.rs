@@ -546,10 +546,10 @@ pub(super) fn fallback_partial_text(messages: &[Message]) -> String {
                         extra_tools += 1;
                     }
                 }
-                ContentBlock::Thinking { thinking: text, .. } => {
-                    if thinking.is_none() && !text.trim().is_empty() {
-                        thinking = Some(text);
-                    }
+                ContentBlock::Thinking { thinking: text, .. }
+                    if thinking.is_none() && !text.trim().is_empty() =>
+                {
+                    thinking = Some(text);
                 }
                 _ => {}
             }
