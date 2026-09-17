@@ -8475,6 +8475,10 @@ base_url = "https://api.xiaomimimo.com/v1"
                     let default: i64 = def.default.parse().unwrap_or(0);
                     vec![(default + 1).to_string()]
                 }
+                None if def.is_float() => {
+                    let default: f64 = def.default.parse().unwrap_or(50.0);
+                    vec![(default + 0.5).to_string()]
+                }
                 None => vec!["roundtrip-probe".to_string()],
             };
             assert!(

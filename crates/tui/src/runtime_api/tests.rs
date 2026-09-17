@@ -8892,8 +8892,8 @@ async fn set_config_rejects_unknown_key_with_bad_request() -> Result<()> {
         .unwrap_or_default()
         .to_lowercase();
     assert!(
-        message.contains("unknown config key"),
-        "error message should mention 'unknown config key', got: {message}"
+        message.contains("unknown setting"),
+        "error message should mention 'unknown setting', got: {message}"
     );
 
     handle.abort();
