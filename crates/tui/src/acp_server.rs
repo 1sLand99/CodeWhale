@@ -3970,7 +3970,7 @@ mod tests {
         );
         let text = crate::prompts::system_prompt_flat_text(&prompt);
 
-        assert!(text.contains(crate::prompts::text::HEADLESS_BASE_PROMPT.trim()));
+        assert!(text.contains(crate::prompts::text::BASE_PROMPT.trim()));
         assert!(text.contains("acp-project-marker"));
         assert!(text.contains("acp-config-marker"));
         assert!(!text.contains("You are a coding assistant inside an ACP-compatible editor."));
