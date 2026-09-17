@@ -2114,7 +2114,7 @@ async fn finish_telemetry(outcome: &Result<()>, surface: codewhale_telemetry::Su
     codewhale_telemetry::record(telemetry_session_end());
     if surface == codewhale_telemetry::Surface::Cli {
         let persistence =
-            codewhale_telemetry::persist_local_blocking(codewhale_telemetry::CLI_PERSIST_TIMEOUT);
+            codewhale_telemetry::persist_local_blocking();
         logging::info(format!(
             "telemetry local persistence outcome={persistence:?}"
         ));
