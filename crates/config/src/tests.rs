@@ -4553,6 +4553,14 @@ fn provider_kind_parses_openrouter_and_novita_aliases() {
         assert_eq!(parsed.provider, ProviderKind::Huggingface);
     }
 
+    for alias in ["modelscope", "modelscope-cn"] {
+        assert_eq!(ProviderKind::parse(alias), Some(ProviderKind::Modelscope));
+
+        let parsed: ConfigToml =
+            toml::from_str(&format!("provider = \"{alias}\"")).expect("modelscope alias");
+        assert_eq!(parsed.provider, ProviderKind::Modelscope);
+    }
+
     for alias in ["deepinfra", "deep-infra", "deep_infra"] {
         assert_eq!(ProviderKind::parse(alias), Some(ProviderKind::Deepinfra));
 
@@ -5562,12 +5570,12 @@ fn meta_model_api_scopes_both_documented_key_names_to_official_endpoint() {
 fn provider_metadata_registry_covers_every_provider_kind_once() {
     let providers = provider::all_providers();
     // Full registry keeps legacy dialect/plan kinds for provider_for_kind.
-    assert_eq!(providers.len(), 49);
+    assert_eq!(providers.len(), 50);
     // Catalog surface is one identity per vendor (no dual-wire / plan rows),
     // and never a retired tombstone: Antigravity stays in the full registry
     // so old config parses and can be cleared, but it left `ALL` when it
     // stopped being selectable (PRD §4.4 PROD-002).
-    assert_eq!(ProviderKind::ALL.len(), 43);
+    assert_eq!(ProviderKind::ALL.len(), 44);
     assert!(
         !ProviderKind::ALL.contains(&ProviderKind::Antigravity),
         "a tombstone must never be offered as a selectable provider"

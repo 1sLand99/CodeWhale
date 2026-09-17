@@ -4764,6 +4764,7 @@ pub(super) fn apply_reasoning_effort(
             | ApiProvider::Qianfan
             | ApiProvider::Arcee
             | ApiProvider::Huggingface
+            | ApiProvider::Modelscope
             | ApiProvider::Custom => {}
             ApiProvider::Moonshot => {
                 // #3024: Kimi models accept thinking enable/disable.
@@ -4853,7 +4854,7 @@ pub(super) fn apply_reasoning_effort(
             ApiProvider::XiaomiMimo => {
                 body["thinking"] = json!({ "type": "enabled" });
             }
-            ApiProvider::Arcee | ApiProvider::Huggingface => {
+            ApiProvider::Arcee | ApiProvider::Huggingface | ApiProvider::Modelscope => {
                 let value = match normalized.as_str() {
                     "minimal" => "minimal",
                     "low" => "low",
@@ -4968,7 +4969,7 @@ pub(super) fn apply_reasoning_effort(
             ApiProvider::XiaomiMimo => {
                 body["thinking"] = json!({ "type": "enabled" });
             }
-            ApiProvider::Arcee | ApiProvider::Huggingface => {
+            ApiProvider::Arcee | ApiProvider::Huggingface | ApiProvider::Modelscope => {
                 body["reasoning_effort"] = json!("high");
             }
             ApiProvider::Fireworks => {
