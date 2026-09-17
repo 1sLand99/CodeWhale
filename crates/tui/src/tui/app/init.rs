@@ -1085,7 +1085,6 @@ impl App {
             queued_messages: VecDeque::new(),
             queued_draft: None,
             pending_steers: VecDeque::new(),
-            rejected_steers: VecDeque::new(),
             inflight_steers: VecDeque::new(),
             submit_pending_steers_after_interrupt: false,
             turn_started_at: None,

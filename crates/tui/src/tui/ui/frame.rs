@@ -1366,13 +1366,11 @@ pub(crate) fn live_tool_content_is_receipt(content: &str) -> bool {
 
 /// Build the pending-input preview widget from current `App` state.
 ///
-/// v0.6.6 (#122) wires all three buckets:
+/// v0.6.6 (#122) wires the live buckets:
 /// - `pending_steers` — typed during a running turn + Esc; held until the
 ///   abort lands and gets resubmitted as a fresh merged turn.
-/// - `rejected_steers` — engine declined a mid-turn steer (scaffolding;
-///   no engine path produces these yet but the bucket renders with a distinct
-///   rejected-steer label).
-/// - `queued_messages` — Enter while busy; drained at end-of-turn. In Operate,
+/// - `queued_messages` — Enter while busy; drained at end-of-turn. An
+///   unaccepted steer also lands here (#6297) so it is never lost. In Operate,
 ///   the foreground operator dispatches these as additional background tasks.
 pub(crate) fn build_pending_input_preview(app: &App) -> PendingInputPreview {
     let mut preview = PendingInputPreview::new();
@@ -1408,7 +1406,6 @@ pub(crate) fn build_pending_input_preview(app: &App) -> PendingInputPreview {
         .chain(app.inflight_steers.iter().map(|steer| &steer.message))
         .map(|m| m.display.clone())
         .collect();
-    preview.rejected_steers = app.rejected_steers.iter().cloned().collect();
     preview.queued_messages = app
         .queued_messages
         .iter()

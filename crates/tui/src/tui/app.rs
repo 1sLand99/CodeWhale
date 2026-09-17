@@ -2268,18 +2268,11 @@ pub struct App {
     /// in-flight input uses Ctrl+Enter for same-turn steering and Enter for
     /// queued follow-ups; Esc only cancels the active turn.
     pub pending_steers: VecDeque<QueuedMessage>,
-    /// Engine-rejected steers (e.g. a tool was already running and couldn't be
-    /// cancelled cleanly). Surfaced in the pending-input preview so the user
-    /// knows the steer was deferred to end-of-turn. Today no engine path
-    /// produces these; the field is scaffolding for a future signalling
-    /// channel and the bucket renders with a rejected-steer label when
-    /// populated.
-    pub rejected_steers: VecDeque<String>,
     /// Steers accepted by the steer channel but not yet seen in the engine's
     /// record. Rendered through the same "sending into turn" preview bucket as
     /// `pending_steers`; promoted to a transcript cell by
-    /// `apply_engine_session_projection`, or moved to `rejected_steers` by
-    /// `TurnComplete` when the turn ended without them (#6190).
+    /// `apply_engine_session_projection`, or queued as a follow-up by
+    /// `TurnComplete` when the turn ended without them (#6190, #6297).
     pub inflight_steers: VecDeque<InflightSteer>,
     /// Legacy resend flag for pending steer recovery.
     pub submit_pending_steers_after_interrupt: bool,

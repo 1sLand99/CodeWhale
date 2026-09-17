@@ -1289,17 +1289,18 @@ fn accepted_steer_index(
         .map(|(index, _)| index)
 }
 
-/// A turn that ended without accepting a steer dropped it. Say so where the
-/// steer was already being shown, instead of leaving it "sending" forever or
-/// — as before #6190 — leaving a transcript cell for input the model never
-/// received.
+/// A turn that ended without accepting a steer must not swallow it (#6190,
+/// #6297). The message becomes a queued follow-up — the queue is the one path
+/// that actually drains into a turn, where the engine's context-pressure gate
+/// sees it like any other send — instead of a display-only "rejected" string
+/// that nothing ever dispatches.
 pub(crate) fn settle_unaccepted_steers_at_turn_end(app: &mut App) {
     if app.inflight_steers.is_empty() {
         return;
     }
-    for steer in std::mem::take(&mut app.inflight_steers) {
-        app.rejected_steers.push_back(steer.message.display);
-    }
+    let deferred = std::mem::take(&mut app.inflight_steers);
+    app.queued_messages
+        .extend(deferred.into_iter().map(|steer| steer.message));
     app.needs_redraw = true;
 }
 

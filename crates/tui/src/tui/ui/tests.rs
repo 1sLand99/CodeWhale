@@ -1,7 +1,6 @@
 use super::activity_detail::*;
 use super::compaction_flow::{
     apply_compaction_started, compact_interrupt_should_stop_turn, maybe_warn_context_pressure,
-    should_auto_compact_before_send, should_auto_compact_before_send_with_config,
 };
 use super::event_loop::{TabDispatch, dispatch_tab_key, shell_binding_for_key};
 use super::observer_hooks::{
@@ -10659,8 +10658,10 @@ async fn paused_dispatch_at_compaction_threshold_enqueues_one_atomic_send() {
     app.api_messages = vec![text_message("assistant", &"context ".repeat(240_000))];
     let planned_compaction =
         app.compaction_config_for_route(app.api_provider, &app.model, app.active_route_limits);
+    let fixture_used =
+        estimated_context_tokens(&app).expect("fixture context estimate should be available");
     assert!(
-        should_auto_compact_before_send_with_config(&app, &planned_compaction),
+        fixture_used >= planned_compaction.token_threshold as i64,
         "fixture must already require compaction"
     );
 
@@ -11872,10 +11873,18 @@ async fn steer_the_turn_never_accepted_is_reported_not_left_in_the_transcript() 
         "a dropped steer must not leave a transcript cell the record never had"
     );
     assert!(app.api_messages.is_empty());
+    assert_eq!(
+        app.queued_messages
+            .iter()
+            .map(|message| message.display.as_str())
+            .collect::<Vec<_>>(),
+        vec!["too late to matter"],
+        "an unaccepted steer is queued for the next turn, never dropped (#6297)"
+    );
     let preview = build_pending_input_preview(&app);
     assert!(preview.pending_steers.is_empty());
     assert_eq!(
-        preview.rejected_steers,
+        preview.queued_messages,
         vec!["too late to matter".to_string()]
     );
 }
@@ -15634,31 +15643,6 @@ fn context_usage_snapshot_prefers_live_estimate_while_loading() {
     assert_eq!(max, 1_000_000);
     assert!(used > i64::from(app.session.last_prompt_tokens.expect("reported tokens")));
     assert!(percent > 0.0);
-}
-
-#[test]
-fn should_auto_compact_before_send_uses_shared_token_threshold() {
-    let mut app = create_test_app();
-    app.api_messages = vec![Message {
-        role: Role::User,
-        content: vec![ContentBlock::Text {
-            text: "context ".repeat(240_000),
-            cache_control: None,
-        }],
-    }];
-    let (used, _, _) = context_usage_snapshot(&app).expect("context snapshot");
-    let used = usize::try_from(used).expect("non-negative context estimate");
-
-    app.auto_compact = true;
-    app.compact_threshold = used;
-    assert!(should_auto_compact_before_send(&app));
-
-    app.compact_threshold = used.saturating_add(1);
-    assert!(!should_auto_compact_before_send(&app));
-
-    app.auto_compact = false;
-    app.compact_threshold = 0;
-    assert!(!should_auto_compact_before_send(&app));
 }
 
 #[test]
@@ -24396,15 +24380,13 @@ fn merged_pending_steers_cross_bounded_message_submit_serialization() {
 }
 
 #[test]
-fn build_pending_input_preview_populates_all_three_buckets() {
+fn build_pending_input_preview_populates_steer_and_queue_buckets() {
     let mut app = create_test_app();
     app.push_pending_steer(QueuedMessage::new("steer-msg".to_string(), None));
-    app.rejected_steers.push_back("rejected-msg".to_string());
     app.queue_message(QueuedMessage::new("queued-msg".to_string(), None));
 
     let preview = build_pending_input_preview(&app);
     assert_eq!(preview.pending_steers, vec!["steer-msg".to_string()]);
-    assert_eq!(preview.rejected_steers, vec!["rejected-msg".to_string()]);
     assert_eq!(preview.queued_messages, vec!["queued-msg".to_string()]);
 }
 
