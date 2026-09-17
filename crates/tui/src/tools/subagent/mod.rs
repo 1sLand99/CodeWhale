@@ -9683,7 +9683,7 @@ impl ToolSpec for AgentTool {
                 },
                 "exact_files": {
                     "type": "array", "items": {"type": "string", "minLength": 1},
-                    "description": "Repo-relative files the write-capable child claims, or files added by action=claim. Prefer disjoint files when peers own neighboring paths."
+                    "description": "Repo-relative files the write-capable child claims, or files added by action=claim. Prefer disjoint files when peers own neighboring paths; files beneath a claimed write_root bind that root to just those files, so peers can share one root with disjoint outputs."
                 },
                 "coordination_contracts": {
                     "type": "array", "items": {"type": "string", "minLength": 1},
