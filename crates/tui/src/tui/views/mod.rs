@@ -2076,16 +2076,6 @@ impl ConfigView {
                     .opens("/provider", MessageId::ConfigActionOpenProvider),
             },
             ConfigRow {
-                key: "provider_templates".to_string(),
-                value: codewhale_config::ProviderSetupTemplate::settings_value(),
-                editable: true,
-                scope: ConfigScope::Saved,
-                facts: ConfigRowFacts::action(
-                    "/provider templates",
-                    MessageId::ConfigActionOpenProviderTemplates,
-                ),
-            },
-            ConfigRow {
                 key: config_base_url_row_key(active_route_provider).to_string(),
                 value: config_base_url_row_value(app),
                 // An endpoint is a route receipt, not a loose global knob.
@@ -7312,7 +7302,6 @@ mod tests {
             .map(|row| row.key.as_str())
             .collect::<Vec<_>>();
         assert!(keys.contains(&"provider"));
-        assert!(keys.contains(&"provider_templates"));
         assert!(keys.contains(&"model"));
         assert!(keys.contains(&"reasoning_effort"));
         assert!(keys.contains(&"base_url"));
@@ -8327,7 +8316,6 @@ base_url = "https://api.xiaomimimo.com/v1"
         // persisted to config.toml by `set_config_value`.
         const NOT_SETTINGS_TOML: &[&str] = &[
             "provider",
-            "provider_templates",
             "model",
             "fleet.exec.max_spawn_depth",
             "goal_command",
@@ -9262,7 +9250,6 @@ context_window = 262144
         };
 
         assert_eq!(kind_for("provider"), SettingKind::Action);
-        assert_eq!(kind_for("provider_templates"), SettingKind::Action);
         assert_eq!(kind_for("model"), SettingKind::Action);
         assert_eq!(kind_for("low_motion"), SettingKind::Boolean);
         assert_eq!(kind_for("default_mode"), SettingKind::Choice);

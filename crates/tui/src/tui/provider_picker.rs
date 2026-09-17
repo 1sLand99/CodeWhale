@@ -55,10 +55,6 @@ use crate::tui::views::{
 use codewhale_config::catalog::{CatalogOffering, CatalogSnapshot};
 use codewhale_config::provider::{CredentialAcquisition, WireFormat};
 use codewhale_config::route::{PricingSku, RequestProtocol};
-use codewhale_config::{
-    AGNES_TEMPLATE_ID, ProviderSetupApply, ProviderSetupTemplate, SENSENOVA_TEMPLATE_ID,
-    provider_setup_template, provider_setup_templates,
-};
 use codewhale_localization::{Locale, MessageId, tr};
 use codewhale_palette as palette;
 use serde_json::Value;
@@ -99,8 +95,6 @@ enum Stage {
     /// Confirmation summary before any secret or model is persisted (#3875).
     Confirm,
     CustomForm,
-    /// Beginner template catalog (#5350).
-    TemplateList,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,12 +214,9 @@ pub struct ProviderPickerView {
     custom_provider_base_url: String,
     custom_provider_model: String,
     custom_provider_api_key_env: String,
-    template_selected_idx: usize,
-    template_row_hitboxes: RefCell<Vec<(Rect, usize)>>,
-    last_template_mouse_selected: Option<usize>,
     /// Pointer geometry for the two-pane picker (Slice D): provider-strip
     /// rows on the left, model rows on the right/under, recorded during
-    /// render like the template hitboxes above.
+    /// render like the consent hitboxes below.
     list_row_hitboxes: RefCell<Vec<(Rect, usize)>>,
     model_row_hitboxes: RefCell<Vec<(Rect, usize)>>,
     consent_row_hitboxes: RefCell<Vec<(Rect, usize)>>,
@@ -239,7 +230,6 @@ pub struct ProviderPickerView {
     /// double-click-activate rhythm (mirrors the model picker).
     last_list_mouse_selected: Option<usize>,
     last_model_mouse_selected: Option<usize>,
-    hovered_template_idx: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -281,11 +271,6 @@ pub struct ProviderDashboardRow {
     /// optional — that would clutter the default view with every untouched
     /// local-provider slot.
     pub is_configured: bool,
-    /// The setup template this row stands in for: a compatible host the
-    /// operator has not configured yet (Baseten, Groq, Cerebras, ...).
-    /// Activating such a row opens the custom-provider form pre-filled from
-    /// the template instead of a key prompt for a route that does not exist.
-    pub template_id: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -681,7 +666,6 @@ impl ProviderDashboardRow {
                     configured,
                     provider == ApiProvider::Custom && provider_id_override.is_some(),
                 ),
-                template_id: None,
             };
         };
 
@@ -901,7 +885,6 @@ impl ProviderDashboardRow {
                 configured,
                 provider == ApiProvider::Custom && provider_id_override.is_some(),
             ),
-            template_id: None,
         }
     }
 
@@ -1718,7 +1701,6 @@ impl ProviderPickerView {
             })
             .collect();
         rows.extend(custom_rows);
-        rows.extend(template_dashboard_rows(active, config, runtime_status));
         // Providers you have configured lead; the rest of the catalog follows
         // alphabetically. Founder live-test: "we should also make that list
         // ordered logically so like the ones you have configured at the top
@@ -1777,9 +1759,6 @@ impl ProviderPickerView {
             custom_provider_base_url: String::new(),
             custom_provider_model: String::new(),
             custom_provider_api_key_env: String::new(),
-            template_selected_idx: 0,
-            template_row_hitboxes: RefCell::new(Vec::new()),
-            last_template_mouse_selected: None,
             list_row_hitboxes: RefCell::new(Vec::new()),
             model_row_hitboxes: RefCell::new(Vec::new()),
             consent_row_hitboxes: RefCell::new(Vec::new()),
@@ -1788,7 +1767,6 @@ impl ProviderPickerView {
             hovered_consent_idx: None,
             last_list_mouse_selected: None,
             last_model_mouse_selected: None,
-            hovered_template_idx: None,
         };
         picker.restore_memory(memory);
         picker
@@ -1878,35 +1856,6 @@ impl ProviderPickerView {
         picker.setup_mode = true;
         picker.enter_ds4_form();
         picker
-    }
-
-    /// Open the beginner template list (`/provider templates`, Settings).
-    #[must_use]
-    pub fn new_for_template_list(
-        active: ApiProvider,
-        config: &Config,
-        runtime_status: Option<ProviderRuntimeStatus>,
-    ) -> Self {
-        let mut picker = Self::new_with_runtime_status(active, config, runtime_status);
-        picker.setup_mode = true;
-        picker.enter_template_list();
-        picker
-    }
-
-    /// Apply one catalog template: first-class key-only setup, compatible
-    /// custom form, or unpublished guidance.
-    #[must_use]
-    pub fn new_for_template_setup(
-        active: ApiProvider,
-        template_id: &str,
-        config: &Config,
-        runtime_status: Option<ProviderRuntimeStatus>,
-    ) -> Option<Self> {
-        let template = provider_setup_template(template_id)?;
-        let mut picker = Self::new_with_runtime_status(active, config, runtime_status);
-        picker.setup_mode = true;
-        picker.apply_template(template);
-        Some(picker)
     }
 
     /// Open the setup catalog for first-run/recovery onboarding (#4763).
@@ -2404,136 +2353,6 @@ impl ProviderPickerView {
         // leave the model editable instead of guessing a stale default.
         self.custom_provider_model.clear();
         self.custom_provider_api_key_env.clear();
-    }
-
-    fn enter_sensenova_form(&mut self) {
-        if let Some(template) = provider_setup_template(SENSENOVA_TEMPLATE_ID) {
-            self.apply_template(template);
-        }
-    }
-
-    fn enter_template_list(&mut self) {
-        self.stage = Stage::TemplateList;
-        self.template_selected_idx = self
-            .template_selected_idx
-            .min(provider_setup_templates().len().saturating_sub(1));
-        self.last_template_mouse_selected = None;
-        self.template_row_hitboxes.borrow_mut().clear();
-    }
-
-    fn selected_template(&self) -> Option<&'static ProviderSetupTemplate> {
-        provider_setup_templates().get(self.template_selected_idx)
-    }
-
-    fn move_template_selection(&mut self, delta: isize) {
-        let total = provider_setup_templates().len();
-        if total == 0 {
-            return;
-        }
-        self.template_selected_idx =
-            crate::tui::list_nav::wrap_index(self.template_selected_idx, total, delta);
-        self.last_template_mouse_selected = None;
-    }
-
-    fn template_kind_label(&self, template: &ProviderSetupTemplate) -> Cow<'static, str> {
-        self.tr(match template.apply {
-            ProviderSetupApply::FirstClass(_) => MessageId::ProviderTemplateKindKeyOnly,
-            ProviderSetupApply::Compatible => MessageId::ProviderTemplateKindCompatible,
-            ProviderSetupApply::Unpublished => MessageId::ProviderTemplateKindUnpublished,
-        })
-    }
-
-    fn template_guidance_text(&self, template: &ProviderSetupTemplate) -> Cow<'static, str> {
-        match template.id {
-            "opencode-zen" => self.tr(MessageId::ProviderTemplateGuidanceOpencodeZen),
-            "opencode-go" => self.tr(MessageId::ProviderTemplateGuidanceOpencodeGo),
-            id if id == SENSENOVA_TEMPLATE_ID => {
-                self.tr(MessageId::ProviderTemplateGuidanceSenseNova)
-            }
-            id if id == AGNES_TEMPLATE_ID => self.tr(MessageId::ProviderTemplateGuidanceAgnes),
-            _ => Cow::Borrowed(template.guidance()),
-        }
-    }
-
-    fn activate_selected_template(&mut self) -> ViewAction {
-        if let Some(template) = self.selected_template() {
-            if template.is_unpublished() {
-                ViewAction::Emit(ViewEvent::StatusMessage {
-                    message: self.tr(MessageId::ProviderTemplateUnpublished).into_owned(),
-                })
-            } else {
-                self.apply_template(template);
-                ViewAction::None
-            }
-        } else {
-            ViewAction::None
-        }
-    }
-
-    fn handle_template_list_click(&mut self, mouse: MouseEvent) -> ViewAction {
-        let clicked = self
-            .template_row_hitboxes
-            .borrow()
-            .iter()
-            .find_map(|(rect, idx)| {
-                rect.contains(Position::new(mouse.column, mouse.row))
-                    .then_some(*idx)
-            });
-        let Some(idx) = clicked else {
-            return ViewAction::None;
-        };
-        let activate =
-            self.last_template_mouse_selected == Some(idx) && self.template_selected_idx == idx;
-        self.template_selected_idx = idx;
-        self.last_template_mouse_selected = Some(idx);
-        if activate {
-            self.activate_selected_template()
-        } else {
-            ViewAction::None
-        }
-    }
-
-    fn apply_template(&mut self, template: &'static ProviderSetupTemplate) {
-        match template.apply {
-            ProviderSetupApply::FirstClass(kind) => {
-                let provider = ApiProvider::from_kind(kind);
-                if !self.rows.iter().any(|row| row.provider == provider)
-                    || (self
-                        .rows
-                        .iter()
-                        .position(|row| row.provider == provider)
-                        .is_some_and(|idx| !self.row_visible(idx)))
-                {
-                    self.view = ProviderListView::Catalog;
-                }
-                if let Some(idx) = self.rows.iter().position(|row| row.provider == provider) {
-                    self.selected_idx = idx;
-                    self.stage = Stage::List;
-                    if !self.selected_has_key() {
-                        self.begin_setup();
-                    }
-                }
-            }
-            ProviderSetupApply::Compatible => self.enter_compatible_form(template),
-            ProviderSetupApply::Unpublished => {
-                if let Some(idx) = provider_setup_templates()
-                    .iter()
-                    .position(|candidate| candidate.id == template.id)
-                {
-                    self.template_selected_idx = idx;
-                }
-                self.enter_template_list();
-            }
-        }
-    }
-
-    fn enter_compatible_form(&mut self, template: &'static ProviderSetupTemplate) {
-        self.stage = Stage::CustomForm;
-        self.custom_provider_field = CustomProviderField::ApiKeyEnv;
-        self.custom_provider_id = template.id.to_string();
-        self.custom_provider_base_url = template.base_url().unwrap_or("").to_string();
-        self.custom_provider_model = template.default_model().unwrap_or("").to_string();
-        self.custom_provider_api_key_env = template.api_key_env().unwrap_or("").to_string();
     }
 
     fn custom_form_field_mut(&mut self) -> &mut String {
@@ -3307,8 +3126,7 @@ impl ProviderPickerView {
                 )));
                 if let Some(url) = help.docs_url {
                     hint_lines.push(Line::from(Span::styled(
-                        self.tr(MessageId::ProviderTemplateDocs)
-                            .replace("{url}", url),
+                        format!("Docs: {url}"),
                         Style::default().fg(palette::TEXT_MUTED),
                     )));
                 }
@@ -3846,10 +3664,7 @@ impl ProviderPickerView {
     }
 
     fn render_custom_form(&self, area: Rect, buf: &mut Buffer) {
-        let title = provider_setup_template(&self.custom_provider_id)
-            .filter(|template| template.is_compatible())
-            .map(|template| format!(" {} ", template.display_name))
-            .unwrap_or_else(|| " Custom provider ".to_string());
+        let title = " Custom provider ".to_string();
         let outer = Block::default()
             .title(Line::from(Span::styled(
                 title,
@@ -3884,19 +3699,7 @@ impl ProviderPickerView {
             ])
             .split(content);
 
-        let hint = provider_setup_template(&self.custom_provider_id)
-            .filter(|template| template.is_compatible())
-            .map(|template| {
-                let mut parts = vec![self.template_guidance_text(template).into_owned()];
-                if let Some(url) = template.docs_url() {
-                    parts.push(
-                        self.tr(MessageId::ProviderTemplateDocs)
-                            .replace("{url}", url),
-                    );
-                }
-                parts.join(" ")
-            })
-            .unwrap_or_else(|| self.tr(MessageId::ProviderCustomFormHint).into_owned());
+        let hint = self.tr(MessageId::ProviderCustomFormHint).into_owned();
         Paragraph::new(Line::from(Span::styled(
             hint,
             Style::default().fg(palette::TEXT_MUTED),
@@ -3926,150 +3729,6 @@ impl ProviderPickerView {
             "API key env",
             "optional",
         );
-    }
-
-    fn render_template_list(&self, area: Rect, buf: &mut Buffer) {
-        self.template_row_hitboxes.borrow_mut().clear();
-        let outer = Block::default()
-            .title(Line::from(Span::styled(
-                format!(" {} ", self.tr(MessageId::ProviderTemplatesTitle)),
-                Style::default()
-                    .fg(palette::WHALE_ACTION)
-                    .add_modifier(Modifier::BOLD),
-            )))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(palette::BORDER_COLOR))
-            .style(Style::default().bg(palette::WHALE_BG));
-        let inner = outer.inner(area);
-        outer.render(area, buf);
-
-        let content = render_modal_footer(
-            inner,
-            buf,
-            &[
-                ActionHint::new("↑↓", self.tr(MessageId::PickerActionMove)),
-                ActionHint::new("Enter", self.tr(MessageId::PickerActionApply)),
-                ActionHint::new("Esc", self.tr(MessageId::PickerActionCancel)),
-            ],
-        );
-        // Each row carries its kind label and the detail pane below explains
-        // the selected row, so the list needs no introductory paragraph.
-        let templates = provider_setup_templates();
-        let detail_reserve = if content.height >= 6 {
-            3
-        } else if content.height >= 4 {
-            2
-        } else if content.height >= 3 {
-            1
-        } else {
-            0
-        };
-        let list_budget = content.height.saturating_sub(detail_reserve).max(1);
-        let visible_count = templates
-            .len()
-            .min(usize::from(list_budget))
-            .max(usize::from(content.height > 0));
-        let list_height = u16::try_from(visible_count).unwrap_or(u16::MAX).max(1);
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(list_height),
-                Constraint::Min(detail_reserve),
-            ])
-            .split(content);
-        let selected = self
-            .template_selected_idx
-            .min(templates.len().saturating_sub(1));
-        let max_start = templates.len().saturating_sub(visible_count);
-        let start = selected
-            .saturating_sub(visible_count.saturating_sub(1))
-            .min(max_start);
-        let list_area = chunks[0];
-        for (offset, (idx, template)) in templates
-            .iter()
-            .enumerate()
-            .skip(start)
-            .take(visible_count)
-            .enumerate()
-        {
-            let row_y = list_area.y.saturating_add(offset as u16);
-            if row_y >= list_area.bottom() {
-                break;
-            }
-            let row = Rect::new(list_area.x, row_y, list_area.width, 1);
-            self.template_row_hitboxes.borrow_mut().push((row, idx));
-            let selected_row = idx == self.template_selected_idx;
-            let marker = crate::tui::glyphs::selection_marker(selected_row);
-            let kind = self.template_kind_label(template);
-            // Slice D hover rule: template rows are clickable, so they
-            // hover-respond with the shared primitive like every other row.
-            let style = if selected_row {
-                menu_style::selected_row_style_with_fg(palette::SELECTION_TEXT)
-            } else if self.hovered_template_idx == Some(idx) {
-                menu_style::hovered_row_style()
-            } else {
-                Style::default().fg(palette::TEXT_PRIMARY)
-            };
-            let label = format!(
-                "{marker} {} ({}) · {kind}",
-                template.display_name, template.id
-            );
-            Paragraph::new(Line::from(Span::styled(
-                crate::tui::ui_text::truncate_line_to_width(&label, usize::from(row.width)),
-                style,
-            )))
-            .render(row, buf);
-        }
-
-        let mut detail = Vec::new();
-        if let Some(template) = self.selected_template() {
-            if template.is_unpublished() {
-                detail.push(Line::from(Span::styled(
-                    self.tr(MessageId::ProviderTemplateUnpublished),
-                    Style::default().fg(palette::TEXT_MUTED),
-                )));
-            } else if let Some(url) = template.base_url() {
-                detail.push(Line::from(Span::styled(
-                    self.tr(MessageId::ProviderTemplateBaseUrl)
-                        .replace("{url}", url),
-                    Style::default().fg(palette::TEXT_MUTED),
-                )));
-            }
-            if let Some(env) = template.api_key_env() {
-                detail.push(Line::from(Span::styled(
-                    env.to_string(),
-                    Style::default().fg(palette::TEXT_MUTED),
-                )));
-            }
-            if let Some(model) = template.default_model() {
-                detail.push(Line::from(Span::styled(
-                    self.tr(MessageId::ProviderTemplateModel)
-                        .replace("{model}", model),
-                    Style::default().fg(palette::TEXT_MUTED),
-                )));
-            }
-            if let Some(url) = template.docs_url() {
-                detail.push(Line::from(Span::styled(
-                    self.tr(MessageId::ProviderTemplateDocs)
-                        .replace("{url}", url),
-                    Style::default().fg(palette::TEXT_MUTED),
-                )));
-            }
-            if let Some(url) = template.credential_url() {
-                detail.push(Line::from(Span::styled(
-                    self.tr(MessageId::ProviderTemplateCredentials)
-                        .replace("{url}", url),
-                    Style::default().fg(palette::TEXT_MUTED),
-                )));
-            }
-            detail.push(Line::from(Span::styled(
-                self.template_guidance_text(template),
-                Style::default().fg(palette::TEXT_MUTED),
-            )));
-        }
-        Paragraph::new(detail)
-            .wrap(Wrap { trim: true })
-            .render(chunks[1], buf);
     }
 
     fn render_custom_form_field(
@@ -4146,18 +3805,6 @@ impl ProviderPickerView {
     /// paths apply, set up, or route to the custom form identically.
     fn activate_selected_row(&mut self) -> ViewAction {
         if !self.row_visible(self.selected_idx) {
-            return ViewAction::None;
-        }
-        if let Some(template) = self.rows[self.selected_idx]
-            .template_id
-            .and_then(provider_setup_template)
-        {
-            // A template row is a host the operator has not configured yet:
-            // land on the custom-provider form with the template's endpoint,
-            // model and key variable filled in, exactly as `/provider
-            // templates` does, instead of prompting for a key on a route that
-            // does not exist.
-            self.apply_template(template);
             return ViewAction::None;
         }
         let provider = self.selected_provider();
@@ -4295,8 +3942,7 @@ impl ModalView for ProviderPickerView {
             | Stage::ModelPick
             | Stage::PlanTier
             | Stage::StepfunBillingRoute
-            | Stage::Confirm
-            | Stage::TemplateList => false,
+            | Stage::Confirm => false,
         }
     }
 
@@ -4410,22 +4056,6 @@ impl ModalView for ProviderPickerView {
                         && c.eq_ignore_ascii_case(&'d') =>
                 {
                     self.enter_ds4_form();
-                    ViewAction::None
-                }
-                KeyCode::Char(c)
-                    if key.modifiers.is_empty()
-                        && self.query.is_empty()
-                        && c.eq_ignore_ascii_case(&'s') =>
-                {
-                    self.enter_sensenova_form();
-                    ViewAction::None
-                }
-                KeyCode::Char(c)
-                    if key.modifiers.is_empty()
-                        && self.query.is_empty()
-                        && c.eq_ignore_ascii_case(&'p') =>
-                {
-                    self.enter_template_list();
                     ViewAction::None
                 }
                 KeyCode::Char(c)
@@ -4775,22 +4405,6 @@ impl ModalView for ProviderPickerView {
                     .unwrap_or(ViewAction::None),
                 _ => ViewAction::None,
             },
-            Stage::TemplateList => match key.code {
-                KeyCode::Esc => {
-                    self.stage = Stage::List;
-                    ViewAction::None
-                }
-                KeyCode::Up => {
-                    self.move_template_selection(-1);
-                    ViewAction::None
-                }
-                KeyCode::Down => {
-                    self.move_template_selection(1);
-                    ViewAction::None
-                }
-                KeyCode::Enter => self.activate_selected_template(),
-                _ => ViewAction::None,
-            },
             Stage::CustomForm => match key.code {
                 KeyCode::Esc => {
                     self.stage = Stage::List;
@@ -4878,31 +4492,6 @@ impl ModalView for ProviderPickerView {
                 }
                 _ => {}
             },
-            Stage::TemplateList => {
-                return match mouse.kind {
-                    MouseEventKind::ScrollUp => {
-                        self.move_template_selection(-1);
-                        ViewAction::None
-                    }
-                    MouseEventKind::ScrollDown => {
-                        self.move_template_selection(1);
-                        ViewAction::None
-                    }
-                    MouseEventKind::Moved => {
-                        let pos = Position::new(mouse.column, mouse.row);
-                        self.hovered_template_idx = self
-                            .template_row_hitboxes
-                            .borrow()
-                            .iter()
-                            .find_map(|(rect, idx)| rect.contains(pos).then_some(*idx));
-                        ViewAction::None
-                    }
-                    MouseEventKind::Down(MouseButton::Left) => {
-                        self.handle_template_list_click(mouse)
-                    }
-                    _ => ViewAction::None,
-                };
-            }
             Stage::PlanTier
             | Stage::StepfunBillingRoute
             | Stage::XaiAuthChoice
@@ -4936,8 +4525,6 @@ impl ModalView for ProviderPickerView {
             Stage::StepfunBillingRoute => 11,
             Stage::Confirm => 10,
             Stage::CustomForm => 12,
-            // Catalog rows + descriptor detail (URL, env, default, docs).
-            Stage::TemplateList => 18,
         };
         let popup_area = centered_modal_area(area, 120, preferred_height, 64, 8);
 
@@ -4958,7 +4545,6 @@ impl ModalView for ProviderPickerView {
             Stage::StepfunBillingRoute => self.render_stepfun_billing_route(popup_area, buf),
             Stage::Confirm => self.render_confirm(popup_area, buf),
             Stage::CustomForm => self.render_custom_form(popup_area, buf),
-            Stage::TemplateList => self.render_template_list(popup_area, buf),
         }
     }
 }
@@ -4991,62 +4577,6 @@ fn custom_provider_dashboard_rows(
                 config,
                 runtime_status,
             )
-        })
-        .collect()
-}
-
-/// Compatible setup templates the operator has not configured yet (Baseten,
-/// Groq, Cerebras, ...) as rows of the provider list. They used to be
-/// reachable only through `/provider templates`; a row is what the operator
-/// looks for. Each row is derived the way a configured custom provider's row
-/// is — from a scoped config carrying the template's endpoint, model and key
-/// variable — so its protocol, readiness and credential-source facts are the
-/// real ones. It is then marked unconfigured, so it sorts with the catalog
-/// and stays out of the configured-only view, and tagged with its template so
-/// activation lands on the pre-filled custom-provider form.
-fn template_dashboard_rows(
-    active: ApiProvider,
-    config: &Config,
-    runtime_status: Option<&ProviderRuntimeStatus>,
-) -> Vec<ProviderDashboardRow> {
-    provider_setup_templates()
-        .iter()
-        .filter(|template| template.is_compatible())
-        .filter(|template| {
-            // A custom provider the operator already named after the
-            // template has its own configured row.
-            !config
-                .providers
-                .as_ref()
-                .is_some_and(|providers| providers.custom_provider_config(template.id).is_some())
-        })
-        .map(|template| {
-            let mut scoped = config.clone();
-            scoped
-                .providers
-                .get_or_insert_with(Default::default)
-                .custom
-                .insert(
-                    template.id.to_string(),
-                    crate::config::ProviderConfig {
-                        kind: Some("openai-compatible".to_string()),
-                        base_url: template.base_url().map(str::to_string),
-                        model: template.default_model().map(str::to_string),
-                        api_key_env: template.api_key_env().map(str::to_string),
-                        ..Default::default()
-                    },
-                );
-            let mut row = ProviderDashboardRow::from_custom_config_with_runtime_status(
-                template.id,
-                active,
-                &scoped,
-                runtime_status,
-            );
-            row.display_name = template.display_name.to_string();
-            row.is_active = false;
-            row.is_configured = false;
-            row.template_id = Some(template.id);
-            row
         })
         .collect()
 }
@@ -5190,17 +4720,8 @@ mod tests {
             .collect();
 
         // Catalog surface: one identity per vendor (not dual-wire / plan
-        // kinds), plus one row per compatible setup template the operator has
-        // not configured (Baseten and friends).
-        let compatible_templates = provider_setup_templates()
-            .iter()
-            .filter(|template| template.is_compatible())
-            .count();
-        assert_eq!(
-            names.len(),
-            ApiProvider::catalog().len() + compatible_templates
-        );
-        assert!(names.contains(&"Baseten"), "{names:?}");
+        // kinds). Setup templates are retired (#6289): no extra rows.
+        assert_eq!(names.len(), ApiProvider::catalog().len());
         assert!(names.contains(&"DeepSeek"));
         assert!(names.contains(&"Alibaba Cloud Model Studio"));
         // Dialect is wire config — no second MiniMax / Model Studio rows.
@@ -5238,50 +4759,9 @@ mod tests {
         );
     }
 
-    /// Baseten (and every other compatible template) is a row of the list,
-    /// not just a `/provider templates` entry, and Enter on it lands on the
-    /// custom-provider form already filled from the template.
+    /// A named custom provider appears exactly once, as a configured row.
     #[test]
-    fn compatible_templates_are_catalog_rows_that_open_a_prefilled_form() {
-        let config = Config::default();
-        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
-        let idx = picker
-            .rows
-            .iter()
-            .position(|row| row.template_id == Some("baseten"))
-            .expect("a Baseten template row");
-        let row = &picker.rows[idx];
-        assert_eq!(row.display_name, "Baseten");
-        assert_eq!(row.provider_id, "baseten");
-        assert_eq!(row.provider, ApiProvider::Custom);
-        assert!(
-            !row.is_configured,
-            "a template is not a configured provider"
-        );
-        assert!(!row.is_active);
-        assert!(row.matches_query("baseten"));
-
-        picker.view = ProviderListView::Catalog;
-        picker.selected_idx = idx;
-        assert!(picker.row_visible(idx));
-        assert!(matches!(picker.activate_selected_row(), ViewAction::None));
-        assert!(
-            matches!(picker.stage, Stage::CustomForm),
-            "{:?}",
-            picker.stage
-        );
-        assert_eq!(picker.custom_provider_id, "baseten");
-        assert_eq!(
-            picker.custom_provider_base_url,
-            "https://inference.baseten.co/v1"
-        );
-        assert_eq!(picker.custom_provider_api_key_env, "BASETEN_API_KEY");
-    }
-
-    /// Once the operator has named a custom provider after a template, the
-    /// configured row is the only one; the template row does not duplicate it.
-    #[test]
-    fn a_configured_custom_provider_replaces_its_template_row() {
+    fn a_configured_custom_provider_appears_once() {
         let mut config = Config::default();
         config
             .providers
@@ -5305,7 +4785,6 @@ mod tests {
             .collect();
         assert_eq!(baseten.len(), 1, "one Baseten row, the configured one");
         assert!(baseten[0].is_configured);
-        assert_eq!(baseten[0].template_id, None);
     }
 
     #[test]
@@ -6716,133 +6195,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn sensenova_preset_fills_published_openai_host() {
-        let config = Config::default();
-        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
-        assert!(matches!(
-            picker.handle_key(key(KeyCode::Char('s'))),
-            ViewAction::None
-        ));
-        assert_eq!(picker.stage, Stage::CustomForm);
-        assert_eq!(picker.custom_provider_id, "sensenova");
-        assert_eq!(
-            picker.custom_provider_base_url,
-            codewhale_config::SENSENOVA_BASE_URL
-        );
-        assert_eq!(
-            picker.custom_provider_model,
-            codewhale_config::SENSENOVA_DEFAULT_MODEL
-        );
-        assert_eq!(
-            picker.custom_provider_api_key_env,
-            codewhale_config::SENSENOVA_API_KEY_ENV
-        );
-        let rendered = render_text(&picker, 100, 20);
-        assert!(rendered.contains("SenseNova"), "{rendered}");
-        assert!(
-            !rendered.contains("Custom provider"),
-            "built-in template must not look like a blank custom form: {rendered}"
-        );
-    }
-
-    #[test]
-    fn p_opens_template_list_with_catalog_rows() {
-        let config = Config::default();
-        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
-        assert!(matches!(
-            picker.handle_key(key(KeyCode::Char('p'))),
-            ViewAction::None
-        ));
-        assert_eq!(picker.stage, Stage::TemplateList);
-        let rendered = render_text(&picker, 100, 24);
-        assert!(rendered.contains("OpenCode Zen"), "{rendered}");
-        assert!(rendered.contains("OpenCode Go"), "{rendered}");
-        assert!(rendered.contains("SenseNova"), "{rendered}");
-        assert!(rendered.contains("Command Code"), "{rendered}");
-        assert!(rendered.contains("Agnes"), "{rendered}");
-        assert!(
-            rendered.contains("no published") || rendered.contains("unpublished"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("https://opencode.ai/zen/v1"),
-            "descriptor endpoint missing: {rendered}"
-        );
-        assert!(
-            rendered.contains("https://opencode.ai/docs/zen/"),
-            "{rendered}"
-        );
-        assert!(
-            !rendered.contains("minimax-m2.7"),
-            "template detail must not dump the Zen roster: {rendered}"
-        );
-    }
-
-    #[test]
-    fn template_list_enter_on_unpublished_agnes_does_not_invent_a_url() {
-        let config = Config::default();
-        let mut picker = ProviderPickerView::new_for_template_setup(
-            ApiProvider::Deepseek,
-            "agnes",
-            &config,
-            None,
-        )
-        .expect("agnes template");
-        assert_eq!(picker.stage, Stage::TemplateList);
-        let action = picker.handle_key(key(KeyCode::Enter));
-        match action {
-            ViewAction::Emit(ViewEvent::StatusMessage { message }) => {
-                assert!(
-                    message.to_ascii_lowercase().contains("no published"),
-                    "{message}"
-                );
-            }
-            other => panic!("expected unpublished status, got {other:?}"),
-        }
-        assert!(picker.custom_provider_base_url.is_empty());
-    }
-
-    fn template_list_click(column: u16, row: u16) -> MouseEvent {
-        MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column,
-            row,
-            modifiers: KeyModifiers::NONE,
-        }
-    }
-
-    /// Slice D hover rule: template rows are clickable, so hover must
-    /// respond visibly without moving the keyboard selection.
-    #[test]
-    fn template_list_hover_tracks_pointer_without_moving_selection() {
-        let config = Config::default();
-        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
-        assert!(matches!(
-            picker.handle_key(key(KeyCode::Char('p'))),
-            ViewAction::None
-        ));
-        let area = Rect::new(0, 0, 100, 24);
-        let mut buf = Buffer::empty(area);
-        picker.render(area, &mut buf);
-        let (rect, idx) = picker
-            .template_row_hitboxes
-            .borrow()
-            .iter()
-            .copied()
-            .find(|(_, row_idx)| *row_idx != picker.template_selected_idx)
-            .expect("a non-selected template row");
-        let selected_before = picker.template_selected_idx;
-        picker.handle_mouse(MouseEvent {
-            kind: MouseEventKind::Moved,
-            column: rect.x,
-            row: rect.y,
-            modifiers: KeyModifiers::NONE,
-        });
-        assert_eq!(picker.hovered_template_idx, Some(idx));
-        assert_eq!(picker.template_selected_idx, selected_before);
-    }
-
     /// Slice D two-pane picker at narrow widths: the provider strip stays on
     /// top and the priced models pane renders under it (stacked layout).
     /// Ollama carries no auth notes, so the pane fits the short detail area;
@@ -6860,192 +6212,6 @@ mod tests {
         assert!(rendered.contains("(default)"), "{rendered}");
         assert!(rendered.contains("local"), "{rendered}");
         assert!(!rendered.contains("cost:"), "{rendered}");
-    }
-
-    #[test]
-    fn template_list_mouse_selects_row_and_second_click_activates() {
-        let config = Config::default();
-        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
-        assert!(matches!(
-            picker.handle_key(key(KeyCode::Char('p'))),
-            ViewAction::None
-        ));
-        let area = Rect::new(0, 0, 100, 24);
-        let mut buf = Buffer::empty(area);
-        picker.render(area, &mut buf);
-        let (rect, idx) = picker
-            .template_row_hitboxes
-            .borrow()
-            .iter()
-            .copied()
-            .find(|(_, row_idx)| *row_idx == 2)
-            .expect("SenseNova row hitbox");
-        assert_eq!(
-            provider_setup_templates()[idx].id,
-            codewhale_config::SENSENOVA_TEMPLATE_ID
-        );
-        let click = template_list_click(rect.x, rect.y);
-        assert!(matches!(picker.handle_mouse(click), ViewAction::None));
-        assert_eq!(picker.template_selected_idx, idx);
-        assert_eq!(picker.stage, Stage::TemplateList);
-        picker.handle_mouse(click);
-        assert_eq!(picker.stage, Stage::CustomForm);
-        assert_eq!(picker.custom_provider_id, "sensenova");
-        assert_eq!(
-            picker.custom_provider_base_url,
-            codewhale_config::SENSENOVA_BASE_URL
-        );
-    }
-
-    #[test]
-    fn template_list_mouse_second_click_on_unpublished_does_not_invent_a_url() {
-        let config = Config::default();
-        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
-        assert!(matches!(
-            picker.handle_key(key(KeyCode::Char('p'))),
-            ViewAction::None
-        ));
-        let area = Rect::new(0, 0, 100, 24);
-        let mut buf = Buffer::empty(area);
-        picker.render(area, &mut buf);
-        let (rect, idx) = picker
-            .template_row_hitboxes
-            .borrow()
-            .iter()
-            .copied()
-            .find(|(_, row_idx)| provider_setup_templates()[*row_idx].is_unpublished())
-            .expect("Agnes row hitbox");
-        let click = template_list_click(rect.x, rect.y);
-        assert!(matches!(picker.handle_mouse(click), ViewAction::None));
-        assert_eq!(picker.template_selected_idx, idx);
-        match picker.handle_mouse(click) {
-            ViewAction::Emit(ViewEvent::StatusMessage { message }) => {
-                assert!(
-                    message.to_ascii_lowercase().contains("no published"),
-                    "{message}"
-                );
-            }
-            other => panic!("expected unpublished status, got {other:?}"),
-        }
-        assert!(picker.custom_provider_base_url.is_empty());
-        assert_eq!(picker.stage, Stage::TemplateList);
-    }
-
-    #[test]
-    fn template_list_compact_40x12_keeps_selection_without_clipping() {
-        let config = Config::default();
-        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
-        assert!(matches!(
-            picker.handle_key(key(KeyCode::Char('p'))),
-            ViewAction::None
-        ));
-
-        for selected in [0usize, provider_setup_templates().len().saturating_sub(1)] {
-            picker.template_selected_idx = selected;
-            let area = Rect::new(0, 0, 40, 12);
-            let mut buf = Buffer::empty(area);
-            picker.render(area, &mut buf);
-            let rendered = render_text(&picker, 40, 12);
-            let selected_template = &provider_setup_templates()[selected];
-            assert!(
-                rendered.contains(selected_template.display_name),
-                "40x12 must keep selected {} visible:\n{rendered}",
-                selected_template.display_name
-            );
-            assert!(
-                rendered.contains(crate::tui::glyphs::SELECTION),
-                "40x12 must show the selection marker:\n{rendered}"
-            );
-            for (idx, line) in rendered.lines().enumerate() {
-                assert!(
-                    crate::tui::ui_text::text_display_width(line) <= 40,
-                    "40x12 line {idx} clips: {line:?}\n{rendered}"
-                );
-            }
-            let hitboxes = picker.template_row_hitboxes.borrow().clone();
-            assert!(
-                !hitboxes.is_empty(),
-                "40x12 must register template hitboxes:\n{rendered}"
-            );
-            assert!(
-                hitboxes.iter().any(|(_, idx)| *idx == selected),
-                "40x12 hitboxes must include selected {selected}: {hitboxes:?}\n{rendered}"
-            );
-            for (rect, idx) in &hitboxes {
-                assert!(
-                    rect.y < 12 && rect.x < 40,
-                    "hitbox for {idx} is outside 40x12: {rect:?}"
-                );
-                let row = (0..40)
-                    .map(|x| buf[(x, rect.y)].symbol())
-                    .collect::<String>();
-                assert!(
-                    row.contains(provider_setup_templates()[*idx].display_name)
-                        || row.contains(provider_setup_templates()[*idx].id),
-                    "40x12 hitbox y={} should map to {}: {row:?}",
-                    rect.y,
-                    provider_setup_templates()[*idx].display_name
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn template_list_uses_locale_for_kinds_labels_and_guidance() {
-        let config = Config::default();
-        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config)
-            .with_locale(codewhale_localization::Locale::ZhHans);
-        assert!(matches!(
-            picker.handle_key(key(KeyCode::Char('p'))),
-            ViewAction::None
-        ));
-        let rendered = render_text(&picker, 100, 24);
-        // TestBackend stores the continuation cell of each wide CJK glyph
-        // as a space. Collapse whitespace for language-copy assertions
-        // while retaining the original cell dump for English-leak checks.
-        let compact: String = rendered.chars().filter(|ch| !ch.is_whitespace()).collect();
-        assert!(rendered.contains("OpenCode Zen"), "{rendered}");
-        assert!(rendered.contains("SenseNova"), "{rendered}");
-        assert!(rendered.contains("Agnes"), "{rendered}");
-        assert!(compact.contains("仅密钥"), "{rendered}");
-        assert!(compact.contains("兼容"), "{rendered}");
-        assert!(
-            compact.contains("基础URL"),
-            "localized Base URL label missing: {rendered}"
-        );
-        assert!(
-            compact.contains("模型：") || compact.contains("模型:"),
-            "localized Model label missing: {rendered}"
-        );
-        assert!(
-            !rendered.contains("key-only"),
-            "English kind leaked: {rendered}"
-        );
-        assert!(
-            !rendered.contains("Base URL:"),
-            "English Base URL leaked: {rendered}"
-        );
-        assert!(
-            !rendered.contains("Create or copy an OpenCode Zen API key"),
-            "English guidance leaked: {rendered}"
-        );
-        picker.template_selected_idx = provider_setup_templates()
-            .iter()
-            .position(|template| template.is_unpublished())
-            .expect("agnes");
-        let unpublished = render_text(&picker, 100, 24);
-        let unpublished_compact: String = unpublished
-            .chars()
-            .filter(|ch| !ch.is_whitespace())
-            .collect();
-        assert!(
-            unpublished_compact.contains("未公布") || unpublished_compact.contains("没有"),
-            "{unpublished}"
-        );
-        assert!(
-            !unpublished.contains("unpublished"),
-            "English unpublished kind leaked: {unpublished}"
-        );
     }
 
     #[test]
@@ -7094,6 +6260,19 @@ mod tests {
         let action = picker.handle_key(key(KeyCode::Char('t')));
         assert!(matches!(action, ViewAction::None));
         assert_eq!(picker.query, "t");
+        assert_eq!(picker.stage, Stage::List);
+    }
+
+    #[test]
+    fn p_key_is_type_ahead_not_a_retired_template_list() {
+        // #6289: the `p` template list is retired; `p` is ordinary
+        // type-ahead like every other unbound letter.
+        let config = Config::default();
+        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
+        picker.toggle_view();
+        let action = picker.handle_key(key(KeyCode::Char('p')));
+        assert!(matches!(action, ViewAction::None));
+        assert_eq!(picker.query, "p");
         assert_eq!(picker.stage, Stage::List);
     }
 
@@ -7625,26 +6804,20 @@ mod tests {
         let mut listed = picker
             .rows
             .iter()
-            .filter(|row| row.template_id.is_none())
             .map(|row| row.provider)
             .collect::<Vec<_>>();
         // With no configured custom providers, the catalog keeps the Custom
         // entry so a custom endpoint can still be created from setup. The
         // canonical universe is the user-facing catalog (one identity per
         // vendor): dual-wire dialects are `wire` config and plan variants are
-        // `mode`/base_url, not picker rows.
+        // `mode`/base_url, not picker rows. Setup templates are retired
+        // (#6289), so every row is a first-class provider.
         let mut expected = ApiProvider::catalog().to_vec();
         listed.sort_by_key(|provider| provider.as_str());
         expected.sort_by_key(|provider| provider.as_str());
         assert_eq!(
             listed, expected,
             "setup must use the canonical provider universe"
-        );
-        assert!(
-            picker
-                .rows
-                .iter()
-                .any(|row| row.template_id == Some("baseten"))
         );
     }
 

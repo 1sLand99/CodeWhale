@@ -9233,7 +9233,7 @@ async fn settings_schema_serves_every_declared_row_with_runtime_state() -> Resul
     assert_eq!(row("approval_mode")["editable"], true);
     assert_eq!(row("provider_url")["editable"], false);
     assert_eq!(row("telemetry")["editable"], false);
-    for action in ["provider_templates", "mcp_open", "plugins_open"] {
+    for action in ["mcp_open", "plugins_open"] {
         assert_eq!(row(action)["row"], "action");
         assert_eq!(row(action)["editable"], false);
     }

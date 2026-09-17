@@ -2252,35 +2252,15 @@ pub enum MessageId {
     FooterHintForAgents,
     FooterHintToManage,
     AgentRailQueuedCount,
-    PickerActionTemplates,
     PickerActionTestConnection,
-    ProviderTemplatesTitle,
-    ProviderTemplateUnpublished,
-    ProviderTemplateDocs,
-    ProviderTemplateCredentials,
-    ProviderTemplateKindKeyOnly,
-    ProviderTemplateKindCompatible,
-    ProviderTemplateKindUnpublished,
-    ProviderTemplateBaseUrl,
-    ProviderTemplateModel,
-    ProviderTemplateGuidanceOpencodeZen,
-    ProviderTemplateGuidanceOpencodeGo,
-    ProviderTemplateGuidanceSenseNova,
-    ProviderTemplateGuidanceAgnes,
     ProviderCustomFormBaseUrl,
     ProviderCustomFormModel,
     ProviderCustomFormHint,
-    ConfigLabelProviderTemplates,
-    ConfigActionOpenProviderTemplates,
-    ConfigHintProviderTemplates,
     ProviderConnectionChecked,
     ProviderConnectionCheckedPickModel,
     ProviderTestConnectionNeedKey,
     ProviderTestConnectionFailed,
     ProviderTestConnectionNoEndpoint,
-    ProviderTemplateOpened,
-    ProviderTemplateOpenedEnvOnly,
-    ProviderTemplateUnknown,
     ComposerPlaceholderFollowUp,
     ComposerPlaceholderSendNow,
     ComposerHintSendWithQueue,
@@ -4514,35 +4494,15 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::FooterHintForAgents,
     MessageId::FooterHintToManage,
     MessageId::AgentRailQueuedCount,
-    MessageId::PickerActionTemplates,
     MessageId::PickerActionTestConnection,
-    MessageId::ProviderTemplatesTitle,
-    MessageId::ProviderTemplateUnpublished,
-    MessageId::ProviderTemplateDocs,
-    MessageId::ProviderTemplateCredentials,
-    MessageId::ProviderTemplateKindKeyOnly,
-    MessageId::ProviderTemplateKindCompatible,
-    MessageId::ProviderTemplateKindUnpublished,
-    MessageId::ProviderTemplateBaseUrl,
-    MessageId::ProviderTemplateModel,
-    MessageId::ProviderTemplateGuidanceOpencodeZen,
-    MessageId::ProviderTemplateGuidanceOpencodeGo,
-    MessageId::ProviderTemplateGuidanceSenseNova,
-    MessageId::ProviderTemplateGuidanceAgnes,
     MessageId::ProviderCustomFormBaseUrl,
     MessageId::ProviderCustomFormModel,
     MessageId::ProviderCustomFormHint,
-    MessageId::ConfigLabelProviderTemplates,
-    MessageId::ConfigActionOpenProviderTemplates,
-    MessageId::ConfigHintProviderTemplates,
     MessageId::ProviderConnectionChecked,
     MessageId::ProviderConnectionCheckedPickModel,
     MessageId::ProviderTestConnectionNeedKey,
     MessageId::ProviderTestConnectionFailed,
     MessageId::ProviderTestConnectionNoEndpoint,
-    MessageId::ProviderTemplateOpened,
-    MessageId::ProviderTemplateOpenedEnvOnly,
-    MessageId::ProviderTemplateUnknown,
     MessageId::ComposerPlaceholderFollowUp,
     MessageId::ComposerPlaceholderSendNow,
     MessageId::ComposerHintSendWithQueue,
@@ -5953,15 +5913,6 @@ mod tests {
             MessageId::ProviderNoConfiguredTitle,
             MessageId::ProviderNoConfiguredHint,
             MessageId::ProviderNoCatalogModels,
-            MessageId::ProviderTemplateKindKeyOnly,
-            MessageId::ProviderTemplateKindCompatible,
-            MessageId::ProviderTemplateKindUnpublished,
-            MessageId::ProviderTemplateBaseUrl,
-            MessageId::ProviderTemplateModel,
-            MessageId::ProviderTemplateGuidanceOpencodeZen,
-            MessageId::ProviderTemplateGuidanceOpencodeGo,
-            MessageId::ProviderTemplateGuidanceSenseNova,
-            MessageId::ProviderTemplateGuidanceAgnes,
             MessageId::ProviderCustomFormBaseUrl,
             MessageId::ProviderCustomFormModel,
             MessageId::ConfigHintProviderUrl,
@@ -5988,50 +5939,6 @@ mod tests {
                     locale.tag()
                 );
             }
-        }
-    }
-
-    #[test]
-    fn provider_template_strings_keep_product_names_and_placeholders() {
-        for locale in Locale::shipped_complete() {
-            let base_url = tr(*locale, MessageId::ProviderTemplateBaseUrl);
-            let model = tr(*locale, MessageId::ProviderTemplateModel);
-            assert!(
-                base_url.contains("{url}"),
-                "{} Base URL must keep {{url}}: {base_url}",
-                locale.tag()
-            );
-            assert!(
-                model.contains("{model}"),
-                "{} Model must keep {{model}}: {model}",
-                locale.tag()
-            );
-            let zen = tr(*locale, MessageId::ProviderTemplateGuidanceOpencodeZen);
-            let go = tr(*locale, MessageId::ProviderTemplateGuidanceOpencodeGo);
-            let sense = tr(*locale, MessageId::ProviderTemplateGuidanceSenseNova);
-            let agnes = tr(*locale, MessageId::ProviderTemplateGuidanceAgnes);
-            assert!(
-                zen.contains("OpenCode Zen"),
-                "{} Zen guidance must keep OpenCode Zen: {zen}",
-                locale.tag()
-            );
-            assert!(
-                go.contains("OpenCode Go") && go.contains("OpenCode Zen"),
-                "{} Go guidance must keep OpenCode Go/Zen: {go}",
-                locale.tag()
-            );
-            assert!(
-                sense.contains("SenseNova")
-                    && sense.contains("SenseTime")
-                    && sense.contains("OpenAI"),
-                "{} SenseNova guidance must keep product names: {sense}",
-                locale.tag()
-            );
-            assert!(
-                agnes.contains("Agnes") && agnes.contains("OpenAI"),
-                "{} Agnes guidance must keep Agnes and OpenAI: {agnes}",
-                locale.tag()
-            );
         }
     }
 

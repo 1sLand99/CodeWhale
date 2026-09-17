@@ -2070,64 +2070,6 @@ pub(crate) async fn apply_command_result(
                     );
                 }
             }
-            AppAction::OpenProviderTemplateList => {
-                if app.view_stack.top_kind() != Some(ModalKind::ProviderPicker) {
-                    let runtime_status = query_provider_runtime_status(engine_handle).await;
-                    app.view_stack.push(
-                        crate::tui::provider_picker::ProviderPickerView::new_for_template_list(
-                            app.api_provider,
-                            config,
-                            runtime_status,
-                        )
-                        .with_locale(app.ui_locale)
-                        .with_provider_health(&app.provider_health),
-                    );
-                }
-            }
-            AppAction::OpenTemplateSetup { template_id } => {
-                if app.view_stack.top_kind() != Some(ModalKind::ProviderPicker) {
-                    let runtime_status = query_provider_runtime_status(engine_handle).await;
-                    if let Some(picker) =
-                        crate::tui::provider_picker::ProviderPickerView::new_for_template_setup(
-                            app.api_provider,
-                            &template_id,
-                            config,
-                            runtime_status,
-                        )
-                    {
-                        app.view_stack.push(
-                            picker
-                                .with_locale(app.ui_locale)
-                                .with_provider_health(&app.provider_health),
-                        );
-                        let template = codewhale_config::provider_setup_template(&template_id);
-                        let message = match template {
-                            Some(template) if template.is_unpublished() => {
-                                app.tr(MessageId::ProviderTemplateUnpublished).into_owned()
-                            }
-                            Some(template) if template.is_compatible() => app
-                                .tr(MessageId::ProviderTemplateOpenedEnvOnly)
-                                .replace("{id}", &template_id),
-                            _ => app
-                                .tr(MessageId::ProviderTemplateOpened)
-                                .replace("{id}", &template_id),
-                        };
-                        let level = if template.is_some_and(|item| item.is_unpublished()) {
-                            StatusToastLevel::Warning
-                        } else {
-                            StatusToastLevel::Info
-                        };
-                        app.push_status_toast(message, level, Some(8_000));
-                    } else {
-                        app.push_status_toast(
-                            app.tr(MessageId::ProviderTemplateUnknown)
-                                .replace("{id}", &template_id),
-                            StatusToastLevel::Error,
-                            Some(8_000),
-                        );
-                    }
-                }
-            }
             AppAction::EditProjectHooks => {
                 edit_project_hooks_from_tui(terminal, app, config);
             }

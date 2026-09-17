@@ -684,17 +684,6 @@ pub const SETTINGS_SCHEMA: &[SettingDef] = &[
         ),
     ),
     def(
-        "provider_templates",
-        SettingKind::String,
-        "",
-        ui_action(
-            TAB_MODELS,
-            "provider",
-            "ConfigLabelProviderTemplates",
-            "ConfigHintProviderTemplates",
-        ),
-    ),
-    def(
         "model",
         SettingKind::String,
         "",

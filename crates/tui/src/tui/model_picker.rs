@@ -2265,12 +2265,15 @@ fn provider_catalog_receipt_for_route(
     source: Option<&CatalogSource>,
 ) -> Option<(CatalogStatus, bool)> {
     let identity = provider_identity.unwrap_or_else(|| provider.as_str());
+    // A custom route owns its catalog only on Baseten's endpoint, whose
+    // account-scoped roster no snapshot can serve (#6289).
     let owns_provider_catalog = matches!(
         provider,
         ApiProvider::Openrouter | ApiProvider::Telecomjs | ApiProvider::Edenai
     ) || (provider == ApiProvider::Custom
-        && codewhale_config::provider_setup_template(identity)
-            .is_some_and(|template| template.is_compatible()));
+        && codewhale_config::catalog::endpoint_is_baseten(
+            &config.base_url_for_route_identity(provider, identity),
+        ));
     if !owns_provider_catalog {
         return None;
     }
@@ -2633,10 +2636,11 @@ fn route_labels_for_rows(rows: &[&ModelPickerRow]) -> BTreeMap<String, String> {
         let Some(identity) = row_provider_identity(row) else {
             continue;
         };
-        let label = codewhale_config::provider_setup_template(identity)
-            .map(|template| template.display_name.to_string())
-            .unwrap_or_else(|| identity.to_string());
-        labels.entry(identity.to_string()).or_insert(label);
+        // Custom tables are labeled by their `[providers.<id>]` key: there
+        // are no compiled display names anymore (#6289).
+        labels
+            .entry(identity.to_string())
+            .or_insert_with(|| identity.to_string());
     }
     labels
 }
@@ -5062,8 +5066,43 @@ mod tests {
 
     #[test]
     fn baseten_picker_models_use_exact_identity_and_direct_provider_label() {
+        let _env = crate::test_support::lock_test_env();
         let _live = crate::provider_lake::lock_live_snapshot();
+        let home = tempfile::tempdir().expect("test home");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        crate::provider_catalog_live::reset_cache_for_test();
         crate::provider_lake::clear_live_snapshot();
+
+        // No compiled seeds: a custom route offers nothing until a live
+        // listing lands for its exact endpoint (#6289).
+        assert!(
+            provider_catalog_model_ids(
+                ApiProvider::Custom,
+                codewhale_config::BASETEN_TEMPLATE_ID,
+                codewhale_config::BASETEN_BASE_URL,
+            )
+            .is_empty()
+        );
+
+        let fingerprint =
+            codewhale_config::catalog::base_url_fingerprint(codewhale_config::BASETEN_BASE_URL);
+        crate::provider_catalog_live::record_success(
+            codewhale_config::catalog::ProviderCatalogDelta {
+                provider: codewhale_config::BASETEN_TEMPLATE_ID.to_string(),
+                base_url_fingerprint: fingerprint.clone(),
+                fetched_at: 1,
+                offerings: vec![codewhale_config::catalog::CatalogOffering {
+                    provider: codewhale_config::BASETEN_TEMPLATE_ID.to_string(),
+                    wire_model_id: codewhale_config::BASETEN_DEFAULT_MODEL.to_string(),
+                    endpoint_key: "chat".to_string(),
+                    source: CatalogSource::Live {
+                        base_url_fingerprint: fingerprint,
+                        fetched_at: 1,
+                    },
+                    ..Default::default()
+                }],
+            },
+        );
 
         let models = provider_catalog_model_ids(
             ApiProvider::Custom,
@@ -5074,7 +5113,6 @@ mod tests {
             models,
             vec![codewhale_config::BASETEN_DEFAULT_MODEL.to_string()]
         );
-        assert!(models.contains(&codewhale_config::BASETEN_DEFAULT_MODEL.to_string()));
 
         let row = ModelPickerRow {
             id: codewhale_config::BASETEN_DEFAULT_MODEL.to_string(),
@@ -5087,7 +5125,8 @@ mod tests {
             enabled: true,
         };
         let labels = route_labels_for_rows(&[&row]);
-        assert_eq!(labels.get("baseten").map(String::as_str), Some("Baseten"));
+        // No compiled display names: the route label is the table key itself.
+        assert_eq!(labels.get("baseten").map(String::as_str), Some("baseten"));
     }
 
     #[test]
@@ -5373,14 +5412,14 @@ model = "deepseek/deepseek-v4-flash"
         {
             let projection = picker.projection.borrow();
             let rows = &projection.as_ref().unwrap().rows;
-            assert!(rows.iter().any(|row| row.route == "Command Code"));
+            assert!(rows.iter().any(|row| row.route == "command_code"));
             assert!(rows.iter().any(|row| row.route == "other_code"));
             let active: Vec<_> = rows.iter().filter(|row| row.active).collect();
             assert_eq!(active.len(), 1);
             assert_eq!(active[0].route, "other_code");
         }
         let rendered = render_text(&picker, 140, 40);
-        assert!(rendered.contains("Command Code"), "{rendered}");
+        assert!(rendered.contains("command_code"), "{rendered}");
         assert!(rendered.contains("other_code"), "{rendered}");
 
         // Legacy memory has no route identity; ambiguity must preserve the
