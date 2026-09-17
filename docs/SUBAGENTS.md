@@ -107,6 +107,16 @@ posture again. This containment is pinned by
 `a_read_only_parents_delegation_never_widens_authority` in
 `crates/tui/src/fleet/exact.rs` tests.
 
+Inside the process, the resolved authority is one object —
+`ChildGrant` in `crates/tui/src/worker_profile.rs`: `files`
+(none/read/write), `shell` (none/inspect/verify/full), `network`, `desktop`
+(never granted to a child), the named tool `surface`, the caller's explicit
+`scope`, and remaining `spawn` depth. A role is a preset over that object
+(`ChildGrant::for_role`); `ChildGrant::resolve` intersects it with the
+parent-derived profile. The child's tool catalog, its dispatch refusals, and
+its capability envelope all read the same fields — a tool that is visible is
+callable, and a tool that is denied never appears.
+
 The session's **permission posture** applies inside every child exactly as
 it applies to the parent turn: under Auto-Review the same deterministic
 floor and one-shot model guardian decide a worker's held calls (never a

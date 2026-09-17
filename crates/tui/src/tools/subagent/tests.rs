@@ -6943,65 +6943,183 @@ fn test_custom_agent_requires_allowed_tools() {
 }
 
 #[test]
-fn role_posture_blocks_writes_and_shell_for_read_only_roles() {
-    // #3217: read-only roles may never run write/edit/patch tools, regardless
-    // of parent auto-approval, but can always read.
+fn role_grants_block_writes_and_raw_shell_for_read_only_roles() {
+    // #3217/#5633: the role preset is the whole table. Read-only roles may
+    // never hold write authority, regardless of parent auto-approval, and the
+    // bounded shell grants are exactly Inspect (evidence reads) and Verify
+    // (the workspace's own checks).
+    use crate::worker_profile::{ChildGrant, FileGrant, ShellGrant, ToolSurface};
+    let full_parent = WorkerRuntimeProfile::for_role(FleetRole::Worker);
+
     for role in [
         FleetRole::Scout,
         FleetRole::Reviewer,
         FleetRole::Planner,
         FleetRole::Verifier,
+        FleetRole::Consultant,
     ] {
+        let grant = ChildGrant::resolve(&role, &full_parent, None, true);
+        assert_eq!(grant.files, FileGrant::Read, "{role:?} must never write");
         assert!(
-            !role_posture_permits(&role, ApprovalRequirement::Suggest),
-            "{role:?} must not run write/edit/patch tools"
+            grant.network,
+            "{role:?} keeps network reach — reads need it"
         );
-        assert!(
-            role_posture_permits(&role, ApprovalRequirement::Auto),
-            "{role:?} can still read"
-        );
+        assert!(!grant.desktop, "{role:?} never drives the desktop");
     }
 
-    // Write-capable roles keep write access.
-    for role in [FleetRole::Builder, FleetRole::Worker] {
-        assert!(
-            role_posture_permits(&role, ApprovalRequirement::Suggest),
-            "{role:?} writes"
-        );
+    // Explore/reviewer run on the evidence surface; planner on the inherited
+    // read surface; advisor carries no process surface at all.
+    for role in [FleetRole::Scout, FleetRole::Reviewer] {
+        let grant = ChildGrant::resolve(&role, &full_parent, None, true);
+        assert_eq!(grant.surface, ToolSurface::Evidence, "{role:?}");
+        assert_eq!(grant.shell, ShellGrant::Inspect, "{role:?}");
+    }
+    let planner = ChildGrant::resolve(&FleetRole::Planner, &full_parent, None, true);
+    assert_eq!(planner.surface, ToolSurface::Inherited);
+    assert_eq!(planner.shell, ShellGrant::Inspect);
+    let consultant = ChildGrant::resolve(&FleetRole::Consultant, &full_parent, None, true);
+    assert_eq!(consultant.shell, ShellGrant::None);
+    let verifier = ChildGrant::resolve(&FleetRole::Verifier, &full_parent, None, true);
+    assert_eq!(verifier.shell, ShellGrant::Verify);
+
+    // Write-capable roles resolve to the full grant under a full parent.
+    for role in [FleetRole::Builder, FleetRole::Worker, FleetRole::Custom] {
+        let grant = ChildGrant::resolve(&role, &full_parent, None, true);
+        assert_eq!(grant.files, FileGrant::Write, "{role:?} writes");
+        assert_eq!(grant.shell, ShellGrant::Full, "{role:?} has full shell");
     }
 
-    // Only Full-shell roles may run shell (Required) tools. Scout/reviewer
-    // now carry the read-only inspection posture (full shell authority, bounded verification
-    // surface; raw shell still requires write and stays denied by the clamp),
-    // so they join verifier/builder/worker. Planner's declared posture is
-    // read-only probes (Auto-classified bash), not Required/raw shell.
-    for role in [
-        FleetRole::Verifier,
-        FleetRole::Builder,
-        FleetRole::Worker,
-        FleetRole::Scout,
-        FleetRole::Reviewer,
-    ] {
-        assert!(
-            role_posture_permits(&role, ApprovalRequirement::Required),
-            "{role:?} has full shell"
-        );
+    // The grant can never exceed the parent: a read-only, shell-less parent
+    // clamps every role, including custom.
+    let read_only_parent = WorkerRuntimeProfile::for_role(FleetRole::Consultant);
+    for role in FleetRole::all() {
+        let grant = ChildGrant::resolve(&role, &read_only_parent, None, true);
+        assert_ne!(grant.files, FileGrant::Write, "{role:?} under read-only");
+        assert_eq!(grant.shell, ShellGrant::None, "{role:?} under shell-less");
     }
-    assert!(
-        !role_posture_permits(&FleetRole::Planner, ApprovalRequirement::Required),
-        "Planner must not run raw/Required shell; read-only probes are Auto"
-    );
 
-    // Custom passes the role-only check; its explicit allowlist, bounded write
-    // authority, and parent-intersected runtime profile are enforced together.
-    assert!(role_posture_permits(
-        &FleetRole::Custom,
-        ApprovalRequirement::Suggest
-    ));
-    assert!(role_posture_permits(
-        &FleetRole::Custom,
-        ApprovalRequirement::Required
-    ));
+    // `tools = false` is total: an empty scope grants no file access at all.
+    let no_tools = ChildGrant::resolve(&FleetRole::Worker, &full_parent, Some(Vec::new()), true);
+    assert_eq!(no_tools.files, FileGrant::None);
+}
+
+/// #5633: catalog visibility and execution denial are one grant projection.
+/// For every role, a name the grant removes never reaches the model-visible
+/// catalog AND is refused at dispatch; a surface the grant holds stays
+/// visible. Asserted against the real child registry.
+#[tokio::test]
+async fn issue_5633_catalog_and_dispatch_are_one_grant() {
+    use crate::worker_profile::{FileGrant, ShellGrant};
+    for role in FleetRole::all() {
+        let tmp = tempdir().expect("tempdir");
+        let mut runtime =
+            stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
+        runtime.context = ToolContext::new(tmp.path().to_path_buf());
+        runtime.allow_shell = true;
+        runtime.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Worker);
+        let registry = SubAgentToolRegistry::new(
+            runtime,
+            role.clone(),
+            None,
+            Arc::new(Mutex::new(TodoList::new())),
+            Arc::new(Mutex::new(PlanState::default())),
+        );
+        let catalog: std::collections::HashSet<String> = registry
+            .tools_for_model(&role)
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        let full_shell = registry.grant.shell == ShellGrant::Full;
+
+        // Raw process surface: visible exactly under a Full grant, and a
+        // hidden name is refused at dispatch by the same grant — the child
+        // can never call what it cannot see. `Bash`/`exec_shell` are hidden
+        // execution-compatibility aliases, so they never appear in any
+        // catalog — under a non-Full grant they are still refused by name.
+        for name in ["terminal/run", "terminal/send", "task_shell_start"] {
+            assert_eq!(
+                catalog.contains(name),
+                full_shell,
+                "{role:?}: {name} visibility must equal the shell grant"
+            );
+        }
+        for name in ["Bash", "exec_shell", "terminal/run", "task_shell_start"] {
+            assert!(!catalog.contains(name) || full_shell, "{role:?}: {name}");
+            if !full_shell {
+                let dispatch = registry
+                    .execute(
+                        "child",
+                        name,
+                        json!({"command": "echo probe", "input": "echo probe"}),
+                    )
+                    .await;
+                assert!(
+                    dispatch.is_err(),
+                    "{role:?}: {name} must be refused at dispatch"
+                );
+            }
+        }
+
+        // The bounded inspection bash: only the Inspect and Full grants
+        // surface canonical `bash` — Inspect's calls are classifier-bounded
+        // at dispatch, and the Verify/None grants see no shell spelling at all.
+        assert_eq!(
+            catalog.contains("bash"),
+            matches!(registry.grant.shell, ShellGrant::Inspect | ShellGrant::Full),
+            "{role:?}: bash visibility must equal the Inspect/Full grant"
+        );
+
+        // The bounded verification surface rides on process-start
+        // authority: Verify and Full keep `Run`, Inspect does not.
+        // (`run_tests`/`run_verifiers` are hidden compat aliases governed by
+        // the same gate at dispatch.)
+        assert_eq!(
+            catalog.contains("Run"),
+            registry.grant.shell >= ShellGrant::Verify,
+            "{role:?}: Run visibility must equal process-start authority"
+        );
+
+        // File mutation actions appear in the `File` family's advertised
+        // enum exactly when the grant writes.
+        if let Some(file_tool) = registry
+            .tools_for_model(&role)
+            .into_iter()
+            .find(|tool| tool.name == "File")
+        {
+            let actions: Vec<String> = file_tool.input_schema["properties"]["action"]["enum"]
+                .as_array()
+                .map(|actions| {
+                    actions
+                        .iter()
+                        .filter_map(|action| action.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let writes_visible = actions
+                .iter()
+                .any(|action| matches!(action.as_str(), "write" | "edit" | "patch"));
+            assert_eq!(
+                writes_visible,
+                registry.grant.files == FileGrant::Write,
+                "{role:?}: File mutation actions must match the write grant"
+            );
+        }
+
+        // A grant-blocked name is refused at dispatch with a reason that
+        // names an alternative — never a bare "unknown tool" that a model
+        // could mistake for a typo.
+        if !full_shell {
+            let error = registry
+                .execute("child", "terminal/run", json!({"command": "echo probe"}))
+                .await
+                .expect_err("a grant-blocked tool must fail at dispatch")
+                .to_string();
+            assert!(
+                error.contains("not available") || error.contains("not allowed"),
+                "{role:?}: dispatch refusal must explain, got: {error}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -8720,7 +8838,7 @@ async fn read_only_roles_expose_and_dispatch_lowercase_bash_only() {
             .expect_err("legacy Bash must stay denied")
             .to_string();
         assert!(
-            error.contains("not allowed"),
+            error.contains("hardened evidence boundary"),
             "{role:?} legacy Bash refusal: {error}"
         );
 
@@ -8758,7 +8876,7 @@ async fn read_only_roles_expose_and_dispatch_lowercase_bash_only() {
         ] {
             assert!(registry.is_tool_allowed(name), "{role:?} must allow {name}");
             assert!(
-                !registry.role_blocks_unhardened_process_tool(name),
+                !registry.grant_blocks_tool(name),
                 "{role:?} must not hide proven read-only tool {name}"
             );
         }
@@ -8768,7 +8886,7 @@ async fn read_only_roles_expose_and_dispatch_lowercase_bash_only() {
                 "{role:?} must allow image_ocr"
             );
             assert!(
-                !registry.role_blocks_unhardened_process_tool("image_ocr"),
+                !registry.grant_blocks_tool("image_ocr"),
                 "{role:?} must not hide proven read-only tool image_ocr"
             );
         }
@@ -12226,7 +12344,10 @@ async fn prompt_only_general_cannot_mutate_under_parent_auto_approve() {
         )
         .await
         .expect_err("read-only General must not receive mutating shell");
-    assert!(shell_error.to_string().contains("not registered"));
+    assert!(
+        shell_error.to_string().contains("not available"),
+        "got: {shell_error}"
+    );
     assert!(!tmp.path().join("forbidden.txt").exists());
     assert!(!tmp.path().join("shell.txt").exists());
 }
@@ -19999,7 +20120,10 @@ fn shell_denial_from_parent_is_not_a_read_only_role_exception() {
                 explicit_rule.is_none()
             );
             if explicit_rule.is_some() {
-                assert_eq!(registry.runtime_profile.shell, ShellPolicy::None);
+                assert_eq!(
+                    registry.grant.shell,
+                    crate::worker_profile::ShellGrant::None
+                );
                 assert!(!registry.is_tool_allowed("bash"));
             }
         }
@@ -20509,8 +20633,10 @@ fn the_launched_authority_is_the_one_the_spawn_boundary_accepts() {
 const READ_ONLY_CHILD_ENVELOPE_BYTE_CEILING: usize = 89_000;
 /// Measured 85,913B on 2026-09-15 with the always-on session recall tools
 /// (#5715). Keep the next increase visible instead of adding another broad
-/// margin.
-const PARENT_SURFACE_BYTE_CEILING: usize = 86_000;
+/// margin. Re-measured at 87,529B on 2026-09-17, with the bounded Git
+/// fetch / merge_tree verify tools (b89349286f) and this slice's grant
+/// text both in the shared catalog.
+const PARENT_SURFACE_BYTE_CEILING: usize = 88_000;
 
 #[tokio::test]
 async fn read_only_child_envelope_stays_within_measured_ceiling() {

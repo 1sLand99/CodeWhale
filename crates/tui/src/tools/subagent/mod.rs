@@ -50,8 +50,7 @@ use crate::dependencies::{ExternalTool, Git};
 /// consumes. Existing `tools::subagent::FleetRole` paths keep resolving.
 pub use crate::fleet::role::FleetRole;
 use crate::fleet::role::{
-    FLEET_ROLE_SCHEMA_VALUES, NETWORK_DENIAL_SENTINEL, SHELL_AUTHORITY_SENTINEL,
-    VALID_ROLE_ALIASES, migrate_legacy_role_token, public_role_label,
+    FLEET_ROLE_SCHEMA_VALUES, VALID_ROLE_ALIASES, migrate_legacy_role_token, public_role_label,
 };
 use crate::llm_client::{LlmClient, LlmError};
 use crate::reasoning_preference::ReasoningEffort;
@@ -9509,8 +9508,7 @@ fn parse_agent_ref(input: &Value) -> Result<Option<String>, ToolError> {
 /// #5186: whether an `agent action=start` call asks for exactly a canonical
 /// read-only Fleet role and nothing that could widen it. Those spawns run
 /// without an approval modal in the default posture because the child's own
-/// posture gates (`role_posture_permits`, `SubAgentToolRegistry`) enforce
-/// read-only behavior from the inside.
+/// grant (`SubAgentToolRegistry`) enforces read-only behavior from the inside.
 ///
 /// Anything this parser cannot prove read-only stays gated: no role token
 /// (defaults to `worker`), an unparseable role, a `profile`
@@ -16750,20 +16748,6 @@ impl SubAgentToolSurface {
 /// narrow what it can execute. Read-only bash operations are classified Auto,
 /// so Scouts and Reviewers do not gain general shell authority through this
 /// branch.
-fn role_posture_permits(agent_type: &FleetRole, approval: ApprovalRequirement) -> bool {
-    if matches!(agent_type, FleetRole::Custom) {
-        return true;
-    }
-    let profile = WorkerRuntimeProfile::for_role(agent_type.clone());
-    match approval {
-        ApprovalRequirement::Auto => true,
-        ApprovalRequirement::Suggest => profile.permissions.write,
-        ApprovalRequirement::Required => {
-            matches!(profile.shell, crate::worker_profile::ShellPolicy::Full)
-        }
-    }
-}
-
 /// Intersect an explicit parent scope with the child's requested subset.
 ///
 /// A child can narrow an explicit parent scope, never widen it. Omitting the
@@ -16810,18 +16794,22 @@ fn policy_tool_name_matches(rule: &str, name: &str) -> bool {
 }
 
 struct SubAgentToolRegistry {
-    // `None` means the role-defined surface; `Some` is the already-intersected
-    // parent/child scope. Deny rules always win, including canonical prefixes.
-    allowed_tools: Option<Vec<String>>,
+    /// The one authority projection this child runs under (#5633): role
+    /// preset ∩ parent-derived profile ∩ caller scope, resolved once at
+    /// construction. Catalog visibility and dispatch refusals read the same
+    /// fields, so a tool that is visible is callable and a denied tool never
+    /// appears. `runtime_profile` is the persisted/transport record the grant
+    /// was resolved from — never a second answer.
+    grant: crate::worker_profile::ChildGrant,
+    // Operator/ancestor deny rules. Deny always wins, including canonical
+    // prefixes; the grant decides what the surface *is*, these names are
+    // removed from whatever it granted.
     disallowed_tools: Vec<String>,
     // Approval posture is separate from authority. Auto approval can remove a
     // prompt, but cannot restore a tool removed by role, scope, or envelope.
     auto_approve: bool,
     accept_edits: bool,
     agent_type: FleetRole,
-    runtime_profile: WorkerRuntimeProfile,
-    // Depth is the only special authority governing nested `agent` calls.
-    can_spawn_child: bool,
     // Every mutation is attributed to the child and checked against its live
     // coordination claim before the underlying registry sees the call.
     owner_agent_id: String,
@@ -16882,26 +16870,34 @@ impl SubAgentToolRegistry {
         let coordination_manager = Arc::clone(&runtime.manager);
         let mut surface_options = runtime.agent_tool_surface_options.clone();
         // Shell authority is an intersection: a parent cannot delegate more
-        // than it owns, and read-only inspection roles (Scout, Reviewer) are
-        // narrowed to the hardened read-only classifier even when the parent
-        // has a full shell.
+        // than it owns. The role preset narrows it further inside the grant
+        // below — read-only inspection roles get the bounded evidence shell,
+        // the verifier gets the bounded verification surface — rather than a
+        // second role-keyed clamp.
         let parent_shell = if tool_denied(Some(&runtime.context.disallowed_tools), "bash") {
             ShellPolicy::None
         } else {
             ShellPolicy::from_legacy_allow_shell(runtime.allow_shell)
         };
-        let mut child_shell = runtime.worker_profile.shell.min_with(parent_shell);
-        if crate::fleet::role::role_requires_read_only_shell(&agent_type)
-            && child_shell.allows_shell()
-        {
-            child_shell = ShellPolicy::ReadOnly;
-        }
+        let child_shell = runtime.worker_profile.shell.min_with(parent_shell);
         let mut effective_profile = runtime.worker_profile.clone();
         effective_profile.shell = child_shell;
-        let allowed_tools =
-            intersect_explicit_tool_scope(&effective_profile.tools, explicit_allowed_tools);
-        surface_options.shell_policy = child_shell;
-        let mut context = runtime.context.clone().with_shell_policy(child_shell);
+        let scope = intersect_explicit_tool_scope(&effective_profile.tools, explicit_allowed_tools);
+        // The one authority object: role preset ∩ effective profile ∩ scope.
+        // Everything after this line — registration policy, catalog filter,
+        // dispatch refusal, execution envelope — is a projection of `grant`.
+        let grant = crate::worker_profile::ChildGrant::resolve(
+            &agent_type,
+            &effective_profile,
+            scope,
+            can_spawn_child,
+        );
+        effective_profile.shell = grant.shell_policy();
+        surface_options.shell_policy = grant.shell_policy();
+        let mut context = runtime
+            .context
+            .clone()
+            .with_shell_policy(grant.shell_policy());
         context.disallowed_tools = effective_profile.denied_tools.clone();
         let mut child_runtime = runtime.clone();
         child_runtime.parent_agent_id = Some(owner_agent_id.clone());
@@ -16940,13 +16936,11 @@ impl SubAgentToolRegistry {
         }
 
         Self {
-            allowed_tools,
+            grant,
             disallowed_tools: effective_profile.denied_tools.clone(),
             auto_approve: runtime.context.auto_approve,
             accept_edits: runtime.accept_edits,
             agent_type,
-            runtime_profile: effective_profile,
-            can_spawn_child,
             owner_agent_id,
             owner_agent_name,
             coordination_manager,
@@ -16979,7 +16973,7 @@ impl SubAgentToolRegistry {
                 // accept Suggest edits for any write-capable posture. #5186:
                 // children inherit the session's in-workspace write carve-out
                 // (#5185) too.
-                let may_write = self.runtime_profile.permissions.write
+                let may_write = self.grant.files == crate::worker_profile::FileGrant::Write
                     && (self.accept_edits || Self::role_can_delegate_writes(&self.agent_type));
                 (!may_write && !self.workspace_write_carve_out_permits(name, input)).then(|| {
                     format!(
@@ -17506,7 +17500,7 @@ impl SubAgentToolRegistry {
         // This is a bounded convenience for write-capable children, not an
         // authority escalation: every target must resolve inside the workspace
         // and still pass sensitive-path, repository-law, and claim checks.
-        if !self.runtime_profile.permissions.write {
+        if self.grant.files != crate::worker_profile::FileGrant::Write {
             return false;
         }
         crate::core::authority::paths_within_workspace_write_carve_out(
@@ -17539,8 +17533,7 @@ impl SubAgentToolRegistry {
             ) {
                 ApprovalRequirement::Auto => true,
                 ApprovalRequirement::Suggest => {
-                    self.runtime_profile.permissions.write
-                        && role_posture_permits(&self.agent_type, ApprovalRequirement::Suggest)
+                    self.grant.files == crate::worker_profile::FileGrant::Write
                 }
                 ApprovalRequirement::Required => {
                     // An outbound read needs approval because its payload can
@@ -17558,11 +17551,11 @@ impl SubAgentToolRegistry {
 
                     // #5426 acceptance point 1: the bounded read-only shell.
                     // `allows_bounded_readonly_bash` admits canonical `bash`
-                    // to the inspection roles through the raw-shell deny
+                    // to the inspection grant through the raw-shell deny
                     // list; a call the agent read-only classifier proves
                     // mutation-free is Auto-class evidence, not a held
-                    // mutation, so the gate must not demand `ShellPolicy::
-                    // Full` for it. Judged by the same predicate
+                    // mutation, so the gate must not demand a full shell
+                    // grant for it. Judged by the same predicate
                     // `BashTool::execute` enforces under
                     // `ShellPolicy::ReadOnly` (shell.rs), so this admission
                     // can never widen past the execute-time refusal — the
@@ -17574,8 +17567,10 @@ impl SubAgentToolRegistry {
                     {
                         return true;
                     }
-                    matches!(self.runtime_profile.shell, ShellPolicy::Full)
-                        && role_posture_permits(&self.agent_type, ApprovalRequirement::Required)
+                    // `Verify` holds process-start authority for the bounded
+                    // verification surface; the envelope below still refuses
+                    // its ExecutesCode/WritesFiles calls by capability.
+                    self.grant.shell >= crate::worker_profile::ShellGrant::Verify
                 }
             },
             None => true,
@@ -17590,35 +17585,30 @@ impl SubAgentToolRegistry {
     }
 
     /// Whether this child may surface and dispatch the canonical lowercase
-    /// `bash` tool under the read-only inspection posture.
+    /// `bash` tool under the read-only inspection grant.
     ///
-    /// Scout, Reviewer, and Planner keep exactly one shell entry point —
+    /// The `Inspect` shell grant keeps exactly one shell entry point —
     /// canonical `bash` — whose concrete calls the strict read-only
     /// classifier bounds.
     /// Catalog visibility and dispatch authorization consult this same
     /// predicate, so a tool that appears on the wire can always be called and
     /// one that is denied never appears.
     ///
-    /// The spawn clamp keeps the raw-shell deny list (legacy `Bash` /
-    /// `exec_shell` rules and the [`RAW_SHELL_SENTINEL`]) installed, because
-    /// removing it would read as "this child has raw shell". Instead the
-    /// catalog and dispatch admit canonical `bash` here, behind the same
-    /// input-specific read-only classifier the legacy carve-out used; every
-    /// other role still loses bash to the raw-shell rules.
+    /// An `Inspect` grant keeps the raw-shell deny entries (legacy `Bash` /
+    /// `exec_shell` rules) installed, because removing them would read as
+    /// "this child has raw shell". Instead the catalog and dispatch admit
+    /// canonical `bash` here, behind the same input-specific read-only
+    /// classifier the legacy carve-out used; every narrower or wider shell
+    /// grant still loses bash to the raw-shell rules.
     ///
     /// The name match is **exact**, not case-insensitive. Legacy `Bash` is a
     /// hidden execution-compatibility alias for saved transcripts, and it is
     /// exactly what the raw-shell deny list names; admitting it here through a
-    /// case-insensitive compare would hand these roles back the raw shell this
+    /// case-insensitive compare would hand the child back the raw shell this
     /// carve-out exists to withhold. Only the canonical lowercase tool the
     /// first-turn catalog actually offers is bounded by the classifier.
     fn allows_bounded_readonly_bash(&self, name: &str) -> bool {
-        name == "bash"
-            && matches!(
-                &self.agent_type,
-                FleetRole::Scout | FleetRole::Reviewer | FleetRole::Planner
-            )
-            && self.runtime_profile.shell != crate::worker_profile::ShellPolicy::None
+        name == "bash" && self.grant.shell == crate::worker_profile::ShellGrant::Inspect
     }
 
     fn legacy_action_alias(family: &str, action: &str) -> Option<&'static str> {
@@ -17646,7 +17636,7 @@ impl SubAgentToolRegistry {
         {
             return false;
         }
-        match &self.allowed_tools {
+        match &self.grant.scope {
             None => true,
             Some(list) => {
                 list.iter().any(|name| name.eq_ignore_ascii_case(family))
@@ -17656,13 +17646,13 @@ impl SubAgentToolRegistry {
     }
 
     fn is_tool_allowed(&self, name: &str) -> bool {
-        if name == "agent" && !self.can_spawn_child {
+        if name == "agent" && !self.grant.spawn {
             return false;
         }
         if self.is_tool_denied(name) && !self.allows_bounded_readonly_bash(name) {
             return false;
         }
-        match &self.allowed_tools {
+        match &self.grant.scope {
             None => true,
             Some(list) => {
                 explicit_scope_permits(list, name)
@@ -17673,19 +17663,31 @@ impl SubAgentToolRegistry {
         }
     }
 
-    fn role_blocks_unhardened_process_tool(&self, name: &str) -> bool {
-        // Catalog filtering is defense in depth. Scout/Reviewer see only the
-        // hardened evidence profile; Verifier may receive bounded Run but not
-        // any raw or session-oriented shell path. Dispatch repeats this check.
+    /// Whether the grant removes `name` from the surface entirely — the
+    /// catalog filter and the dispatch refusal consult this same predicate,
+    /// so a tool that is hidden is never callable by spelling.
+    fn grant_blocks_tool(&self, name: &str) -> bool {
         let lower = name.to_ascii_lowercase();
+        // Desktop / machine-control is never in a child's grant.
+        if !self.grant.desktop && is_machine_control_tool(name) {
+            return true;
+        }
         let evidence_tool = crate::tools::registry::readonly_evidence_tool_name(name)
             || self
                 .registry
                 .get(name)
                 .is_some_and(|tool| crate::tools::registry::readonly_evidence_tool(tool.as_ref()));
-        let bounded_inspection = matches!(&self.agent_type, FleetRole::Scout | FleetRole::Reviewer)
+        // The Evidence surface admits only the hardened evidence tools and
+        // `agent` (delegation).
+        if self.grant.surface == crate::worker_profile::ToolSurface::Evidence
             && lower != "agent"
-            && !evidence_tool;
+            && !evidence_tool
+        {
+            return true;
+        }
+        // Below a Full shell grant the raw process surface is gone — except
+        // canonical `bash` under Inspect, which the read-only classifier
+        // bounds at dispatch.
         let raw_shell = lower == "bash"
             || lower.starts_with("exec_shell")
             || matches!(
@@ -17693,34 +17695,33 @@ impl SubAgentToolRegistry {
                 "exec_wait" | "exec_interact" | "task_shell_start" | "task_shell_wait"
             )
             || lower.starts_with("terminal/");
-        bounded_inspection || matches!(&self.agent_type, FleetRole::Verifier) && raw_shell
+        raw_shell
+            && self.grant.shell < crate::worker_profile::ShellGrant::Full
+            && !self.allows_bounded_readonly_bash(name)
     }
 
     fn network_is_denied(&self) -> bool {
-        // Network denial has two sources: the resolved permission profile and
-        // the exact-fleet sentinel. Either one is sufficient to deny a call.
-        !self.runtime_profile.permissions.network || self.is_tool_denied(NETWORK_DENIAL_SENTINEL)
+        !self.grant.network
     }
 
     fn write_is_denied(&self) -> bool {
-        !self.runtime_profile.permissions.write
+        self.grant.files != crate::worker_profile::FileGrant::Write
     }
 
+    /// Whether the grant holds process-start authority — the bounded
+    /// verification surface and anything stronger. `Inspect`'s read-only
+    /// evidence commands are Auto-classified exceptions, not shell authority.
     fn shell_is_denied(&self) -> bool {
-        // Likewise, shell requires both a Full profile and no explicit shell
-        // sentinel. Read-only evidence commands are Auto-classified exceptions,
-        // not a Full-shell grant.
-        !matches!(self.runtime_profile.shell, ShellPolicy::Full)
-            || self.is_tool_denied(SHELL_AUTHORITY_SENTINEL)
+        self.grant.shell < crate::worker_profile::ShellGrant::Verify
     }
 
     fn execution_envelope(&self) -> crate::tools::execution_envelope::ExecutionEnvelope {
-        // Keep the network sentinel distinct from the broader permission bit:
-        // read-only Web evidence remains visible when policy allows it, while
-        // arbitrary network-reaching inputs are rejected separately at dispatch.
+        // The capability envelope is the grant's own projection: catalog and
+        // dispatch derive it from the same fields, never from a deny-list
+        // sentinel or a role re-mapping that could disagree with them.
         crate::tools::execution_envelope::ExecutionEnvelope {
-            write: !self.write_is_denied(),
-            network: !self.is_tool_denied(NETWORK_DENIAL_SENTINEL),
+            write: self.grant.files == crate::worker_profile::FileGrant::Write,
+            network: self.grant.network,
             shell: !self.shell_is_denied(),
         }
     }
@@ -17806,17 +17807,15 @@ impl SubAgentToolRegistry {
         if !matches!(action, "claim" | "release") {
             return true;
         }
-        !self.write_is_denied() && !self.is_tool_denied("agents/coordinate")
+        self.grant.files == crate::worker_profile::FileGrant::Write
+            && !self.is_tool_denied("agents/coordinate")
     }
 
     fn visibility_representative_input(&self, name: &str) -> Option<Value> {
         // Visibility and dispatch consult the same capability guard. These
         // representative calls let a read-only bash schema survive catalog
         // shaping without treating an empty input as arbitrary shell authority.
-        if !matches!(
-            &self.agent_type,
-            FleetRole::Scout | FleetRole::Reviewer | FleetRole::Planner
-        ) {
+        if self.grant.shell != crate::worker_profile::ShellGrant::Inspect {
             return None;
         }
         match name {
@@ -17832,7 +17831,7 @@ impl SubAgentToolRegistry {
         // execute() repeats role, scope, posture, envelope, and claim checks.
         let _ = agent_type;
         let api_tools = self.registry.to_api_tools();
-        let filtered = match &self.allowed_tools {
+        let filtered = match &self.grant.scope {
             None => api_tools,
             Some(list) => api_tools
                 .into_iter()
@@ -17856,11 +17855,11 @@ impl SubAgentToolRegistry {
         };
         let mut tools = filtered
             .into_iter()
-            .filter(|tool| tool.name != "agent" || self.can_spawn_child)
+            .filter(|tool| tool.name != "agent" || self.grant.spawn)
             .filter(|tool| {
                 !self.is_tool_denied(&tool.name) || self.allows_bounded_readonly_bash(&tool.name)
             })
-            .filter(|tool| !self.role_blocks_unhardened_process_tool(&tool.name))
+            .filter(|tool| !self.grant_blocks_tool(&tool.name))
             .filter(|tool| {
                 let representative = self.visibility_representative_input(&tool.name);
                 tool.name == "File"
@@ -17898,13 +17897,12 @@ impl SubAgentToolRegistry {
                     return false;
                 };
                 let posture_allows = tool.name != "File"
-                    || (self.runtime_profile.permissions.write
-                        && role_posture_permits(&self.agent_type, ApprovalRequirement::Suggest))
+                    || self.grant.files == crate::worker_profile::FileGrant::Write
                     || matches!(action, "read" | "list" | "search_name" | "search_content");
-                let evidence_action =
-                    !matches!(&self.agent_type, FleetRole::Scout | FleetRole::Reviewer)
-                        || tool.name != "Web"
-                        || matches!(action, "search" | "fetch");
+                let evidence_action = self.grant.surface
+                    != crate::worker_profile::ToolSurface::Evidence
+                    || tool.name != "Web"
+                    || matches!(action, "search" | "fetch");
                 let mut representative = self
                     .visibility_representative_input(&tool.name)
                     .unwrap_or_else(|| json!({}));
@@ -17958,7 +17956,7 @@ impl SubAgentToolRegistry {
         );
         // A tool-free child (explicit empty scope) has nothing to discover:
         // drop tool_search as well so the wire request genuinely omits tools.
-        let discoverable = !self.allowed_tools.as_ref().is_some_and(Vec::is_empty);
+        let discoverable = !self.grant.scope.as_ref().is_some_and(Vec::is_empty);
         catalog.retain(|tool| {
             (discoverable && tool.name == TOOL_SEARCH_NAME) || self.registry.contains(&tool.name)
         });
@@ -17967,7 +17965,7 @@ impl SubAgentToolRegistry {
     }
 
     fn unavailable_allowed_tools(&self) -> Vec<String> {
-        match &self.allowed_tools {
+        match &self.grant.scope {
             None => Vec::new(),
             Some(list) => list
                 .iter()
@@ -17991,18 +17989,18 @@ impl SubAgentToolRegistry {
         // message is the same for every role. The catalog removal at spawn
         // makes this unreachable in practice; the executor refusal keeps
         // hiding from being the only defense (#6296, #6298).
-        if is_machine_control_tool(name) {
+        if !self.grant.desktop && is_machine_control_tool(name) {
             return Err(admission_denied(format!(
                 "[tool.family.denied] Desktop/computer-control tool `{name}` is not available to sub-agents. Run it in the parent session instead, or ask the user."
             )));
         }
-        if self.role_blocks_unhardened_process_tool(name) {
+        if self.grant_blocks_tool(name) {
             return Err(admission_denied(format!(
                 "Tool {name} is not available to this read-only worker because its process path does not share the hardened evidence boundary. Use read/search, classifier-bounded bash reads, or the verifier's bounded Run tool instead."
             )));
         }
         let action = input.get("action").and_then(Value::as_str);
-        if matches!(&self.agent_type, FleetRole::Scout | FleetRole::Reviewer)
+        if self.grant.surface == crate::worker_profile::ToolSurface::Evidence
             && name == "Web"
             && !matches!(action, Some("search" | "fetch"))
         {
@@ -18031,7 +18029,8 @@ impl SubAgentToolRegistry {
         } else if let Some(action) = action {
             self.is_action_allowed(name, action)
         } else {
-            self.allowed_tools
+            self.grant
+                .scope
                 .as_ref()
                 .is_none_or(|list| list.iter().any(|allowed| allowed == name))
         };

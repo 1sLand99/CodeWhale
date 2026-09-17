@@ -41,6 +41,8 @@ Fleet 的八个规范角色名是 `general`、`explore`、`planner`、`reviewer`
 
 **委派移动的是工作，绝不是权限。** 只读父代理可以委派给 `implement`，但子代理的写入、网络、shell 和工具权限仍受父代理实时权限限制。检查角色可以使用分类的只读 shell；平台提供原生强制隔离时，也可以使用显式的只读分析模式。角色名称或 `read_only` 标志都不能授予调用方原本没有的 shell 权限。`fleet/exact.rs` 中的 `ChildAuthority::clamp` 对每个权限字段取较窄的值，并合并拒绝列表；`inherit_disallowed_tools: false` 不能删除操作者或祖先的拒绝规则。恢复保存的 worker 时，还会再次与当前调用方权限求交。测试 `a_read_only_parents_delegation_never_widens_authority` 验证此边界。
 
+进程内部，解析后的权限只有一个对象——`crates/tui/src/worker_profile.rs` 中的 `ChildGrant`：`files`（none/read/write）、`shell`（none/inspect/verify/full）、`network`、`desktop`（子代理一律不授予）、命名工具 `surface`、调用方的显式 `scope`，以及剩余 `spawn` 深度。角色只是该对象上的预设（`ChildGrant::for_role`）；`ChildGrant::resolve` 将它与父代理派生的配置求交。子代理的工具目录、分发拒绝和能力包络读取同一份字段——可见即可调，被拒即不可见。
+
 会话的**权限姿态**在每个子代理内部的应用方式与父代理回合完全一致：在 Auto-Review 下，同一个确定性底线和一次性模型守护者决定 worker 的被扣留调用（绝不是提示词；守护者不可用时拒绝，fail closed）；在 Ask 下，角色无法委派的被扣留调用会作为审批提示在父代理的 UI 中弹出，worker 可见地等待（`waiting for user`），或者在无法提示的主机上带着原因被拒绝；Full Access 仍然在不可绕过的安全底线上 fail closed。每一次没有人被提示的决策都是该 worker 转录中的一行备注（聚焦时可见）和一条审计日志记录。参见 `docs/MODES.md`。
 
 每个角色的完整系统提示词位于 `crates/tui/src/tools/subagent/mod.rs`（搜索 `*_AGENT_INTRO`）。提示词前缀在子代理启动时自动加载；父代理的委派提示词成为第一个回合的用户消息。

@@ -196,6 +196,12 @@ because they did anything wrong. Treat their time as more expensive than ours.
 - Prefer focused compilation, a relevant existing check, and direct product or
   manual evidence. Run a broad suite only when the change creates a genuine
   cross-cutting or release risk. Do not repeatedly rerun an unchanged suite.
+- **Batch edits; compile once.** `cargo check` and test builds on this
+  workspace take minutes, so an edit→compile→edit loop spends most of its
+  time waiting on the linker. Read precisely, write every edit a coherent
+  slice needs, then compile and test once — the same errors surface either
+  way, just later and all at once. Reserve mid-slice compiles for genuinely
+  uncertain API or borrow questions where a wrong guess would cascade.
 - Declared migrations are one-way. Once the repository adopts a replacement
   architecture or shared spine, new work uses it and touched legacy code moves
   toward it. Do not add another legacy call site for convenience. Keep a
