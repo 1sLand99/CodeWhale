@@ -5737,6 +5737,7 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
         "exact_files",
         "expected_artifact",
         "limit",
+        "max_output_tokens",
         "max_steps",
         "message",
         "model",
@@ -14215,6 +14216,7 @@ pub(crate) fn stub_runtime() -> SubAgentRuntime {
         step_api_timeout: DEFAULT_STEP_API_TIMEOUT,
         api_timeout_retry_base_backoff: SUBAGENT_API_TIMEOUT_INITIAL_BACKOFF,
         tool_timeout: DEFAULT_TOOL_TIMEOUT,
+        max_output_tokens: None,
         speech_output_dir: None,
         todos: crate::tools::todo::new_shared_todo_list(),
     }
