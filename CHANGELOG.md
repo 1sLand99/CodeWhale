@@ -217,6 +217,9 @@ tag, packages, checksums and release assets exist.
   behind every user row (striping), then behind none; newest-only keeps the
   eye on the turn in play. Sending a new prompt moves the highlight and
   un-highlights its predecessor.
+- Diff rows tint whole: added/deleted line numbers now share the row's green
+  / red background instead of sitting bare next to a painted body. Context
+  rows stay on the bare ground.
 
 - A steer the engine never delivered is no longer reported as sent. The runtime
   API persisted the steer item as already-`Completed` and emitted
