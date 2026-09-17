@@ -8293,6 +8293,72 @@ async fn read_only_inspection_roles_execute_pwd_and_absolute_git_log() {
     }
 }
 
+#[test]
+fn machine_control_tools_are_classified_by_mcp_name() {
+    for name in [
+        "mcp_codewhale-cu_type",
+        "mcp_codewhale-cu_run_actions",
+        "mcp_codewhale--cu_get_app_state",
+        "mcp_plugin-12-computer-use-computer_screenshot",
+    ] {
+        assert!(
+            super::is_machine_control_tool(name),
+            "{name} must classify as machine control"
+        );
+    }
+    for name in [
+        "mcp_github_create_issue",
+        "mcp_memory_search",
+        "mcp_codewhale-cu",
+        "bash",
+        "Web",
+    ] {
+        assert!(
+            !super::is_machine_control_tool(name),
+            "{name} must not classify as machine control"
+        );
+    }
+}
+
+/// A child never inherits desktop control. The catalog removal at spawn keeps
+/// the family off the wire; this proves the executor refuses it anyway, for
+/// every role, with a message that names the alternative (#6296).
+#[tokio::test]
+async fn children_cannot_reach_machine_control_tools() {
+    for role in [
+        FleetRole::Verifier,
+        FleetRole::Scout,
+        FleetRole::Reviewer,
+        FleetRole::Builder,
+        FleetRole::Worker,
+    ] {
+        let mut runtime =
+            stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
+        runtime.worker_profile = WorkerRuntimeProfile::for_role(role.clone());
+        let registry = SubAgentToolRegistry::new(
+            runtime,
+            role.clone(),
+            None,
+            crate::tools::todo::new_shared_todo_list(),
+            crate::tools::plan::new_shared_plan_state(),
+        );
+
+        let refusal = registry
+            .execute(
+                "agent_machine_control",
+                "mcp_codewhale-cu_type",
+                json!({"text": "echo VERIFY_TAB_OK"}),
+            )
+            .await
+            .expect_err("a child must never dispatch machine-control tools")
+            .to_string();
+        assert!(
+            refusal.contains("[tool.family.denied]"),
+            "{role:?} refusal did not identify the family rule: {refusal}"
+        );
+    }
+}
+
 /// Read-only text filters may transform stdout, but they must not reach their
 /// file-output or helper-program forms through the same bounded bash carve-out.
 #[tokio::test]

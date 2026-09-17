@@ -16809,6 +16809,18 @@ impl SubAgentToolRegistry {
         // root-only mutations are removed before catalog filtering and search.
         registry.remove_tool("create_goal");
         registry.remove_tool("update_goal");
+        // Machine-control MCP tools are never part of a child's grant: remove
+        // them from the built surface so they are neither eager nor
+        // discoverable. `execute_full` repeats the refusal at dispatch.
+        if let Some(pool) = runtime.mcp_pool.as_ref()
+            && let Ok(pool) = pool.try_lock()
+        {
+            for (name, _) in pool.all_tools() {
+                if is_machine_control_tool(&name) {
+                    registry.remove_tool(&name);
+                }
+            }
+        }
 
         Self {
             allowed_tools,
@@ -17855,6 +17867,18 @@ impl SubAgentToolRegistry {
         name: &str,
         input: Value,
     ) -> Result<RichToolResult> {
+        // Desktop / computer-control is never part of a child's grant. This is
+        // a hard family denial, not a posture nuance: a caller must grant it
+        // explicitly (and visibly) before any child may drive the user's
+        // machine. Checked before the read-only process gate so the family
+        // message is the same for every role. The catalog removal at spawn
+        // makes this unreachable in practice; the executor refusal keeps
+        // hiding from being the only defense (#6296, #6298).
+        if is_machine_control_tool(name) {
+            return Err(admission_denied(format!(
+                "[tool.family.denied] Desktop/computer-control tool `{name}` is not available to sub-agents. Run it in the parent session instead, or ask the user."
+            )));
+        }
         if self.role_blocks_unhardened_process_tool(name) {
             return Err(admission_denied(format!(
                 "Tool {name} is not available to this read-only worker because its process path does not share the hardened evidence boundary. Use read/search, classifier-bounded bash reads, or the verifier's bounded Run tool instead."
@@ -18110,6 +18134,27 @@ impl SubAgentToolRegistry {
 /// A child admission refusal is a typed permission denial, not an opaque
 /// execution error — the worker loop's no-progress guard (#6015) can only
 /// count denials it can name.
+/// Whether `name` is a desktop / computer-control surface.
+///
+/// Desktop control is the most machine-wide capability Codewhale can grant —
+/// it types on the user's screen — so children never inherit it: `execute_full`
+/// refuses the whole family at dispatch and the child registry build removes
+/// it from the catalog, so a tool that would be denied never appears on the
+/// wire (#6296, #6298). Classification is by MCP naming
+/// (`mcp_<server>_<tool>`): the two shipped computer-use surfaces plus the
+/// generic `computer-use` / `computer_use` markers a third-party desktop
+/// server carries in its server id.
+fn is_machine_control_tool(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let Some(rest) = lower.strip_prefix("mcp_") else {
+        return false;
+    };
+    rest.starts_with("codewhale-cu_")
+        || rest.starts_with("codewhale--cu_")
+        || rest.contains("computer-use")
+        || rest.contains("computer_use")
+}
+
 fn admission_denied(message: impl Into<String>) -> anyhow::Error {
     ToolError::permission_denied(message).into()
 }
