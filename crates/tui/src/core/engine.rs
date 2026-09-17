@@ -1709,28 +1709,6 @@ impl Engine {
         // `run_turn` restarts it per turn; this initial value only matters
         // for hosts that inspect the engine before the first turn.
         let turn_wall_clock_budget = config.turn_wall_clock;
-        // Skill-name snapshot for the plugin-suggestion gate (#6274): the
-        // SAME catalogue the system prompt indexes (prompts.rs skills block —
-        // workspace roots + configured skills_dir + plugin-sourced skills),
-        // so suppression sees everything the session actually has.
-        let gate_skill_names: std::collections::BTreeSet<String> =
-            crate::skills::discover_for_workspace_and_dir_with_mode_and_plugins(
-                &config.workspace,
-                &config.skills_dir,
-                crate::skills::SkillDiscoveryMode::from_codewhale_only(
-                    config.skills_scan_codewhale_only,
-                ),
-                Some(plugin_registry.as_ref()),
-            )
-            .list()
-            .iter()
-            .flat_map(|skill| {
-                std::iter::once(skill.name.clone()).chain(skill.aliases.iter().cloned())
-            })
-            .map(|name| name.trim().to_ascii_lowercase())
-            .filter(|name| !name.is_empty())
-            .collect();
-
         let engine = Engine {
             config,
             api_config: api_config.clone(),
@@ -1757,9 +1735,7 @@ impl Engine {
             mcp_event_generation: 0,
             plugin_registry,
             recommended_plugin_gate: StdMutex::new(
-                crate::plugins::recommend::RecommendedPluginGate::with_skill_names(
-                    gate_skill_names,
-                ),
+                crate::plugins::recommend::RecommendedPluginGate::default(),
             ),
             api_provider,
             api_provider_identity,

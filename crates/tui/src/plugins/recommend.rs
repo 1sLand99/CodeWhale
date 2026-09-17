@@ -190,6 +190,14 @@ pub fn idle_and_catalog_keyword_matches(
         if candidate.has_errors() {
             continue;
         }
+        // Only plugins are plugin suggestions (#6290 rework): skill entries
+        // are installable, but this pool feeds the composer toast and the
+        // `<recommended_plugins>` fragment, so a skill must not be dressed as
+        // one. This replaces #6274's name suppression, which existed only
+        // because the catalog mixed the two kinds.
+        if candidate.kind != crate::plugins::marketplace::types::MarketplaceEntryKind::Plugin {
+            continue;
+        }
         if installed_names.contains(&candidate.name.to_ascii_lowercase()) {
             continue;
         }
@@ -261,45 +269,23 @@ pub fn match_plugin_for_draft_among(
 
 /// Per-Engine gate for the append-only `<recommended_plugins>` fragment.
 ///
-/// A plugin id is suggested at most once per Engine lifetime, and a plugin
-/// whose name (or alias) matches a skill in the session's catalogue is never
-/// suggested — the skill already covers the domain, so the nudge is noise
-/// (#6274). Dismissals continue to be honored through `Settings`.
+/// A plugin id is suggested at most once per Engine lifetime, and dismissals
+/// are honored through `Settings`.
 ///
-/// Known limitation: the skill-name set is snapshotted once at Engine
-/// construction (from the same catalogue the system prompt indexes), so a
-/// skill installed mid-session does not suppress its plugin twin until the
-/// next Engine starts.
+/// Skill-name suppression (#6274) is gone with the #6290 rework: it existed
+/// only because skill entries were catalogued as plugins and then had to be
+/// suppressed by name — a snapshot-based check that missed mid-session
+/// changes and never applied to the composer toast. Entry kinds now keep
+/// skills out of the plugin pool entirely (see `MarketplaceEntryKind`).
 #[derive(Debug, Default)]
 pub struct RecommendedPluginGate {
     shown: BTreeSet<String>,
-    skill_names: BTreeSet<String>,
 }
 
 impl RecommendedPluginGate {
-    /// Engine constructor input and test seam: suppress exactly these
-    /// skill names and aliases (case is normalized here, so callers may
-    /// pass them in any form).
-    #[must_use]
-    pub fn with_skill_names(skill_names: BTreeSet<String>) -> Self {
-        Self {
-            shown: BTreeSet::new(),
-            skill_names: skill_names
-                .into_iter()
-                .map(|name| name.trim().to_ascii_lowercase())
-                .filter(|name| !name.is_empty())
-                .collect(),
-        }
-    }
-
-    /// True when this plugin may be suggested now: not covered by a
-    /// catalogue skill and not already suggested in this Engine's lifetime.
-    /// First admission records the plugin id.
-    fn admits(&mut self, id: &str, name: &str) -> bool {
-        let name_key = name.trim().to_ascii_lowercase();
-        if !name_key.is_empty() && self.skill_names.contains(&name_key) {
-            return false;
-        }
+    /// True when this plugin may be suggested now: not already suggested in
+    /// this Engine's lifetime. First admission records the plugin id.
+    fn admits(&mut self, id: &str) -> bool {
         self.shown.insert(id.to_string())
     }
 }
@@ -323,9 +309,9 @@ pub fn recommended_plugins_user_fragment(
         marketplace,
         &settings.dismissed_plugin_suggestions,
     )?;
-    // Once per Engine lifetime per plugin id, and never when a local skill
-    // already covers the plugin's domain (#6274).
-    if !gate.admits(&matched.id, &matched.name) {
+    // Once per Engine lifetime per plugin id. Skill exclusion happens a
+    // layer down: skill-kind entries never enter the plugin pool (#6290).
+    if !gate.admits(&matched.id) {
         return None;
     }
     let mut listed = vec![matched];
@@ -377,6 +363,9 @@ pub fn recommend_plugins_for_task(
     }
     for candidate in marketplace {
         if candidate.has_errors() {
+            continue;
+        }
+        if candidate.kind != crate::plugins::marketplace::types::MarketplaceEntryKind::Plugin {
             continue;
         }
         if installed_names.contains(&candidate.name.to_ascii_lowercase()) {
@@ -526,7 +515,7 @@ mod tests {
     use super::*;
     use crate::plugins::marketplace::types::{
         CatalogProvenance, CatalogTier, MarketplaceCandidate, MarketplaceCandidateId,
-        MarketplaceCatalogId, MarketplaceInstallPlan, MarketplaceSourceSpec,
+        MarketplaceCatalogId, MarketplaceEntryKind, MarketplaceInstallPlan, MarketplaceSourceSpec,
     };
     use crate::test_support::{EnvVarGuard, lock_test_env};
     use std::fs;
@@ -558,6 +547,7 @@ mod tests {
         MarketplaceCandidate {
             id: MarketplaceCandidateId::new(&MarketplaceCatalogId::new(catalog), name),
             catalog_id: MarketplaceCatalogId::new(catalog),
+            kind: MarketplaceEntryKind::Plugin,
             name: name.to_string(),
             display_name: Some(format!("{name} plugin")),
             icon: None,
@@ -752,26 +742,44 @@ mod tests {
         );
     }
 
+    /// A skill entry in a catalog is installable but is never a plugin
+    /// suggestion — the structural replacement for #6274's name suppression.
     #[test]
-    fn recommended_plugins_fragment_suppressed_by_local_skill_name() {
+    fn skill_entries_never_enter_the_plugin_suggestion_pool() {
         let _lock = lock_test_env();
         let root = TempDir::new().unwrap();
         let _home = EnvVarGuard::set("CODEWHALE_HOME", root.path().join("home"));
-        write_keyword_bundle(root.path(), "supabase", "Hosted Postgres", &["supabase"]);
-        let registry = crate::plugins::PluginDiscoveryContext::capture_pre_dotenv()
-            .registry_for_workspace(root.path());
-
-        let skills: BTreeSet<String> = ["Supabase".to_string()].into_iter().collect();
-        let mut gate = RecommendedPluginGate::with_skill_names(skills);
+        let registry = crate::plugins::PluginRegistry::empty(root.path());
+        let mut skill = marketplace_candidate("cw2", "test", &["test"]);
+        skill.kind = MarketplaceEntryKind::Skill;
+        let slice = std::slice::from_ref(&skill);
+        assert!(
+            idle_and_catalog_keyword_matches(&registry, slice).is_empty(),
+            "a skill entry must not be a plugin candidate"
+        );
         assert!(
             recommended_plugins_user_fragment(
-                "add supabase auth to login",
+                "run the test suite",
                 &registry,
-                &[],
-                &mut gate,
+                slice,
+                &mut RecommendedPluginGate::default(),
             )
             .is_none(),
-            "a loaded local skill covering the plugin name must suppress the suggestion (#6274)"
+            "a skill entry must not produce a <recommended_plugins> fragment"
+        );
+
+        // Control: the same entry as a plugin still matches, so the
+        // exclusion is the kind and not a broken fixture.
+        skill.kind = MarketplaceEntryKind::Plugin;
+        assert!(
+            recommended_plugins_user_fragment(
+                "run the test suite",
+                &registry,
+                std::slice::from_ref(&skill),
+                &mut RecommendedPluginGate::default(),
+            )
+            .is_some(),
+            "the same entry as a plugin still matches"
         );
     }
 
