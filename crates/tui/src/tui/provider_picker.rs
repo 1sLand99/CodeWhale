@@ -47,6 +47,7 @@ use crate::provider_readiness::{
     credential_state_for_provider, route_identity_for_model,
 };
 use crate::reasoning_preference::ReasoningEffort;
+use crate::tui::list_nav::{self, Motion};
 use crate::tui::menu_style;
 use crate::tui::views::{
     ActionHint, EmptyState, ListDetailLayout, ModalKind, ModalView, ViewAction, ViewEvent,
@@ -67,6 +68,10 @@ const DS4_BASE_URL: &str = "http://127.0.0.1:8000/v1";
 const DS4_DEFAULT_MODEL: &str = "deepseek-v4-flash";
 const LM_STUDIO_PROVIDER_ID: &str = "lm_studio";
 const LM_STUDIO_BASE_URL: &str = "http://127.0.0.1:1234/v1";
+/// Rows a PageUp/PageDown travels in the provider lists. Both views are
+/// short modal surfaces; a page is a readable jump, not a screenful measured
+/// at paint time — the same rule as `fleet_detail`'s page constant.
+const PROVIDER_PAGE: usize = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
@@ -2007,6 +2012,63 @@ impl ProviderPickerView {
 
     fn move_up(&mut self) {
         self.move_selection(-1);
+    }
+
+    /// Apply one [`list_nav`] motion to the provider list (#6290).
+    ///
+    /// The key vocabulary is single-sourced in `list_nav`; this surface owns
+    /// only what a motion means here: step motions wrap through the visible
+    /// rows (existing behavior), page and edge motions clamp and never land
+    /// on a row the active filter hides.
+    fn move_by_list_motion(&mut self, key: &KeyEvent) {
+        let Some(motion) = list_nav::motion_while_typing(key) else {
+            return;
+        };
+        match motion {
+            Motion::Prev => self.move_selection(-1),
+            Motion::Next => self.move_selection(1),
+            Motion::PagePrev => self.move_selection_clamped(-(PROVIDER_PAGE as i64)),
+            Motion::PageNext => self.move_selection_clamped(PROVIDER_PAGE as i64),
+            Motion::First => self.select_first_visible(),
+            Motion::Last => self.select_last_visible(),
+            // Single-column surface: the region axis has nowhere to move to.
+            Motion::RegionPrev | Motion::RegionNext => {}
+        }
+    }
+
+    /// Clamped sibling of [`Self::move_selection`]: no wrap (a paging key asks
+    /// to travel, not to teleport — `list_nav`'s contract), and rows the
+    /// filter hides are never landed on.
+    fn move_selection_clamped(&mut self, step: i64) {
+        let count = self.rows.len();
+        if count == 0 || self.visible_row_count() == 0 {
+            return;
+        }
+        let last = count - 1;
+        let target = (self.selected_idx as i64 + step).clamp(0, last as i64) as usize;
+        let found = if step >= 0 {
+            (target..=last).find(|&index| self.row_visible(index))
+        } else {
+            (0..=target).rev().find(|&index| self.row_visible(index))
+        };
+        if let Some(index) = found {
+            self.selected_idx = index;
+        }
+    }
+
+    fn select_first_visible(&mut self) {
+        if let Some(index) = (0..self.rows.len()).find(|&index| self.row_visible(index)) {
+            self.selected_idx = index;
+        }
+    }
+
+    fn select_last_visible(&mut self) {
+        if let Some(index) = (0..self.rows.len())
+            .rev()
+            .find(|&index| self.row_visible(index))
+        {
+            self.selected_idx = index;
+        }
     }
 
     fn move_down(&mut self) {
@@ -3960,12 +4022,19 @@ impl ModalView for ProviderPickerView {
                         .get(self.selected_idx)
                         .map(|row| row.provider_id.clone()),
                 }),
-                KeyCode::Up => {
-                    self.move_up();
-                    ViewAction::None
-                }
-                KeyCode::Down => {
-                    self.move_down();
+                // One movement vocabulary (#6290): `list_nav` classifies the
+                // keys; this surface owns only what a motion means for its
+                // rows. A surface with a live filter uses the typing-safe key
+                // set — no letter aliases to eat the query.
+                KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::End
+                    if key.modifiers.is_empty() =>
+                {
+                    self.move_by_list_motion(&key);
                     ViewAction::None
                 }
                 // Row-dependent actions are no-ops when the current filter
@@ -6741,6 +6810,51 @@ mod tests {
 
         picker.handle_key(key(KeyCode::Down));
         assert_eq!(picker.selected_provider(), first);
+    }
+
+    #[test]
+    fn page_and_edge_motions_clamp_and_never_land_on_hidden_rows() {
+        let config = Config::default();
+        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
+        picker.toggle_view(); // full catalog (#3830)
+        let last = picker.rows.len() - 1;
+
+        picker.selected_idx = 0;
+        picker.handle_key(key(KeyCode::PageDown));
+        assert_eq!(
+            picker.selected_idx,
+            PROVIDER_PAGE.min(last),
+            "PageDown travels one page and clamps at the end"
+        );
+        picker.handle_key(key(KeyCode::End));
+        assert_eq!(picker.selected_idx, last, "End is the last visible row");
+        picker.handle_key(key(KeyCode::PageDown));
+        assert_eq!(
+            picker.selected_idx, last,
+            "paging at the end clamps, never wraps"
+        );
+        picker.handle_key(key(KeyCode::PageUp));
+        assert_eq!(picker.selected_idx, last.saturating_sub(PROVIDER_PAGE));
+        picker.handle_key(key(KeyCode::Home));
+        assert_eq!(picker.selected_idx, 0, "Home is the first visible row");
+
+        // With a live filter, motions land only on rows it shows.
+        picker.update_query("deep".to_string());
+        picker.handle_key(key(KeyCode::End));
+        assert!(
+            picker.row_visible(picker.selected_idx),
+            "End must skip rows the filter hides"
+        );
+        let last_visible = (0..picker.rows.len())
+            .rev()
+            .find(|&index| picker.row_visible(index))
+            .expect("a filter matching something");
+        assert_eq!(picker.selected_idx, last_visible);
+        picker.handle_key(key(KeyCode::Home));
+        let first_visible = (0..picker.rows.len())
+            .find(|&index| picker.row_visible(index))
+            .expect("a filter matching something");
+        assert_eq!(picker.selected_idx, first_visible);
     }
 
     #[test]
