@@ -3004,16 +3004,16 @@ impl DeepSeekClient {
             .unwrap_or_else(|| self.api_provider.as_str().to_string())
     }
 
-    /// Reviewed response schema for a named compatible provider.
+    /// Whether this route speaks Baseten's `/models` dialect.
     ///
-    /// Schema recognition is intentionally separate from catalog ownership:
-    /// `base-ten` may use Baseten's `/models` shape, while its exact configured
-    /// identity remains `base-ten` rather than sharing the `baseten` partition.
-    fn catalog_setup_template_id(&self) -> Option<&'static str> {
-        (self.api_provider == ApiProvider::Custom)
-            .then(|| codewhale_config::provider_setup_template(&self.provider_identity))
-            .flatten()
-            .map(|template| template.id)
+    /// Schema recognition is by endpoint, never by table name: whatever the
+    /// user called the `[providers.<name>]` table, the wire shape is a fact
+    /// about the host (#6289). Catalog ownership still uses the exact
+    /// configured identity, so a renamed Baseten table keeps its own
+    /// partition.
+    fn catalog_endpoint_is_baseten(&self) -> bool {
+        self.api_provider == ApiProvider::Custom
+            && codewhale_config::catalog::endpoint_is_baseten(&self.base_url)
     }
 
     /// Fetch the provider's live `/models` listing as a secret-free
@@ -3050,7 +3050,7 @@ impl DeepSeekClient {
                     openrouter_to_catalog_offering(item, &provider, &fingerprint, fetched_at)
                 })
                 .collect::<Result<Vec<_>, _>>()?
-        } else if self.catalog_setup_template_id() == Some(codewhale_config::BASETEN_TEMPLATE_ID) {
+        } else if self.catalog_endpoint_is_baseten() {
             let baseten_models = parse_baseten_models_response(&body)?;
             if baseten_models.is_empty() {
                 return Err(CatalogRefreshError::EmptyList);
@@ -3191,8 +3191,10 @@ impl DeepSeekClient {
     /// allowing this provider's successful roster to retire removed ids.
     ///
     /// Activated for model-list authorities that are not satisfied by the
-    /// cross-provider Models.dev snapshot: OpenRouter, named live gateways, and
-    /// the reviewed OpenAI-compatible setup templates (including Baseten).
+    /// cross-provider Models.dev snapshot: OpenRouter, named live gateways,
+    /// and Baseten's account-scoped endpoint (no static snapshot can serve a
+    /// per-credential roster). Every other custom host is an ordinary
+    /// provider served by Models.dev plus its configured models (#6289).
     /// The refresh is non-fatal: on failure, persisted prior rows and static
     /// seeds remain available with a typed failed receipt.
     pub fn spawn_active_provider_catalog_refresh(config: &Config) {
@@ -3203,9 +3205,10 @@ impl DeepSeekClient {
         {
             let provider = config.api_provider();
             let provider_identity = config.provider_identity_for(provider);
-            let is_reviewed_compatible_template = provider == ApiProvider::Custom
-                && codewhale_config::provider_setup_template(&provider_identity)
-                    .is_some_and(|template| template.is_compatible());
+            let is_baseten_endpoint = provider == ApiProvider::Custom
+                && codewhale_config::catalog::endpoint_is_baseten(
+                    &config.base_url_for_route_identity(provider, &provider_identity),
+                );
             if !matches!(
                 provider,
                 ApiProvider::Openrouter
@@ -3214,7 +3217,7 @@ impl DeepSeekClient {
                     | ApiProvider::Concentrate
                     | ApiProvider::Codewhale
                     | ApiProvider::Ollama
-            ) && !is_reviewed_compatible_template
+            ) && !is_baseten_endpoint
             {
                 return;
             }
@@ -11963,11 +11966,7 @@ mod tests {
         .expect("openrouter client")
     }
 
-    pub(super) fn baseten_client_for(server: &MockServer) -> DeepSeekClient {
-        baseten_client_for_identity(server, codewhale_config::BASETEN_TEMPLATE_ID)
-    }
-
-    pub(super) fn baseten_client_for_identity(
+    pub(super) fn custom_mock_client_for_identity(
         server: &MockServer,
         identity: &str,
     ) -> DeepSeekClient {
@@ -11977,9 +11976,9 @@ mod tests {
             identity.to_string(),
             ProviderConfig {
                 kind: Some("openai-compatible".to_string()),
-                api_key: Some("test-baseten-key".to_string()),
+                api_key: Some("test-custom-key".to_string()),
                 base_url: Some(format!("{}/v1", server.uri())),
-                model: Some(codewhale_config::BASETEN_DEFAULT_MODEL.to_string()),
+                model: Some("synthetic/custom-model".to_string()),
                 ..ProviderConfig::default()
             },
         );
@@ -12483,55 +12482,46 @@ mod tests {
             openrouter_lkg
         );
 
-        let baseten_server = MockServer::start().await;
+        // Same plumbing for an ordinary custom host: the generic branch
+        // ignores unknown pricing fields, so the failure injector here is a
+        // body that is not a model list at all. Absurd-price rejection stays
+        // covered at the Baseten builder's own fixture tests.
+        let custom_server = MockServer::start().await;
         mount_models_json(
-            &baseten_server,
+            &custom_server,
             200,
             json!({"data": [{
-                "id": "synthetic/baseten-priced",
-                "pricing": {"prompt": "0.000001", "completion": "0.000002"}
+                "id": "synthetic/custom-model"
             }]}),
         )
         .await;
-        let baseten = baseten_client_for(&baseten_server);
-        let mut baseten_cache = ProviderCatalogCache::new();
+        let custom = custom_mock_client_for_identity(&custom_server, "custom-lkg");
+        let mut custom_cache = ProviderCatalogCache::new();
         assert_eq!(
-            baseten
-                .refresh_catalog_cache(&mut baseten_cache, 3_600)
-                .await,
+            custom.refresh_catalog_cache(&mut custom_cache, 3_600).await,
             CatalogStatus::Fresh
         );
-        let baseten_fp = base_url_fingerprint(&format!("{}/v1", baseten_server.uri()));
-        let baseten_lkg = baseten_cache
-            .get(codewhale_config::BASETEN_TEMPLATE_ID, &baseten_fp)
-            .expect("Baseten LKG")
+        let custom_fp = base_url_fingerprint(&format!("{}/v1", custom_server.uri()));
+        let custom_lkg = custom_cache
+            .get("custom-lkg", &custom_fp)
+            .expect("custom LKG")
             .offerings
             .clone();
 
-        baseten_server.reset().await;
-        mount_models_json(
-            &baseten_server,
-            200,
-            json!({"data": [{
-                "id": "synthetic/baseten-priced",
-                "pricing": {"prompt": "0.100001", "completion": "0.000002"}
-            }]}),
-        )
-        .await;
+        custom_server.reset().await;
+        mount_models_json(&custom_server, 200, json!("not a model list")).await;
         assert!(matches!(
-            baseten
-                .refresh_catalog_cache(&mut baseten_cache, 3_600)
-                .await,
+            custom.refresh_catalog_cache(&mut custom_cache, 3_600).await,
             CatalogStatus::Failed {
                 reason: CatalogRefreshError::InvalidResponse
             }
         ));
         assert_eq!(
-            baseten_cache
-                .get(codewhale_config::BASETEN_TEMPLATE_ID, &baseten_fp)
-                .expect("preserved Baseten LKG")
+            custom_cache
+                .get("custom-lkg", &custom_fp)
+                .expect("preserved custom LKG")
                 .offerings,
-            baseten_lkg
+            custom_lkg
         );
     }
 
@@ -13881,20 +13871,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn baseten_live_catalog_keeps_exact_identity_auth_and_metadata() {
+    async fn custom_catalog_schema_ignores_table_name() {
+        // The same enriched body served from a non-Baseten endpoint takes
+        // the generic branch for every identity: the table name selects
+        // ownership, never the wire parser (#6289). Baseten enrichment
+        // itself stays covered at the parser's fixture tests.
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/v1/models"))
-            .and(header("authorization", "Bearer test-baseten-key"))
+            .and(header("authorization", "Bearer test-custom-key"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "data": [{
-                    "id": codewhale_config::BASETEN_DEFAULT_MODEL,
+                    "id": "synthetic/custom-model",
                     "context_length": 1_048_576,
-                    "max_completion_tokens": 262_144,
                     "pricing": {
                         "prompt": 0.0000014,
-                        "completion": 0.0000044,
-                        "input_cache_read": 0.00000014
+                        "completion": 0.0000044
                     },
                     "supported_features": ["reasoning", "tools", "structured_outputs", "vision"]
                 }]
@@ -13902,51 +13894,54 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = baseten_client_for(&server);
-        assert_eq!(client.catalog_provider_id(), "baseten");
-        let delta = client.fetch_catalog_delta().await.expect("Baseten delta");
-        assert_eq!(delta.provider, "baseten");
-        assert_eq!(delta.offerings.len(), 1);
-        let offering = &delta.offerings[0];
-        assert_eq!(
-            offering.wire_model_id,
-            codewhale_config::BASETEN_DEFAULT_MODEL
-        );
-        assert_eq!(
-            offering.limit.as_ref().and_then(|limit| limit.context),
-            Some(1_048_576)
-        );
-        assert_eq!(
-            offering.cost.as_ref().and_then(|cost| cost.input),
-            Some(1.4)
-        );
-        assert_eq!(offering.tool_call, Some(true));
-        assert_eq!(offering.structured_output, Some(true));
+        for identity in ["baseten", "renamed-host"] {
+            let client = custom_mock_client_for_identity(&server, identity);
+            assert_eq!(client.catalog_provider_id(), identity);
+            let delta = client.fetch_catalog_delta().await.expect("delta");
+            assert_eq!(delta.provider, identity);
+            assert_eq!(delta.offerings.len(), 1);
+            let offering = &delta.offerings[0];
+            assert_eq!(offering.wire_model_id, "synthetic/custom-model");
+            assert_eq!(offering.provider, identity);
+            assert!(
+                offering.limit.is_none() && offering.cost.is_none() && offering.tool_call.is_none(),
+                "a non-Baseten endpoint takes the generic branch for any identity: {offering:?}"
+            );
+        }
+    }
 
-        let alias = baseten_client_for_identity(&server, "base-ten");
-        assert_eq!(alias.catalog_provider_id(), "base-ten");
-        assert_eq!(
-            alias.catalog_setup_template_id(),
-            Some(codewhale_config::BASETEN_TEMPLATE_ID)
-        );
-        let alias_delta = alias
-            .fetch_catalog_delta()
-            .await
-            .expect("Baseten alias delta");
-        assert_eq!(alias_delta.provider, "base-ten");
+    #[test]
+    fn baseten_dialect_recognized_by_endpoint_not_name() {
+        fn client_for(identity: &str, base_url: &str) -> DeepSeekClient {
+            let mut providers = ProvidersConfig::default();
+            providers.custom.insert(
+                identity.to_string(),
+                ProviderConfig {
+                    kind: Some("openai-compatible".to_string()),
+                    api_key: Some("test-key".to_string()),
+                    base_url: Some(base_url.to_string()),
+                    model: Some("synthetic/custom-model".to_string()),
+                    ..ProviderConfig::default()
+                },
+            );
+            DeepSeekClient::new(&Config {
+                provider: Some(identity.to_string()),
+                providers: Some(providers),
+                ..Config::default()
+            })
+            .expect("client")
+        }
+
+        let baseten_url = codewhale_config::catalog::BASETEN_BASE_URL;
+        assert!(client_for("baseten", baseten_url).catalog_endpoint_is_baseten());
+        assert!(client_for("renamed-host", baseten_url).catalog_endpoint_is_baseten());
         assert!(
-            alias_delta
-                .offerings
-                .iter()
-                .all(|row| row.provider == "base-ten"),
-            "schema aliases must preserve exact catalog ownership"
+            client_for("baseten", &format!("{baseten_url}/")).catalog_endpoint_is_baseten(),
+            "a trailing slash still recognizes the host"
         );
-        assert_eq!(offering.attachment, Some(true));
+        assert!(!client_for("baseten", "https://127.0.0.1:9/v1").catalog_endpoint_is_baseten());
         assert!(
-            offering
-                .modalities
-                .as_ref()
-                .is_some_and(|modalities| modalities.input.iter().any(|value| value == "image"))
+            !client_for("groq", "https://api.groq.com/openai/v1").catalog_endpoint_is_baseten()
         );
     }
 }

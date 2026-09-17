@@ -970,9 +970,10 @@ pub fn all_catalog_models_for_provider(provider: ApiProvider) -> Vec<String> {
 
 /// Catalog-backed model ids for one exact provider route.
 ///
-/// Built-in providers retain their canonical ids. Named compatible custom
-/// routes use `provider_identity`, so Baseten's live `/v1/models` rows and its
-/// offline setup-template seeds remain isolated from every other custom host.
+/// Built-in providers retain their canonical ids. Named custom routes use
+/// `provider_identity`, so one host's live `/v1/models` rows remain isolated
+/// from every other custom host. There are no compiled seed models: a custom
+/// route with no live, bundled, or configured rows offers nothing (#6289).
 #[must_use]
 pub fn all_catalog_models_for_provider_identity(
     provider: ApiProvider,
@@ -996,15 +997,6 @@ pub fn all_catalog_models_for_provider_identity(
             catalog_id.as_ref(),
         )),
     };
-    if models.is_empty()
-        && provider == ApiProvider::Custom
-        && let Some(template) = codewhale_config::provider_setup_template(catalog_id.as_ref())
-        && template.is_compatible()
-    {
-        for model in template.picker_models() {
-            push_unique_model(&mut models, model);
-        }
-    }
     if models.is_empty() {
         for model in model_completion_names_for_provider(provider) {
             push_unique_model(&mut models, model);
@@ -1268,21 +1260,9 @@ pub(crate) fn catalog_models_for_route(
         return models;
     }
     if provider == ApiProvider::Custom {
-        return codewhale_config::provider_setup_template(identity)
-            .filter(|template| {
-                template.is_compatible()
-                    && template.base_url().is_some_and(|default| {
-                        base_url_fingerprint(default) == base_url_fingerprint(base_url)
-                    })
-            })
-            .map(|template| {
-                template
-                    .picker_models()
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default();
+        // No compiled seeds: without a cached listing the caller retains the
+        // configured model and the live refresh fills the roster (#6289).
+        return Vec::new();
     }
     if provider.kind().is_none_or(|kind| {
         codewhale_config::provider_preserves_custom_base_url_model(kind, base_url)
@@ -2355,27 +2335,19 @@ mod tests {
     }
 
     #[test]
-    fn named_custom_catalogs_keep_exact_identity_and_baseten_offline_seeds() {
+    fn named_custom_catalogs_keep_exact_identity_without_compiled_seeds() {
         let _live = lock_live_snapshot();
         clear_live_snapshot();
 
-        let offline = all_catalog_models_for_provider_identity(
-            ApiProvider::Custom,
-            Some(codewhale_config::BASETEN_TEMPLATE_ID),
-        );
-        assert_eq!(
-            offline,
-            vec![codewhale_config::BASETEN_DEFAULT_MODEL.to_string()]
-        );
-        assert!(
-            !all_catalog_models_for_provider_identity(
-                ApiProvider::Custom,
-                Some("another-compatible-host"),
-            )
-            .iter()
-            .any(|model| offline.contains(model)),
-            "Baseten seeds must not leak into another custom provider"
-        );
+        // No live rows, no bundled rows, no configured rows: an ordinary
+        // custom route offers nothing rather than a compiled default (#6289).
+        for identity in ["baseten", "another-custom-host"] {
+            assert!(
+                all_catalog_models_for_provider_identity(ApiProvider::Custom, Some(identity))
+                    .is_empty(),
+                "{identity} must not invent models offline"
+            );
+        }
 
         set_live_snapshot(
             CatalogSnapshot {
@@ -2399,10 +2371,9 @@ mod tests {
         );
         let case_distinct =
             all_catalog_models_for_provider_identity(ApiProvider::Custom, Some("BASETEN"));
-        assert_eq!(
-            case_distinct,
-            vec![codewhale_config::BASETEN_DEFAULT_MODEL.to_string()],
-            "template schema aliases may share offline seeds, but not another exact table's live roster"
+        assert!(
+            case_distinct.is_empty(),
+            "a case variant shares neither seeds nor another exact table's live roster"
         );
         assert!(
             catalog_offering_for_model_identity(

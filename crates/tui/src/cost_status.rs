@@ -242,7 +242,6 @@ impl EffectiveRouteEnvelope {
     pub fn audit(&self, usage: &Usage) -> TurnCostAudit {
         let reviewed_custom_metered = crate::pricing::reviewed_custom_route_is_metered(
             self.provider,
-            Some(&self.provider_identity),
             self.endpoint_fingerprint.as_deref(),
         );
         let declared_estimate = self.provider_live_pricing.as_ref().is_some_and(|quote| {
@@ -2419,9 +2418,12 @@ mod tests {
         )
         .audit(&usage);
         assert!(!generic.is_priced(), "{generic:?}");
+        // The endpoint fingerprint establishes Baseten's billing contract no
+        // matter the table name, so the failure is an unverified price for
+        // this identity — not an unknown basis (#6289).
         assert_eq!(
             generic.unpriced_reason,
-            Some(crate::pricing::UnpricedReason::UnknownBillingBasis)
+            Some(crate::pricing::UnpricedReason::UnverifiedLivePricing)
         );
 
         let wrong_fingerprint =
@@ -2631,7 +2633,11 @@ mod tests {
             if provider == ApiProvider::Custom {
                 // Baseten's same URL can represent another account after a key
                 // switch. Starting that refresh clears the mutable old scope.
-                let _new_key_refresh = crate::provider_catalog_live::begin_refresh(identity);
+                let _new_key_refresh = crate::provider_catalog_live::begin_refresh_for_identity(
+                    provider,
+                    identity,
+                    codewhale_config::catalog::BASETEN_BASE_URL,
+                );
             }
 
             let first_audit = first.audit(&usage);
@@ -2874,13 +2880,11 @@ mod tests {
 
             let mut wrong_identity = captured.clone();
             wrong_identity.provider_identity.push_str("-other");
+            // The endpoint fingerprint still establishes the billing contract,
+            // so a renamed identity fails quote verification (#6289).
             assert_eq!(
                 wrong_identity.audit(&usage).unpriced_reason,
-                Some(if provider == ApiProvider::Custom {
-                    crate::pricing::UnpricedReason::UnknownBillingBasis
-                } else {
-                    crate::pricing::UnpricedReason::UnverifiedLivePricing
-                })
+                Some(crate::pricing::UnpricedReason::UnverifiedLivePricing)
             );
 
             let mut wrong_endpoint = captured;

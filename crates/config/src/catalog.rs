@@ -852,6 +852,26 @@ pub fn base_url_fingerprint(base_url: &str) -> String {
     out
 }
 
+/// Baseten Model APIs endpoint: the one hosted Chat Completions host whose
+/// wire facts differ from the generic shape (#6289).
+///
+/// Baseten's `/models` uses its own response schema and returns an
+/// account-scoped roster, so response parsing, account-scoped cache
+/// isolation, and the reviewed per-token billing contract all key off this
+/// endpoint. Recognition is by endpoint fingerprint — never by what the user
+/// named the `[providers.<name>]` table — so renames and aliases cannot
+/// change wire handling.
+pub const BASETEN_BASE_URL: &str = "https://inference.baseten.co/v1";
+
+/// Whether `base_url` is Baseten's Model APIs endpoint.
+///
+/// Compares fingerprints, not spellings, so a trailing slash or case
+/// difference in a user-configured URL still recognizes the host.
+#[must_use]
+pub fn endpoint_is_baseten(base_url: &str) -> bool {
+    base_url_fingerprint(base_url) == base_url_fingerprint(BASETEN_BASE_URL)
+}
+
 fn secret_free_fingerprint_input(base_url: &str) -> String {
     const REDACTED: &str = "invalid-or-secret-bearing-url";
     let trimmed = base_url.trim();

@@ -477,32 +477,25 @@ fn canonical_provider_scope(provider: &str) -> String {
 
 #[cfg(test)]
 fn inferred_provider_kind(identity: &str) -> ApiProvider {
-    if codewhale_config::provider_setup_template(identity).is_some_and(|t| t.is_compatible()) {
-        ApiProvider::Custom
-    } else {
-        ApiProvider::parse(identity).unwrap_or(ApiProvider::Custom)
-    }
+    // No recognized built-in spelling resolves to a compatible-template id,
+    // so the parse fallback below already answers Custom for every named
+    // custom table (#6289).
+    ApiProvider::parse(identity).unwrap_or(ApiProvider::Custom)
 }
 
 fn storage_provider(kind: ApiProvider, identity: &str) -> String {
     format!("{}:{}", kind.as_str(), identity.trim())
 }
 
-fn identity_from_storage(provider: &str) -> &str {
-    provider
-        .split_once(':')
-        .map_or(provider, |(_, identity)| identity)
-}
-
-fn is_account_scoped_provider(provider: &str) -> bool {
-    provider.starts_with("codewhale:")
-        || codewhale_config::provider_setup_template(identity_from_storage(provider))
-            .is_some_and(|template| template.id == codewhale_config::BASETEN_TEMPLATE_ID)
-}
-
+/// Whether a catalog scope holds an account-scoped roster that must never be
+/// shared across credentials (#6289).
+///
+/// Baseten's `/models` answers per workspace, so its rows are fenced by
+/// endpoint fingerprint — never by table name. The Codewhale API's own rows
+/// are fenced the same way.
 fn is_account_scoped_scope(provider: &str, fingerprint: &str) -> bool {
-    is_account_scoped_provider(provider)
-        || fingerprint == base_url_fingerprint(codewhale_config::BASETEN_BASE_URL)
+    provider.starts_with("codewhale:")
+        || fingerprint == base_url_fingerprint(codewhale_config::catalog::BASETEN_BASE_URL)
         || fingerprint == base_url_fingerprint(ApiProvider::Codewhale.default_base_url())
 }
 
@@ -1091,10 +1084,9 @@ fn begin_refresh_inner(
     let generation = if let Ok(mut generations) = REFRESH_GENERATIONS.write() {
         let generation = generations.entry(scope.clone()).or_default();
         *generation = generation.saturating_add(1);
-        if is_account_scoped_provider(&scope)
-            || fingerprint
-                .as_deref()
-                .is_some_and(|fp| is_account_scoped_scope(&scope, fp))
+        if fingerprint
+            .as_deref()
+            .is_some_and(|fp| is_account_scoped_scope(&scope, fp))
         {
             forget_account_scoped_provider(provider_kind, &provider);
         }
@@ -1230,9 +1222,8 @@ fn reviewed_provider_live_scope(
                     == base_url_fingerprint(crate::config::DEFAULT_OPENROUTER_BASE_URL)
         }
         ApiProvider::Custom => {
-            codewhale_config::provider_setup_template(provider_identity)
-                .is_some_and(|template| template.id == codewhale_config::BASETEN_TEMPLATE_ID)
-                && endpoint_fingerprint == base_url_fingerprint(codewhale_config::BASETEN_BASE_URL)
+            endpoint_fingerprint
+                == base_url_fingerprint(codewhale_config::catalog::BASETEN_BASE_URL)
         }
         _ => false,
     }
@@ -2053,12 +2044,8 @@ mod tests {
             Some("baseten"),
         );
         assert!(
-            !after_switch.contains(&"old-endpoint-model".to_string()),
-            "rows from the old Baseten endpoint must not survive a fingerprint change"
-        );
-        assert!(
-            after_switch.contains(&codewhale_config::BASETEN_DEFAULT_MODEL.to_string()),
-            "the exact provider should fall back to its offline seed"
+            after_switch.is_empty(),
+            "rows from the old Baseten endpoint must not survive a fingerprint change, and no compiled seed replaces them (#6289)"
         );
         crate::provider_lake::clear_live_snapshot();
     }

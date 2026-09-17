@@ -1,7 +1,8 @@
 //! Local HTTP regressions for complete, bounded provider catalog observations.
 
 use super::tests::{
-    baseten_client_for_identity, mount_models_json, opencode_go_client_for, openrouter_client_for,
+    custom_mock_client_for_identity, mount_models_json, opencode_go_client_for,
+    openrouter_client_for,
 };
 use super::*;
 use crate::config::{ProviderConfig, ProvidersConfig};
@@ -1002,7 +1003,7 @@ async fn later_page_http_and_transport_errors_do_not_expose_cursor_or_key() {
 }
 
 #[tokio::test]
-async fn unpaginated_baseten_aliases_keep_exact_identity_and_endpoint_ownership() {
+async fn unpaginated_custom_identities_keep_exact_identity_and_endpoint_ownership() {
     let first = MockServer::start().await;
     let second = MockServer::start().await;
     mount_models_json(&first, 200, json!({"data":[{"id":"first/model"}]})).await;
@@ -1013,7 +1014,7 @@ async fn unpaginated_baseten_aliases_keep_exact_identity_and_endpoint_ownership(
         ("Base-Ten", &first, "first/model"),
         ("base-ten", &second, "second/model"),
     ] {
-        let client = baseten_client_for_identity(server, identity);
+        let client = custom_mock_client_for_identity(server, identity);
         let delta = client.fetch_catalog_delta().await.unwrap();
         assert_eq!(delta.provider, identity);
         assert_eq!(delta.offerings[0].provider, identity);

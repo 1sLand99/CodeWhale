@@ -2004,8 +2004,7 @@ pub(crate) fn audit_turn_cost_for_route_on_endpoint_for_identity_at(
         }
         _ => None,
     };
-    let reviewed_custom_metered =
-        reviewed_custom_route_is_metered(provider, provider_identity, endpoint_fingerprint);
+    let reviewed_custom_metered = reviewed_custom_route_is_metered(provider, endpoint_fingerprint);
     let reviewed_provider_live =
         reviewed_provider_live_route_is_metered(provider, provider_identity, endpoint_fingerprint);
     // An explicitly recorded surface is evidence.  Exact non-metered surfaces
@@ -2220,31 +2219,26 @@ fn audit_openrouter_immutable_pricing(
     )
 }
 
-/// Whether a named compatible route has a reviewed per-token billing contract.
+/// Whether a named custom route has a reviewed per-token billing contract.
 ///
-/// Baseten is accepted only through its setup-template identity (including the
-/// aliases that resolve to that canonical template) and the fingerprint of its
-/// documented Model APIs endpoint. A generic custom table, a Baseten-like name,
-/// or a Baseten identity pointed at another host cannot become metered merely by
-/// publishing a priced `/models` row.
+/// Baseten is accepted only through the fingerprint of its documented Model
+/// APIs endpoint (#6289). The table name is irrelevant: a Baseten identity
+/// pointed at another host cannot become metered, and any table pointed at
+/// Baseten carries Baseten's billing contract. A priced `/models` row alone
+/// never mints metering.
 #[must_use]
 pub(crate) fn reviewed_custom_route_is_metered(
     provider: ApiProvider,
-    provider_identity: Option<&str>,
     endpoint_fingerprint: Option<&str>,
 ) -> bool {
     if provider != ApiProvider::Custom {
         return false;
     }
-    let is_baseten = provider_identity
-        .and_then(codewhale_config::provider_setup_template)
-        .is_some_and(|template| template.id == codewhale_config::BASETEN_TEMPLATE_ID);
-    if !is_baseten {
-        return false;
-    }
     endpoint_fingerprint.is_some_and(|fingerprint| {
         fingerprint
-            == codewhale_config::catalog::base_url_fingerprint(codewhale_config::BASETEN_BASE_URL)
+            == codewhale_config::catalog::base_url_fingerprint(
+                codewhale_config::catalog::BASETEN_BASE_URL,
+            )
     })
 }
 
@@ -2253,8 +2247,8 @@ pub(crate) fn reviewed_custom_route_is_metered(
 ///
 /// OpenRouter is accepted only as the built-in identity on its official API;
 /// a custom table shadowing that name or an endpoint override is a different
-/// billing contract. Baseten-compatible custom identities follow the reviewed
-/// setup template but retain their exact, case-sensitive cache ownership.
+/// billing contract. Custom tables are metered only on Baseten's endpoint
+/// fingerprint and retain their exact, case-sensitive cache ownership.
 #[must_use]
 fn reviewed_provider_live_route_is_metered(
     provider: ApiProvider,
@@ -2271,9 +2265,7 @@ fn reviewed_provider_live_route_is_metered(
                         )
                 })
         }
-        ApiProvider::Custom => {
-            reviewed_custom_route_is_metered(provider, provider_identity, endpoint_fingerprint)
-        }
+        ApiProvider::Custom => reviewed_custom_route_is_metered(provider, endpoint_fingerprint),
         _ => false,
     }
 }
