@@ -40,8 +40,7 @@ use crate::route_runtime::{
     ResolvedRuntimeRoute, ValidatedRuntimeRoute, resolve_runtime_route_for_identity,
 };
 use crate::tools::goal::{
-    GoalPauseReason, GoalSnapshot, GoalStatus, SharedGoalState, explicit_goal_directive,
-    new_shared_goal_state,
+    GoalPauseReason, GoalSnapshot, GoalStatus, SharedGoalState, new_shared_goal_state,
 };
 use crate::tools::plan::{SharedPlanState, new_shared_plan_state};
 use crate::tools::shell::{SharedShellManager, new_shared_shell_manager};
@@ -4853,66 +4852,20 @@ impl Engine {
         if autonomous && self.cancel_token.is_cancelled() {
             return SendMessageOutcome::NotStarted { error: None };
         }
-        let mut goal_objective = goal_objective;
-        let mut goal_token_budget = goal_token_budget;
-        let mut goal_status = goal_status;
         let initial_usage_owner = compaction.runtime_cost_owner.clone();
 
-        // A literal natural-language `/goal` declaration is control-plane
-        // intent, not a suggestion that each provider may acknowledge or
-        // ignore. Activate it through the same GoalState::create path as the
-        // model-visible create_goal tool before constructing any provider
-        // request. Only structurally external user input can authorize this;
-        // runtime text, recalled memory, handoffs, and pasted multi-line
-        // transcripts cannot create a goal.
+        // Goals are created by the model (`create_goal`) or by the leading
+        // `/goal <objective>` command; the host never infers one from
+        // wording (docs/design/TUI_DECONSTRUCTION.md — founder clarification
+        // 2026-09-09: the model decides when a goal is useful). The
+        // natural-language `/goal` prose parser that used to recognize
+        // "make it your /goal to ..." is gone with the #6290 rework — a
+        // prose ask reaches the model, which calls `create_goal` when a goal
+        // is actually useful.
         //
-        // Goals are created by the model (`create_goal`) or by this literal
-        // user declaration; the host never infers one from wording. The
-        // verb-list promotion that used to turn ordinary Operate prompts into
-        // goals is gone (docs/design/TUI_DECONSTRUCTION.md — founder
-        // clarification 2026-09-09: the model decides when a goal is useful).
-        // `GoalState::create` still refuses while an unfinished goal exists,
-        // so a paused or blocked goal is never silently replaced.
-        //
-        // KV-cache effect: this only selects the already-existing volatile
-        // <session_goal> contributor. It adds no new stable-prefix text.
-        let goal_request = if provenance.can_authorize_work() {
-            explicit_goal_directive(&content)
-        } else {
-            None
-        };
-        if let Some(directive) = goal_request {
-            let result = self
-                .config
-                .goal_state
-                .lock()
-                .map_err(|_| "goal state lock poisoned".to_string())
-                .and_then(|mut state| {
-                    state
-                        .create(directive.objective, None)
-                        .map_err(str::to_string)?;
-                    Ok(state.snapshot())
-                });
-            match result {
-                Ok(snapshot) => {
-                    goal_objective.clone_from(&snapshot.objective);
-                    goal_token_budget = snapshot.token_budget;
-                    goal_status = GoalStatus::Active;
-                    // Publish before TurnStarted/provider dispatch so the TUI
-                    // and durable runtime host observe the real goal action,
-                    // even when this model would otherwise reply only in prose.
-                    let _ = self.tx_event.send(Event::GoalUpdated { snapshot }).await;
-                }
-                Err(error) => {
-                    let _ = self
-                        .tx_event
-                        .send(Event::status(format!(
-                            "Requested /goal was not created: {error}"
-                        )))
-                        .await;
-                }
-            }
-        }
+        // KV-cache effect: none. Goal state still flows through the existing
+        // volatile <session_goal> contributor; nothing here touches the
+        // stable prefix.
 
         let effective_provider = route.identity.provider;
         let provider_identity = route.identity.key.clone();

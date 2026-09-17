@@ -3160,7 +3160,7 @@ fn goal_custom_route_config() -> Config {
 }
 
 #[tokio::test]
-async fn explicit_natural_goal_activates_before_provider_request() {
+async fn ordinary_prose_never_activates_a_goal() {
     let request_entered = std::sync::Arc::new(tokio::sync::Notify::new());
     let release_request = std::sync::Arc::new(tokio::sync::Notify::new());
     let model = std::sync::Arc::new(FirstRequestGatedGoalModelClient {
@@ -3213,24 +3213,25 @@ async fn explicit_natural_goal_activates_before_provider_request() {
         .await
         .expect("send explicit natural goal turn");
 
-    let mut saw_goal_before_turn = false;
+    // #6290 rework: the natural-language `/goal` prose parser is gone. The
+    // same wording that used to activate a goal is now an ordinary turn;
+    // only the model (`create_goal`) or the `/goal` command creates one.
+    let mut saw_goal = false;
     loop {
         let event = tokio::time::timeout(model_turn_event_timeout(), async {
             handle.rx_event.write().await.recv().await
         })
         .await
-        .expect("explicit goal event timeout")
-        .expect("explicit goal event");
+        .expect("prose goal event timeout")
+        .expect("prose goal event");
         match event {
-            Event::GoalUpdated { snapshot } => {
-                assert_eq!(snapshot.objective.as_deref(), Some("solve navier stokes"));
-                assert_eq!(snapshot.status, "active");
-                saw_goal_before_turn = true;
+            Event::GoalUpdated { .. } => {
+                saw_goal = true;
             }
             Event::TurnStarted { .. } => {
                 assert!(
-                    saw_goal_before_turn,
-                    "durable goal must be published before provider work starts"
+                    !saw_goal,
+                    "ordinary prose must not publish a goal before provider work starts"
                 );
                 break;
             }
@@ -3241,29 +3242,15 @@ async fn explicit_natural_goal_activates_before_provider_request() {
     tokio::time::timeout(model_turn_event_timeout(), request_entered.notified())
         .await
         .expect("provider request was never entered");
-    let snapshot = goal_state.lock().expect("goal lock").snapshot();
-    assert_eq!(snapshot.objective.as_deref(), Some("solve navier stokes"));
-    assert!(snapshot.is_active());
-
-    // Stop autonomous continuation after the one provider-boundary receipt.
-    handle
-        .send(Op::SetGoalStatus {
-            goal_id: None,
-            status: crate::tools::goal::GoalStatus::Paused,
-            clear: false,
-        })
-        .await
-        .expect("queue goal pause");
     release_request.notify_one();
     let _ = tokio::time::timeout(model_turn_event_timeout(), handle.get_session_snapshot())
         .await
-        .expect("goal pause did not settle")
-        .expect("post-goal session snapshot");
+        .expect("turn did not settle")
+        .expect("post-turn session snapshot");
+    let snapshot = goal_state.lock().expect("goal lock").snapshot();
+    assert_eq!(snapshot.objective.as_deref(), None);
+    assert!(!snapshot.is_active());
     assert_eq!(model.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert_eq!(
-        goal_state.lock().expect("goal lock").snapshot().status,
-        "paused"
-    );
 
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     run_task.await.expect("engine task");
@@ -3395,11 +3382,16 @@ async fn operate_never_promotes_wording_to_a_goal() {
     assert!(!active);
     assert_eq!(contracts, 0, "Work never sees the Operate contract");
 
-    // An explicit declaration still creates one, through the same path.
+    // #6290 rework: even an explicit-looking declaration is ordinary
+    // prose now — the host never parses it, and the model decides goals
+    // through `create_goal`.
     let (objective, active, contracts) =
         operate_goal_probe(AppMode::Operate, "Please set /goal to ship the release").await;
-    assert_eq!(objective.as_deref(), Some("ship the release"));
-    assert!(active, "an explicit declaration must create the goal");
+    assert_eq!(
+        objective, None,
+        "prose asking for a goal must not create one host-side"
+    );
+    assert!(!active);
     assert_eq!(contracts, 1);
 }
 
@@ -3507,9 +3499,20 @@ async fn operate_contract_is_appended_once_and_an_existing_goal_is_never_replace
 
     let first_objective =
         "Migrate the settings loader to the new config crate and keep the old keys readable";
-    let first = format!("Please set /goal to {first_objective}");
+    // #6290 rework: prose no longer creates goals, so the unfinished goal
+    // this test needs is seeded directly — the same `GoalState::create` path
+    // the `/goal` command and the model's `create_goal` tool use.
+    goal_state
+        .lock()
+        .expect("goal lock")
+        .create(first_objective.to_string(), None)
+        .expect("seed unfinished goal");
     handle
-        .send(send(&first, None, crate::tools::goal::GoalStatus::Active))
+        .send(send(
+            first_objective,
+            Some(first_objective.to_string()),
+            crate::tools::goal::GoalStatus::Active,
+        ))
         .await
         .expect("send first Operate turn");
     tokio::time::timeout(model_turn_event_timeout(), first_entered.notified())
@@ -12372,10 +12375,10 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
         "\"finish_reason\":\"stop\"}]}\n\n",
         "data: [DONE]\n\n",
     );
-    // Operate no longer infers a goal from wording, so this fixture declares
-    // one explicitly; after the approved shell runs, the model seals it
-    // through the same `update_goal` tool a live Operate turn uses, and only
-    // then does the final "done" arrive.
+    // The goal this fixture seals is seeded directly (prose no longer
+    // creates goals since the #6290 rework); after the approved shell runs,
+    // the model seals it through the same `update_goal` tool a live Operate
+    // turn uses, and only then does the final "done" arrive.
     let goal_seal_marker = "goal-seal-receipt-0902";
     let goal_sse = concat!(
         "data: {\"id\":\"chatcmpl-operate-goal\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[",
@@ -12455,19 +12458,26 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
         },
         &api_config,
     );
+    engine
+        .config
+        .goal_state
+        .lock()
+        .expect("goal lock")
+        .create("write the requested local fixture".to_string(), None)
+        .expect("seed fixture goal");
     let handle_for_approval = handle.clone();
     let run_task = tokio::spawn(engine.run());
 
     handle
         .send(Op::SendMessage(TurnSpec {
             max_output_tokens: None,
-            content: "Please set /goal to write the requested local fixture".to_string(),
+            content: "Write the requested local fixture to the workspace".to_string(),
             images: Vec::new(),
             mode: AppMode::Operate,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
             initial_routed_usage: Box::default(),
-            goal_objective: None,
+            goal_objective: Some("write the requested local fixture".to_string()),
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
             reasoning_effort: None,
@@ -12499,9 +12509,8 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
             Event::ApprovalRequired { id, tool_name, .. } => {
                 saw_approval = true;
                 assert_eq!(tool_name, "Bash");
-                // No goal is created for this prompt: goals are model-decided
-                // (`create_goal`), so there is no goal-continuation loop to
-                // pause in this mock.
+                // The seeded fixture goal is orthogonal to this gate:
+                // Operate uses the normal approval flow either way.
                 handle_for_approval
                     .approve_tool_call(id)
                     .await
