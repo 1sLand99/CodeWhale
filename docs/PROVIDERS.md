@@ -193,7 +193,7 @@ the listed provider env vars.
 
 | Provider ID | TOML table | Wire protocol | Auth env vars |
 | --- | --- | --- | --- |
-| `deepseek` | `[providers.deepseek]` | OpenAI Chat Completions | `DEEPSEEK_API_KEY` |
+| `deepseek` | `[providers.deepseek]` | Model-aware: Responses default (`deepseek-flash`); Chat Completions (`deepseek-v4-pro`) | `DEEPSEEK_API_KEY` |
 | `deepseek-anthropic` | `[providers.deepseek_anthropic]` | Anthropic Messages | `DEEPSEEK_API_KEY` |
 | `nvidia-nim` | `[providers.nvidia_nim]` | OpenAI Chat Completions | `NVIDIA_API_KEY`, `NVIDIA_NIM_API_KEY` |
 | `openai` | `[providers.openai]` | OpenAI Chat Completions | `OPENAI_API_KEY` |
@@ -243,8 +243,11 @@ Default base URLs and models for each route are listed in the shipped provider
 table below. The wire protocol values above are derived from
 `crates/config/src/provider.rs`: `ChatCompletions` is the default,
 `openai-codex` overrides to `Responses`; `deepseek-anthropic`, `anthropic`, and
-`openmodel` override to `AnthropicMessages`; and `opencode-zen` resolves the
-protocol from the selected model's curated offering.
+`openmodel` override to `AnthropicMessages`; `opencode-zen` resolves the
+protocol from the selected model's curated offering; and `deepseek` is
+model-aware — the shipped default `deepseek-flash` (and legacy
+`deepseek-v4-flash`) rides the Responses endpoint while `deepseek-v4-pro`
+stays on Chat Completions.
 
 ## Auth And Env Rules
 
@@ -652,7 +655,7 @@ overlay and lets DSH resolve its own keys.
 
 | Provider ID | TOML table | Auth env | Base URL env and default | Default or static models | Notes |
 | --- | --- | --- | --- | --- | --- |
-| `deepseek` | `[providers.deepseek]` | `DEEPSEEK_API_KEY` | `CODEWHALE_BASE_URL` / `DEEPSEEK_BASE_URL`; default `https://api.deepseek.com/beta` | `deepseek-flash` (shipped default; V4.1 Flash, unversioned id), `deepseek-v4-pro`, `deepseek-v4-flash`, experimental `deepseek-v4-flash-vision-exp`; vision aliases `flash-vision`, `deepseek-v4flashvisionexp`; compatibility aliases `deepseek-chat`, `deepseek-reasoner` | First-class default. The live Pro backend is labeled `DeepSeek-V4-Pro-0813`; the callable API ID remains `deepseek-v4-pro`. Beta URL enables strict tool mode, chat prefix completion, and FIM completion. The documented V4 routes can use provider-native web search through a separate bounded Responses request; compatible custom endpoints do not inherit that capability. Set `https://api.deepseek.com` or `/v1` explicitly to opt out of beta-only features. Reasoning effort maps to the documented wire ladder `low`/`high`/`max` plus the `thinking` toggle: `off` sends `thinking: {"type":"disabled"}`, `low` sends `reasoning_effort: "low"`, `medium` rounds up to `"high"` (the wire has no medium), and `high`/`max` pass through. The experimental vision ID was observed in the authenticated `/models` roster on 2026-08-21 and is advertised as image-input capable on the direct Chat Completions route only. Its limits, reasoning, and tool-call flags provisionally inherit Flash; pricing remains unknown, and no funded image round trip was made during this release work. |
+| `deepseek` | `[providers.deepseek]` | `DEEPSEEK_API_KEY` | `CODEWHALE_BASE_URL` / `DEEPSEEK_BASE_URL`; default `https://api.deepseek.com/beta` | `deepseek-flash` (shipped default; V4.1 Flash, unversioned id), `deepseek-v4-pro`, `deepseek-v4-flash`, experimental `deepseek-v4-flash-vision-exp`; vision aliases `flash-vision`, `deepseek-v4flashvisionexp`; compatibility aliases `deepseek-chat`, `deepseek-reasoner` | First-class default. The live Pro backend is labeled `DeepSeek-V4-Pro-0813`; the callable API ID remains `deepseek-v4-pro`. Beta URL enables strict tool mode, chat prefix completion, and FIM completion. The documented V4 routes can use provider-native web search through a separate bounded Responses request; compatible custom endpoints do not inherit that capability. Set `https://api.deepseek.com` or `/v1` explicitly to opt out of beta-only features. The shipped default `deepseek-flash` speaks the Responses API (DeepSeek's documented path for Codex-style integration, since the 2026-07-31 Flash production update); the Chat-only controls (the `thinking` toggle and strict-tool `/beta` routing) apply to Chat Completions routes, and `deepseek-v4-pro` stays on Chat Completions until its announced Responses rollout. Reasoning effort follows DeepSeek's documented requested-to-actual mapping: `minimal`/`low` land on `low`, `medium`/`xhigh` on `high`, and `max`/`ultra` on `max`; `off` disables thinking (`thinking: {"type":"disabled"}` on Chat, `reasoning.effort: "none"` on Responses). The experimental vision ID was observed in the authenticated `/models` roster on 2026-08-21 and is advertised as image-input capable on the direct Chat Completions route only. Its limits, reasoning, and tool-call flags provisionally inherit Flash; pricing remains unknown, and no funded image round trip was made during this release work. |
 | `deepseek-anthropic` | `[providers.deepseek_anthropic]` | `DEEPSEEK_API_KEY` | `DEEPSEEK_ANTHROPIC_BASE_URL`; default `https://api.deepseek.com/anthropic` | `deepseek-v4-pro`, `deepseek-v4-flash`; compatibility aliases `deepseek-chat`, `deepseek-reasoner` | Opt-in DeepSeek route for the Anthropic Messages wire protocol. Uses `/v1/messages`, `x-api-key`, and `anthropic-version: 2023-06-01`. Keep `provider = "deepseek"` for the default Chat Completions path. |
 | `nvidia-nim` | `[providers.nvidia_nim]` | `NVIDIA_API_KEY`, `NVIDIA_NIM_API_KEY` | `NVIDIA_NIM_BASE_URL`, `NIM_BASE_URL`, `NVIDIA_BASE_URL`; default `https://integrate.api.nvidia.com/v1` | `deepseek-ai/deepseek-v4-pro`, `deepseek-ai/deepseek-v4-flash` | Hosted DeepSeek V4 through NVIDIA NIM. `NVIDIA_NIM_MODEL` is accepted by the TUI config path. |
 | `openai` | `[providers.openai]` | `OPENAI_API_KEY` | `OPENAI_BASE_URL`; default `https://api.openai.com/v1` | `gpt-5.6` (default), `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` | Generic OpenAI-compatible route whose built-in endpoint and fallback catalog are native to OpenAI. The [GPT-5.6 family](https://developers.openai.com/api/docs/models/gpt-5.6-sol) uses OpenAI's documented 1.05M context, 128K max output, and reasoning levels. Custom gateways remain free to select an explicit gateway-owned model. `OPENAI_MODEL` is accepted. |

@@ -233,7 +233,11 @@ pub fn codewhale_endpoint_key_for_model(model: &str) -> &'static str {
 #[must_use]
 pub fn bundled_offerings() -> Vec<ProviderModelOffering> {
     // DeepSeek's 2026-07-31 production Flash update added a native Responses
-    // endpoint without changing the model id. Pro remains Chat Completions
+    // endpoint without changing the model id, and the 2026-08 unversioned
+    // rename to `deepseek-flash` kept that wire: DeepSeek's own Codex
+    // integration documents the Responses API as the path for `deepseek-flash`
+    // (legacy `deepseek-v4-flash` ids are served by the same model). The
+    // shipped default therefore rides Responses; Pro remains Chat Completions
     // until its announced Responses rollout. These exact-route transport facts
     // cannot be represented by the Models.dev-shaped fallback asset.
     let deepseek = ProviderId::from("deepseek");
@@ -258,10 +262,20 @@ pub fn bundled_offerings() -> Vec<ProviderModelOffering> {
     let mut offerings = vec![
         ProviderModelOffering {
             provider: deepseek.clone(),
+            canonical_model: Some(ModelId::from("deepseek-flash")),
+            wire_model_id: WireModelId::from("deepseek-flash"),
+            endpoint_key: "responses".to_string(),
+            default_for_provider: true,
+            limits: documented_limits,
+            capabilities: documented_capabilities,
+            pricing: PricingSku::UnknownOrStale,
+        },
+        ProviderModelOffering {
+            provider: deepseek.clone(),
             canonical_model: Some(ModelId::from("deepseek-v4-pro")),
             wire_model_id: WireModelId::from("deepseek-v4-pro"),
             endpoint_key: "chat".to_string(),
-            default_for_provider: true,
+            default_for_provider: false,
             limits: documented_limits,
             capabilities: documented_capabilities,
             pricing: PricingSku::UnknownOrStale,
