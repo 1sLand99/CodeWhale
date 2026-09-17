@@ -64,11 +64,7 @@
 mod input;
 mod interaction;
 mod model;
-#[cfg(test)]
-pub(crate) mod panels;
 mod render;
-#[cfg(test)] // Tideline rail rendering (spec §5a); wired by the landing slice
-pub mod tideline;
 mod views;
 
 pub use input::{cycle_view, enter_agents, handle_key, handle_mouse};
