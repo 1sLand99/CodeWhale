@@ -2668,6 +2668,10 @@ struct StructuredPlanChild {
     mode: Option<String>,
     #[serde(default)]
     file_scope: Vec<String>,
+    /// Optional child working directory, repository-relative like
+    /// `task({cwd})`. Disambiguates multi-repo workspaces (#6232).
+    #[serde(default)]
+    cwd: Option<String>,
 }
 
 fn structured_plan_to_workflow_spec(plan_value: &Value) -> Result<WorkflowSpec, ToolError> {
@@ -2904,6 +2908,12 @@ fn plan_children_to_leaves(
                 "Workflow plan child '{id}' model must not be empty"
             )));
         }
+        let cwd = child.cwd.as_deref().map(str::trim);
+        if cwd == Some("") {
+            return Err(ToolError::invalid_input(format!(
+                "Workflow plan child '{id}' cwd must not be empty"
+            )));
+        }
         leaves.push(LeafSpec {
             id,
             prompt: prompt.to_string(),
@@ -2913,6 +2923,7 @@ fn plan_children_to_leaves(
             mode,
             isolation: Default::default(),
             file_scope: child.file_scope.clone(),
+            cwd: cwd.map(str::to_string),
             depends_on_results: Vec::new(),
             budget: BudgetSpec {
                 max_tokens: token_budget,
@@ -3259,6 +3270,7 @@ impl DeclarativeWorkflowLowerer {
                 &spec.id,
                 Some("reduce"),
                 None,
+                None,
             )
         ));
         Ok(())
@@ -3351,6 +3363,7 @@ fn leaf_task_options_expression(
         &spec.id,
         phase,
         leaf_allowed_tools(spec)?,
+        spec.cwd.as_deref(),
     ))
 }
 
@@ -3518,6 +3531,7 @@ fn task_options_expression(
     label: &str,
     phase: Option<&str>,
     allowed_tools: Option<Vec<String>>,
+    cwd: Option<&str>,
 ) -> String {
     let mut fields = vec![format!("description: {description_expr}")];
     if let Some(subagent_type) = subagent_type {
@@ -3526,6 +3540,9 @@ fn task_options_expression(
     fields.push(format!("label: {}", js_string(label)));
     if let Some(phase) = phase {
         fields.push(format!("phase: {}", js_string(phase)));
+    }
+    if let Some(cwd) = cwd {
+        fields.push(format!("cwd: {}", js_string(cwd)));
     }
     if let Some(role) = role {
         fields.push(format!("role: {}", js_string(role)));
@@ -8093,6 +8110,76 @@ export default workflow({
         };
         assert!(branch.parallel);
         assert_eq!(branch.children.len(), 2);
+    }
+
+    #[test]
+    fn structured_plan_child_cwd_lowers_to_task_cwd() {
+        // #6232: plan children accept `cwd` (repository-relative, like
+        // task({cwd})) so multi-repo workspaces can disambiguate the child
+        // repository — including the worktree root the parallel-write default
+        // (#4120) resolves. A blank value is refused, never lowered.
+        let ctx = ToolContext::new(".");
+        let source = workflow_source(
+            &json!({
+                "plan": {
+                    "goal": "patch two repos",
+                    "risk": "writes",
+                    "phases": [{
+                        "id": "build",
+                        "children": [
+                            {
+                                "id": "a",
+                                "prompt": "Patch repo A",
+                                "type": "implement",
+                                "file_scope": ["src/**"],
+                                "cwd": "repos/a"
+                            },
+                            {
+                                "id": "b",
+                                "prompt": "Patch repo B",
+                                "type": "implement",
+                                "file_scope": ["src/**"],
+                                "cwd": "repos/b"
+                            }
+                        ]
+                    }]
+                }
+            }),
+            &ctx,
+        )
+        .expect("structured plan with child cwd should lower");
+        assert!(
+            source.source.contains(r#"cwd: "repos/a""#),
+            "child cwd must reach the lowered task() call:\n{}",
+            source.source
+        );
+        assert!(
+            source.source.contains(r#"cwd: "repos/b""#),
+            "child cwd must reach the lowered task() call:\n{}",
+            source.source
+        );
+
+        let blank = workflow_source(
+            &json!({
+                "plan": {
+                    "goal": "blank cwd",
+                    "risk": "read_only",
+                    "children": [
+                        {
+                            "id": "blank",
+                            "prompt": "Inspect",
+                            "type": "explore",
+                            "cwd": "  "
+                        }
+                    ]
+                }
+            }),
+            &ctx,
+        );
+        let err = blank
+            .expect_err("blank child cwd must be refused")
+            .to_string();
+        assert!(err.contains("cwd"), "{err}");
     }
 
     #[test]

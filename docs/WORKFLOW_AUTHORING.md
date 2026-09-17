@@ -24,7 +24,10 @@ Compatibility launch paths on the `workflow` tool:
 Use `agent(action="roster")` to inspect the saved Fleet models and roles before
 assigning children. Native plan children accept `model` for a saved shortlist
 selector, or `role`/`profile` for a saved assignment. Named Exact Fleets keep
-their member routes fixed and reject per-step model overrides.
+their member routes fixed and reject per-step model overrides. Plan children
+also accept `cwd`, a repository-relative working directory — required in
+multi-repository workspaces so the child (and worktree isolation) resolves the
+right repository, mirroring `task({cwd})`.
 
 For a guided walkthrough from fleet task specs to Workflow authoring and
 monitoring, see [fleet + Workflow Tutorial](FLEET_WORKFLOW_TUTORIAL.md).
