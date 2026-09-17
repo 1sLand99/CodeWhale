@@ -8690,11 +8690,51 @@ Provide findings ordered by severity with file references, then open questions, 
     let mut accumulator = pr_plan
         .as_ref()
         .map(crate::tools::review::PrReviewAccumulator::new);
+    // Visible-text reserve for this exact route/model (#6285). A reasoning route
+    // shares one `max_tokens` allowance between hidden reasoning and visible
+    // text, so the review request has to keep room for the review itself.
+    let review_allowance = client.effective_max_output_tokens(&request_route.model);
+    let review_reserve_percent =
+        crate::route_budget::review_visible_text_reserve_percent(&request_route.model);
+    let review_reserve_tokens = crate::route_budget::review_visible_text_reserve_tokens(
+        &request_route.model,
+        review_allowance,
+    );
+    // Criterion 4 (no silent caps): whatever a budget stop leaves unread is
+    // named by file, never silently dropped.
+    let unreviewed_note = |completed_passes: usize| -> String {
+        let Some(plan) = pr_plan.as_ref() else {
+            return "the entire diff".to_string();
+        };
+        let mut unread: Vec<String> = Vec::new();
+        for pass in plan.manifest.passes.iter().skip(completed_passes) {
+            for file in &pass.files {
+                if !unread.iter().any(|seen| seen == file) {
+                    unread.push(file.clone());
+                }
+            }
+        }
+        if unread.is_empty() {
+            "no planned file was left unread".to_string()
+        } else {
+            format!(
+                "{} file(s) were never read: {}",
+                unread.len(),
+                unread.join(", ")
+            )
+        }
+    };
     let mut output = String::new();
     let mut review_stop_reason = None;
     for (index, user_prompt) in prompts.into_iter().enumerate() {
         let reasoning_effort = route.reasoning_effort.and_then(|effort| {
-            cli_reasoning_effort_value_for_prompt(&execution_config, &model, effort, &user_prompt)
+            review_reasoning_effort_value_for_prompt(
+                &execution_config,
+                &model,
+                effort,
+                review_reserve_percent,
+                &user_prompt,
+            )
         });
         let request = MessageRequest {
             model: model.clone(),
@@ -8734,15 +8774,32 @@ Provide findings ordered by severity with file references, then open questions, 
         crate::tools::review::add_review_usage(&mut usage, &response.usage);
         review_stop_reason = response.stop_reason.clone();
         if codewhale_models::is_incomplete_stop_reason(review_stop_reason.as_deref()) {
+            // #6285: budget exhaustion is an infrastructure outcome, not a
+            // review verdict. The PR was never judged, so the message must not
+            // read as findings and must name what was and was not reviewed.
+            let reasoning_tokens = usage
+                .reasoning_tokens
+                .map_or_else(|| "unknown".to_string(), |tokens| tokens.to_string());
+            let reserve_clause = if review_reserve_percent == 0 {
+                "no reasoning reserve was needed for this model".to_string()
+            } else {
+                format!("the pass's reasoning level was capped to fit that reserve")
+            };
             return report_failure(
                 &usage,
                 index,
                 publication,
                 format!(
-                    "Review pass {}/{} incomplete: provider stop reason `{}`; the partial review was not accepted or posted.",
+                    "Review pass {}/{} exhausted its output allowance and produced no review text. This is an infrastructure/budget outcome, not a review result: the provider stopped with reason `{}` after reporting {} of {} requested output tokens as reasoning; this model's review reserve is {} tokens ({review_reserve_percent}% of the allowance) and {reserve_clause}. Coverage: {}. Reviewed so far: {} of {} planned pass(es). The partial review was not accepted or posted.",
                     index + 1,
                     planned_passes,
-                    codewhale_models::stop_reason_detail(review_stop_reason.as_deref())
+                    codewhale_models::stop_reason_detail(review_stop_reason.as_deref()),
+                    reasoning_tokens,
+                    review_allowance,
+                    review_reserve_tokens,
+                    unreviewed_note(index),
+                    index,
+                    planned_passes,
                 ),
             );
         }
@@ -8917,6 +8974,11 @@ fn review_failure_payload(
         "model": model,
         "success": false,
         "complete": false,
+        // #6285: a run that never produced findings is an infrastructure or
+        // budget outcome. Keeping it explicit in the payload stops CI and
+        // operators from reading `success: false` as "this PR failed review".
+        "outcome": "infrastructure",
+        "review_verdict": "not_produced",
         "publication": publication.as_str(),
         "error": message,
         "usage": usage,
@@ -11508,6 +11570,25 @@ fn cli_reasoning_effort_value_for_prompt(
         effort
     };
     cli_reasoning_effort_value(config, model, resolved)
+}
+
+/// Review-pass reasoning effort: resolve `Auto` from the prompt exactly as the
+/// ordinary CLI path does, then bound the result so hidden reasoning cannot
+/// consume the whole shared output allowance (#6285).
+fn review_reasoning_effort_value_for_prompt(
+    config: &Config,
+    model: &str,
+    effort: crate::reasoning_preference::ReasoningEffort,
+    reserve_percent: u32,
+    prompt: &str,
+) -> Option<String> {
+    let resolved = if effort == crate::reasoning_preference::ReasoningEffort::Auto {
+        crate::auto_reasoning::select(false, prompt)
+    } else {
+        effort
+    };
+    let bounded = crate::tools::review::bounded_review_reasoning_effort(resolved, reserve_percent);
+    cli_reasoning_effort_value(config, model, bounded)
 }
 
 fn normalize_cli_reasoning_effort(value: &str) -> Result<Option<String>> {

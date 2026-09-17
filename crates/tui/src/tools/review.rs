@@ -29,6 +29,67 @@ const FALLBACK_MAX_CHARS: usize = 4000;
 const REVIEW_RECEIPT_SCHEMA_VERSION: u32 = 1;
 const PR_COVERAGE_RECEIPT_SCHEMA_VERSION: u32 = 2;
 
+/// Rank used to bound reasoning level without depending on `Ord`.
+fn reasoning_effort_rank(effort: crate::reasoning_preference::ReasoningEffort) -> u8 {
+    use crate::reasoning_preference::ReasoningEffort;
+    match effort {
+        ReasoningEffort::Off => 0,
+        ReasoningEffort::Minimal => 1,
+        ReasoningEffort::Low => 2,
+        ReasoningEffort::Medium => 3,
+        ReasoningEffort::High => 4,
+        ReasoningEffort::XHigh => 5,
+        ReasoningEffort::Ultra => 6,
+        ReasoningEffort::Max => 7,
+        // `Auto` is resolved from the prompt before this bound is applied; if
+        // it somehow arrives unresolved, treat it as the medium default rather
+        // than silently unbounded.
+        ReasoningEffort::Auto => 3,
+    }
+}
+
+fn reasoning_effort_from_rank(rank: u8) -> crate::reasoning_preference::ReasoningEffort {
+    use crate::reasoning_preference::ReasoningEffort;
+    match rank {
+        0 => ReasoningEffort::Off,
+        1 => ReasoningEffort::Minimal,
+        2 => ReasoningEffort::Low,
+        3 => ReasoningEffort::Medium,
+        4 => ReasoningEffort::High,
+        5 => ReasoningEffort::XHigh,
+        6 => ReasoningEffort::Ultra,
+        _ => ReasoningEffort::Max,
+    }
+}
+
+/// Highest reasoning level a review pass may request, given the visible-text
+/// reserve this exact model needs (`route_budget::review_visible_text_reserve_percent`).
+///
+/// A review pass only has to rank findings, so unbounded reasoning buys little
+/// while a shared `max_tokens` allowance lets it consume everything: #6285 saw
+/// `reasoning_tokens == output_tokens == 65536`, stop reason `length`, zero
+/// visible text, and a PR blocked with no findings shown. The cap scales with
+/// the reserve the model actually needs and never raises the caller's request.
+///
+/// What this does not do: it cannot separate reasoning from text on a route
+/// that exposes no effort knob, and it does not re-request a pass that already
+/// exhausted its allowance — that stays a reported budget outcome.
+#[must_use]
+pub(crate) fn bounded_review_reasoning_effort(
+    requested: crate::reasoning_preference::ReasoningEffort,
+    reserve_percent: u32,
+) -> crate::reasoning_preference::ReasoningEffort {
+    let ceiling = match reserve_percent {
+        // Nothing reserved: the model does not reason, so nothing to bound.
+        0 => u8::MAX,
+        // A quarter of the allowance must survive as text.
+        1..=25 => 3,
+        // Half the allowance must survive as text.
+        _ => 2,
+    };
+    reasoning_effort_from_rank(reasoning_effort_rank(requested).min(ceiling))
+}
+
 /// Budget for how many lines a committable suggestion may replace. A
 /// mechanical fix is small; anything larger is judgement wearing a
 /// suggestion fence, so it must degrade to prose.
@@ -2771,6 +2832,41 @@ mod tests {
             validation
                 .reason
                 .contains("review receipt check 'cargo test' did not pass: not_run")
+        );
+    }
+
+    #[test]
+    fn bounded_review_effort_caps_reasoning_by_visible_text_reserve() {
+        use crate::reasoning_preference::ReasoningEffort;
+
+        // Half the allowance must survive as text: reasoning capped to Low.
+        assert_eq!(
+            bounded_review_reasoning_effort(ReasoningEffort::Max, 50),
+            ReasoningEffort::Low
+        );
+        // A quarter reserved: capped to Medium.
+        assert_eq!(
+            bounded_review_reasoning_effort(ReasoningEffort::Max, 25),
+            ReasoningEffort::Medium
+        );
+        // Nothing reserved (non-reasoning model): request untouched.
+        assert_eq!(
+            bounded_review_reasoning_effort(ReasoningEffort::Max, 0),
+            ReasoningEffort::Max
+        );
+        // The cap never raises a lower request.
+        assert_eq!(
+            bounded_review_reasoning_effort(ReasoningEffort::Low, 50),
+            ReasoningEffort::Low
+        );
+        assert_eq!(
+            bounded_review_reasoning_effort(ReasoningEffort::Off, 50),
+            ReasoningEffort::Off
+        );
+        // Unresolved Auto must not survive as unbounded either.
+        assert_eq!(
+            bounded_review_reasoning_effort(ReasoningEffort::Auto, 50),
+            ReasoningEffort::Low
         );
     }
 }
