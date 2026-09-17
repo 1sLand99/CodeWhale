@@ -729,13 +729,6 @@ impl CatalogCompiler {
         self
     }
 
-    /// Add Codewhale-owned bundled catalog rows (layer 5).
-    #[must_use]
-    pub fn with_codewhale_bundled(mut self, rows: Vec<CatalogOffering>) -> Self {
-        self.codewhale_bundled.extend(rows);
-        self
-    }
-
     /// Add live models.dev refresh rows (layer 10).
     #[must_use]
     pub fn with_models_dev_live(mut self, rows: Vec<CatalogOffering>) -> Self {

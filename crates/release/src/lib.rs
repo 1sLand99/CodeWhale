@@ -354,21 +354,6 @@ pub async fn latest_release_tag_async(channel: ReleaseChannel) -> Result<String>
     }
 }
 
-/// Blocking counterpart of [`latest_release_tag_async`].
-pub fn latest_release_tag_blocking(channel: ReleaseChannel) -> Result<String> {
-    match resolve_release_query(channel) {
-        ReleaseQuery::Mirror { version, .. } => Ok(format!("v{}", version.trim_start_matches('v'))),
-        ReleaseQuery::GitHubLatest { url } => {
-            let body = fetch_release_json_blocking(url, "latest release")?;
-            latest_tag_from_release_json(&body)
-        }
-        ReleaseQuery::GitHubReleaseList { url } => {
-            let body = fetch_release_json_blocking(url, "release list")?;
-            latest_beta_tag_from_release_list_json(&body)
-        }
-    }
-}
-
 /// Compares a current version string against a release tag using semver
 /// ordering. Both `v` prefixes and trailing build metadata (e.g. `(abc123)`)
 /// are stripped before comparison.
