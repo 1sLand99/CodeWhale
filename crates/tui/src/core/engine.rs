@@ -7843,7 +7843,8 @@ pub(crate) struct TurnMailboxBarrier {
     pub(crate) foreground_children: Arc<ForegroundChildRegistry>,
     pub(crate) flush_tx: tokio::sync::oneshot::Sender<()>,
     pub(crate) drain_handle: tokio::task::JoinHandle<()>,
-    /// Bound on the cancelled-child join inside `cancel_and_flush` (#6184).
+    /// Bound on the cancelled-child join and on the mailbox-drainer flush
+    /// inside the barrier (#6184).
     pub(crate) settle_grace: Duration,
 }
 
@@ -7909,10 +7910,43 @@ impl TurnMailboxBarrier {
         labels
     }
 
+    /// Seal the turn mailbox and wait for the drainer *under a bound* (#6184).
+    /// The drainer forwards into the event channel with an untimed send; a
+    /// UI that has stopped draining parks it, and the flush signal cannot be
+    /// observed from inside that send. Without the bound this await held the
+    /// turn — and every later user message — for hours.
     async fn flush(self) {
         self.mailbox.seal();
         let _ = self.flush_tx.send(());
-        let _ = self.drain_handle.await;
+        let mut drain_handle = self.drain_handle;
+        await_mailbox_drain_bounded(&mut drain_handle, self.settle_grace).await;
+    }
+}
+
+/// Bound the mailbox drainer's exit (#6184).
+///
+/// The drainer forwards envelopes into the 256-slot event channel with an
+/// untimed `send().await`; when the UI stops draining that channel the
+/// forward parks, and because `select!` stops observing its other branches
+/// once one is taken, a flush signal sent afterwards is never seen. Awaiting
+/// the drainer then holds the turn with no clock on it. On expiry the
+/// drainer is aborted: a UI that is not draining the event channel cannot
+/// receive these envelopes anyway, so turn liveness wins over best-effort
+/// delivery of the in-flight message — the same trade the bounded child
+/// join above makes for children.
+async fn await_mailbox_drain_bounded(
+    drain_handle: &mut tokio::task::JoinHandle<()>,
+    grace: Duration,
+) {
+    if tokio::time::timeout(grace, &mut *drain_handle)
+        .await
+        .is_err()
+    {
+        drain_handle.abort();
+        tracing::warn!(
+            grace_ms = u64::try_from(grace.as_millis()).unwrap_or(u64::MAX),
+            "subagent-mailbox drainer exceeded its bound with the event channel not draining; aborted so the turn can settle"
+        );
     }
 }
 

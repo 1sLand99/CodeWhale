@@ -326,6 +326,52 @@ async fn terminal_barrier_cancel_names_child_that_ignores_cancellation() {
     assert_eq!(children.active_count(), 0);
 }
 
+/// Regression for #6184: the mailbox drainer parked in an untimed
+/// `tx_event.send().await` (event channel full, UI not draining) must not
+/// withhold the terminal turn event. `flush` gives up at `settle_grace` and
+/// aborts the drainer, so the turn settles instead of waiting hours.
+#[tokio::test]
+async fn terminal_barrier_flush_bounds_a_drainer_parked_on_a_full_event_channel() {
+    let turn_token = CancellationToken::new();
+    let (mailbox, _receiver) = Mailbox::new(turn_token.clone());
+    let children = Arc::new(ForegroundChildRegistry::new());
+    // The wedged shape from the report: a one-slot event channel, already
+    // full, with nobody draining — so the drainer's forward parks in `send`.
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<()>(1);
+    event_tx.send(()).await.unwrap();
+    let drain_handle = tokio::spawn(async move {
+        // Parked forever: the channel is full and the receiver never drains.
+        let _ = event_tx.send(()).await;
+    });
+    // Give the drainer a moment to park before the flush races it.
+    tokio::task::yield_now().await;
+    let (flush_tx, _flush_rx) = tokio::sync::oneshot::channel();
+    let barrier = TurnMailboxBarrier {
+        mailbox,
+        cancel_token: turn_token,
+        foreground_children: Arc::clone(&children),
+        flush_tx,
+        drain_handle,
+        settle_grace: Duration::from_millis(50),
+    };
+    let started = Instant::now();
+    tokio::time::timeout(Duration::from_secs(2), barrier.continue_and_flush())
+        .await
+        .expect("flush must give up at its grace, not park with the drainer");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "flush returned in {:?}",
+        started.elapsed()
+    );
+    // Abort receipt: an aborted drainer drops its sender half, so the
+    // buffered item drains and the channel then reads closed.
+    assert!(event_rx.recv().await.is_some());
+    assert!(
+        event_rx.recv().await.is_none(),
+        "aborted drainer must release the event channel"
+    );
+}
+
 /// A turn that fails without user cancellation runs the same barrier with a
 /// live turn token: Esc during the join must still break it rather than sit
 /// out the whole grace period (#6184).
