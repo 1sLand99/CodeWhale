@@ -630,10 +630,7 @@ async fn handle_line_during_turn(
             )));
         }
         "shutdown" => {
-            let live: Vec<String> = state.in_flight_turns.lock().await.keys().cloned().collect();
-            for thread_id in live {
-                let _ = interrupt_stdio_turn(state, &thread_id).await;
-            }
+            let _ = interrupt_all_stdio_turns(state).await;
             pending.push_back(PendingStdioWork::Request(request));
         }
         _ => pending.push_back(PendingStdioWork::Request(request)),
@@ -1452,13 +1449,12 @@ async fn acquire_runtime_bridge(
 /// Everything this needs was copied out of the bridge when the turn started,
 /// so it never touches the bridge mutex the turn is holding. Returns whether
 /// a live turn was found for `thread_id`.
-async fn interrupt_stdio_turn(
-    state: &AppState,
-    thread_id: &str,
-) -> std::result::Result<bool, JsonRpcError> {
-    let Some(turn) = state.in_flight_turns.lock().await.get(thread_id).cloned() else {
-        return Ok(false);
-    };
+/// Interrupt one in-flight turn over HTTP, from an owned snapshot.
+///
+/// Split from [`interrupt_stdio_turn`] so teardown paths can run many
+/// concurrently (#6211 R8b) — each future owns its snapshot and never holds
+/// the turn registry across the request.
+async fn interrupt_turn_request(turn: &InFlightTurn) -> std::result::Result<bool, JsonRpcError> {
     let mut request = codewhale_release::platform_http_client_builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -1476,6 +1472,43 @@ async fn interrupt_stdio_turn(
         .and_then(reqwest::Response::error_for_status)
         .map_err(|err| JsonRpcError::internal(format!("interrupt failed: {err}")))?;
     Ok(true)
+}
+
+async fn interrupt_stdio_turn(
+    state: &AppState,
+    thread_id: &str,
+) -> std::result::Result<bool, JsonRpcError> {
+    let Some(turn) = state.in_flight_turns.lock().await.get(thread_id).cloned() else {
+        return Ok(false);
+    };
+    interrupt_turn_request(&turn).await
+}
+
+/// Interrupt every in-flight turn concurrently, reporting how many were
+/// reached (#6211 R8b).
+///
+/// The teardown paths used to await each turn's interrupt in sequence, so
+/// their latency grew with the number of live turns — up to the 10s
+/// per-request timeout apiece. Each interrupt now owns its snapshot and runs
+/// as an independent task; individual failures are ignored exactly as the
+/// sequential loop ignored them, and the registry lock is never held across
+/// the requests.
+async fn interrupt_all_stdio_turns(state: &AppState) -> usize {
+    let turns: Vec<InFlightTurn> = {
+        let map = state.in_flight_turns.lock().await;
+        map.values().cloned().collect()
+    };
+    let mut set = tokio::task::JoinSet::new();
+    for turn in turns {
+        set.spawn(async move { interrupt_turn_request(&turn).await });
+    }
+    let mut interrupted = 0usize;
+    while let Some(joined) = set.join_next().await {
+        if matches!(joined, Ok(Ok(true))) {
+            interrupted += 1;
+        }
+    }
+    interrupted
 }
 
 /// Drop the cached runtime bridge so the next stdio thread message spawns a
@@ -2427,10 +2460,7 @@ async fn dispatch_stdio_request_with_writer<W: AsyncWrite + Unpin>(
             // to kill the child would block until that turn ends — the exact
             // deadlock that made shutdown useless against a runaway turn.
             // Interrupt live turns first; they release the mutex promptly.
-            let live: Vec<String> = state.in_flight_turns.lock().await.keys().cloned().collect();
-            for thread_id in live {
-                let _ = interrupt_stdio_turn(state, &thread_id).await;
-            }
+            let _ = interrupt_all_stdio_turns(state).await;
             if let Some(bridge) = state.runtime_bridge.lock().await.take() {
                 bridge.lock().await.shutdown_child();
             }
