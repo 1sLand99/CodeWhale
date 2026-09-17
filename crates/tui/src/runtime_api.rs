@@ -595,7 +595,6 @@ fn runtime_api_sub_agent_manager(workspace: &FsPath, workers: usize) -> SharedSu
         max_agents,
         Duration::from_secs(crate::config::DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS),
         max_agents,
-        None,
     )
 }
 

@@ -3282,29 +3282,6 @@ fn structured_role_pins_require_a_typed_model_field() {
 }
 
 #[test]
-fn subagent_token_budget_is_optional_and_zero_disables() {
-    assert_eq!(Config::default().subagent_token_budget(), None);
-
-    let disabled = Config {
-        subagents: Some(SubagentsConfig {
-            token_budget: Some(0),
-            ..SubagentsConfig::default()
-        }),
-        ..Config::default()
-    };
-    assert_eq!(disabled.subagent_token_budget(), None);
-
-    let configured = Config {
-        subagents: Some(SubagentsConfig {
-            token_budget: Some(50_000),
-            ..SubagentsConfig::default()
-        }),
-        ..Config::default()
-    };
-    assert_eq!(configured.subagent_token_budget(), Some(50_000));
-}
-
-#[test]
 fn subagent_admission_limit_defaults_and_clamps() {
     assert_eq!(
         Config::default().max_admitted_subagents(),
@@ -3357,7 +3334,6 @@ max_concurrent = 20
 launch_concurrency = 20
 max_admitted = 200
 max_depth = 6
-token_budget = 100000
 api_timeout_secs = 900
 heartbeat_timeout_secs = 1200
 
@@ -3366,7 +3342,6 @@ max_concurrent = 4
 launch_concurrency = 3
 max_admitted = 12
 max_depth = 2
-token_budget = 25000
 api_timeout_secs = 180
 heartbeat_timeout_secs = 240
 "#,
@@ -3384,10 +3359,6 @@ heartbeat_timeout_secs = 240
     assert_eq!(
         config.subagent_max_spawn_depth_for_provider(ApiProvider::Zai),
         2
-    );
-    assert_eq!(
-        config.subagent_token_budget_for_provider(ApiProvider::Zai),
-        Some(25_000)
     );
     assert_eq!(
         config.subagent_api_timeout_secs_for_provider(ApiProvider::Zai),

@@ -219,7 +219,6 @@ async fn lifecycle_compact_roster_bounds_every_state_and_pages_multibyte_names()
             }
             let record = guard.worker_records.get_mut(&id).unwrap();
             record.usage.total_tokens = Some(100);
-            record.usage.budget_spent_tokens = Some(3700);
             record.verification.summary = "\"🐋".repeat(10_000);
             if i > 0 {
                 record.parent_run_id = Some("agent_bounded-0".into());

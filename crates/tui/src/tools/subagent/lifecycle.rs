@@ -123,12 +123,7 @@ pub(super) fn compact_row(manager: &SubAgentManager, agent: &SubAgent) -> Value 
         object.insert("max_spawn_depth".into(), json!(record.spec.max_spawn_depth));
         if let Ok(profile) = serde_json::to_value(&record.spec.runtime_profile) {
             let mut limits = serde_json::Map::new();
-            for key in [
-                "max_steps",
-                "token_budget",
-                "wall_time_secs",
-                "wall_deadline_ms",
-            ] {
+            for key in ["max_steps", "wall_time_secs", "wall_deadline_ms"] {
                 if let Some(value) = profile.get(key) {
                     limits.insert(key.to_string(), value.clone());
                 }
@@ -142,8 +137,7 @@ pub(super) fn compact_row(manager: &SubAgentManager, agent: &SubAgent) -> Value 
             "usage".into(),
             json!({
                 "input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens,
-                "total_tokens": usage.total_tokens, "token_budget": usage.token_budget,
-                "budget_remaining_tokens": usage.budget_remaining_tokens,
+                "total_tokens": usage.total_tokens,
             }),
         );
         object.insert("last_activity_ms".into(), json!(record.updated_at_ms));

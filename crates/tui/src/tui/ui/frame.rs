@@ -935,7 +935,6 @@ pub(crate) fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
             },
         ),
         max_spawn_depth: config.subagent_max_spawn_depth_for_provider(provider),
-        subagent_token_budget: config.subagent_token_budget_for_provider(provider),
         allowed_tools: app.active_allowed_tools.clone(),
         disallowed_tools: None,
         max_tool_calls: None,

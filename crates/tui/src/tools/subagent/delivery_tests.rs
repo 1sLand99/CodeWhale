@@ -42,7 +42,6 @@ fn worker(root: &Path, write: bool, paths: &[&str], scope: &[&str]) -> (SubAgent
         coordination_contracts: Vec::new(),
         expected_artifact: None,
         deliverables: paths.iter().map(|path| (*path).into()).collect(),
-        token_budget: None,
         resume_identity: None,
         generation: 1,
         resume_from_agent_id: None,

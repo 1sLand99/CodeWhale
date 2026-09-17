@@ -10370,7 +10370,6 @@ impl RuntimeThreadManager {
                 plan_state: new_shared_plan_state(),
                 goal_state,
                 max_spawn_depth: cfg.subagent_max_spawn_depth_for_provider(provider),
-                subagent_token_budget: cfg.subagent_token_budget_for_provider(provider),
                 network_policy,
                 snapshots_enabled: !isolated_chat && cfg.snapshots_config().enabled,
                 snapshots_max_workspace_bytes: cfg

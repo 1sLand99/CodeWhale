@@ -376,9 +376,6 @@ pub struct WorkerRuntimeProfile {
     pub max_spawn_depth: u32,
     #[serde(default)]
     pub spawn_depth: u32,
-    /// Measured input plus output tokens for this worker and its descendants.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token_budget: Option<u64>,
     /// Whole-run wall time, including queued, model and tool work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wall_time_secs: Option<u64>,
@@ -470,7 +467,6 @@ impl WorkerRuntimeProfile {
             denied_tools: Vec::new(),
             max_spawn_depth: codewhale_config::DEFAULT_SPAWN_DEPTH,
             spawn_depth: 0,
-            token_budget: None,
             wall_time_secs: None,
             wall_deadline_ms: None,
             max_steps: Self::default_max_steps(role.clone()),
@@ -539,7 +535,6 @@ impl WorkerRuntimeProfile {
             denied_tools,
             max_spawn_depth,
             spawn_depth: self.spawn_depth.saturating_add(1),
-            token_budget: narrow_optional_limit(self.token_budget, requested.token_budget),
             wall_time_secs: narrow_optional_limit(self.wall_time_secs, requested.wall_time_secs),
             wall_deadline_ms: narrow_optional_limit(
                 self.wall_deadline_ms,
@@ -614,7 +609,6 @@ pub struct ChildLaunchManifest {
     pub expected_artifact: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deliverables: Vec<String>,
-    pub token_budget: Option<u64>,
     pub resume_identity: Option<String>,
     #[serde(default)]
     pub generation: u32,

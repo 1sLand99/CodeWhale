@@ -2497,11 +2497,6 @@ pub struct SubagentsConfig {
     /// execution bounded.
     #[serde(default, alias = "max_total", alias = "admission_limit")]
     pub max_admitted: Option<usize>,
-    /// Optional aggregate token budget shared by a root `agent` run and its
-    /// descendants. When unset or 0, sub-agents keep legacy unlimited spend
-    /// behavior unless an individual `agent` call supplies a per-run override.
-    #[serde(default)]
-    pub token_budget: Option<u64>,
     /// Deprecated pre-v0.8.61 alias for `launch_concurrency`. Honored only
     /// when `launch_concurrency` is unset, so the new key always wins.
     #[serde(default, rename = "interactive_max_launch")]
@@ -2586,8 +2581,6 @@ pub struct SubagentProviderConfig {
     pub launch_concurrency: Option<usize>,
     #[serde(default, alias = "max_total", alias = "admission_limit")]
     pub max_admitted: Option<usize>,
-    #[serde(default)]
-    pub token_budget: Option<u64>,
     #[serde(default)]
     pub api_timeout_secs: Option<u64>,
     #[serde(default)]
@@ -7874,28 +7867,6 @@ impl Config {
             .or_else(|| self.subagents.as_ref().and_then(|cfg| cfg.max_admitted))
             .unwrap_or(MAX_SUBAGENT_ADMISSION)
             .clamp(max_concurrent, MAX_SUBAGENT_ADMISSION)
-    }
-
-    /// Optional aggregate token budget for each root `agent` run.
-    ///
-    /// Reads `[subagents] token_budget`. `None` and `0` both mean unlimited,
-    /// preserving legacy behavior until a budget is explicitly configured.
-    #[must_use]
-    pub fn subagent_token_budget(&self) -> Option<u64> {
-        self.subagents
-            .as_ref()
-            .and_then(|cfg| cfg.token_budget)
-            .filter(|budget| *budget > 0)
-    }
-
-    /// Return the provider-specific aggregate token budget for each root
-    /// `agent` run.
-    #[must_use]
-    pub fn subagent_token_budget_for_provider(&self, provider: ApiProvider) -> Option<u64> {
-        self.subagent_provider_config(provider)
-            .and_then(|cfg| cfg.token_budget)
-            .or_else(|| self.subagents.as_ref().and_then(|cfg| cfg.token_budget))
-            .filter(|budget| *budget > 0)
     }
 
     /// Default per-child model-turn budget from `[subagents]

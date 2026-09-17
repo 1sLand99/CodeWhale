@@ -172,13 +172,13 @@ fn compact_receipt_bounds_long_labels_and_declared_outputs_without_hiding_limits
         "follow_up": {"tool": "agent", "agent_id": "agent_bounded_receipt", "session_name": "🐋".repeat(4000)},
         "usage": {"status": "unknown", "note": "No provider receipt yet"},
         "worker_record": {"spec": {
-            "runtime_profile": {"spawn_depth": 1, "max_spawn_depth": 2, "max_steps": 8, "token_budget": 500, "wall_time_secs": 30, "wall_deadline_ms": 10000},
+            "runtime_profile": {"spawn_depth": 1, "max_spawn_depth": 2, "max_steps": 8, "wall_time_secs": 30, "wall_deadline_ms": 10000},
             "launch_manifest": {"deliverables": paths}
         }}
     });
     compact_spawn_receipt(&mut receipt, false);
     assert!(serde_json::to_vec(&receipt).unwrap().len() <= lifecycle::COMPACT_SPAWN_BYTES);
-    assert_eq!(receipt["effective_limits"]["token_budget"], 500);
+    assert_eq!(receipt["effective_limits"]["max_steps"], 8);
     assert_eq!(receipt["effective_limits"]["wall_deadline_ms"], 10000);
     assert_eq!(receipt["child_route"]["truncated"], true);
     let shown = receipt["deliverables"].as_array().unwrap();

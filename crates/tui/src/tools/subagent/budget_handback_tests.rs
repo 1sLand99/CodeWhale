@@ -13,7 +13,6 @@ struct Fixture {
     report_started: Arc<Notify>,
     release_report: Arc<Notify>,
     cancel: CancellationToken,
-    resume_runtime: SubAgentRuntime,
     completions: mpsc::Receiver<SubAgentCompletion>,
     mailbox: MailboxReceiver,
 }
@@ -41,12 +40,7 @@ impl Drop for Fixture {
     }
 }
 
-async fn fixture(
-    mode: &'static str,
-    first_tokens: u64,
-    cap: Option<u64>,
-    max_steps: u32,
-) -> Fixture {
+async fn fixture(mode: &'static str, first_tokens: u64, max_steps: u32) -> Fixture {
     let workspace = tempdir().unwrap();
     fs::write(
         workspace.path().join("README.md"),
@@ -70,11 +64,7 @@ async fn fixture(
                     requests.push(body);
                     requests.len()
                 };
-                if mode == "resume-unknown" && call == 2 {
-                    report_started.notify_one();
-                    release_report.notified().await;
-                }
-                let choice = if call == 1 || (mode == "resume-unknown" && call == 3) {
+                let choice = if call == 1 {
                     json!({"index": 0, "message": {"role": "assistant",
                         "content": if mode == "tool-only" { Value::Null } else { json!("RECORDED_FINDING: checksum validation is missing.") },
                         "tool_calls": [{"id": "read-one", "type": "function", "function": {
@@ -127,7 +117,6 @@ async fn fixture(
     ));
     let mut spec = make_worker_spec("report-worker", workspace.path().to_path_buf());
     spec.max_steps = max_steps;
-    spec.runtime_profile.token_budget = cap;
     spec.runtime_profile.max_steps = max_steps;
     spec.runtime_profile.wall_time_secs = Some(5);
     spec.runtime_profile.wall_deadline_ms = Some(epoch_millis_now() + 5_000);
@@ -186,39 +175,8 @@ async fn fixture(
     {
         let mut guard = manager.write().await;
         guard.register_worker_for_session(spec, &runtime.context.state_namespace);
-        if let Some(cap) = cap {
-            guard.attach_shared_budget_scope("report-worker", "report-pool", cap);
-        }
         guard.agents.insert("report-worker".to_string(), agent);
-        if mode == "shared-unknown" {
-            let mut sibling = make_worker_spec("settled-sibling", workspace.path().to_path_buf());
-            sibling.runtime_profile.token_budget = cap;
-            guard.register_worker_for_session(sibling, &runtime.context.state_namespace);
-            guard.attach_shared_budget_scope("settled-sibling", "report-pool", cap.unwrap());
-            guard.record_worker_usage(
-                "settled-sibling",
-                "missing-sibling",
-                &Usage::default(),
-                None,
-            );
-            guard.record_worker_usage(
-                "settled-sibling",
-                "known-sibling",
-                &Usage {
-                    input_tokens: 7,
-                    output_tokens: 4,
-                    ..Usage::default()
-                },
-                None,
-            );
-            guard
-                .worker_records
-                .get_mut("settled-sibling")
-                .unwrap()
-                .status = AgentWorkerStatus::Completed;
-        }
     }
-    let resume_runtime = runtime.clone();
     let task = tokio::spawn(run_subagent_task(SubAgentTask {
         manager_handle: Arc::clone(&manager),
         runtime,
@@ -230,7 +188,6 @@ async fn fixture(
         fork_context: false,
         started_at: Instant::now(),
         max_steps,
-        token_budget: cap,
         wall_time: Duration::from_secs(5),
         input_rx,
         launch_gate: None,
@@ -245,7 +202,6 @@ async fn fixture(
         report_started,
         release_report,
         cancel,
-        resume_runtime,
         completions,
         mailbox: mailbox_rx,
     }
@@ -256,7 +212,7 @@ async fn fixture(
 async fn budget_handback_turn_consolidates_tool_only_work_and_checks_declared_deliverables() {
     let _retry = crate::retry_status::test_guard();
     crate::retry_status::clear_rate_limit();
-    let mut fixture = fixture("tool-only", 15, Some(100_000), 2).await;
+    let mut fixture = fixture("tool-only", 15, 1).await;
     let result = fixture.finish().await;
     assert_eq!(result.status, SubAgentStatus::BudgetExhausted);
     assert_eq!(result.steps_taken, 2);
@@ -319,41 +275,10 @@ async fn budget_handback_turn_consolidates_tool_only_work_and_checks_declared_de
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn budget_handback_turn_uses_remaining_token_reserve_before_hard_exhaustion() {
-    let _retry = crate::retry_status::test_guard();
-    crate::retry_status::clear_rate_limit();
-    let mut fixture = fixture("success", 92_000, Some(100_000), 8).await;
-    let result = fixture.finish().await;
-    assert_eq!(result.status, SubAgentStatus::BudgetExhausted);
-    assert_eq!(result.usage.as_ref().unwrap().total_tokens, Some(92_030));
-    assert_eq!(fixture.requests.lock().unwrap().len(), 2);
-    assert!(result.result.as_deref().unwrap().contains("PARTIAL_REPORT"));
-    assert!(
-        fixture.requests.lock().unwrap()[1]
-            .to_string()
-            .contains("RECORDED_FINDING")
-    );
-    assert!(result.checkpoint.as_ref().unwrap().messages.iter().flat_map(|message| &message.content)
-        .any(|block| matches!(block, ContentBlock::ToolResult { tool_use_id, content, is_error, .. }
-            if tool_use_id == "read-one" && *is_error == Some(true)
-                && content.contains("not executed") && content.contains("budget_exhausted")
-                && !content.contains("crashed_and_repaired"))));
-    assert!(
-        !fixture
-            .mailbox
-            .drain()
-            .iter()
-            .any(|entry| matches!(entry.message, MailboxMessage::ToolCallStarted { .. })),
-        "normal work stops at the reporting reserve"
-    );
-}
-
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn budget_handback_turn_rejects_provider_tools_and_preserves_fallback_verdicts() {
     let _retry = crate::retry_status::test_guard();
     crate::retry_status::clear_rate_limit();
-    let mut fixture = fixture("tool", 15, Some(100_000), 2).await;
+    let mut fixture = fixture("tool", 15, 1).await;
     let result = fixture.finish().await;
     assert_eq!(fixture.requests.lock().unwrap().len(), 2);
     assert_eq!(result.status, SubAgentStatus::BudgetExhausted);
@@ -419,7 +344,7 @@ async fn budget_handback_turn_failure_and_timeout_do_not_add_worker_retries() {
         ("failure", "provider call failed"),
         ("timeout", "report deadline expired"),
     ] {
-        let mut fixture = fixture(mode, 15, Some(100_000), 2).await;
+        let mut fixture = fixture(mode, 15, 1).await;
         let result = fixture.finish().await;
         assert_eq!(fixture.requests.lock().unwrap().len(), 2);
         assert_eq!(result.status, SubAgentStatus::BudgetExhausted);
@@ -444,34 +369,10 @@ async fn budget_handback_turn_failure_and_timeout_do_not_add_worker_retries() {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn budget_handback_turn_tiny_exhausted_and_unknown_allowances_refuse_paid_summary() {
-    let _retry = crate::retry_status::test_guard();
-    crate::retry_status::clear_rate_limit();
-    for (mode, tokens, cap, reason) in [
-        ("success", 15, 15, "too small"),
-        ("success", 100_000, 100_000, "remaining token allowance"),
-        ("unknown", 0, 100_000, "usage is unknown"),
-    ] {
-        let mut fixture = fixture(mode, tokens, Some(cap), 2).await;
-        let result = fixture.finish().await;
-        assert_eq!(fixture.requests.lock().unwrap().len(), 1);
-        assert_eq!(result.status, SubAgentStatus::BudgetExhausted);
-        assert!(
-            result.result.as_deref().unwrap().contains(reason),
-            "{result:?}"
-        );
-        if mode == "unknown" {
-            assert_eq!(result.usage.as_ref().unwrap().total_tokens, None);
-        }
-    }
-}
-
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn budget_handback_turn_missing_report_usage_is_not_claimed_as_zero_cost() {
     let _retry = crate::retry_status::test_guard();
     crate::retry_status::clear_rate_limit();
-    let mut fixture = fixture("report-unknown", 15, Some(100_000), 2).await;
+    let mut fixture = fixture("report-unknown", 15, 1).await;
     let result = fixture.finish().await;
     assert_eq!(fixture.requests.lock().unwrap().len(), 2);
     assert_eq!(result.status, SubAgentStatus::BudgetExhausted);
@@ -483,120 +384,10 @@ async fn budget_handback_turn_missing_report_usage_is_not_claimed_as_zero_cost()
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn budget_handback_resumed_known_response_keeps_interrupted_source_usage_unknown() {
+async fn budget_handback_inflight_wall_timeout_persists_unreported_usage() {
     let _retry = crate::retry_status::test_guard();
     crate::retry_status::clear_rate_limit();
-    let mut fixture = fixture("resume-unknown", 0, Some(100_000), 4).await;
-    // The first response omits usage; the second ordinary request is held so
-    // the real interrupt/followup path resumes that checkpoint, not a forged
-    // continuation edge. A known response in the successor cannot repair the
-    // source's positively known missing coverage.
-    tokio::time::timeout(Duration::from_secs(2), fixture.report_started.notified())
-        .await
-        .unwrap();
-    let successor = {
-        let mut manager = fixture.manager.write().await;
-        let (_, interrupted) = manager
-            .interrupt_child("report-worker", None, "fixture interruption".to_string())
-            .unwrap();
-        assert!(matches!(interrupted.status, SubAgentStatus::Interrupted(_)));
-        assert!(interrupted.checkpoint.as_ref().unwrap().continuable);
-        assert!(manager.worker_records["report-worker"].has_unreported_usage);
-        assert_eq!(
-            manager.worker_records["report-worker"].usage.total_tokens,
-            None
-        );
-        // This fixture owns the original task handle instead of the manager.
-        // Abort it just as production interrupt does before launching followup.
-        fixture.task.take().unwrap().abort();
-        let saved = serde_json::to_vec(&manager.worker_records).unwrap();
-        manager.worker_records = serde_json::from_slice(&saved).unwrap();
-        assert!(manager.worker_records["report-worker"].has_unreported_usage);
-        manager
-            .resume_from_checkpoint(
-                Arc::clone(&fixture.manager),
-                fixture.resume_runtime.clone(),
-                "report-worker",
-                "Continue the inspection.",
-            )
-            .unwrap()
-            .agent_id
-    };
-    let result = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let result = fixture.manager.read().await.get_result(&successor).unwrap();
-            if result.status != SubAgentStatus::Running {
-                return result;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("resumed worker must settle");
-    assert_eq!(result.status, SubAgentStatus::BudgetExhausted);
-    assert_eq!(result.usage.as_ref().unwrap().total_tokens, Some(15));
-    assert!(
-        result
-            .result
-            .as_deref()
-            .unwrap()
-            .contains("usage is unknown in an applicable budget scope")
-    );
-    assert_eq!(
-        fixture.requests.lock().unwrap().len(),
-        3,
-        "no successor reporting request"
-    );
-    let manager = fixture.manager.read().await;
-    assert!(manager.worker_records["report-worker"].has_unreported_usage);
-    assert!(!manager.worker_records[&successor].has_unreported_usage);
-    assert_eq!(
-        manager.worker_records["report-worker"].usage.total_tokens,
-        None
-    );
-}
-
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn budget_handback_shared_sibling_unknown_usage_blocks_only_paid_reporting() {
-    let _retry = crate::retry_status::test_guard();
-    crate::retry_status::clear_rate_limit();
-    let mut fixture = fixture("shared-unknown", 15, Some(100_000), 2).await;
-    let result = fixture.finish().await;
-    assert_eq!(result.status, SubAgentStatus::BudgetExhausted);
-    assert_eq!(result.usage.as_ref().unwrap().total_tokens, Some(15));
-    assert!(
-        result
-            .result
-            .as_deref()
-            .unwrap()
-            .contains("usage is unknown in an applicable budget scope")
-    );
-    assert_eq!(fixture.requests.lock().unwrap().len(), 1);
-    let manager = fixture.manager.read().await;
-    assert!(manager.worker_records["settled-sibling"].has_unreported_usage);
-    assert!(!manager.worker_records["report-worker"].has_unreported_usage);
-    assert_eq!(
-        manager.worker_records["settled-sibling"].usage.total_tokens,
-        Some(11)
-    );
-    assert_eq!(
-        manager.aggregate_budget_spent("report-pool"),
-        26,
-        "known subtotals are never erased"
-    );
-    assert_eq!(
-        manager.worker_records["report-worker"].verification.status,
-        "deliverable_missing"
-    );
-}
-
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn budget_handback_inflight_wall_timeout_persists_unknown_scope_coverage() {
-    let _retry = crate::retry_status::test_guard();
-    crate::retry_status::clear_rate_limit();
-    let mut fixture = fixture("work-timeout", 15, Some(100_000), 4).await;
+    let mut fixture = fixture("work-timeout", 15, 4).await;
     let result = fixture.finish().await;
     assert_eq!(result.status, SubAgentStatus::BudgetExhausted);
     assert!(
@@ -608,26 +399,15 @@ async fn budget_handback_inflight_wall_timeout_persists_unknown_scope_coverage()
     );
     assert_eq!(
         fixture.requests.lock().unwrap().len(),
-        2,
-        "no report after an unmeasured in-flight request"
+        3,
+        "the reserved hand-back turn still dispatches after an unmeasured in-flight request; its own deadline bounds it"
     );
-    let mut manager = fixture.manager.write().await;
+    let manager = fixture.manager.read().await;
     assert!(manager.worker_records["report-worker"].has_unreported_usage);
     assert_eq!(
         manager.worker_records["report-worker"].usage.total_tokens,
         Some(15)
     );
-    let saved = serde_json::to_vec(&manager.worker_records).unwrap();
-    manager.worker_records = serde_json::from_slice(&saved).unwrap();
-    let mut sibling = make_worker_spec("later-sibling", fixture.workspace.path().to_path_buf());
-    sibling.runtime_profile.token_budget = Some(100_000);
-    manager.register_worker(sibling);
-    manager.attach_shared_budget_scope("later-sibling", "report-pool", 100_000);
-    assert!(matches!(
-        manager.reserve_handback("later-sibling", Some(100_000), 8_192, 500, 1_024),
-        Err(reason) if reason.contains("usage is unknown")
-    ));
-    assert_eq!(manager.aggregate_budget_spent("report-pool"), 15);
 }
 
 #[test]
@@ -635,8 +415,7 @@ fn budget_handback_coverage_marker_is_sticky_without_reclassifying_legacy_or_mea
     let tmp = tempdir().unwrap();
     let mut manager = SubAgentManager::new(tmp.path().to_path_buf(), 4);
     for id in ["worker", "unrelated"] {
-        let mut spec = make_worker_spec(id, tmp.path().to_path_buf());
-        spec.runtime_profile.token_budget = Some(20_000);
+        let spec = make_worker_spec(id, tmp.path().to_path_buf());
         manager.register_worker(spec);
     }
     let measured_zero = Usage {
@@ -655,9 +434,7 @@ fn budget_handback_coverage_marker_is_sticky_without_reclassifying_legacy_or_mea
     let legacy: AgentWorkerRecord = serde_json::from_value(legacy).unwrap();
     assert!(!legacy.has_unreported_usage);
     manager.worker_records.insert("worker".to_string(), legacy);
-    let lease = manager
-        .reserve_handback("worker", Some(20_000), 2_000, 500, 1_024)
-        .unwrap();
+    let (_output, lease) = manager.reserve_handback("worker", 500, 1_024).unwrap();
     drop(lease);
     manager.record_worker_usage("worker", "missing", &Usage::default(), None);
     manager.record_worker_usage(
@@ -677,10 +454,6 @@ fn budget_handback_coverage_marker_is_sticky_without_reclassifying_legacy_or_mea
         Some(15)
     );
     assert!(manager.worker_records["worker"].has_unreported_usage);
-    assert!(matches!(
-        manager.reserve_handback("worker", Some(20_000), 2_000, 500, 1_024),
-        Err(reason) if reason.contains("usage is unknown")
-    ));
 }
 
 #[tokio::test]
@@ -688,7 +461,7 @@ fn budget_handback_coverage_marker_is_sticky_without_reclassifying_legacy_or_mea
 async fn budget_handback_turn_cancellation_wins_once_and_releases_shared_reservation() {
     let _retry = crate::retry_status::test_guard();
     crate::retry_status::clear_rate_limit();
-    let mut fixture = fixture("hold", 15, Some(100_000), 2).await;
+    let mut fixture = fixture("hold", 15, 2).await;
     tokio::time::timeout(Duration::from_secs(2), fixture.report_started.notified())
         .await
         .unwrap();
@@ -722,7 +495,7 @@ async fn budget_handback_turn_cancellation_wins_once_and_releases_shared_reserva
 async fn budget_handback_turn_cancellation_after_response_preserves_actual_usage() {
     let _retry = crate::retry_status::test_guard();
     crate::retry_status::clear_rate_limit();
-    let mut fixture = fixture("hold", 15, Some(100_000), 2).await;
+    let mut fixture = fixture("hold", 15, 2).await;
     tokio::time::timeout(Duration::from_secs(2), fixture.report_started.notified())
         .await
         .unwrap();
@@ -755,76 +528,21 @@ async fn budget_handback_turn_cancellation_after_response_preserves_actual_usage
 }
 
 #[test]
-fn budget_handback_reservations_intersect_shared_ancestor_and_source_caps_without_refunds() {
+fn handback_reservation_uses_the_fixed_allowance_and_refuses_a_second_turn() {
     let tmp = tempdir().unwrap();
-    let mut manager = SubAgentManager::new(tmp.path().to_path_buf(), 8);
-    for (id, parent, cap) in [
-        ("parent", None, 20_000),
-        ("source", None, 15_000),
-        ("one", Some("parent"), 15_000),
-        ("two", Some("parent"), 15_000),
-    ] {
-        let mut spec = make_worker_spec(id, tmp.path().to_path_buf());
-        spec.parent_run_id = parent.map(str::to_string);
-        spec.runtime_profile.token_budget = Some(cap);
-        manager.register_worker(spec);
-        manager.attach_shared_budget_scope(id, "shared", 20_000);
-    }
-    manager
-        .worker_records
-        .get_mut("parent")
-        .unwrap()
-        .usage
-        .total_tokens = Some(18_000);
-    let one = manager
-        .reserve_handback("one", Some(2_000), 2_000, 900, 1_024)
-        .unwrap();
-    assert_eq!(manager.available_worker_tokens("two", false), Some(76));
-    assert!(
-        manager
-            .reserve_handback("two", Some(2_000), 2_000, 100, 1_024)
-            .is_err()
-    );
-    assert!(
-        manager
-            .resolve_spawn_budget_scope("new", Some("parent"), None)
-            .is_err()
-    );
-    assert_eq!(
-        manager.aggregate_budget_spent("shared"),
-        18_000,
-        "a reservation is not actual usage"
-    );
-    drop(one);
-    assert_eq!(manager.available_worker_tokens("two", false), Some(2_000));
-    let source = manager.worker_records.get_mut("source").unwrap();
-    source.usage.total_tokens = Some(1_000);
-    source.spec.runtime_profile.token_budget = Some(1_050);
-    let profile = manager.worker_records["two"].spec.runtime_profile.clone();
-    manager
-        .worker_records
-        .get_mut("two")
-        .unwrap()
-        .spec
-        .launch_manifest = Some(
-        serde_json::from_value(json!({
-            "owner_session": "parent", "child_id": "two", "profile": profile,
-            "prompt": "continue", "cwd": null, "worktree": false, "writable_roots": [],
-            "writable_files": [], "coordination_contracts": [], "generation": 1,
-            "resume_identity": null, "resume_from_agent_id": "source"
-        }))
-        .unwrap(),
-    );
-    assert_eq!(manager.available_worker_tokens("two", false), Some(50));
-    assert!(
-        manager
-            .reserve_handback("two", None, 2_000, 100, 1_024)
-            .is_err()
-    );
-    let saved = serde_json::to_vec(&manager.worker_records).unwrap();
-    manager.worker_records = serde_json::from_slice(&saved).unwrap();
-    assert_eq!(manager.available_worker_tokens("two", false), Some(50));
-    assert_eq!(manager.aggregate_budget_spent("shared"), 19_000);
+    let mut manager = SubAgentManager::new(tmp.path().to_path_buf(), 4);
+    manager.register_worker(make_worker_spec("w", tmp.path().to_path_buf()));
+    let (output, lease) = manager.reserve_handback("w", 500, 1_024).unwrap();
+    assert_eq!(output, 1_024);
+    assert!(matches!(
+        manager.reserve_handback("w", 500, 1_024),
+        Err(reason) if reason.contains("already in flight")
+    ));
+    drop(lease);
+    assert!(matches!(
+        manager.reserve_handback("w", 8_200, 1_024),
+        Err(reason) if reason.contains("fixed hand-back allowance")
+    ));
 }
 
 #[tokio::test]
@@ -849,10 +567,6 @@ async fn budget_handback_expired_original_deadline_refuses_the_model_call() {
         &mut vec![],
         &mut steps,
         2,
-        Some(100_000),
-        15,
-        8_192,
-        true,
         Some(Instant::now() - Duration::from_millis(1)),
         "wall-time budget exhausted",
     )
@@ -890,7 +604,7 @@ fn git(root: &Path, args: &[&str]) {
 /// spawn-time delivery baseline is what makes the inventory attributable to
 /// this worker rather than the parent's own dirty files.
 #[tokio::test]
-async fn budget_death_preservation_note_names_surviving_workspace_changes() {
+async fn run_death_preservation_note_names_surviving_workspace_changes() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
     git(root, &["init", "--quiet"]);

@@ -3912,15 +3912,12 @@ impl SubAgentWorkflowDriver {
     }
 
     fn current_budget_snapshot(&self) -> BudgetSnapshot {
-        let spent = self
-            .manager
-            .try_read()
-            .ok()
-            .map(|manager| manager.budget_spent_for_scope(&self.run_id))
-            .unwrap_or(0);
+        // Token-budget enforcement was removed (#6189): nothing stops a run.
+        // The snapshot survives for the declared spec ceiling only; spent is
+        // no longer tracked per scope.
         BudgetSnapshot {
             total: self.total_budget,
-            spent,
+            spent: 0,
         }
     }
 
@@ -4621,7 +4618,6 @@ impl SubAgentWorkflowDriver {
             .map(str::to_string);
         let identity = WorkflowTaskSpawnIdentity {
             workflow_run_id: self.run_id.clone(),
-            shared_token_budget: self.total_budget,
             workflow_phase_id,
             workflow_task_label,
             workflow_child_index,

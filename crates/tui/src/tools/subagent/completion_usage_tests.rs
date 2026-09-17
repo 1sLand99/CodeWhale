@@ -15,8 +15,6 @@ fn child(
     record.usage.input_tokens = units.map(|units| units * 8);
     record.usage.output_tokens = units.map(|units| units * 2);
     record.usage.total_tokens = units.map(|units| units * 10);
-    // This repeated pool subtotal is deliberately not this child's spend.
-    record.usage.budget_spent_tokens = Some(99_999);
     id
 }
 
@@ -413,11 +411,8 @@ async fn completion_usage_dozen_child_status_measures_bytes_and_keeps_descendant
                 runtime_build_sha: "a".repeat(40),
             });
             record.spec.runtime_profile.max_steps = 12;
-            record.spec.runtime_profile.token_budget = Some(12_000);
             record.spec.runtime_profile.wall_time_secs = Some(600);
             record.spec.runtime_profile.wall_deadline_ms = Some(record.updated_at_ms + 600_000);
-            record.usage.token_budget = Some(12_000);
-            record.usage.budget_remaining_tokens = Some(11_220);
             if index == 11 {
                 record.verification.status = "deliverable_missing".into();
                 record.verification.summary = "The claimed report.md is missing.".into();
@@ -507,7 +502,8 @@ async fn completion_usage_dozen_child_status_measures_bytes_and_keeps_descendant
     let addressed: Value = serde_json::from_str(&addressed.content).unwrap();
     assert_eq!(addressed["compact"], true);
     assert_eq!(addressed["child_route"]["model_id"], "deepseek-v4-flash");
-    assert_eq!(addressed["effective_limits"]["token_budget"], 12_000);
+    assert_eq!(addressed["effective_limits"]["max_steps"], 12);
+    assert_eq!(addressed["effective_limits"]["wall_time_secs"], 600);
     assert_eq!(addressed["max_spawn_depth"], 4);
     assert_eq!(addressed["usage"]["input_tokens"], 8);
     assert_eq!(addressed["usage"]["output_tokens"], 2);

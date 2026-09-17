@@ -468,10 +468,6 @@ pub fn fleet_task_to_worker_spec_with_profiles(
         coordination_contracts,
         expected_artifact: None,
         deliverables: Vec::new(),
-        token_budget: task_spec
-            .budget
-            .as_ref()
-            .and_then(|budget| budget.max_tokens),
         resume_identity: Some(session_name.clone()),
         generation: 1,
         resume_from_agent_id: None,

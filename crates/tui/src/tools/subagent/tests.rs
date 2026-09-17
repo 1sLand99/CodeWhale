@@ -237,7 +237,6 @@ fn make_write_worker_spec(worker_id: &str, workspace: PathBuf, root: &str) -> Ag
         coordination_contracts: Vec::new(),
         expected_artifact: Some("tested patch".to_string()),
         deliverables: Vec::new(),
-        token_budget: None,
         resume_identity: Some(worker_id.to_string()),
         generation: 1,
         resume_from_agent_id: None,
@@ -553,101 +552,11 @@ fn worker_record_usage_accumulates_provider_tokens() {
         reloaded.usage_source_fingerprints,
         record.usage_source_fingerprints
     );
-    assert_eq!(record.usage.token_budget, None);
     assert!(
         record.usage.note.contains("175 tokens"),
         "usage note includes reported total: {}",
         record.usage.note
     );
-}
-
-#[test]
-fn token_budget_scope_is_shared_across_nested_workers_and_blocks_when_spent() {
-    let tmp = tempdir().expect("tempdir");
-    let workspace = tmp.path().to_path_buf();
-    let mut manager =
-        SubAgentManager::new(workspace.clone(), 4).with_default_token_budget(Some(100));
-
-    manager.register_worker(make_worker_spec("agent_root", workspace.clone()));
-    let root_scope = manager
-        .resolve_spawn_budget_scope("agent_root", None, None)
-        .expect("root budget resolves")
-        .expect("root budget present");
-    manager.attach_budget_scope("agent_root", root_scope);
-    manager.record_worker_usage(
-        "agent_root",
-        "agent_root:response:1",
-        &Usage {
-            input_tokens: 40,
-            output_tokens: 10,
-            ..Usage::default()
-        },
-        None,
-    );
-
-    let mut child_spec = make_worker_spec("agent_child", workspace);
-    child_spec.parent_run_id = Some("agent_root".to_string());
-    let child_scope = manager
-        .resolve_spawn_budget_scope("agent_child", Some("agent_root"), None)
-        .expect("child inherits budget")
-        .expect("child budget present");
-    assert_eq!(child_scope.scope_id, "agent_root");
-    assert_eq!(child_scope.limit, 100);
-    assert_eq!(child_scope.spent, 50);
-    for request in [20, 1_000] {
-        let scope = manager
-            .resolve_spawn_budget_scope("agent_override", Some("agent_root"), Some(request))
-            .expect("a remaining inherited pool still permits a narrowed child")
-            .expect("inherited pool remains present");
-        assert_eq!(
-            scope.scope_id, "agent_root",
-            "a per-call cap cannot reset accounting"
-        );
-        assert_eq!(
-            scope.limit, 100,
-            "the local cap does not replace the aggregate ceiling"
-        );
-        assert_eq!(scope.spent, 50);
-        assert_eq!(scope.remaining, 50);
-    }
-    manager.register_worker(child_spec);
-    manager.attach_budget_scope("agent_child", child_scope);
-    manager.record_worker_usage(
-        "agent_child",
-        "agent_child:response:1",
-        &Usage {
-            input_tokens: 30,
-            output_tokens: 20,
-            ..Usage::default()
-        },
-        None,
-    );
-
-    let root = manager.get_worker_record("agent_root").expect("root");
-    let child = manager.get_worker_record("agent_child").expect("child");
-    assert_eq!(root.usage.budget_spent_tokens, Some(100));
-    assert_eq!(child.usage.budget_spent_tokens, Some(100));
-    assert_eq!(root.usage.budget_remaining_tokens, Some(0));
-    assert_eq!(child.usage.budget_remaining_tokens, Some(0));
-    assert_eq!(root.usage.status, "budget_exhausted");
-
-    let err = manager
-        .resolve_spawn_budget_scope("agent_grandchild", Some("agent_child"), None)
-        .expect_err("spent shared budget blocks further child spawn");
-    assert!(
-        err.to_string().contains("token budget exhausted"),
-        "actionable exhaustion error: {err}"
-    );
-
-    for request in [20, 1_000] {
-        let error = manager
-            .resolve_spawn_budget_scope("agent_override", Some("agent_child"), Some(request))
-            .expect_err("neither a lower nor a higher local cap can escape an exhausted pool");
-        assert!(
-            error.to_string().contains("scope agent_root: 100/100"),
-            "{error}"
-        );
-    }
 }
 
 #[test]
@@ -1164,7 +1073,6 @@ fn headless_worker_registration_enforces_live_claims_and_projects_context() {
             coordination_contracts: Vec::new(),
             expected_artifact: None,
             deliverables: Vec::new(),
-            token_budget: None,
             resume_identity: Some(format!("fleet-{id}")),
             generation: 1,
             resume_from_agent_id: None,
@@ -2805,7 +2713,6 @@ async fn tool_free_subagent_omits_chat_tools_and_tool_choice() {
         Instant::now(),
         1,
         None,
-        None,
         input_rx,
     )
     .await
@@ -3459,7 +3366,6 @@ fn deliberate_spawn_requires_delegation_fields() {
     }))
     .expect("deliberate spawn with all fields");
     assert_eq!(ok.agent_type, FleetRole::Reviewer);
-    assert_eq!(ok.token_budget, None);
     assert_eq!(ok.write_authority, Some(SpawnWriteAuthority::ReadOnly));
     assert_eq!(ok.expected_artifact.as_deref(), Some("review findings"));
     assert!(
@@ -5375,35 +5281,6 @@ fn test_delegate_defaults_to_fork_context() {
 }
 
 #[test]
-fn spawn_request_parses_token_budget_override() {
-    let parsed = parse_spawn_request(&json!({
-        "prompt": "fan out safely",
-        "token_budget": 12_345
-    }))
-    .expect("token budget parses");
-    assert_eq!(parsed.token_budget, Some(12_345));
-
-    let parsed = parse_spawn_request(&json!({
-        "prompt": "fleet-shaped alias",
-        "max_tokens": 4_000
-    }))
-    .expect("max_tokens alias parses");
-    assert_eq!(parsed.token_budget, Some(4_000));
-
-    let err = parse_spawn_request(&json!({
-        "prompt": "bad budget",
-        "token_budget": 0
-    }))
-    .expect_err("zero budget is invalid in tool input");
-    assert!(
-        err.to_string()
-            .contains("token_budget must be an integer greater than zero")
-            && err.to_string().contains("omit it to inherit"),
-        "clear token budget error: {err}"
-    );
-}
-
-#[test]
 fn forked_subagent_messages_preserve_parent_prefix_then_append_task() {
     let parent_message = Message {
         role: Role::User,
@@ -5748,7 +5625,6 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
         "prompt",
         "resume_from",
         "thinking",
-        "token_budget",
         "type",
         "until",
         "wall_time_secs",
@@ -5795,8 +5671,8 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
 fn agent_tool_unadvertised_fields_remain_parse_accepted() {
     // #5324 compat: the fields removed from the advertised schema must stay
     // parse-accepted and honored unchanged — saved transcripts, ACP/MCP
-    // clients and Fleet configs still replay them. Same contract as the
-    // `token_budget` precedent (docs/SUBAGENTS.md).
+    // clients and Fleet configs still replay them, the same contract as the
+    // retired `token_budget` key (docs/SUBAGENTS.md).
     let request = parse_spawn_request(&json!({
         "prompt": "summarize the diff",
         "model": "deepseek-v4-flash",
@@ -5856,14 +5732,14 @@ fn agent_tool_unadvertised_fields_remain_parse_accepted() {
     .expect_err("read_only plus a declared write scope stays refused");
     assert!(err.to_string().contains("read_only"), "{err}");
 
-    // token_budget keeps its own long-standing unadvertised-but-accepted
-    // contract.
-    let request = parse_spawn_request(&json!({
+    // token_budget is retired from the runtime (#6189): runs are never
+    // stopped by token accounting. Legacy input carrying it still parses;
+    // the value is ignored, never enforced.
+    parse_spawn_request(&json!({
         "prompt": "p",
         "token_budget": 5000,
     }))
-    .expect("token_budget must stay parse-accepted");
-    assert_eq!(request.token_budget, Some(5000));
+    .expect("retired token_budget key stays parse-tolerated");
 
     // The removed lifecycle extras are still read on their actions:
     // action aliases keep parsing, wait still reads timeout_secs, status
@@ -9342,7 +9218,6 @@ async fn api_timeout_preserves_checkpoint_and_returns_needs_input_without_parkin
         fork_context: false,
         started_at: Instant::now(),
         max_steps: 3,
-        token_budget: None,
         wall_time: DEFAULT_CHILD_WALL_TIME,
         input_rx: task_input_rx,
         launch_gate: None,
@@ -9513,7 +9388,6 @@ async fn subagent_retries_api_timeout_before_succeeding() {
         fork_context: false,
         started_at: Instant::now(),
         max_steps: 3,
-        token_budget: None,
         wall_time: DEFAULT_CHILD_WALL_TIME,
         input_rx: task_input_rx,
         launch_gate: None,
@@ -9661,7 +9535,6 @@ async fn subagent_retries_transient_provider_header_timeout_before_succeeding() 
         fork_context: false,
         started_at: Instant::now(),
         max_steps: 3,
-        token_budget: None,
         wall_time: DEFAULT_CHILD_WALL_TIME,
         input_rx: task_input_rx,
         launch_gate: None,
@@ -9735,7 +9608,6 @@ async fn subagent_rate_limit_exhaustion_interrupts_with_checkpoint() {
         fork_context: false,
         started_at: Instant::now(),
         max_steps: 3,
-        token_budget: None,
         wall_time: DEFAULT_CHILD_WALL_TIME,
         input_rx: task_input_rx,
         launch_gate: None,
@@ -10880,7 +10752,6 @@ fn explicit_state_roots_isolate_managers_for_the_same_execution_workspace() {
         2,
         None,
         None,
-        None,
     );
     let manager_b = new_shared_subagent_manager_with_state_root_and_timeout(
         workspace.clone(),
@@ -10889,7 +10760,6 @@ fn explicit_state_roots_isolate_managers_for_the_same_execution_workspace() {
         2,
         Duration::from_secs(60),
         2,
-        None,
         None,
         None,
     );
@@ -11559,7 +11429,7 @@ fn budget_exhaustion_is_a_high_priority_failure_event() {
     assert!(
         completion
             .payload
-            .contains(r#""failure_class":"token_budget""#)
+            .contains(r#""failure_class":"budget_exhausted""#)
     );
 }
 
@@ -13944,7 +13814,6 @@ async fn turn_end_parking_preserves_a_step_zero_resumable_checkpoint() {
         false,
         Instant::now(),
         1,
-        None,
         Some(parking),
         input_rx,
     )
@@ -15436,7 +15305,6 @@ async fn run_subagent_task_claims_before_delivery_and_then_finalizes() {
         fork_context: false,
         started_at: Instant::now(),
         max_steps: 1,
-        token_budget: None,
         wall_time: DEFAULT_CHILD_WALL_TIME,
         input_rx: task_input_rx,
         launch_gate: None,
@@ -15523,7 +15391,6 @@ async fn cancellation_wins_task_race_but_still_fans_in_exactly_once() {
         fork_context: false,
         started_at: Instant::now(),
         max_steps: 1,
-        token_budget: None,
         wall_time: DEFAULT_CHILD_WALL_TIME,
         input_rx: task_input_rx,
         launch_gate: None,
@@ -15727,7 +15594,6 @@ async fn fatal_provider_failure_mid_run_parks_a_continuable_checkpoint() {
         fork_context: false,
         started_at: Instant::now(),
         max_steps: 4,
-        token_budget: None,
         wall_time: DEFAULT_CHILD_WALL_TIME,
         input_rx: task_input_rx,
         launch_gate: None,
@@ -15828,7 +15694,6 @@ async fn fatal_provider_failure_mid_run_parks_a_continuable_checkpoint() {
         fork_context: false,
         started_at: Instant::now(),
         max_steps: 2,
-        token_budget: None,
         wall_time: DEFAULT_CHILD_WALL_TIME,
         input_rx: resume_input_rx,
         launch_gate: None,
@@ -15988,7 +15853,6 @@ async fn repeated_typed_denials_stop_worker_as_failed_not_budget() {
         fork_context: false,
         started_at: Instant::now(),
         max_steps: 20,
-        token_budget: None,
         wall_time: DEFAULT_CHILD_WALL_TIME,
         input_rx: task_input_rx,
         launch_gate: None,
@@ -16075,7 +15939,6 @@ async fn non_retryable_provider_failure_fans_in_to_every_terminal_sink() {
         fork_context: false,
         started_at: Instant::now(),
         max_steps: 1,
-        token_budget: None,
         wall_time: DEFAULT_CHILD_WALL_TIME,
         input_rx: task_input_rx,
         launch_gate: None,
@@ -16255,7 +16118,7 @@ fn subagent_budget_exhaustion_completion_carries_budget_exhausted_sentinel() {
     assert_eq!(parsed["event"], "subagent.failed");
     assert_eq!(parsed["priority"], "high");
     assert_eq!(parsed["status"], "budget_exhausted");
-    assert_eq!(parsed["failure_class"], "token_budget");
+    assert_eq!(parsed["failure_class"], "budget_exhausted");
     assert_eq!(parsed["error_location"], "previous_line");
 }
 
@@ -16887,7 +16750,6 @@ async fn launch_gate_queues_extra_direct_children() {
             fork_context: false,
             started_at: Instant::now(),
             max_steps: 1,
-            token_budget: None,
             wall_time: DEFAULT_CHILD_WALL_TIME,
             input_rx,
             launch_gate: gate,
@@ -17044,7 +16906,6 @@ async fn queued_turn_owned_child_parks_without_a_false_start_transition() {
         fork_context: false,
         started_at: Instant::now(),
         max_steps: 1,
-        token_budget: None,
         wall_time: Duration::from_secs(5),
         input_rx,
         launch_gate: Some(Arc::clone(&gate)),
@@ -17195,7 +17056,6 @@ async fn launch_gate_wait_counts_against_child_wall_timeout() {
         fork_context: false,
         started_at: Instant::now(),
         max_steps: 1,
-        token_budget: None,
         wall_time: WALL_TIME,
         input_rx,
         launch_gate: Some(Arc::clone(&gate)),
@@ -17417,7 +17277,6 @@ pub(super) async fn run_incomplete_response_worker(
     workspace: &Path,
     stop_reason: &str,
     max_steps: u32,
-    token_budget: Option<u64>,
 ) -> (
     SubAgentResult,
     Arc<AtomicUsize>,
@@ -17471,7 +17330,6 @@ pub(super) async fn run_incomplete_response_worker(
         fork_context: false,
         started_at: Instant::now(),
         max_steps,
-        token_budget,
         wall_time: DEFAULT_CHILD_WALL_TIME,
         input_rx: task_input_rx,
         launch_gate: None,
@@ -17510,7 +17368,7 @@ fn assert_partial_tool_was_not_executed(messages: &[MailboxMessage]) {
 async fn output_limit_on_last_step_preserves_partial_text_and_exact_cause() {
     let tmp = tempdir().expect("tempdir");
     let (result, calls, mailbox, total_tokens) =
-        run_incomplete_response_worker(tmp.path(), "length", 1, None).await;
+        run_incomplete_response_worker(tmp.path(), "length", 1).await;
 
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let SubAgentStatus::Failed(reason) = &result.status else {
@@ -17542,21 +17400,17 @@ async fn output_limit_on_last_step_preserves_partial_text_and_exact_cause() {
 }
 
 #[tokio::test]
-async fn output_limit_cause_wins_over_generic_token_budget() {
+async fn output_limit_incomplete_response_is_typed_and_records_usage() {
     let tmp = tempdir().expect("tempdir");
     let (result, calls, mailbox, total_tokens) =
-        run_incomplete_response_worker(tmp.path(), "max_tokens", 4, Some(10)).await;
+        run_incomplete_response_worker(tmp.path(), "max_tokens", 4).await;
 
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert_eq!(result.status, SubAgentStatus::BudgetExhausted);
-    let reason = &result
-        .checkpoint
-        .as_ref()
-        .expect("budget checkpoint")
-        .reason;
+    let SubAgentStatus::Failed(reason) = &result.status else {
+        panic!("incomplete output must fail, got {:?}", result.status);
+    };
     assert!(reason.contains("output was truncated"), "{reason}");
     assert!(reason.contains("`max_tokens`"), "{reason}");
-    assert!(reason.contains("token budget exhausted"), "{reason}");
     assert!(
         result
             .result
@@ -17569,21 +17423,17 @@ async fn output_limit_cause_wins_over_generic_token_budget() {
 }
 
 #[tokio::test]
-async fn non_output_incomplete_cause_wins_over_generic_token_budget() {
+async fn non_output_incomplete_response_is_typed_and_records_usage() {
     let tmp = tempdir().expect("tempdir");
     let (result, calls, mailbox, total_tokens) =
-        run_incomplete_response_worker(tmp.path(), "incomplete:content_filter", 4, Some(10)).await;
+        run_incomplete_response_worker(tmp.path(), "incomplete:content_filter", 4).await;
 
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert_eq!(result.status, SubAgentStatus::BudgetExhausted);
-    let reason = &result
-        .checkpoint
-        .as_ref()
-        .expect("budget checkpoint")
-        .reason;
+    let SubAgentStatus::Failed(reason) = &result.status else {
+        panic!("incomplete response must fail, got {:?}", result.status);
+    };
     assert!(reason.contains("response was incomplete"), "{reason}");
     assert!(reason.contains("`content_filter`"), "{reason}");
-    assert!(reason.contains("token budget exhausted"), "{reason}");
     assert!(
         result
             .result
@@ -17599,7 +17449,7 @@ async fn non_output_incomplete_cause_wins_over_generic_token_budget() {
 async fn output_limit_never_retries_or_executes_partial_tools() {
     let tmp = tempdir().expect("tempdir");
     let (result, calls, mailbox, total_tokens) =
-        run_incomplete_response_worker(tmp.path(), "length", 2, Some(100)).await;
+        run_incomplete_response_worker(tmp.path(), "length", 2).await;
 
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let SubAgentStatus::Failed(reason) = &result.status else {
@@ -17622,7 +17472,6 @@ async fn spawn_budget_capped_worker(
     workspace: &Path,
     prompt_tokens: u64,
     completion_tokens: u64,
-    token_budget: Option<u64>,
     max_steps: u32,
     wall_time: Duration,
 ) -> (
@@ -17673,7 +17522,6 @@ async fn spawn_budget_capped_worker(
         fork_context: false,
         started_at: Instant::now(),
         max_steps,
-        token_budget,
         wall_time,
         input_rx: task_input_rx,
         launch_gate: None,
@@ -17687,7 +17535,7 @@ async fn spawn_budget_capped_worker(
 async fn worker_stops_with_typed_wall_time_reason() {
     let tmp = tempdir().expect("tempdir");
     let (manager, agent_id, _calls, task_handle) =
-        spawn_budget_capped_worker(tmp.path(), 60, 40, None, 120, Duration::from_millis(1)).await;
+        spawn_budget_capped_worker(tmp.path(), 60, 40, 120, Duration::from_millis(1)).await;
 
     tokio::time::timeout(Duration::from_secs(5), task_handle)
         .await
@@ -17706,255 +17554,8 @@ async fn worker_stops_with_typed_wall_time_reason() {
         .expect("wall-budget checkpoint")
         .reason;
     assert!(reason.contains("wall-time budget exhausted"), "{reason}");
-    assert!(reason.contains("limit:"), "{reason}");
+    assert!(reason.contains("wall-time limit"), "{reason}");
     assert!(reason.contains("operator"), "{reason}");
-}
-
-#[tokio::test]
-async fn worker_stops_when_per_worker_token_budget_exceeded() {
-    let tmp = tempdir().expect("tempdir");
-    // 100 tokens/turn (60 in + 40 out) vs a 50-token cap: the worker must
-    // stop with `BudgetExhausted` after its very first model turn instead of
-    // running on to `max_steps`.
-    let (manager, agent_id, calls, task_handle) =
-        spawn_budget_capped_worker(tmp.path(), 60, 40, Some(50), 4, DEFAULT_CHILD_WALL_TIME).await;
-
-    tokio::time::timeout(Duration::from_secs(5), task_handle)
-        .await
-        .expect("budget-capped worker must terminate")
-        .expect("task should finish");
-
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        1,
-        "worker must stop after the first over-budget turn, not run to max_steps"
-    );
-
-    let result = {
-        let manager = manager.read().await;
-        manager.get_result(&agent_id).expect("agent registered")
-    };
-    assert!(
-        matches!(result.status, SubAgentStatus::BudgetExhausted),
-        "expected BudgetExhausted, got {:?}",
-        result.status
-    );
-}
-
-#[tokio::test]
-async fn worker_without_per_worker_token_budget_runs_to_completion() {
-    let tmp = tempdir().expect("tempdir");
-    // No per-worker cap: a final-text response completes the worker normally
-    // even though each turn reports 100 tokens.
-    let (manager, agent_id, calls, task_handle) =
-        spawn_budget_capped_worker(tmp.path(), 60, 40, None, 4, DEFAULT_CHILD_WALL_TIME).await;
-
-    tokio::time::timeout(Duration::from_secs(5), task_handle)
-        .await
-        .expect("uncapped worker must terminate")
-        .expect("task should finish");
-
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-
-    let result = {
-        let manager = manager.read().await;
-        manager.get_result(&agent_id).expect("agent registered")
-    };
-    assert!(
-        matches!(result.status, SubAgentStatus::Completed),
-        "uncapped worker should complete normally, got {:?}",
-        result.status
-    );
-}
-
-#[tokio::test]
-async fn per_worker_token_budget_does_not_double_count_scope_accounting() {
-    let tmp = tempdir().expect("tempdir");
-    // The per-worker runtime cap stops the worker, but the scope-level
-    // accounting (#3319 `aggregate_budget_spent` sums worker_records'
-    // `total_tokens`) must reflect the tokens actually consumed exactly once
-    // — never inflated by the runtime accumulator that triggered the stop.
-    let (manager, agent_id, calls, task_handle) =
-        spawn_budget_capped_worker(tmp.path(), 60, 40, Some(50), 4, DEFAULT_CHILD_WALL_TIME).await;
-
-    tokio::time::timeout(Duration::from_secs(5), task_handle)
-        .await
-        .expect("budget-capped worker must terminate")
-        .expect("task should finish");
-
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-
-    let (result, worker_record) = {
-        let manager = manager.read().await;
-        (
-            manager.get_result(&agent_id).expect("agent registered"),
-            manager.get_worker_record(&agent_id).expect("worker record"),
-        )
-    };
-    assert!(
-        matches!(result.status, SubAgentStatus::BudgetExhausted),
-        "expected BudgetExhausted, got {:?}",
-        result.status
-    );
-    // One turn of 60 in + 40 out = 100 tokens, counted exactly once.
-    assert_eq!(
-        worker_record.usage.total_tokens,
-        Some(100),
-        "scope accounting must equal the single turn's tokens, not double-count: {:?}",
-        worker_record.usage
-    );
-}
-
-/// Variant of [`spawn_budget_capped_worker`] that attaches the worker to a
-/// shared workflow budget scope before its first model turn (no per-worker
-/// cap), returning the manager, agent id, call counter, and task handle.
-// Test helper: the eight parameters mirror the distinct knobs each test case
-// tunes; grouping them into a struct would add boilerplate at every call site
-// without improving readability.
-#[allow(clippy::too_many_arguments)]
-async fn spawn_scope_budgeted_worker(
-    manager: &Arc<RwLock<SubAgentManager>>,
-    workspace: &Path,
-    agent_id: &str,
-    scope_id: &str,
-    scope_limit: u64,
-    prompt_tokens: u64,
-    completion_tokens: u64,
-    max_steps: u32,
-) -> (Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
-    let agent_id = agent_id.to_string();
-    let (task_input_tx, task_input_rx) = mpsc::unbounded_channel();
-    let agent = SubAgent::new(
-        agent_id.clone(),
-        FleetRole::Worker,
-        "Work within shared budget".to_string(),
-        make_assignment(),
-        "deepseek-v4-flash".to_string(),
-        Some("Budget".to_string()),
-        Some(vec![]),
-        task_input_tx,
-        workspace.to_path_buf(),
-        "boot_scope_budget".to_string(),
-    );
-    {
-        let mut manager = manager.write().await;
-        manager.agents.insert(agent_id.clone(), agent);
-        manager.register_worker(make_worker_spec(&agent_id, workspace.to_path_buf()));
-        manager.attach_shared_budget_scope(&agent_id, scope_id, scope_limit);
-    }
-
-    let (client, calls) =
-        token_heavy_chat_client(prompt_tokens, completion_tokens, "partial answer").await;
-    let mut runtime = stub_runtime();
-    runtime.client = client;
-    runtime.manager = Arc::clone(manager);
-    runtime.context = ToolContext::new(workspace.to_path_buf());
-
-    let task = SubAgentTask {
-        manager_handle: Arc::clone(manager),
-        runtime,
-        agent_id: agent_id.clone(),
-        agent_type: FleetRole::Worker,
-        prompt: "Work within shared budget".to_string(),
-        assignment: make_assignment(),
-        allowed_tools: Some(vec![]),
-        fork_context: false,
-        started_at: Instant::now(),
-        max_steps,
-        token_budget: None,
-        wall_time: DEFAULT_CHILD_WALL_TIME,
-        input_rx: task_input_rx,
-        launch_gate: None,
-        _foreground_child_registration: None,
-    };
-    let task_handle = tokio::spawn(run_subagent_task(task));
-    (calls, task_handle)
-}
-
-#[tokio::test]
-async fn shared_scope_budget_stops_admitted_children_mid_run() {
-    // A workflow run's token_budget must be a collective ceiling for the
-    // children it admitted, not just an admission gate for future spawns:
-    // children that attach while the scope has room used to run uncapped, so
-    // a fan-out could burn many times the budget and still report Completed.
-    let tmp = tempdir().expect("tempdir");
-    let manager = Arc::new(RwLock::new(SubAgentManager::new(
-        tmp.path().to_path_buf(),
-        4,
-    )));
-    let scope_id = "run-budget-ceiling";
-    // Each model turn burns 100 tokens (60 in + 40 out); the run-level budget
-    // leaves room for exactly one full turn across ALL children.
-    let scope_limit = 150;
-
-    // First child: admitted while the scope is empty, burns its 100 and
-    // completes normally.
-    let (calls_a, handle_a) = spawn_scope_budgeted_worker(
-        &manager,
-        tmp.path(),
-        "agent_scope_a",
-        scope_id,
-        scope_limit,
-        60,
-        40,
-        4,
-    )
-    .await;
-    tokio::time::timeout(Duration::from_secs(5), handle_a)
-        .await
-        .expect("first child must terminate")
-        .expect("task should finish");
-    assert_eq!(calls_a.load(Ordering::SeqCst), 1);
-    let status_a = manager
-        .read()
-        .await
-        .get_result("agent_scope_a")
-        .expect("first child registered")
-        .status;
-    assert!(
-        matches!(status_a, SubAgentStatus::Completed),
-        "first child completes inside the shared budget, got {status_a:?}"
-    );
-
-    // Second child: also admitted without a per-worker cap (remaining 50 >=
-    // the spawn reserve). Its first turn pushes the shared scope to 200/150,
-    // so it must stop with BudgetExhausted right after that turn instead of
-    // completing or running on to max_steps.
-    let (calls_b, handle_b) = spawn_scope_budgeted_worker(
-        &manager,
-        tmp.path(),
-        "agent_scope_b",
-        scope_id,
-        scope_limit,
-        60,
-        40,
-        4,
-    )
-    .await;
-    tokio::time::timeout(Duration::from_secs(5), handle_b)
-        .await
-        .expect("second child must terminate")
-        .expect("task should finish");
-    assert_eq!(
-        calls_b.load(Ordering::SeqCst),
-        1,
-        "second child must stop after the turn that crossed the shared budget"
-    );
-    let status_b = manager
-        .read()
-        .await
-        .get_result("agent_scope_b")
-        .expect("second child registered")
-        .status;
-    assert!(
-        matches!(status_b, SubAgentStatus::BudgetExhausted),
-        "second child must hit the shared ceiling, got {status_b:?}"
-    );
-    assert_eq!(
-        manager.read().await.budget_spent_for_scope(scope_id),
-        200,
-        "collective spend is accounted once per child"
-    );
 }
 
 /// Clears the process-wide rate-limit window on drop so a panicking test
@@ -17983,7 +17584,7 @@ async fn worker_is_not_stranded_by_transient_global_rate_limit_window() {
 
     let tmp = tempdir().expect("tempdir");
     let (manager, agent_id, _calls, task_handle) =
-        spawn_budget_capped_worker(tmp.path(), 60, 40, Some(50), 4, DEFAULT_CHILD_WALL_TIME).await;
+        spawn_budget_capped_worker(tmp.path(), 60, 40, 4, DEFAULT_CHILD_WALL_TIME).await;
 
     // Simulate the concurrent test finishing: the window closes shortly
     // after the worker's first request has already observed it.
@@ -18001,11 +17602,11 @@ async fn worker_is_not_stranded_by_transient_global_rate_limit_window() {
         let manager = manager.read().await;
         manager.get_result(&agent_id).expect("agent registered")
     };
-    assert!(
-        matches!(result.status, SubAgentStatus::BudgetExhausted),
-        "expected BudgetExhausted, got {:?}",
-        result.status
-    );
+    // Token budgets are tracked, never enforced (#6298 slice 5), so a
+    // worker that used to stop at its token ceiling now runs to
+    // completion. The regression under test is only that an already-cleared
+    // rate-limit window cannot strand the worker past the 5s timeout.
+    assert_eq!(result.status, SubAgentStatus::Completed);
 }
 
 /// #4217: terminal worker records must age out of the persisted ledger so
@@ -18553,7 +18154,6 @@ fn coordination_process_lock_rejects_second_process() {
             4,
             Duration::from_secs(30),
             4,
-            None,
         );
         if role == "holder" {
             manager

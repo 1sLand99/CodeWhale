@@ -280,7 +280,6 @@ const MAX_CHILD_WALL_TIME: Duration = Duration::from_secs(24 * 60 * 60);
 /// drift from the value actually applied to a running tool.
 const DEFAULT_TOOL_TIMEOUT: Duration =
     Duration::from_secs(crate::config::DEFAULT_SUBAGENT_TOOL_TIMEOUT_SECS);
-const MIN_SUBAGENT_SPAWN_TOKEN_RESERVE: u64 = 1;
 const MIN_EVENT_CHANNEL_HEADROOM_FOR_ROUTINE_PROGRESS: usize = 32;
 
 /// Format a step counter for sub-agent progress messages.
@@ -320,8 +319,6 @@ fn child_runtime_budget_context(
     runtime: &SubAgentRuntime,
     max_steps: u32,
     work_max_steps: u32,
-    handback_reserved: bool,
-    token_allowance: Option<u64>,
 ) -> String {
     let wall = match runtime.worker_profile.wall_deadline_ms {
         Some(deadline_ms) => {
@@ -339,26 +336,15 @@ fn child_runtime_budget_context(
     };
     let steps = if max_steps == 0 {
         "no per-run step cap".to_string()
-    } else if handback_reserved && work_max_steps < max_steps {
+    } else if work_max_steps < max_steps {
         format!(
             "{work_max_steps} model turns of task work (limit {max_steps}; the last turn stays reserved for a bounded hand-back report)"
         )
     } else {
         format!("{max_steps} model turns")
     };
-    let tokens = match token_allowance {
-        Some(allowance) => format!(
-            "about {allowance} input+output tokens for the whole run, shared with any descendants"
-        ),
-        None => "no per-run token cap".to_string(),
-    };
-    let stop_note = if handback_reserved {
-        "When a limit is reached, task work stops where it stands and only a small reserved hand-back turn remains to report it."
-    } else {
-        "When a limit is reached, task work stops where it stands."
-    };
     format!(
-        "Runtime budget (host-enforced; you cannot raise it):\n- wall clock: {wall}.\n- model steps: {steps}.\n- token allowance: {tokens}.\n{stop_note} Commit or checkpoint work-in-progress early rather than holding it, and keep a current partial report ready."
+        "Runtime budget (host-enforced; you cannot raise it):\n- wall clock: {wall}.\n- model steps: {steps}.\nThere is no token cap; manage context with compaction. When a limit is reached, task work stops where it stands and only a small reserved hand-back turn remains to report it. Commit or checkpoint work-in-progress early rather than holding it, and keep a current partial report ready."
     )
 }
 
@@ -371,8 +357,6 @@ fn child_budget_pacing_notice(
     deadline: Option<Instant>,
     steps: u32,
     work_max_steps: u32,
-    remaining_tokens: Option<u64>,
-    token_allowance: Option<u64>,
 ) -> Option<String> {
     let mut consumed = Vec::new();
     if let Some(deadline) = deadline {
@@ -392,14 +376,6 @@ fn child_budget_pacing_notice(
     }
     if work_max_steps > 0 && u64::from(steps) * 4 >= u64::from(work_max_steps) * 3 {
         consumed.push(format!("model steps: {steps} of {work_max_steps} used"));
-    }
-    if let (Some(allowance), Some(remaining)) = (token_allowance, remaining_tokens)
-        && allowance > 0
-        && remaining <= allowance / 4
-    {
-        consumed.push(format!(
-            "token allowance: ~{remaining} of ~{allowance} tokens remain"
-        ));
     }
     if consumed.is_empty() {
         return None;
@@ -826,12 +802,6 @@ pub struct AgentCoordSummary {
     pub child_route: Option<ChildRouteReceipt>,
     pub status: String,
     pub steps_taken: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token_budget: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub budget_spent_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub budget_remaining_tokens: Option<u64>,
     #[serde(default)]
     pub recent_progress: Vec<String>,
     #[serde(default)]
@@ -895,14 +865,6 @@ pub struct AgentRunUsage {
     /// it never means the worker was free.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_microusd: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token_budget: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub budget_spent_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub budget_remaining_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub budget_scope: Option<String>,
     pub note: String,
 }
 
@@ -1104,16 +1066,8 @@ fn default_agent_run_usage() -> AgentRunUsage {
         output_tokens: None,
         total_tokens: None,
         cost_microusd: None,
-        token_budget: None,
-        budget_spent_tokens: None,
-        budget_remaining_tokens: None,
-        budget_scope: None,
         note: "Token usage is not yet reported by the sub-agent worker ledger.".to_string(),
     }
-}
-
-fn positive_token_budget(budget: Option<u64>) -> Option<u64> {
-    budget.filter(|value| *value > 0)
 }
 
 fn usage_total_tokens(usage: &Usage) -> u64 {
@@ -1311,26 +1265,7 @@ fn child_guardian_usage_source_id(agent_id: &str, tool_id: &str) -> String {
 
 fn refresh_usage_note(usage: &mut AgentRunUsage) {
     let worker_total = usage.total_tokens.unwrap_or(0);
-    if let Some(limit) = usage.token_budget {
-        let spent = usage.budget_spent_tokens.unwrap_or(worker_total);
-        let remaining = usage
-            .budget_remaining_tokens
-            .unwrap_or_else(|| limit.saturating_sub(spent));
-        usage.status = if remaining == 0 {
-            "budget_exhausted".to_string()
-        } else if worker_total > 0 {
-            "reported".to_string()
-        } else {
-            "tracking".to_string()
-        };
-        usage.note = if worker_total > 0 {
-            format!(
-                "Token budget: {spent}/{limit} spent, {remaining} remaining. This worker reported {worker_total} tokens."
-            )
-        } else {
-            format!("Token budget: {spent}/{limit} spent, {remaining} remaining.")
-        };
-    } else if worker_total > 0 {
+    if worker_total > 0 {
         usage.status = "reported".to_string();
         usage.note = format!("Provider reported {worker_total} tokens for this worker.");
     } else if usage.status.is_empty() {
@@ -1714,13 +1649,9 @@ pub(crate) struct SubAgentSpawnOptions {
     pub child_route: Option<ChildRouteReceipt>,
     pub nickname: Option<String>,
     pub fork_context: bool,
-    pub token_budget: Option<u64>,
     /// Per-tool-result output token cap for this child (#6282). `None` uses
     /// the runtime default (10k).
     pub max_output_tokens: Option<std::num::NonZeroU32>,
-    /// Host-derived Workflow run id and shared limit. Installed in the worker
-    /// registration transaction, before the child can begin a model request.
-    pub workflow_budget_scope: Option<(String, u64)>,
     /// Optional per-child model-turn override, clamped to the runtime ceiling.
     pub max_steps: Option<u32>,
     /// Optional per-child wall-clock override, clamped to the runtime ceiling.
@@ -1754,8 +1685,6 @@ pub(crate) struct WorkflowTaskSpawnResult {
 #[derive(Debug, Clone)]
 pub(crate) struct WorkflowTaskSpawnIdentity {
     pub workflow_run_id: String,
-    /// The host's shared run ceiling; never accepted from task/agent JSON.
-    pub shared_token_budget: Option<u64>,
     pub workflow_phase_id: Option<String>,
     pub workflow_task_label: Option<String>,
     pub workflow_child_index: u32,
@@ -1960,10 +1889,6 @@ struct SpawnRequest {
     /// Legacy recursion budget for descendants. The model-facing child tool
     /// surface is leaf-only; this remains for persisted/internal records.
     max_depth: Option<u32>,
-    /// Optional aggregate token budget for this child and its descendants.
-    /// When unset, the child inherits the parent's budget pool or the
-    /// configured root default.
-    token_budget: Option<u64>,
     /// Per-tool-result output token cap for this child (#6282). `None` uses
     /// the runtime default (10k); `Some(n)` clamps every tool result to at
     /// most n tokens before it enters the child's message history.
@@ -2011,14 +1936,6 @@ enum SpawnWriteAuthority {
     ReadOnly,
     WorkspaceWrite,
     WorktreeWrite,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AgentUsageBudgetScope {
-    scope_id: String,
-    limit: u64,
-    spent: u64,
-    remaining: u64,
 }
 
 /// Which terminal states `resume_from_checkpoint_with_policy` may re-dispatch.
@@ -3505,7 +3422,6 @@ pub struct SubAgentManager {
     wall_time: Option<Duration>,
     max_agents: usize,
     max_admitted_agents: usize,
-    default_token_budget: Option<u64>,
     running_heartbeat_timeout: Duration,
     /// Stable id assigned at manager construction (#405). Stamped on
     /// every agent the manager spawns; agents loaded from the
@@ -3644,7 +3560,6 @@ impl SubAgentManager {
             wall_time: None,
             max_agents,
             max_admitted_agents: max_agents,
-            default_token_budget: None,
             running_heartbeat_timeout: Duration::from_secs(
                 crate::config::DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS,
             ),
@@ -3681,14 +3596,6 @@ impl SubAgentManager {
     pub fn with_admission_limit(mut self, max_admitted: usize) -> Self {
         self.max_admitted_agents =
             max_admitted.clamp(self.max_agents, crate::config::MAX_SUBAGENT_ADMISSION);
-        self
-    }
-
-    /// Set the default aggregate token budget for root sub-agent runs.
-    /// `None` and `Some(0)` both preserve unlimited legacy behavior.
-    #[must_use]
-    pub fn with_default_token_budget(mut self, budget: Option<u64>) -> Self {
-        self.default_token_budget = positive_token_budget(budget);
         self
     }
 
@@ -4414,12 +4321,10 @@ impl SubAgentManager {
         max_admitted_agents: usize,
         running_heartbeat_timeout: Duration,
         launch_concurrency: usize,
-        default_token_budget: Option<u64>,
     ) -> bool {
         self.max_agents = max_agents.clamp(1, crate::config::MAX_SUBAGENTS);
         self.max_admitted_agents =
             max_admitted_agents.clamp(self.max_agents, crate::config::MAX_SUBAGENT_ADMISSION);
-        self.default_token_budget = positive_token_budget(default_token_budget);
         self.running_heartbeat_timeout = if running_heartbeat_timeout.is_zero() {
             Duration::from_secs(crate::config::DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS)
         } else {
@@ -4726,7 +4631,6 @@ impl SubAgentManager {
                 .insert(worker.spec.worker_id.clone(), worker);
         }
         self.reconcile_orphaned_workers_after_restart();
-        self.refresh_all_budget_scopes();
         self.prune_worker_records();
 
         Ok(())
@@ -4873,14 +4777,11 @@ impl SubAgentManager {
     }
 
     fn prune_worker_records(&mut self) {
-        let budget_records = self.budget_records_in_use();
         while self.worker_records.len() > MAX_AGENT_WORKER_RECORDS {
             let oldest_terminal = self
                 .worker_records
                 .values()
-                .filter(|record| {
-                    record.status.is_terminal() && !budget_records.contains(&record.spec.worker_id)
-                })
+                .filter(|record| record.status.is_terminal())
                 .min_by(|a, b| {
                     a.updated_at_ms
                         .cmp(&b.updated_at_ms)
@@ -5373,272 +5274,6 @@ impl SubAgentManager {
         true
     }
 
-    fn aggregate_budget_spent(&self, scope_id: &str) -> u64 {
-        self.worker_records
-            .values()
-            .filter(|record| {
-                self.budget_ancestors(&record.spec.worker_id)
-                    .iter()
-                    .any(|id| {
-                        self.worker_records.get(id).is_some_and(|ancestor| {
-                            ancestor.usage.budget_scope.as_deref() == Some(scope_id)
-                        })
-                    })
-            })
-            .fold(0_u64, |total, record| {
-                total.saturating_add(record.usage.total_tokens.unwrap_or(0))
-            })
-    }
-
-    fn inherited_budget_scope(&self, parent_run_id: Option<&str>) -> Option<(String, u64)> {
-        let parent = self.worker_records.get(parent_run_id?)?;
-        let limit = parent.usage.token_budget?;
-        let scope_id = parent
-            .usage
-            .budget_scope
-            .clone()
-            .unwrap_or_else(|| parent.spec.worker_id.clone());
-        Some((scope_id, limit))
-    }
-
-    fn resolve_spawn_budget_scope(
-        &self,
-        worker_id: &str,
-        parent_run_id: Option<&str>,
-        requested_budget: Option<u64>,
-    ) -> Result<Option<AgentUsageBudgetScope>> {
-        // A nested request stays in its ancestor's accounting pool. Its local
-        // cap is stored on the worker profile and checked separately; creating
-        // a new pool here would make its spend disappear from the parent.
-        let scope = self.inherited_budget_scope(parent_run_id).or_else(|| {
-            narrow_optional_limit(
-                self.default_token_budget,
-                positive_token_budget(requested_budget),
-            )
-            .map(|limit| (worker_id.to_string(), limit))
-        });
-
-        let Some((scope_id, limit)) = scope else {
-            return Ok(None);
-        };
-        self.resolve_budget_scope(scope_id, limit).map(Some)
-    }
-
-    fn resolve_budget_scope(&self, scope_id: String, limit: u64) -> Result<AgentUsageBudgetScope> {
-        if scope_id.trim().is_empty() {
-            return Err(anyhow!("Sub-agent token budget scope must not be empty"));
-        }
-        let spent = self.aggregate_budget_spent(&scope_id);
-        let remaining = limit.saturating_sub(spent);
-        let work_remaining = remaining
-            .saturating_sub(budget_handback::token_reserve(limit))
-            .saturating_sub(self.reserved_handback_tokens(&scope_id, Some(&scope_id)));
-        if work_remaining < MIN_SUBAGENT_SPAWN_TOKEN_RESERVE {
-            return Err(anyhow!(
-                "Sub-agent token budget exhausted for scope {scope_id}: {spent}/{limit} tokens spent, {remaining} remaining (including reserved reporting allowance). Wait for the parent/Workflow to summarize results or start a fresh agent run."
-            ));
-        }
-        Ok(AgentUsageBudgetScope {
-            scope_id,
-            limit,
-            spent,
-            remaining,
-        })
-    }
-
-    /// Follow both delegation and continuation edges. A set makes malformed
-    /// persisted cycles finite and ensures shared descendants count once.
-    fn budget_ancestors(&self, worker_id: &str) -> BTreeSet<String> {
-        let mut ancestors = BTreeSet::new();
-        let mut pending = vec![worker_id.to_string()];
-        while let Some(id) = pending.pop() {
-            if !ancestors.insert(id.clone()) {
-                continue;
-            }
-            if let Some(record) = self.worker_records.get(&id) {
-                pending.extend(record.spec.parent_run_id.iter().cloned());
-                pending.extend(
-                    record
-                        .spec
-                        .launch_manifest
-                        .as_ref()
-                        .and_then(|manifest| manifest.resume_from_agent_id.as_ref())
-                        .cloned(),
-                );
-            }
-        }
-        ancestors
-    }
-
-    /// Budget accounting must outlive completed siblings while any member of
-    /// the family/pool remains active. Retention cannot refund measured spend.
-    fn budget_records_in_use(&self) -> BTreeSet<String> {
-        let live_ancestors = self
-            .worker_records
-            .values()
-            .filter(|record| !record.status.is_terminal())
-            .flat_map(|record| self.budget_ancestors(&record.spec.worker_id))
-            .collect::<BTreeSet<_>>();
-        let live_scopes = live_ancestors
-            .iter()
-            .filter_map(|id| {
-                self.worker_records
-                    .get(id)
-                    .and_then(|record| record.usage.budget_scope.as_deref())
-            })
-            .collect::<BTreeSet<_>>();
-        self.worker_records
-            .values()
-            .filter(|record| {
-                self.budget_ancestors(&record.spec.worker_id)
-                    .iter()
-                    .any(|id| live_ancestors.contains(id))
-                    || record
-                        .usage
-                        .budget_scope
-                        .as_deref()
-                        .is_some_and(|scope| live_scopes.contains(scope))
-            })
-            .map(|record| record.spec.worker_id.clone())
-            .collect()
-    }
-
-    fn subtree_budget_spent(&self, owner: &str) -> u64 {
-        self.worker_records
-            .values()
-            .filter(|record| {
-                self.budget_ancestors(&record.spec.worker_id)
-                    .contains(owner)
-            })
-            .fold(0_u64, |spent, record| {
-                spent.saturating_add(record.usage.total_tokens.unwrap_or(0))
-            })
-    }
-
-    /// The tightest measured allowance across the shared pool and every local
-    /// ancestor cap. Accounting is provider-reported input + output tokens;
-    /// an in-flight response may overshoot, and is reported in full.
-    fn remaining_worker_tokens(&self, worker_id: &str) -> Option<u64> {
-        self.budget_ancestors(worker_id)
-            .iter()
-            .fold(None, |remaining, id| {
-                let shared = self
-                    .budget_scope_state(id)
-                    .map(|(spent, limit)| limit.saturating_sub(spent));
-                let cap = self
-                    .worker_records
-                    .get(id)
-                    .and_then(|record| record.spec.runtime_profile.token_budget)
-                    .map(|limit| limit.saturating_sub(self.subtree_budget_spent(id)));
-                narrow_optional_limit(remaining, narrow_optional_limit(shared, cap))
-            })
-    }
-
-    fn token_budget_exhausted_detail(&self, worker_id: &str) -> Option<String> {
-        for id in self.budget_ancestors(worker_id) {
-            if let Some((spent, limit)) = self.budget_scope_state(&id)
-                && spent >= limit
-            {
-                return Some(format!(
-                    "shared token budget exhausted ({spent}/{limit} measured input + output tokens across the run)"
-                ));
-            }
-            if let Some(limit) = self
-                .worker_records
-                .get(&id)
-                .and_then(|record| record.spec.runtime_profile.token_budget)
-            {
-                let spent = self.subtree_budget_spent(&id);
-                if spent >= limit {
-                    return Some(format!(
-                        "token budget exhausted for {id} ({spent}/{limit} measured input + output tokens including descendants)"
-                    ));
-                }
-            }
-        }
-        None
-    }
-
-    fn attach_budget_scope(&mut self, worker_id: &str, scope: AgentUsageBudgetScope) {
-        let Some(record) = self.worker_records.get_mut(worker_id) else {
-            return;
-        };
-        record.usage.token_budget = Some(scope.limit);
-        record.usage.budget_scope = Some(scope.scope_id.clone());
-        record.usage.budget_spent_tokens = Some(scope.spent);
-        record.usage.budget_remaining_tokens = Some(scope.remaining);
-        refresh_usage_note(&mut record.usage);
-        self.refresh_budget_scope(&scope.scope_id);
-    }
-
-    /// Aggregate token spend for a shared workflow budget scope.
-    pub(crate) fn budget_spent_for_scope(&self, scope_id: &str) -> u64 {
-        self.aggregate_budget_spent(scope_id)
-    }
-
-    /// Current `(spent, limit)` for the shared budget scope this worker is
-    /// attached to, if any. `spent` is the live aggregate across every worker
-    /// in the scope, so a caller checking mid-run sees sibling spend as it
-    /// lands, not the snapshot frozen at attach time.
-    pub(crate) fn budget_scope_state(&self, worker_id: &str) -> Option<(u64, u64)> {
-        let record = self.worker_records.get(worker_id)?;
-        let scope_id = record.usage.budget_scope.as_deref()?;
-        let limit = record.usage.token_budget?;
-        Some((self.aggregate_budget_spent(scope_id), limit))
-    }
-
-    /// Attach a workflow child to the run-level shared budget pool.
-    #[cfg(test)]
-    pub(crate) fn attach_shared_budget_scope(
-        &mut self,
-        worker_id: &str,
-        scope_id: &str,
-        limit: u64,
-    ) {
-        let spent = self.aggregate_budget_spent(scope_id);
-        self.attach_budget_scope(
-            worker_id,
-            AgentUsageBudgetScope {
-                scope_id: scope_id.to_string(),
-                limit,
-                spent,
-                remaining: limit.saturating_sub(spent),
-            },
-        );
-    }
-
-    fn refresh_budget_scope(&mut self, scope_id: &str) {
-        let Some(limit) = self
-            .worker_records
-            .values()
-            .find(|record| record.usage.budget_scope.as_deref() == Some(scope_id))
-            .and_then(|record| record.usage.token_budget)
-        else {
-            return;
-        };
-        let spent = self.aggregate_budget_spent(scope_id);
-        let remaining = limit.saturating_sub(spent);
-        for record in self.worker_records.values_mut() {
-            if record.usage.budget_scope.as_deref() == Some(scope_id) {
-                record.usage.token_budget = Some(limit);
-                record.usage.budget_spent_tokens = Some(spent);
-                record.usage.budget_remaining_tokens = Some(remaining);
-                refresh_usage_note(&mut record.usage);
-            }
-        }
-    }
-
-    fn refresh_all_budget_scopes(&mut self) {
-        let scope_ids = self
-            .worker_records
-            .values()
-            .filter_map(|record| record.usage.budget_scope.clone())
-            .collect::<std::collections::HashSet<_>>();
-        for scope_id in scope_ids {
-            self.refresh_budget_scope(&scope_id);
-        }
-    }
-
     fn record_worker_usage(
         &mut self,
         worker_id: &str,
@@ -5692,11 +5327,7 @@ impl SubAgentManager {
                     .saturating_add(cost_microusd),
             );
         }
-        let scope_id = record.usage.budget_scope.clone();
         refresh_usage_note(&mut record.usage);
-        if let Some(scope_id) = scope_id {
-            self.refresh_budget_scope(&scope_id);
-        }
         self.persist_state_debounced();
     }
 
@@ -6762,9 +6393,6 @@ impl SubAgentManager {
             child_route: record.and_then(|r| r.spec.child_route.clone()),
             status: subagent_status_name(&snap.status).to_string(),
             steps_taken: snap.steps_taken,
-            token_budget: record.and_then(|r| r.usage.token_budget),
-            budget_spent_tokens: record.and_then(|r| r.usage.budget_spent_tokens),
-            budget_remaining_tokens: record.and_then(|r| r.usage.budget_remaining_tokens),
             recent_progress,
             queued_mail,
             checkpoint_id: snap.checkpoint.as_ref().map(|c| c.checkpoint_id.clone()),
@@ -7098,8 +6726,6 @@ impl SubAgentManager {
         if let Some(preserved) = options.preserve_runtime_profile.as_ref() {
             runtime.spawn_depth = runtime.spawn_depth.max(preserved.spawn_depth);
             runtime.max_spawn_depth = runtime.max_spawn_depth.min(preserved.max_spawn_depth);
-            runtime.worker_profile.token_budget =
-                narrow_optional_limit(runtime.worker_profile.token_budget, preserved.token_budget);
             runtime.worker_profile.max_steps =
                 narrow_model_steps(runtime.worker_profile.max_steps, preserved.max_steps);
             runtime.worker_profile.wall_time_secs = narrow_optional_limit(
@@ -7114,23 +6740,6 @@ impl SubAgentManager {
         // #6282: spawn options narrow the per-result output cap.
         runtime.max_output_tokens =
             narrow_optional_limit(runtime.max_output_tokens, options.max_output_tokens);
-        let budget_parent = options
-            .resume_from_agent_id
-            .as_deref()
-            .or(runtime.parent_agent_id.as_deref());
-        let inherited_remaining = budget_parent.and_then(|id| self.remaining_worker_tokens(id));
-        if inherited_remaining == Some(0) {
-            return Err(anyhow!(
-                "Sub-agent token budget exhausted; continuation cannot reset its inherited allowance"
-            ));
-        }
-        let effective_token_budget = narrow_optional_limit(
-            narrow_optional_limit(runtime.worker_profile.token_budget, inherited_remaining),
-            narrow_optional_limit(
-                self.default_token_budget,
-                positive_token_budget(options.token_budget),
-            ),
-        );
         let mut max_steps = narrow_model_steps(
             runtime.worker_profile.max_steps,
             resolve_max_steps(agent_type.clone(), options.max_steps, self.max_steps),
@@ -7223,16 +6832,6 @@ impl SubAgentManager {
         // registry, a racing descendant is refused rather than escaping the
         // one-shot join and publishing after TurnComplete.
         let foreground_child_registration = runtime.foreground_child_registration(&agent_id)?;
-        let budget_scope =
-            self.resolve_spawn_budget_scope(&agent_id, budget_parent, effective_token_budget)?;
-        // Check the host's run pool while the same manager lock still covers
-        // admission. Per-call and ancestor limits remain independently checked
-        // above and by remaining_worker_tokens throughout the child's lifetime.
-        let workflow_budget_scope = options
-            .workflow_budget_scope
-            .as_ref()
-            .map(|(scope_id, limit)| self.resolve_budget_scope(scope_id.clone(), *limit))
-            .transpose()?;
         let active_names: std::collections::HashSet<String> = self
             .agents
             .values()
@@ -7435,7 +7034,6 @@ impl SubAgentManager {
         runtime_profile.max_spawn_depth = runtime.max_spawn_depth;
         runtime_profile.spawn_depth = runtime.spawn_depth;
         runtime_profile.max_steps = max_steps;
-        runtime_profile.token_budget = effective_token_budget;
         runtime_profile.wall_time_secs = Some(
             wall_time
                 .as_secs()
@@ -7491,7 +7089,6 @@ impl SubAgentManager {
                     .unwrap_or_default(),
                 expected_artifact: options.expected_artifact.clone(),
                 deliverables: delivery_paths.clone(),
-                token_budget: effective_token_budget,
                 resume_identity: Some(agent.session_name.clone()),
                 generation: 1,
                 resume_from_agent_id: options.resume_from_agent_id.clone(),
@@ -7511,9 +7108,6 @@ impl SubAgentManager {
         agent.owner_session_id = runtime.context.state_namespace.clone();
         agent.terminal_delivery = Some(SubAgentTerminalDeliveryContext::from_runtime(&runtime));
         self.register_worker_for_session(worker_spec, &runtime.context.state_namespace);
-        if let Some(scope) = workflow_budget_scope.or(budget_scope) {
-            self.attach_budget_scope(&agent_id, scope);
-        }
 
         // Shared-workspace writers may execute only after their exact worker
         // identity and claim are durably replayable. Persist a Starting record
@@ -7587,7 +7181,6 @@ impl SubAgentManager {
             fork_context: options.fork_context,
             started_at,
             max_steps,
-            token_budget: effective_token_budget,
             wall_time,
             input_rx,
             launch_gate,
@@ -7973,6 +7566,42 @@ impl SubAgentManager {
             .collect()
     }
 
+    /// Follow both delegation and continuation edges. A set makes malformed
+    /// persisted cycles finite and ensures shared descendants count once.
+    fn lineage_ancestors(&self, worker_id: &str) -> BTreeSet<String> {
+        let mut ancestors = BTreeSet::new();
+        let mut pending = vec![worker_id.to_string()];
+        while let Some(id) = pending.pop() {
+            if !ancestors.insert(id.clone()) {
+                continue;
+            }
+            if let Some(record) = self.worker_records.get(&id) {
+                pending.extend(record.spec.parent_run_id.iter().cloned());
+                pending.extend(
+                    record
+                        .spec
+                        .launch_manifest
+                        .as_ref()
+                        .and_then(|manifest| manifest.resume_from_agent_id.as_ref())
+                        .cloned(),
+                );
+            }
+        }
+        ancestors
+    }
+
+    /// Ancestors of live workers are pinned: continuation lookup and
+    /// descendant control both walk this lineage, so a completed parent must
+    /// outlive every reference a running descendant still holds. Keyed to
+    /// liveness, not age, so the retention is bounded by real work.
+    fn lineage_records_in_use(&self) -> BTreeSet<String> {
+        self.worker_records
+            .values()
+            .filter(|record| !record.status.is_terminal())
+            .flat_map(|record| self.lineage_ancestors(&record.spec.worker_id))
+            .collect()
+    }
+
     /// Clean up stale running agents and completed agents older than the
     /// given duration. Returns the number of running agents auto-cancelled
     /// during this pass.
@@ -8086,12 +7715,11 @@ impl SubAgentManager {
         // the flock (owner report, 2026-08-04). See `docs/architecture/
         // delegated-coordination.md` for what lock loss legitimately costs.
 
-        // The same retained lineage that prevents a budget refund also owns
-        // continuation lookup and descendant control. Keep both projections
-        // while live work references them.
-        let budget_records = self.budget_records_in_use();
+        // The retained lineage owns continuation lookup and descendant
+        // control. Keep the agents projection while live work references it.
+        let lineage_records = self.lineage_records_in_use();
         self.agents.retain(|agent_id, agent| {
-            if budget_records.contains(agent_id) {
+            if lineage_records.contains(agent_id) {
                 return true;
             }
             if active_session_id.is_some() && !scoped_agent_ids.contains(agent_id) {
@@ -8109,11 +7737,7 @@ impl SubAgentManager {
         // Running / starting / waiting records are always preserved.
         let now_ms = epoch_millis_now();
         let max_age_ms = max_age.as_millis() as u64;
-        let budget_records = self.budget_records_in_use();
         self.worker_records.retain(|worker_id, record| {
-            if budget_records.contains(worker_id) {
-                return true;
-            }
             if active_session_id.is_some() && !scoped_worker_ids.contains(worker_id) {
                 return true;
             }
@@ -9284,7 +8908,6 @@ pub fn new_shared_subagent_manager(workspace: PathBuf, max_agents: usize) -> Sha
         max_agents,
         Duration::from_secs(crate::config::DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS),
         max_agents,
-        None,
     )
 }
 
@@ -9297,7 +8920,6 @@ pub fn new_shared_subagent_manager_with_timeout(
     max_admitted_agents: usize,
     running_heartbeat_timeout: Duration,
     launch_concurrency: usize,
-    default_token_budget: Option<u64>,
 ) -> SharedSubAgentManager {
     let state_root = workspace.clone();
     new_shared_subagent_manager_with_state_root_and_timeout(
@@ -9307,9 +8929,6 @@ pub fn new_shared_subagent_manager_with_timeout(
         max_admitted_agents,
         running_heartbeat_timeout,
         launch_concurrency,
-        default_token_budget,
-        // `[subagents]` budget defaults are an interactive `agent`-tool
-        // concern; this control-plane path keeps role/spec defaults.
         None,
         None,
     )
@@ -9322,7 +8941,7 @@ pub fn new_shared_subagent_manager_with_timeout(
 /// `state_root/.codewhale/state`. Distinct state roots intentionally do not
 /// share write claims; an embedding host that runs them against the same
 /// workspace must provide any required cross-session write coordination.
-#[allow(clippy::too_many_arguments)] // legacy open constructor; budget pair rides along
+#[allow(clippy::too_many_arguments)] // legacy open constructor
 #[must_use]
 pub fn new_shared_subagent_manager_with_state_root_and_timeout(
     workspace: PathBuf,
@@ -9331,7 +8950,6 @@ pub fn new_shared_subagent_manager_with_state_root_and_timeout(
     max_admitted_agents: usize,
     running_heartbeat_timeout: Duration,
     launch_concurrency: usize,
-    default_token_budget: Option<u64>,
     default_max_steps: Option<u32>,
     default_wall_time: Option<Duration>,
 ) -> SharedSubAgentManager {
@@ -9352,7 +8970,6 @@ pub fn new_shared_subagent_manager_with_state_root_and_timeout(
         .with_admission_limit(max_admitted_agents)
         .with_running_heartbeat_timeout(running_heartbeat_timeout)
         .with_launch_concurrency(launch_concurrency)
-        .with_default_token_budget(default_token_budget)
         .with_default_max_steps(default_max_steps)
         .with_default_wall_time(default_wall_time);
     if let Some(state_path) = state_path {
@@ -9573,7 +9190,7 @@ static AGENT_TOOL_DESCRIPTION: std::sync::LazyLock<String> = std::sync::LazyLock
         "type selects the Fleet role: general (full tool access for multi-step tasks), explore (fast read-only exploration), planner (grounded strategy, read-only probes), reviewer (reads and grades code), implement (lands focused code changes), test (runs tests and reports evidence), advisor (read-only design counsel), or custom (allowed_tools on the parent's posture). ",
         "profile selects a saved member or built-in role. Saved profile and manual role pins are exact; model/strength choose unpinned routes; thinking overrides the tier. ",
         "Use action=roster for resolved roles, models, reasoning, context and cost evidence; it makes no provider request. ",
-        "token_budget, max_steps and wall_time_secs only narrow inherited limits; the worker reserves an allowance for one tools-disabled partial-report turn within those limits and falls back to recorded work when reporting is unavailable. ",
+        "max_steps and wall_time_secs only narrow inherited limits; the worker reserves one tools-disabled partial-report turn and falls back to recorded work when reporting is unavailable. There is no token budget: runs are never stopped by token accounting. ",
         "Prefer type=implement for write work and type=test (or the Run tool with action=\"verifiers\") after writes settle — dispatch is not completion. ",
         "action=claim widens your own enforced write scope: pass write_roots (and optionally exact_files, coordination_contracts) before mutating anything a fail-closed write refusal named. It records a durable claim receipt and fails on contention with a peer claim; it never touches another agent's scope. ",
         "Action contract: start requires prompt; message/followup require targets and a message; followup accepts one id, agent_ids or all_parked=true and returns continuation mappings. peek/interrupt/cancel require a target; claim requires scope entries; status is compact and paginated unless an addressed detail is requested. ",
@@ -9705,10 +9322,6 @@ impl ToolSpec for AgentTool {
                     "type": "array",
                     "items": { "type": "string" },
                     "description": "Repo-relative directory trees a write-capable agent may mutate. On action=start: the scope this child claims, defaulting to the parent workspace ('.') when omitted. On action=claim: the trees to add to your own enforced scope, which you must do before mutating anything outside it. Paths outside the parent workspace are refused."
-                },
-                "token_budget": {
-                    "type": "integer", "minimum": 1,
-                    "description": "Measured provider input + output token allowance for this child and descendants. Only narrows inherited/operator pools. Request output is capped to remaining allowance; unknown prompt tokens or responses already in flight may overshoot and are reported in full. No extra model request for partial handback."
                 },
                 "max_output_tokens": {
                     "type": "integer", "minimum": 1,
@@ -10115,7 +9728,6 @@ fn compact_spawn_receipt(value: &mut Value, verbose: bool) {
             "spawn_depth",
             "max_spawn_depth",
             "max_steps",
-            "token_budget",
             "wall_time_secs",
             "wall_deadline_ms",
         ] {
@@ -10836,15 +10448,9 @@ async fn spawn_subagent_from_input(
             child_route: Some(child_route),
             nickname: None,
             fork_context,
-            token_budget: spawn_request.token_budget,
             max_output_tokens: spawn_request
                 .max_output_tokens
                 .and_then(std::num::NonZeroU32::new),
-            workflow_budget_scope: workflow_identity.and_then(|identity| {
-                identity
-                    .shared_token_budget
-                    .map(|limit| (identity.workflow_run_id.clone(), limit))
-            }),
             max_steps: spawn_request.max_steps,
             wall_time: spawn_request.wall_time,
             write_claim,
@@ -11108,9 +10714,6 @@ pub(crate) async fn spawn_workflow_task(
     }
     if let Some(value) = request.max_depth {
         input["max_depth"] = json!(value);
-    }
-    if let Some(value) = request.token_budget {
-        input["token_budget"] = json!(value);
     }
     if let Some(value) = request.max_steps {
         input["max_steps"] = json!(value);
@@ -11459,12 +11062,6 @@ struct SubAgentTask {
     fork_context: bool,
     started_at: Instant,
     max_steps: u32,
-    /// Per-worker token cap sourced from the spawn request's `token_budget`
-    /// (the explicit `max_tokens`/`tokenBudget` override). `None` means no
-    /// per-worker limit; the worker still obeys the scope admission gate.
-    /// When set, the worker stops with `BudgetExhausted` once its accumulated
-    /// model tokens exceed this value. Independent of the scope budget (#3319).
-    token_budget: Option<u64>,
     /// Hard wall-clock deadline for the whole child run.
     wall_time: Duration,
     input_rx: mpsc::UnboundedReceiver<SubAgentInput>,
@@ -11633,7 +11230,7 @@ fn budget_partial_result_with_note(
 }
 
 #[allow(clippy::too_many_lines)]
-async fn run_subagent_task_inner(task: SubAgentTask) {
+async fn run_subagent_task_inner(mut task: SubAgentTask) {
     // `spawn_background_with_assignment_options` installs this before the task
     // is scheduled. Keep this fallback for internal/test task launchers so a
     // manually-created worker still owns the same terminal fan-in contract.
@@ -11657,6 +11254,29 @@ async fn run_subagent_task_inner(task: SubAgentTask) {
                 Instant::now() + Duration::from_millis(deadline.saturating_sub(epoch_millis_now()))
             },
         ),
+    );
+    // One effective deadline, visible to both layers. The inner stages read
+    // `worker_profile.wall_deadline_ms` (work deadline, reserved hand-back),
+    // while an authored task wall time used to narrow the budget only through
+    // the outer backstop below. The backstop must not race the deadline
+    // (#6277), so fold the task wall time into the profile before the run:
+    // enforcement, the model-visible budget block, and the receipt then all
+    // describe the same limit.
+    let effective_deadline_ms = epoch_millis_now().saturating_add(
+        u64::try_from(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis(),
+        )
+        .unwrap_or(u64::MAX),
+    );
+    task.runtime.worker_profile.wall_deadline_ms = Some(
+        task.runtime
+            .worker_profile
+            .wall_deadline_ms
+            .map_or(effective_deadline_ms, |existing| {
+                existing.min(effective_deadline_ms)
+            }),
     );
 
     // Interactive launch gate (#3095): direct children acquire a permit
@@ -11695,12 +11315,22 @@ async fn run_subagent_task_inner(task: SubAgentTask) {
         ._foreground_child_registration
         .as_ref()
         .map(ForegroundChildRegistration::parking_signal);
+    // Every inner stage bounds itself by `deadline` (step requests by the
+    // work deadline, and the reserved hand-back turn by the hard deadline),
+    // so the inner run can always produce its own receipt: the specific stop
+    // cause, the hand-back outcome, and preserved usage. This outer backstop
+    // exists only for an inner stage that overruns anyway; racing it at the
+    // same instant as the inner deadline replaced real receipts with the
+    // generic error below (#6277). The grace keeps the anti-hang guarantee
+    // while letting the inner receipt win.
+    let backstop = deadline + Duration::from_secs(30);
+    let effective_limit = deadline.saturating_duration_since(task.started_at);
     let result = if launch_wait_timed_out {
         task.runtime.cancel_token.cancel();
-        Err(anyhow!(child_wall_time_exhausted_reason(task.wall_time)))
+        Err(anyhow!(child_wall_time_exhausted_reason(effective_limit)))
     } else {
         tokio::time::timeout_at(
-            deadline.into(),
+            backstop.into(),
             run_subagent(
                 &task.runtime,
                 task.agent_id.clone(),
@@ -11711,7 +11341,6 @@ async fn run_subagent_task_inner(task: SubAgentTask) {
                 task.fork_context,
                 task.started_at,
                 task.max_steps,
-                task.token_budget,
                 turn_end_parking,
                 task.input_rx,
             ),
@@ -11719,7 +11348,7 @@ async fn run_subagent_task_inner(task: SubAgentTask) {
         .await
         .unwrap_or_else(|_| {
             task.runtime.cancel_token.cancel();
-            Err(anyhow!(child_wall_time_exhausted_reason(task.wall_time)))
+            Err(anyhow!(child_wall_time_exhausted_reason(effective_limit)))
         })
     };
 
@@ -12117,7 +11746,7 @@ fn subagent_failure_class(status: &SubAgentStatus, error: &str) -> &'static str 
     } else if error.contains("wall-time budget exhausted") {
         "wall_time_budget"
     } else if matches!(status, SubAgentStatus::BudgetExhausted) {
-        "token_budget"
+        "budget_exhausted"
     } else if error.contains("authorization failed")
         || error.contains("usage limit")
         || error.contains("quota")
@@ -12947,7 +12576,6 @@ async fn run_subagent(
     fork_context: bool,
     started_at: Instant,
     max_steps: u32,
-    token_budget: Option<u64>,
     turn_end_parking: Option<Arc<std::sync::atomic::AtomicBool>>,
     mut input_rx: mpsc::UnboundedReceiver<SubAgentInput>,
 ) -> Result<SubAgentResult> {
@@ -12965,40 +12593,20 @@ async fn run_subagent(
         Some(context) => Some(context.with_resolved_state_block().await),
         None => None,
     };
-    let initial_allowance = narrow_optional_limit(
-        runtime
-            .manager
-            .read()
-            .await
-            .remaining_worker_tokens(&agent_id),
-        token_budget,
-    );
-    let handback_allowance = initial_allowance
-        .map(budget_handback::token_reserve)
-        .unwrap_or(budget_handback::MAX_HAND_BACK_TOKENS);
-    let work_max_steps = if handback_allowance > 0 && max_steps >= 2 {
+    // One reporting turn is reserved from the step cap and the wall clock;
+    // token accounting never stops a run (#6189).
+    let work_max_steps = if max_steps >= 2 {
         max_steps - 1
     } else {
         max_steps
     };
     let (work_deadline, hard_deadline) = budget_handback::wall_deadlines(runtime);
-    let work_deadline = if handback_allowance > 0 {
-        work_deadline
-    } else {
-        hard_deadline
-    };
     // #6194: the child sees what it is racing from the first turn — the
     // resolved budgets ride inside the task text so the transcript artifact
     // logs exactly what the model was told.
     let prompt = format!(
         "{prompt}\n\n{}",
-        child_runtime_budget_context(
-            runtime,
-            max_steps,
-            work_max_steps,
-            handback_allowance > 0,
-            initial_allowance,
-        )
+        child_runtime_budget_context(runtime, max_steps, work_max_steps)
     );
     let mut messages = build_initial_subagent_messages_with_system(
         &prompt,
@@ -13087,7 +12695,6 @@ async fn run_subagent(
     let mut terminal_failure_reason: Option<String> = None;
     let mut budget_failure_reason: Option<String> = None;
     let mut handback_note: Option<String> = None;
-    let mut usage_complete = true;
     // Distinguish a real "the model chose to stop" exit from an explicitly
     // configured step-cap exit. The normal loop is unbounded (max_steps == 0).
     let mut stopped_naturally = false;
@@ -13182,38 +12789,8 @@ async fn run_subagent(
             }
             SubAgentLoopBoundary::Continue => {}
         }
-        let remaining_tokens = {
-            let manager = runtime.manager.read().await;
-            narrow_optional_limit(
-                manager.available_worker_tokens(&agent_id, true),
-                token_budget.map(|limit| {
-                    limit
-                        .saturating_sub(tokens_used)
-                        .saturating_sub(if handback_allowance > 0 {
-                            budget_handback::token_reserve(limit)
-                        } else {
-                            0
-                        })
-                }),
-            )
-        };
-        if remaining_tokens == Some(0) {
-            budget_failure_reason = Some(
-                runtime
-                    .manager
-                    .read()
-                    .await
-                    .token_budget_exhausted_detail(&agent_id)
-                    .unwrap_or_else(|| {
-                        format!(
-                            "token budget exhausted for task execution ({tokens_used} measured input + output tokens; remaining allowance is reserved for hand-back)"
-                        )
-                    }),
-            );
-            break;
-        }
         if work_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            budget_failure_reason = Some("child wall-time budget exhausted for task execution; remaining time is reserved for hand-back within the original deadline".to_string());
+            budget_failure_reason = Some("child wall-time budget exhausted for task execution; remaining time is reserved for hand-back within the original deadline. Narrow the task or have the operator raise the inherited wall-time limit".to_string());
             break;
         }
 
@@ -13270,8 +12847,6 @@ async fn run_subagent(
                 work_deadline.or(hard_deadline),
                 steps,
                 work_max_steps,
-                remaining_tokens,
-                initial_allowance,
             )
         {
             messages.push(Message {
@@ -13324,42 +12899,12 @@ async fn run_subagent(
             image_input,
             &request_route.model,
         );
-        let work_output_allowance = if handback_allowance > 0 {
-            let input_estimate = crate::compaction::estimate_input_tokens_conservative(
-                &request_messages,
-                Some(&request_system),
-            )
-            .saturating_add(
-                tools
-                    .iter()
-                    .map(|tool| serde_json::to_vec(tool).map_or(0, |bytes| bytes.len().div_ceil(3)))
-                    .sum::<usize>(),
-            ) as u64;
-            remaining_tokens.map(|remaining| remaining.saturating_sub(input_estimate))
-        } else {
-            remaining_tokens
-        };
-        if work_output_allowance == Some(0) {
-            // This step has not made a request; preserve its model-turn slot
-            // for the bounded report instead of charging an unmade turn.
-            steps = steps.saturating_sub(1);
-            budget_failure_reason = Some("token budget exhausted for task execution: the estimated next request would consume the reporting allowance".to_string());
-            break;
-        }
         let request = MessageRequest {
             model: runtime.model.clone(),
             messages: request_messages,
-            // This is an output ceiling, while the budget includes input too.
-            // Unknown provider tokenization and parallel in-flight responses
-            // can overshoot; settle their real usage and stop before more work.
-            max_tokens: u32::try_from(
-                work_output_allowance.unwrap_or(u64::MAX).min(u64::from(
-                    runtime
-                        .client
-                        .effective_max_output_tokens(&request_route.model),
-                )),
-            )
-            .expect("bounded to the route output ceiling"),
+            max_tokens: runtime
+                .client
+                .effective_max_output_tokens(&request_route.model),
             system: Some(request_system.clone()),
             tools: has_tools.then(|| tools.clone()),
             tool_choice: if has_tools && fleet_report_response {
@@ -13434,11 +12979,10 @@ async fn run_subagent(
                 }
             } => {
                 if request_attempted.load(std::sync::atomic::Ordering::Relaxed) {
-                    budget_failure_reason = Some("child wall-time budget exhausted during a model request; reporting remains bounded by the original deadline, and any unreported in-flight usage is unknown".to_string());
-                    usage_complete = false;
+                    budget_failure_reason = Some("child wall-time budget exhausted during a model request; reporting remains bounded by the original deadline, and any unreported in-flight usage is unknown. Narrow the task or have the operator raise the inherited wall-time limit".to_string());
                     runtime.manager.write().await.mark_worker_unreported_usage(&agent_id);
                 } else {
-                    budget_failure_reason = Some("child wall-time budget exhausted before model request dispatch; remaining time is reserved for hand-back".to_string());
+                    budget_failure_reason = Some("child wall-time budget exhausted before model request dispatch; remaining time is reserved for hand-back. Narrow the task or have the operator raise the inherited wall-time limit".to_string());
                     steps = steps.saturating_sub(1);
                 }
                 break;
@@ -13588,11 +13132,6 @@ async fn run_subagent(
         .await;
 
         tokens_used = tokens_used.saturating_add(usage_total_tokens(&response.usage));
-        usage_complete &= usage_has_reported_data(&response.usage);
-        let budget_exhausted_detail = runtime.manager.read().await
-            .token_budget_exhausted_detail(&agent_id)
-            .or_else(|| token_budget.filter(|&limit| tokens_used >= limit)
-                .map(|limit| format!("token budget exhausted ({tokens_used}/{limit} measured input + output tokens)")));
 
         let mut current_response_text = None;
         for block in &response.content {
@@ -13639,21 +13178,6 @@ async fn run_subagent(
             fork_context_enabled,
         )
         .await;
-
-        if let Some(mut detail) = budget_exhausted_detail {
-            if is_incomplete_stop_reason(response.stop_reason.as_deref()) {
-                detail.push_str("; ");
-                detail.push_str(&incomplete_subagent_response_failure(&response));
-            }
-            record_agent_progress(
-                runtime,
-                &agent_id,
-                AgentProgressEventMeta::new(AgentWorkerStatus::Failed).with_step(steps),
-                format!("{}: {detail}", format_step_counter(steps, max_steps)),
-            );
-            budget_failure_reason = Some(detail);
-            break;
-        }
 
         if is_incomplete_stop_reason(response.stop_reason.as_deref()) {
             final_result = current_response_text;
@@ -13755,26 +13279,7 @@ async fn run_subagent(
         let mut denial_batch = FleetDenialBatch::default();
         for (tool_id, tool_name, tool_input) in tool_uses {
             if work_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                budget_failure_reason = Some("child wall-time budget exhausted during task execution; remaining time is reserved for hand-back".to_string());
-                break;
-            }
-            if runtime
-                .manager
-                .read()
-                .await
-                .available_worker_tokens(&agent_id, true)
-                == Some(0)
-            {
-                budget_failure_reason = Some("token budget exhausted for task execution; remaining allowance is reserved for hand-back".to_string());
-                break;
-            }
-            if let Some(detail) = runtime
-                .manager
-                .read()
-                .await
-                .token_budget_exhausted_detail(&agent_id)
-            {
-                budget_failure_reason = Some(detail);
+                budget_failure_reason = Some("child wall-time budget exhausted during task execution; remaining time is reserved for hand-back. Narrow the task or have the operator raise the inherited wall-time limit".to_string());
                 break;
             }
             // The report-only response and re-denied actions after a strategy
@@ -13908,7 +13413,7 @@ async fn run_subagent(
                 tool_ok,
                 output.result.content,
             );
-            let mut result = hard_cap_tool_result(
+            let result = hard_cap_tool_result(
                 raw_result,
                 runtime.max_output_tokens.unwrap_or(
                     std::num::NonZeroU32::new(SUBAGENT_TOOL_RESULT_TOKEN_CAP_DEFAULT)
@@ -13958,40 +13463,6 @@ async fn run_subagent(
                 }
             }
 
-            // #6282: check whether adding this result to history would
-            // blow past the remaining token budget. If even a truncated
-            // result won't fit, stop the loop with budget-exhausted.
-            let estimated = crate::compaction::estimate_text_tokens_conservative(&result);
-            let remaining = runtime
-                .manager
-                .read()
-                .await
-                .available_worker_tokens(&agent_id, true);
-            if let Some(remaining) = remaining
-                && estimated as u64 >= remaining
-            {
-                // Try shrinking to fit within the remaining allowance.
-                // The cap charges bytes (tokens × 3) while the estimator
-                // charges chars/3, and the `[truncated: true]` marker adds
-                // 18 ASCII bytes (≈6 estimated tokens) on top of the cap.
-                // Reserve that overhead, or the shrunk result always
-                // re-estimates at remaining + marker and never fits.
-                const SHRINK_MARKER_OVERHEAD_TOKENS: u64 = 8;
-                let fit_tokens = remaining.saturating_sub(SHRINK_MARKER_OVERHEAD_TOKENS);
-                let token_cap = std::num::NonZeroU32::new(fit_tokens as u32)
-                    .unwrap_or(std::num::NonZeroU32::MIN);
-                let minimal = hard_cap_tool_result(result.clone(), token_cap);
-                if crate::compaction::estimate_text_tokens_conservative(&minimal) as u64
-                    >= remaining
-                {
-                    budget_failure_reason = Some(
-                        "token budget exhausted: next tool result would exceed remaining allowance"
-                            .to_string(),
-                    );
-                    break;
-                }
-                result = minimal;
-            }
             tool_results.push(ContentBlock::ToolResult {
                 tool_use_id: tool_id,
                 content: result,
@@ -14074,10 +13545,6 @@ async fn run_subagent(
             &mut messages,
             &mut steps,
             max_steps,
-            token_budget,
-            tokens_used,
-            handback_allowance,
-            usage_complete,
             hard_deadline,
             cause,
         )
@@ -14541,8 +14008,6 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
                 })
         })
         .transpose()?;
-    let token_budget =
-        parse_optional_positive_u64(input, &["token_budget", "tokenBudget", "max_tokens"])?;
     let max_output_tokens = parse_optional_bounded_limit(
         input,
         &["max_output_tokens", "maxOutputTokens"],
@@ -14708,7 +14173,6 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
         resident_file,
         fork_context,
         max_depth,
-        token_budget,
         max_output_tokens,
         max_steps,
         wall_time,
@@ -15945,10 +15409,6 @@ fn parse_optional_bounded_limit(
         }
     }
     Ok(limit)
-}
-
-fn parse_optional_positive_u64(input: &Value, names: &[&str]) -> Result<Option<u64>, ToolError> {
-    parse_optional_bounded_limit(input, names, u64::MAX)
 }
 
 #[cfg(test)]

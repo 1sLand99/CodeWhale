@@ -533,8 +533,6 @@ pub(crate) async fn run_exec_agent(
         } else {
             execution_config.subagent_max_spawn_depth_for_provider(effective_provider)
         },
-        subagent_token_budget: execution_config
-            .subagent_token_budget_for_provider(effective_provider),
         network_policy,
         snapshots_enabled: !fleet_authority_active && execution_config.snapshots_config().enabled,
         snapshots_max_workspace_bytes: execution_config

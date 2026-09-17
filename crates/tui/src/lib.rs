@@ -3301,7 +3301,6 @@ async fn run_fleet_command(workspace: &Path, config: &Config, args: FleetArgs) -
             .max(max_subagents),
         Duration::from_secs(config.subagent_heartbeat_timeout_secs_for_provider(provider)),
         config.launch_concurrency_for_provider(provider),
-        config.subagent_token_budget_for_provider(provider),
     );
     // Probe the durable ledger *before* opening the manager: FleetManager::open
     // creates `.codewhale/fleet.jsonl` as a side effect, so a later probe would
@@ -12436,7 +12435,6 @@ async fn build_direct_workflow_tool(
             .max(max_subagents),
         Duration::from_secs(config.subagent_heartbeat_timeout_secs_for_provider(provider)),
         config.launch_concurrency_for_provider(provider),
-        config.subagent_token_budget_for_provider(provider),
     );
     let roster = Arc::new(crate::fleet::identity::load_effective_roster(
         &config.fleet_config(),
