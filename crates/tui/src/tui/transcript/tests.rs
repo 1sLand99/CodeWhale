@@ -128,7 +128,7 @@ fn spacer_rows_after_cell(cache: &TranscriptViewCache, target_cell: usize) -> us
 }
 
 #[test]
-fn cache_renders_user_cells_with_highlight_background() {
+fn cache_renders_user_cells_without_a_painted_background() {
     let cells = vec![user_cell("# literal user prompt")];
     let revisions = vec![1u64];
 
@@ -136,8 +136,14 @@ fn cache_renders_user_cells_with_highlight_background() {
     cache.ensure(&cells, &revisions, 40, TranscriptRenderOptions::default());
 
     let lines = cache.lines();
-    assert_eq!(lines[0].style.bg, Some(palette::SURFACE_ELEVATED));
-    assert_eq!(lines[0].width(), 40);
+    assert_eq!(lines[0].style.bg, None);
+    assert!(
+        lines[0]
+            .spans
+            .iter()
+            .all(|span| span.style.bg.is_none()),
+        "user rows must not paint a background block"
+    );
     assert_eq!(plain_lines(&cache)[0].trim_end(), "▎ # literal user prompt");
 }
 
