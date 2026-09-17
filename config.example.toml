@@ -1034,6 +1034,7 @@ max_subagents = 10 # optional (default 64, clamped to 1-128)
 #                            #             设置 METASO_API_KEY 或 [search] api_key
 #                            # searxng:    https://docs.searxng.org — trusted/self-hosted JSON API,
 #                            #             set base_url; no public instance is used by default
+#                            #             instance must enable JSON (settings.yml search.formats); HTML-only instances 403
 #                            # baidu:      百度 AI Search via qianfan.baidubce.com，需 api_key
 #                            # volcengine: 火山引擎 Ark web_search (免费 2 万次/月), 需 api_key
 #                            #             也回退到 VOLCENGINE_API_KEY / VOLCENGINE_ARK_API_KEY / ARK_API_KEY 环境变量

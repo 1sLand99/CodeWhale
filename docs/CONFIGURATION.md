@@ -2909,6 +2909,32 @@ configured instance's JSON API. Set `provider = "searxng"` and
 by default because public instances often disable JSON output or rate-limit API
 traffic.
 
+Self-host it as a separate process (Docker is fine); Codewhale never bundles or
+manages the search engine itself:
+
+- Enable JSON on the instance (`settings.yml`, `search.formats` must include
+  `json`) and restart it. An HTML-only instance answers the API with HTTP 403;
+  Codewhale reports that as a JSON/API-access problem on the SearXNG hop rather
+  than silently returning no results.
+- Bind it to loopback, or to a host and port your network policy allows. The
+  instance keeps its own engine list, limiter, and limits.
+- Point Codewhale at it with `[search] provider = "searxng"` and `base_url`
+  (required; either the root URL or the `/search` endpoint). No instance ships
+  as a default, and none is discovered automatically.
+- `codewhale doctor --probe-search` sends a transport-only `HEAD` to that
+  origin — no `q=`, no credentials, no redirects, no audit receipt — so a green
+  probe proves reachability and network-policy admission, not that JSON is on.
+
+Confirm the JSON API itself before assuming a Codewhale bug:
+
+```sh
+curl -sS "$BASE/search?q=codewhale&format=json" | jq '.results[0] | {title,url,score}'
+```
+
+Codewhale ranks the returned rows by `score`, highest first, and applies
+`max_results` to that ranking; rows an instance reports without a usable score
+keep their original relative order.
+
 **Metaso** ([metaso.cn](https://metaso.cn)) requires a user-supplied key. Set
 `METASO_API_KEY` or `[search] api_key`; Codewhale does not ship a shared key.
 

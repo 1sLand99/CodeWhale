@@ -1331,6 +1331,21 @@ exec_policy = true
 
 **SearXNG**([docs](https://docs.searxng.org/dev/search_api.html))使用配置实例的 JSON API。设置 `provider = "searxng"` 和 `base_url = "https://your-searxng.example"`；Codewhale 调用 `/search?q=...&format=json`。Codewhale 默认不使用公共 SearXNG 实例，因为公共实例常禁用 JSON 输出或对 API 流量限速。
 
+把它作为独立进程自托管（Docker 即可）；Codewhale 不内嵌也不管理搜索引擎本身：
+
+- 在实例上启用 JSON（`settings.yml` 的 `search.formats` 必须包含 `json`）并重启。仅 HTML 的实例会对 API 返回 HTTP 403；Codewhale 会把它作为 SearXNG 这一跳的 JSON/API 访问问题报告出来，而不是静默返回空结果。
+- 绑定到 loopback，或绑定到你的网络策略允许的主机和端口。实例自带引擎列表、限流器和限额。
+- 用 `[search] provider = "searxng"` 和 `base_url` 指向它（必填；根 URL 或 `/search` 端点均可）。不随任何默认实例发布，也不会自动发现实例。
+- `codewhale doctor --probe-search` 只对该 origin 发送一个传输层 `HEAD`——不带 `q=`、不带凭据、不跟随重定向、不写审计回执——所以探测通过只证明可达性和网络策略放行，不证明 JSON 已开启。
+
+在假定是 Codewhale 的 bug 之前，先用直接请求确认 JSON API 本身：
+
+```sh
+curl -sS "$BASE/search?q=codewhale&format=json" | jq '.results[0] | {title,url,score}'
+```
+
+Codewhale 按 `score` 从高到低排序返回行，再对排序结果应用 `max_results`；实例未给出可用分数的行保持原始相对顺序。
+
 **秘塔(Metaso)**([metaso.cn](https://metaso.cn))需要用户提供的 key。设置 `METASO_API_KEY` 或 `[search] api_key`；Codewhale 不提供共享 key。
 
 **Firecrawl**([docs](https://docs.firecrawl.dev/sdks/cli))用其有界的按 IP 每日配额无 key 搜索 Firecrawl Cloud。设置 `FIRECRAWL_API_KEY` 或 `[search] api_key` 用于认证限额。Codewhale 在无 key 模式不发送 `Authorization` 头。

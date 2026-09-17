@@ -1805,8 +1805,34 @@ fn parse_baidu_results(parsed: &Value, max_results: usize) -> Vec<WebSearchEntry
         .collect()
 }
 
+/// Read a SearXNG result `score`.
+///
+/// SearXNG emits a float, but instances and versions vary: a JSON integer, a
+/// numeric string, or no `score` at all are all tolerated. Unusable or
+/// non-finite values (`"not-a-number"`, `"NaN"`, `"inf"`, missing) read as
+/// `0.0`, so such rows keep their input order behind scored rows instead of
+/// being dropped or sorted by NaN.
+fn searxng_score(item: &Value) -> f64 {
+    let raw = item.get("score");
+    let n = raw
+        .and_then(Value::as_f64)
+        .or_else(|| raw.and_then(Value::as_i64).map(|i| i as f64))
+        .or_else(|| {
+            raw.and_then(Value::as_str)
+                .and_then(|s| s.trim().parse().ok())
+        })
+        .unwrap_or(0.0);
+    if n.is_finite() { n } else { 0.0 }
+}
+
+/// Normalize a SearXNG JSON response into the engine-agnostic result shape.
+///
+/// Rows without a non-empty `title` or `url` are skipped. Everything else is
+/// ordered by descending `score` with a stable sort (equal scores keep the
+/// instance's order) and only then capped, so a strong late row is not lost to
+/// an earlier `take` over the raw instance order.
 fn parse_searxng_results(parsed: &Value, max_results: usize) -> Vec<WebSearchEntry> {
-    parsed
+    let mut scored: Vec<(f64, WebSearchEntry)> = parsed
         .get("results")
         .and_then(|v| v.as_array())
         .into_iter()
@@ -1818,14 +1844,21 @@ fn parse_searxng_results(parsed: &Value, max_results: usize) -> Vec<WebSearchEnt
                 return None;
             }
             let snippet = first_non_empty_string(item, &["content", "snippet"]);
-            Some(WebSearchEntry {
-                title: title.to_string(),
-                url: url.to_string(),
-                snippet,
-            })
+            Some((
+                searxng_score(item),
+                WebSearchEntry {
+                    title: title.to_string(),
+                    url: url.to_string(),
+                    snippet,
+                },
+            ))
         })
-        .take(max_results)
-        .collect()
+        .collect();
+
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+    scored.truncate(max_results);
+
+    scored.into_iter().map(|(_, entry)| entry).collect()
 }
 
 fn baidu_error_message(parsed: &Value) -> Option<String> {
@@ -2280,8 +2313,8 @@ mod tests {
         parse_baidu_results, parse_bocha_results, parse_metaso_results, parse_searxng_results,
         parse_serply_results, parse_sofya_results, parse_tavily_results, parse_volcengine_results,
         register_search_citations, rerank, run_scrape_search_with_endpoints, sanitize_error_body,
-        search_probe_target, search_timeout_budgets, searxng_search_url, serply_search_url,
-        truncate_error_body, volcengine_extract_text,
+        search_probe_target, search_timeout_budgets, searxng_score, searxng_search_url,
+        serply_search_url, truncate_error_body, volcengine_extract_text,
     };
     use crate::config::SearchProvider;
     use crate::tools::web::contract::{
@@ -3258,6 +3291,120 @@ mod tests {
         assert_eq!(results[0].url, "https://example.com/rust");
         assert_eq!(results[0].snippet.as_deref(), Some("Result content"));
         assert_eq!(results[1].snippet.as_deref(), Some("Fallback snippet"));
+    }
+
+    #[test]
+    fn searxng_score_reads_floats_integers_strings_and_clamps_junk() {
+        assert_eq!(searxng_score(&json!({"score": 0.75})), 0.75);
+        assert_eq!(searxng_score(&json!({"score": 1})), 1.0);
+        assert_eq!(searxng_score(&json!({"score": " 2.5 "})), 2.5);
+        assert_eq!(searxng_score(&json!({"score": "-1.5"})), -1.5);
+        assert_eq!(searxng_score(&json!({})), 0.0);
+        assert_eq!(searxng_score(&json!({"score": null})), 0.0);
+        assert_eq!(searxng_score(&json!({"score": true})), 0.0);
+        assert_eq!(searxng_score(&json!({"score": ""})), 0.0);
+        assert_eq!(searxng_score(&json!({"score": "not-a-number"})), 0.0);
+        assert_eq!(searxng_score(&json!({"score": {"nested": 1.0}})), 0.0);
+        assert_eq!(
+            searxng_score(&json!({"score": "NaN"})),
+            0.0,
+            "a non-finite score must not reach the sort"
+        );
+        assert_eq!(
+            searxng_score(&json!({"score": "inf"})),
+            0.0,
+            "an infinite score must not outrank every finite row"
+        );
+    }
+
+    #[test]
+    fn searxng_parser_sorts_by_descending_score() {
+        // The strongest row is last in the instance's own order; only the
+        // score sort can promote it.
+        let parsed = json!({
+            "results": [
+                {"title": "Low", "url": "https://example.com/low", "score": 0.25},
+                {"title": "Middle", "url": "https://example.com/mid", "score": 1},
+                {"title": "High", "url": "https://example.com/high", "score": "4.5"},
+                {"title": "Zero", "url": "https://example.com/zero", "score": 0.0}
+            ]
+        });
+
+        let titles: Vec<String> = parse_searxng_results(&parsed, 10)
+            .into_iter()
+            .map(|entry| entry.title)
+            .collect();
+        assert_eq!(titles, ["High", "Middle", "Low", "Zero"]);
+    }
+
+    #[test]
+    fn searxng_parser_keeps_input_order_for_equal_scores() {
+        let parsed = json!({
+            "results": [
+                {"title": "First", "url": "https://example.com/1", "score": 1.5},
+                {"title": "Second", "url": "https://example.com/2", "score": 1.5},
+                {"title": "Third", "url": "https://example.com/3", "score": 1.5},
+                {"title": "Lower", "url": "https://example.com/4", "score": 1.4}
+            ]
+        });
+
+        let titles: Vec<String> = parse_searxng_results(&parsed, 10)
+            .into_iter()
+            .map(|entry| entry.title)
+            .collect();
+        assert_eq!(titles, ["First", "Second", "Third", "Lower"]);
+    }
+
+    #[test]
+    fn searxng_parser_sorts_missing_or_invalid_scores_last() {
+        let parsed = json!({
+            "results": [
+                {"title": "No score", "url": "https://example.com/none"},
+                {
+                    "title": "Garbage",
+                    "url": "https://example.com/garbage",
+                    "score": "not-a-number"
+                },
+                {"title": "NaN string", "url": "https://example.com/nan", "score": "NaN"},
+                {"title": "Infinite string", "url": "https://example.com/inf", "score": "inf"},
+                {"title": "Boolean", "url": "https://example.com/bool", "score": true},
+                {"title": "Scored", "url": "https://example.com/scored", "score": 0.5}
+            ]
+        });
+
+        let results = parse_searxng_results(&parsed, 10);
+        let titles: Vec<&str> = results.iter().map(|entry| entry.title.as_str()).collect();
+        // Every row with a title and a URL survives. Unusable scores read as
+        // 0.0 and keep their input order behind the one scored row.
+        assert_eq!(
+            titles,
+            [
+                "Scored",
+                "No score",
+                "Garbage",
+                "NaN string",
+                "Infinite string",
+                "Boolean"
+            ]
+        );
+    }
+
+    #[test]
+    fn searxng_parser_caps_after_score_sort() {
+        // A `take` before the sort would drop "Strong"; the cap must apply to
+        // the ranked list instead.
+        let parsed = json!({
+            "results": [
+                {"title": "Weak one", "url": "https://example.com/1", "score": 0.1},
+                {"title": "Weak two", "url": "https://example.com/2", "score": 0.2},
+                {"title": "Strong", "url": "https://example.com/3", "score": 9.0}
+            ]
+        });
+
+        let results = parse_searxng_results(&parsed, 2);
+        assert_eq!(results.len(), 2, "max_results caps the ranked list");
+        assert_eq!(results[0].title, "Strong");
+        assert_eq!(results[1].title, "Weak two");
     }
 
     #[tokio::test]
