@@ -94,6 +94,19 @@ const EVENT_TRANSACTION_LOCK_FILE: &str = "events.lock";
 const RUNTIME_PROCESS_OWNER_LOCK_FILE: &str = "runtime-process.owner.lock";
 const RUNTIME_PROCESS_OWNER_LOCK_HELD: &str = "This runtime is already active in another process. Close the other Codewhale session and try again, or set CODEWHALE_RUNTIME_DIR to a different directory.";
 const AGENT_MAIL_OWNER_FILE: &str = "owner.json";
+/// Every directory `RuntimeThreadStore::open` creates to hold work. Emptiness
+/// across all of them is what lets a switch adopt an existing store (#6207);
+/// `adoptable_empty_store_reports_nothing_to_abandon` pins this list against
+/// `open` by asserting each directory is load-bearing on its own.
+const RUNTIME_STORE_WORK_DIRS: [&str; 7] = [
+    "threads",
+    "turns",
+    "items",
+    "events",
+    "goals",
+    "agent-mail",
+    "turn-operations",
+];
 const TURN_OPERATION_BINDING_SCHEMA_VERSION: u32 = 1;
 const REQUEST_USER_INPUT_TOOL_NAME: &str = "request_user_input";
 const REDACTED_USER_INPUT_RECEIPT: &str = "User input submitted";
@@ -2896,9 +2909,11 @@ pub struct RuntimeStoreBinding {
 }
 
 impl RuntimeStoreBinding {
-    /// Only a missing, confined session store can recover from its transcript.
-    /// Existing stores with a wrong owner, symlinks and external paths fail closed.
-    pub(crate) fn is_missing_session_store(&self) -> Result<bool> {
+    /// The confinement shared by every store-recovery predicate: the bound
+    /// store must sit at `<state>/sessions/<session-id>/runtime` (or a
+    /// `runtime-recovered-*` sibling) with no symlink on the way down. Wrong
+    /// owner, symlinks and external paths fail closed for all callers.
+    fn is_confined_session_store(&self) -> Result<bool> {
         let sessions = codewhale_config::resolve_state_dir("sessions")?;
         let Some(session_dir) = self.data_dir.parent() else {
             return Ok(false);
@@ -2918,11 +2933,141 @@ impl RuntimeStoreBinding {
         for path in [&sessions, session_dir, &self.data_dir] {
             reject_symlinked_store_dir(path)?;
         }
+        Ok(true)
+    }
+
+    /// Only a missing, confined session store can recover from its transcript.
+    /// Existing stores with a wrong owner, symlinks and external paths fail closed.
+    pub(crate) fn is_missing_session_store(&self) -> Result<bool> {
+        if !self.is_confined_session_store()? {
+            return Ok(false);
+        }
         match fs::symlink_metadata(&self.data_dir) {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(true),
             Err(err) => Err(err.into()),
             Ok(_) => Ok(false),
         }
+    }
+
+    /// True when a confined store exists but holds nothing a session switch
+    /// could abandon.
+    ///
+    /// The switch path can rebind a conversation but cannot carry a store's
+    /// durable work across — queued tasks, pending approvals, agent mail —
+    /// which is why only a *missing* store was ever allowed to recover. A
+    /// store that exists and is empty is the case that policy never covered:
+    /// there is nothing to abandon, so refusing protects nothing, and a
+    /// force-quit leaves exactly this shape (#6207).
+    ///
+    /// Fails closed: anything unreadable, unconfined, or non-empty is treated
+    /// as work worth keeping. Scope-pinned automations live outside the store
+    /// directories and are covered by [`Self::has_scope_pinned_automation`],
+    /// not here.
+    pub(crate) fn has_no_durable_work(&self) -> Result<bool> {
+        if !self.is_confined_session_store()? {
+            return Ok(false);
+        }
+        if !self.data_dir.is_dir() {
+            return Ok(false);
+        }
+        for name in RUNTIME_STORE_WORK_DIRS {
+            match fs::read_dir(self.data_dir.join(name)) {
+                Ok(mut entries) => {
+                    if entries.next().is_some() {
+                        return Ok(false);
+                    }
+                }
+                // A store opened by an older build may predate a directory;
+                // absent is empty.
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err.into()),
+            }
+        }
+        // A sequence past its initial value means events were appended, even
+        // if those files have since been pruned.
+        match fs::read_to_string(self.data_dir.join("state.json")) {
+            Ok(raw) => {
+                let state: RuntimeStoreState = serde_json::from_str(&raw)?;
+                Ok(state.next_seq <= 1)
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    /// True when another live process holds this store's process-owner lock.
+    ///
+    /// `open_inner` acquires the lock before the store is opened and holds it
+    /// for the manager's lifetime, so a live holder's disk state is moving
+    /// under us and an emptiness read against it is meaningless — that was
+    /// the race that reverted the first #6207 fix. A missing lock file means
+    /// no manager ever opened the store. The probe lock is released on drop;
+    /// nothing is created or retained.
+    ///
+    /// Fails closed: an unconfined path reads as held, and an unexpected IO
+    /// error refuses the adopt.
+    pub(crate) fn has_live_holder(&self) -> Result<bool> {
+        if !self.is_confined_session_store()? {
+            return Ok(true);
+        }
+        let path = self.data_dir.join(RUNTIME_PROCESS_OWNER_LOCK_FILE);
+        let file = match fs::OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(err) => return Err(err.into()),
+        };
+        match RuntimeProcessOwnerLock::try_lock_exclusive(&file) {
+            Ok(()) => Ok(false),
+            Err(error) if RuntimeProcessOwnerLock::is_contention(&error) => Ok(true),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// True when an automation's execution scope matches this binding.
+    ///
+    /// Scope-pinned automations are recorded outside the store directories, so
+    /// [`Self::has_no_durable_work`] cannot see them — adopting their store
+    /// would orphan their scheduled work. A missing automations directory
+    /// means no definitions exist. Read-only: the manager is only opened when
+    /// the directory exists, and listing takes no locks.
+    ///
+    /// Fails closed: an unconfined path reads as pinned, and an unreadable
+    /// automations directory refuses the adopt.
+    pub(crate) fn has_scope_pinned_automation(&self) -> Result<bool> {
+        if !self.is_confined_session_store()? {
+            return Ok(true);
+        }
+        let root = crate::automation_manager::default_automations_dir();
+        if !root.join("automations").is_dir() {
+            return Ok(false);
+        }
+        let manager = crate::automation_manager::AutomationManager::open(root)?;
+        Ok(manager.list_automations()?.iter().any(|automation| {
+            automation.execution_scope.as_deref() == Some(self.execution_scope.as_str())
+        }))
+    }
+
+    /// True when the bound store exists and a switch may adopt it: confined,
+    /// empty, unheld, with no scope-pinned automation. Liveness is checked
+    /// before emptiness — a live holder's disk state moves under the read —
+    /// and the automation check runs last because it parses every definition.
+    pub(crate) fn is_adoptable_empty_store(&self) -> Result<bool> {
+        if !self.is_confined_session_store()? {
+            return Ok(false);
+        }
+        if !self.data_dir.is_dir() {
+            return Ok(false);
+        }
+        if self.has_live_holder()? {
+            return Ok(false);
+        }
+        if !self.has_no_durable_work()? {
+            return Ok(false);
+        }
+        if self.has_scope_pinned_automation()? {
+            return Ok(false);
+        }
+        Ok(true)
     }
 
     pub(crate) fn validate_existing_store(&self) -> Result<()> {
@@ -4193,7 +4338,7 @@ impl RuntimeProcessOwnerLock {
         }
     }
 
-    fn acquire(root: &Path) -> Result<Self> {
+    pub(crate) fn acquire(root: &Path) -> Result<Self> {
         let root = checked_runtime_store_root(root.to_path_buf())?;
         ensure_runtime_store_dir(&root)?;
         let path = root.join(RUNTIME_PROCESS_OWNER_LOCK_FILE);

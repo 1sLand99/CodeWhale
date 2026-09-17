@@ -3621,10 +3621,20 @@ pub(crate) fn apply_loaded_session_with_goal(
         && let Some(tasks) = app.runtime_services.task_manager.as_ref()
         && tasks.session_store_binding().as_ref() != Some(binding)
     {
-        if binding
+        // A switch can rebind the conversation but cannot carry the saved
+        // store's durable work into the running host, so it may only adopt a
+        // store there is nothing to lose from leaving: one that is missing, or
+        // one that exists and is provably empty *and* provably unheld, with no
+        // scope-pinned automation. A force-quit leaves the second shape — the
+        // store is on disk, ownerless and holding zero events — and refusing
+        // it protected nothing while making the session unopenable (#6207).
+        let nothing_to_abandon = binding
             .is_missing_session_store()
             .map_err(|error| error.to_string())?
-        {
+            || binding
+                .is_adoptable_empty_store()
+                .map_err(|error| error.to_string())?;
+        if nothing_to_abandon {
             recovered_binding = tasks.session_store_binding();
         }
         if recovered_binding.is_none() {

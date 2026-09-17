@@ -1805,21 +1805,28 @@ impl SessionManager {
     fn hydrate_recovered_runtime_binding(&self, session: &mut SavedSession) -> std::io::Result<()> {
         // Compare under the session write lock. A stale process may neither
         // resurrect a missing binding nor replace a different recovered owner.
+        // An adoptable empty store (#6207) counts as abandonable on either
+        // side, exactly like a missing one: there is no durable work to lose
+        // in either direction.
         if let Some(incoming) = session.metadata.runtime_store.as_ref()
             && let Ok(persisted) =
                 Self::load_session_metadata(&self.validated_session_path(&session.metadata.id)?)
             && let Some(binding) = persisted.runtime_store
             && incoming != &binding
         {
-            if incoming.is_missing_session_store().unwrap_or(false)
-                && binding.validate_existing_store().is_ok()
-            {
+            let incoming_abandonable = incoming.is_missing_session_store().unwrap_or(false)
+                || incoming.is_adoptable_empty_store().unwrap_or(false);
+            if incoming_abandonable && binding.validate_existing_store().is_ok() {
                 session.metadata.runtime_store = Some(binding);
-            } else if !binding.is_missing_session_store().unwrap_or(false) {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "Session Runtime ownership changed; reopen the session before saving",
-                ));
+            } else {
+                let persisted_abandonable = binding.is_missing_session_store().unwrap_or(false)
+                    || binding.is_adoptable_empty_store().unwrap_or(false);
+                if !persisted_abandonable {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "Session Runtime ownership changed; reopen the session before saving",
+                    ));
+                }
             }
         }
         Ok(())
