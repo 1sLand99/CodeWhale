@@ -3689,6 +3689,100 @@ fn selection_to_text_handles_multiline_and_reversed_endpoints() {
     assert_eq!(selection_to_text(&app).as_deref(), Some("a beta\ngam"));
 }
 
+/// #6228: with `selection_copy_markdown` on (the default), a fragment
+/// selection copies exactly the fragment — the Markdown path only fires for
+/// whole cells and never rounds a fragment out to the cells it touches.
+#[test]
+fn partial_selection_copies_exact_fragment_not_whole_cells() {
+    let mut app = create_test_app();
+    assert!(
+        app.viewport.selection_copy_markdown,
+        "markdown copy is the default under test"
+    );
+    app.history = vec![HistoryCell::Assistant {
+        content: "alpha beta\ngamma delta".to_string(),
+        streaming: false,
+    }];
+    app.resync_history_revisions();
+    app.viewport.transcript_cache.ensure(
+        &app.history,
+        &app.history_revisions,
+        80,
+        app.transcript_render_options(),
+    );
+
+    app.viewport.transcript_selection.anchor = Some(TranscriptSelectionPoint {
+        line_index: 0,
+        column: 6,
+    });
+    app.viewport.transcript_selection.head = Some(TranscriptSelectionPoint {
+        line_index: 1,
+        column: 5,
+    });
+
+    assert_eq!(selection_to_markdown(&app), None);
+    copy_active_selection(&mut app);
+    assert_eq!(app.clipboard.last_written_text(), Some("a beta\ngam"));
+
+    // A fully-covered middle line is still partial: the line range cuts the
+    // cell in half, so no whole cell exists to project.
+    app.viewport.transcript_selection.anchor = Some(TranscriptSelectionPoint {
+        line_index: 1,
+        column: 0,
+    });
+    app.viewport.transcript_selection.head = Some(TranscriptSelectionPoint {
+        line_index: 1,
+        column: 80,
+    });
+    assert_eq!(
+        selection_to_markdown(&app),
+        None,
+        "mid-cell line range must not round out"
+    );
+}
+
+/// #6156 retained: a selection covering whole cells end to end still copies
+/// Markdown source rather than rendered text.
+#[test]
+fn full_cell_selection_keeps_markdown_source() {
+    let mut app = create_test_app();
+    app.history = vec![HistoryCell::Assistant {
+        content: "alpha beta\ngamma delta".to_string(),
+        streaming: false,
+    }];
+    app.resync_history_revisions();
+    app.viewport.transcript_cache.ensure(
+        &app.history,
+        &app.history_revisions,
+        80,
+        app.transcript_render_options(),
+    );
+
+    let last = app
+        .viewport
+        .transcript_cache
+        .lines()
+        .len()
+        .saturating_sub(1);
+    app.viewport.transcript_selection.anchor = Some(TranscriptSelectionPoint {
+        line_index: 0,
+        column: 0,
+    });
+    app.viewport.transcript_selection.head = Some(TranscriptSelectionPoint {
+        line_index: last,
+        column: 80,
+    });
+
+    let (text, cells) = selection_to_markdown(&app).expect("whole-cell selection keeps markdown");
+    assert_eq!(cells, 1);
+    assert_eq!(text, "alpha beta\ngamma delta");
+    copy_active_selection(&mut app);
+    assert_eq!(
+        app.clipboard.last_written_text(),
+        Some("alpha beta\ngamma delta")
+    );
+}
+
 #[test]
 fn selection_to_text_removes_visual_wrap_breaks_from_paragraphs() {
     let mut app = create_test_app();

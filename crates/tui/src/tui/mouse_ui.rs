@@ -1881,17 +1881,101 @@ pub(crate) fn copy_active_selection(app: &mut App) {
     }
 }
 
+/// Whether a drag selection covers every cell it touches end to end (#6228).
+///
+/// Two checks: the edge columns must reach the content edges on the boundary
+/// lines, and the line range must not cut a cell in half at either end.
+/// Middle lines are fully covered by construction, and cells render as
+/// contiguous spans, so the two edge cells decide for the whole range.
+fn selection_covers_cells_fully(
+    app: &App,
+    start: &TranscriptSelectionPoint,
+    end: &TranscriptSelectionPoint,
+    start_index: usize,
+    end_index: usize,
+) -> bool {
+    let (first_head, _) = match content_column_span(app, start_index) {
+        Some(span) => span,
+        None => return false,
+    };
+    if start.column > first_head {
+        return false;
+    }
+    let (_, last_tail) = match content_column_span(app, end_index) {
+        Some(span) => span,
+        None => return false,
+    };
+    if end.column < last_tail {
+        return false;
+    }
+    let line_meta = app.viewport.transcript_cache.line_meta();
+    let mut edge_cells = (start_index..=end_index).filter_map(|line_index| {
+        line_meta
+            .get(line_index)
+            .and_then(|meta| meta.cell_line())
+            .map(|(cell_index, _)| cell_index)
+    });
+    let Some(first_cell) = edge_cells.next() else {
+        return false;
+    };
+    let last_cell = edge_cells.last().unwrap_or(first_cell);
+    [first_cell, last_cell].into_iter().all(|cell| {
+        let mut span = line_meta
+            .iter()
+            .enumerate()
+            .filter_map(|(line_index, meta)| {
+                meta.cell_line()
+                    .filter(|(cell_index, _)| *cell_index == cell)
+                    .map(|_| line_index)
+            });
+        match (span.next(), span.last()) {
+            (Some(cell_first), Some(cell_last)) => {
+                cell_first >= start_index && cell_last <= end_index
+            }
+            (Some(only), None) => start_index <= only && only <= end_index,
+            (None, _) => false,
+        }
+    })
+}
+
+/// Rendered-column span of selectable content on one transcript cache line.
+///
+/// Mirrors the prefix math in [`selection_to_text`]: rail decorations plus
+/// copy-only prefixes are visual, so content runs from their combined width
+/// to that width plus the content's display width.
+fn content_column_span(app: &App, line_index: usize) -> Option<(usize, usize)> {
+    let cache = &app.viewport.transcript_cache;
+    let full_width = text_display_width(&line_to_plain(cache.lines().get(line_index)?));
+    let rail_width = cache.rail_prefix_width(line_index).min(full_width);
+    let copy_prefix = cache
+        .line_meta()
+        .get(line_index)
+        .map(|meta| meta.copy_prefix_width())
+        .unwrap_or(0)
+        .min(full_width.saturating_sub(rail_width));
+    let head = rail_width.saturating_add(copy_prefix);
+    let tail = head.saturating_add(
+        full_width
+            .saturating_sub(rail_width)
+            .saturating_sub(copy_prefix),
+    );
+    Some((head, tail))
+}
+
 /// Project a transcript drag selection to Markdown source (#6156).
 ///
 /// Collects every history cell intersecting the selection's rendered line
 /// range, in order, and serializes each through
 /// `history_cell_to_clipboard_text` — the same canonical projection Ctrl-Y
 /// and `/copy` use — joined with a blank line. Returns the payload plus the
-/// projected cell count for the toast. A selection that cuts a cell in half
-/// rounds out to the whole cell; the caller says so in the toast.
+/// projected cell count for the toast.
 ///
-/// Returns `None` when no cell metadata intersects the range or every
-/// projection is blank; the caller falls back to [`selection_to_text`].
+/// Markdown source is only truthful for whole cells, so a selection that
+/// cuts a cell in half is not projected here at all — it keeps its exact
+/// rendered text through the caller's [`selection_to_text`] fallback (#6228).
+///
+/// Returns `None` when the selection is a fragment, when no cell metadata
+/// intersects the range, or when every projection is blank.
 pub(crate) fn selection_to_markdown(app: &App) -> Option<(String, usize)> {
     let (start, end) = app.viewport.transcript_selection.ordered_endpoints()?;
     let lines = app.viewport.transcript_cache.lines();
@@ -1900,6 +1984,9 @@ pub(crate) fn selection_to_markdown(app: &App) -> Option<(String, usize)> {
     }
     let end_index = end.line_index.min(lines.len().saturating_sub(1));
     let start_index = start.line_index.min(end_index);
+    if !selection_covers_cells_fully(app, &start, &end, start_index, end_index) {
+        return None;
+    }
     let line_meta = app.viewport.transcript_cache.line_meta();
     let width = app
         .viewport
