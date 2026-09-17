@@ -5862,15 +5862,18 @@ impl App {
                 .is_some_and(|instant| instant.elapsed() < Self::DOUBLE_TAP_WINDOW)
     }
 
-    /// Pop the most recently queued message when the double-tap window is
-    /// still open. Clears the window so a third Enter does not re-steer.
-    pub fn take_queued_for_double_tap_steer(&mut self) -> Option<QueuedMessage> {
+    /// Drain every queued message when the double-tap window is still
+    /// open, oldest first. Clears the window so a third Enter does not
+    /// re-steer. The posture bar promises "{enter} again to send now" — with
+    /// several follow-ups queued, "now" means all of them in order, not just
+    /// the latest.
+    pub fn take_queued_for_double_tap_steer(&mut self) -> Vec<QueuedMessage> {
         if !self.double_tap_window_open() || self.queued_messages.is_empty() {
-            return None;
+            return Vec::new();
         }
         match self.enter_with_double_tap() {
-            Some(SubmitDisposition::Steer) => self.queued_messages.pop_back(),
-            _ => None,
+            Some(SubmitDisposition::Steer) => self.queued_messages.drain(..).collect(),
+            _ => Vec::new(),
         }
     }
 

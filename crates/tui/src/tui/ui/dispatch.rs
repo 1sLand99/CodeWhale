@@ -1331,7 +1331,7 @@ pub(crate) async fn attempt_steer_with_queue_fallback(
     engine_handle: &EngineHandle,
     message: QueuedMessage,
     recovery: DispatchRecovery,
-) {
+) -> bool {
     match steer_user_message(app, config, engine_handle, message.clone()).await {
         Ok(true) => {
             app.push_status_toast(
@@ -1339,6 +1339,7 @@ pub(crate) async fn attempt_steer_with_queue_fallback(
                 StatusToastLevel::Info,
                 Some(1_500),
             );
+            true
         }
         Ok(false) => {
             restore_queued_or_draft_message(app, recovery, message);
@@ -1347,12 +1348,14 @@ pub(crate) async fn attempt_steer_with_queue_fallback(
                 StatusToastLevel::Warning,
                 Some(4_000),
             );
+            false
         }
         Err(err) => {
             restore_queued_or_draft_message(app, recovery, message);
             let status = format!("{} ({err})", app.tr(MessageId::ToastCouldNotSendIntoTurn));
             app.status_message = Some(status.clone());
             app.push_status_toast(status, StatusToastLevel::Warning, Some(4_000));
+            false
         }
     }
 }

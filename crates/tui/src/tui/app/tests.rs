@@ -5352,24 +5352,29 @@ fn bare_enter_scenario() {
 }
 
 #[test]
-fn double_tap_takes_the_just_queued_message_only_inside_the_window() {
+fn double_tap_drains_every_queued_message_oldest_first_inside_the_window() {
     let mut app = App::new(test_options(false), &Config::default());
     app.is_loading = true;
     app.streaming_message_index = Some(0);
     app.queue_message(QueuedMessage::new("older queued".to_string(), None));
     app.queue_message(QueuedMessage::new("just typed follow-up".to_string(), None));
     assert!(
-        app.take_queued_for_double_tap_steer().is_none(),
+        app.take_queued_for_double_tap_steer().is_empty(),
         "no window armed"
     );
     app.arm_double_tap_window();
-    let taken = app
-        .take_queued_for_double_tap_steer()
-        .expect("the window is open");
-    assert_eq!(taken.display, "just typed follow-up");
-    assert_eq!(app.queued_message_count(), 1);
+    let taken = app.take_queued_for_double_tap_steer();
+    assert_eq!(
+        taken
+            .iter()
+            .map(|message| message.display.as_str())
+            .collect::<Vec<_>>(),
+        vec!["older queued", "just typed follow-up"],
+        "the window drains the whole queue in order"
+    );
+    assert_eq!(app.queued_message_count(), 0);
     assert!(
-        app.take_queued_for_double_tap_steer().is_none(),
+        app.take_queued_for_double_tap_steer().is_empty(),
         "one steer per tap"
     );
 }
