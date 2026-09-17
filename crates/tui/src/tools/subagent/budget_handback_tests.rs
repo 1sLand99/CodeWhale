@@ -955,3 +955,96 @@ async fn budget_death_preservation_note_names_surviving_workspace_changes() {
         .expect("baseline exists");
     assert!(note.contains("No workspace changes"), "{note}");
 }
+
+fn assistant_message(content: Vec<ContentBlock>) -> Message {
+    Message {
+        role: Role::Assistant,
+        content,
+    }
+}
+
+fn tool_use(name: &str, input: Value) -> ContentBlock {
+    ContentBlock::ToolUse {
+        id: format!("call_{name}"),
+        name: name.to_string(),
+        input,
+        caller: None,
+        thought_signature: None,
+    }
+}
+
+#[test]
+fn fallback_partial_text_prefers_last_assistant_text() {
+    let messages = vec![
+        assistant_message(vec![ContentBlock::Text {
+            text: "first".to_string(),
+            cache_control: None,
+        }]),
+        assistant_message(vec![
+            tool_use("Read", json!({"path": "src/main.rs"})),
+            ContentBlock::Text {
+                text: "second".to_string(),
+                cache_control: None,
+            },
+        ]),
+    ];
+    assert_eq!(fallback_partial_text(&messages), "second");
+}
+
+#[test]
+fn fallback_partial_text_digests_thinking_and_tool_calls_without_text() {
+    let messages = vec![
+        assistant_message(vec![ContentBlock::Thinking {
+            thinking: "checking whether the ring slot write precedes the read".to_string(),
+            signature: None,
+            state: None,
+        }]),
+        assistant_message(vec![tool_use("Read", json!({"path": "ring.rs"}))]),
+        assistant_message(vec![tool_use(
+            "Grep",
+            json!({"pattern": "slot", "path": "ring.rs"}),
+        )]),
+    ];
+    let digest = fallback_partial_text(&messages);
+    assert!(digest.contains("Tool calls (newest first)"), "{digest}");
+    assert!(digest.contains("- Grep ring.rs"), "{digest}");
+    assert!(digest.contains("- Read ring.rs"), "{digest}");
+    assert!(
+        digest.find("- Grep").unwrap() < digest.find("- Read").unwrap(),
+        "{digest}"
+    );
+    assert!(digest.contains("unverified"), "{digest}");
+    assert!(
+        digest.contains("ring slot write precedes the read"),
+        "{digest}"
+    );
+}
+
+#[test]
+fn fallback_partial_text_caps_tool_entries_and_reports_overflow() {
+    let messages: Vec<Message> = (0..14)
+        .map(|i| {
+            assistant_message(vec![tool_use(
+                "Read",
+                json!({"path": format!("file_{i}.rs")}),
+            )])
+        })
+        .collect();
+    let digest = fallback_partial_text(&messages);
+    assert!(digest.contains("...and 2 more"), "{digest}");
+    assert!(!digest.contains("file_0.rs"), "{digest}");
+    assert!(digest.contains("file_13.rs"), "{digest}");
+}
+
+#[test]
+fn fallback_partial_text_is_silent_only_when_nothing_was_recorded() {
+    assert!(fallback_partial_text(&[]).contains("No assistant text was recorded"));
+    let user_only = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "do the thing".to_string(),
+            cache_control: None,
+        }],
+    }];
+    assert!(fallback_partial_text(&user_only).contains("No assistant text was recorded"));
+}

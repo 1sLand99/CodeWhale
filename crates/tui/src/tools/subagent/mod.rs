@@ -11530,43 +11530,125 @@ async fn budget_work_preservation_note(
     })
 }
 
+/// Deterministic fallback body when no model hand-back report exists (#6194).
+///
+/// Prefers the last recorded assistant text. When a budget death interrupts a
+/// child that only ever emitted thinking and tool calls — the read-only review
+/// shape — there is no text, and returning silence discards everything the
+/// child did. The digest below names the grounded work instead: tool calls are
+/// actions that happened, and the thinking excerpt is explicitly unverified.
+/// Everything is bounded; the parent gets evidence, never a report.
+fn fallback_partial_text(messages: &[Message]) -> String {
+    const MAX_TEXT_CHARS: usize = 4_000;
+    const MAX_TOOL_ENTRIES: usize = 12;
+    const MAX_THINKING_BYTES: usize = 1_500;
+
+    if let Some(text) = messages
+        .iter()
+        .rev()
+        .filter(|message| message.role == Role::Assistant)
+        .flat_map(|message| message.content.iter().rev())
+        .find_map(|block| match block {
+            ContentBlock::Text { text, .. } if !text.trim().is_empty() => Some(text),
+            _ => None,
+        })
+    {
+        return text.chars().take(MAX_TEXT_CHARS).collect();
+    }
+    let mut tools = Vec::new();
+    let mut extra_tools = 0usize;
+    let mut thinking = None;
+    for message in messages.iter().rev() {
+        if message.role != Role::Assistant {
+            continue;
+        }
+        for block in message.content.iter().rev() {
+            match block {
+                ContentBlock::ToolUse { name, input, .. } => {
+                    if tools.len() < MAX_TOOL_ENTRIES {
+                        tools.push(format!("{name} {}", tool_target_preview(input)));
+                    } else {
+                        extra_tools += 1;
+                    }
+                }
+                ContentBlock::Thinking { thinking: text, .. } => {
+                    if thinking.is_none() && !text.trim().is_empty() {
+                        thinking = Some(text);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if tools.is_empty() && thinking.is_none() {
+        return "No assistant text was recorded; inspect the checkpoint for completed tool work."
+            .to_string();
+    }
+    let mut digest =
+        String::from("No assistant text was recorded. Work recorded before the budget death:");
+    if !tools.is_empty() {
+        digest.push_str("\nTool calls (newest first):");
+        for entry in &tools {
+            digest.push_str(&format!("\n- {entry}"));
+        }
+        if extra_tools > 0 {
+            digest.push_str(&format!("\n- ...and {extra_tools} more"));
+        }
+    }
+    if let Some(text) = thinking {
+        digest.push_str("\nLatest reasoning (unverified, may be incomplete):\n");
+        digest.push_str(&lifecycle::text_preview(text, MAX_THINKING_BYTES));
+    }
+    digest
+}
+
+/// One-line target for a recorded tool call: the well-known path/commandish
+/// key when present, else a truncated rendering of the whole input.
+fn tool_target_preview(input: &serde_json::Value) -> String {
+    const KEYS: [&str; 7] = [
+        "path",
+        "file",
+        "file_path",
+        "command",
+        "pattern",
+        "query",
+        "url",
+    ];
+    for key in KEYS {
+        if let Some(hit) = input.get(key).and_then(serde_json::Value::as_str)
+            && !hit.trim().is_empty()
+        {
+            return lifecycle::text_preview(hit, 120);
+        }
+    }
+    if let Some(hit) = input.as_str() {
+        return lifecycle::text_preview(hit, 120);
+    }
+    lifecycle::text_preview(&input.to_string(), 120)
+}
+
 fn budget_partial_result_with_note(
     mut result: SubAgentResult,
     cause: &str,
     handback_note: &str,
 ) -> SubAgentResult {
-    let text = result
-        .result
-        .take()
-        .filter(|text| !text.trim().is_empty())
-        .or_else(|| {
-            result.checkpoint.as_ref().and_then(|checkpoint| {
-                checkpoint
-                    .messages
-                    .iter()
-                    .rev()
-                    .filter(|message| message.role == Role::Assistant)
-                    .flat_map(|message| message.content.iter().rev())
-                    .find_map(|block| match block {
-                        ContentBlock::Text { text, .. } if !text.trim().is_empty() => {
-                            Some(text.clone())
-                        }
-                        _ => None,
-                    })
-            })
-        });
+    let text = result.result.take().filter(|text| !text.trim().is_empty());
+    let partial = match text {
+        Some(text) => text.chars().take(4_000).collect::<String>(),
+        None => result.checkpoint.as_ref().map_or_else(
+            || {
+                "No assistant text was recorded; inspect the checkpoint for completed tool work."
+                    .to_string()
+            },
+            |checkpoint| fallback_partial_text(&checkpoint.messages),
+        ),
+    };
     let measured = result
         .usage
         .as_ref()
         .and_then(|usage| usage.total_tokens)
         .map(|tokens| format!("Measured worker usage: {tokens} input + output tokens."))
         .unwrap_or_else(|| "Worker token usage has not been reported.".to_string());
-    let partial = text
-        .map(|text| text.chars().take(4_000).collect::<String>())
-        .unwrap_or_else(|| {
-            "No assistant text was recorded; inspect the checkpoint for completed tool work."
-                .to_string()
-        });
     result.status = SubAgentStatus::BudgetExhausted;
     result.result = Some(format!(
         "{cause}. {measured} {handback_note}\nPartial output:\n{partial}"
@@ -13972,10 +14054,7 @@ async fn run_subagent(
         // Unavailable or rejected reports must not replace the recorded work
         // used by the deterministic fallback.
         if final_result.is_none() {
-            final_result = Some(
-                "No assistant text was recorded; inspect the checkpoint for completed tool work."
-                    .to_string(),
-            );
+            final_result = Some(fallback_partial_text(&messages));
         }
         match budget_handback::request_report(
             runtime,
