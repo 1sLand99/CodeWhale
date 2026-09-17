@@ -2899,9 +2899,18 @@ impl TaskManager {
         Ok(())
     }
 
+    /// Acquire the cross-process task-store lock.
+    ///
+    /// Polls with exponential backoff (5ms → 50ms) instead of a flat 5ms
+    /// interval: under contention the old shape woke ~200×/s for up to its
+    /// whole five-second deadline (#6211 R7c). The deadline and the busy
+    /// error are unchanged. What this does not do: it does not add the
+    /// in-process mutex the issue also suggested — in-process contenders
+    /// just back off against the same file lock.
     async fn lock_store(&self) -> Result<RuntimeProcessOwnerLock> {
         let path = self.cfg.data_dir.join("task-store.lock");
         let deadline = Instant::now() + Duration::from_secs(5);
+        let mut wait = Duration::from_millis(5);
         loop {
             if let Some(owner) = RuntimeProcessOwnerLock::try_acquire_file(&path, true)? {
                 return Ok(owner);
@@ -2909,7 +2918,8 @@ impl TaskManager {
             if Instant::now() >= deadline {
                 bail!("Task store is busy; state is unavailable");
             }
-            sleep(Duration::from_millis(5)).await;
+            sleep(wait).await;
+            wait = (wait * 2).min(Duration::from_millis(50));
         }
     }
 
