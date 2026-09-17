@@ -525,6 +525,29 @@ PASSWORD=hunter2hunter2"
     }
 
     #[test]
+    fn redact_json_truncates_pathological_nesting() {
+        let mut value = serde_json::Value::String("leaf".to_string());
+        for _ in 0..150 {
+            let mut map = serde_json::Map::new();
+            map.insert("t".to_string(), value);
+            value = serde_json::Value::Object(map);
+        }
+        let out = redact_json_secrets(&value);
+        let mut cursor = &out;
+        let mut descended = 0;
+        while let serde_json::Value::Object(map) = cursor {
+            cursor = map.values().next().expect("single-key nesting");
+            descended += 1;
+        }
+        assert_eq!(
+            cursor,
+            &serde_json::Value::String(REDACTED.to_string()),
+            "over-deep value must be redacted, not traversed"
+        );
+        assert!(descended < 150, "guard must fire before the leaf");
+    }
+
+    #[test]
     fn redact_text_masks_camel_case_and_dotted_secret_assignments() {
         let synthetic_secret = synthetic_secret_fixture();
         for key in ["accessToken", "refreshToken", "oauth.token", "APIKey"] {

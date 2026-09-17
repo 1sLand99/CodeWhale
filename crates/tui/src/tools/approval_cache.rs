@@ -195,7 +195,20 @@ fn hash_json_value(value: &Value) -> String {
     short
 }
 
+/// Maximum nesting depth the canonical serializer descends. Aligned with
+/// serde_json's own parse limit so parsed input never truncates; anything
+/// deeper emits a fixed marker, keeping keys deterministic.
+const MAX_CANONICAL_JSON_DEPTH: usize = 128;
+
 fn push_canonical_json(value: &Value, out: &mut String) {
+    push_canonical_json_at(value, out, 0)
+}
+
+fn push_canonical_json_at(value: &Value, out: &mut String, depth: usize) {
+    if depth > MAX_CANONICAL_JSON_DEPTH {
+        out.push_str("maxdepth");
+        return;
+    }
     match value {
         Value::Null => out.push_str("null"),
         Value::Bool(value) => {
@@ -240,7 +253,7 @@ fn push_canonical_json(value: &Value, out: &mut String) {
                 if index > 0 {
                     out.push(',');
                 }
-                push_canonical_json(item, out);
+                push_canonical_json_at(item, out, depth + 1);
             }
             out.push(']');
         }
@@ -257,7 +270,7 @@ fn push_canonical_json(value: &Value, out: &mut String) {
                     serde_json::to_string(key).expect("serializing an object key cannot fail");
                 out.push_str(&encoded_key);
                 out.push(':');
-                push_canonical_json(value, out);
+                push_canonical_json_at(value, out, depth + 1);
             }
             out.push('}');
         }
@@ -281,6 +294,19 @@ mod tests {
         let key_a = build_approval_key("exec_shell", &json!({"command": "cargo build --release"}));
         let key_b = build_approval_key("exec_shell", &json!({"command": "cargo build --release"}));
         assert_eq!(key_a, key_b);
+    }
+
+    #[test]
+    fn pathological_nesting_yields_a_stable_key() {
+        let mut value = Value::String("leaf".to_string());
+        for _ in 0..150 {
+            let mut map = serde_json::Map::new();
+            map.insert("t".to_string(), value);
+            value = Value::Object(map);
+        }
+        let key_a = build_approval_key("exec_shell", &value);
+        let key_b = build_approval_key("exec_shell", &value);
+        assert_eq!(key_a, key_b, "truncated keys must stay deterministic");
     }
 
     #[test]

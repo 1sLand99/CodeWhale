@@ -43,6 +43,18 @@ pub const REDACTED: &str = "[redacted]";
 /// one flat keyed assignment.
 #[must_use]
 pub fn redact_json_secrets(value: &serde_json::Value) -> serde_json::Value {
+    redact_json_secrets_at(value, 0)
+}
+
+/// Maximum nesting depth the JSON redactor descends. Aligned with
+/// serde_json's own parse limit so parsed input never truncates; anything
+/// deeper is redacted wholesale.
+const MAX_REDACT_JSON_DEPTH: usize = 128;
+
+fn redact_json_secrets_at(value: &serde_json::Value, depth: usize) -> serde_json::Value {
+    if depth > MAX_REDACT_JSON_DEPTH {
+        return serde_json::Value::String(REDACTED.to_string());
+    }
     match value {
         serde_json::Value::Object(object) => serde_json::Value::Object(
             object
@@ -51,15 +63,18 @@ pub fn redact_json_secrets(value: &serde_json::Value) -> serde_json::Value {
                     let value = if key_is_sensitive(key) {
                         serde_json::Value::String(REDACTED.to_string())
                     } else {
-                        redact_json_secrets(value)
+                        redact_json_secrets_at(value, depth + 1)
                     };
                     (key.clone(), value)
                 })
                 .collect(),
         ),
-        serde_json::Value::Array(items) => {
-            serde_json::Value::Array(items.iter().map(redact_json_secrets).collect())
-        }
+        serde_json::Value::Array(items) => serde_json::Value::Array(
+            items
+                .iter()
+                .map(|item| redact_json_secrets_at(item, depth + 1))
+                .collect(),
+        ),
         serde_json::Value::String(text) => serde_json::Value::String(redact_secrets(text)),
         scalar => scalar.clone(),
     }
