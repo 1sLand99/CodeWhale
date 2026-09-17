@@ -488,8 +488,8 @@ impl TasksTool {
             owner_session_id: Some(context.state_namespace.clone()),
         };
         let task_id = crate::task_manager::TaskManager::new_task_id();
-        if let Some(work) = context.runtime.work.as_ref() {
-            work.register_operation(
+        if let Some(work) = context.runtime.work.as_ref()
+            && let Err(err) = work.register_operation(
                 &context.state_namespace,
                 OperationIntent::new(
                     format!("task:{task_id}"),
@@ -499,7 +499,15 @@ impl TasksTool {
                     &task_id,
                 ),
             )
-            .map_err(ToolError::execution_failed)?;
+        {
+            // Bookkeeping must not veto the task: every later reconcile is
+            // guarded by `has_operation_binding`, so an unbound task merely
+            // goes unreported on the Work surface.
+            tracing::warn!(
+                task_id = %task_id,
+                error = %err,
+                "task work-graph registration skipped; running unbound"
+            );
         }
         let task = match manager.add_task_with_id(req, task_id.clone()).await {
             Ok(task) => task,

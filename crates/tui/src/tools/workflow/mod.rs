@@ -147,19 +147,27 @@ impl WorkflowWorkLifecycle {
             session_id: context.state_namespace.clone(),
             external: format!("workflow:{run_id}"),
         };
-        lifecycle
-            .work
-            .register_operation(
-                &lifecycle.session_id,
-                OperationIntent::new(
-                    lifecycle.external.clone(),
-                    title,
-                    true,
-                    "workflow",
-                    format!("workflow:{run_id}:start"),
-                ),
-            )
-            .map_err(ToolError::execution_failed)?;
+        // Work-graph registration is observability bookkeeping: a transiently
+        // busy To-do/Plan state must not veto the run. Unbound workflows keep
+        // every later reconcile skipped (`if let Some(lifecycle)` at the call
+        // sites, and `attach_bound_workflow_lifecycles` binds by lookup).
+        if let Err(err) = lifecycle.work.register_operation(
+            &lifecycle.session_id,
+            OperationIntent::new(
+                lifecycle.external.clone(),
+                title,
+                true,
+                "workflow",
+                format!("workflow:{run_id}:start"),
+            ),
+        ) {
+            tracing::warn!(
+                run_id = %run_id,
+                error = %err,
+                "workflow work-graph registration skipped; running unbound"
+            );
+            return Ok(None);
+        }
         Ok(Some(lifecycle))
     }
 
@@ -9011,14 +9019,14 @@ reviewer = "reviewer"
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn a_fan_out_where_every_child_died_of_budget_exhaustion_fails_the_run() {
-        // R9 blocker: budget-exhausted children map to `BudgetExceeded` task
-        // records, and the ledger used to count only plain `Failed` records —
-        // so a fan-out that lost every child to the token ceiling read as a
-        // clean completion. This drives the real path end to end: per-task
-        // `tokenBudget` forks an isolated pool, the fake provider reports more
-        // tokens than the cap, the child terminalizes `BudgetExhausted`, and
-        // the completion pump delivers it as a `BudgetExceeded` record.
+    async fn a_token_budget_never_kills_a_child_nor_fails_the_run() {
+        // #6189 removed token-budget enforcement: usage is tracked, never
+        // enforced, and no token budget may kill a worker. This drives the
+        // same end-to-end path the former budget-death test used — a 1-token
+        // `tokenBudget` on both children, with the fake provider reporting
+        // more tokens than that cap — and asserts the run completes with both
+        // results. A regression back to enforcement (children dying of the
+        // token ceiling, the run failing) fails here.
         let _retry_guard = workflow_test_retry_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path().to_path_buf());
@@ -9043,20 +9051,16 @@ reviewer = "reviewer"
                 &ctx,
             )
             .await
-            .expect("all-budget fan-out still returns the run record");
+            .expect("budgeted fan-out still returns the run record");
         let payload: Value = serde_json::from_str(&result.content).expect("json result");
 
-        assert_eq!(payload["status"], "failed", "{payload}");
-        let error = payload["error"].as_str().expect("error surfaced");
-        assert!(
-            error.contains("all 2 task(s) failed")
-                && error.contains("1 fan-out(s) lost every slot"),
-            "error should name the budget-dead children and the dead fan-out: {error}"
-        );
-        // The output is preserved — a failure with a receipt, not an erasure.
+        assert_eq!(payload["status"], "completed", "{payload}");
         let slots = payload["result"].as_array().expect("run kept its output");
         assert_eq!(slots.len(), 2, "{payload}");
-        assert!(slots.iter().all(|slot| slot.is_null()), "{slots:?}");
+        assert!(
+            slots.iter().all(|slot| slot == "child done"),
+            "a token budget must not stop a child from reporting: {slots:?}"
+        );
         assert_eq!(payload["child_ids"].as_array().unwrap().len(), 2);
         assert!(
             calls.load(Ordering::SeqCst) >= 2,
@@ -11701,7 +11705,10 @@ FINAL RECEIPT
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn workflow_budget_spent_delegates_to_manager_scope() {
+    async fn workflow_token_budget_is_reported_never_enforced() {
+        // #6189: a declared workflow `token_budget` survives as a reported
+        // ceiling in the run snapshot; it no longer seeds a manager budget
+        // scope, clamps a child's provider request, or stops a run.
         let _retry_guard = workflow_test_retry_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path().to_path_buf());
@@ -11734,18 +11741,20 @@ FINAL RECEIPT
         let payload: Value = serde_json::from_str(&result.content).expect("json result");
 
         assert_eq!(payload["status"], "completed", "{payload}");
-        assert_eq!(payload["result"]["spent"], 2);
+        // #6189 removed per-scope token tracking: `spent` is deliberately 0
+        // and the declared ceiling survives only as a reported total.
+        assert_eq!(payload["result"]["spent"], 0, "{payload}");
         assert_eq!(payload["result"]["total"], 1000);
-        assert_eq!(payload["result"]["remaining"], 998);
+        assert_eq!(payload["result"]["remaining"], 1000);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         let bodies = bodies.lock().expect("captured first request");
-        assert_eq!(
-            bodies[0]
-                .get("max_tokens")
-                .or_else(|| bodies[0].get("max_completion_tokens"))
-                .and_then(Value::as_u64),
-            Some(1000),
-            "the host Workflow ceiling must reach the first provider request"
+        let max_tokens = bodies[0]
+            .get("max_tokens")
+            .or_else(|| bodies[0].get("max_completion_tokens"))
+            .and_then(Value::as_u64);
+        assert!(
+            max_tokens.is_some_and(|tokens| tokens > 1000),
+            "a declared token budget must not clamp the child's provider request (#6189): {max_tokens:?}"
         );
     }
 

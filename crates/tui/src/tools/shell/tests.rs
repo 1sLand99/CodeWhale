@@ -735,8 +735,7 @@ fn shell_owner_registers_before_spawn_and_silent_work_stays_live() {
             Some(lifecycle.clone()),
             "shell_spawn_failure",
             "missing-program",
-        )
-        .expect("register spawn intent");
+        );
     }
     lifecycle
         .register("shell_silent", "sleep 30")
@@ -4612,4 +4611,49 @@ async fn readonly_sed_extra_options_never_mutate_files() {
         .await
         .unwrap();
     assert!(result.success, "{}", result.content);
+}
+
+/// A transiently busy Work-graph must not veto the command.
+///
+/// `register_operation` acquires the To-do/Plan locks with a short try-lock
+/// spin. Before this guard existed, a shell call landing in that window failed
+/// outright with "To-do state is busy; operation was not registered" — observed
+/// twice in one live session, each time right after another tool call. The
+/// registration is the same bookkeeping whose `observe` half is already
+/// best-effort, so a busy state now degrades to an unbound run.
+#[tokio::test]
+async fn busy_work_graph_degrades_the_spawn_intent_instead_of_failing_it() {
+    use crate::tools::plan::new_shared_plan_state;
+    use crate::tools::todo::new_shared_todo_list;
+    use crate::work_graph::new_shared_work_runtime;
+
+    let todos = new_shared_todo_list();
+    let plan = new_shared_plan_state();
+    let lifecycle = || ShellWorkLifecycle {
+        work: new_shared_work_runtime(todos.clone(), plan.clone()),
+        session_id: "session-test".to_string(),
+    };
+
+    // Control: with the graph free, the intent binds.
+    let bound = ShellSpawnIntentGuard::new(Some(lifecycle()), "shell_free", "echo hi");
+    assert!(
+        bound.lifecycle.is_some(),
+        "a free work-graph must bind the spawn intent"
+    );
+
+    // Busy: hold the To-do lock so the try-lock spin cannot win.
+    let _held = todos.lock().await;
+    // The raw register call still reports the busy state — this is exactly what
+    // used to propagate out of the spawn path and fail the command.
+    assert!(
+        lifecycle()
+            .register("shell_busy_direct", "echo hi")
+            .is_err(),
+        "the raw register call must observe the held lock as busy"
+    );
+    let busy = ShellSpawnIntentGuard::new(Some(lifecycle()), "shell_busy", "echo hi");
+    assert!(
+        busy.lifecycle.is_none(),
+        "a busy work-graph must degrade to an unbound guard, not fail the spawn"
+    );
 }

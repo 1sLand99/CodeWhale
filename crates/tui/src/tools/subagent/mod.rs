@@ -3053,19 +3053,26 @@ impl SubAgentWorkLifecycle {
             session_id,
             external,
         };
-        lifecycle
-            .work
-            .register_operation(
-                &lifecycle.session_id,
-                OperationIntent::new(
-                    lifecycle.external.clone(),
-                    title,
-                    true,
-                    "agent",
-                    format!("agent:{agent_id}:spawn"),
-                ),
-            )
-            .map_err(|err| anyhow!("failed to register sub-agent work: {err}"))?;
+        if let Err(err) = lifecycle.work.register_operation(
+            &lifecycle.session_id,
+            OperationIntent::new(
+                lifecycle.external.clone(),
+                title,
+                true,
+                "agent",
+                format!("agent:{agent_id}:spawn"),
+            ),
+        ) {
+            // Bookkeeping must not veto dispatch (#6194): a transiently busy
+            // To-do/Plan state leaves the spawn unbound, and every later
+            // reconcile skips via the `Option<SubAgentWorkLifecycle>`.
+            tracing::warn!(
+                agent_id = %agent_id,
+                error = %err,
+                "sub-agent work-graph registration skipped; spawning unbound"
+            );
+            return Ok(None);
+        }
 
         // A root Operate verification lease is provenance, not delegated
         // authority. Nested workers cannot inherit this bit.

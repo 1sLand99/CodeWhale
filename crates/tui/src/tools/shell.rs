@@ -1071,15 +1071,35 @@ struct ShellSpawnContext {
 }
 
 impl ShellSpawnIntentGuard {
-    fn new(lifecycle: Option<ShellWorkLifecycle>, id: &str, command: &str) -> Result<Self> {
-        if let Some(lifecycle) = lifecycle.as_ref() {
-            lifecycle.register(id, command)?;
-        }
-        Ok(Self {
+    /// Register the spawn intent with the Work graph.
+    ///
+    /// Registration is observability bookkeeping — the same subsystem already
+    /// treats the `observe` half as best-effort (a graph-write failure must
+    /// not relabel a completed command) — so a transiently busy To-do/Plan
+    /// state must not veto the command itself. Live sessions hit this: a
+    /// shell call issued right after another tool call failed outright with
+    /// "To-do state is busy; operation was not registered" because
+    /// `register_operation` gives the lock only a short try-lock spin.
+    ///
+    /// On failure the guard goes inert: the shell still runs, and no later
+    /// `observe` pretends the operation was bound.
+    fn new(lifecycle: Option<ShellWorkLifecycle>, id: &str, command: &str) -> Self {
+        let lifecycle = lifecycle.and_then(|lifecycle| match lifecycle.register(id, command) {
+            Ok(()) => Some(lifecycle),
+            Err(err) => {
+                tracing::warn!(
+                    shell_id = %id,
+                    error = %err,
+                    "shell work-graph registration skipped; running without a bound operation"
+                );
+                None
+            }
+        });
+        Self {
             lifecycle,
             id: id.to_string(),
             armed: true,
-        })
+        }
     }
 
     fn disarm(&mut self) {
@@ -2495,7 +2515,7 @@ impl ShellManager {
         } = spawn_context;
         let task_id = format!("shell_{}", &Uuid::new_v4().to_string()[..8]);
         let mut spawn_guard =
-            ShellSpawnIntentGuard::new(work_lifecycle.clone(), &task_id, original_command)?;
+            ShellSpawnIntentGuard::new(work_lifecycle.clone(), &task_id, original_command);
         let started = Instant::now();
         let sandbox_type = exec_env.sandbox_type;
         let sandboxed = exec_env.is_sandboxed();
@@ -5499,8 +5519,7 @@ impl ToolSpec for BashTool {
             let work_lifecycle = shell_work_lifecycle_from_context(context);
             let task_id = format!("shell_{}", &Uuid::new_v4().to_string()[..8]);
             let mut spawn_guard =
-                ShellSpawnIntentGuard::new(work_lifecycle.clone(), &task_id, command)
-                    .map_err(|err| ToolError::execution_failed(err.to_string()))?;
+                ShellSpawnIntentGuard::new(work_lifecycle.clone(), &task_id, command);
             let result = manager.execute_interactive_with_policy_env(
                 command,
                 working_dir.as_deref(),
