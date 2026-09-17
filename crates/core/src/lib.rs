@@ -1724,13 +1724,6 @@ impl Runtime {
             .load_checkpoint(thread_id, checkpoint_id)?
             .map(|checkpoint| checkpoint.state))
     }
-
-    /// Cancels a job and persists the change.
-    pub fn cancel_job(&mut self, job_id: &str) -> Result<()> {
-        self.jobs.cancel(job_id);
-        self.jobs
-            .persist_job(self.thread_manager.state_store(), job_id)
-    }
 }
 
 fn thread_response_from_new(status: &str, new: NewThread) -> ThreadResponse {

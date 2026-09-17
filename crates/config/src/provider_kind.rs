@@ -401,11 +401,6 @@ impl ProviderKind {
             .map(|p| p.kind())
     }
 
-    #[must_use]
-    pub fn is_siliconflow(self) -> bool {
-        matches!(self, Self::Siliconflow | Self::SiliconflowCN)
-    }
-
     /// Canonical durable-credential slot in the local secret store.
     ///
     /// Most providers own a slot named after their id. Variants authenticated
