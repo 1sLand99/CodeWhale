@@ -8189,3 +8189,166 @@ fn resource_uri_template_matching_is_anchored_and_fail_closed() {
     assert!(Arc::ptr_eq(&first, &second));
     assert!(compiled_resource_template("x{?query}").is_none());
 }
+
+struct DeadTransport;
+
+#[async_trait::async_trait]
+impl McpTransport for DeadTransport {
+    async fn send(&mut self, _msg: Vec<u8>) -> Result<()> {
+        Ok(())
+    }
+
+    async fn recv(&mut self) -> Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
+
+    fn probe_dead(&self) -> bool {
+        true
+    }
+}
+
+fn supervised_pool(name: &str) -> McpPool {
+    let mut servers = HashMap::new();
+    servers.insert(name.to_string(), test_server_config());
+    McpPool::new(McpConfig {
+        timeouts: McpTimeouts::default(),
+        servers,
+    })
+}
+
+/// #6187: a dead connection is planned for reconnect, and a failed attempt
+/// reports the death once with the diagnosis.
+#[test]
+fn supervisor_plans_dead_connection_and_reports_failed_reconnect() {
+    let mut pool = supervised_pool("alpha");
+    let mut connection = test_connection(Box::new(DeadTransport));
+    connection.name = "alpha".to_string();
+    pool.connections.insert("alpha".to_string(), connection);
+
+    let plan = pool.plan_supervision();
+    assert_eq!(plan.due.len(), 1);
+    assert_eq!(plan.due[0].name, "alpha");
+    assert!(plan.due[0].fresh_death);
+    assert!(plan.recovered.is_empty());
+
+    let update = pool.resolve_supervision_attempt(
+        "alpha",
+        true,
+        Err(anyhow::anyhow!("connection reset by peer")),
+    );
+    assert_eq!(update.died.len(), 1);
+    assert!(update.died[0].1.contains("connection reset"));
+    assert!(update.failed.is_empty() && update.recovered.is_empty());
+
+    // The failure bought a cooldown: the next sweep attempts nothing and
+    // reports nothing new.
+    let plan = pool.plan_supervision();
+    assert!(plan.due.is_empty());
+    assert!(plan.recovered.is_empty() && plan.parked.is_empty());
+}
+
+/// #6187: recovery is reported on the transition back to alive.
+#[test]
+fn supervisor_reports_recovery_on_transition() {
+    let mut pool = supervised_pool("alpha");
+    let mut dead = test_connection(Box::new(DeadTransport));
+    dead.name = "alpha".to_string();
+    pool.connections.insert("alpha".to_string(), dead);
+
+    let plan = pool.plan_supervision();
+    assert_eq!(plan.due.len(), 1);
+    let update = pool.resolve_supervision_attempt("alpha", true, Err(anyhow::anyhow!("boom")));
+    assert_eq!(update.died.len(), 1);
+
+    // The transport reads alive again (a flapping probe, or a connection
+    // restored outside the store path): the next sweep reports recovery.
+    let mut live = test_connection(Box::new(DropCountingTransportForSupervision));
+    live.name = "alpha".to_string();
+    pool.connections.insert("alpha".to_string(), live);
+    let plan = pool.plan_supervision();
+    assert_eq!(plan.recovered, vec!["alpha".to_string()]);
+    assert!(plan.due.is_empty());
+
+    // Reported once: the sweep after is silent.
+    let plan = pool.plan_supervision();
+    assert!(plan.recovered.is_empty() && plan.due.is_empty());
+}
+
+struct DropCountingTransportForSupervision;
+
+#[async_trait::async_trait]
+impl McpTransport for DropCountingTransportForSupervision {
+    async fn send(&mut self, _msg: Vec<u8>) -> Result<()> {
+        Ok(())
+    }
+
+    async fn recv(&mut self) -> Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
+}
+
+/// #6187: five consecutive failures park the server — no more auto attempts
+/// until an explicit retry — and the park is reported once.
+#[test]
+fn supervisor_parks_after_repeated_failures() {
+    let mut pool = supervised_pool("alpha");
+    let mut dead = test_connection(Box::new(DeadTransport));
+    dead.name = "alpha".to_string();
+    pool.connections.insert("alpha".to_string(), dead);
+
+    for attempt in 0..5 {
+        let update = pool.resolve_supervision_attempt(
+            "alpha",
+            attempt == 0,
+            Err(anyhow::anyhow!("refused")),
+        );
+        if attempt < 4 {
+            assert!(update.parked.is_empty(), "parks on the fifth failure");
+        } else {
+            assert_eq!(update.parked, vec!["alpha".to_string()]);
+        }
+    }
+    // Parked: the plan attempts nothing further.
+    let plan = pool.plan_supervision();
+    assert!(plan.due.is_empty());
+
+    // A stored-ready connection clears the park.
+    let mut live = test_connection(Box::new(DropCountingTransportForSupervision));
+    live.name = "alpha".to_string();
+    live.catalog_generation = pool.current_catalog_generation();
+    pool.store_ready_connection("alpha".to_string(), live)
+        .expect("stores");
+    assert!(!pool.supervised_parked.contains("alpha"));
+    assert!(!pool.supervised_dead.contains("alpha"));
+}
+
+/// #6187: an explicit retry restarts supervision even when the retry itself
+/// fails — the user asked, so the park and dead mark clear.
+#[tokio::test]
+async fn manual_retry_clears_supervision_marks() {
+    let mut pool = supervised_pool("alpha");
+    pool.supervised_dead.insert("alpha".to_string());
+    pool.supervised_parked.insert("alpha".to_string());
+    // `mock` is not a real binary, so the retry fails; the marks still clear.
+    let _ = pool.retry_connection("alpha").await;
+    assert!(!pool.supervised_dead.contains("alpha"));
+    assert!(!pool.supervised_parked.contains("alpha"));
+}
+
+/// #6187: tool-call retry covers a dead pipe/socket, not just stale sessions.
+#[test]
+fn retriable_call_error_covers_closed_transports() {
+    use super::wire::is_retriable_mcp_call_error;
+    assert!(is_retriable_mcp_call_error(&anyhow::anyhow!(
+        "MCP session expired"
+    )));
+    assert!(is_retriable_mcp_call_error(&anyhow::anyhow!(
+        "connection reset by peer"
+    )));
+    assert!(is_retriable_mcp_call_error(&anyhow::anyhow!(
+        "Stdio transport closed"
+    )));
+    assert!(!is_retriable_mcp_call_error(&anyhow::anyhow!(
+        "tool returned an application error"
+    )));
+}

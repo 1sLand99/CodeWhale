@@ -31,7 +31,7 @@ use crate::config::{ApiProvider, Config, DEFAULT_MAX_SUBAGENTS, DEFAULT_TEXT_MOD
 use crate::core::model_client::SharedModelClient;
 use crate::error_taxonomy::{ErrorCategory, ErrorEnvelope, ErrorSeverity, StreamError};
 use crate::features::{Feature, Features};
-use crate::mcp::{McpConfig, McpPool};
+use crate::mcp::{McpConfig, McpPool, McpSupervisorUpdate};
 use crate::prompts;
 use crate::purge::{emit_purge_completed, emit_purge_failed, emit_purge_started, run_purge};
 #[cfg(test)]
@@ -862,6 +862,10 @@ pub struct Engine {
     /// `mcp_tools` snapshots ready servers instead of waiting on optionals.
     mcp_boot_in_flight: bool,
     mcp_boot_rx: Option<mpsc::Receiver<McpBootUpdate>>,
+    /// Supervisor sweep updates. `Some` while the supervisor task is armed;
+    /// the channel closing (task exited with the pool) disarms it and the
+    /// next pool ensure respawns.
+    mcp_supervisor_rx: Option<mpsc::Receiver<McpSupervisorUpdate>>,
     mcp_boot_done: Option<tokio::sync::watch::Receiver<bool>>,
     /// Generation owned by the currently installed boot receiver. Terminal
     /// cleanup is conditional on this exact value so an older pass can never
@@ -1135,6 +1139,8 @@ enum EngineRunInput {
     ShellCompletionWake,
     /// One MCP boot progress/settled update from the spawn-time connect task.
     McpBootUpdate(McpBootUpdate),
+    /// One connection-supervisor sweep: deaths, recoveries, failed attempts.
+    McpSupervisorUpdate(McpSupervisorUpdate),
 }
 
 impl SendMessageOutcome {
@@ -1751,6 +1757,7 @@ impl Engine {
             mcp_connection_errors: HashMap::new(),
             mcp_boot_in_flight: false,
             mcp_boot_rx: None,
+            mcp_supervisor_rx: None,
             mcp_boot_done: None,
             mcp_boot_generation: None,
             mcp_event_generation: 0,
@@ -2428,6 +2435,7 @@ impl Engine {
                 let subagent_wake_armed = !host_managed_turns && !self.cancel_token.is_cancelled();
                 let shell_wake_armed = !host_managed_turns && self.idle_shell_wake_armed();
                 let mcp_boot_armed = self.mcp_boot_rx.is_some();
+                let mcp_supervisor_armed = self.mcp_supervisor_rx.is_some();
                 tokio::select! {
                     op = self.rx_op.recv() => {
                         return op.map(|op| EngineRunInput::Operation(Box::new(op)));
@@ -2452,6 +2460,21 @@ impl Engine {
                         match update {
                             Some(update) => return Some(EngineRunInput::McpBootUpdate(update)),
                             None => self.mcp_boot_rx = None,
+                        }
+                    }
+                    update = async {
+                        match self.mcp_supervisor_rx.as_mut() {
+                            Some(rx) => rx.recv().await,
+                            None => None,
+                        }
+                    }, if mcp_supervisor_armed => {
+                        match update {
+                            Some(update) => {
+                                return Some(EngineRunInput::McpSupervisorUpdate(update))
+                            }
+                            // Task exited with the pool; the next pool
+                            // ensure respawns against the new one.
+                            None => self.mcp_supervisor_rx = None,
                         }
                     }
                     // Background shells have no completion channel, so an
@@ -2652,6 +2675,9 @@ impl Engine {
                 }
                 EngineRunInput::McpBootUpdate(update) => {
                     self.apply_mcp_boot_update(update).await;
+                }
+                EngineRunInput::McpSupervisorUpdate(update) => {
+                    self.apply_mcp_supervisor_update(update).await;
                 }
                 EngineRunInput::ShellCompletionWake => {
                     self.handle_idle_shell_completion_wake().await;
@@ -6157,8 +6183,9 @@ impl Engine {
     }
 
     async fn ensure_mcp_pool(&mut self) -> Result<Arc<AsyncMutex<McpPool>>, ToolError> {
-        if let Some(pool) = self.mcp_pool.as_ref() {
-            return Ok(Arc::clone(pool));
+        if let Some(pool) = self.mcp_pool.clone() {
+            self.ensure_mcp_supervisor();
+            return Ok(pool);
         }
         let mut pool = McpPool::from_config_path_with_workspace_and_plugins(
             &self.session.mcp_config_path,
@@ -6196,7 +6223,54 @@ impl Engine {
         );
         let pool = Arc::new(AsyncMutex::new(pool));
         self.mcp_pool = Some(Arc::clone(&pool));
+        self.ensure_mcp_supervisor();
         Ok(pool)
+    }
+
+    /// Start the connection supervisor once per pool. The task holds only a
+    /// Weak: pool replacement lets the old task exit, its channel closes, the
+    /// run loop disarms, and the next ensure respawns against the new pool.
+    fn ensure_mcp_supervisor(&mut self) {
+        if self.mcp_supervisor_rx.is_some() {
+            return;
+        }
+        let Some(pool) = self.mcp_pool.as_ref() else {
+            return;
+        };
+        let (tx, rx) = mpsc::channel(16);
+        self.mcp_supervisor_rx = Some(rx);
+        let weak = Arc::downgrade(pool);
+        spawn_supervised(
+            "mcp-supervisor",
+            std::panic::Location::caller(),
+            McpPool::supervise_pool(weak, tx),
+        );
+    }
+
+    /// Apply one supervisor sweep: deaths and failures refresh the engine's
+    /// error map, recoveries clear it, parking writes the suspended notice.
+    /// Emits a finished boot update exactly when something changed, so the
+    /// Extensions rows flip with liveness instead of parking on stale-ready.
+    async fn apply_mcp_supervisor_update(&mut self, update: McpSupervisorUpdate) {
+        if update.is_empty() {
+            return;
+        }
+        for (name, error) in update.died.into_iter().chain(update.failed) {
+            self.mcp_connection_errors.insert(name, error);
+        }
+        for name in &update.recovered {
+            self.mcp_connection_errors.remove(name);
+        }
+        for name in update.parked {
+            self.mcp_connection_errors.insert(
+                name.clone(),
+                format!(
+                    "Auto-reconnect suspended after repeated failures; `/mcp retry {name}` to try again."
+                ),
+            );
+        }
+        let generation = self.next_mcp_event_generation();
+        self.emit_mcp_session_boot(generation, true).await;
     }
 
     /// Force the engine-owned pool to re-read its config sources and start

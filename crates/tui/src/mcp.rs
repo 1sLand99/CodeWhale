@@ -36,7 +36,7 @@ use self::sse::SseTransport;
 use self::stdio::StdioTransport;
 #[cfg(all(test, unix))]
 use self::stdio::{STDIO_SHUTDOWN_GRACE, StderrTail};
-use self::wire::{is_mcp_stale_session_body, is_mcp_stale_session_error};
+use self::wire::{is_mcp_stale_session_body, is_retriable_mcp_call_error};
 use crate::network_policy::{Decision, NetworkPolicyDecider, host_from_url};
 use crate::utils::write_atomic;
 
@@ -2657,6 +2657,14 @@ pub struct McpPool {
     /// healthy. Explicit intent (`retry_connection`, `get_or_connect`, a
     /// config reload) ignores the cooldown.
     connect_backoff: HashMap<String, ConnectBackoff>,
+    /// Servers the supervisor last saw dead. Death is reported once, on the
+    /// transition, so status surfaces flip exactly when liveness does instead
+    /// of re-emitting every sweep (#6187).
+    supervised_dead: HashSet<String>,
+    /// Servers the supervisor stopped auto-reconnecting after
+    /// [`SUPERVISOR_PARK_AFTER_CONSECUTIVE_FAILURES`] consecutive failures.
+    /// A stored-ready connection or an explicit `/mcp retry` clears the park.
+    supervised_parked: HashSet<String>,
     /// Servers with a spawned connect in flight right now. `connect_all`,
     /// the session boot pass, and explicit tool-selection connects all mark
     /// names here and clear them on resolution, so status surfaces never
@@ -2671,6 +2679,56 @@ struct ConnectBackoff {
     consecutive_failures: u32,
     retry_after: std::time::Instant,
     last_error: String,
+}
+
+/// One supervised reconnect candidate: the name, the config to redial, and
+/// whether this sweep newly observed the death.
+pub(crate) struct SupervisionDue {
+    pub name: String,
+    pub config: McpServerConfig,
+    pub fresh_death: bool,
+}
+
+/// One supervisor sweep's plan: candidates to redial plus the transitions
+/// the plan phase already knows (recoveries and newly parked servers).
+pub(crate) struct SupervisionPlan {
+    pub due: Vec<SupervisionDue>,
+    pub recovered: Vec<String>,
+    pub parked: Vec<String>,
+    pub timeouts: McpTimeouts,
+    pub network_policy: Option<NetworkPolicyDecider>,
+    pub catalog_generation: u64,
+}
+
+/// One supervisor sweep's transitions. Death, recovery, failed attempts, and
+/// parking are reported on transition only, so the engine emits a snapshot
+/// update exactly when something changed (#6187).
+#[derive(Debug, Default)]
+pub(crate) struct McpSupervisorUpdate {
+    /// Newly observed dead, with the reconnect failure that confirmed it.
+    pub died: Vec<(String, String)>,
+    /// Reconnect attempt failed for an already-dead server, with last error.
+    pub failed: Vec<(String, String)>,
+    /// Dead last sweep, alive now.
+    pub recovered: Vec<String>,
+    /// Newly parked after repeated failures; explicit `/mcp retry` resumes.
+    pub parked: Vec<String>,
+}
+
+impl McpSupervisorUpdate {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.died.is_empty()
+            && self.failed.is_empty()
+            && self.recovered.is_empty()
+            && self.parked.is_empty()
+    }
+
+    fn merge(&mut self, other: McpSupervisorUpdate) {
+        self.died.extend(other.died);
+        self.failed.extend(other.failed);
+        self.recovered.extend(other.recovered);
+        self.parked.extend(other.parked);
+    }
 }
 
 /// Cooldown after `failures` consecutive failed connects.
@@ -2721,6 +2779,8 @@ impl McpPool {
             config_hash,
             catalog_generation: AtomicU64::new(1),
             connect_backoff: HashMap::new(),
+            supervised_dead: HashSet::new(),
+            supervised_parked: HashSet::new(),
             connecting: HashSet::new(),
             last_mtimes: Vec::new(),
             dynamic_servers: Arc::new(RwLock::new(HashMap::new())),
@@ -3162,7 +3222,12 @@ impl McpPool {
         // A person asked for this one by name. Clear the cooldown so the
         // attempt happens now and, if it fails again, the ladder restarts
         // from the short end rather than from wherever it had climbed to.
+        // Explicit intent restarts supervision: the cooldown, the dead mark,
+        // and any park all clear, so the supervisor resumes watching whatever
+        // this retry stores — or stays quiet while the server is connectionless.
         self.connect_backoff.remove(server_name);
+        self.supervised_dead.remove(server_name);
+        self.supervised_parked.remove(server_name);
         let plugin_source = self
             .connections
             .get(server_name)
@@ -3229,9 +3294,12 @@ impl McpPool {
             source.validate_before_use(&name, "use")?;
         }
         // A successful connect settles the auth question for this server,
-        // and the cooldown with it.
+        // and the cooldown with it — plus any supervisor dead mark or park,
+        // since a stored-ready connection is alive by construction.
         self.connecting.remove(&name);
         self.connect_backoff.remove(&name);
+        self.supervised_dead.remove(&name);
+        self.supervised_parked.remove(&name);
         if self.needs_auth_servers.remove(&name) {
             self.needs_auth_generation = self.needs_auth_generation.wrapping_add(1);
         }
@@ -3313,6 +3381,191 @@ impl McpPool {
     /// produced. Eight keeps wall-clock wins (the connect timeout dominates)
     /// while bounding peak memory.
     const CONNECT_CONCURRENCY: usize = 8;
+
+    /// Consecutive failed reconnects after which the supervisor parks a
+    /// server instead of redialing it. The cooldown ladder already spaces
+    /// attempts, but a server that never answers (wrong binary, dead port)
+    /// should not burn a spawn+handshake every sweep forever. A stored-ready
+    /// connection or an explicit `/mcp retry` clears the park — and every
+    /// success resets the count, so an occasionally-crashing server keeps
+    /// recovering instead of parking.
+    const SUPERVISOR_PARK_AFTER_CONSECUTIVE_FAILURES: u32 = 5;
+
+    /// Supervisor sweep cadence. Death is noticed within one tick; an idle
+    /// tick costs one pool lock plus a `try_wait` per stdio child.
+    const SUPERVISOR_TICK: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// One supervisor sweep's reconnect candidates, computed under a brief
+    /// pool lock. Handshakes run outside the lock via
+    /// [`Self::spawn_pending_connects`], so a wedged server never blocks a
+    /// live turn's pool access while it burns its connect timeout.
+    pub(crate) fn plan_supervision(&mut self) -> SupervisionPlan {
+        let dynamic = self.dynamic_servers.read();
+        let candidates: Vec<(String, McpServerConfig)> = self
+            .config
+            .servers
+            .iter()
+            .filter(|(name, server)| server.is_enabled() && self.server_allowed(name))
+            .map(|(name, server)| (name.clone(), server.clone()))
+            .chain(
+                dynamic
+                    .iter()
+                    .filter(|(_, server)| server.is_enabled())
+                    .map(|(name, server)| (name.clone(), server.clone())),
+            )
+            .collect();
+        drop(dynamic);
+        let watched: HashSet<String> = candidates.iter().map(|(name, _)| name.clone()).collect();
+        // Silent prune: manual retries drop connections the supervisor never
+        // re-spawns (on-demand reconnect owns connectionless servers), and
+        // removed/disabled servers leave supervision without an event.
+        self.supervised_dead
+            .retain(|name| watched.contains(name) && self.connections.contains_key(name));
+        self.supervised_parked.retain(|name| watched.contains(name));
+        let mut due = Vec::new();
+        let mut recovered = Vec::new();
+        let mut parked = Vec::new();
+        let now = std::time::Instant::now();
+        for (name, config) in candidates {
+            let Some(connection) = self.connections.get(&name) else {
+                continue;
+            };
+            if connection.is_transport_ready() {
+                if self.supervised_dead.remove(&name) {
+                    self.supervised_parked.remove(&name);
+                    recovered.push(name);
+                }
+                continue;
+            }
+            // A login-pending server cannot be fixed by redialing; the auth
+            // surface owns it. It stays out of the dead set so recovery via
+            // login reports nothing stale.
+            if self.needs_auth_servers.contains(&name) {
+                continue;
+            }
+            let fresh_death = self.supervised_dead.insert(name.clone());
+            if self.connecting.contains(&name) {
+                continue;
+            }
+            if let Some(backoff) = self.connect_backoff.get(&name) {
+                if backoff.consecutive_failures >= Self::SUPERVISOR_PARK_AFTER_CONSECUTIVE_FAILURES
+                {
+                    if self.supervised_parked.insert(name.clone()) {
+                        parked.push(name);
+                    }
+                    continue;
+                }
+                if now < backoff.retry_after {
+                    continue;
+                }
+            }
+            due.push(SupervisionDue {
+                name,
+                config,
+                fresh_death,
+            });
+        }
+        SupervisionPlan {
+            due,
+            recovered,
+            parked,
+            timeouts: self.config.timeouts,
+            network_policy: self.network_policy.clone(),
+            catalog_generation: self.catalog_generation.load(Ordering::SeqCst),
+        }
+    }
+
+    /// Resolve one supervised reconnect attempt. Success stores the live
+    /// connection (which clears the backoff, the dead mark, and any park);
+    /// failure records the backoff and reports the death or the repeated
+    /// failure with the diagnosis, parking on the threshold crossing.
+    pub(crate) fn resolve_supervision_attempt(
+        &mut self,
+        name: &str,
+        fresh_death: bool,
+        result: Result<McpConnection, anyhow::Error>,
+    ) -> McpSupervisorUpdate {
+        let mut update = McpSupervisorUpdate::default();
+        let stored =
+            result.and_then(|connection| self.store_ready_connection(name.to_string(), connection));
+        match stored {
+            Ok(()) => {
+                if !fresh_death {
+                    update.recovered.push(name.to_string());
+                }
+            }
+            Err(error) => {
+                self.note_connect_failure(name, &error);
+                let last_error = self
+                    .connect_backoff
+                    .get(name)
+                    .map(|backoff| backoff.last_error.clone())
+                    .unwrap_or_else(|| format!("{error:#}"));
+                if fresh_death {
+                    update.died.push((name.to_string(), last_error));
+                } else {
+                    update.failed.push((name.to_string(), last_error));
+                }
+                if self.connect_backoff.get(name).is_some_and(|backoff| {
+                    backoff.consecutive_failures >= Self::SUPERVISOR_PARK_AFTER_CONSECUTIVE_FAILURES
+                }) && self.supervised_parked.insert(name.to_string())
+                {
+                    update.parked.push(name.to_string());
+                }
+            }
+        }
+        update
+    }
+
+    /// Watch every live connection and reconnect the dead ones. Exits when
+    /// the pool is dropped (the engine holds the only strong reference) or
+    /// the engine stops listening. Reports transitions only, so the engine
+    /// emits a snapshot update exactly when something changed (#6187).
+    pub(crate) async fn supervise_pool(
+        pool: std::sync::Weak<tokio::sync::Mutex<McpPool>>,
+        tx: tokio::sync::mpsc::Sender<McpSupervisorUpdate>,
+    ) {
+        loop {
+            tokio::time::sleep(Self::SUPERVISOR_TICK).await;
+            let Some(pool) = pool.upgrade() else { break };
+            let plan = pool.lock().await.plan_supervision();
+            if plan.due.is_empty() && plan.recovered.is_empty() && plan.parked.is_empty() {
+                continue;
+            }
+            let mut connects = Self::spawn_pending_connects(
+                plan.due
+                    .iter()
+                    .map(|due| (due.name.clone(), due.config.clone()))
+                    .collect(),
+                plan.timeouts,
+                plan.network_policy.clone(),
+                plan.catalog_generation,
+            );
+            let mut update = McpSupervisorUpdate {
+                recovered: plan.recovered,
+                parked: plan.parked,
+                ..Default::default()
+            };
+            let fresh_by_name: HashMap<String, bool> = plan
+                .due
+                .into_iter()
+                .map(|due| (due.name, due.fresh_death))
+                .collect();
+            while let Some(joined) = connects.join_next().await {
+                let (name, result) = joined
+                    .unwrap_or_else(|error| ("connection task".to_string(), Err(error.into())));
+                let fresh_death = fresh_by_name.get(&name).copied().unwrap_or(false);
+                let resolution =
+                    pool.lock()
+                        .await
+                        .resolve_supervision_attempt(&name, fresh_death, result);
+                update.merge(resolution);
+            }
+            if !update.is_empty() && tx.send(update).await.is_err() {
+                break;
+            }
+        }
+    }
 
     /// Collect the configured servers a connect pass should start. `only`
     /// scopes the pass to the given names; `None` connects every enabled,
@@ -4663,7 +4916,7 @@ impl McpPool {
             // replays the same rejection, so it takes the auth-required
             // path below instead of the transparent retry.
             Err(err)
-                if is_mcp_stale_session_error(&err) && !oauth::error_looks_auth_required(&err) =>
+                if is_retriable_mcp_call_error(&err) && !oauth::error_looks_auth_required(&err) =>
             {
                 tracing::debug!(
                     target: "mcp",
@@ -4695,7 +4948,11 @@ impl McpPool {
                             conn.call_tool(&tool_name, arguments, timeout).await
                         }
                     }
-                    Err(err) => Err(err),
+                    // A reconnect that fails must not swallow the call error
+                    // that triggered it: report both, original first.
+                    Err(reconnect_err) => Err(anyhow::anyhow!(
+                        "{err:#}; reconnect failed: {reconnect_err:#}"
+                    )),
                 }
             }
             Err(err) => Err(err),

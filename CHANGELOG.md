@@ -220,6 +220,15 @@ tag, packages, checksums and release assets exist.
 - Diff rows tint whole: added/deleted line numbers now share the row's green
   / red background instead of sitting bare next to a painted body. Context
   rows stay on the bare ground.
+- MCP connections are supervised now: a background task notices a dead
+  server within one sweep, reconnects on the existing backoff ladder, and
+  reports each transition, so Extensions rows flip with liveness instead
+  of parking on stale-ready or a silent [reconnect]. Five consecutive
+  failures park the server with a notice naming `/mcp retry`; an explicit
+  retry or a fresh connection resumes watching. Tool calls also retry
+  once across a dead pipe/socket (not just stale sessions), and a
+  reconnect that fails reports both errors instead of swallowing the
+  original (#6187; `list_changed` catalog refresh stays open).
 
 - A steer the engine never delivered is no longer reported as sent. The runtime
   API persisted the steer item as already-`Completed` and emitted

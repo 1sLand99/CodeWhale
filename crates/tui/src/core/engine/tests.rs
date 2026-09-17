@@ -24429,3 +24429,49 @@ mod fleet_permission_denial_tests {
         assert_eq!(guard.denial_rounds_without_progress(), 6);
     }
 }
+
+/// #6187: a supervisor sweep refreshes the engine error map and bumps the
+/// snapshot generation exactly when something changed.
+#[tokio::test]
+async fn supervisor_update_refreshes_error_map_and_generation() {
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    engine
+        .apply_mcp_supervisor_update(McpSupervisorUpdate {
+            died: vec![("alpha".to_string(), "connection reset".to_string())],
+            failed: Vec::new(),
+            recovered: Vec::new(),
+            parked: Vec::new(),
+        })
+        .await;
+    assert_eq!(
+        engine
+            .mcp_connection_errors
+            .get("alpha")
+            .map(String::as_str),
+        Some("connection reset")
+    );
+    assert_eq!(engine.mcp_event_generation, 1);
+
+    engine
+        .apply_mcp_supervisor_update(McpSupervisorUpdate {
+            died: Vec::new(),
+            failed: Vec::new(),
+            recovered: vec!["alpha".to_string()],
+            parked: vec!["beta".to_string()],
+        })
+        .await;
+    assert!(!engine.mcp_connection_errors.contains_key("alpha"));
+    assert!(
+        engine.mcp_connection_errors["beta"].contains("/mcp retry beta"),
+        "the park notice names the way out"
+    );
+    assert_eq!(engine.mcp_event_generation, 2);
+
+    engine
+        .apply_mcp_supervisor_update(McpSupervisorUpdate::default())
+        .await;
+    assert_eq!(
+        engine.mcp_event_generation, 2,
+        "an empty sweep emits nothing"
+    );
+}
