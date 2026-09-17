@@ -4515,7 +4515,7 @@ async fn run_doctor(
     println!("{}", "Configuration:".bold());
     let config_path = &doctor_paths.config;
 
-    if config_path.exists() {
+    if tokio::fs::try_exists(config_path).await.unwrap_or(false) {
         println!(
             "  {} config.toml found at {}",
             "✓".truecolor(aqua_r, aqua_g, aqua_b),

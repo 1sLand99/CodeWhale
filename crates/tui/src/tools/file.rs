@@ -757,7 +757,7 @@ impl ReadFileTool {
         }
         enforce_read_denylist(&file_path, "read")?;
         check_file_operation_cancelled(context)?;
-        let bytes = fs::read(&file_path).map_err(|error| {
+        let bytes = tokio::fs::read(&file_path).await.map_err(|error| {
             ToolError::execution_failed(format!("Failed to read {}: {error}", file_path.display()))
         })?;
         // #6283: every read response carries the file's byte size, line
@@ -952,10 +952,14 @@ impl ToolSpec for ReadFileTool {
         // Open before parameter parsing so a missing file keeps the
         // historical "Failed to read …" error shape regardless of the other
         // arguments.
-        let file = fs::File::open(&file_path).map_err(|e| {
+        let file = tokio::fs::File::open(&file_path).await.map_err(|e| {
             ToolError::execution_failed(format!("Failed to read {}: {}", file_path.display(), e))
         })?;
-        let file_bytes = file.metadata().map(|meta| meta.len()).unwrap_or(u64::MAX);
+        let file_bytes = file
+            .metadata()
+            .await
+            .map(|meta| meta.len())
+            .unwrap_or(u64::MAX);
 
         let explicit_range = input
             .get("start_line")
@@ -967,7 +971,7 @@ impl ToolSpec for ReadFileTool {
         // tiny file would silently ignore the request.
         if !explicit_range && file_bytes <= SMALL_FILE_BYTES as u64 {
             drop(file);
-            let contents = fs::read_to_string(&file_path).map_err(|e| {
+            let contents = tokio::fs::read_to_string(&file_path).await.map_err(|e| {
                 ToolError::execution_failed(format!(
                     "Failed to read {}: {}",
                     file_path.display(),
@@ -1047,7 +1051,7 @@ impl ToolSpec for ReadFileTool {
         // runs to EOF so the total line count and whole-file UTF-8 validation
         // match the historical read_to_string behavior.
         let (window, total_lines) =
-            read_window_streaming(file, start_line, max_lines).map_err(|e| {
+            read_window_streaming(file.into_std().await, start_line, max_lines).map_err(|e| {
                 ToolError::execution_failed(format!(
                     "Failed to read {}: {}",
                     file_path.display(),
@@ -1063,7 +1067,7 @@ impl ToolSpec for ReadFileTool {
         // pass back to `edit`. Special files are skipped: reopening a FIFO or
         // device can block indefinitely (or re-consume a one-shot stream),
         // and a stream has no stable content an edit guard could pin.
-        let hash = match fs::metadata(&file_path) {
+        let hash = match tokio::fs::metadata(&file_path).await {
             Ok(meta) if meta.is_file() => hash_file_streaming(&file_path).ok(),
             _ => None,
         };
@@ -1442,16 +1446,16 @@ impl WriteFileTool {
         let mutation_guard = acquire_file_mutation(&file_path, context).await?;
         check_file_operation_cancelled(context)?;
 
-        let existed_before = file_path.exists();
+        let existed_before = tokio::fs::try_exists(&file_path).await.unwrap_or(false);
         let prior_bytes = if existed_before {
-            fs::read(&file_path).unwrap_or_default()
+            tokio::fs::read(&file_path).await.unwrap_or_default()
         } else {
             Vec::new()
         };
         let prior_contents = String::from_utf8_lossy(&prior_bytes);
 
         if let Some(parent) = file_path.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
+            tokio::fs::create_dir_all(parent).await.map_err(|error| {
                 ToolError::execution_failed(format!(
                     "Failed to create directory {}: {error}",
                     parent.display()
@@ -1556,9 +1560,11 @@ impl ToolSpec for WriteFileTool {
 
         // Snapshot the existing contents (if any) before we overwrite — used
         // to render an inline diff in the tool result.
-        let existed_before = file_path.exists();
+        let existed_before = tokio::fs::try_exists(&file_path).await.unwrap_or(false);
         let prior_contents = if existed_before {
-            fs::read_to_string(&file_path).unwrap_or_default()
+            tokio::fs::read_to_string(&file_path)
+                .await
+                .unwrap_or_default()
         } else {
             String::new()
         };
@@ -1579,7 +1585,7 @@ impl ToolSpec for WriteFileTool {
 
         // Create parent directories if needed
         if let Some(parent) = file_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
                 ToolError::execution_failed(format!(
                     "Failed to create directory {}: {}",
                     parent.display(),
@@ -2023,17 +2029,18 @@ impl EditFileTool {
         let mutation_guard = acquire_file_mutation(&file_path, context).await?;
         check_file_operation_cancelled(context)?;
 
-        fs::OpenOptions::new()
+        tokio::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(&file_path)
+            .await
             .map_err(|error| {
                 ToolError::execution_failed(format!(
                     "Could not edit file {path_str}: target must be readable and writable ({error})"
                 ))
             })?;
         check_file_operation_cancelled(context)?;
-        let raw_bytes = fs::read(&file_path).map_err(|error| {
+        let raw_bytes = tokio::fs::read(&file_path).await.map_err(|error| {
             ToolError::execution_failed(format!("Could not edit file {path_str}: {error}"))
         })?;
         check_file_operation_cancelled(context)?;
@@ -2170,7 +2177,7 @@ impl ToolSpec for EditFileTool {
         let file_path = context.resolve_path(path_str)?;
         context.require_fresh_file_read(&file_path, path_str)?;
 
-        let contents = fs::read_to_string(&file_path).map_err(|e| {
+        let contents = tokio::fs::read_to_string(&file_path).await.map_err(|e| {
             ToolError::execution_failed(format!("Failed to read {}: {}", file_path.display(), e))
         })?;
 
@@ -2310,7 +2317,7 @@ impl ToolSpec for EditFileTool {
         // actually applied. A fabricated "Replaced 1 occurrence" + diff is
         // worse than a hard error: models trust it and re-edit the same
         // span 3–5× before noticing nothing changed.
-        let on_disk = fs::read_to_string(&file_path).map_err(|e| {
+        let on_disk = tokio::fs::read_to_string(&file_path).await.map_err(|e| {
             ToolError::execution_failed(format!(
                 "Failed to verify write to {}: {}",
                 file_path.display(),

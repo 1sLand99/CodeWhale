@@ -336,7 +336,7 @@ impl ToolSpec for GitBlameTool {
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
         let path_str = required_str(&input, "path")?;
         let resolved_path = context.resolve_path(path_str)?;
-        let metadata = fs::metadata(&resolved_path).map_err(|e| {
+        let metadata = tokio::fs::metadata(&resolved_path).await.map_err(|e| {
             ToolError::invalid_input(format!(
                 "Path does not exist or is not accessible: {path_str} ({e})"
             ))
