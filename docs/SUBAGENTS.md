@@ -210,8 +210,10 @@ Optional fields:
 - `worktree_path`: exact checkout path. Relative paths stay under the default
   sibling `.codewhale-worktrees/` root.
 
-Do not combine `cwd` with `worktree`; `cwd` remains the manual escape hatch for
-an already-created directory inside the parent workspace.
+`cwd` may be combined with `worktree`: the requested directory becomes the
+discovery anchor the repo root (and the new checkout) is resolved from
+(`prepare_child_workspace`). Without `worktree`, `cwd` remains the manual
+escape hatch for an already-created directory inside the parent workspace.
 
 ### File deliverables and edit claims
 
@@ -359,8 +361,12 @@ OUTPUT: VERDICT, EVIDENCE, GAPS, NEXT.
   on the test suite or other validation. Verifiers don't fix
   failures; they capture the failing assertion + stack and put fix
   candidates under RISKS. The verifier posture never writes, and shell
-  is clamped to the bounded built-in verification surface: the write
-  ceiling is read-only and unbounded shell forms are refused (#5186).
+  is clamped to the bounded built-in verification surface: Run
+  tests/verifiers (pass `cwd` when the checks live in a
+  subdirectory), Git fetch for remote refs, Git merge_tree for merge
+  results. The write ceiling is read-only and unbounded shell forms
+  are refused (#5186). A refused probe is reported to the parent,
+  never worked around (#6298).
 - **`advisor`** — when the operator wants a high-leverage second opinion
   before cheaper execution continues. Consultants read enough to ground a
   recommendation, but cannot write or run shell commands. `oracle` and

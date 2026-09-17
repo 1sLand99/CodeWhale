@@ -5097,9 +5097,15 @@ impl ToolSpec for BashTool {
                 ));
             }
             ShellPolicy::ReadOnly if !exec_shell_input_agent_readonly(&input) => {
-                return Ok(ToolResult::error(
-                    "Shell command blocked by read-only shell policy. Use a non-mutating, non-background inspection command, or switch to Work mode (`/mode work`) for write-capable shell work.",
-                ));
+                // #6298: a child has no mode to switch to, so the parent's
+                // `/mode work` advice is unreachable. Name the child's own
+                // alternatives instead, plus the escalation path.
+                let message = if context.owner_agent_id.is_some() {
+                    "Shell command blocked by read-only shell policy. As a sub-agent you cannot switch modes: read files with read_file/grep_files, inspect Git with fetch/log/show (merge_tree for merge results), run checks with Run tests/verifiers (pass `cwd` when the checks live in a subdirectory), and report the blocked probe to the parent instead of working around it."
+                } else {
+                    "Shell command blocked by read-only shell policy. Use a non-mutating, non-background inspection command, or switch to Work mode (`/mode work`) for write-capable shell work."
+                };
+                return Ok(ToolResult::error(message));
             }
             ShellPolicy::ReadOnly | ShellPolicy::Full => {}
         }

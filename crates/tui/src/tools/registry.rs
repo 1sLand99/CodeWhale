@@ -589,7 +589,7 @@ fn enforce_tool_authority(
                 return Ok(());
             }
             return Err(ToolError::permission_denied(format!(
-                "worker '{}' cannot run unbounded verification arguments or commands",
+                "worker '{}' cannot run unbounded verification arguments or commands. Re-run the default gate instead: drop `commands` (run_verifiers) and any flag that can redirect what runs (run_tests `args` may only select tests), and report the blocked probe to the parent rather than working around it.",
                 authority.owner
             )));
         }

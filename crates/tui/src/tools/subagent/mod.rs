@@ -17920,7 +17920,7 @@ impl SubAgentToolRegistry {
         };
         if !self.is_tool_allowed(name) || !family_action_allowed {
             return Err(admission_denied(format!(
-                "Tool {name} not allowed for this sub-agent"
+                "Tool {name} not allowed for this sub-agent; report the blocked probe to the parent instead of working around it"
             )));
         }
         // #3217: authoritative per-role posture — read-only roles cannot mutate

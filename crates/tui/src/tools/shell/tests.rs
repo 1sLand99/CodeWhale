@@ -1230,6 +1230,44 @@ async fn read_only_shell_policy_blocks_non_readonly_commands() {
     }
 }
 
+#[tokio::test]
+async fn read_only_refusal_names_child_alternatives_instead_of_mode_switch() {
+    // #6298: a child has no `/mode` to switch to — a refusal that tells it to
+    // switch modes is a dead end beside an available absurd path. The child
+    // branch must name the child's own alternatives and the escalation path.
+    let tmp = tempdir().expect("tempdir");
+    let child_ctx = ToolContext::new(tmp.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly)
+        .with_owner_agent("agent_child", "child");
+    let tool = BashTool::new("Bash");
+    let result = tool
+        .execute(json!({"command": "cargo build"}), &child_ctx)
+        .await
+        .expect("execute");
+    assert!(!result.success);
+    assert!(result.content.contains("read-only shell policy"));
+    assert!(result.content.contains("read_file"));
+    assert!(
+        result
+            .content
+            .contains("report the blocked probe to the parent")
+    );
+    assert!(
+        !result.content.contains("/mode work"),
+        "child must never be told to switch modes: {}",
+        result.content
+    );
+
+    let parent_ctx = ToolContext::new(tmp.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+    let result = tool
+        .execute(json!({"command": "cargo build"}), &parent_ctx)
+        .await
+        .expect("execute");
+    assert!(!result.success);
+    assert!(result.content.contains("/mode work"));
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn read_only_shell_resolves_operands_from_the_effective_cwd() {

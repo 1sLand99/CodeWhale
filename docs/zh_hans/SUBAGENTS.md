@@ -73,7 +73,7 @@ Fleet 的八个规范角色名是 `general`、`explore`、`planner`、`reviewer`
 - `worktree_base`：要从中开分支的 git ref；默认为 `HEAD`。
 - `worktree_path`：确切的检出路径。相对路径留在默认的兄弟目录 `.codewhale-worktrees/` 根下。
 
-不要组合 `cwd` 与 `worktree`；`cwd` 仍是针对父工作区内已经存在的目录的手动逃生舱。
+`cwd` 可与 `worktree` 组合：所请求的目录成为仓库根（及新检出）解析所用的发现锚点（`prepare_child_workspace`）。没有 `worktree` 时，`cwd` 仍是针对父工作区内已经存在的目录的手动逃生舱。
 
 ## 委派简报
 
@@ -126,7 +126,7 @@ OUTPUT: VERDICT、EVIDENCE、GAPS、NEXT。
 - **`planner`** —— 当父代理有目标但没有可执行的分解。planner 写工件（`todo_write` 条目、响应体里的策略），但不执行它们。
 - **`reviewer`** —— 当已经有一个变更，父代理想要它被评分。reviewer 不打补丁——他们在发现里描述修复方案，这样如果判定是"修它"，父代理可以派一个 implement。
 - **`implement`** —— 当变更已经被明确指定、只需要落地。implement 保持严格的范围：最小改动，不做顺手重构，交回前跑一次快速验证。
-- **`test`** —— 当父代理需要测试套件或其他验证上的权威通过/失败结论。test 角色不修失败；他们记录失败的断言 + 栈，把修复候选放在 RISKS 下。
+- **`test`** —— 当父代理需要测试套件或其他验证上的权威通过/失败结论。test 角色不修失败；他们记录失败的断言 + 栈，把修复候选放在 RISKS 下。test 姿态永不写入，shell 被收窄到有界的内置验证面：Run tests/verifiers（当检查位于子目录时传 `cwd`）、Git fetch 拉取远端引用、Git merge_tree 求合并结果。写入上限为只读，无界 shell 形式会被拒绝（#5186）。被拒绝的探测上报给父代理，绝不绕行（#6298）。
 - **`advisor`** —— 当操作者想在更便宜的执行继续之前得到一个高杠杆的第二意见。advisor 读足够的材料来支撑一条建议，但不能写，也不能运行 shell 命令。`oracle` 和 `consultant` 仅作为旧输入兼容接受；新的提示词、回执和 UI 使用 `advisor`。
 - **`custom`** —— 只有当父代理需要显式约束工具集时。通过 legacy/internal 子代理记录上的 `allowed_tools` 字段传 allowlist；面向模型的 `agent` 工具刻意保持公共 schema 很小。
 
