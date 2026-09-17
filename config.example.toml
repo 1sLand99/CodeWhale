@@ -1027,6 +1027,8 @@ max_subagents = 10 # optional (default 64, clamped to 1-128)
 #                            # duckduckgo: HTML scrape with Bing fallback
 #                            # bing:       HTML scrape, no API key
 #                            # tavily:     https://tavily.com — AI search, needs api_key
+#                            #             TAVILY_API_KEY set + provider unset auto-selects tavily
+#                            #             at runtime; it is never written to config.toml
 #                            # bocha:      https://bochaai.com — 博查AI搜索，国内友好，需api_key
 #                            # metaso:     https://metaso.cn — 秘塔AI搜索，需 api_key
 #                            #             设置 METASO_API_KEY 或 [search] api_key
@@ -1060,6 +1062,9 @@ max_subagents = 10 # optional (default 64, clamped to 1-128)
 #   VOLCENGINE_API_KEY / VOLCENGINE_ARK_API_KEY / ARK_API_KEY → volcengine key fallback
 #   SOFYA_API_KEY            → sofya key fallback
 #   SERPLY_API_KEY           → serply key fallback
+#   TAVILY_API_KEY           → tavily autodetect when provider is unset (explicit
+#                              provider = "..." or CODEWHALE_SEARCH_PROVIDER still
+#                              wins; the autodetect is never persisted)
 
 # ─────────────────────────────────────────────────────────────────────────────────
 # Network Policy (#135)

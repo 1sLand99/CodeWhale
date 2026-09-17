@@ -9054,6 +9054,133 @@ async fn set_config_with_config_path_writes_to_specified_file() -> Result<()> {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn get_config_search_provider_reports_runtime_source() -> Result<()> {
+    let _lock = lock_test_env();
+    let _code = EnvVarGuard::remove("CODEWHALE_SEARCH_PROVIDER");
+    let _legacy = EnvVarGuard::remove("DEEPSEEK_SEARCH_PROVIDER");
+    let _tavily = EnvVarGuard::remove("TAVILY_API_KEY");
+
+    let root = std::env::temp_dir().join(format!("codewhale-search-source-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root)?;
+    let config_file = root.join("config.toml");
+    fs::write(&config_file, "[search]\napi_key = \"tvly-autodetected\"\n")?;
+
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_config_path(config_file).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+    let body: serde_json::Value = client
+        .get(format!("http://{addr}/v1/config"))
+        .send()
+        .await
+        .expect("GET /v1/config should not fail at transport level")
+        .json()
+        .await
+        .expect("GET /v1/config should be JSON");
+    handle.abort();
+
+    assert_eq!(body["search_provider"], "tavily", "body: {body}");
+    assert_eq!(
+        body["search_provider_source"], "tavily key",
+        "GET must publish the same source token doctor prints: {body}"
+    );
+    assert!(
+        body.get("missing_key").is_none(),
+        "missing-key is stdout-only: {body}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn set_config_search_provider_persist_skips_firecrawl_default_round_trip() -> Result<()> {
+    let _lock = lock_test_env();
+    let _code = EnvVarGuard::remove("CODEWHALE_SEARCH_PROVIDER");
+    let _legacy = EnvVarGuard::remove("DEEPSEEK_SEARCH_PROVIDER");
+    let _tavily = EnvVarGuard::remove("TAVILY_API_KEY");
+
+    let root = std::env::temp_dir().join(format!("codewhale-search-persist-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root)?;
+    let config_file = root.join("config.toml");
+    fs::write(&config_file, "# initial\n")?;
+
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_config_path(config_file.clone()).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    // GET returns `firecrawl`; saving it back must NOT write a pin, because
+    // `provider = "firecrawl"` would flip source Default -> Config and then
+    // block a later Tavily key.
+    let (status, body) =
+        post_set_config(&client, &addr, "search_provider", "firecrawl", true).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["persisted"], false, "body: {body}");
+    let contents = fs::read_to_string(&config_file)?;
+    assert!(
+        !contents.contains("provider"),
+        "round-tripping the resolved default must not pin it: {contents}"
+    );
+
+    // An explicit *change* still persists.
+    let (status, body) = post_set_config(&client, &addr, "search_provider", "bocha", true).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["persisted"], true, "body: {body}");
+    let contents = fs::read_to_string(&config_file)?;
+    assert!(
+        contents.contains("provider = \"bocha\""),
+        "an explicit provider change must persist: {contents}"
+    );
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn set_config_search_provider_persist_skips_tavily_autodetect() -> Result<()> {
+    let _lock = lock_test_env();
+    let _code = EnvVarGuard::remove("CODEWHALE_SEARCH_PROVIDER");
+    let _legacy = EnvVarGuard::remove("DEEPSEEK_SEARCH_PROVIDER");
+    let _tavily = EnvVarGuard::remove("TAVILY_API_KEY");
+
+    let root = std::env::temp_dir().join(format!("codewhale-search-auto-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root)?;
+    let config_file = root.join("config.toml");
+    fs::write(&config_file, "[search]\napi_key = \"tvly-autodetected\"\n")?;
+
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_config_path(config_file.clone()).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let (status, body) = post_set_config(&client, &addr, "search_provider", "tavily", true).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["persisted"], false, "body: {body}");
+    assert!(
+        body["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("tavily key")),
+        "the skip must explain the autodetect source: {body}"
+    );
+    let contents = fs::read_to_string(&config_file)?;
+    assert!(
+        !contents.contains("provider"),
+        "GET -> POST round-trip must not pin autodetect: {contents}"
+    );
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn reload_config_endpoint_returns_success() -> Result<()> {
     // Basic smoke test that /v1/config/reload returns 200 with a message.
     let root = std::env::temp_dir().join(format!("codewhale-config-reload-{}", Uuid::new_v4()));

@@ -2932,6 +2932,17 @@ title, URL, and snippet. Set `[search] api_key` to your Serply key, or the
 `SERPLY_API_KEY` env var. This is a search-tool backend only; it does not add a
 Serply model provider.
 
+**Tavily** ([tavily.com](https://tavily.com)) is selected automatically when a
+Tavily key is present and no provider is pinned: `TAVILY_API_KEY` set, or
+`[search] api_key` / `CODEWHALE_SEARCH_API_KEY` in the `tvly-` family. Doctor
+reports that as `source: tavily key`. Autodetect is runtime-only — Codewhale
+never writes `[search] provider` for it, and `TAVILY_API_KEY` is never merged
+into `[search] api_key`. An explicit `[search] provider` or
+`CODEWHALE_SEARCH_PROVIDER` always wins, so `provider = "firecrawl"` keeps
+Firecrawl even with a Tavily key in the environment. Pinned `tavily` accepts
+any non-empty `[search] api_key` and is configured by that key or
+`TAVILY_API_KEY`; with both empty it fails closed.
+
 ```toml
 [search]
 provider = "firecrawl" # also duckduckgo | bing | tavily | bocha | metaso | searxng | baidu | volcengine | sofya | serply

@@ -8,7 +8,7 @@
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec, optional_u64,
 };
-use crate::config::SearchProvider;
+use crate::config::{SearchProvider, tavily_env_key, tavily_key_from};
 use crate::network_policy::{Decision, NetworkPolicyDecider};
 use async_trait::async_trait;
 use regex::Regex;
@@ -412,12 +412,23 @@ impl WebSearchTool {
         timeout_ms: u64,
         context: &ToolContext,
     ) -> Result<Vec<WebSearchEntry>, ToolError> {
-        let api_key = context
-            .search_api_key
-            .as_deref()
+        let api_key = tavily_key_from(context.search_api_key.as_deref())
+            .or_else(|| {
+                // An explicit `provider = "tavily"` still accepts any
+                // non-empty generic key, so a non-`tvly-` pin keeps working.
+                // Reaching this hop at all means Tavily was the resolved
+                // provider (pinned, or selected by a `tvly-` signal), so the
+                // generic fallback is never a Firecrawl/sentinel key.
+                context
+                    .search_api_key
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            })
             .ok_or_else(|| {
                 ToolError::execution_failed(
-                    "Tavily search requires an API key. Set `[search] api_key = \"tvly-...\"` in config.toml.",
+                    "Tavily search requires an API key. Set `[search] api_key = \"tvly-...\"` in config.toml or the `TAVILY_API_KEY` env var.",
                 )
             })?;
 
@@ -1080,8 +1091,8 @@ fn preflight_search_provider(context: &ToolContext) -> Result<(), ToolError> {
     let not_configured = |message: &str| Err(ToolError::invalid_input(message));
 
     match context.search_provider {
-        SearchProvider::Tavily if !configured_key => not_configured(
-            "Tavily search is not configured: it requires an API key. Set `[search] api_key = \"tvly-...\"` in config.toml.",
+        SearchProvider::Tavily if !configured_key && tavily_env_key().is_none() => not_configured(
+            "Tavily search is not configured: it requires an API key. Set `[search] api_key = \"tvly-...\"` in config.toml or the `TAVILY_API_KEY` env var.",
         ),
         SearchProvider::Bocha if !configured_key => not_configured(
             "Bocha search is not configured: it requires an API key. Set `[search] api_key = \"sk-...\"` in config.toml.",
@@ -3277,9 +3288,16 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn missing_provider_key_fails_closed_as_not_configured() {
         use crate::config::SearchProvider;
         use crate::tools::spec::{ToolContext, ToolError, ToolSpec};
+
+        let _guard = crate::test_support::lock_test_env();
+        let prev_tavily = std::env::var_os("TAVILY_API_KEY");
+        // "both keys empty" must mean *both*: an ambient key from the
+        // operator's shell would otherwise satisfy the Tavily arm.
+        unsafe { std::env::remove_var("TAVILY_API_KEY") };
 
         for provider in [SearchProvider::Tavily, SearchProvider::Bocha] {
             let tmp = tempfile::tempdir().expect("tempdir");
@@ -3298,6 +3316,69 @@ mod tests {
             let message = error.to_string();
             assert!(message.contains("is not configured"), "got `{message}`");
             assert!(message.contains("api_key"), "got `{message}`");
+        }
+
+        // Sibling case: only `TAVILY_API_KEY` is set. Explicit Tavily is
+        // configured, and the copy that names both sources is the one the
+        // operator never sees here.
+        unsafe { std::env::set_var("TAVILY_API_KEY", "tvly-test-env-only") };
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut ctx = ToolContext::new(tmp.path().to_path_buf());
+        ctx.search_provider = SearchProvider::Tavily;
+        ctx.search_api_key = None;
+        let preflight = super::preflight_search_provider(&ctx);
+
+        match prev_tavily {
+            Some(value) => unsafe { std::env::set_var("TAVILY_API_KEY", value) },
+            None => unsafe { std::env::remove_var("TAVILY_API_KEY") },
+        }
+
+        assert!(
+            preflight.is_ok(),
+            "TAVILY_API_KEY alone must configure explicit Tavily: {preflight:?}"
+        );
+    }
+
+    #[test]
+    fn tavily_key_from_prefers_dedicated_env_and_prefix_gates_only_the_generic_key() {
+        let _guard = crate::test_support::lock_test_env();
+        let prev = std::env::var_os("TAVILY_API_KEY");
+
+        unsafe { std::env::set_var("TAVILY_API_KEY", "tvly-a") };
+        assert_eq!(
+            crate::config::tavily_key_from(Some("tvly-b")).as_deref(),
+            Some("tvly-a"),
+            "the dedicated env wins over the shared generic slot"
+        );
+        assert_eq!(crate::config::tavily_env_key().as_deref(), Some("tvly-a"));
+
+        // A dedicated env key is never prefix-checked.
+        unsafe { std::env::set_var("TAVILY_API_KEY", "not-a-tvly-prefix") };
+        assert_eq!(
+            crate::config::tavily_key_from(None).as_deref(),
+            Some("not-a-tvly-prefix")
+        );
+
+        unsafe { std::env::set_var("TAVILY_API_KEY", "   ") };
+        assert_eq!(crate::config::tavily_env_key(), None);
+
+        unsafe { std::env::remove_var("TAVILY_API_KEY") };
+        assert_eq!(
+            crate::config::tavily_key_from(Some("tvly-b")).as_deref(),
+            Some("tvly-b")
+        );
+        assert_eq!(
+            crate::config::tavily_key_from(Some("doctor-offline-search-sentinel")),
+            None,
+            "a non-`tvly-` generic key must never autodetect Tavily"
+        );
+        assert_eq!(crate::config::tavily_key_from(Some("   ")), None);
+        assert!(crate::config::looks_like_tavily_key(" tvly-x "));
+        assert!(!crate::config::looks_like_tavily_key("fc-live-test"));
+
+        match prev {
+            Some(value) => unsafe { std::env::set_var("TAVILY_API_KEY", value) },
+            None => unsafe { std::env::remove_var("TAVILY_API_KEY") },
         }
     }
 

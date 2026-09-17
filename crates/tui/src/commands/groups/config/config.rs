@@ -1163,6 +1163,10 @@ fn search_provider_display(config: &Config, locale: codewhale_localization::Loca
             .to_string(),
         SearchProviderSource::Config => "config.toml".to_string(),
         SearchProviderSource::EnvOverride => "CODEWHALE_SEARCH_PROVIDER".to_string(),
+        // Same token doctor prints: the signal is a Tavily key, not a disk
+        // pin, so never name `TAVILY_API_KEY` (the winner may have been a
+        // generic `tvly-` `[search] api_key`).
+        SearchProviderSource::TavilyKey => "tavily key".to_string(),
     };
     tr(locale, MessageId::ConfigCommandSource)
         .replace("{value}", resolved.provider.as_str())
@@ -3363,6 +3367,7 @@ mod tests {
                 EnvVarGuard::remove("PTYXIS_VERSION"),
                 EnvVarGuard::remove("CODEWHALE_SEARCH_PROVIDER"),
                 EnvVarGuard::remove("DEEPSEEK_SEARCH_PROVIDER"),
+                EnvVarGuard::remove("TAVILY_API_KEY"),
             ];
             Self {
                 _vars: vars,
@@ -5051,6 +5056,33 @@ completion_sound = "bell"
         assert!(
             notifications_msg.contains("completion_sound = bell"),
             "{notifications_msg}"
+        );
+    }
+
+    #[test]
+    fn config_command_shows_autodetected_tavily_key_source() {
+        let temp_root = tempfile::tempdir().expect("isolated config dir");
+        let _guard = EnvGuard::new(temp_root.path());
+        let config_path = temp_root.path().join("custom-config.toml");
+        fs::write(
+            &config_path,
+            r#"
+[search]
+api_key = "tvly-autodetected"
+"#,
+        )
+        .unwrap();
+
+        let mut app = create_test_app();
+        app.config_path = Some(config_path);
+
+        let search = config_command(&mut app, Some("search.provider"));
+        assert!(!search.is_error, "{:?}", search.message);
+        let message = search.message.expect("search provider display");
+        assert_eq!(message, "search.provider = tavily (source: tavily key)");
+        assert!(
+            !message.contains("TAVILY_API_KEY"),
+            "a generic `tvly-` key must not be reported as the env var: {message}"
         );
     }
 

@@ -7496,6 +7496,9 @@ struct GuiConfigResponse {
     strict_tool_mode: bool,
     memory_enabled: bool,
     search_provider: String,
+    /// How `search_provider` was chosen: `default` / `config` /
+    /// `env override` / `tavily key`. Runtime-only — never persisted.
+    search_provider_source: String,
     prompt_suggestion: bool,
     /// Effective device settings, using the same leaf vocabulary as CLI/TUI.
     notifications: std::collections::BTreeMap<String, String>,
@@ -7609,6 +7612,11 @@ async fn get_config(
         strict_tool_mode: config.strict_tool_mode.unwrap_or(false),
         memory_enabled: config.memory_enabled(),
         search_provider: config.search_provider().as_str().to_string(),
+        search_provider_source: config
+            .search_provider_resolution()
+            .source
+            .as_str()
+            .to_string(),
         prompt_suggestion: config.prompt_suggestion_enabled(),
         notifications: codewhale_config::notifications::NotificationSetting::ALL
             .into_iter()
@@ -7861,6 +7869,34 @@ async fn set_config(
             }
             "search_provider" => {
                 let normalized = value.to_lowercase();
+                // GET returns the *resolved* provider. A settings save that
+                // round-trips that value must not turn autodetect (or the
+                // Firecrawl default) into a disk pin — `provider = "firecrawl"`
+                // would flip the source to `config` and permanently block a
+                // later Tavily key. A POST that differs from the resolved
+                // provider is an explicit change and still persists.
+                let resolution = state.config.read().search_provider_resolution();
+                let posted = crate::config::SearchProvider::parse(&normalized);
+                if posted == Some(resolution.provider)
+                    && matches!(
+                        resolution.source,
+                        crate::config::SearchProviderSource::Default
+                            | crate::config::SearchProviderSource::TavilyKey
+                    )
+                {
+                    return Ok(Json(SetConfigResponse {
+                        key,
+                        value,
+                        message: format!(
+                            "Config not persisted: '{}' is the resolved {} (source: {}), not a pin. Set a different provider, or pin it in config.toml.",
+                            normalized,
+                            resolution.provider.as_str(),
+                            resolution.source.as_str()
+                        ),
+                        persisted: false,
+                        requires_reload: true,
+                    }));
+                }
                 config_persistence::persist_table_string_key(
                     config_path,
                     "search",

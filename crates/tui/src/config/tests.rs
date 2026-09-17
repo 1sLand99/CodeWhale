@@ -1692,6 +1692,31 @@ fn window_title_config_parses_and_overlays() {
     assert_eq!(merged.title.as_deref(), Some("base-title"));
 }
 
+/// Run `body` with the three Tavily-resolution signals set exactly as given,
+/// restoring the ambient values afterwards. A `Default` pin (and the
+/// Firecrawl China-switch hint) means all three are absent, not just the
+/// legacy `DEEPSEEK_SEARCH_PROVIDER` alias.
+fn with_search_resolution_env<R>(set: &[(&str, &str)], body: impl FnOnce() -> R) -> R {
+    let _guard = lock_test_env();
+    let keys = [
+        "CODEWHALE_SEARCH_PROVIDER",
+        "DEEPSEEK_SEARCH_PROVIDER",
+        "TAVILY_API_KEY",
+    ];
+    let previous: Vec<Option<OsString>> = keys.iter().map(|key| env::var_os(key)).collect();
+    for key in keys {
+        unsafe { env::remove_var(key) };
+    }
+    for (key, value) in set {
+        unsafe { env::set_var(key, value) };
+    }
+    let output = body();
+    for (key, value) in keys.iter().zip(previous) {
+        unsafe { EnvGuard::restore_var(key, value) };
+    }
+    output
+}
+
 #[test]
 fn search_provider_scenario() {
     // Scenario consolidation of: search_provider_defaults_to_firecrawl, search_provider_resolution_reports_default_source, search_provider_resolution_reports_config_source, search_provider_resolution_reports_env_override_source, search_provider_env_override_accepts_baidu, search_provider_resolution_ignores_invalid_env_override
@@ -1705,22 +1730,121 @@ fn search_provider_scenario() {
         assert_eq!(SearchProvider::Firecrawl.as_str(), "firecrawl");
     }
     // from search_provider_resolution_reports_default_source
-    {
-        let _guard = lock_test_env();
-        let prev = env::var_os("DEEPSEEK_SEARCH_PROVIDER");
-        unsafe { env::remove_var("DEEPSEEK_SEARCH_PROVIDER") };
+    // (empty config, no env)
+    with_search_resolution_env(&[], || {
+        let config = Config::default();
+        let resolution = config.search_provider_resolution();
 
-        let resolution = Config::default().search_provider_resolution();
-
-        unsafe { EnvGuard::restore_var("DEEPSEEK_SEARCH_PROVIDER", prev) };
         assert_eq!(resolution.provider, SearchProvider::Firecrawl);
         assert_eq!(resolution.source, SearchProviderSource::Default);
-    }
+        // Autodetect never writes a provider into the config view.
+        assert_eq!(
+            config.search.as_ref().and_then(|search| search.provider),
+            None
+        );
+    });
+    // `TAVILY_API_KEY=tvly-test`, provider unset
+    with_search_resolution_env(&[("TAVILY_API_KEY", "tvly-test")], || {
+        let config = Config::default();
+        let resolution = config.search_provider_resolution();
+
+        assert_eq!(resolution.provider, SearchProvider::Tavily);
+        assert_eq!(resolution.source, SearchProviderSource::TavilyKey);
+        assert_eq!(resolution.source.as_str(), "tavily key");
+        assert_eq!(resolution.provider.as_str(), "tavily");
+        // Autodetect is runtime-only: `config.search.provider` stays unset.
+        assert_eq!(
+            config.search.as_ref().and_then(|search| search.provider),
+            None
+        );
+    });
+    // `TAVILY_API_KEY=not-a-tvly-prefix`, provider unset — a dedicated env key
+    // is never prefix-checked.
+    with_search_resolution_env(&[("TAVILY_API_KEY", "not-a-tvly-prefix")], || {
+        let resolution = Config::default().search_provider_resolution();
+
+        assert_eq!(resolution.provider, SearchProvider::Tavily);
+        assert_eq!(resolution.source, SearchProviderSource::TavilyKey);
+    });
+    // `[search] api_key = "tvly-test"`, provider unset — also the shape left by
+    // `CODEWHALE_SEARCH_API_KEY=tvly-test` after `apply_env_overrides`.
+    with_search_resolution_env(&[], || {
+        let config: Config = toml::from_str(
+            r#"
+            [search]
+            api_key = "tvly-test"
+            "#,
+        )
+        .expect("search config");
+        let resolution = config.search_provider_resolution();
+
+        assert_eq!(resolution.provider, SearchProvider::Tavily);
+        assert_eq!(resolution.source, SearchProviderSource::TavilyKey);
+        assert_eq!(
+            config.search.as_ref().and_then(|search| search.provider),
+            None
+        );
+    });
+    // A non-`tvly-` generic key never autodetects. Covers
+    // `CODEWHALE_SEARCH_API_KEY=doctor-offline-search-sentinel` and any
+    // Firecrawl `fc-` generic value.
+    with_search_resolution_env(&[], || {
+        let config: Config = toml::from_str(
+            r#"
+            [search]
+            api_key = "doctor-offline-search-sentinel"
+            "#,
+        )
+        .expect("search config");
+        let resolution = config.search_provider_resolution();
+
+        assert_eq!(resolution.provider, SearchProvider::Firecrawl);
+        assert_eq!(resolution.source, SearchProviderSource::Default);
+    });
+    // Dedicated provider keys that are not the Tavily signal leave the
+    // Firecrawl default in place.
+    with_search_resolution_env(
+        &[
+            ("FIRECRAWL_API_KEY", "fc-test"),
+            ("SOFYA_API_KEY", "ay_live_test"),
+        ],
+        || {
+            let resolution = Config::default().search_provider_resolution();
+
+            assert_eq!(resolution.provider, SearchProvider::Firecrawl);
+            assert_eq!(resolution.source, SearchProviderSource::Default);
+        },
+    );
+    // Explicit Firecrawl wins over a Tavily key.
+    with_search_resolution_env(&[("TAVILY_API_KEY", "tvly-test")], || {
+        let config: Config = toml::from_str(
+            r#"
+            [search]
+            provider = "firecrawl"
+            "#,
+        )
+        .expect("search config");
+        let resolution = config.search_provider_resolution();
+
+        assert_eq!(resolution.provider, SearchProvider::Firecrawl);
+        assert_eq!(resolution.source, SearchProviderSource::Config);
+    });
+    // An env override outranks both the config pin and the Tavily signal.
+    with_search_resolution_env(
+        &[
+            ("CODEWHALE_SEARCH_PROVIDER", "firecrawl"),
+            ("TAVILY_API_KEY", "tvly-test"),
+        ],
+        || {
+            let resolution = Config::default().search_provider_resolution();
+
+            assert_eq!(resolution.provider, SearchProvider::Firecrawl);
+            assert_eq!(resolution.source, SearchProviderSource::EnvOverride);
+        },
+    );
+
     // from search_provider_resolution_reports_config_source
-    {
-        let _guard = lock_test_env();
-        let prev = env::var_os("DEEPSEEK_SEARCH_PROVIDER");
-        unsafe { env::remove_var("DEEPSEEK_SEARCH_PROVIDER") };
+    with_search_resolution_env(&[], || {
         let config: Config = toml::from_str(
             r#"
             [search]
@@ -1731,15 +1855,11 @@ fn search_provider_scenario() {
 
         let resolution = config.search_provider_resolution();
 
-        unsafe { EnvGuard::restore_var("DEEPSEEK_SEARCH_PROVIDER", prev) };
         assert_eq!(resolution.provider, SearchProvider::Tavily);
         assert_eq!(resolution.source, SearchProviderSource::Config);
-    }
+    });
     // from search_provider_resolution_reports_env_override_source
-    {
-        let _guard = lock_test_env();
-        let prev = env::var_os("DEEPSEEK_SEARCH_PROVIDER");
-        unsafe { env::set_var("DEEPSEEK_SEARCH_PROVIDER", "bocha") };
+    with_search_resolution_env(&[("CODEWHALE_SEARCH_PROVIDER", "bocha")], || {
         let config: Config = toml::from_str(
             r#"
             [search]
@@ -1750,15 +1870,11 @@ fn search_provider_scenario() {
 
         let resolution = config.search_provider_resolution();
 
-        unsafe { EnvGuard::restore_var("DEEPSEEK_SEARCH_PROVIDER", prev) };
         assert_eq!(resolution.provider, SearchProvider::Bocha);
         assert_eq!(resolution.source, SearchProviderSource::EnvOverride);
-    }
-    // from search_provider_env_override_accepts_baidu
-    {
-        let _guard = lock_test_env();
-        let prev = env::var_os("DEEPSEEK_SEARCH_PROVIDER");
-        unsafe { env::set_var("DEEPSEEK_SEARCH_PROVIDER", "baidu") };
+    });
+    // The legacy alias still resolves the same way.
+    with_search_resolution_env(&[("DEEPSEEK_SEARCH_PROVIDER", "bocha")], || {
         let config: Config = toml::from_str(
             r#"
             [search]
@@ -1769,15 +1885,26 @@ fn search_provider_scenario() {
 
         let resolution = config.search_provider_resolution();
 
-        unsafe { EnvGuard::restore_var("DEEPSEEK_SEARCH_PROVIDER", prev) };
+        assert_eq!(resolution.provider, SearchProvider::Bocha);
+        assert_eq!(resolution.source, SearchProviderSource::EnvOverride);
+    });
+    // from search_provider_env_override_accepts_baidu
+    with_search_resolution_env(&[("CODEWHALE_SEARCH_PROVIDER", "baidu")], || {
+        let config: Config = toml::from_str(
+            r#"
+            [search]
+            provider = "duckduckgo"
+            "#,
+        )
+        .expect("search config");
+
+        let resolution = config.search_provider_resolution();
+
         assert_eq!(resolution.provider, SearchProvider::Baidu);
         assert_eq!(resolution.source, SearchProviderSource::EnvOverride);
-    }
+    });
     // from search_provider_resolution_ignores_invalid_env_override
-    {
-        let _guard = lock_test_env();
-        let prev = env::var_os("DEEPSEEK_SEARCH_PROVIDER");
-        unsafe { env::set_var("DEEPSEEK_SEARCH_PROVIDER", "not-a-provider") };
+    with_search_resolution_env(&[("CODEWHALE_SEARCH_PROVIDER", "not-a-provider")], || {
         let config: Config = toml::from_str(
             r#"
             [search]
@@ -1788,10 +1915,9 @@ fn search_provider_scenario() {
 
         let resolution = config.search_provider_resolution();
 
-        unsafe { EnvGuard::restore_var("DEEPSEEK_SEARCH_PROVIDER", prev) };
         assert_eq!(resolution.provider, SearchProvider::Tavily);
         assert_eq!(resolution.source, SearchProviderSource::Config);
-    }
+    });
 }
 
 #[test]

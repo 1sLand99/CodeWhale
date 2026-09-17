@@ -4704,6 +4704,21 @@ impl Config {
             };
         }
 
+        // Tavily autodetect: a dedicated `TAVILY_API_KEY`, or a generic
+        // `[search] api_key` in the `tvly-` family. Runtime-only — never write
+        // `[search] provider` from here, and never merge the env key into
+        // `search.api_key`.
+        let generic_key = self
+            .search
+            .as_ref()
+            .and_then(|search| search.api_key.as_deref());
+        if tavily_key_from(generic_key).is_some() {
+            return SearchProviderResolution {
+                provider: SearchProvider::Tavily,
+                source: SearchProviderSource::TavilyKey,
+            };
+        }
+
         SearchProviderResolution {
             provider: SearchProvider::default(),
             source: SearchProviderSource::Default,

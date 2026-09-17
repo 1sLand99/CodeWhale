@@ -1341,6 +1341,8 @@ exec_policy = true
 
 **Serply**([serply.io](https://serply.io))返回 Google 自然搜索结果，包含标题、URL 和摘要片段。把 `[search] api_key` 设为你的 Serply key，或用 `SERPLY_API_KEY` 环境变量。这只是搜索工具后端；它不添加 Serply 模型 provider。
 
+**Tavily**([tavily.com](https://tavily.com))在存在 Tavily key 且没有固定 provider 时自动选中：设置了 `TAVILY_API_KEY`，或 `[search] api_key` / `CODEWHALE_SEARCH_API_KEY` 属于 `tvly-` 家族。doctor 会把这种情况报告为 `source: tavily key`。自动检测只在运行时生效——Codewhale 不会为它写入 `[search] provider`，也不会把 `TAVILY_API_KEY` 合并进 `[search] api_key`。显式的 `[search] provider` 或 `CODEWHALE_SEARCH_PROVIDER` 始终优先，所以即使环境里有 Tavily key，`provider = "firecrawl"` 仍然是 Firecrawl。固定为 `tavily` 时接受任何非空的 `[search] api_key`，由该 key 或 `TAVILY_API_KEY` 提供配置；两者都为空时直接失败关闭。
+
 ```toml
 [search]
 provider = "firecrawl" # 也 duckduckgo | bing | tavily | bocha | metaso | searxng | baidu | volcengine | sofya | serply

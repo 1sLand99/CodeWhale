@@ -2860,6 +2860,7 @@ fn is_workspace_dotenv_credential_key(key: &str) -> bool {
                 | "SERPLY_API_KEY"
                 | "METASO_API_KEY"
                 | "BAIDU_SEARCH_API_KEY"
+                | "TAVILY_API_KEY"
                 | "DEEPSEEK_SANDBOX_API_KEY"
         )
 }
@@ -7534,13 +7535,41 @@ fn doctor_search_provider_line(config: &Config) -> String {
     } else {
         ""
     };
+    // Missing-key is stdout-only (never JSON) and only applies when the
+    // operator pinned Tavily: autodetect (`tavily key`) cannot reach this line
+    // without a key signal, so it never reports a missing key.
+    let missing_key = if search_provider.provider == crate::config::SearchProvider::Tavily
+        && matches!(
+            search_provider.source,
+            crate::config::SearchProviderSource::Config
+                | crate::config::SearchProviderSource::EnvOverride
+        )
+        && !search_provider_has_tavily_key(config)
+    {
+        "; missing TAVILY_API_KEY or [search] api_key"
+    } else {
+        ""
+    };
 
     format!(
-        "search_provider: {} (source: {}{})",
+        "search_provider: {} (source: {}{}){}",
         search_provider.provider.as_str(),
         search_provider.source.as_str(),
-        switch_hint
+        switch_hint,
+        missing_key
     )
+}
+
+/// Whether *any* Tavily key is reachable: the dedicated env var, or a
+/// non-empty generic `[search] api_key`. Deliberately not prefix-gated — an
+/// explicit `provider = "tavily"` accepts any non-empty generic key.
+fn search_provider_has_tavily_key(config: &Config) -> bool {
+    crate::config::tavily_env_key().is_some()
+        || config
+            .search
+            .as_ref()
+            .and_then(|search| search.api_key.as_deref())
+            .is_some_and(|key| !key.trim().is_empty())
 }
 
 fn doctor_search_provider_json(config: &Config) -> serde_json::Value {
@@ -14637,19 +14666,133 @@ mod doctor_endpoint_tests {
     #[test]
     fn doctor_search_provider_line_includes_firecrawl_default_source_and_switch_hint() {
         let _guard = crate::test_support::lock_test_env();
+        // A Default pin means all three Tavily-resolution signals are absent.
+        let prev_code = std::env::var_os("CODEWHALE_SEARCH_PROVIDER");
         let prev = std::env::var_os("DEEPSEEK_SEARCH_PROVIDER");
-        unsafe { std::env::remove_var("DEEPSEEK_SEARCH_PROVIDER") };
+        let prev_tavily = std::env::var_os("TAVILY_API_KEY");
+        unsafe {
+            std::env::remove_var("CODEWHALE_SEARCH_PROVIDER");
+            std::env::remove_var("DEEPSEEK_SEARCH_PROVIDER");
+            std::env::remove_var("TAVILY_API_KEY");
+        }
 
         let line = doctor_search_provider_line(&Config::default());
 
+        match prev_code {
+            Some(value) => unsafe { std::env::set_var("CODEWHALE_SEARCH_PROVIDER", value) },
+            None => unsafe { std::env::remove_var("CODEWHALE_SEARCH_PROVIDER") },
+        }
         match prev {
             Some(value) => unsafe { std::env::set_var("DEEPSEEK_SEARCH_PROVIDER", value) },
             None => unsafe { std::env::remove_var("DEEPSEEK_SEARCH_PROVIDER") },
+        }
+        match prev_tavily {
+            Some(value) => unsafe { std::env::set_var("TAVILY_API_KEY", value) },
+            None => unsafe { std::env::remove_var("TAVILY_API_KEY") },
         }
         assert!(line.contains("search_provider: firecrawl"));
         assert!(line.contains("source: default"));
         assert!(line.contains("[search] provider"));
         assert!(line.contains("provider = \"baidu\""));
+        assert!(!line.contains("missing"), "got `{line}`");
+    }
+
+    #[test]
+    fn doctor_search_provider_line_reports_autodetected_tavily_key_without_missing_key() {
+        let _guard = crate::test_support::lock_test_env();
+        let prev_code = std::env::var_os("CODEWHALE_SEARCH_PROVIDER");
+        let prev = std::env::var_os("DEEPSEEK_SEARCH_PROVIDER");
+        let prev_tavily = std::env::var_os("TAVILY_API_KEY");
+        unsafe {
+            std::env::remove_var("CODEWHALE_SEARCH_PROVIDER");
+            std::env::remove_var("DEEPSEEK_SEARCH_PROVIDER");
+            std::env::set_var("TAVILY_API_KEY", "tvly-test-doctor");
+        }
+
+        let config = Config::default();
+        let line = doctor_search_provider_line(&config);
+        let report = doctor_search_provider_json(&config);
+
+        match prev_code {
+            Some(value) => unsafe { std::env::set_var("CODEWHALE_SEARCH_PROVIDER", value) },
+            None => unsafe { std::env::remove_var("CODEWHALE_SEARCH_PROVIDER") },
+        }
+        match prev {
+            Some(value) => unsafe { std::env::set_var("DEEPSEEK_SEARCH_PROVIDER", value) },
+            None => unsafe { std::env::remove_var("DEEPSEEK_SEARCH_PROVIDER") },
+        }
+        match prev_tavily {
+            Some(value) => unsafe { std::env::set_var("TAVILY_API_KEY", value) },
+            None => unsafe { std::env::remove_var("TAVILY_API_KEY") },
+        }
+
+        assert_eq!(line, "search_provider: tavily (source: tavily key)");
+        assert_eq!(report["provider"], "tavily");
+        assert_eq!(report["source"], "tavily key");
+        assert!(
+            report.get("missing_key").is_none(),
+            "missing-key is stdout-only: {report}"
+        );
+        // Autodetect is runtime-only; nothing was written to the config view.
+        assert_eq!(
+            config.search.as_ref().and_then(|search| search.provider),
+            None
+        );
+    }
+
+    #[test]
+    fn doctor_search_provider_line_reports_explicit_tavily_missing_key() {
+        let _guard = crate::test_support::lock_test_env();
+        let prev_code = std::env::var_os("CODEWHALE_SEARCH_PROVIDER");
+        let prev = std::env::var_os("DEEPSEEK_SEARCH_PROVIDER");
+        let prev_tavily = std::env::var_os("TAVILY_API_KEY");
+        unsafe {
+            std::env::remove_var("CODEWHALE_SEARCH_PROVIDER");
+            std::env::remove_var("DEEPSEEK_SEARCH_PROVIDER");
+            std::env::remove_var("TAVILY_API_KEY");
+        }
+        let config = Config {
+            search: Some(crate::config::SearchConfig {
+                provider: Some(crate::config::SearchProvider::Tavily),
+                base_url: None,
+                api_key: None,
+            }),
+            ..Default::default()
+        };
+
+        let line = doctor_search_provider_line(&config);
+
+        // The env-override arm of the same rule.
+        unsafe { std::env::set_var("CODEWHALE_SEARCH_PROVIDER", "tavily") };
+        let env_line = doctor_search_provider_line(&Config::default());
+
+        match prev_code {
+            Some(value) => unsafe { std::env::set_var("CODEWHALE_SEARCH_PROVIDER", value) },
+            None => unsafe { std::env::remove_var("CODEWHALE_SEARCH_PROVIDER") },
+        }
+        match prev {
+            Some(value) => unsafe { std::env::set_var("DEEPSEEK_SEARCH_PROVIDER", value) },
+            None => unsafe { std::env::remove_var("DEEPSEEK_SEARCH_PROVIDER") },
+        }
+        match prev_tavily {
+            Some(value) => unsafe { std::env::set_var("TAVILY_API_KEY", value) },
+            None => unsafe { std::env::remove_var("TAVILY_API_KEY") },
+        }
+
+        assert_eq!(
+            line,
+            "search_provider: tavily (source: config); missing TAVILY_API_KEY or [search] api_key"
+        );
+        assert_eq!(
+            env_line,
+            "search_provider: tavily (source: env override); missing TAVILY_API_KEY or [search] api_key"
+        );
+        // Missing-key is stdout-only.
+        assert!(
+            doctor_search_provider_json(&config)
+                .get("missing_key")
+                .is_none()
+        );
     }
 
     #[test]
