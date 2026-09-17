@@ -1427,13 +1427,6 @@ impl ToolRegistryBuilder {
         use super::subagent::AgentTool;
         use super::subagent::register_coordination_tools;
         use super::workflow::WorkflowTool;
-        use super::workflow_trigger::soft_auto_policy_is_linked;
-
-        // Keep soft-auto trigger policy linked in release builds (#4127).
-        debug_assert!(
-            soft_auto_policy_is_linked(),
-            "workflow soft-auto policy must stay linked"
-        );
 
         let builder = self
             .with_tool(Arc::new(WorkflowTool::new(

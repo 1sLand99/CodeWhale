@@ -576,7 +576,6 @@ pub(crate) fn prepare_user_dispatch(
     message: QueuedMessage,
 ) -> Result<UserDispatchPrepare> {
     anyhow::ensure!(!app.redaction_gate, "{INITIAL_PROMPT_DEFERRED_STATUS}");
-    let _ = app.maybe_nudge_for_planning_prompt(&message.display);
     let _ = app.maybe_nudge_plugin_for_prompt(&message.display);
 
     // Plan paused-command changes without touching App or the engine pause

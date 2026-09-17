@@ -3411,7 +3411,7 @@ mod tests {
         let _guard = EnvGuard::new(temp.path());
         let mut app = create_test_app();
         app.status_toasts.clear();
-        assert!(app.maybe_show_behavioral_tip(BehavioralTip::PlanningMode));
+        assert!(app.maybe_show_behavioral_tip(BehavioralTip::McpValidation));
         app.push_status_toast("warning receipt", StatusToastLevel::Warning, None);
         app.push_status_toast("error receipt", StatusToastLevel::Error, None);
         app.sticky_status = Some(StatusToast::context_pressure(
