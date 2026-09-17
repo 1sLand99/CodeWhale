@@ -15,11 +15,11 @@ export const PLUGINS_COPY = {
   marketplaceCta: { en: "Browse the Codewhale catalog", zh: "浏览 Codewhale 目录" },
   docsCta: { en: "Plugin authoring guide", zh: "插件编写指南" },
 
-  cuLabel: { en: "First-party plugin · source preview", zh: "官方插件 · 源码预览" },
+  cuLabel: { en: "First-party plugin · macOS beta", zh: "官方插件 · macOS Beta" },
   cuTitle: { en: "Computer Use: eyes and hands for the agent.", zh: "Computer Use：代理的眼睛与手。" },
   cuLead: {
-    en: "The agent stops being blind to your desktop. It observes the apps you choose, reads their controls through the accessibility tree, types and clicks where you point it — then reports every action with a receipt. Launch qualification covers the local macOS candidate; Windows, Linux and HarmonyOS paths are implemented and still under device verification.",
-    zh: "代理不再对你的桌面视而不见。它观察你选择的应用，通过无障碍树读取控件，在你指定的地方输入与点击——然后用回执报告每一步操作。发布认证目前覆盖本地 macOS 候选版本；Windows、Linux 与 HarmonyOS 路径已实现，仍在设备验证中。",
+    en: "The agent stops being blind to your desktop. It observes the apps you choose, reads their controls through the accessibility tree, types and clicks where you point it — then reports every action with a receipt. macOS is the qualified beta platform; Windows, Linux and HarmonyOS backends remain experimental and source-only.",
+    zh: "代理不再对你的桌面视而不见。它观察你选择的应用，通过无障碍树读取控件，在你指定的地方输入与点击——然后用回执报告每一步操作。macOS 是完成认证的 Beta 平台；Windows、Linux 与 HarmonyOS 后端仍为实验性、仅提供源码。",
   },
   cuInstall: { en: "/plugin marketplace install codewhale computer-use", zh: "/plugin marketplace install codewhale computer-use" },
   cuFeatures: [
@@ -65,10 +65,24 @@ export const PLUGINS_COPY = {
         zh: "过期的观察结果、意外的前台变化与不可用的能力都会携带回执拒绝执行，而非猜测。每个任务独占自己的会话；停止即释放所有按住的输入。",
       },
     },
+    {
+      title: { en: "Drives a browser, in its own profile", zh: "以独立配置文件驱动浏览器" },
+      detail: {
+        en: "A Chromium-family browser is driven over the DevTools protocol in a self-owned profile — clicked by CSS selector or page pixel, screenshotted from the page itself. Your own profile, tabs and logins are never attached to.",
+        zh: "通过 DevTools 协议在独立配置文件中驱动 Chromium 系浏览器——按 CSS 选择器或页面像素点击，直接截取页面画面。你自己的配置文件、标签页与登录信息绝不会被连接。",
+      },
+    },
+    {
+      title: { en: "Watch it, bound it, replay it", zh: "可看、可限、可重放" },
+      detail: {
+        en: "A live preview shows the bound app while a session works, and list_sessions names every live session on the machine. The stop switch halts input, kill_app quits a named app by exact identity, trajectories record every call — refusals included — for faithful replay, and a launch-time capability grant fixes what a session may ever call.",
+        zh: "会话工作时，实时预览持续显示所绑定的应用；list_sessions 列出机器上的每个活动会话。停止开关终止输入，kill_app 按精确身份退出指定应用，轨迹记录包括被拒绝调用在内的每一步以供忠实重放，启动时的能力授权固定会话可调用的范围。",
+      },
+    },
   ],
   cuToolsNote: {
-    en: "39 MCP tools: observation, actions, screenshots and zoom, keyboard and pointer, clipboard, recording, and computer switching.",
-    zh: "39 个 MCP 工具：观察、操作、截图与缩放、键盘与指针、剪贴板、录制以及计算机切换。",
+    en: "36 MCP tools: observation, actions, screenshots and zoom, keyboard and pointer, clipboard, recording, browser control over CDP, window frames, the installed-app catalog, sessions and computer switching.",
+    zh: "36 个 MCP 工具：观察、操作、截图与缩放、键盘与指针、剪贴板、录制、基于 CDP 的浏览器控制、窗口边框、已安装应用目录、会话以及计算机切换。",
   },
 
   catalogLabel: { en: "First-party catalog", zh: "官方目录" },
