@@ -315,28 +315,24 @@ impl SessionPickerView {
         self.refresh_preview();
     }
 
-    fn move_selection(&mut self, delta: isize) {
-        self.selected = crate::tui::list_nav::wrap_index(self.selected, self.filtered.len(), delta);
-        self.ensure_selected_visible();
-        self.refresh_preview();
-    }
-
-    /// Page the session list by one viewport (#6014). Clamped, not wrapped:
-    /// PgDn near the end lands on the last row, not back at the top.
-    fn page_selection(&mut self, direction: isize) {
+    /// Apply one [`list_nav`](crate::tui::list_nav) motion (#6290), returning
+    /// whether it was consumed. `Prev`/`Next` wrap (existing behavior);
+    /// paging and Home/End clamp — a paging key asks to travel, not to
+    /// teleport. The horizontal axis has nowhere to go on this surface.
+    fn apply_motion(&mut self, motion: crate::tui::list_nav::Motion) -> bool {
         if self.filtered.is_empty() {
-            return;
+            return false;
         }
         let page = self.list_visible_rows.get().max(1);
-        self.selected = if direction.is_negative() {
-            self.selected.saturating_sub(page)
-        } else {
-            self.selected
-                .saturating_add(page)
-                .min(self.filtered.len() - 1)
+        let Some(next) =
+            crate::tui::list_nav::apply(self.selected, self.filtered.len(), page, motion)
+        else {
+            return false;
         };
+        self.selected = next;
         self.ensure_selected_visible();
         self.refresh_preview();
+        true
     }
 
     fn select_visible_shortcut(&mut self, c: char) -> bool {
@@ -650,8 +646,12 @@ impl ModalView for SessionPickerView {
 
     fn handle_mouse(&mut self, mouse: MouseEvent) -> ViewAction {
         match mouse.kind {
-            MouseEventKind::ScrollUp => self.move_selection(-1),
-            MouseEventKind::ScrollDown => self.move_selection(1),
+            MouseEventKind::ScrollUp => {
+                self.apply_motion(crate::tui::list_nav::Motion::Prev);
+            }
+            MouseEventKind::ScrollDown => {
+                self.apply_motion(crate::tui::list_nav::Motion::Next);
+            }
             MouseEventKind::Down(MouseButton::Left) => {
                 let clicked = self
                     .last_row_hitboxes
@@ -747,37 +747,33 @@ impl ModalView for SessionPickerView {
             }
         }
 
+        // Shift-modified paging belongs to the preview pane (#6014) and must
+        // be claimed before the shared vocabulary sees the bare keys.
+        if key.modifiers.contains(KeyModifiers::SHIFT) {
+            match key.code {
+                KeyCode::PageUp => {
+                    let rows = self.history_visible_rows.get().max(1);
+                    self.scroll_history(-(rows as isize));
+                    return ViewAction::None;
+                }
+                KeyCode::PageDown => {
+                    let rows = self.history_visible_rows.get().max(1);
+                    self.scroll_history(rows as isize);
+                    return ViewAction::None;
+                }
+                _ => {}
+            }
+        }
+        // Movement keys come from the shared vocabulary (#6290); this match
+        // owns only the picker's own verbs.
+        if let Some(motion) = crate::tui::list_nav::motion(&key)
+            && self.apply_motion(motion)
+        {
+            return ViewAction::None;
+        }
+
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => ViewAction::Close,
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.move_selection(-1);
-                ViewAction::None
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.move_selection(1);
-                ViewAction::None
-            }
-            // PgUp/PgDn page the session list — the picker's primary
-            // navigation target (#6014). The history preview keeps keyboard
-            // paging on Shift+PgUp/PgDn.
-            KeyCode::PageUp if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                let rows = self.history_visible_rows.get().max(1);
-                self.scroll_history(-(rows as isize));
-                ViewAction::None
-            }
-            KeyCode::PageDown if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                let rows = self.history_visible_rows.get().max(1);
-                self.scroll_history(rows as isize);
-                ViewAction::None
-            }
-            KeyCode::PageUp => {
-                self.page_selection(-1);
-                ViewAction::None
-            }
-            KeyCode::PageDown => {
-                self.page_selection(1);
-                ViewAction::None
-            }
             KeyCode::Char('/') => {
                 self.enter_search();
                 ViewAction::None
@@ -1704,6 +1700,30 @@ mod tests {
         assert_eq!(view.selected, 19, "paging clamps at the last row");
         view.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
         assert_eq!(view.selected, 11);
+    }
+
+    /// #6290 step 2: the picker navigates on the shared `list_nav` vocabulary,
+    /// so Home/End exist here and the `j`/`k` aliases keep working — the two
+    /// behaviors this surface previously hand-rolled (or lacked).
+    #[test]
+    fn home_end_and_letter_aliases_come_from_the_shared_vocabulary() {
+        let sessions: Vec<SessionMetadata> = (0..20)
+            .map(|i| test_session(i, &format!("work {i}")))
+            .collect();
+        let mut view = picker_with(sessions, None);
+        for session in &view.sessions {
+            view.preview_cache
+                .insert(session.id.clone(), vec!["preview".to_string()]);
+        }
+
+        view.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(view.selected, 19, "End lands on the last row");
+        view.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(view.selected, 0, "Home lands on the first row");
+        view.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(view.selected, 1, "`j` is still the Down alias");
+        view.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert_eq!(view.selected, 0, "`k` is still the Up alias");
     }
 
     #[test]
