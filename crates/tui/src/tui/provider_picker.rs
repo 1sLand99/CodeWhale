@@ -5470,9 +5470,14 @@ mod tests {
             .find(|row| row.provider == ApiProvider::Deepseek)
             .expect("DeepSeek row");
         assert_eq!(row.readiness, ResolvedProviderReadiness::SavedUnchecked);
+        // Readiness is per route identity (provider + endpoint + auth class +
+        // model), so record the check against the row's own default-route
+        // model. A hardcoded model literal goes stale whenever the provider's
+        // default route moves — which is exactly what happened here.
+        let row_model = row.default_route.logical_model.clone();
 
         let mut health = ProviderReadinessSnapshot::default();
-        health.record_success(&config, ApiProvider::Deepseek, "deepseek-v4-pro");
+        health.record_success(&config, ApiProvider::Deepseek, &row_model);
         let ready =
             ProviderPickerView::new(ApiProvider::Deepseek, &config).with_provider_health(&health);
         assert_eq!(
@@ -5488,7 +5493,7 @@ mod tests {
         health.record_failure_message(
             &config,
             ApiProvider::Deepseek,
-            "deepseek-v4-pro",
+            &row_model,
             crate::error_taxonomy::ErrorCategory::Authentication,
             "credential rejected",
         );
