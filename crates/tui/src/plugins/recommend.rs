@@ -1,9 +1,12 @@
-//! Deterministic plugin suggestions for a user task.
+//! Plugin suggestions for a user task.
 //!
 //! Ranks installed bundles and locally-added marketplace candidates. A
 //! suggestion is never an install, trust, enable, or network side effect.
-//! Proactive toasts must use a high `min_score` so description-only matches
-//! do not nag; `/plugin suggest` can rank more loosely.
+//!
+//! The proactive toast and the `<recommended_plugins>` fragment are driven
+//! by the declared-keyword matcher (`match_plugin_for_draft`), not by the
+//! score below: there is no host score gate on what the model sees. Scoring
+//! only ranks the user-invoked `/plugin suggest` list.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -15,8 +18,6 @@ use super::registry::PluginRegistry;
 use super::types::LoadedPlugin;
 
 const DEFAULT_LIMIT: usize = 3;
-/// Keyword and name matches score 700–900; description fallbacks are ~120.
-pub const PROACTIVE_MIN_SCORE: usize = 700;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecommendOptions {
@@ -31,17 +32,6 @@ impl Default for RecommendOptions {
             limit: DEFAULT_LIMIT,
             min_score: 0,
             include_active: true,
-        }
-    }
-}
-
-impl RecommendOptions {
-    #[must_use]
-    pub fn proactive() -> Self {
-        Self {
-            limit: 1,
-            min_score: PROACTIVE_MIN_SCORE,
-            include_active: false,
         }
     }
 }
@@ -599,11 +589,11 @@ mod tests {
             "add supabase auth to this app",
             &registry,
             &[],
-            RecommendOptions::proactive(),
+            RecommendOptions::default(),
         );
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].name, "supabase");
-        assert!(recs[0].score >= PROACTIVE_MIN_SCORE);
+        assert!(recs[0].score > 0);
         assert_eq!(recs[0].next_step, PluginNextStep::Trust);
         assert_eq!(recs[0].command(), "/plugin trust supabase");
     }
@@ -621,7 +611,7 @@ mod tests {
             "wire up supabase row level security",
             &registry,
             &catalog,
-            RecommendOptions::proactive(),
+            RecommendOptions::default(),
         );
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].name, "supabase");
@@ -638,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn already_active_plugins_are_skipped_for_proactive_toasts() {
+    fn already_active_plugins_are_skipped_when_active_excluded() {
         let _lock = lock_test_env();
         let root = TempDir::new().unwrap();
         let _home = EnvVarGuard::set("CODEWHALE_HOME", root.path().join("home"));
@@ -654,30 +644,10 @@ mod tests {
             "add supabase auth",
             &registry,
             &[],
-            RecommendOptions::proactive(),
-        );
-        assert!(recs.is_empty(), "{recs:?}");
-    }
-
-    #[test]
-    fn generic_prompts_do_not_match_on_description_alone() {
-        let _lock = lock_test_env();
-        let root = TempDir::new().unwrap();
-        let _home = EnvVarGuard::set("CODEWHALE_HOME", root.path().join("home"));
-        write_keyword_bundle(
-            root.path(),
-            "notes",
-            "Create and organize spreadsheet notes",
-            &[],
-        );
-        let registry = crate::plugins::PluginDiscoveryContext::capture_pre_dotenv()
-            .registry_for_workspace(root.path());
-
-        let recs = recommend_plugins_for_task(
-            "fix the failing test",
-            &registry,
-            &[],
-            RecommendOptions::proactive(),
+            RecommendOptions {
+                include_active: false,
+                ..RecommendOptions::default()
+            },
         );
         assert!(recs.is_empty(), "{recs:?}");
     }
