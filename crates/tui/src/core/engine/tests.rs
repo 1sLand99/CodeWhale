@@ -3375,17 +3375,19 @@ async fn operate_goal_probe(mode: AppMode, prompt: &str) -> (Option<String>, boo
 }
 
 #[tokio::test]
-async fn operate_turns_a_work_prompt_into_the_goal_but_work_mode_does_not() {
+async fn operate_never_promotes_wording_to_a_goal() {
     let prompt =
         "Migrate the settings loader to the new config crate and keep the old keys readable";
 
+    // The verb-list promotion is gone: an ordinary work prompt is an ordinary
+    // turn in every mode, and the model decides goals through `create_goal`
+    // (docs/design/TUI_DECONSTRUCTION.md, founder clarification 2026-09-09).
     let (objective, active, contracts) = operate_goal_probe(AppMode::Operate, prompt).await;
     assert_eq!(
-        objective.as_deref(),
-        Some(prompt),
-        "Operate must publish the prompt as the goal before the provider call"
+        objective, None,
+        "the host must not infer a goal from wording"
     );
-    assert!(active, "Operate goal must be active in engine state");
+    assert!(!active);
     assert_eq!(contracts, 1, "Operate appends its contract exactly once");
 
     let (objective, active, contracts) = operate_goal_probe(AppMode::Agent, prompt).await;
@@ -3393,11 +3395,12 @@ async fn operate_turns_a_work_prompt_into_the_goal_but_work_mode_does_not() {
     assert!(!active);
     assert_eq!(contracts, 0, "Work never sees the Operate contract");
 
+    // An explicit declaration still creates one, through the same path.
     let (objective, active, contracts) =
-        operate_goal_probe(AppMode::Operate, "thanks, looks good").await;
-    assert_eq!(objective, None, "chat stays chat even in Operate");
-    assert!(!active);
-    assert_eq!(contracts, 1, "the contract is about the mode, not the goal");
+        operate_goal_probe(AppMode::Operate, "Please set /goal to ship the release").await;
+    assert_eq!(objective.as_deref(), Some("ship the release"));
+    assert!(active, "an explicit declaration must create the goal");
+    assert_eq!(contracts, 1);
 }
 
 #[tokio::test]
@@ -3502,10 +3505,11 @@ async fn operate_contract_is_appended_once_and_an_existing_goal_is_never_replace
         })
     };
 
-    let first =
+    let first_objective =
         "Migrate the settings loader to the new config crate and keep the old keys readable";
+    let first = format!("Please set /goal to {first_objective}");
     handle
-        .send(send(first, None, crate::tools::goal::GoalStatus::Active))
+        .send(send(&first, None, crate::tools::goal::GoalStatus::Active))
         .await
         .expect("send first Operate turn");
     tokio::time::timeout(model_turn_event_timeout(), first_entered.notified())
@@ -3513,7 +3517,7 @@ async fn operate_contract_is_appended_once_and_an_existing_goal_is_never_replace
         .expect("first provider request was never entered");
     assert_eq!(
         goal_state.lock().expect("goal lock").objective(),
-        Some(first)
+        Some(first_objective)
     );
     handle
         .send(Op::SetGoalStatus {
@@ -3534,7 +3538,7 @@ async fn operate_contract_is_appended_once_and_an_existing_goal_is_never_replace
     handle
         .send(send(
             "Refactor the provider table so it survives a config reload",
-            Some(first.to_string()),
+            Some(first_objective.to_string()),
             crate::tools::goal::GoalStatus::Paused,
         ))
         .await
@@ -3554,7 +3558,7 @@ async fn operate_contract_is_appended_once_and_an_existing_goal_is_never_replace
         "the contract must not repeat on later Operate turns"
     );
     let goal = goal_state.lock().expect("goal lock").snapshot();
-    assert_eq!(goal.objective.as_deref(), Some(first));
+    assert_eq!(goal.objective.as_deref(), Some(first_objective));
     assert_eq!(goal.status, "paused");
 
     handle.send(Op::Shutdown).await.expect("shutdown engine");
@@ -12368,9 +12372,10 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
         "\"finish_reason\":\"stop\"}]}\n\n",
         "data: [DONE]\n\n",
     );
-    // Operate turns the work prompt into a goal, so after the approved shell
-    // runs, the model must seal the goal through the same `update_goal` tool
-    // a live Operate turn uses; only then does the final "done" arrive.
+    // Operate no longer infers a goal from wording, so this fixture declares
+    // one explicitly; after the approved shell runs, the model seals it
+    // through the same `update_goal` tool a live Operate turn uses, and only
+    // then does the final "done" arrive.
     let goal_seal_marker = "goal-seal-receipt-0902";
     let goal_sse = concat!(
         "data: {\"id\":\"chatcmpl-operate-goal\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[",
@@ -12456,7 +12461,7 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
     handle
         .send(Op::SendMessage(TurnSpec {
             max_output_tokens: None,
-            content: "write the requested local fixture".to_string(),
+            content: "Please set /goal to write the requested local fixture".to_string(),
             images: Vec::new(),
             mode: AppMode::Operate,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
@@ -12494,19 +12499,9 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
             Event::ApprovalRequired { id, tool_name, .. } => {
                 saw_approval = true;
                 assert_eq!(tool_name, "Bash");
-                // Operate turned this work prompt into the goal; pause it
-                // before the turn ends so the goal-continuation loop cannot
-                // queue passes nobody answers in this mock. The goal-complete
-                // `update_goal` response below stays: it is the receipt a
-                // real Operate turn seals with.
-                handle_for_approval
-                    .send(Op::SetGoalStatus {
-                        goal_id: None,
-                        status: crate::tools::goal::GoalStatus::Paused,
-                        clear: false,
-                    })
-                    .await
-                    .expect("queue goal pause");
+                // No goal is created for this prompt: goals are model-decided
+                // (`create_goal`), so there is no goal-continuation loop to
+                // pause in this mock.
                 handle_for_approval
                     .approve_tool_call(id)
                     .await

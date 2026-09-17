@@ -41,7 +41,7 @@ use crate::route_runtime::{
 };
 use crate::tools::goal::{
     GoalPauseReason, GoalSnapshot, GoalStatus, SharedGoalState, explicit_goal_directive,
-    new_shared_goal_state, operate_goal_from_prompt,
+    new_shared_goal_state,
 };
 use crate::tools::plan::{SharedPlanState, new_shared_plan_state};
 use crate::tools::shell::{SharedShellManager, new_shared_shell_manager};
@@ -4866,9 +4866,11 @@ impl Engine {
         // runtime text, recalled memory, handoffs, and pasted multi-line
         // transcripts cannot create a goal.
         //
-        // Operate turns an ordinary work prompt into the goal through this
-        // same path when the host reports no unfinished goal
-        // (`operate_goal_from_prompt` owns the "is this real work?" rule).
+        // Goals are created by the model (`create_goal`) or by this literal
+        // user declaration; the host never infers one from wording. The
+        // verb-list promotion that used to turn ordinary Operate prompts into
+        // goals is gone (docs/design/TUI_DECONSTRUCTION.md — founder
+        // clarification 2026-09-09: the model decides when a goal is useful).
         // `GoalState::create` still refuses while an unfinished goal exists,
         // so a paused or blocked goal is never silently replaced.
         //
@@ -4876,19 +4878,10 @@ impl Engine {
         // <session_goal> contributor. It adds no new stable-prefix text.
         let goal_request = if provenance.can_authorize_work() {
             explicit_goal_directive(&content)
-                .map(|directive| (directive, true))
-                .or_else(|| {
-                    let host_goal_unfinished =
-                        goal_objective.is_some() && goal_status != GoalStatus::Complete;
-                    (mode == AppMode::Operate && !host_goal_unfinished)
-                        .then(|| operate_goal_from_prompt(&content))
-                        .flatten()
-                        .map(|directive| (directive, false))
-                })
         } else {
             None
         };
-        if let Some((directive, explicit)) = goal_request {
+        if let Some(directive) = goal_request {
             let result = self
                 .config
                 .goal_state
@@ -4910,7 +4903,7 @@ impl Engine {
                     // even when this model would otherwise reply only in prose.
                     let _ = self.tx_event.send(Event::GoalUpdated { snapshot }).await;
                 }
-                Err(error) if explicit => {
+                Err(error) => {
                     let _ = self
                         .tx_event
                         .send(Event::status(format!(
@@ -4918,8 +4911,6 @@ impl Engine {
                         )))
                         .await;
                 }
-                // Operate keeps the unfinished goal it already has.
-                Err(_) => {}
             }
         }
 
