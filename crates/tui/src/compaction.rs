@@ -191,6 +191,7 @@ pub const COMPACTION_SUMMARY_MARKER: &str = "Another language model started to s
 /// Marker written by pre-v0.9.6 compaction; sessions saved under the old
 /// format must still be recognized so their summary is replaced, not stacked.
 pub const LEGACY_COMPACTION_SUMMARY_MARKER: &str = "Conversation Summary (Auto-Generated)";
+const COMPACTION_CHECKPOINT_PROVENANCE: &str = "<!-- codewhale.compaction-checkpoint.v1 -->";
 const COMPACTION_SUMMARY_BEGIN: &str = "<!-- compaction-summary:begin -->";
 const COMPACTION_SUMMARY_END: &str = "<!-- compaction-summary:end -->";
 
@@ -306,16 +307,70 @@ pub fn summary_prompt_text(prompt: &SystemPrompt) -> String {
 pub(crate) fn compaction_checkpoint_message(prompt: &SystemPrompt) -> Message {
     Message {
         role: Role::User,
-        content: vec![ContentBlock::Text {
-            text: summary_prompt_text(prompt),
-            cache_control: None,
-        }],
+        content: vec![
+            ContentBlock::Text {
+                text: summary_prompt_text(prompt),
+                cache_control: None,
+            },
+            ContentBlock::Text {
+                text: COMPACTION_CHECKPOINT_PROVENANCE.to_string(),
+                cache_control: None,
+            },
+        ],
     }
 }
 
 #[must_use]
 pub(crate) fn is_compaction_checkpoint_message(message: &Message) -> bool {
     user_text_of(message).is_some_and(|text| is_compaction_summary_text(&text))
+}
+
+/// Request-time recognition is narrower than legacy summary replacement:
+/// user text merely quoting the marker must keep its original wire position.
+pub(crate) fn is_wire_compaction_checkpoint_message(message: &Message) -> bool {
+    let [
+        ContentBlock::Text {
+            text,
+            cache_control: None,
+        },
+        ContentBlock::Text {
+            text: provenance,
+            cache_control: None,
+        },
+    ] = message.content.as_slice()
+    else {
+        return false;
+    };
+    message.role == Role::User
+        && text.starts_with(SUMMARY_HEADER)
+        && provenance == COMPACTION_CHECKPOINT_PROVENANCE
+}
+
+/// Keep the checkpoint at its original historical boundary on session load.
+/// Later user turns must remain after the saved compaction boundary.
+pub(crate) fn restore_compaction_checkpoint(
+    mut messages: Vec<Message>,
+    checkpoint: Option<&SystemPrompt>,
+) -> Vec<Message> {
+    let typed_position = messages
+        .iter()
+        .position(is_wire_compaction_checkpoint_message);
+    let checkpoint_index = if let Some(index) = typed_position {
+        messages.retain(|message| !is_wire_compaction_checkpoint_message(message));
+        index
+    } else {
+        // Legacy sessions have no independent provenance. Preserve their
+        // existing broad cleanup behavior; identical user text is ambiguous.
+        messages.retain(|message| !is_compaction_checkpoint_message(message));
+        messages.len()
+    };
+    if let Some(checkpoint) = checkpoint {
+        messages.insert(
+            checkpoint_index.min(messages.len()),
+            compaction_checkpoint_message(checkpoint),
+        );
+    }
+    messages
 }
 
 pub(crate) fn estimate_tokens_for_message(message: &Message, include_thinking: bool) -> usize {
@@ -1211,7 +1266,7 @@ pub async fn compact_messages_safe(
         .unwrap_or_else(|| anyhow::anyhow!("Compaction failed after {MAX_RETRIES} retries")))
 }
 
-fn build_compaction_summary_block_text(summary: &str, anchors: &str) -> String {
+pub(crate) fn build_compaction_summary_block_text(summary: &str, anchors: &str) -> String {
     let summary = summary.trim();
     let summary = if summary.is_empty() {
         "(no summary available)"
@@ -1249,6 +1304,7 @@ pub(crate) fn retained_user_messages(messages: &[Message], max_tokens: usize) ->
             break;
         }
         if msg.role != Role::User
+            || crate::runtime_handoff::is_runtime_owned_user_message(msg)
             || (user_text_of(msg).is_none()
                 && !msg
                     .content
@@ -1704,6 +1760,40 @@ mod quota_tests;
 #[cfg(test)]
 mod tests {
     use codewhale_models::{ImageUrlContent, Message};
+
+    #[test]
+    fn restore_replaces_duplicate_generated_checkpoints_without_deleting_user_quote() {
+        let summary = SystemPrompt::Text(build_compaction_summary_block_text("Summary", ""));
+        let generated = compaction_checkpoint_message(&summary);
+        let user_quote = Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: summary_prompt_text(&summary),
+                cache_control: None,
+            }],
+        };
+        assert!(!is_wire_compaction_checkpoint_message(&user_quote));
+        let restored = restore_compaction_checkpoint(
+            vec![generated.clone(), user_quote.clone(), generated],
+            Some(&summary),
+        );
+        assert_eq!(restored.len(), 2);
+        assert!(is_wire_compaction_checkpoint_message(&restored[0]));
+        assert_eq!(restored[1], user_quote);
+
+        // No provenance means the historical broad cleanup remains in force.
+        let legacy = Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: format!("{COMPACTION_SUMMARY_MARKER}\nold summary"),
+                cache_control: None,
+            }],
+        };
+        let legacy_restored =
+            restore_compaction_checkpoint(vec![legacy.clone(), legacy], Some(&summary));
+        assert_eq!(legacy_restored.len(), 1);
+        assert!(is_wire_compaction_checkpoint_message(&legacy_restored[0]));
+    }
 
     #[test]
     fn inline_image_estimates_nonzero_tokens() {
@@ -2275,10 +2365,13 @@ mod tests {
             })
         }));
         assert!(is_compaction_checkpoint_message(retained.last().unwrap()));
-        assert_eq!(
-            user_text_of(retained.last().unwrap()).as_deref(),
-            Some(text.as_str())
-        );
+        assert!(is_wire_compaction_checkpoint_message(
+            retained.last().unwrap()
+        ));
+        assert!(matches!(
+            &retained.last().unwrap().content[0],
+            ContentBlock::Text { text: checkpoint, .. } if checkpoint == text
+        ));
         last_round::validate_last_round_coverage(&messages, &retained[..retained.len() - 1])
             .unwrap();
     }
