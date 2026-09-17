@@ -3412,9 +3412,12 @@ pub(crate) async fn run_event_loop(
                     ) =>
                     {
                         let display = bound_agent_activity_text(&friendly_subagent_progress(
-                            app, &id, &status,
+                            app,
+                            &id,
+                            &status,
+                            activity.routine_wait,
                         ));
-                        if is_noisy_subagent_progress(&status) {
+                        if activity.routine_wait {
                             app.agent_progress
                                 .entry(id.clone())
                                 .or_insert_with(|| display.clone());

@@ -12804,7 +12804,9 @@ async fn run_subagent(
         record_agent_progress(
             runtime,
             &agent_id,
-            AgentProgressEventMeta::new(AgentWorkerStatus::ModelWait).with_step(steps),
+            AgentProgressEventMeta::new(AgentWorkerStatus::ModelWait)
+                .with_step(steps)
+                .routine_wait(),
             format!(
                 "{}: requesting model response",
                 format_step_counter(steps, max_steps)

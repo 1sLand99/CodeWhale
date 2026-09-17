@@ -53,11 +53,6 @@ pub(crate) fn maybe_log_provider_wait_incident(app: &mut App) {
     ));
 }
 
-pub(crate) fn is_noisy_subagent_progress(status: &str) -> bool {
-    let status = status.trim().to_ascii_lowercase();
-    status.contains("requesting model response")
-}
-
 thread_local! {
     /// Objective summaries keyed by agent id (#6213 T7). The objective is
     /// immutable per agent, so `summarize_tool_output` — which JSON-parses the
@@ -99,16 +94,22 @@ fn memoized_objective_summary(id: &str, objective: &str) -> Option<String> {
     })
 }
 
-pub(crate) fn friendly_subagent_progress(app: &App, id: &str, status: &str) -> String {
-    if !is_noisy_subagent_progress(status) {
+pub(crate) fn friendly_subagent_progress(
+    app: &App,
+    id: &str,
+    status: &str,
+    routine_wait: bool,
+) -> String {
+    if !routine_wait {
         return summarize_tool_output(status);
     }
 
     if let Some(summary) = subagent_objective_summary(app, id) {
         return format!("working on {summary}");
     }
+    // Stored entries are always friendly rewrites (the event handler stores
+    // `display`, never raw text), so no content check is needed here.
     if let Some(existing) = app.agent_progress.get(id)
-        && !is_noisy_subagent_progress(existing)
         && existing != "working"
         && existing != "in the current"
     {

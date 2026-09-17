@@ -23614,10 +23614,33 @@ fn noisy_subagent_progress_keeps_existing_objective_summary() {
         "starting: inspect release state".to_string(),
     );
 
-    let display =
-        friendly_subagent_progress(&app, "agent_live", "step 1/8: requesting model response");
+    let display = friendly_subagent_progress(
+        &app,
+        "agent_live",
+        "step 1/8: requesting model response",
+        true,
+    );
 
     assert_eq!(display, "starting: inspect release state");
+}
+
+#[test]
+fn informative_waits_show_their_text_rather_than_rewriting() {
+    // Retry/timeout waits share the ModelWait status but carry informative
+    // text: the producer leaves routine_wait false and the footer shows the
+    // message instead of rewriting it to the objective summary.
+    let app = create_test_app();
+    let display = friendly_subagent_progress(
+        &app,
+        "agent_live",
+        "step 1/8: API call timed out after 30000ms; retrying API request 1/3 in 500ms",
+        false,
+    );
+
+    assert!(
+        display.contains("retrying API request"),
+        "informative wait must stay visible: {display}"
+    );
 }
 
 /// Regression for issue #65: `truncate_line_to_width` with a tiny budget

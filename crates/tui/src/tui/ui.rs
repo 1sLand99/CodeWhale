@@ -90,7 +90,7 @@ use crate::tui::composer_ui::*;
 use crate::tui::context_inspector::ContextInspectorView;
 use crate::tui::event_broker::EventBroker;
 use crate::tui::file_picker_relevance;
-use crate::tui::footer_ui::{friendly_subagent_progress, is_noisy_subagent_progress};
+use crate::tui::footer_ui::friendly_subagent_progress;
 use crate::tui::format_helpers;
 use crate::tui::hotbar::actions::HotbarDispatch;
 use crate::tui::key_shortcuts;
