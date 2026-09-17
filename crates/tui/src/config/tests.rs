@@ -1703,7 +1703,7 @@ fn with_search_resolution_env<R>(set: &[(&str, &str)], body: impl FnOnce() -> R)
         "DEEPSEEK_SEARCH_PROVIDER",
         "TAVILY_API_KEY",
     ];
-    let previous: Vec<Option<OsString>> = keys.iter().map(|key| env::var_os(key)).collect();
+    let previous: Vec<Option<OsString>> = keys.iter().map(env::var_os).collect();
     for key in keys {
         unsafe { env::remove_var(key) };
     }
