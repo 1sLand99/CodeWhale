@@ -56,7 +56,10 @@ use crate::automation_manager::{
 use crate::config::DEFAULT_TEXT_MODEL;
 use crate::config::{ApiProvider, Config, normalize_model_name_for_provider, validate_route};
 use crate::fleet::executor::{FleetExecutor, configured_codewhale_binary};
-use crate::fleet::ledger::{FleetEventReplayError, FleetLedgerState, FleetTaskLedgerStatus};
+use crate::fleet::ledger::{
+    FleetEventReplayError, FleetLedgerState, FleetTaskLedgerStatus, fleet_ledger_path,
+    subscribe_fleet_ledger_appends,
+};
 use crate::fleet::manager::{
     FleetManager, FleetStatusSnapshot, FleetWorkerInspection, FleetWorkerRuntimeProjection,
     ManagedFleetRunDescriptor,
@@ -2225,10 +2228,13 @@ async fn stream_fleet_events(
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
     let (after, limit) = validate_fleet_events_query(query)?;
     let run_id = FleetRunId::from(run_id);
+    // Subscribe before the initial load so no append between the load and the
+    // first wait is missed for longer than the fallback poll (#6211 R7b).
+    let appends = subscribe_fleet_ledger_appends(&fleet_ledger_path(&state.workspace));
     let initial = load_fleet_event_replay(state.clone(), run_id.clone(), after.clone(), limit)
         .await
         .map_err(map_fleet_replay_error)?;
-    let event_stream = replay_live_fleet_events(state, run_id, after, limit, initial);
+    let event_stream = replay_live_fleet_events(state, run_id, after, limit, initial, appends);
     Ok(Sse::new(event_stream).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
@@ -2236,12 +2242,18 @@ async fn stream_fleet_events(
     ))
 }
 
+/// Fallback re-poll when no ledger-append wake arrives. Wakes cover every
+/// in-process append; the fallback heals missed wakes, out-of-process
+/// writers, and ledger compaction, which replaces rather than appends.
+const FLEET_SSE_FALLBACK_POLL: Duration = Duration::from_secs(5);
+
 fn replay_live_fleet_events(
     state: RuntimeApiState,
     run_id: FleetRunId,
     mut after: Option<String>,
     limit: usize,
     initial: FleetEventReplay,
+    appends: std::sync::Arc<tokio::sync::Notify>,
 ) -> impl futures_util::Stream<Item = Result<SseEvent, Infallible>> {
     stream! {
         let mut page = initial;
@@ -2260,7 +2272,14 @@ fn replay_live_fleet_events(
                 yield Ok(fleet_sse_event(&event));
             }
             if !page.has_more {
-                tokio::time::sleep(Duration::from_millis(250)).await;
+                // Register interest before yielding to the runtime so an
+                // append racing this wait still wakes us (#6211 R7b).
+                let notified = appends.notified();
+                tokio::pin!(notified);
+                tokio::select! {
+                    _ = &mut notified => {}
+                    _ = tokio::time::sleep(FLEET_SSE_FALLBACK_POLL) => {}
+                }
             }
             match load_fleet_event_replay(
                 state.clone(),
