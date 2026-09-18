@@ -8108,6 +8108,7 @@ async fn worker_lifecycle_receipts_preserve_owner_outcome_and_durable_replay() -
                             parent_run_id: Some("parent".into()),
                             spawn_depth: Some(2),
                             continuable: Some(id == "worker_interrupted"),
+                            usage: None,
                         })
                         .await;
                 }
@@ -8220,6 +8221,7 @@ async fn preturn_control_status_does_not_make_empty_turn_succeed() -> Result<()>
                     parent_run_id: None,
                     spawn_depth: None,
                     continuable: None,
+                    usage: None,
                 })
                 .await;
             let _ = tx_event
@@ -16473,10 +16475,27 @@ async fn notices_raise_from_engine_events_and_clear_on_settle_or_ack() -> Result
             parent_run_id: None,
             spawn_depth: None,
             continuable: None,
+            usage: Some(crate::tools::subagent::AgentRunUsage {
+                status: "completed".to_string(),
+                input_tokens: Some(800),
+                output_tokens: Some(200),
+                total_tokens: Some(1000),
+                cost_microusd: Some(50),
+                note: String::new(),
+            }),
         })
         .await?;
     let notices = wait_for_notices(&manager, &thread.id, 1).await;
     assert_eq!(notices.len(), 1, "agent completion raises: {notices:?}");
+    // #6315: the completion receipt's usage persists on the event payload
+    // so metrics can answer where the child tokens went.
+    let events = manager.events_since(&thread.id, None)?;
+    let completed = events
+        .iter()
+        .find(|event| event.event == "agent.completed")
+        .expect("agent.completed persisted");
+    assert_eq!(completed.payload["usage"]["total_tokens"], 1000);
+    assert_eq!(completed.payload["usage"]["cost_microusd"], 50);
 
     harness
         .tx_event

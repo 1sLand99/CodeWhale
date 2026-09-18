@@ -440,6 +440,9 @@ pub enum Event {
         parent_run_id: Option<String>,
         spawn_depth: Option<u32>,
         continuable: Option<bool>,
+        /// Provider-reported child usage from the durable ledger (#6315).
+        /// None means the worker has no usage receipt, never zero tokens.
+        usage: Option<crate::tools::subagent::AgentRunUsage>,
     },
 
     /// Receipt for an operator follow-up sent to a child (`Op::FollowUpSubAgent`).

@@ -719,6 +719,9 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
             parent_run_id,
             spawn_depth,
             continuable,
+            // Child usage stays off the wire: no protocol client consumes
+            // it, and metrics reads the persisted runtime payload (#6315).
+            usage: _,
         } => wire::EventMsg::AgentComplete {
             thread_id,
             session_id,
@@ -1248,6 +1251,7 @@ mod tests {
                 parent_run_id: Some("parent".into()),
                 spawn_depth: Some(2),
                 continuable: Some(false),
+                usage: None,
             };
             let wire = serde_json::to_value(event_to_protocol(&event, &ids)).unwrap();
             assert_eq!(wire["worker_status"].as_str(), expected);

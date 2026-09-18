@@ -2282,6 +2282,7 @@ impl SubAgentTerminalDeliveryContext {
                 parent_run_id: result.parent_run_id.clone(),
                 spawn_depth: Some(result.spawn_depth),
                 continuable: Some(subagent_checkpoint_is_continuable(result)),
+                usage: result.usage.clone(),
             });
         }
     }
