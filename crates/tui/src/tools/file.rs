@@ -951,15 +951,24 @@ impl ToolSpec for ReadFileTool {
 
         // Open before parameter parsing so a missing file keeps the
         // historical "Failed to read …" error shape regardless of the other
-        // arguments.
-        let file = tokio::fs::File::open(&file_path).await.map_err(|e| {
-            ToolError::execution_failed(format!("Failed to read {}: {}", file_path.display(), e))
-        })?;
-        let file_bytes = file
-            .metadata()
-            .await
-            .map(|meta| meta.len())
-            .unwrap_or(u64::MAX);
+        // arguments. The open and size probe run on the blocking pool —
+        // tool handlers execute on the Tokio runtime (blocking-call
+        // convention, #6149).
+        let file_bytes = tokio::task::spawn_blocking({
+            let file_path = file_path.clone();
+            move || {
+                let file = fs::File::open(&file_path).map_err(|e| {
+                    ToolError::execution_failed(format!(
+                        "Failed to read {}: {}",
+                        file_path.display(),
+                        e
+                    ))
+                })?;
+                Ok::<_, ToolError>(file.metadata().map(|meta| meta.len()).unwrap_or(u64::MAX))
+            }
+        })
+        .await
+        .map_err(|e| ToolError::execution_failed(format!("File open task: {e}")))??;
 
         let explicit_range = input
             .get("start_line")
@@ -970,7 +979,6 @@ impl ToolSpec for ReadFileTool {
         // explicit range — otherwise an explicit `start_line = 5` on a
         // tiny file would silently ignore the request.
         if !explicit_range && file_bytes <= SMALL_FILE_BYTES as u64 {
-            drop(file);
             let contents = tokio::fs::read_to_string(&file_path).await.map_err(|e| {
                 ToolError::execution_failed(format!(
                     "Failed to read {}: {}",
@@ -1049,28 +1057,44 @@ impl ToolSpec for ReadFileTool {
         // Bounded read for ranged/large files: skip and take lines through a
         // BufReader instead of materializing the whole file. The stream still
         // runs to EOF so the total line count and whole-file UTF-8 validation
-        // match the historical read_to_string behavior.
-        let (window, total_lines) =
-            read_window_streaming(file.into_std().await, start_line, max_lines).map_err(|e| {
-                ToolError::execution_failed(format!(
-                    "Failed to read {}: {}",
-                    file_path.display(),
-                    e
-                ))
-            })?;
+        // match the historical read_to_string behavior. Open, stream, and hash
+        // all run on the blocking pool (blocking-call convention, #6149).
+        let (window, total_lines, hash) = tokio::task::spawn_blocking({
+            let file_path = file_path.clone();
+            move || {
+                let file = fs::File::open(&file_path).map_err(|e| {
+                    ToolError::execution_failed(format!(
+                        "Failed to read {}: {}",
+                        file_path.display(),
+                        e
+                    ))
+                })?;
+                let (window, total_lines) = read_window_streaming(file, start_line, max_lines)
+                    .map_err(|e| {
+                        ToolError::execution_failed(format!(
+                            "Failed to read {}: {}",
+                            file_path.display(),
+                            e
+                        ))
+                    })?;
+                // The window is a slice; the guard needs the whole file. A
+                // second streaming pass digests the rest without ever
+                // materializing it. A failure here only costs the guard — the
+                // read itself already succeeded, so the window is still
+                // returned, just without a hash to pass back to `edit`.
+                // Special files are skipped: reopening a FIFO or device can
+                // block indefinitely (or re-consume a one-shot stream), and a
+                // stream has no stable content an edit guard could pin.
+                let hash = match fs::metadata(&file_path) {
+                    Ok(meta) if meta.is_file() => hash_file_streaming(&file_path).ok(),
+                    _ => None,
+                };
+                Ok::<_, ToolError>((window, total_lines, hash))
+            }
+        })
+        .await
+        .map_err(|e| ToolError::execution_failed(format!("File read task: {e}")))??;
         context.note_file_read(&file_path);
-
-        // The window is a slice; the guard needs the whole file. A second
-        // streaming pass digests the rest without ever materializing it. A
-        // failure here only costs the guard — the read itself already
-        // succeeded, so the window is still returned, just without a hash to
-        // pass back to `edit`. Special files are skipped: reopening a FIFO or
-        // device can block indefinitely (or re-consume a one-shot stream),
-        // and a stream has no stable content an edit guard could pin.
-        let hash = match tokio::fs::metadata(&file_path).await {
-            Ok(meta) if meta.is_file() => hash_file_streaming(&file_path).ok(),
-            _ => None,
-        };
 
         // `start_line > total_lines` is not an error — it lets the model
         // page past the end without raising. Returns an empty-content

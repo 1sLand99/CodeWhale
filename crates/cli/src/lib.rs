@@ -5373,13 +5373,15 @@ fn tui_argv(cli: &Cli, passthrough: Vec<String>) -> Vec<String> {
 
 /// Set one process environment variable for the CLI-to-TUI bridge.
 ///
-/// The dispatcher must call this only on the main thread before the TUI
-/// runtime starts; all current callers are inside [`apply_tui_env`].
+/// Callers must guarantee no concurrent environment access: production
+/// callers run pre-runtime on the main thread, and tests serialize on the
+/// shared env lock. All current callers are inside [`apply_tui_env`].
 fn set_tui_env(key: impl AsRef<std::ffi::OsStr>, value: impl AsRef<std::ffi::OsStr>) {
-    // SAFETY: the dispatcher runs on the main thread and these setters execute
-    // before the TUI runtime starts. The only other thread that may be alive
-    // is the detached telemetry writer, which never reads or writes the
-    // process environment, so no concurrent environment access can occur.
+    // SAFETY: no concurrent environment access. Production setters run on
+    // the main thread before the TUI runtime starts, and the only other
+    // thread that may be alive is the detached telemetry writer, which
+    // never reads or writes the process environment. Tests serialize on
+    // the shared env lock instead.
     unsafe {
         std::env::set_var(key, value);
     }

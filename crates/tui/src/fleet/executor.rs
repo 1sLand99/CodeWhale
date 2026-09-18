@@ -931,6 +931,11 @@ impl FleetExecutor {
             // Whatever remains has no newline; drop it rather than buffering
             // a newline-free flood forever.
             if stream.pending.len() as u64 > Self::MAX_DRAIN_BYTES {
+                tracing::debug!(
+                    worker_id,
+                    dropped_bytes = stream.pending.len(),
+                    "fleet drain dropped a newline-free flood exceeding the per-call budget"
+                );
                 stream.pending.clear();
             }
         }
