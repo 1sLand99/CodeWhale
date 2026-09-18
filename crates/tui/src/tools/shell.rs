@@ -3872,6 +3872,17 @@ fn attach_shell_owner_metadata(metadata: &mut serde_json::Value, context: &ToolC
     metadata["owner_agent_name"] = json!(owner.agent_name);
 }
 
+/// NUL bytes cannot cross the `exec` boundary: `Command` panics on them.
+/// Refuse with the byte offset before anything spawns (#5529).
+fn require_no_nul<'a>(value: &'a str, field: &str) -> Result<&'a str, ToolError> {
+    if let Some(offset) = value.find('\0') {
+        return Err(ToolError::invalid_input(format!(
+            "Shell {field} contains a NUL byte at byte offset {offset}; it cannot cross the exec boundary. Remove it (usually a truncated heredoc or binary paste) and re-send."
+        )));
+    }
+    Ok(value)
+}
+
 fn enforce_readonly_github_network_policy(
     command: &str,
     context: &ToolContext,
@@ -5109,7 +5120,7 @@ impl ToolSpec for BashTool {
                 )));
             }
         }
-        let command = required_str(&input, "command")?;
+        let command = require_no_nul(required_str(&input, "command")?, "command")?;
         match context.shell_policy {
             ShellPolicy::None => {
                 return Ok(ToolResult::error(
@@ -5278,6 +5289,7 @@ impl ToolSpec for BashTool {
                 value
                     .as_str()
                     .ok_or_else(|| type_mismatch(name, value, "a string"))
+                    .and_then(|dir| require_no_nul(dir, name))
             })
             .transpose()?
         {

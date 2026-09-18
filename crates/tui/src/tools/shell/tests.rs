@@ -3885,6 +3885,54 @@ async fn unknown_bash_action_is_refused_instead_of_running_the_command() {
     assert!(!marker.exists(), "the command must not have run");
 }
 
+/// A NUL byte cannot cross the `exec` boundary: `Command` panics on it.
+/// Refuse with the byte offset before anything spawns (#5529).
+#[tokio::test]
+async fn nul_byte_in_shell_command_is_refused_before_spawn() {
+    let workspace = tempdir().expect("workspace");
+    let context = ToolContext::new(workspace.path().to_path_buf());
+    let marker = workspace.path().join("should-not-exist");
+
+    let error = BashTool::new("Bash")
+        .execute(
+            json!({
+                "command": format!("echo hi\0; touch {}", marker.display()),
+            }),
+            &context,
+        )
+        .await
+        .expect_err("NUL byte must be refused");
+
+    let message = error.to_string();
+    assert!(message.contains("NUL byte"), "{message}");
+    assert!(message.contains("byte offset 7"), "{message}");
+    assert!(!marker.exists(), "the command must not have run");
+}
+
+/// `cwd` crosses the same boundary via `current_dir`, so the guard covers it
+/// too (#5529).
+#[tokio::test]
+async fn nul_byte_in_shell_cwd_is_refused_before_spawn() {
+    let workspace = tempdir().expect("workspace");
+    let context = ToolContext::new(workspace.path().to_path_buf());
+
+    let error = BashTool::new("Bash")
+        .execute(
+            json!({
+                "command": "echo hi",
+                "cwd": "sub\0dir",
+            }),
+            &context,
+        )
+        .await
+        .expect_err("NUL byte must be refused");
+
+    let message = error.to_string();
+    assert!(message.contains("NUL byte"), "{message}");
+    assert!(message.contains("cwd"), "{message}");
+    assert!(message.contains("byte offset 3"), "{message}");
+}
+
 /// The same hole one type down. `and_then(as_str).unwrap_or("run")` read a
 /// non-string `action` as absent and fell through to the branch that executes
 /// arbitrary code, so `Bash{action: 3, command: "…"}` ran the command. `File`,
