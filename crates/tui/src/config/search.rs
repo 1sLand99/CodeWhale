@@ -64,11 +64,6 @@ pub enum SearchProvider {
     /// returns Google organic results with snippets. Falls back to the
     /// `SERPLY_API_KEY` env var when `[search] api_key` is not set.
     Serply,
-    /// TinyFish Search API (<https://tinyfish.ai>). Free at any wallet
-    /// balance, but requires an API key: `[search] api_key`, or the
-    /// `TINYFISH_API_KEY` env var (which also autodetects this provider).
-    #[serde(alias = "tiny-fish", alias = "tiny_fish")]
-    Tinyfish,
 }
 
 impl SearchProvider {
@@ -88,7 +83,6 @@ impl SearchProvider {
             "volcengine" | "ark" | "volc" | "volcengine-ark" => Some(Self::Volcengine),
             "sofya" => Some(Self::Sofya),
             "serply" => Some(Self::Serply),
-            "tinyfish" | "tiny-fish" | "tiny_fish" => Some(Self::Tinyfish),
             _ => None,
         }
     }
@@ -107,13 +101,12 @@ impl SearchProvider {
             Self::Volcengine => "volcengine",
             Self::Sofya => "sofya",
             Self::Serply => "serply",
-            Self::Tinyfish => "tinyfish",
         }
     }
 
     #[must_use]
     pub fn names_hint() -> &'static str {
-        "bing, duckduckgo, firecrawl, tavily, bocha, metaso, searxng, baidu, volcengine, sofya, serply, tinyfish"
+        "bing, duckduckgo, firecrawl, tavily, bocha, metaso, searxng, baidu, volcengine, sofya, serply"
     }
 }
 
@@ -126,10 +119,6 @@ pub enum SearchProviderSource {
     /// `[search] api_key` / `CODEWHALE_SEARCH_API_KEY` value in the `tvly-`
     /// family. Runtime-only — resolution never writes `[search] provider`.
     TavilyKey,
-    /// Autodetected from `TINYFISH_API_KEY`. TinyFish publishes no key
-    /// prefix to sniff, so a generic `[search] api_key` never autodetects
-    /// it. Runtime-only, like [`Self::TavilyKey`].
-    TinyfishKey,
 }
 
 impl SearchProviderSource {
@@ -144,7 +133,6 @@ impl SearchProviderSource {
             Self::Config => "config",
             Self::EnvOverride => "env override",
             Self::TavilyKey => "tavily key",
-            Self::TinyfishKey => "tinyfish key",
         }
     }
 }
@@ -188,28 +176,6 @@ pub fn tavily_key_from(search_api_key: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
-/// `TINYFISH_API_KEY`, read at request time. Same never-merged discipline
-/// as [`tavily_env_key`]: the generic `[search] api_key` slot is shared, so
-/// merging would forward a TinyFish key to another provider.
-#[must_use]
-pub fn tinyfish_env_key() -> Option<String> {
-    std::env::var("TINYFISH_API_KEY")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-/// The key a TinyFish request should send.
-///
-/// Dedicated env only: TinyFish publishes no key prefix, so unlike Tavily
-/// there is no safe generic sniff — a generic `[search] api_key` is honored
-/// solely by the explicit-`provider = "tinyfish"` fallback in the adapter,
-/// never for autodetect.
-#[must_use]
-pub fn tinyfish_key_from(_search_api_key: Option<&str>) -> Option<String> {
-    tinyfish_env_key()
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SearchProviderResolution {
     pub provider: SearchProvider,
@@ -227,19 +193,17 @@ pub struct SearchConfig {
     /// SearXNG instance root or `/search` endpoint.
     #[serde(default)]
     pub base_url: Option<String>,
-    /// Optional for Firecrawl; required for Tavily, Bocha, Metaso, Baidu, Volcengine, Sofya, Serply, or Tinyfish.
+    /// Optional for Firecrawl; required for Tavily, Bocha, Metaso, Baidu, Volcengine, Sofya, or Serply.
     /// Metaso also falls back to the `METASO_API_KEY` env var.
     /// Baidu also falls back to `BAIDU_SEARCH_API_KEY` env var.
     /// Serply also falls back to the `SERPLY_API_KEY` env var.
-    /// Tinyfish also falls back to the `TINYFISH_API_KEY` env var.
     /// Volcengine also falls back to `VOLCENGINE_API_KEY` / `VOLCENGINE_ARK_API_KEY` / `ARK_API_KEY` env vars.
     ///
     /// This slot is shared across providers. `TAVILY_API_KEY` is **not**
     /// merged into it — Tavily reads its dedicated env at request time
     /// ([`tavily_key_from`]) so pinning another provider never forwards a
     /// Tavily key, and a `tvly-` value here can autodetect Tavily without a
-    /// disk write. `TINYFISH_API_KEY` follows the same discipline
-    /// ([`tinyfish_key_from`]).
+    /// disk write.
     #[serde(default)]
     pub api_key: Option<String>,
 }

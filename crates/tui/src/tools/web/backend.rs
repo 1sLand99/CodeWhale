@@ -38,7 +38,6 @@ pub(crate) enum ConfiguredSearchBackend<'a> {
     Volcengine(BackendContext<'a>),
     Sofya(BackendContext<'a>),
     Serply(BackendContext<'a>),
-    Tinyfish(BackendContext<'a>),
 }
 
 #[derive(Clone, Copy)]
@@ -64,7 +63,6 @@ impl<'a> ConfiguredSearchBackend<'a> {
             SearchProvider::Volcengine => Self::Volcengine(backend),
             SearchProvider::Sofya => Self::Sofya(backend),
             SearchProvider::Serply => Self::Serply(backend),
-            SearchProvider::Tinyfish => Self::Tinyfish(backend),
         }
     }
 
@@ -81,7 +79,6 @@ impl<'a> ConfiguredSearchBackend<'a> {
             Self::Volcengine(_) => SearchProvider::Volcengine,
             Self::Sofya(_) => SearchProvider::Sofya,
             Self::Serply(_) => SearchProvider::Serply,
-            Self::Tinyfish(_) => SearchProvider::Tinyfish,
         }
     }
 
@@ -97,8 +94,7 @@ impl<'a> ConfiguredSearchBackend<'a> {
             | Self::Baidu(context)
             | Self::Volcengine(context)
             | Self::Sofya(context)
-            | Self::Serply(context)
-            | Self::Tinyfish(context) => context,
+            | Self::Serply(context) => context,
         }
     }
 }
@@ -297,7 +293,6 @@ impl SearchBackend for ConfiguredSearchBackend<'_> {
             SearchProvider::Volcengine => BackendId::Volcengine,
             SearchProvider::Sofya => BackendId::Sofya,
             SearchProvider::Serply => BackendId::Serply,
-            SearchProvider::Tinyfish => BackendId::Tinyfish,
         }
     }
 

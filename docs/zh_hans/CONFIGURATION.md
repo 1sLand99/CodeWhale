@@ -1357,11 +1357,9 @@ Codewhale 按 `score` 从高到低排序返回行，再对排序结果应用 `ma
 
 **Tavily**([tavily.com](https://tavily.com))在存在 Tavily key 且没有固定 provider 时自动选中：设置了 `TAVILY_API_KEY`，或 `[search] api_key` / `CODEWHALE_SEARCH_API_KEY` 属于 `tvly-` 家族。doctor 会把这种情况报告为 `source: tavily key`。自动检测只在运行时生效——Codewhale 不会为它写入 `[search] provider`，也不会把 `TAVILY_API_KEY` 合并进 `[search] api_key`。显式的 `[search] provider` 或 `CODEWHALE_SEARCH_PROVIDER` 始终优先，所以即使环境里有 Tavily key，`provider = "firecrawl"` 仍然是 Firecrawl。固定为 `tavily` 时接受任何非空的 `[search] api_key`，由该 key 或 `TAVILY_API_KEY` 提供配置；两者都为空时直接失败关闭。
 
-**TinyFish**([tinyfish.ai](https://tinyfish.ai))搜索在任何钱包余额下都免费，只需要一个 API key。没有固定 provider 且没有 Tavily 信号时，它从 `TINYFISH_API_KEY` 自动检测（两个 key 都存在时，故意配置的付费 Tavily 仍然优先）。doctor 会把这种情况报告为 `source: tinyfish key`。和 Tavily 一样只在运行时生效：不写盘、不合并进 `[search] api_key`。固定为 `tinyfish` 时接受任何非空的 `[search] api_key`，由该 key 或 `TINYFISH_API_KEY` 提供配置；两者都为空时直接失败关闭。
-
 ```toml
 [search]
-provider = "firecrawl" # 也 duckduckgo | bing | tavily | bocha | metaso | searxng | baidu | volcengine | sofya | serply | tinyfish
+provider = "firecrawl" # 也 duckduckgo | bing | tavily | bocha | metaso | searxng | baidu | volcengine | sofya | serply
 # base_url = "https://search.example/" # provider = "duckduckgo" 时可选;"searxng" 时必填
 # api_key = "YOUR_KEY" # firecrawl 可选;其他 API 提供商必填
 ```

@@ -4650,17 +4650,6 @@ impl Config {
             };
         }
 
-        // TinyFish autodetect: a dedicated `TINYFISH_API_KEY` only — no
-        // published key prefix exists to sniff a generic key against.
-        // Checked after Tavily so a deliberate paid Tavily setup keeps
-        // winning when both keys are present. Runtime-only, like Tavily.
-        if tinyfish_key_from(generic_key).is_some() {
-            return SearchProviderResolution {
-                provider: SearchProvider::Tinyfish,
-                source: SearchProviderSource::TinyfishKey,
-            };
-        }
-
         SearchProviderResolution {
             provider: SearchProvider::default(),
             source: SearchProviderSource::Default,
