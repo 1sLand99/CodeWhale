@@ -2694,6 +2694,68 @@ impl ConfigView {
         &self.filter
     }
 
+    /// The key whose inline editor is open, if any. Exposes the transient
+    /// editing state to the host-level tests in `tui::ui::tests` that drive
+    /// the real `refresh_config_view_if_open` path (#theme-nav-exit).
+    ///
+    /// Test-only: production code reads `editing` directly, and a non-test lib
+    /// build would flag this as dead code under `-D warnings`.
+    #[cfg(test)]
+    pub(crate) fn editing_key(&self) -> Option<&str> {
+        self.editing.as_ref().map(|edit| edit.key.as_str())
+    }
+
+    /// The highlighted choice index inside the open editor, if any.
+    ///
+    /// Test-only; see [`Self::editing_key`].
+    #[cfg(test)]
+    pub(crate) fn editing_selected_choice(&self) -> Option<usize> {
+        self.editing.as_ref().map(|edit| edit.selected_choice)
+    }
+
+    /// Rebuild after the host applied a setting (`refresh_config_view_if_open`)
+    /// while keeping the open editor alive.
+    ///
+    /// The theme editor live-previews on every highlight, and each preview is a
+    /// `ConfigUpdated` that lands here again. A bare `new_for_app` dropped
+    /// `editing`, so the first arrow key closed the editor, the next one fell
+    /// through to the non-editing key map (where Left/Right switch category),
+    /// and `selected_choice` snapped back to 0. The user saw the highlight leap
+    /// away from the row they were on — the theme never moved (#theme-nav-exit).
+    ///
+    /// The rows themselves must come from the refreshed snapshot: a persisted
+    /// commit changes the value on disk and the row has to show it. Only the
+    /// transient editing state is carried over.
+    pub(crate) fn rebuild_preserving(app: &App, previous: &Self, focus_key: &str) -> Self {
+        let mut view = Self::new_for_app(app);
+        view.restore_filter(previous.filter_query().to_string());
+        view.focus_key(focus_key);
+        let carried = match &previous.editing {
+            // A row that vanished from the refreshed snapshot (filter, scope or
+            // availability changed underneath) has no editor to belong to.
+            Some(edit) => view
+                .rows
+                .iter()
+                .position(|row| row.key == edit.key)
+                .map(|index| (index, edit.clone())),
+            None => None,
+        };
+        match carried {
+            Some((index, mut edit)) => {
+                // The highlight is the user's cursor, not a disk fact: keep it
+                // inside the refreshed choice list instead of resetting it.
+                let choices_len = edit.choices.as_ref().map_or(0, Vec::len);
+                if edit.selected_choice >= choices_len {
+                    edit.selected_choice = choices_len.saturating_sub(1);
+                }
+                view.selected = index;
+                view.editing = Some(edit);
+            }
+            None => view.editing = None,
+        }
+        view
+    }
+
     pub(crate) fn restore_filter(&mut self, filter: String) {
         self.update_filter(|current| *current = filter);
     }
