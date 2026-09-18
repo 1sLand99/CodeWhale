@@ -16,4 +16,4 @@ To activate:
 
 Skills: gh-file-issue, gh-compile-issues, gh-assign-issues, gh-find-prs,
 gh-treasure-hunt, gh-close-issues, gh-credit-harvest, codew-release-qa-sweep,
-contributor-onboarding.
+contributor-onboarding, feedback.

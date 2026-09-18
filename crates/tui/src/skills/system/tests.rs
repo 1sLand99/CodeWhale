@@ -73,8 +73,9 @@ fn contributor_onboarding_is_repo_local_and_keeps_its_refusals() {
     // The pin tracks the current catalog generation: 9 added handoff,
     // 10 added mcp-discovery (#5238), 11 rewrote mcp-discovery from a
     // Registry-first gate into a missing-capability fallback, 12 added the
-    // everyday pack and demoted contributor-onboarding to repo-local.
-    assert_eq!(BUNDLED_SKILL_VERSION, "12");
+    // everyday pack and demoted contributor-onboarding to repo-local, 13
+    // trimmed social-media/health and demoted feedback to repo-local.
+    assert_eq!(BUNDLED_SKILL_VERSION, "13");
     assert!(
         !is_bundled_skill_name("contributor-onboarding"),
         "contributor-onboarding must not ship to every user anymore"
@@ -127,6 +128,42 @@ fn upgrade_to_generation_12_leaves_contributor_onboarding_in_place() {
         !skill_file(&fresh, "contributor-onboarding").exists(),
         "fresh installs must not receive the repo-local skill"
     );
+}
+
+/// Generation 13 trims `social-media` and `health` from the bundle and moves
+/// `feedback` repo-local. None of the three may ship to new installs; a
+/// generation-12 `feedback` copy is left in place, never deleted by name.
+#[test]
+fn generation_13_trims_pack_and_feedback_goes_repo_local() {
+    for name in ["social-media", "health", "feedback"] {
+        assert!(
+            !is_bundled_skill_name(name),
+            "{name} must not ship in generation 13"
+        );
+    }
+
+    let tmp = TempDir::new().unwrap();
+    fs::write(marker_file(&tmp), "12").unwrap();
+    let dir = skill_dir(&tmp, "feedback");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("SKILL.md"), feedback_body()).unwrap();
+
+    install_system_skills(tmp.path()).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(skill_file(&tmp, "feedback")).unwrap(),
+        feedback_body(),
+        "upgrade must leave the installed feedback copy untouched"
+    );
+
+    let fresh = TempDir::new().unwrap();
+    install_system_skills(fresh.path()).unwrap();
+    for name in ["social-media", "health", "feedback"] {
+        assert!(
+            !skill_file(&fresh, name).exists(),
+            "fresh installs must not receive {name}"
+        );
+    }
 }
 
 #[test]

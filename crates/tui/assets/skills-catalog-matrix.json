@@ -15,7 +15,7 @@
     "in_model_catalogue": "true when the skill renders as an ambient catalogue line",
     "shadowed_aliases": "aliases that collide with another canonical bundled name; the canonical skill wins resolution"
   },
-  "generation": "12",
+  "generation": "13",
   "skills": [
     {
       "name": "skill-creator",
@@ -332,14 +332,6 @@
       "shadowed_aliases": []
     },
     {
-      "name": "social-media",
-      "tier": "core",
-      "invocation": "model+user",
-      "aliases": [],
-      "in_model_catalogue": true,
-      "shadowed_aliases": []
-    },
-    {
       "name": "money",
       "tier": "core",
       "invocation": "model+user",
@@ -365,14 +357,6 @@
     },
     {
       "name": "podcast",
-      "tier": "core",
-      "invocation": "model+user",
-      "aliases": [],
-      "in_model_catalogue": true,
-      "shadowed_aliases": []
-    },
-    {
-      "name": "health",
       "tier": "core",
       "invocation": "model+user",
       "aliases": [],
@@ -421,14 +405,6 @@
     },
     {
       "name": "forget",
-      "tier": "core",
-      "invocation": "model+user",
-      "aliases": [],
-      "in_model_catalogue": true,
-      "shadowed_aliases": []
-    },
-    {
-      "name": "feedback",
       "tier": "core",
       "invocation": "model+user",
       "aliases": [],

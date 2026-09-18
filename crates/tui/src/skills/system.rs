@@ -24,7 +24,10 @@ use std::path::Path;
 /// shopping/travel, media, github, goals, forget, feedback) and demotes
 /// `contributor-onboarding` to a repo-local project skill: existing installed
 /// copies are left in place, new installs do not receive it.
-const BUNDLED_SKILL_VERSION: &str = "12";
+/// Generation 13 trims the pack: `social-media` and `health` ship to nobody
+/// (phone-export workflows, not everyday), and `feedback` joins
+/// `contributor-onboarding` as a repo-local project skill.
+const BUNDLED_SKILL_VERSION: &str = "13";
 
 // ── system & extension (meta) ───────────────────────────────────────────────
 const SKILL_CREATOR_BODY: &str = include_str!("../../assets/skills/skill-creator/SKILL.md");
@@ -64,12 +67,10 @@ const SPREADSHEETS_ALIAS_BODY: &str = include_str!("../../assets/skills/spreadsh
 const GITHUB_BODY: &str = include_str!("../../assets/skills/github/SKILL.md");
 const GMAIL_BODY: &str = include_str!("../../assets/skills/gmail/SKILL.md");
 const GOOGLE_CALENDAR_BODY: &str = include_str!("../../assets/skills/google-calendar/SKILL.md");
-const SOCIAL_MEDIA_BODY: &str = include_str!("../../assets/skills/social-media/SKILL.md");
 const MONEY_BODY: &str = include_str!("../../assets/skills/money/SKILL.md");
 const SPOTIFY_BODY: &str = include_str!("../../assets/skills/spotify/SKILL.md");
 const TTS_BODY: &str = include_str!("../../assets/skills/tts/SKILL.md");
 const PODCAST_BODY: &str = include_str!("../../assets/skills/podcast/SKILL.md");
-const HEALTH_BODY: &str = include_str!("../../assets/skills/health/SKILL.md");
 const SHOPPING_BODY: &str = include_str!("../../assets/skills/shopping/SKILL.md");
 const FLIGHTS_BODY: &str = include_str!("../../assets/skills/flights/SKILL.md");
 const PHOTOS_BODY: &str = include_str!("../../assets/skills/photos/SKILL.md");
@@ -316,11 +317,6 @@ const BUNDLED_SKILLS: &[BundledSkill] = &[
         introduced_in: 12,
     },
     BundledSkill {
-        name: "social-media",
-        body: SOCIAL_MEDIA_BODY,
-        introduced_in: 12,
-    },
-    BundledSkill {
         name: "money",
         body: MONEY_BODY,
         introduced_in: 12,
@@ -338,11 +334,6 @@ const BUNDLED_SKILLS: &[BundledSkill] = &[
     BundledSkill {
         name: "podcast",
         body: PODCAST_BODY,
-        introduced_in: 12,
-    },
-    BundledSkill {
-        name: "health",
-        body: HEALTH_BODY,
         introduced_in: 12,
     },
     BundledSkill {
@@ -373,11 +364,6 @@ const BUNDLED_SKILLS: &[BundledSkill] = &[
     BundledSkill {
         name: "forget",
         body: FORGET_BODY,
-        introduced_in: 12,
-    },
-    BundledSkill {
-        name: "feedback",
-        body: FEEDBACK_BODY,
         introduced_in: 12,
     },
 ];
@@ -453,6 +439,13 @@ fn feishu_body() -> &'static str {
 /// its load-bearing refusals and so an installed copy stays recognizable.
 fn contributor_onboarding_body() -> &'static str {
     CONTRIBUTOR_ONBOARDING_BODY
+}
+
+/// Last shipped `feedback` body (removed from the bundle in generation 13;
+/// now a repo-local project skill). Retained so an installed copy stays
+/// recognizable and is left in place, never deleted by name.
+fn feedback_body() -> &'static str {
+    FEEDBACK_BODY
 }
 
 /// Whether a skill name matches one of the bundled first-party skills.
@@ -572,6 +565,9 @@ pub fn install_system_skills(skills_dir: &Path) -> std::io::Result<()> {
     // for new users. An older bundle's installed copy is left in place, same as
     // Feishu above — never delete by name alone.
     let _ = contributor_onboarding_body();
+
+    // Feedback is repo-local since generation 13: same leave-in-place rule.
+    let _ = feedback_body();
 
     if changed || repair_marker {
         fs::create_dir_all(skills_dir)?;
