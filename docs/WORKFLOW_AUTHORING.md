@@ -50,6 +50,8 @@ its own. Real work happens in sub-agents the script launches.
 - Up to **1_000 agents per run** (VM lifetime spawn cap).
 - Configured `max_children` and `max_concurrent` can narrow these limits.
 - Automatic launch is model-judged on scope; the host enforces only the hard `max_children` / `max_depth` ceilings.
+- Plan the population the work needs and let the host queue and clamp it.
+  These ceilings are enforcement, not a reason to pre-shrink a valid plan.
 
 See the Workflow JS sandbox tests for the fail-closed host surface inventory.
 
@@ -108,7 +110,9 @@ paired with `worktree: true` when the child needs an isolated checkout.
 The compiler rejects effectful constructs such as `import`, `require`, `fetch`,
 `process`, `Deno`, `Bun`, `child_process`, file reads/writes, `eval`, `async`,
 and `await`. This is intentionally stricter than JavaScript: workflow source is
-a familiar declaration format, not a second execution runtime.
+a familiar declaration format, not a second execution runtime. The denied
+effects are not denied to the run — put them in a child worker, which has
+the full tool surface, and keep the script to coordination.
 
 ## Verification
 
@@ -127,9 +131,9 @@ Workflow owns the plan: phases, branches, loops, reducers, and intermediate
 results. fleet owns the durable roster, member identity, semantic role, and
 saved provider/model pins or inheritance. Runtime owns tool posture, launch
 concurrency, leases, heartbeats, logs, receipts, and resume/stop/restart
-controls. In other words, a workflow can select fleet members and monitor their
-Runtime runs, but it must not become a second executor with its own shell or
-filesystem authority.
+controls. In other words, a workflow selects fleet members and monitors their
+Runtime runs; it isn't an executor, because the script has no shell or
+filesystem of its own — effects live in the workers.
 
 Workflow-to-Runtime launch validation applies a conservative default shape
 before any Workflow IR is lowered to selected workers:

@@ -298,6 +298,9 @@ structured `dependencies` and `acceptance` arrays for bounded prerequisite facts
 and observable checks; keep the focused objective in `prompt`. Do not copy raw
 parent reasoning or an unbounded transcript.
 
+Default shape for the brief — a plain sentence beats the template when the
+delegation is trivial:
+
 ```
 QUESTION:
 SCOPE:
@@ -309,12 +312,12 @@ OUTPUT: VERDICT, EVIDENCE, GAPS, NEXT
 
 `scout` briefs default to quick, read-only investigation (no writes, but
 network reach and the bounded verification surface are available for real
-scouting). About 3-5 tool calls
-is enough for quick exploration: orient, search, read the decisive lines, and
-return. Do not repeat `ALREADY_KNOWN` work unless evidence contradicts it. Review
-and verifier briefs can spend more calls, but should stop after decisive
-evidence. Builder and repair-style briefs should use checkpoints before
-scope expansion or after repeated failures rather than a tiny call cap.
+scouting). A quick scout usually needs only a handful of calls: orient,
+search, read the decisive lines, and return — but stop at decisive evidence,
+not at a number. There is no per-agent call cap to save; the runtime budgets
+depth and concurrency, not curiosity. Do not repeat `ALREADY_KNOWN` work
+unless evidence contradicts it. Builder and repair-style briefs should use
+checkpoints before scope expansion or after repeated failures.
 
 Good delegation prompt examples:
 
@@ -361,25 +364,26 @@ OUTPUT: VERDICT, EVIDENCE, GAPS, NEXT.
   decomposition. Planners write artifacts (`todo_write` items,
   strategy in the response body) but don't carry them out.
 - **`reviewer`** — when there's already a change and the parent wants
-  it graded. Reviewers don't patch — they describe the fix in the
-  finding so the parent can dispatch a builder if the verdict
-  is "fix it".
+  it graded. Reviewers run under read-only posture, so the runtime
+  refuses patch attempts — describe the fix in the finding and the
+  parent dispatches a builder when the verdict is "fix it".
 - **`implement`** — when the change is already specified and just
   needs to land. Builders stay tightly scoped: minimum edit, no
   drive-by refactoring, run a quick verification before handing back.
 - **`test`** — when the parent needs an authoritative pass/fail
-  on the test suite or other validation. Verifiers don't fix
-  failures; they capture the failing assertion + stack and put fix
-  candidates under RISKS. The verifier posture never writes, and shell
-  is clamped to the bounded built-in verification surface: Run
-  tests/verifiers (pass `cwd` when the checks live in a
+  on the test suite or other validation. The verifier posture never
+  writes — the runtime refuses fix attempts — so capture the failing
+  assertion + stack and put fix candidates under RISKS for the parent
+  to dispatch. Shell is clamped to the bounded built-in verification
+  surface: Run tests/verifiers (pass `cwd` when the checks live in a
   subdirectory), Git fetch for remote refs, Git merge_tree for merge
   results. The write ceiling is read-only and unbounded shell forms
   are refused (#5186). A refused probe is reported to the parent,
   never worked around (#6298).
 - **`advisor`** — when the operator wants a high-leverage second opinion
   before cheaper execution continues. Consultants read enough to ground a
-  recommendation, but cannot write or run shell commands. `oracle` and
+  recommendation; their grant carries no writes and no shell, so the
+  runtime refuses both. `oracle` and
   `consultant` remain accepted only when loading older requests or persisted
   records; new prompts, receipts, and UI use `advisor`.
 - **`custom`** — only when the parent needs to constrain the tool
@@ -417,7 +421,9 @@ request broad fan-out and let the manager drain it without creating an
 unbounded population.
 
 By default every admitted child may start immediately — there is no artificial
-throttle. If you want gentler fan-out, lower `[subagents].launch_concurrency`
+throttle. Request the fan-out the work actually needs and let the runtime
+queue and drain it; the caps above are enforcement, not a reason to
+pre-refuse valid work. If you want gentler fan-out, lower `[subagents].launch_concurrency`
 (how many direct children start at once); children beyond that limit **queue**
 for a launch slot rather than bursting. `launch_concurrency` defaults to the
 resolved `max_subagents` cap. (The pre-v0.8.61 `interactive_max_launch` key is

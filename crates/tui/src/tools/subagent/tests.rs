@@ -3153,7 +3153,7 @@ fn explore_prompt_orients_before_searching() {
 fn explore_prompt_is_quick_bounded_and_read_only() {
     let prompt = FleetRole::Scout.system_prompt();
     assert!(prompt.contains("Default to `EFFORT: quick`"));
-    assert!(prompt.contains("3-5 tool calls"));
+    assert!(prompt.contains("stop at decisive evidence, not at a number"));
     assert!(prompt.contains("strictly read-only"));
     assert!(prompt.contains("ALREADY_KNOWN"));
     assert!(prompt.contains("STOP_CONDITION"));

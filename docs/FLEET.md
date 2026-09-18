@@ -196,8 +196,7 @@ every step — the choice you still have to make, or the exact resolved file
 once you have made it. Nothing is written until you activate the save control
 on the review step.
 
-The **Destination** step is a focused two-option list (arrows move, Enter or
-Space chooses; Tab never changes the destination):
+The **Destination** step is a focused two-option list:
 
 - **This project** writes `<workspace>/.codewhale/agents/<role>.toml`. It
   applies to this project only and takes precedence over a Personal profile
@@ -214,12 +213,10 @@ create a new file or **replace an existing one**, and the precedence
 consequence for the roster. The review step repeats those facts under
 "Saves to" and names the final action by its effect — **Save to this
 project**, **Save as Personal profile**, or **Replace …**. Replacing an
-existing file needs a second Enter on the save control. Tab / Shift+Tab (or
-←/→) move focus between the save control, **Change destination**, and
-**Back**; `s` is a secondary shortcut back to the Destination step. Reopening a
+existing file asks for a second confirmation on the save control. Reopening a
 saved member from `/fleet` starts from what is on disk: its member identity,
 route, and save scope. Thinking (`inherit`, `off`, `low`, `medium`, `high`,
-`max`, or `auto`) is adjusted on the review step with `t`, but remains a route
+`max`, or `auto`) is adjusted on the review step, but remains a route
 execution setting rather than part of the member's fleet identity.
 
 Profile scope controls where a role definition is reusable; it does not widen
@@ -417,8 +414,8 @@ happened.
 
 ## Manager-owned Workflow fan-in
 
-When parallel work must return one combined answer, use a manager-owned
-Workflow instead of a flat `agent` fan-out:
+When parallel work must return one combined answer, prefer a manager-owned
+Workflow over a flat `agent` fan-out. Default shape:
 
 1. **Cast one manager** (operator or workflow orchestrator).
 2. **Fan out** child tasks through `workflow` (`task()`, `parallel()`,
@@ -427,9 +424,10 @@ Workflow instead of a flat `agent` fan-out:
 4. **Aggregate and verify** load-bearing claims before treating them as facts.
 5. **Synthesize** one result the operator can depend on.
 
-Raw `agent` fan-out is appropriate only for independent, fire-and-forget work
-where no single fan-in result is required. If results must be merged, compared,
-or verified, route through `workflow` so the manager owns fan-in.
+Raw `agent` fan-out fits independent work with no combined result. When
+results must be merged, compared, or verified, route through `workflow` so
+the manager owns fan-in — that is what the shape above is for, not a ban
+on simpler patterns when nothing needs combining.
 
 ## Workflow on fleet
 
