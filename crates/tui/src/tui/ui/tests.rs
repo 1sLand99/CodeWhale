@@ -16696,6 +16696,30 @@ fn slash_menu_down_wraps_from_last_to_first() {
 }
 
 #[test]
+fn slash_menu_paging_clamps_instead_of_wrapping() {
+    use crate::tui::list_nav::Motion;
+    let mut app = create_test_app();
+    app.input = "/".to_string();
+    app.cursor_position = 1;
+
+    let entries = visible_slash_menu_entries(&app, 128);
+    assert!(entries.len() > 1);
+    let last = entries.len() - 1;
+
+    // Pages travel and clamp (#6290); only steps wrap.
+    app.slash_menu_selected = 0;
+    move_slash_menu_selection(&mut app, entries.len(), Motion::PageNext);
+    assert_eq!(app.slash_menu_selected, 10.min(last));
+    move_slash_menu_selection(&mut app, entries.len(), Motion::PageNext);
+    assert_eq!(app.slash_menu_selected, 20.min(last));
+    move_slash_menu_selection(&mut app, entries.len(), Motion::Last);
+    assert_eq!(app.slash_menu_selected, last);
+    move_slash_menu_selection(&mut app, entries.len(), Motion::First);
+    assert_eq!(app.slash_menu_selected, 0);
+    assert_eq!(app.input, "/");
+}
+
+#[test]
 fn apply_slash_menu_selection_appends_space_for_arg_commands() {
     let mut app = create_test_app();
     let entries = vec![

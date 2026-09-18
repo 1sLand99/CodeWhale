@@ -1070,6 +1070,40 @@ impl ModelPickerView {
         }
     }
 
+    /// Apply one [`list_nav`](crate::tui::list_nav) motion (#6290), returning
+    /// whether it was consumed. Steps wrap; pages travel [`MODEL_PAGE`] rows
+    /// and clamp. The region axis toggles between the model and effort panes.
+    fn apply_motion(&mut self, motion: crate::tui::list_nav::Motion) -> bool {
+        use crate::tui::list_nav::Motion;
+        if matches!(motion, Motion::RegionPrev | Motion::RegionNext) {
+            if self.can_edit_effort() {
+                self.toggle_focus();
+            }
+            return true;
+        }
+        let (current, len) = match self.focus {
+            Pane::Model => (self.selected_model_idx, self.model_row_count()),
+            Pane::Effort => (self.selected_effort_idx, self.current_efforts().len()),
+        };
+        if len == 0 {
+            return false;
+        }
+        let Some(next) = crate::tui::list_nav::apply(current, len, MODEL_PAGE, motion) else {
+            return false;
+        };
+        match self.focus {
+            Pane::Model => {
+                self.selected_model_idx = next;
+                self.select_effort_for_current_model();
+            }
+            Pane::Effort => {
+                self.selected_effort_idx = next;
+                self.selected_effort_request = self.resolved_effort();
+            }
+        }
+        true
+    }
+
     fn toggle_focus(&mut self) {
         self.focus = match self.focus {
             Pane::Model => Pane::Effort,
@@ -3595,6 +3629,14 @@ impl ModalView for ModelPickerView {
 
     fn handle_key(&mut self, key: KeyEvent) -> ViewAction {
         self.last_mouse_selected = None;
+        // Movement keys come from the shared vocabulary (#6290); the match
+        // below owns only the picker's own verbs. The live filter means the
+        // typing-safe set — no letter aliases to eat the query.
+        if let Some(motion) = crate::tui::list_nav::motion_while_typing(&key)
+            && self.apply_motion(motion)
+        {
+            return ViewAction::None;
+        }
         match key.code {
             KeyCode::Char('s' | 'S') if key.modifiers == KeyModifiers::CONTROL => {
                 self.cycle_sort();
@@ -3698,58 +3740,6 @@ impl ModalView for ModelPickerView {
                 let mut query = self.query.clone();
                 query.pop();
                 self.update_query(query);
-                ViewAction::None
-            }
-            KeyCode::Up => {
-                self.move_up();
-                ViewAction::None
-            }
-            KeyCode::Down => {
-                self.move_down();
-                ViewAction::None
-            }
-            KeyCode::PageUp => {
-                for _ in 0..5 {
-                    self.move_up();
-                }
-                ViewAction::None
-            }
-            KeyCode::PageDown => {
-                for _ in 0..5 {
-                    self.move_down();
-                }
-                ViewAction::None
-            }
-            KeyCode::Home => {
-                match self.focus {
-                    Pane::Model => {
-                        self.selected_model_idx = 0;
-                        self.select_effort_for_current_model();
-                    }
-                    Pane::Effort => {
-                        self.selected_effort_idx = 0;
-                        self.selected_effort_request = self.resolved_effort();
-                    }
-                }
-                ViewAction::None
-            }
-            KeyCode::End => {
-                match self.focus {
-                    Pane::Model => {
-                        self.selected_model_idx = self.model_row_count().saturating_sub(1);
-                        self.select_effort_for_current_model();
-                    }
-                    Pane::Effort => {
-                        self.selected_effort_idx = self.current_efforts().len().saturating_sub(1);
-                        self.selected_effort_request = self.resolved_effort();
-                    }
-                }
-                ViewAction::None
-            }
-            KeyCode::Tab | KeyCode::Right | KeyCode::Left | KeyCode::BackTab => {
-                if self.can_edit_effort() {
-                    self.toggle_focus();
-                }
                 ViewAction::None
             }
             // Explicit readiness + catalog refresh (safe, non-destructive).
@@ -4025,6 +4015,10 @@ impl ModelPickerView {
         );
     }
 }
+
+/// Rows one PageUp/PageDown travels. Pages clamp at the ends per the shared
+/// vocabulary instead of wrapping (#6290).
+const MODEL_PAGE: usize = 5;
 
 /// Previous index in a list that rotates: 0 wraps to the last row.
 /// `count` must be non-zero.

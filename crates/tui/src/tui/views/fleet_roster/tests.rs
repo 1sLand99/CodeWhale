@@ -188,10 +188,23 @@ fn arrows_move_selection_and_wrap() {
 #[test]
 fn selection_change_resets_detail_scroll() {
     let mut view = built_in_view();
-    view.handle_key(key(KeyCode::PageDown));
+    // Bare paging drives the row list; Shift-modified paging scrolls the
+    // detail pane (#6290, #6014-style split).
+    view.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::SHIFT));
     assert_eq!(view.detail_scroll, 8);
     view.handle_key(key(KeyCode::Down));
     assert_eq!(view.detail_scroll, 0);
+}
+
+#[test]
+fn bare_paging_drives_rows_not_the_detail_pane() {
+    let mut view = built_in_view();
+    let last = view.members.len();
+    view.handle_key(key(KeyCode::PageDown));
+    assert_eq!(view.detail_scroll, 0);
+    assert_eq!(view.selected, 10.min(last));
+    view.handle_key(key(KeyCode::Home));
+    assert_eq!(view.selected, 0);
 }
 
 #[test]

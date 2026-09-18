@@ -6275,6 +6275,26 @@ pub(crate) async fn run_event_loop(
                 {
                     select_next_slash_menu_entry(app, slash_menu_entries.len());
                 }
+                // Paging and edge motions from the shared vocabulary (#6290),
+                // claimed before the unconditional transcript-scroll arms.
+                KeyCode::PageUp if key.modifiers.is_empty() && slash_menu_open => {
+                    move_slash_menu_selection(
+                        app,
+                        slash_menu_entries.len(),
+                        crate::tui::list_nav::Motion::PagePrev,
+                    );
+                }
+                KeyCode::PageDown if key.modifiers.is_empty() && slash_menu_open => {
+                    move_slash_menu_selection(
+                        app,
+                        slash_menu_entries.len(),
+                        crate::tui::list_nav::Motion::PageNext,
+                    );
+                }
+                // Home/End deliberately stay cursor keys while the menu is open:
+                // the composer is still the focused input (same as Left/Right
+                // and the mention menu), so only vertical travel belongs to
+                // the popup.
                 KeyCode::Down
                     if key.modifiers.is_empty()
                         && app.selected_composer_attachment_index().is_some() =>
