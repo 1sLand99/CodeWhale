@@ -441,19 +441,23 @@ pub(crate) fn disable_hotbar(app: &mut App, config: &mut Config) {
 }
 
 pub(crate) fn refresh_config_view_if_open(app: &mut App, focus_key: &str) {
-    if app.view_stack.top_kind() == Some(ModalKind::Config) {
-        let filter = app.view_stack.pop().and_then(|mut view| {
-            view.as_any_mut()
-                .downcast_mut::<ConfigView>()
-                .map(|config_view| config_view.filter_query().to_string())
-        });
-        let mut config_view = ConfigView::new_for_app(app);
-        if let Some(filter) = filter {
-            config_view.restore_filter(filter);
-        }
-        config_view.focus_key(focus_key);
-        app.view_stack.push(config_view);
+    if app.view_stack.top_kind() != Some(ModalKind::Config) {
+        return;
     }
+    let Some(mut boxed) = app.view_stack.pop() else {
+        return;
+    };
+    let rebuilt = match boxed.as_any_mut().downcast_ref::<ConfigView>() {
+        Some(previous) => ConfigView::rebuild_preserving(app, previous, focus_key),
+        // Not a `ConfigView`: rebuild from scratch rather than restoring an
+        // unknown modal, matching how the stack got here.
+        None => {
+            let mut fresh = ConfigView::new_for_app(app);
+            fresh.focus_key(focus_key);
+            fresh
+        }
+    };
+    app.view_stack.push(rebuilt);
 }
 
 pub(crate) fn refresh_skills_manager_if_open(
