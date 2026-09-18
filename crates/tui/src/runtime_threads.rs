@@ -3619,6 +3619,28 @@ pub struct RunningThread {
     pub active_turns: Vec<ActiveTurn>,
 }
 
+/// One watchable notice on a thread, projected from engine events so
+/// watch-only clients see what the TUI shows (#6180, codewhale-apps#573).
+/// `kind` is a [`codewhale_config::notifications::NotificationEvent`] name
+/// (`subagent-terminal`, `elevation-needed`, `model-notify`); `subject` is
+/// the agent, tool-call, or tool id the notice is about, for targeted
+/// clearing. Notices are in-memory session state, bounded per thread, and
+/// never persisted: terminal/notify kinds clear on client ack, elevation
+/// clears when its tool call completes.
+#[derive(Debug, Clone, Serialize)]
+pub struct ActiveNotice {
+    pub id: String,
+    pub kind: String,
+    pub turn_id: String,
+    pub subject: String,
+    pub detail: String,
+    pub raised_at: DateTime<Utc>,
+}
+
+/// Per-thread notice bound. Oldest-first eviction keeps a chatty child from
+/// growing a watch-only client's banner list without bound.
+pub(crate) const MAX_NOTICES_PER_THREAD: usize = 32;
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct UsageBucket {
     pub key: String,
@@ -4337,6 +4359,7 @@ pub struct RuntimeThreadManager {
     pending_user_inputs: Arc<parking_lot::Mutex<HashMap<(String, String), PendingUserInputEntry>>>,
     pending_dynamic_tools: Arc<parking_lot::Mutex<HashMap<String, PendingDynamicToolEntry>>>,
     recovery_receipts: Arc<parking_lot::Mutex<HashMap<String, Vec<RecoveredTurnReceipt>>>>,
+    notices: Arc<parking_lot::Mutex<HashMap<String, Vec<ActiveNotice>>>>,
     recovery_flush: Arc<Mutex<()>>,
     #[cfg(test)]
     snapshot_test_hook: Arc<parking_lot::Mutex<Option<mpsc::UnboundedSender<SnapshotTestPoint>>>>,
@@ -4916,6 +4939,7 @@ impl RuntimeThreadManager {
             pending_user_inputs: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             pending_dynamic_tools: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             recovery_receipts: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            notices: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             recovery_flush: Arc::new(Mutex::new(())),
             #[cfg(test)]
             snapshot_test_hook: Arc::new(parking_lot::Mutex::new(None)),
@@ -7259,6 +7283,70 @@ impl RuntimeThreadManager {
             }
         }
         Ok(out)
+    }
+
+    /// Raise a watchable notice on a thread (#6180). Kind names must stay in
+    /// the [`codewhale_config::notifications::NotificationEvent`] vocabulary
+    /// so clients and `[notifications.events]` gates agree. Oldest-first
+    /// eviction past [`MAX_NOTICES_PER_THREAD`] keeps the list bounded.
+    pub(crate) fn raise_notice(
+        &self,
+        thread_id: &str,
+        kind: &str,
+        turn_id: &str,
+        subject: &str,
+        detail: String,
+    ) -> String {
+        debug_assert!(
+            codewhale_config::notifications::NotificationEvent::parse(kind).is_some(),
+            "notice kind must be a NotificationEvent name: {kind}"
+        );
+        let id = format!("notice_{}", &Uuid::new_v4().to_string()[..8]);
+        let mut notices = self.notices.lock();
+        let list = notices.entry(thread_id.to_string()).or_default();
+        list.push(ActiveNotice {
+            id: id.clone(),
+            kind: kind.to_string(),
+            turn_id: turn_id.to_string(),
+            subject: subject.to_string(),
+            detail,
+            raised_at: Utc::now(),
+        });
+        if list.len() > MAX_NOTICES_PER_THREAD {
+            list.drain(..list.len() - MAX_NOTICES_PER_THREAD);
+        }
+        id
+    }
+
+    /// Notices currently raised on a thread, oldest first. Unknown threads
+    /// simply have none; the API layer maps thread existence to 404.
+    pub(crate) fn list_notices(&self, thread_id: &str) -> Vec<ActiveNotice> {
+        self.notices
+            .lock()
+            .get(thread_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Acknowledge one notice. Returns false when the notice (or thread) is
+    /// unknown; acking is idempotent from the client's view via GET.
+    pub(crate) fn ack_notice(&self, thread_id: &str, notice_id: &str) -> bool {
+        let mut notices = self.notices.lock();
+        let Some(list) = notices.get_mut(thread_id) else {
+            return false;
+        };
+        let before = list.len();
+        list.retain(|notice| notice.id != notice_id);
+        list.len() != before
+    }
+
+    /// Drop every notice about one subject on a thread. Elevation notices
+    /// clear this way when their tool call completes, however it completed.
+    pub(crate) fn clear_notices_for_subject(&self, thread_id: &str, subject: &str) {
+        let mut notices = self.notices.lock();
+        if let Some(list) = notices.get_mut(thread_id) {
+            list.retain(|notice| notice.subject != subject);
+        }
     }
 
     /// Whether `/v1/threads/summary?search=` should keep this thread.
@@ -11357,6 +11445,24 @@ impl RuntimeThreadManager {
                     .await?;
                 }
                 EngineEvent::ToolCallComplete { id, name, result } => {
+                    // An elevation question is over once its tool call
+                    // completes, however it completed. Clear before the
+                    // notify raise below: a notify call of its own settles
+                    // its elevation and still raises its notice.
+                    self.clear_notices_for_subject(&thread_id, &id);
+                    // Model-notify projection (#6180): the notify tool has no
+                    // thread context of its own, so its completion is the
+                    // watchable "come back" signal.
+                    if name == "notify" {
+                        self.raise_notice(
+                            &thread_id,
+                            codewhale_config::notifications::NotificationEvent::ModelNotify
+                                .as_str(),
+                            &turn_id,
+                            &id,
+                            "model asked the user to come back".to_string(),
+                        );
+                    }
                     if let Ok(output) = &result
                         && let Some(metadata) = output.metadata.as_ref()
                     {
@@ -11735,6 +11841,18 @@ impl RuntimeThreadManager {
                             "spawn_depth": spawn_depth, "continuable": continuable }),
                     )
                     .await?;
+                    self.raise_notice(
+                        &thread_id,
+                        codewhale_config::notifications::NotificationEvent::SubagentTerminal
+                            .as_str(),
+                        &turn_id,
+                        &id,
+                        format!(
+                            "sub-agent {} {}",
+                            id,
+                            worker_status.unwrap_or("settled (outcome unconfirmed)")
+                        ),
+                    );
                 }
                 EngineEvent::AgentList {
                     owner_session_id,
@@ -12024,6 +12142,14 @@ impl RuntimeThreadManager {
                         }),
                     )
                     .await?;
+                    self.raise_notice(
+                        &thread_id,
+                        codewhale_config::notifications::NotificationEvent::ElevationNeeded
+                            .as_str(),
+                        &turn_id,
+                        &tool_id,
+                        format!("{tool_name} needs elevation: {denial_reason}"),
+                    );
                     let authority = self
                         .active_turn_authority(&thread_id, &turn_id, &engine)
                         .await

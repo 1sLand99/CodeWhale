@@ -16517,3 +16517,160 @@ fn output_cap_wire_requires_positive_integer_and_preserves_legacy_absence() -> R
     assert_eq!(valid.max_output_tokens.unwrap().get(), 1500);
     Ok(())
 }
+
+/// Notice projection (#6180): engine events raise watchable notices with
+/// thread/turn identity; elevation clears when its tool call completes and
+/// the rest clear on ack.
+#[tokio::test]
+async fn notices_raise_from_engine_events_and_clear_on_settle_or_ack() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            model: None,
+            workspace: None,
+            mode: None,
+            allow_shell: None,
+            trust_mode: Some(true),
+            auto_approve: Some(true),
+            archived: false,
+            system_prompt: None,
+            task_id: None,
+            ..Default::default()
+        })
+        .await?;
+    let mut harness = install_mock_engine(&manager, &thread.id).await;
+    let turn = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "raise notices".to_string(),
+                ..Default::default()
+            },
+        )
+        .await?;
+    assert!(matches!(
+        harness.rx_op.recv().await,
+        Some(Op::SendMessage(TurnSpec { .. }))
+    ));
+    // Agent-scoped events before TurnStarted are control-plane receipts and
+    // are skipped; the turn must start before completions count.
+    harness
+        .tx_event
+        .send(EngineEvent::TurnStarted {
+            turn_id: turn.id.clone(),
+            created_at: Utc::now(),
+            route: None,
+        })
+        .await?;
+
+    // Event projection runs on the engine task; wait (bounded) for each
+    // notice rather than sleeping a fixed span.
+    async fn wait_for_notices(
+        manager: &RuntimeThreadManager,
+        thread_id: &str,
+        count: usize,
+    ) -> Vec<ActiveNotice> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let notices = manager.list_notices(thread_id);
+            if notices.len() == count || tokio::time::Instant::now() >= deadline {
+                return notices;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    harness
+        .tx_event
+        .send(EngineEvent::AgentComplete {
+            owner_session_id: thread.id.clone(),
+            id: "agent_done".to_string(),
+            result: "did the thing".to_string(),
+            outcome: Some(crate::tools::subagent::SubAgentStatus::Completed),
+            parent_run_id: None,
+            spawn_depth: None,
+            continuable: None,
+        })
+        .await?;
+    let notices = wait_for_notices(&manager, &thread.id, 1).await;
+    assert_eq!(notices.len(), 1, "agent completion raises: {notices:?}");
+
+    harness
+        .tx_event
+        .send(EngineEvent::ToolCallComplete {
+            id: "tool_notify_1".to_string(),
+            name: "notify".to_string(),
+            result: Ok(crate::tools::spec::ToolResult::success("pinged")),
+        })
+        .await?;
+    let notices = wait_for_notices(&manager, &thread.id, 2).await;
+    assert_eq!(notices.len(), 2, "model notify raises: {notices:?}");
+
+    harness
+        .tx_event
+        .send(EngineEvent::ElevationRequired {
+            tool_id: "tool_needs_elev".to_string(),
+            tool_name: "exec_command".to_string(),
+            command: None,
+            denial_reason: "sandbox denied".to_string(),
+            blocked_network: false,
+            blocked_write: false,
+        })
+        .await?;
+    assert!(matches!(
+        harness.recv_approval_event().await,
+        Some(crate::core::engine::MockApprovalEvent::RetryWithPolicy { .. })
+    ));
+    let notices = wait_for_notices(&manager, &thread.id, 3).await;
+    let kinds: Vec<&str> = notices.iter().map(|n| n.kind.as_str()).collect();
+    assert_eq!(notices.len(), 3, "all three kinds raise: {kinds:?}");
+    assert!(kinds.contains(&"elevation-needed"));
+    assert!(kinds.contains(&"subagent-terminal"));
+    assert!(kinds.contains(&"model-notify"));
+    assert!(notices.iter().all(|n| n.turn_id == turn.id));
+    let notify_id = notices
+        .iter()
+        .find(|n| n.kind == "model-notify")
+        .map(|n| n.id.clone())
+        .context("missing model-notify")?;
+
+    // The elevation question ends when its tool call completes.
+    harness
+        .tx_event
+        .send(EngineEvent::ToolCallComplete {
+            id: "tool_needs_elev".to_string(),
+            name: "exec_command".to_string(),
+            result: Ok(crate::tools::spec::ToolResult::success("elevated ok")),
+        })
+        .await?;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let notices = manager.list_notices(&thread.id);
+        if notices.len() == 2 || tokio::time::Instant::now() >= deadline {
+            assert_eq!(notices.len(), 2, "elevation clears on settle");
+            assert!(notices.iter().all(|n| n.kind != "elevation-needed"));
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    // Terminal/notify kinds clear on ack; unknown acks report false.
+    assert!(manager.ack_notice(&thread.id, &notify_id));
+    assert!(!manager.ack_notice(&thread.id, &notify_id));
+    assert!(!manager.ack_notice(&thread.id, "notice_nope"));
+    assert_eq!(manager.list_notices(&thread.id).len(), 1);
+
+    harness
+        .tx_event
+        .send(EngineEvent::TurnComplete {
+            usage: Usage::default(),
+            parent_route_usage: Usage::default(),
+            routed_usage_dropped_records: 0,
+            status: TurnOutcomeStatus::Completed,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        })
+        .await?;
+    Ok(())
+}

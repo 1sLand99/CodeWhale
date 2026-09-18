@@ -680,6 +680,8 @@ and live state comes only from a resumed thread's SSE stream.
 - `GET /v1/threads?limit=50&include_archived=false&archived_only=false`
 - `GET /v1/threads/summary?limit=50&search=<optional>&include_archived=false&archived_only=false`
 - `GET /v1/threads/running`
+- `GET /v1/threads/{id}/notices`
+- `DELETE /v1/threads/{id}/notices/{notice_id}`
 - `POST /v1/threads`
 - `GET /v1/threads/{id}`
 - `PATCH /v1/threads/{id}` (see body shape below)
@@ -752,6 +754,16 @@ complete tree.
 Background-capable clients use it for quit/background decisions — one call,
 no inference from latest-turn status. Archive state is ignored (archiving
 has no quiescence gate); an empty array means no owned work is live.
+
+`GET /v1/threads/{id}/notices` is the per-thread active-notice surface
+(#6180): the TUI-visible conditions a watch-only client must surface —
+`subagent-terminal` (a child settled), `elevation-needed` (a tool call is
+blocked on elevation), `model-notify` (the model asked the user to come
+back) — each with `turn_id` and a `subject` id for targeting. Notices are
+in-memory session state, bounded to 32 per thread (oldest evicted), and
+never persisted. Clearing: elevation auto-clears when its tool call
+completes; terminal/notify clear on `DELETE .../notices/{notice_id}`
+(204, unknown ids 404). Unknown threads 404 on both endpoints.
 
 `archived_only=true` returns archived threads only (mutually overrides
 `include_archived`). Default behavior is unchanged: `include_archived=false`

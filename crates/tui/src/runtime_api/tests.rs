@@ -17502,3 +17502,83 @@ async fn threads_running_lists_active_turns_and_clears_on_settle() -> Result<()>
     handle.abort();
     Ok(())
 }
+
+/// Notice serving (#6180): GET lists raised notices with thread/turn
+/// identity, DELETE acks one, unknown notices and threads 404.
+#[tokio::test]
+async fn thread_notices_serve_list_and_ack() -> Result<()> {
+    let Some((addr, manager, handle)) = spawn_test_server().await? else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+    let base = format!("http://{addr}");
+
+    let created: serde_json::Value = client
+        .post(format!("{base}/v1/threads"))
+        .json(&serde_json::json!({ "model": "test-model" }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let thread_id = created["id"].as_str().context("missing thread id")?;
+
+    let empty: serde_json::Value = client
+        .get(format!("{base}/v1/threads/{thread_id}/notices"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(empty, serde_json::json!([]));
+
+    let notice_id = manager.raise_notice(
+        thread_id,
+        "model-notify",
+        "turn_1",
+        "tool_1",
+        "come back".to_string(),
+    );
+    let listed: serde_json::Value = client
+        .get(format!("{base}/v1/threads/{thread_id}/notices"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(listed.as_array().map(Vec::len), Some(1));
+    assert_eq!(listed[0]["id"], notice_id);
+    assert_eq!(listed[0]["kind"], "model-notify");
+    assert_eq!(listed[0]["turn_id"], "turn_1");
+    assert_eq!(listed[0]["subject"], "tool_1");
+
+    let ack = client
+        .delete(format!("{base}/v1/threads/{thread_id}/notices/{notice_id}"))
+        .send()
+        .await?;
+    assert_eq!(ack.status(), reqwest::StatusCode::NO_CONTENT);
+
+    let cleared: serde_json::Value = client
+        .get(format!("{base}/v1/threads/{thread_id}/notices"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(cleared, serde_json::json!([]));
+
+    let again = client
+        .delete(format!("{base}/v1/threads/{thread_id}/notices/{notice_id}"))
+        .send()
+        .await?;
+    assert_eq!(again.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let unknown = client
+        .get(format!("{base}/v1/threads/nope/notices"))
+        .send()
+        .await?;
+    assert_eq!(unknown.status(), reqwest::StatusCode::NOT_FOUND);
+
+    handle.abort();
+    Ok(())
+}

@@ -17,7 +17,7 @@ use axum::middleware;
 use axum::response::Html;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -1199,6 +1199,11 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .route("/v1/threads", get(list_threads).post(create_thread))
         .route("/v1/threads/summary", get(list_threads_summary))
         .route("/v1/threads/running", get(list_running_threads))
+        .route("/v1/threads/{id}/notices", get(list_thread_notices))
+        .route(
+            "/v1/threads/{id}/notices/{notice_id}",
+            delete(ack_thread_notice),
+        )
         .route("/v1/threads/{id}", get(get_thread).patch(update_thread))
         .route(
             "/v1/threads/{id}/jobs",
@@ -1758,6 +1763,40 @@ async fn list_running_threads(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
     Ok(Json(running))
+}
+
+/// Active notices on one thread (#6180): the TUI-visible conditions a
+/// watch-only client must surface — subagent-terminal, elevation-needed,
+/// model-notify — each with turn identity for targeting.
+async fn list_thread_notices(
+    State(state): State<RuntimeApiState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<crate::runtime_threads::ActiveNotice>>, ApiError> {
+    state
+        .runtime_threads
+        .get_thread(&id)
+        .await
+        .map_err(map_thread_err)?;
+    Ok(Json(state.runtime_threads.list_notices(&id)))
+}
+
+/// Acknowledge (clear) one notice. Terminal/notify kinds clear only here;
+/// elevation additionally auto-clears when its tool call completes.
+async fn ack_thread_notice(
+    State(state): State<RuntimeApiState>,
+    Path((id, notice_id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    state
+        .runtime_threads
+        .get_thread(&id)
+        .await
+        .map_err(map_thread_err)?;
+    if !state.runtime_threads.ack_notice(&id, &notice_id) {
+        return Err(ApiError::not_found(format!(
+            "thread '{id}' has no notice '{notice_id}'"
+        )));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_threads_summary(
