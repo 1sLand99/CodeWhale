@@ -4038,11 +4038,13 @@ fn mouse_selection_autocopies_on_release_without_ctrl_c() {
             modifiers: KeyModifiers::NONE,
         },
     );
+    // Full-cell coverage (#6228 sends fragments down the exact-text
+    // fallback): "alpha beta" spans columns 0-10, so release past it.
     handle_mouse_event(
         &mut app,
         MouseEvent {
             kind: MouseEventKind::Drag(MouseButton::Left),
-            column: 8,
+            column: 12,
             row: 0,
             modifiers: KeyModifiers::NONE,
         },
@@ -4051,7 +4053,7 @@ fn mouse_selection_autocopies_on_release_without_ctrl_c() {
         &mut app,
         MouseEvent {
             kind: MouseEventKind::Up(MouseButton::Left),
-            column: 8,
+            column: 12,
             row: 0,
             modifiers: KeyModifiers::NONE,
         },
