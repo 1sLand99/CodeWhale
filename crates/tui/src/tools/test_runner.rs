@@ -349,8 +349,11 @@ mod tests {
             "nested cargo test unexpectedly failed:\\n{}",
             parsed.stderr
         );
+        // `resolve_existing_dir` returns the canonical path, which on Windows
+        // carries the `\\?\` verbatim prefix the raw tempdir lacks (#6346).
+        let scoped_dir = project_dir.canonicalize().expect("canonical project dir");
         assert!(
-            parsed.command.contains(&project_dir.display().to_string()),
+            parsed.command.contains(&scoped_dir.display().to_string()),
             "cargo must run in the scoped dir, ran: {}",
             parsed.command
         );
