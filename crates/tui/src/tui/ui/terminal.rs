@@ -724,6 +724,22 @@ pub(crate) fn terminal_event_needs_viewport_recapture(evt: &Event) -> bool {
     matches!(evt, Event::FocusGained)
 }
 
+/// Next frame-emission gate from one terminal event (#6311).
+///
+/// GTK3 pauses the frame clock on full occlusion while VTE keeps queuing
+/// damage, so every frame emitted while covered becomes flicker backlog on
+/// return. Focus loss therefore defers draws (state keeps ingesting;
+/// `needs_redraw` stays set); focus gain re-arms with the existing
+/// full-repaint recovery. Any key/mouse/paste input also re-arms: input
+/// focus means a visible window, and it unsticks a lost `FocusGained`.
+pub(crate) fn next_unfocused(unfocused: bool, evt: &Event) -> bool {
+    match evt {
+        Event::FocusLost => true,
+        Event::FocusGained | Event::Key(_) | Event::Mouse(_) | Event::Paste(_) => false,
+        _ => unfocused,
+    }
+}
+
 pub(crate) fn terminal_pause_has_live_owner(app: &App) -> bool {
     app.active_cell.as_ref().is_some_and(|active| {
         active.entries().iter().any(|cell| {

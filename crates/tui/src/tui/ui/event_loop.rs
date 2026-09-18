@@ -1449,6 +1449,10 @@ pub(crate) async fn run_event_loop(
     // (#6004); `None` until the first publish records it without firing.
     let mut previous_turn_state = None;
     let mut force_terminal_repaint = false;
+    // #6311: while the terminal reports unfocused, frames are pure backlog
+    // (GTK3 defers all VTE damage on occlusion and replays it on return).
+    // Event ingestion continues; only `terminal.draw` emission is gated.
+    let mut terminal_unfocused = false;
     // FocusGained debounce: some terminal emulators (e.g. Tabby) re-trigger
     // FocusGained when we re-arm focus-change reporting inside
     // recover_terminal_modes, creating a tight repaint loop. Skip
@@ -4532,7 +4536,7 @@ pub(crate) async fn run_event_loop(
             force_terminal_repaint = true;
             app.force_next_full_repaint = false;
         }
-        if app.needs_redraw && draw_wait.is_none() {
+        if app.needs_redraw && draw_wait.is_none() && !terminal_unfocused {
             draw_app_frame_inner(terminal, app, config, force_terminal_repaint)?;
             force_terminal_repaint = false;
             frame_rate_limiter.mark_emitted(Instant::now());
@@ -4626,6 +4630,7 @@ pub(crate) async fn run_event_loop(
             let event_observed_at = observed_terminal_event.observed_at;
             let evt = observed_terminal_event.event;
             app.needs_redraw = true;
+            terminal_unfocused = next_unfocused(terminal_unfocused, &evt);
 
             // Handle bracketed paste events
             if app.redaction_gate && app.onboarding == OnboardingState::None {
@@ -4746,6 +4751,13 @@ pub(crate) async fn run_event_loop(
                 }
 
                 app.handle_resize(final_w, final_h);
+                // #6311: a resize that lands while unfocused records the size
+                // but must not emit the frame — same deferral as zero-size.
+                if terminal_unfocused {
+                    force_terminal_repaint = true;
+                    app.needs_redraw = true;
+                    continue;
+                }
                 // #macos-resize: some terminals (macOS Terminal.app, Windows
                 // ConHost) briefly report stale dimensions via
                 // `terminal::size()` after a resize. ratatui's `draw()` calls

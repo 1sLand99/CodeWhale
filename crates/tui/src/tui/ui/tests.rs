@@ -3173,6 +3173,31 @@ fn focus_gained_forces_terminal_viewport_recapture() {
     assert!(!terminal_event_needs_viewport_recapture(&Event::FocusLost));
 }
 
+/// #6311: focus loss defers frame emission (occluded VTE replays every
+/// emitted frame as flicker backlog); focus gain or any input re-arms.
+#[test]
+fn focus_loss_defers_frames_until_focus_or_input_returns() {
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
+    let key = || Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+    let mouse = || {
+        Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+    assert!(next_unfocused(false, &Event::FocusLost));
+    assert!(next_unfocused(true, &Event::Resize(80, 24)));
+    assert!(!next_unfocused(true, &Event::FocusGained));
+    assert!(!next_unfocused(true, &key()));
+    assert!(!next_unfocused(true, &mouse()));
+    assert!(!next_unfocused(true, &Event::Paste("x".to_string())));
+    assert!(!next_unfocused(false, &key()));
+}
+
 // ANSI byte sequences are only written on platforms where crossterm uses the
 // ANSI execution path. On Windows the same logical commands route through the
 // WinAPI console backend and never reach the writer, so byte-level assertions
