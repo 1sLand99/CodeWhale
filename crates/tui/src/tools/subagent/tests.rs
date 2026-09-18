@@ -4426,7 +4426,7 @@ async fn manual_config_role_pin_refuses_task_model_and_strength_before_binding()
             selection.model_route,
             ModelRoute::Fixed("deepseek-v4-flash".into())
         );
-        let error = bind_spawn_model_route(&mut runtime, &request, None, true)
+        let error = bind_spawn_model_route(&mut runtime, &request, None, true, true)
             .await
             .expect_err("task choices cannot replace a current Config pin");
         let message = error.to_string();
@@ -4455,7 +4455,7 @@ async fn manual_role_pin_accepts_only_its_exact_qualified_provider_selector() {
         let request =
             parse_spawn_request(&json!({"prompt":"review", "type":"reviewer", "model":model}))
                 .unwrap();
-        let (route, source) = bind_spawn_model_route(&mut runtime, &request, None, true)
+        let (route, source, _) = bind_spawn_model_route(&mut runtime, &request, None, true, true)
             .await
             .expect("the task may restate the same exact route");
         assert_eq!(route, ModelRoute::Fixed("deepseek-v4-flash".into()));
@@ -4466,7 +4466,7 @@ async fn manual_role_pin_accepts_only_its_exact_qualified_provider_selector() {
         "prompt":"review", "type":"reviewer", "model":"moonshot/deepseek-v4-flash"
     }))
     .unwrap();
-    let error = bind_spawn_model_route(&mut runtime, &request, None, true)
+    let error = bind_spawn_model_route(&mut runtime, &request, None, true, true)
         .await
         .expect_err("a provider prefix cannot retarget the saved pin");
     assert!(error.to_string().contains("conflicts"), "{error}");
@@ -4493,7 +4493,7 @@ async fn structured_role_pin_rejects_incomplete_auto_and_unknown_provider_pairs(
             .unwrap(),
         );
         let request = parse_spawn_request(&json!({"prompt":"review", "type":"reviewer"})).unwrap();
-        let error = bind_spawn_model_route(&mut runtime, &request, None, true)
+        let error = bind_spawn_model_route(&mut runtime, &request, None, true, true)
             .await
             .expect_err("an invalid explicit route cannot inherit a usable default");
         assert!(!error.to_string().is_empty(), "{value:?}: {error}");
@@ -4507,6 +4507,86 @@ async fn structured_role_pin_rejects_incomplete_auto_and_unknown_provider_pairs(
             "{value:?}: no other provider was selected"
         );
     }
+}
+#[tokio::test]
+async fn xai_pin_without_credentials_falls_back_to_the_session_route_loudly() {
+    // #5529 mode 2: a saved profile pinning a real provider whose client
+    // cannot be built (no credentials) must not fail the dispatch — the
+    // child runs on the session route and the receipt names the
+    // substitution.
+    let _env = crate::test_support::lock_test_env();
+    let _xai_key = crate::test_support::EnvVarGuard::remove("XAI_API_KEY");
+    let _cli_key = crate::test_support::EnvVarGuard::remove("CODEWHALE_CLI_API_KEY");
+    let mut runtime = credentialless_xai_runtime();
+    let member = credentialless_xai_member();
+    let request = parse_spawn_request(&json!({"prompt": "fixture", "type": "reviewer"})).unwrap();
+    let session_provider = runtime.client.api_provider();
+    let (_route, source, note) =
+        bind_spawn_model_route(&mut runtime, &request, Some(&member), true, true)
+            .await
+            .expect("credentialless pin falls back instead of failing");
+    assert!(matches!(source, SpawnRouteSource::SessionFallback));
+    assert_eq!(source.as_str(), "session.fallback");
+    let note = note.expect("fallback note");
+    assert!(note.contains("xai"), "{note}");
+    assert!(note.contains("session route"), "{note}");
+    assert_eq!(
+        runtime.client.api_provider(),
+        session_provider,
+        "session client kept"
+    );
+}
+
+#[tokio::test]
+async fn xai_pin_without_credentials_fails_closed_without_fallback() {
+    // Exact-bound spawns refuse provider substitution: their route is
+    // preflighted and must not be silently replaced.
+    let _env = crate::test_support::lock_test_env();
+    let _xai_key = crate::test_support::EnvVarGuard::remove("XAI_API_KEY");
+    let _cli_key = crate::test_support::EnvVarGuard::remove("CODEWHALE_CLI_API_KEY");
+    let mut runtime = credentialless_xai_runtime();
+    let member = credentialless_xai_member();
+    let request = parse_spawn_request(&json!({"prompt": "fixture", "type": "reviewer"})).unwrap();
+    let error = bind_spawn_model_route(&mut runtime, &request, Some(&member), true, false)
+        .await
+        .expect_err("exact-bound spawns refuse substitution");
+    assert!(error.to_string().contains("xai"), "{error}");
+    assert!(error.to_string().contains("unavailable"), "{error}");
+}
+
+fn credentialless_xai_member() -> crate::fleet::profile::AgentProfile {
+    crate::fleet::profile::AgentProfile {
+        id: "xai-pin".to_string(),
+        display_name: None,
+        description: None,
+        requires: Vec::new(),
+        profile: codewhale_config::FleetProfile {
+            provider: Some("xai".to_string()),
+            model: Some("grok-4-6".to_string()),
+            ..Default::default()
+        },
+        source: std::path::PathBuf::new(),
+        origin: crate::fleet::profile::ProfileOrigin::Config,
+        plugin_authority: None,
+    }
+}
+
+/// Session runtime whose config offers xAI no credential sources at all: no
+/// xai table, no root key, ambient key env removed by the caller. The
+/// credential store is cfg(test)-excluded, so the pinned client build fails
+/// deterministically and offline.
+fn credentialless_xai_runtime() -> SubAgentRuntime {
+    let mut runtime = stub_runtime();
+    let mut config = runtime
+        .api_config
+        .as_ref()
+        .expect("stub config")
+        .as_ref()
+        .clone();
+    config.api_key = None;
+    config.providers = None;
+    runtime.api_config = Some(std::sync::Arc::new(config));
+    runtime
 }
 
 #[tokio::test]
@@ -4560,7 +4640,7 @@ async fn manual_role_pin_keeps_case_distinct_custom_provider_identity() {
             "prompt":"review", "type":"reviewer", "model":selector
         }))
         .unwrap();
-        let result = bind_spawn_model_route(&mut runtime, &request, None, true).await;
+        let result = bind_spawn_model_route(&mut runtime, &request, None, true, true).await;
         if succeeds {
             assert_eq!(result.unwrap().1, SpawnRouteSource::RolePin);
         } else {
@@ -4602,7 +4682,7 @@ async fn foreign_manual_role_pin_is_not_downgraded_to_an_implicit_default() {
     assert!(error.to_string().contains("moonshot"), "{error}");
     assert_eq!(selected.source, SpawnRouteSource::RolePin);
     assert!(matches!(selected.model_route, ModelRoute::Fixed(_)));
-    bind_spawn_model_route(&mut runtime, &request, None, true)
+    bind_spawn_model_route(&mut runtime, &request, None, true, true)
         .await
         .expect_err("the actual bind must keep the same known-foreign refusal");
     assert_eq!(runtime.model, "kimi-k2.6");
@@ -4659,7 +4739,7 @@ async fn structured_custom_pin_refuses_named_provider_migration_but_accepts_lite
             "prompt":"review", "type":"reviewer", "model":"custom/model-x"
         }))
         .unwrap();
-        let result = bind_spawn_model_route(&mut runtime, &request, None, true).await;
+        let result = bind_spawn_model_route(&mut runtime, &request, None, true, true).await;
         if should_bind {
             assert_eq!(result.unwrap().1, SpawnRouteSource::RolePin);
             assert_eq!(runtime.model, "model-x");
@@ -20664,6 +20744,7 @@ fn spawn_route_metadata(provider: &str, model: &str, source: &str) -> WorkflowTa
         provider_id: provider.to_string(),
         model_id: model.to_string(),
         route_source: source.to_string(),
+        fallback_note: None,
         requested_reasoning: "inherit".to_string(),
         effective_reasoning: None,
         runtime_version: "test".to_string(),
@@ -21184,6 +21265,7 @@ async fn parked_followup_reuses_successor_and_preserves_route_authority_and_line
         provider_id: "deepseek".into(),
         model_id: "deepseek-v4-flash".into(),
         route_source: "role.pin".into(),
+        fallback_note: None,
         requested_reasoning: "inherit".into(),
         effective_reasoning: None,
         runtime_version: "fixture".into(),
@@ -21359,6 +21441,7 @@ async fn parked_followup_executes_on_the_saved_cross_provider_route() {
         provider_id: "zai".into(),
         model_id: "glm-5".into(),
         route_source: "role.pin".into(),
+        fallback_note: None,
         requested_reasoning: "inherit".into(),
         effective_reasoning: None,
         runtime_version: "fixture".into(),
@@ -21538,6 +21621,7 @@ async fn resume_keeps_recorded_reasoning_in_manifest_and_request_after_parent_ch
                 provider_id: "deepseek".into(),
                 model_id: "deepseek-v4-flash".into(),
                 route_source: "role.pin".into(),
+                fallback_note: None,
                 requested_reasoning: "inherit".into(),
                 effective_reasoning: tier.map(str::to_string),
                 runtime_version: "fixture".into(),

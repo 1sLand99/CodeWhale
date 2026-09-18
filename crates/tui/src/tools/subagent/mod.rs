@@ -700,6 +700,10 @@ pub struct ChildRouteReceipt {
     pub provider_id: String,
     pub model_id: String,
     pub route_source: String,
+    /// Present only when the dispatch fell back past an unusable pinned
+    /// provider: names the pin and the reason (#5529 mode 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_note: Option<String>,
     pub requested_reasoning: String,
     pub effective_reasoning: Option<String>,
     pub runtime_version: String,
@@ -10318,11 +10322,14 @@ async fn spawn_subagent_from_input(
         .map(|file_path| read_bounded_resident_context(&runtime.context, file_path))
         .transpose()?;
     let effective_prompt = assemble_spawn_prompt(&spawn_request, resident_context.as_ref());
-    let (model_route, route_source) = bind_spawn_model_route(
+    let (model_route, route_source, fallback_note) = bind_spawn_model_route(
         &mut child_runtime,
         &spawn_request,
         profile_member.as_ref(),
         true,
+        // Exact-bound spawns refuse provider substitution: their route is
+        // preflighted and "will not guess or fall back".
+        exact_fleet_binding.is_none(),
     )
     .await?;
     if let Some(binding) = exact_fleet_binding {
@@ -10348,6 +10355,7 @@ async fn spawn_subagent_from_input(
         &child_runtime,
         effective_model.clone(),
         route_source.as_str(),
+        fallback_note.as_deref(),
     )?;
 
     if spawn_request.worktree.is_some() {
@@ -10627,6 +10635,7 @@ fn mint_child_route_receipt(
     runtime: &SubAgentRuntime,
     model_id: String,
     route_source: &str,
+    fallback_note: Option<&str>,
 ) -> Result<ChildRouteReceipt, ToolError> {
     // Identity comes from the same member snapshot used to bind this child.
     let canonical_role = request
@@ -10649,6 +10658,7 @@ fn mint_child_route_receipt(
         provider_id,
         model_id,
         route_source: route_source.to_string(),
+        fallback_note: fallback_note.map(str::to_string),
         requested_reasoning: requested_route.requested_reasoning.clone(),
         effective_reasoning: runtime.reasoning_effort.clone(),
         runtime_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -14816,12 +14826,12 @@ fn apply_spawn_profile(
 fn bind_profile_provider(
     runtime: &mut SubAgentRuntime,
     member: Option<&crate::fleet::profile::AgentProfile>,
-) -> Result<(), ToolError> {
+) -> Result<MemberProviderBind, ToolError> {
     let Some(provider_id) = crate::fleet::worker_runtime::explicit_fleet_provider_id(member) else {
-        return Ok(());
+        return Ok(MemberProviderBind::Bound);
     };
     if provider_pin_matches_session(runtime, &provider_id) {
-        return Ok(());
+        return Ok(MemberProviderBind::Bound);
     }
     if member
         .and_then(|member| member.profile.model.as_deref())
@@ -14831,12 +14841,39 @@ fn bind_profile_provider(
             "A saved cross-provider route must pin an exact model as well as its provider.",
         ));
     }
-    bind_spawn_provider(runtime, &provider_id)
+    try_bind_spawn_provider(runtime, &provider_id)
+}
+
+/// Outcome of binding a saved profile's provider pin (#5529 mode 2).
+enum MemberProviderBind {
+    /// No pin, a session-identical pin, or bound successfully.
+    Bound,
+    /// The pin names a real provider whose client cannot be built
+    /// (missing credentials, unusable route). The dispatch may fall back
+    /// to the session route loudly instead of failing. Unknown provider
+    /// ids stay a hard fail-closed error — running elsewhere on a typo'd
+    /// pin would be guessing, not falling back.
+    Unavailable { provider_id: String, reason: String },
 }
 
 fn bind_spawn_provider(runtime: &mut SubAgentRuntime, provider_id: &str) -> Result<(), ToolError> {
+    match try_bind_spawn_provider(runtime, provider_id)? {
+        MemberProviderBind::Bound => Ok(()),
+        MemberProviderBind::Unavailable {
+            provider_id,
+            reason,
+        } => Err(ToolError::execution_failed(format!(
+            "Saved provider '{provider_id}' is unavailable: {reason}"
+        ))),
+    }
+}
+
+fn try_bind_spawn_provider(
+    runtime: &mut SubAgentRuntime,
+    provider_id: &str,
+) -> Result<MemberProviderBind, ToolError> {
     if provider_pin_matches_session(runtime, provider_id) {
-        return Ok(());
+        return Ok(MemberProviderBind::Bound);
     }
     let config = runtime.api_config.as_deref().ok_or_else(|| ToolError::execution_failed(
         "An exact provider choice needs the session Config; the child cannot safely change providers without it."
@@ -14846,14 +14883,30 @@ fn bind_spawn_provider(runtime: &mut SubAgentRuntime, provider_id: &str) -> Resu
         .map_err(ToolError::invalid_input)?;
     let mut scoped = config.clone();
     scoped.scope_to_provider_identity(&identity);
-    runtime.client = DeepSeekClient::new(&scoped).map_err(|error| {
-        ToolError::execution_failed(format!(
-            "Saved provider '{provider_id}' is unavailable: {}",
-            runtime.client.redact_model_bound_text(&error.to_string())
-        ))
-    })?;
-    runtime.api_config = Some(Arc::new(scoped));
-    Ok(())
+    match DeepSeekClient::new(&scoped) {
+        Ok(client) => {
+            // #5529 mode 2: a bound client with unresolvable credentials
+            // dies on its first request; probe servability now so the
+            // dispatch can fall back loudly instead. Read-only probe: real
+            // requests still own secret migration.
+            if let Err(error) = scoped.deepseek_api_key_read_only() {
+                return Ok(MemberProviderBind::Unavailable {
+                    provider_id: provider_id.to_string(),
+                    reason: format!(
+                        "credentials unresolvable: {}",
+                        runtime.client.redact_model_bound_text(&error.to_string())
+                    ),
+                });
+            }
+            runtime.client = client;
+            runtime.api_config = Some(Arc::new(scoped));
+            Ok(MemberProviderBind::Bound)
+        }
+        Err(error) => Ok(MemberProviderBind::Unavailable {
+            provider_id: provider_id.to_string(),
+            reason: runtime.client.redact_model_bound_text(&error.to_string()),
+        }),
+    }
 }
 
 fn provider_pin_matches_session(runtime: &SubAgentRuntime, provider_id: &str) -> bool {
@@ -15002,6 +15055,10 @@ enum SpawnRouteSource {
     TaskModelStrength,
     RoleDefault,
     RunModel,
+    /// The profile's pinned provider was unusable, so the dispatch fell
+    /// back to the session route loudly (receipt note names the pin and
+    /// the reason) instead of failing (#5529 mode 2).
+    SessionFallback,
 }
 
 impl SpawnRouteSource {
@@ -15013,6 +15070,7 @@ impl SpawnRouteSource {
             Self::TaskModelStrength => "task.model_strength",
             Self::RoleDefault => "role.default",
             Self::RunModel => "run.model",
+            Self::SessionFallback => "session.fallback",
         }
     }
 }
@@ -15191,8 +15249,35 @@ async fn bind_spawn_model_route(
     request: &SpawnRequest,
     member: Option<&crate::fleet::profile::AgentProfile>,
     apply_role_pins: bool,
-) -> Result<(ModelRoute, SpawnRouteSource), ToolError> {
-    bind_profile_provider(runtime, member)?;
+    allow_provider_fallback: bool,
+) -> Result<(ModelRoute, SpawnRouteSource, Option<String>), ToolError> {
+    // #5529 mode 2: a profile pin to an unusable provider falls back to the
+    // session route loudly instead of failing the dispatch. Exact-bound
+    // spawns refuse the substitution (their route is preflighted), and
+    // task-level pins stay exact — only saved-profile rot falls back.
+    let mut member = member;
+    let mut fallback_note = None;
+    match bind_profile_provider(runtime, member)? {
+        MemberProviderBind::Bound => {}
+        MemberProviderBind::Unavailable {
+            provider_id,
+            reason,
+        } if allow_provider_fallback => {
+            let reason: String = reason.chars().take(160).collect();
+            fallback_note = Some(format!(
+                "pinned provider '{provider_id}' unavailable ({reason}); fell back to the session route"
+            ));
+            member = None;
+        }
+        MemberProviderBind::Unavailable {
+            provider_id,
+            reason,
+        } => {
+            return Err(ToolError::execution_failed(format!(
+                "Saved provider '{provider_id}' is unavailable: {reason}"
+            )));
+        }
+    }
     let mut shortlisted = false;
     let mut manual_pin = None;
     let mut selection = if let Some(member) = member
@@ -15291,7 +15376,12 @@ async fn bind_spawn_model_route(
     runtime.model = model;
     runtime.reasoning_effort = route.reasoning_effort;
     runtime.reasoning_effort_auto = false;
-    Ok((route.model_route, selection.source))
+    let source = if fallback_note.is_some() {
+        SpawnRouteSource::SessionFallback
+    } else {
+        selection.source
+    };
+    Ok((route.model_route, source, fallback_note))
 }
 
 fn validate_spawn_pin_request(
@@ -15409,12 +15499,13 @@ async fn resolved_spawn_roster_entry(
     let mut child = runtime.child_runtime();
     let resolved = match request {
         Ok((request, member)) => {
-            bind_spawn_model_route(&mut child, &request, member.as_ref(), apply_role_pins).await
+            bind_spawn_model_route(&mut child, &request, member.as_ref(), apply_role_pins, true)
+                .await
         }
         Err(error) => Err(error),
     };
     match resolved {
-        Ok((_, source)) => {
+        Ok((_, source, _)) => {
             let envelope = child
                 .client
                 .effective_route_envelope(&child.model, chrono::Utc::now())
@@ -18680,10 +18771,11 @@ async fn configured_model_subagent_full_bind_preserves_task_profile_and_role_ids
                 _ => unreachable!(),
             }
             let request = parse_spawn_request(&input).unwrap();
-            let (route, _) = bind_spawn_model_route(
+            let (route, _, _) = bind_spawn_model_route(
                 &mut runtime,
                 &request,
                 (source == "profile").then_some(&member),
+                true,
                 true,
             )
             .await
@@ -18842,9 +18934,10 @@ mod declared_shortlist_tests {
                         &json!({"prompt":"fixture", "type":"reviewer", "model":requested}),
                     )
                     .unwrap();
-                    let (route, _) = bind_spawn_model_route(&mut runtime, &request, None, true)
-                        .await
-                        .unwrap();
+                    let (route, _, _) =
+                        bind_spawn_model_route(&mut runtime, &request, None, true, true)
+                            .await
+                            .unwrap();
                     assert_eq!(route, ModelRoute::Fixed(model.into()));
                     assert_eq!(runtime.model, model);
                     assert_eq!(
@@ -18907,6 +19000,7 @@ mod declared_shortlist_tests {
                         &request,
                         (source == "profile").then_some(&member),
                         true,
+                        true,
                     )
                     .await;
                     if requested_model == upper {
@@ -18930,7 +19024,7 @@ mod declared_shortlist_tests {
         )
         .unwrap();
         assert!(
-            bind_spawn_model_route(&mut runtime, &request, None, true)
+            bind_spawn_model_route(&mut runtime, &request, None, true, true)
                 .await
                 .unwrap_err()
                 .to_string()
@@ -18956,7 +19050,7 @@ mod declared_shortlist_tests {
             parse_spawn_request(&json!({"prompt":"fixture", "type":"reviewer", "model":lower}))
                 .unwrap();
         assert!(
-            bind_spawn_model_route(&mut runtime, &request, None, true)
+            bind_spawn_model_route(&mut runtime, &request, None, true, true)
                 .await
                 .is_err()
         );
@@ -18968,7 +19062,7 @@ mod declared_shortlist_tests {
         )
         .unwrap();
         assert_eq!(
-            bind_spawn_model_route(&mut runtime, &request, None, true)
+            bind_spawn_model_route(&mut runtime, &request, None, true, true)
                 .await
                 .unwrap()
                 .0,

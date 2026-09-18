@@ -312,6 +312,7 @@ fn issue_5305_builtin_inheritance_and_redaction_are_bounded() {
         &runtime,
         "deepseek-v4-flash".to_string(),
         "run.model",
+        None,
     )
     .expect("bounded receipt");
     let encoded = serde_json::to_string(&receipt).expect("receipt json");
@@ -326,6 +327,24 @@ fn issue_5305_builtin_inheritance_and_redaction_are_bounded() {
             "receipt leaked {forbidden}: {encoded}"
         );
     }
+    // #5529 mode 2: the fallback note rides the receipt inside the same
+    // byte ceiling.
+    let fallback = mint_child_route_receipt(
+        &requested_route,
+        &request,
+        None,
+        &runtime,
+        "deepseek-v4-flash".to_string(),
+        "session.fallback",
+        Some("pinned provider 'xai' unavailable (no credentials); fell back to the session route"),
+    )
+    .expect("bounded receipt");
+    assert_eq!(
+        fallback.fallback_note.as_deref(),
+        Some("pinned provider 'xai' unavailable (no credentials); fell back to the session route")
+    );
+    let fallback_encoded = serde_json::to_string(&fallback).expect("receipt json");
+    assert!(fallback_encoded.len() <= CHILD_ROUTE_RECEIPT_MAX_BYTES);
 }
 
 #[tokio::test]
@@ -341,6 +360,7 @@ async fn issue_5305_receipt_survives_ledger_interruption_completion_and_resume()
         provider_id: "openai-codex".to_string(),
         model_id: "gpt-5.6-sol".to_string(),
         route_source: "agent_profile.model".to_string(),
+        fallback_note: None,
         requested_reasoning: "inherit".to_string(),
         effective_reasoning: Some("high".to_string()),
         runtime_version: "test".to_string(),
