@@ -5042,6 +5042,7 @@ fn policy_for_catalog(
         disallowed_tools,
         None,
         approval_mode,
+        crate::core::engine::tool_catalog::ToolMode::Direct,
     )
 }
 
@@ -6193,6 +6194,7 @@ fn test_tool_surface(
         engine.config.disallowed_tools.clone(),
         engine.config.max_tool_calls,
         engine.session.approval_mode,
+        crate::core::engine::tool_catalog::ToolMode::Direct,
     )
 }
 
@@ -10584,7 +10586,12 @@ fn default_active_contract_keeps_discovery_and_core_tools_eager() {
         AppMode::Agent,
         &always_load,
     );
-    ensure_advanced_tooling(&mut catalog, AppMode::Agent, &always_load);
+    ensure_advanced_tooling(
+        &mut catalog,
+        AppMode::Agent,
+        &always_load,
+        crate::core::engine::tool_catalog::ToolMode::Direct,
+    );
     let active = initial_active_tools(&catalog);
     let expected = EXPECTED_NATIVE
         .into_iter()
@@ -10813,7 +10820,12 @@ fn plugin_or_benchmark_tools_remain_searchable_not_eager() {
         &always_load,
     );
 
-    ensure_advanced_tooling(&mut catalog, AppMode::Agent, &always_load);
+    ensure_advanced_tooling(
+        &mut catalog,
+        AppMode::Agent,
+        &always_load,
+        crate::core::engine::tool_catalog::ToolMode::Direct,
+    );
 
     let active = initial_active_tools(&catalog);
     assert!(!active.contains("KB_search"));
@@ -19127,7 +19139,12 @@ fn tool_search_activates_discovered_deferred_tools() {
         },
     ];
     let always_load = HashSet::new();
-    ensure_advanced_tooling(&mut catalog, AppMode::Agent, &always_load);
+    ensure_advanced_tooling(
+        &mut catalog,
+        AppMode::Agent,
+        &always_load,
+        crate::core::engine::tool_catalog::ToolMode::Direct,
+    );
     let mut active = initial_active_tools(&catalog);
     let result = execute_tool_search(
         TOOL_SEARCH_NAME,
@@ -19152,7 +19169,12 @@ fn tool_search_scenario() {
             AppMode::Agent,
             &always_load,
         );
-        ensure_advanced_tooling(&mut catalog, AppMode::Agent, &always_load);
+        ensure_advanced_tooling(
+            &mut catalog,
+            AppMode::Agent,
+            &always_load,
+            crate::core::engine::tool_catalog::ToolMode::Direct,
+        );
 
         let mut active = initial_active_tools(&catalog);
         assert!(!active.contains(REQUEST_USER_INPUT_NAME));
@@ -19213,7 +19235,12 @@ fn tool_search_scenario() {
     {
         let mut catalog = Vec::new();
         let always_load = HashSet::new();
-        ensure_advanced_tooling(&mut catalog, AppMode::Agent, &always_load);
+        ensure_advanced_tooling(
+            &mut catalog,
+            AppMode::Agent,
+            &always_load,
+            crate::core::engine::tool_catalog::ToolMode::Direct,
+        );
 
         let tool = catalog
             .iter()
@@ -19243,7 +19270,12 @@ fn tool_search_catalog_with_matches(count: usize) -> Vec<Tool> {
         })
         .collect::<Vec<_>>();
     let always_load = HashSet::new();
-    ensure_advanced_tooling(&mut catalog, AppMode::Agent, &always_load);
+    ensure_advanced_tooling(
+        &mut catalog,
+        AppMode::Agent,
+        &always_load,
+        crate::core::engine::tool_catalog::ToolMode::Direct,
+    );
     catalog
 }
 
@@ -19340,7 +19372,12 @@ async fn code_execution_scenario() {
 fn plan_mode_catalog_skips_code_execution_tool_but_agent_keeps_it() {
     let mut plan_catalog = vec![api_tool("read_file")];
     let always_load = HashSet::new();
-    ensure_advanced_tooling(&mut plan_catalog, AppMode::Plan, &always_load);
+    ensure_advanced_tooling(
+        &mut plan_catalog,
+        AppMode::Plan,
+        &always_load,
+        crate::core::engine::tool_catalog::ToolMode::Direct,
+    );
     assert!(
         !plan_catalog
             .iter()
@@ -19349,7 +19386,12 @@ fn plan_mode_catalog_skips_code_execution_tool_but_agent_keeps_it() {
     );
 
     let mut agent_catalog = vec![api_tool("read_file")];
-    ensure_advanced_tooling(&mut agent_catalog, AppMode::Agent, &always_load);
+    ensure_advanced_tooling(
+        &mut agent_catalog,
+        AppMode::Agent,
+        &always_load,
+        crate::core::engine::tool_catalog::ToolMode::Direct,
+    );
     assert!(
         agent_catalog
             .iter()
@@ -22289,6 +22331,7 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
         Some(vec!["mcp_slow_denied".into()]),
         None,
         ApprovalMode::Suggest,
+        crate::core::engine::tool_catalog::ToolMode::Direct,
     );
     let mut catalog = policy.catalog.clone();
     let mut active = policy.active_names.clone();

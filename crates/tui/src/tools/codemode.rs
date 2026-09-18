@@ -477,7 +477,12 @@ mod tests {
         let empty = HashSet::new();
         for mode in [AppMode::Agent, AppMode::Operate] {
             let mut catalog = Vec::new();
-            crate::core::engine::tool_catalog::ensure_advanced_tooling(&mut catalog, mode, &empty);
+            crate::core::engine::tool_catalog::ensure_advanced_tooling(
+                &mut catalog,
+                mode,
+                &empty,
+                ToolMode::Direct,
+            );
             let tool = catalog
                 .iter()
                 .find(|tool| tool.name == EXECUTE_TOOLS_TOOL_NAME)
@@ -489,6 +494,7 @@ mod tests {
             &mut catalog,
             AppMode::Plan,
             &empty,
+            ToolMode::Direct,
         );
         assert!(
             catalog
@@ -528,6 +534,7 @@ mod tests {
         assert!(value["preview"].as_str().is_some());
     }
 
+    use crate::core::engine::tool_catalog::ToolMode;
     use crate::tools::file_tool::{ReadTool, WriteTool};
     use crate::tools::registry::ToolRegistryBuilder;
 

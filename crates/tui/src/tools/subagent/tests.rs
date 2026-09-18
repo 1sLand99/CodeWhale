@@ -8041,7 +8041,12 @@ fn small_surface_caches_are_independent_bounded_and_revalidated() {
     let mut catalog = (0..9)
         .map(|index| synthetic_deferred_tool(&format!("deferred_{index}"), 8))
         .collect::<Vec<_>>();
-    ensure_advanced_tooling(&mut catalog, AppMode::Agent, &HashSet::new());
+    ensure_advanced_tooling(
+        &mut catalog,
+        AppMode::Agent,
+        &HashSet::new(),
+        crate::core::engine::tool_catalog::ToolMode::Direct,
+    );
     catalog.retain(|tool| tool.name == TOOL_SEARCH_NAME || tool.name.starts_with("deferred_"));
     let warm = (0..9)
         .map(|index| format!("deferred_{index}"))
@@ -8063,7 +8068,12 @@ fn small_surface_caches_are_independent_bounded_and_revalidated() {
     let mut byte_catalog = (0..3)
         .map(|index| synthetic_deferred_tool(&format!("bytes_{index}"), 6 * 1024))
         .collect::<Vec<_>>();
-    ensure_advanced_tooling(&mut byte_catalog, AppMode::Agent, &HashSet::new());
+    ensure_advanced_tooling(
+        &mut byte_catalog,
+        AppMode::Agent,
+        &HashSet::new(),
+        crate::core::engine::tool_catalog::ToolMode::Direct,
+    );
     byte_catalog.retain(|tool| tool.name == TOOL_SEARCH_NAME || tool.name.starts_with("bytes_"));
     let byte_warm = (0..3)
         .map(|index| format!("bytes_{index}"))

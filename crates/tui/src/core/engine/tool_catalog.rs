@@ -21,6 +21,7 @@ use codewhale_models::Tool;
 
 use crate::core::session::ToolActivationCache;
 use crate::dependencies::ExternalTool;
+use crate::features::{Feature, Features};
 use crate::regex_cache::compile_user_regex;
 
 pub(super) const MULTI_TOOL_PARALLEL_NAME: &str = "multi_tool_use.parallel";
@@ -255,10 +256,45 @@ pub(super) fn surface_budgets_produce_same_catalog(
     serde_json::to_string(&left).ok() == serde_json::to_string(&right).ok()
 }
 
+/// How the harness exposes tool-calling to the model, resolved per turn.
+///
+/// Mirrors Codex's `ToolMode`: the model's own metadata wins, `[features]`
+/// flags override the default, and anything else is [`ToolMode::Direct`].
+/// There is no user-facing mode to enter — the catalog shape is the whole
+/// mechanism, so `CodeMode` only promotes `execute_tools` from deferred to
+/// eager. (A `CodeModeOnly` restriction needs dispatch enforcement and is a
+/// later slice, not a third variant here.)
+///
+/// KV-cache effect: the inputs are session config (plus future per-model
+/// metadata), so the resolved mode is prefix-stable within a session; a flag
+/// flip refreshes the prefix under an explicit config-change reason like any
+/// other catalog reshape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolMode {
+    /// Composition by choice: `execute_tools` stays deferred until `tool_search`.
+    Direct,
+    /// Composition by default: `execute_tools` is eager alongside direct tools.
+    CodeMode,
+}
+
+/// Resolve the turn's tool mode: model hint first, `[features] code_mode`
+/// second, [`ToolMode::Direct`] otherwise. The engine passes `None` for the
+/// hint until per-model metadata is wired (model_registry follow-up).
+pub(crate) fn requested_tool_mode(model_hint: Option<ToolMode>, features: &Features) -> ToolMode {
+    model_hint.unwrap_or_else(|| {
+        if features.enabled(Feature::CodeMode) {
+            ToolMode::CodeMode
+        } else {
+            ToolMode::Direct
+        }
+    })
+}
+
 pub(crate) fn ensure_advanced_tooling(
     catalog: &mut Vec<Tool>,
     mode: AppMode,
     always_load: &HashSet<String>,
+    tool_mode: ToolMode,
 ) {
     // code_execution depends on a locally-installed Python interpreter
     // (python3 / python / py -3). Before v0.8.31, the tool was always
@@ -309,10 +345,13 @@ pub(crate) fn ensure_advanced_tooling(
 
     // execute_tools needs no dependency probe: QuickJS is compiled in.
     // Otherwise it follows the interpreter tools exactly — hidden from Plan,
-    // deferred everywhere else.
+    // deferred everywhere else — except under CodeMode, where the harness
+    // promotes composition to eager instead of waiting for tool_search.
     if mode != AppMode::Plan && !catalog.iter().any(|t| t.name == EXECUTE_TOOLS_TOOL_NAME) {
         let mut tool = crate::tools::codemode::execute_tools_tool_definition();
-        tool.defer_loading = Some(should_default_defer_tool(&tool.name, always_load));
+        tool.defer_loading = Some(
+            tool_mode == ToolMode::Direct && should_default_defer_tool(&tool.name, always_load),
+        );
         catalog.push(tool);
     }
 
@@ -496,10 +535,11 @@ impl ToolSurfacePolicy {
         disallowed_tools: Option<Vec<String>>,
         max_tool_calls: Option<u32>,
         approval_mode: ApprovalMode,
+        tool_mode: ToolMode,
     ) -> Self {
         let mut catalog = tools.unwrap_or_default();
         if !catalog.is_empty() {
-            ensure_advanced_tooling(&mut catalog, mode, always_load);
+            ensure_advanced_tooling(&mut catalog, mode, always_load, tool_mode);
         }
 
         // Synthetic tools are injected before narrowing. Doing this after the

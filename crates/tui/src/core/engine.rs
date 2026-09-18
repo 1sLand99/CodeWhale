@@ -4493,6 +4493,7 @@ impl Engine {
                     None,
                     Some(0),
                     input_policy.approval_mode_for_session(),
+                    tool_catalog::ToolMode::Direct,
                 ),
                 mcp_tool_names: Vec::new(),
                 mcp: McpToolState::Disabled,
@@ -4748,6 +4749,9 @@ impl Engine {
             self.config.disallowed_tools.clone(),
             self.config.max_tool_calls,
             input_policy.approval_mode_for_session(),
+            // Model metadata wins once wired; today the hint is always None
+            // and the [features] flags decide (model_registry follow-up).
+            tool_catalog::requested_tool_mode(None, &self.config.features),
         );
         TurnToolBuild {
             surface,

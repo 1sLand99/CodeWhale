@@ -33,7 +33,7 @@ use uuid::Uuid;
 use crate::client::DeepSeekClient;
 use crate::config::{MAX_SUBAGENTS, SubagentModelOverride};
 use crate::core::engine::tool_catalog::{
-    TOOL_SEARCH_NAME, active_tools_for_request, apply_native_tool_deferral,
+    TOOL_SEARCH_NAME, ToolMode, active_tools_for_request, apply_native_tool_deferral,
     ensure_advanced_tooling, execute_tool_search_with_cache, initial_active_tools,
     is_tool_search_tool, remove_evicted_cache_activations, tool_denied,
     touch_cached_tool_after_execution,
@@ -17686,6 +17686,9 @@ impl SubAgentToolRegistry {
             &mut catalog,
             AppMode::Agent,
             &std::collections::HashSet::new(),
+            // Children run under a worker envelope, which refuses
+            // execute_tools at dispatch; never advertise it eagerly here.
+            ToolMode::Direct,
         );
         // A tool-free child (explicit empty scope) has nothing to discover:
         // drop tool_search as well so the wire request genuinely omits tools.

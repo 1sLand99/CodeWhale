@@ -528,6 +528,7 @@ mod tests {
             None,
             Some(4),
             engine.session.approval_mode,
+            crate::core::engine::tool_catalog::ToolMode::Direct,
         );
         let events = handle.rx_event.clone();
         let mut handle = Some(handle);
