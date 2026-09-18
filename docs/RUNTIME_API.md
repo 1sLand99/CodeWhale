@@ -405,10 +405,14 @@ Prompt requests are routed through the configured Codewhale client and current
 default model. Responses are emitted as `session/update` agent message chunks
 followed by a `session/prompt` response with `stopReason: "end_turn"`.
 
-The adapter is intentionally conservative: it does not yet expose shell tools,
-file-write tools, checkpoint replay, or session loading through ACP. Use
-`codewhale serve --http` for the full local runtime API and `codewhale serve --mcp`
-when another client needs Codewhale's tools as MCP tools.
+Each session executes tool calls locally through a registry built from the
+same file/search/git/patch/shell tools as the CLI exec agent, gated by
+`session/request_permission` and reported as `tool_call` / `tool_call_update`
+session updates. What ACP sessions still lack is the full thread/turn
+runtime: no durable threads, snapshots, steering, or approval parity with
+`/v1/*` (tracked by #5835). Use `codewhale serve --http` for the full local
+runtime API and `codewhale serve --mcp` when another client needs
+Codewhale's tools as MCP tools.
 
 ## Capability endpoint: `codewhale doctor --json`
 
