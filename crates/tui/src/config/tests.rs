@@ -304,57 +304,6 @@ fn provider_environment_model_outranks_startup_memory() {
     );
 }
 
-#[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-struct HeaderItemsTestConfig {
-    #[serde(default, deserialize_with = "deser_header_items")]
-    header_items: Option<Vec<HeaderItem>>,
-}
-
-#[test]
-fn parses_header_tokens_item() {
-    let config: HeaderItemsTestConfig = toml::from_str(
-        r#"
-header_items = ["tokens"]
-"#,
-    )
-    .expect("header_items should parse");
-
-    assert_eq!(config.header_items, Some(vec![HeaderItem::Tokens]));
-}
-
-#[test]
-fn ignores_unknown_header_items() {
-    let config: HeaderItemsTestConfig = toml::from_str(
-        r#"
-header_items = ["tokens", "future_item"]
-"#,
-    )
-    .expect("unknown header items should not reject the config");
-
-    assert_eq!(config.header_items, Some(vec![HeaderItem::Tokens]));
-}
-
-#[test]
-fn header_items_scenario() {
-    // Scenario consolidation of: header_items_round_trip, header_items_are_opt_in_by_default
-    // from header_items_round_trip
-    {
-        let original = HeaderItemsTestConfig {
-            header_items: Some(vec![HeaderItem::Tokens]),
-        };
-
-        let serialized = toml::to_string(&original).expect("config should serialize");
-        let decoded: HeaderItemsTestConfig =
-            toml::from_str(&serialized).expect("serialized config should parse");
-
-        assert_eq!(decoded, original);
-    }
-    // from header_items_are_opt_in_by_default
-    {
-        assert!(HeaderItem::default_header().is_empty());
-    }
-}
-
 #[test]
 fn malformed_config_error_omits_secret_contents_and_keys() {
     let dir = tempfile::tempdir().expect("tempdir");

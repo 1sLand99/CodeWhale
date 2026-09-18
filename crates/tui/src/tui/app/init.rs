@@ -1021,11 +1021,6 @@ impl App {
             // once here so every render pass — main cache and full-screen
             // overlay — shares one effective width; `None` = full width.
             prose_measure: config.prose_measure(),
-            header_items: config
-                .tui
-                .as_ref()
-                .and_then(|tui| tui.header_items.clone())
-                .unwrap_or_else(crate::config::HeaderItem::default_header),
             project_doc: None,
             plan_state,
             todos,

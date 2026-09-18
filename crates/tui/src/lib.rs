@@ -18791,7 +18791,6 @@ api_key = "test-only-key"
                 osc8_links: None,
                 composer_arrows_scroll: None,
                 notification_condition: None,
-                header_items: None,
             }),
             ..Config::default()
         };
@@ -18893,7 +18892,6 @@ api_key = "test-only-key"
                 osc8_links: None,
                 composer_arrows_scroll: None,
                 notification_condition: None,
-                header_items: None,
             }),
             ..Config::default()
         };
@@ -18933,7 +18931,6 @@ api_key = "test-only-key"
                 osc8_links: None,
                 composer_arrows_scroll: None,
                 notification_condition: None,
-                header_items: None,
             }),
             ..Config::default()
         };
@@ -19027,7 +19024,6 @@ api_key = "test-only-key"
                 osc8_links: None,
                 composer_arrows_scroll: None,
                 notification_condition: None,
-                header_items: None,
             }),
             ..Config::default()
         };

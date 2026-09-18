@@ -913,23 +913,6 @@ impl Default for ComposerState {
     }
 }
 
-/// Compatibility name retained for the first Tideline header slice. New
-/// surfaces register [`crate::tui::tideline::InteractionAction`] directly.
-#[cfg_attr(not(test), expect(dead_code))]
-pub type HeaderActionTarget = crate::tui::tideline::InteractionAction;
-
-/// A header target painted in the latest frame.
-///
-/// The visible chrome owns placement; input owns dispatch. Keeping the
-/// rectangular target alongside its typed action gives mouse and keyboard
-/// routes one shared destination without a second navigation system.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), expect(dead_code))]
-pub struct HeaderHitbox {
-    pub area: Rect,
-    pub target: HeaderActionTarget,
-}
-
 /// Viewport/scroll state — fields related to transcript scrolling and caching.
 pub struct ViewportState {
     pub transcript_scroll: TranscriptScroll,
@@ -2118,14 +2101,6 @@ pub struct App {
     /// `compact` keeps the route, context, cost and balance and drops the
     /// telemetry and the help hint.
     pub metrics_line: crate::config::ChromeRowPreset,
-    /// Optional header items enabled from `tui.header_items` in `config.toml`
-    /// at startup. Built-in header content remains independent of this list.
-    /// Unread since the classic header was superseded by the Tideline info
-    /// line (2026-08-29): the info line carries the context meter by default and the
-    /// token breakdown lives behind `/cost` (spec §3). The field stays so the
-    /// config surface keeps parsing; its reader returns with the classic
-    /// renderer deletion slice.
-    pub header_items: Vec<crate::config::HeaderItem>,
     /// Project documentation (AGENTS.md or CLAUDE.md)
     #[expect(dead_code)]
     pub project_doc: Option<String>,
