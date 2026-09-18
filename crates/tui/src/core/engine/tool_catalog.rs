@@ -28,6 +28,7 @@ pub(super) const REQUEST_USER_INPUT_NAME: &str = "request_user_input";
 pub(super) const CODE_EXECUTION_TOOL_NAME: &str = "code_execution";
 const CODE_EXECUTION_TOOL_TYPE: &str = "code_execution_20250825";
 const CODE_EXECUTION_DESCRIPTION: &str = "Execute Python code with the local Python interpreter in the workspace and return stdout/stderr/return_code as JSON.";
+pub(super) use crate::tools::codemode::EXECUTE_TOOLS_TOOL_NAME;
 pub(super) use crate::tools::js_execution::JS_EXECUTION_TOOL_NAME;
 pub(crate) const TOOL_SEARCH_NAME: &str = "tool_search";
 const TOOL_RESULT_RETRIEVAL_NAME: &str = "retrieve_tool_result";
@@ -302,6 +303,15 @@ pub(crate) fn ensure_advanced_tooling(
         && crate::dependencies::resolve_node().is_some()
     {
         let mut tool = crate::tools::js_execution::js_execution_tool_definition();
+        tool.defer_loading = Some(should_default_defer_tool(&tool.name, always_load));
+        catalog.push(tool);
+    }
+
+    // execute_tools needs no dependency probe: QuickJS is compiled in.
+    // Otherwise it follows the interpreter tools exactly — hidden from Plan,
+    // deferred everywhere else.
+    if mode != AppMode::Plan && !catalog.iter().any(|t| t.name == EXECUTE_TOOLS_TOOL_NAME) {
+        let mut tool = crate::tools::codemode::execute_tools_tool_definition();
         tool.defer_loading = Some(should_default_defer_tool(&tool.name, always_load));
         catalog.push(tool);
     }
@@ -1010,6 +1020,7 @@ pub(super) fn default_synthetic_catalog_tool_names() -> Vec<String> {
         LEGACY_TOOL_SEARCH_BM25_NAME.to_string(),
         CODE_EXECUTION_TOOL_NAME.to_string(),
         JS_EXECUTION_TOOL_NAME.to_string(),
+        EXECUTE_TOOLS_TOOL_NAME.to_string(),
     ];
     names.sort();
     names.dedup();
@@ -1019,7 +1030,10 @@ pub(super) fn default_synthetic_catalog_tool_names() -> Vec<String> {
 #[cfg(test)]
 fn is_synthetic_catalog_tool(name: &str) -> bool {
     is_tool_search_tool(name)
-        || matches!(name, CODE_EXECUTION_TOOL_NAME | JS_EXECUTION_TOOL_NAME)
+        || matches!(
+            name,
+            CODE_EXECUTION_TOOL_NAME | JS_EXECUTION_TOOL_NAME | EXECUTE_TOOLS_TOOL_NAME
+        )
         || McpPool::is_mcp_tool(name)
 }
 

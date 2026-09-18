@@ -72,6 +72,12 @@ MCP tools are dynamic. Successfully connected servers register names such as
 must not be presented as available. MCP and plugin tools are deferred unless a
 user explicitly names them in `[tools].always_load`.
 
+`execute_tools` is deferred and engine-injected, alongside the synthetic
+interpreter tools. It runs a JavaScript program whose only host surface is
+`tools.call(name, args)`; nested calls must be read-only and auto-approved,
+and anything else aborts the program with a host-owned receipt. It is hidden
+from Plan mode and refused under a worker authority envelope.
+
 ### Conversation toolbox cache
 
 A successful search activation is remembered by name for the current

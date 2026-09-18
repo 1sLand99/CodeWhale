@@ -8099,8 +8099,8 @@ use self::streaming::{
     sleep_gap_detected, stream_read_error_user_message,
 };
 use self::tool_catalog::{
-    CODE_EXECUTION_TOOL_NAME, JS_EXECUTION_TOOL_NAME, MULTI_TOOL_PARALLEL_NAME,
-    REQUEST_USER_INPUT_NAME, ToolSurfacePolicy, active_tools_for_request,
+    CODE_EXECUTION_TOOL_NAME, EXECUTE_TOOLS_TOOL_NAME, JS_EXECUTION_TOOL_NAME,
+    MULTI_TOOL_PARALLEL_NAME, REQUEST_USER_INPUT_NAME, ToolSurfacePolicy, active_tools_for_request,
     build_model_tool_catalog_with_surface, default_synthetic_catalog_tool_names,
     execute_code_execution_tool, is_tool_search_tool, maybe_hydrate_requested_deferred_tool,
     missing_tool_error_message,

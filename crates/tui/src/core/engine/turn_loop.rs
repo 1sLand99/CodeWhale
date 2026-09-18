@@ -2982,6 +2982,7 @@ impl Engine {
                 && !McpPool::is_mcp_tool(&tool_name)
                 && tool_name != CODE_EXECUTION_TOOL_NAME
                 && tool_name != JS_EXECUTION_TOOL_NAME
+                && tool_name != EXECUTE_TOOLS_TOOL_NAME
                 && !is_tool_search_tool(&tool_name)
             {
                 blocked_error = Some(ToolError::not_available(missing_tool_error_message(
@@ -5630,6 +5631,7 @@ fn mode_blocks_command_execution(mode: AppMode, tool_name: &str) -> bool {
                 | "exec_interact"
                 | CODE_EXECUTION_TOOL_NAME
                 | JS_EXECUTION_TOOL_NAME
+                | EXECUTE_TOOLS_TOOL_NAME
         )
 }
 
@@ -5761,6 +5763,7 @@ mod pre_tool_snapshot_gate_tests {
             "exec_shell_interact",
             CODE_EXECUTION_TOOL_NAME,
             JS_EXECUTION_TOOL_NAME,
+            EXECUTE_TOOLS_TOOL_NAME,
         ] {
             assert!(mode_blocks_command_execution(AppMode::Plan, tool));
             assert!(

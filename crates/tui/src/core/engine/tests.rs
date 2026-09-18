@@ -19257,6 +19257,46 @@ fn tool_search_reference_count(result: &ToolResult) -> usize {
 }
 
 #[tokio::test]
+async fn execute_tools_dispatches_through_common_executor() {
+    use crate::tools::file_tool::ReadTool;
+    use crate::tools::registry::ToolRegistryBuilder;
+    use crate::tools::spec::ToolContext;
+
+    let tmp = tempdir().expect("tempdir");
+    std::fs::write(tmp.path().join("note.txt"), "alpha\n").expect("write note");
+    let context = ToolContext::new(tmp.path());
+    let registry = ToolRegistryBuilder::new()
+        .with_tool(Arc::new(ReadTool))
+        .build(context.clone());
+    let path = tmp
+        .path()
+        .join("note.txt")
+        .to_string_lossy()
+        .replace('\\', "\\\\");
+    let code = format!(
+        "const r = await tools.call('read', {{ path: '{path}' }}); return JSON.stringify(r).includes('alpha');"
+    );
+    let (tx_event, _rx_event) = mpsc::channel(8);
+    let result = Engine::execute_tool_with_lock(
+        Arc::new(RwLock::new(())),
+        false,
+        false,
+        tx_event,
+        None,
+        EXECUTE_TOOLS_TOOL_NAME.to_string(),
+        json!({"code": code}),
+        tmp.path().to_path_buf(),
+        Some(&registry),
+        None,
+        Some(context),
+    )
+    .await
+    .expect("execute_tools should dispatch");
+    assert!(result.content.contains("\"nested_calls\":1"));
+    assert!(result.content.contains("true"));
+}
+
+#[tokio::test]
 async fn code_execution_scenario() {
     // Scenario consolidation of: code_execution_runs_python_and_returns_result_payload, code_execution_runs_through_common_executor_after_approval_gate
     // from code_execution_runs_python_and_returns_result_payload

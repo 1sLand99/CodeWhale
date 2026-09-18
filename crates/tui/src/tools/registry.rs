@@ -511,7 +511,7 @@ fn project_readonly_evidence_schema(name: &str, schema: &mut Value) {
     }
 }
 
-fn enforce_tool_authority(
+pub(crate) fn enforce_tool_authority(
     name: &str,
     input: &Value,
     tool: &dyn ToolSpec,
