@@ -269,10 +269,12 @@ async fn issue_5305_unbuildable_route_refuses_before_worktree_admission() {
 }
 
 #[tokio::test]
-async fn issue_5305_untethered_runtime_fails_closed_before_admission() {
-    // Role-only dispatch builds no provider client, but the wire-protocol
-    // bind still needs the session `Config`: without it the spawn fails
-    // closed before admission instead of dispatching half-bound.
+async fn issue_6320_untethered_runtime_binds_exact_route() {
+    // #6320 decision: binding to the already-exact route is acceptable. The
+    // runtime keeps its fully-constructed client; `api_config = None` only
+    // matters when a cross-protocol rebuild is needed, and that path still
+    // fails closed (see untethered_cross_protocol_rebound_fails_closed_without_config).
+    // Untethered means "no Config to rebuild from", not "no client at all".
     let workspace = tempfile::tempdir().expect("workspace tempdir");
     let manager = new_shared_subagent_manager(workspace.path().to_path_buf(), 1);
     let mut runtime = stub_runtime();
@@ -280,18 +282,17 @@ async fn issue_5305_untethered_runtime_fails_closed_before_admission() {
     runtime.manager = manager.clone();
     runtime.api_config = None;
     let context = runtime.context.clone();
-    let err = AgentTool::new(manager.clone(), runtime)
+    let start = AgentTool::new(manager.clone(), runtime)
         .execute(
             json!({"action":"start", "type":"consultant", "prompt":"untethered spawn"}),
             &context,
         )
         .await
-        .expect_err("untethered runtime must fail closed");
-    assert!(
-        err.to_string().contains("no configuration is available"),
-        "{err}"
-    );
-    assert!(manager.read().await.list_filtered(true).is_empty());
+        .expect("untethered runtime binds its exact route");
+    let receipt = receipt_from(&start);
+    assert_eq!(receipt["model_id"], json!("deepseek-v4-flash"));
+    assert!(!manager.read().await.list_filtered(true).is_empty());
+    cancel_started(&manager, &start).await;
 }
 
 #[test]

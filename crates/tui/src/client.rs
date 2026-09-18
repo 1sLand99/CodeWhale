@@ -13728,6 +13728,25 @@ mod tests {
     }
 
     #[test]
+    fn untethered_cross_protocol_rebound_fails_closed_without_config() {
+        // #6320: the #5042 early-outs cover the already-exact route, but a
+        // cross-protocol rebound with no Config to rebuild from still fails
+        // closed — this is what still guards half-bound dispatch.
+        let (_config, route) =
+            deepseek_route_for_test("https://api.deepseek.com/beta", "deepseek-v4-pro");
+        let client = DeepSeekClient::new(&route.config).expect("pro client resolves");
+        assert_eq!(client.wire_format, WireFormat::ChatCompletions);
+        let err = match client.rebound_for_model_protocol(None, "deepseek-v4-flash") {
+            Ok(_) => panic!("cross-protocol rebound without config fails closed"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("no configuration is available"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn from_candidate_binds_custom_provider_base_url_and_model() {
         // #1519: a custom OpenAI-compatible provider resolves to a candidate
         // whose endpoint/model come from the named `[providers.<name>]` table,
