@@ -1269,6 +1269,11 @@ fn tool_result_message_with_blocks(
 /// LLM <-> tool round-trips as the model requests (bounded by
 /// [`MAX_ACP_TOOL_ROUNDS`]).
 ///
+/// Recorded interim exception to the one-turn-loop rule (#6088, named in
+/// `crates/core/tests/single_turn_loop.rs`): ACP IDE sessions do not run on
+/// the full thread/turn runtime yet. #5835 converges them onto
+/// `Engine::run_turn` and deletes this loop along with the exception.
+///
 /// `open_stream` opens a fresh provider stream for the given message
 /// history; production callers wire it to [`AcpServer::open_prompt_stream`],
 /// while tests supply canned per-round streams so the loop can be exercised
