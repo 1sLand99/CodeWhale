@@ -2282,6 +2282,7 @@ impl SubAgentTerminalDeliveryContext {
                 parent_run_id: result.parent_run_id.clone(),
                 spawn_depth: Some(result.spawn_depth),
                 continuable: Some(subagent_checkpoint_is_continuable(result)),
+                usage: result.usage.clone(),
             });
         }
     }
@@ -7003,9 +7004,14 @@ impl SubAgentManager {
             // hydrated from a previous session's ledger is invisible to
             // `status`/`peek`/`followup`, so it must not reserve the name
             // either (cloud-agent e2e, 2026-08-30: a fresh `exec` in the same
-            // workspace could not spawn `worker-a` again).
+            // workspace could not spawn `worker-a` again). Settled workers
+            // release their names the same way: a retry after cancel must
+            // not fail "already in use" (#6313). Name lookup prefers the
+            // live holder, so a reused name never resolves ambiguously.
             if let Some(existing) = self.agents.values().find(|existing| {
-                existing.session_name == name && !self.is_from_prior_session(existing)
+                existing.session_name == name
+                    && !self.is_from_prior_session(existing)
+                    && !subagent_status_is_settled(&existing.status)
             }) {
                 // #3020: Include elapsed time so the parent can distinguish a
                 // live worker from a stale/failed earlier spawn (#2656).
@@ -7484,7 +7490,7 @@ impl SubAgentManager {
             return Ok(agent.id.clone());
         }
 
-        let matches = self
+        let mut matches = self
             .agents
             .values()
             .filter(|agent| agent.session_name == agent_ref)
@@ -7492,6 +7498,17 @@ impl SubAgentManager {
                 active_session_id
                     .is_none_or(|session_id| self.agent_is_owned_by_session(agent, session_id))
             })
+            .collect::<Vec<_>>();
+        // A reused name shadows settled holders: the live worker wins, and
+        // settled records stay id-addressable (#6313).
+        if matches
+            .iter()
+            .any(|agent| !subagent_status_is_settled(&agent.status))
+        {
+            matches.retain(|agent| !subagent_status_is_settled(&agent.status));
+        }
+        let matches = matches
+            .iter()
             .map(|agent| agent.id.clone())
             .collect::<Vec<_>>();
 
@@ -9490,6 +9507,10 @@ impl ToolSpec for AgentTool {
                 "worktree": {
                     "type": "boolean",
                     "description": "When true, create a fresh git worktree and branch for this child before it starts. Use for parallel edit tasks that must not collide with the parent checkout."
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "Working directory for this child. With worktree=true it becomes the worktree root; otherwise the child's workspace. Pass it when the parent directory holds several checkouts and the spawn names no single repository."
                 },
                 "write_roots": {
                     "type": "array",
@@ -18679,6 +18700,19 @@ pub(crate) fn subagent_status_name(status: &SubAgentStatus) -> &'static str {
         SubAgentStatus::Cancelled => "cancelled",
         SubAgentStatus::BudgetExhausted => "budget_exhausted",
     }
+}
+
+/// Settled beyond resume: the worker will never run again under this record.
+/// `Interrupted` is excluded — an interrupted child continues from its
+/// checkpoint, so its name stays reserved (#6313).
+pub(crate) fn subagent_status_is_settled(status: &SubAgentStatus) -> bool {
+    matches!(
+        status,
+        SubAgentStatus::Completed
+            | SubAgentStatus::Failed(_)
+            | SubAgentStatus::Cancelled
+            | SubAgentStatus::BudgetExhausted
+    )
 }
 
 use crate::prompts::text::SUBAGENT_OUTPUT_FORMAT;

@@ -2168,6 +2168,93 @@ fn config_refresh_preserves_active_search_filter() {
     assert_eq!(config.filter_query(), "model");
 }
 
+/// Regression for #theme-nav-exit: the theme editor live-previews every
+/// highlight, and each preview round-trips through `refresh_config_view_if_open`.
+/// Rebuilding with a bare `new_for_app` dropped the open editor, so the first
+/// arrow key closed it and the next fell through to the non-editing key map —
+/// the user saw the modal "exit" on any arrow key.
+#[test]
+fn config_refresh_keeps_the_open_theme_editor_across_arrow_keys() {
+    let mut app = create_test_app();
+    app.view_stack.push(ConfigView::new_for_app(&app));
+
+    // Walk to the theme row the way a user does, then open its choice editor.
+    // Enter opens the editor without emitting: the first arrow key is what
+    // live-previews through `refresh_config_view_if_open`.
+    let mut view = app.view_stack.pop().expect("config view");
+    {
+        let config = view
+            .as_any_mut()
+            .downcast_mut::<ConfigView>()
+            .expect("config view type");
+        config.focus_key("theme");
+    }
+    let _ = view.handle_key(KeyEvent::new(
+        crossterm::event::KeyCode::Enter,
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    {
+        let config = view
+            .as_any_mut()
+            .downcast_mut::<ConfigView>()
+            .expect("config view type");
+        assert_eq!(
+            config.editing_key(),
+            Some("theme"),
+            "Enter on the theme row must open the choice editor"
+        );
+    }
+    app.view_stack.push_boxed(view);
+
+    // The host applies the preview and rebuilds the modal; the editor must
+    // survive that rebuild or the next arrow key leaves the editing key map.
+    refresh_config_view_if_open(&mut app, "theme");
+    let mut view = app.view_stack.pop().expect("config view after refresh");
+    let before = {
+        let config = view
+            .as_any_mut()
+            .downcast_mut::<ConfigView>()
+            .expect("config view type");
+        assert_eq!(
+            config.editing_key(),
+            Some("theme"),
+            "the open theme editor must survive a host-driven config refresh"
+        );
+        config
+            .editing_selected_choice()
+            .expect("editor still open after refresh")
+    };
+
+    // The arrow key that used to exit now moves the highlight inside the editor
+    // and emits the next live preview.
+    let moved = view.handle_key(KeyEvent::new(
+        crossterm::event::KeyCode::Down,
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    assert!(
+        matches!(
+            moved,
+            ViewAction::Emit(ViewEvent::ConfigUpdated {
+                ref key,
+                persist: false,
+                ..
+            }) if key == "theme"
+        ),
+        "Down inside the open editor must live-preview the next theme, got {moved:?}"
+    );
+
+    let config = view
+        .as_any_mut()
+        .downcast_mut::<ConfigView>()
+        .expect("config view type");
+    assert_eq!(config.editing_key(), Some("theme"), "editor still open");
+    assert_ne!(
+        config.editing_selected_choice(),
+        Some(before),
+        "Down must advance the highlighted choice"
+    );
+}
+
 #[test]
 fn workflow_ui_events_apply_only_to_the_active_session_owner() {
     let mut app = create_test_app();
@@ -4038,11 +4125,13 @@ fn mouse_selection_autocopies_on_release_without_ctrl_c() {
             modifiers: KeyModifiers::NONE,
         },
     );
+    // Full-cell coverage (#6228 sends fragments down the exact-text
+    // fallback): "alpha beta" spans columns 0-10, so release past it.
     handle_mouse_event(
         &mut app,
         MouseEvent {
             kind: MouseEventKind::Drag(MouseButton::Left),
-            column: 8,
+            column: 12,
             row: 0,
             modifiers: KeyModifiers::NONE,
         },
@@ -4051,7 +4140,7 @@ fn mouse_selection_autocopies_on_release_without_ctrl_c() {
         &mut app,
         MouseEvent {
             kind: MouseEventKind::Up(MouseButton::Left),
-            column: 8,
+            column: 12,
             row: 0,
             modifiers: KeyModifiers::NONE,
         },

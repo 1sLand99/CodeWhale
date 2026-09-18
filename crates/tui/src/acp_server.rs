@@ -694,7 +694,7 @@ fn prepare_acp_tool_admission(
     }
     let mut permission_reason =
         (prepared.approval != ApprovalRequirement::Auto).then(|| prepared.description.clone());
-    let approval_mode = ApprovalMode::Suggest;
+    let approval_mode = acp_approval_mode(config);
     let workspace = registry.context().workspace.as_path();
 
     let typed_rule = exec_shell_ask_rule_decision_for_policy(
@@ -764,6 +764,17 @@ fn prepare_acp_tool_admission(
     let admission = permission_reason
         .map(AcpToolAdmission::RequestPermission)
         .unwrap_or(AcpToolAdmission::Auto);
+    // #6337: Bypass pre-approves prompts so an unattended `--yolo` session
+    // executes instead of stalling on permission requests no client answers.
+    // Hard blocks above (safety floor, repo law, reviewer consult) return
+    // early and are never downgraded.
+    let admission = if approval_mode == ApprovalMode::Bypass
+        && matches!(admission, AcpToolAdmission::RequestPermission(_))
+    {
+        AcpToolAdmission::Auto
+    } else {
+        admission
+    };
     Ok((prepared, admission))
 }
 
@@ -2099,6 +2110,23 @@ fn acp_mode(config: &Config) -> AppMode {
     }
 }
 
+/// Approval posture for ACP turns, derived from server config instead of
+/// hardcoded: `--yolo` resolves to Bypass so an unattended headless session
+/// actually executes tools (#6337); otherwise the configured approval policy,
+/// else the Suggest default. Plan mode still pins read-only downstream
+/// regardless of posture.
+fn acp_approval_mode(config: &Config) -> ApprovalMode {
+    if config.yolo.unwrap_or(false) {
+        ApprovalMode::Bypass
+    } else {
+        config
+            .approval_policy
+            .as_deref()
+            .and_then(ApprovalMode::from_config_value)
+            .unwrap_or_default()
+    }
+}
+
 /// Build the tool registry for one ACP session, rooted at the session's
 /// `cwd`. Reuses the shared registry builders used by headless `exec` and the
 /// MCP adapter — no ACP-specific tool implementations.
@@ -2147,7 +2175,7 @@ fn build_acp_tool_registry(
     };
     let sandbox_policy = crate::core::authority::sandbox_policy_for_turn(
         acp_mode(config),
-        ApprovalMode::Suggest,
+        acp_approval_mode(config),
         config.sandbox_mode.as_deref(),
         workspace,
         crate::core::authority::SandboxNetworkAccess::from_config(config.sandbox_network_access),
@@ -2965,6 +2993,75 @@ mod tests {
         assert!(
             matches!(outcome, Err(ToolError::PermissionDenied { .. })),
             "the shared authority must reject mutation: {outcome:?}"
+        );
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn acp_approval_mode_derives_from_server_config() {
+        // #6337: `--yolo --danger-full-access` must not silently run as Ask.
+        let yolo = Config {
+            yolo: Some(true),
+            ..Config::default()
+        };
+        assert_eq!(acp_approval_mode(&yolo), ApprovalMode::Bypass);
+        let policy = Config {
+            approval_policy: Some("never".into()),
+            ..Config::default()
+        };
+        assert_eq!(acp_approval_mode(&policy), ApprovalMode::Never);
+        assert_eq!(acp_approval_mode(&Config::default()), ApprovalMode::Suggest);
+    }
+
+    #[test]
+    fn yolo_admission_auto_executes_write_without_permission_round_trip() {
+        // #6337: an unattended `--yolo` session must execute tools instead of
+        // stalling on permission requests no headless client answers.
+        let (dir, registry) = workspace_registry();
+        let config = Config {
+            yolo: Some(true),
+            ..Config::default()
+        };
+        let call = pending_call(
+            "File",
+            json!({"action": "write", "path": "yolo.txt", "content": "yolo"}),
+        );
+        let (_, admission) = prepare_acp_tool_admission(&config, &registry, &call).unwrap();
+        assert_eq!(admission, AcpToolAdmission::Auto);
+        assert_eq!(registry.context().workspace, dir.path());
+    }
+
+    #[test]
+    fn default_admission_still_requests_permission_for_write() {
+        // Pins the Ask default the yolo test above contrasts with: without
+        // `--yolo`, a write surfaces a permission request to the client.
+        let (_dir, registry) = workspace_registry();
+        let call = pending_call(
+            "File",
+            json!({"action": "write", "path": "ask.txt", "content": "ask"}),
+        );
+        let (_, admission) =
+            prepare_acp_tool_admission(&Config::default(), &registry, &call).unwrap();
+        assert!(matches!(admission, AcpToolAdmission::RequestPermission(_)));
+    }
+
+    #[tokio::test]
+    async fn plan_mode_stays_read_only_under_yolo() {
+        // The posture derivation must never loosen the Plan guardrail.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = Config {
+            yolo: Some(true),
+            sandbox_mode: Some("read-only".into()),
+            ..Config::default()
+        };
+        let registry = build_acp_tool_registry(&config, dir.path(), false);
+        let target = dir.path().join("must-not-exist.txt");
+        let outcome = registry
+            .execute_full("write", json!({"path": target, "content": "x"}))
+            .await;
+        assert!(
+            matches!(outcome, Err(ToolError::PermissionDenied { .. })),
+            "Plan stays read-only under yolo: {outcome:?}"
         );
         assert!(!target.exists());
     }

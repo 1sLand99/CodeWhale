@@ -11808,6 +11808,7 @@ impl RuntimeThreadManager {
                     parent_run_id,
                     spawn_depth,
                     continuable,
+                    usage,
                 } if owner_session_id == thread_id => {
                     let worker_status = outcome
                         .as_ref()
@@ -11839,7 +11840,8 @@ impl RuntimeThreadManager {
                         "agent.completed",
                         json!({ "item": item, "agent_id": id,
                             "worker_status": worker_status, "parent_run_id": parent_run_id,
-                            "spawn_depth": spawn_depth, "continuable": continuable }),
+                            "spawn_depth": spawn_depth, "continuable": continuable,
+                            "usage": usage }),
                     )
                     .await?;
                     self.raise_notice(

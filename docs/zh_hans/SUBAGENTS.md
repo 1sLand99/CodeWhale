@@ -169,7 +169,6 @@ max_depth = 6
 # 可选的操作者步数上限；未配置时角色没有默认模型回合上限。
 default_max_steps = 120
 default_wall_time_secs = 1800
-token_budget = 100000
 
 [subagents.providers.deepseek]
 # 直连 API key，有余地扇出。
@@ -207,7 +206,7 @@ max_admitted = 12
 |---|---|
 | 启动与路由 | `action`、`prompt`、`type`、`profile`、`name`、`model`、`model_strength`、`thinking` |
 | 作用域与交付 | `worktree`、`write_authority`、`write_roots`、`exact_files`、`coordination_contracts`、`deliverables`、`expected_artifact` |
-| 收窄运行限制 | `token_budget`、`max_steps`、`wall_time_secs` |
+| 收窄运行限制 | `max_steps`、`wall_time_secs` |
 | 协调与恢复 | `agent_id`、`agent_ids`、`all_parked`、`message`、`until`、`detached`、`resume_from` |
 | 检查 | `detail`、`offset`、`limit` |
 
@@ -223,7 +222,7 @@ max_admitted = 12
 
 ## 子代理预算（步数、墙钟时间、token）
 
-`max_steps`、`wall_time_secs` 和 `token_budget` 是可选的每次调用限制，只能收窄角色、操作者、父代理及保存运行的适用限制。省略时继承；工具解析器拒绝显式的零、null、负值和越界值。
+`max_steps` 和 `wall_time_secs` 是可选的每次调用限制，只能收窄角色、操作者、父代理及保存运行的适用限制。省略时继承；工具解析器拒绝显式的零、null、负值和越界值。
 
 `max_steps` 计算模型回合，接受 1..=2000；所有角色默认不限制模型回合数，除非操作者或祖先已经设置上限。内部用零表示未设上限，不会抵消继承的有限限制。`wall_time_secs` 接受 1..=86400，默认 1800 秒，可由操作者配置；计时包含排队、模型请求和工具执行，有效绝对截止时间会持久化。
 
@@ -231,7 +230,7 @@ max_admitted = 12
 
 ### Token 记账与部分结果
 
-`[subagents].token_budget` 为根子代理及后代设置共享额度。子调用可以再指定更小的额度，用量仍计入每个适用的祖先作用域；继续执行和转录分叉同时保留源任务及当前父代理的记账。同一作用域内的后代用量不会重复累计。
+Token 预算已于 0.9.14 退役：token 用量仅被记录，不再强制执行——运行不会因 token 记账而停止。仍携带 `token_budget` 的旧输入可以正常解析但会被忽略；`max_steps` 和 `wall_time_secs` 仍是可收窄的每次调用限制。
 
 额度依据 provider 报告的输入加输出 token；请求输出限制为剩余额度。未知的提示词用量和已在执行的请求仍可能导致超额，回执保留完整的实际报告值；未知用量不等于零。worker 自身用量与共享 `budget_spent_tokens` / `budget_remaining_tokens` 分开记录，不应按后代重复相加同一共享池。
 
