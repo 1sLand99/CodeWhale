@@ -8700,30 +8700,6 @@ Provide findings ordered by severity with file references, then open questions, 
         &request_route.model,
         review_allowance,
     );
-    // Criterion 4 (no silent caps): whatever a budget stop leaves unread is
-    // named by file, never silently dropped.
-    let unreviewed_note = |completed_passes: usize| -> String {
-        let Some(plan) = pr_plan.as_ref() else {
-            return "the entire diff".to_string();
-        };
-        let mut unread: Vec<String> = Vec::new();
-        for pass in plan.manifest.passes.iter().skip(completed_passes) {
-            for file in &pass.files {
-                if !unread.iter().any(|seen| seen == file) {
-                    unread.push(file.clone());
-                }
-            }
-        }
-        if unread.is_empty() {
-            "no planned file was left unread".to_string()
-        } else {
-            format!(
-                "{} file(s) were never read: {}",
-                unread.len(),
-                unread.join(", ")
-            )
-        }
-    };
     let mut output = String::new();
     let mut review_stop_reason = None;
     for (index, user_prompt) in prompts.into_iter().enumerate() {
@@ -8796,7 +8772,7 @@ Provide findings ordered by severity with file references, then open questions, 
                     reasoning_tokens,
                     review_allowance,
                     review_reserve_tokens,
-                    unreviewed_note(index),
+                    pr_review_unreviewed_note(pr_plan.as_ref(), index),
                     index,
                     planned_passes,
                 ),
@@ -8867,7 +8843,7 @@ Provide findings ordered by severity with file references, then open questions, 
             );
             if let Some(coverage) = coverage {
                 crate::tools::review::attach_pr_review_coverage(&mut receipt, coverage)
-                    .context("Failed to attach complete PR coverage to review receipt")?;
+                    .context("Failed to attach PR coverage to review receipt")?;
             }
             let path =
                 crate::tools::review::write_review_receipt(&receipt, args.receipt_path.as_deref())
@@ -8902,6 +8878,10 @@ Provide findings ordered by severity with file references, then open questions, 
             "stop_reason": review_stop_reason,
             "usage": usage,
             "review_passes": pr_plan.as_ref().map(|plan| plan.passes.len()),
+            "complete": pr_plan
+                .as_ref()
+                .is_none_or(|plan| plan.manifest.skipped_files.is_empty()),
+            "skipped_files": pr_plan.as_ref().map(|plan| &plan.manifest.skipped_files),
             "receipt_path": receipt
                 .as_ref()
                 .map(|(path, _)| path.display().to_string()),
@@ -8936,7 +8916,62 @@ Provide findings ordered by severity with file references, then open questions, 
             eprintln!("Review receipt written: {}", path.display());
         }
     }
+    if let Some(plan) = &pr_plan
+        && !plan.manifest.skipped_files.is_empty()
+    {
+        // #6285 AC3: the partial review above is real findings, already
+        // printed and posted — but the gate must not pass on unread
+        // files. The exit still fails, naming what the gate did not read
+        // and the remedy, so it reads as limits rather than as "this PR
+        // failed review".
+        bail!(
+            "Partial PR review: {} pass(es) completed, but the gate did not read: {}. Raise --max-chars/--max-passes or shrink the PR, then re-run; publication: {}",
+            plan.passes.len(),
+            crate::tools::review::format_skipped_files(&plan.manifest.skipped_files),
+            publication.as_str()
+        );
+    }
     Ok(())
+}
+
+/// Criterion 4 (no silent caps): whatever a budget stop leaves unread is
+/// named by file, never silently dropped — including files the plan itself
+/// skipped before the first pass ran (#6285 AC4). A free function so tests
+/// can pin the note without running a review.
+fn pr_review_unreviewed_note(
+    plan: Option<&crate::tools::review::PrReviewPlan>,
+    completed_passes: usize,
+) -> String {
+    let Some(plan) = plan else {
+        return "the entire diff".to_string();
+    };
+    let mut unread: Vec<String> = Vec::new();
+    for pass in plan.manifest.passes.iter().skip(completed_passes) {
+        for file in &pass.files {
+            if !unread.iter().any(|seen| seen == file) {
+                unread.push(file.clone());
+            }
+        }
+    }
+    let mut clauses = Vec::new();
+    if !unread.is_empty() {
+        clauses.push(format!(
+            "{} file(s) were never read: {}",
+            unread.len(),
+            unread.join(", ")
+        ));
+    }
+    if !plan.manifest.skipped_files.is_empty() {
+        clauses.push(format!(
+            "the plan never scheduled: {}",
+            crate::tools::review::format_skipped_files(&plan.manifest.skipped_files)
+        ));
+    }
+    if clauses.is_empty() {
+        "no planned file was left unread".to_string()
+    } else {
+        clauses.join("; ")
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -17062,6 +17097,49 @@ api_key = "test-only-key"
         assert!(prompt.contains("+LAST_PATCH"));
         assert!(prompt.contains(&view.head_sha));
         assert!(!prompt.contains("diff truncated"));
+    }
+
+    #[test]
+    fn pr_review_unreviewed_note_names_budget_stops_and_plan_skips() {
+        assert_eq!(pr_review_unreviewed_note(None, 0), "the entire diff");
+        fn patch(name: &str, content: &str) -> String {
+            format!(
+                "diff --git a/{name} b/{name}\nnew file mode 100644\n--- /dev/null\n+++ b/{name}\n@@ -0,0 +1 @@\n+{content}\n"
+            )
+        }
+        let patches = [
+            patch("a.txt", "alpha"),
+            patch("b.txt", "bravo"),
+            patch("c.txt", "charlie"),
+        ];
+        let diff = patches.concat();
+        let max_chars = patches
+            .iter()
+            .map(|patch| patch.chars().count())
+            .max()
+            .unwrap();
+        let view = GhPullRequest {
+            changed_files: 3,
+            ..Default::default()
+        };
+        // Two passes of budget: a and b are planned, c is skipped by the plan.
+        let plan = crate::tools::review::plan_pr_review(&diff, &view, max_chars, 2).unwrap();
+        let note = pr_review_unreviewed_note(Some(&plan), 0);
+        assert!(note.contains("were never read"), "{note}");
+        assert!(note.contains("a/b.txt b/b.txt"), "{note}");
+        assert!(note.contains("the plan never scheduled"), "{note}");
+        assert!(note.contains("a/c.txt b/c.txt"), "{note}");
+        // One pass done: only b is left unread, but the plan skip still stands.
+        let note = pr_review_unreviewed_note(Some(&plan), 1);
+        assert!(!note.contains("a/a.txt b/a.txt"), "{note}");
+        assert!(note.contains("a/b.txt b/b.txt"), "{note}");
+        assert!(note.contains("a/c.txt b/c.txt"), "{note}");
+        // A complete plan with every pass done names nothing.
+        let complete = crate::tools::review::plan_pr_review(&diff, &view, max_chars, 3).unwrap();
+        assert_eq!(
+            pr_review_unreviewed_note(Some(&complete), 3),
+            "no planned file was left unread"
+        );
     }
 
     #[test]
