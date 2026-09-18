@@ -455,7 +455,6 @@ max_depth = 6
 # when an operator deliberately wants a per-child cap.
 default_max_steps = 0
 default_wall_time_secs = 1800
-token_budget = 100000
 
 [subagents.providers.deepseek]
 # Direct API key with room to fan out.
@@ -494,7 +493,7 @@ The model-facing `agent` schema exposes these controls:
 | --- | --- |
 | Launch and route | `action`, `prompt`, `type`, `profile`, `name`, `model`, `model_strength`, `thinking` |
 | Scope and outputs | `worktree`, `write_authority`, `write_roots`, `exact_files`, `coordination_contracts`, `deliverables`, `expected_artifact` |
-| Narrow run limits | `token_budget`, `max_steps`, `wall_time_secs` |
+| Narrow run limits | `max_steps`, `wall_time_secs` |
 | Coordinate and recover | `agent_id`, `agent_ids`, `all_parked`, `message`, `until`, `detached`, `resume_from` |
 | Inspect | `detail`, `offset`, `limit` |
 
@@ -553,7 +552,7 @@ finite budget.
 
 ## Child budgets (steps, wall time, tokens)
 
-`max_steps`, `wall_time_secs`, and `token_budget` are optional per-call limits.
+`max_steps` and `wall_time_secs` are optional per-call limits.
 Each can only narrow the applicable role, operator, parent, and saved-run
 limits. Omission inherits those limits; explicit zero, null, negative, or
 out-of-range values are rejected by the tool parser.
@@ -573,8 +572,7 @@ For example, a focused review can request:
   "type": "reviewer",
   "prompt": "Review the parser diff and report concrete regressions.",
   "max_steps": 12,
-  "wall_time_secs": 300,
-  "token_budget": 20000
+  "wall_time_secs": 300
 }
 ```
 
@@ -585,11 +583,10 @@ remaining steps, original deadline, and token history. A new ID, role, or
 
 ### Token accounting and partial results
 
-`[subagents].token_budget` sets an aggregate allowance for a root child and
-its descendants. An explicit child `token_budget` may add a smaller scope;
-usage still counts toward every applicable ancestor scope. Continuations and
-transcript forks retain their source accounting as well as the current
-parent's scope. Shared descendants are counted once per scope.
+Token budgets were retired in 0.9.14: token usage is tracked, never
+enforced — runs are no longer stopped by token accounting. Legacy input that
+still carries `token_budget` parses and is ignored; `max_steps` and
+`wall_time_secs` remain the narrowable per-call limits.
 
 The governor uses provider-reported input plus output tokens, not a local
 estimate presented as a bill. Request output is capped to the remaining
