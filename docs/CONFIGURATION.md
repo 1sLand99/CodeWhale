@@ -335,8 +335,7 @@ account. `codewhale account login` starts the Codewhale browser device flow;
 session for the selected `--profile`. Account sessions prefer the OS
 credential manager and fall back automatically to the private `0600`
 Codewhale secrets file when no credential manager is available (headless
-hosts, SSH, containers); the former
-`CODEWHALE_CLOUD_ALLOW_FILE_SESSION_STORE` opt-in is deprecated and ignored.
+hosts, SSH, containers).
 `codewhale account keys list|set|remove` manages the
 signed-in account's BYOK vault without displaying secret values. The older
 `codewhale cloud ...` spelling remains a command alias.

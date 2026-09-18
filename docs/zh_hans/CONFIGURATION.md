@@ -172,7 +172,7 @@ allow_shell = true
 
 `codewhale login` 登录 Codewhale 账号——它与 `codewhale account login` 是同一个浏览器设备流(device flow)，不是 provider-key 命令。Provider 凭据完全通过 `codewhale auth set --provider <provider>` 配置。
 
-该 provider 凭据与可选的管理产品账号是分开的。`codewhale account login` 启动 Codewhale 浏览器设备流；`codewhale account status` 和 `codewhale account logout` 检查或移除所选 `--profile` 的会话。账号会话优先使用 OS 凭据管理器，在无凭据管理器可用时自动回退到私有 `0600` Codewhale secrets 文件(无头主机、SSH、容器)；旧的 `CODEWHALE_CLOUD_ALLOW_FILE_SESSION_STORE` 选择加入已弃用并被忽略。`codewhale account keys list|set|remove` 管理已登录账号的 BYOK 保险库(vault)，不显示秘密值。更旧的 `codewhale cloud ...` 拼写仍是命令别名。
+该 provider 凭据与可选的管理产品账号是分开的。`codewhale account login` 启动 Codewhale 浏览器设备流；`codewhale account status` 和 `codewhale account logout` 检查或移除所选 `--profile` 的会话。账号会话优先使用 OS 凭据管理器，在无凭据管理器可用时自动回退到私有 `0600` Codewhale secrets 文件(无头主机、SSH、容器)。`codewhale account keys list|set|remove` 管理已登录账号的 BYOK 保险库(vault)，不显示秘密值。更旧的 `codewhale cloud ...` 拼写仍是命令别名。
 
 ### 可移植配置包(Portable config bundles)
 

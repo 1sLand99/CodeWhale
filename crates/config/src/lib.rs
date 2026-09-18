@@ -69,7 +69,6 @@ use std::fs;
 use std::io::Read;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::sync::OnceLock;
 
 use anyhow::{Context, Result, bail};
 pub use app_mode::AppMode;
@@ -3056,51 +3055,6 @@ impl ConfigToml {
         Ok(())
     }
 
-    /// Merge safe project-level overrides from `$WORKSPACE/.codewhale/config.toml`
-    /// or legacy `$WORKSPACE/.deepseek/config.toml`.
-    ///
-    /// Repo-local config is untrusted input. This helper intentionally ignores
-    /// credentials, endpoints, provider selection, auth/session values, telemetry,
-    /// network policy, skill registry, LSP command tables, and unknown extras.
-    /// Approval and sandbox values may only tighten the existing user/global
-    /// posture.
-    pub fn merge_project_overrides(&mut self, project: ConfigToml) {
-        if project.default_text_model.is_some() {
-            self.default_text_model = project.default_text_model;
-        }
-        if project.model.is_some() {
-            self.model = project.model;
-        }
-        if project.output_mode.is_some() {
-            self.output_mode = project.output_mode;
-        }
-        if project.verbosity.is_some() {
-            self.verbosity = project.verbosity;
-        }
-        if project.log_level.is_some() {
-            self.log_level = project.log_level;
-        }
-        if let Some(policy) = project.approval_policy
-            && project_approval_policy_is_allowed(self.approval_policy.as_deref(), &policy)
-        {
-            self.approval_policy = Some(policy);
-        }
-        if let Some(mode) = project.sandbox_mode
-            && project_sandbox_mode_is_allowed(self.sandbox_mode.as_deref(), &mode)
-        {
-            self.sandbox_mode = Some(mode);
-        }
-        if project.tools.is_some() {
-            self.tools = project.tools;
-        }
-        for provider in provider::all_providers().iter().map(|p| p.kind()) {
-            merge_project_provider_config(
-                self.providers.for_provider_mut(provider),
-                project.providers.for_provider(provider),
-            );
-        }
-    }
-
     #[must_use]
     pub fn get_value(&self, key: &str) -> Option<String> {
         if notifications::in_namespace(key) {
@@ -3879,12 +3833,6 @@ fn descriptor_fallback_base_url(provider: ProviderKind, auth_mode: Option<&str>)
     crate::route::ProviderDescriptor::for_kind(provider)
         .default_base_url()
         .to_string()
-}
-
-fn merge_project_provider_config(target: &mut ProviderConfigToml, source: &ProviderConfigToml) {
-    if source.model.is_some() {
-        target.model = source.model.clone();
-    }
 }
 
 /// Where an enabled session's batches go when nobody has said otherwise.
@@ -6008,30 +5956,6 @@ fn copy_item_decor_table(target: &mut toml_edit::Table, source: &toml_edit::Tabl
     *target.decor_mut() = source.decor().clone();
 }
 
-/// Process-wide default [`Secrets`] façade. The first caller wins; the
-/// lock is exposed so test or CLI code can install an explicit
-/// backend (e.g. an [`codewhale_secrets::InMemoryKeyringStore`]) before
-/// any resolver runs.
-pub fn default_secrets() -> &'static Secrets {
-    static SECRETS: OnceLock<Secrets> = OnceLock::new();
-    SECRETS.get_or_init(|| {
-        // Tests should never poke real platform credential stores. Cargo sets the
-        // `RUST_TEST_*` family of env vars (and `CARGO_PKG_NAME` is
-        // always populated), but the `cfg(test)` flag is the canonical
-        // signal here. See `install_test_secrets` for explicit installs.
-        #[cfg(test)]
-        {
-            Secrets::new(std::sync::Arc::new(
-                codewhale_secrets::InMemoryKeyringStore::new(),
-            ))
-        }
-        #[cfg(not(test))]
-        {
-            Secrets::auto_detect()
-        }
-    })
-}
-
 // ── CodeWhale state root (v0.8.44) ──────────────────────────────────
 //
 // v0.8.44 migrates product-owned app state from ~/.deepseek/ to
@@ -6617,12 +6541,6 @@ pub fn remove_permission_rule(
         write_permissions_atomic(path, body.as_bytes())?;
         Ok(rule)
     })
-}
-
-/// Read a resolved `permissions.toml` path using the same checked/no-follow
-/// path handling as config loading.
-pub fn read_permissions_file(path: &Path) -> Result<String> {
-    read_checked_permissions_file(path)
 }
 
 fn load_sibling_permissions(config_path: &Path) -> Result<PermissionsToml> {
