@@ -38,6 +38,10 @@ tag, packages, checksums and release assets exist.
 
 ### Added
 
+- `read` responses now always report the file's byte size, line count, and
+  whether output was truncated, and truncation footers name the total size
+  alongside the continuation offset — so paging through a large file is
+  deliberate instead of a surprise (#6283).
 - File edits are parse-gated before the write lands: Rust goes through
   `syn::parse_file` for a grammar-exact `line:column`, and `.toml` / `.json`
   through the parsers already vendored. An edit is refused only when the file
