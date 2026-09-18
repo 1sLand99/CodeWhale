@@ -2110,6 +2110,7 @@ mod tests {
             ApiProvider::Concentrate,
             ApiProvider::Telecomjs,
             ApiProvider::Edenai,
+            ApiProvider::Zenmux,
         ] {
             let identity = provider.as_str();
             let endpoint = format!("https://{identity}.catalog.invalid/v1");

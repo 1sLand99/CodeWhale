@@ -525,6 +525,14 @@ pub struct ProvidersToml {
         alias = "eden_ai"
     )]
     pub edenai: ProviderConfigToml,
+    /// ZenMux — OpenAI-compatible AI gateway (aggregator).
+    #[serde(
+        default,
+        skip_serializing_if = "ProviderConfigToml::is_empty",
+        alias = "zen-mux",
+        alias = "zen_mux"
+    )]
+    pub zenmux: ProviderConfigToml,
     /// Concentrate — OpenAI Responses-compatible AI gateway (aggregator).
     #[serde(
         default,
@@ -770,6 +778,7 @@ impl ProvidersToml {
             ProviderKind::Antigravity => &self.antigravity,
             ProviderKind::Telecomjs => &self.telecomjs,
             ProviderKind::Edenai => &self.edenai,
+            ProviderKind::Zenmux => &self.zenmux,
             ProviderKind::Concentrate => &self.concentrate,
             ProviderKind::Codewhale => &self.codewhale,
             ProviderKind::ModelstudioTokenPlan => &self.modelstudio_token_plan,
@@ -825,6 +834,7 @@ impl ProvidersToml {
             ProviderKind::Antigravity => &mut self.antigravity,
             ProviderKind::Telecomjs => &mut self.telecomjs,
             ProviderKind::Edenai => &mut self.edenai,
+            ProviderKind::Zenmux => &mut self.zenmux,
             ProviderKind::Concentrate => &mut self.concentrate,
             ProviderKind::Codewhale => &mut self.codewhale,
             ProviderKind::ModelstudioTokenPlan => &mut self.modelstudio_token_plan,
@@ -3919,6 +3929,7 @@ fn provider_passes_model_through(provider: ProviderKind) -> bool {
             | ProviderKind::Xai
             | ProviderKind::Telecomjs
             | ProviderKind::Edenai
+            | ProviderKind::Zenmux
             | ProviderKind::Concentrate
             | ProviderKind::ModelstudioTokenPlan
             | ProviderKind::ModelstudioTokenPlanAnthropic
@@ -4456,6 +4467,7 @@ fn default_model_for_provider(provider: ProviderKind) -> &'static str {
         ProviderKind::Antigravity => DEFAULT_ANTIGRAVITY_MODEL,
         ProviderKind::Telecomjs => DEFAULT_TELECOMJS_MODEL,
         ProviderKind::Edenai => DEFAULT_EDENAI_MODEL,
+        ProviderKind::Zenmux => DEFAULT_ZENMUX_MODEL,
         ProviderKind::Concentrate => DEFAULT_CONCENTRATE_MODEL,
         ProviderKind::Codewhale => DEFAULT_CODEWHALE_MODEL,
         ProviderKind::ModelstudioTokenPlan
@@ -4512,6 +4524,7 @@ fn default_base_url_for_provider(provider: ProviderKind) -> &'static str {
         ProviderKind::Antigravity => DEFAULT_ANTIGRAVITY_BASE_URL,
         ProviderKind::Telecomjs => DEFAULT_TELECOMJS_BASE_URL,
         ProviderKind::Edenai => DEFAULT_EDENAI_BASE_URL,
+        ProviderKind::Zenmux => DEFAULT_ZENMUX_BASE_URL,
         ProviderKind::Concentrate => DEFAULT_CONCENTRATE_BASE_URL,
         ProviderKind::Codewhale => DEFAULT_CODEWHALE_BASE_URL,
         ProviderKind::ModelstudioTokenPlan => DEFAULT_MODELSTUDIO_TOKEN_PLAN_BASE_URL,
@@ -4812,6 +4825,7 @@ pub fn provider_base_url_is_official(provider: ProviderKind, base_url: &str) -> 
             normalized.as_str(),
             "https://api.edenai.run/v3" | "https://api.eu.edenai.run/v3"
         ),
+        ProviderKind::Zenmux => normalized == DEFAULT_ZENMUX_BASE_URL,
         ProviderKind::Concentrate => normalized == DEFAULT_CONCENTRATE_BASE_URL,
         // The Codewhale API's official endpoint family is its default base
         // plus whatever the operator declared in `CODEWHALE_API_BASE` — the
@@ -6961,6 +6975,8 @@ struct EnvRuntimeOverrides {
     telecomjs_model: Option<String>,
     edenai_base_url: Option<String>,
     edenai_model: Option<String>,
+    zenmux_base_url: Option<String>,
+    zenmux_model: Option<String>,
     concentrate_base_url: Option<String>,
     concentrate_model: Option<String>,
     codewhale_base_url: Option<String>,
@@ -7323,6 +7339,12 @@ impl EnvRuntimeOverrides {
             edenai_model: std::env::var("EDENAI_MODEL")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
+            zenmux_base_url: std::env::var("ZENMUX_BASE_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            zenmux_model: std::env::var("ZENMUX_MODEL")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
             concentrate_base_url: std::env::var("CONCENTRATE_BASE_URL")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
@@ -7419,6 +7441,7 @@ impl EnvRuntimeOverrides {
             ProviderKind::Antigravity => None,
             ProviderKind::Telecomjs => self.telecomjs_base_url.clone(),
             ProviderKind::Edenai => self.edenai_base_url.clone(),
+            ProviderKind::Zenmux => self.zenmux_base_url.clone(),
             ProviderKind::Concentrate => self.concentrate_base_url.clone(),
             ProviderKind::Codewhale => self.codewhale_base_url.clone(),
             ProviderKind::ModelstudioTokenPlan | ProviderKind::ModelstudioTokenPlanAnthropic => {
@@ -7469,6 +7492,7 @@ impl EnvRuntimeOverrides {
             ProviderKind::Antigravity => None,
             ProviderKind::Telecomjs => self.telecomjs_model.clone(),
             ProviderKind::Edenai => self.edenai_model.clone(),
+            ProviderKind::Zenmux => self.zenmux_model.clone(),
             ProviderKind::Concentrate => self.concentrate_model.clone(),
             ProviderKind::Codewhale => self.codewhale_model.clone(),
             ProviderKind::ModelstudioTokenPlan | ProviderKind::ModelstudioTokenPlanAnthropic => {

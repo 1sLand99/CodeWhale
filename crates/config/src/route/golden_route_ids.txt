@@ -50,3 +50,4 @@ wanjie-ark
 xai
 xiaomi-mimo
 zai
+zenmux

@@ -202,6 +202,10 @@ pub(crate) const DEFAULT_TELECOMJS_BASE_URL: &str = "https://aigw.telecomjs.com/
 // Eden AI (OpenAI-compatible AI gateway) defaults
 pub(crate) const DEFAULT_EDENAI_MODEL: &str = "deepseek/deepseek-v4-pro";
 pub(crate) const DEFAULT_EDENAI_BASE_URL: &str = "https://api.edenai.run/v3";
+// ZenMux (OpenAI-compatible AI gateway) defaults. Default model verified
+// present in the live keyless catalog at https://zenmux.ai/api/v1/models.
+pub(crate) const DEFAULT_ZENMUX_MODEL: &str = "deepseek/deepseek-v4.1-flash";
+pub(crate) const DEFAULT_ZENMUX_BASE_URL: &str = "https://zenmux.ai/api/v1";
 // Concentrate (OpenAI Responses-compatible AI gateway) defaults. Contract:
 // https://concentrate.ai/docs/api-reference/introduction — base URL, bearer
 // Universal API key, `POST /v1/responses`, unauthenticated `GET /v1/models`.

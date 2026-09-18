@@ -986,6 +986,7 @@ pub(crate) fn mirror_saved_api_key_in_config(
         ApiProvider::Antigravity => &mut providers.antigravity,
         ApiProvider::Telecomjs => &mut providers.telecomjs,
         ApiProvider::Edenai => &mut providers.edenai,
+        ApiProvider::Zenmux => &mut providers.zenmux,
         ApiProvider::Concentrate => &mut providers.concentrate,
         ApiProvider::Codewhale => &mut providers.codewhale,
         ApiProvider::ModelstudioTokenPlan => &mut providers.modelstudio_token_plan,

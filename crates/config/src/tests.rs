@@ -5170,6 +5170,66 @@ model = "anthropic/claude-sonnet-4-5"
     assert_eq!(resolved.api_key_source, Some(RuntimeApiKeySource::Env));
 }
 
+#[test]
+fn zenmux_resolves_named_chat_gateway_and_environment_overrides() {
+    let _lock = env_lock();
+    let _env = EnvGuard::without_deepseek_runtime_overrides();
+
+    for alias in ["zenmux", "zen-mux", "zen_mux"] {
+        assert_eq!(ProviderKind::parse(alias), Some(ProviderKind::Zenmux));
+        let parsed: ConfigToml =
+            toml::from_str(&format!("provider = \"{alias}\"")).expect("ZenMux alias");
+        assert_eq!(parsed.provider, ProviderKind::Zenmux);
+    }
+
+    let metadata = provider::resolve_provider("zen-mux").expect("ZenMux metadata");
+    assert_eq!(metadata.id(), "zenmux");
+    assert_eq!(metadata.display_name(), "ZenMux");
+    assert_eq!(metadata.provider_config_key(), "zenmux");
+    assert_eq!(metadata.default_base_url(), DEFAULT_ZENMUX_BASE_URL);
+    assert_eq!(metadata.default_model(), DEFAULT_ZENMUX_MODEL);
+    assert_eq!(metadata.env_vars(), &["ZENMUX_API_KEY"]);
+    assert_eq!(
+        metadata.wire_policy(),
+        provider::WirePolicy::Fixed(provider::WireFormat::ChatCompletions)
+    );
+
+    let config: ConfigToml = toml::from_str(
+        r#"
+provider = "zenmux"
+
+[providers.zenmux]
+api_key = "zen-config-key"
+model = "z-ai/glm-5.3"
+"#,
+    )
+    .expect("ZenMux provider table");
+    let resolved = config.resolve_runtime_options(&CliRuntimeOverrides::default());
+    assert_eq!(resolved.provider, ProviderKind::Zenmux);
+    assert_eq!(resolved.base_url, DEFAULT_ZENMUX_BASE_URL);
+    assert_eq!(resolved.model, "z-ai/glm-5.3");
+    assert_eq!(resolved.api_key.as_deref(), Some("zen-config-key"));
+    assert_eq!(
+        resolved.api_key_source,
+        Some(RuntimeApiKeySource::ConfigFile)
+    );
+
+    unsafe {
+        std::env::set_var("ZENMUX_API_KEY", "zen-env-key");
+        std::env::set_var("ZENMUX_BASE_URL", "https://zenmux.ai/api/v1");
+        std::env::set_var("ZENMUX_MODEL", "deepseek/deepseek-v4.1-flash");
+    }
+    let env_config = ConfigToml {
+        provider: ProviderKind::Zenmux,
+        ..ConfigToml::default()
+    };
+    let resolved = env_config.resolve_runtime_options(&CliRuntimeOverrides::default());
+    assert_eq!(resolved.base_url, "https://zenmux.ai/api/v1");
+    assert_eq!(resolved.model, "deepseek/deepseek-v4.1-flash");
+    assert_eq!(resolved.api_key.as_deref(), Some("zen-env-key"));
+    assert_eq!(resolved.api_key_source, Some(RuntimeApiKeySource::Env));
+}
+
 /// Concentrate is an opt-in, BYOK, Responses-wire gateway: aliases collapse
 /// onto one catalog identity, the metadata names the official base URL and a
 /// distinct `CONCENTRATE_API_KEY` slot, the wire policy is fixed on the
@@ -5410,12 +5470,12 @@ fn meta_model_api_scopes_both_documented_key_names_to_official_endpoint() {
 fn provider_metadata_registry_covers_every_provider_kind_once() {
     let providers = provider::all_providers();
     // Full registry keeps legacy dialect/plan kinds for provider_for_kind.
-    assert_eq!(providers.len(), 50);
+    assert_eq!(providers.len(), 51);
     // Catalog surface is one identity per vendor (no dual-wire / plan rows),
     // and never a retired tombstone: Antigravity stays in the full registry
     // so old config parses and can be cleared, but it left `ALL` when it
     // stopped being selectable (PRD §4.4 PROD-002).
-    assert_eq!(ProviderKind::ALL.len(), 44);
+    assert_eq!(ProviderKind::ALL.len(), 45);
     assert!(
         !ProviderKind::ALL.contains(&ProviderKind::Antigravity),
         "a tombstone must never be offered as a selectable provider"

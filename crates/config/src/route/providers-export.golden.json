@@ -1264,6 +1264,24 @@
         }
       ],
       "transport": "chat-completions"
+    },
+    {
+      "id": "zenmux",
+      "family": "zenmux",
+      "label": "ZenMux",
+      "endpoint": "https://zenmux.ai/api/v1",
+      "wire": "chat-completions",
+      "defaultModel": "deepseek/deepseek-v4.1-flash",
+      "envVars": [
+        "ZENMUX_API_KEY"
+      ],
+      "auth": [
+        {
+          "kind": "api-key",
+          "label": "API key"
+        }
+      ],
+      "transport": "chat-completions"
     }
   ]
 }
