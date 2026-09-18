@@ -1654,7 +1654,7 @@ enum SandboxCommand {
     },
 }
 
-const CODEWHALE_MAIN_STACK_BYTES: usize = 16 * 1024 * 1024;
+const CODEWHALE_MAIN_STACK_BYTES: usize = 32 * 1024 * 1024;
 
 /// Pre-clap seam feeding `apply_process_hardening` (#5723): resolve only the
 /// *startup* sandbox posture — `CODEWHALE_SANDBOX_MODE` /
@@ -1855,6 +1855,18 @@ fn run_with_args(args: Vec<String>) -> Result<()> {
     // platform main-thread default (8 MiB on macOS). Give that owner an
     // explicit stack while keeping process hardening and the global panic hook
     // above this boundary, before Tokio or any worker thread exists.
+    //
+    // 16 MiB stopped being enough: in a debug build the deepest measured
+    // chain — the event-loop poll stack down to the trust-confirm engine
+    // respawn (`handle_view_events` → `apply_command_result` →
+    // `spawn_tui_engine` → `Engine::new` → `DeepSeekClient::new` →
+    // `resolve_runtime_route` → `Config::clone`) — consumed ~16.5 MiB and
+    // aborted on the guard page (the plugin_toml_binary cucumber acceptance
+    // on the ubuntu CI leg). The fat frames are the debug poll functions of
+    // the giant top-level futures (`run_async_main_inner` ~5.5 MiB, `run_tui`
+    // ~3.2 MiB, `handle_view_events` ~2.1 MiB), so any small addition to them
+    // re-tips a zero-margin stack. 32 MiB restores real headroom; the cost is
+    // address space only, since thread stacks commit lazily.
     let runtime_thread = std::thread::Builder::new()
         .name("codewhale-main".to_string())
         .stack_size(CODEWHALE_MAIN_STACK_BYTES)
