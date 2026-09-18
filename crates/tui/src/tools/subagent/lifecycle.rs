@@ -180,6 +180,51 @@ pub(super) fn compact_row(manager: &SubAgentManager, agent: &SubAgent) -> Value 
                 compact_child_route(serde_json::to_value(route).unwrap_or(Value::Null)),
             );
         }
+        // #6194 item 5: live declared-vs-observed write surfacing. The child
+        // declares deliverables at spawn and the registry records every
+        // successful scoped write; the parent sees the diff while the child
+        // is still alive instead of only in the post-mortem receipt.
+        if record.spec.runtime_profile.permissions.write {
+            const MAX_LISTED_WRITES: usize = 4;
+            let declared: Vec<String> = record
+                .spec
+                .launch_manifest
+                .as_ref()
+                .map(|manifest| {
+                    manifest
+                        .deliverables
+                        .iter()
+                        .take(MAX_LISTED_WRITES)
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            let declared_total = record
+                .spec
+                .launch_manifest
+                .as_ref()
+                .map(|manifest| manifest.deliverables.len())
+                .unwrap_or(0);
+            let observed: Vec<String> = record
+                .delivery_evidence
+                .observed_writes
+                .iter()
+                .take(MAX_LISTED_WRITES)
+                .cloned()
+                .collect();
+            let observed_total = record.delivery_evidence.observed_writes.len();
+            if declared_total > 0 || observed_total > 0 {
+                object.insert(
+                    "write_progress".into(),
+                    json!({
+                        "declared": declared,
+                        "declared_total": declared_total,
+                        "observed": observed,
+                        "observed_total": observed_total,
+                    }),
+                );
+            }
+        }
     }
     if let Some(source) = manager.continuation_source(&agent.id) {
         object.insert("resumed_from".into(), json!(source));
