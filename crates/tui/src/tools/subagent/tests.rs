@@ -5612,6 +5612,7 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
         "agent_id",
         "agent_ids",
         "all_parked",
+        "allowed_tools",
         "coordination_contracts",
         "deliverables",
         "detail",
@@ -5669,6 +5670,41 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
     assert!(
         worktree.contains("git worktree") && worktree.contains("parallel edit"),
         "worktree description should teach isolated parallel edits: {worktree}"
+    );
+}
+
+#[test]
+fn agent_start_schema_documents_hidden_spawn_requirements() {
+    // #6194 item 6: every spawn-time refusal must be discoverable before the
+    // call — the parent burned dispatches learning these from errors.
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 1);
+    let schema = AgentTool::new(manager, stub_runtime()).input_schema();
+    let allowed = schema_property_description(&schema, "allowed_tools");
+    for needle in ["type=custom", "non-empty", "narrows"] {
+        assert!(
+            allowed.contains(needle),
+            "allowed_tools description should teach {needle:?}: {allowed}"
+        );
+    }
+    let profile = schema_property_description(&schema, "profile");
+    for needle in ["ambiguous", "action=roster"] {
+        assert!(
+            profile.contains(needle),
+            "profile description should teach {needle:?}: {profile}"
+        );
+    }
+    let authority = schema_property_description(&schema, "write_authority");
+    for needle in ["type=custom", "workspace_write"] {
+        assert!(
+            authority.contains(needle),
+            "write_authority description should teach {needle:?}: {authority}"
+        );
+    }
+    let model = schema_property_description(&schema, "model");
+    assert!(
+        model.contains("resolved route"),
+        "model description should point at per-role resolved routes: {model}"
     );
 }
 

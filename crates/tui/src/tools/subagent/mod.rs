@@ -9342,11 +9342,16 @@ impl ToolSpec for AgentTool {
                 },
                 "profile": {
                     "type": "string",
-                    "description": "Saved member id or built-in role from action=roster. Saved instructions, route and depth bounds apply; conflicting model/type pins are refused. thinking may override the saved tier."
+                    "description": "Saved member id or built-in role from action=roster. Saved instructions, route and depth bounds apply; conflicting model/type pins are refused. thinking may override the saved tier. A role:NAME selector matching several members is refused as ambiguous — list exact member ids with action=roster and pass one."
+                },
+                "allowed_tools": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                    "description": "Tool names for this child. Required and non-empty for type=custom, which is refused without it; for other roles narrows the inherited registry. Blank entries are dropped and duplicates merged."
                 },
                 "model": {
                     "type": "string",
-                    "description": "For an unpinned role, choose an exact model or provider/model from roster models, plus the session model. A selected Fleet constrains task choices to those routes; saved profile and manual role pins remain exact. With no selected models, current-provider overrides remain available."
+                    "description": "For an unpinned role, choose an exact model or provider/model from roster models, plus the session model. Roster member rows show each role's resolved route, i.e. which models each role accepts. A selected Fleet constrains task choices to those routes; saved profile and manual role pins remain exact. With no selected models, current-provider overrides remain available."
                 },
                 "model_strength": {
                     "type": "string",
@@ -9390,7 +9395,7 @@ impl ToolSpec for AgentTool {
                 },
                 "write_authority": {
                     "type": "string", "enum": ["read_only", "workspace_write", "worktree_write"],
-                    "description": "Optional typed narrowing of the child's write permissions. read_only admits no write scope; worktree_write requires worktree isolation."
+                    "description": "Optional typed narrowing of the child's write permissions. read_only admits no write scope; worktree_write requires worktree isolation. type=custom declaring write_roots, exact_files, or coordination_contracts must pass workspace_write or worktree_write explicitly; custom without scopes defaults to read_only."
                 },
                 "exact_files": {
                     "type": "array", "items": {"type": "string", "minLength": 1},
