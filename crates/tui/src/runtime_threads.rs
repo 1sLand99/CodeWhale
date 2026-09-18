@@ -3598,6 +3598,27 @@ pub struct UsageTotals {
     pub turns: u64,
 }
 
+/// One in-flight or queued turn, for running-work accounting. Served by
+/// `GET /v1/threads/running` so background-capable clients (quit,
+/// backgrounding) can enumerate owned work without inferring it from
+/// per-thread latest-turn status (#6180, codewhale-apps#573).
+#[derive(Debug, Clone, Serialize)]
+pub struct ActiveTurn {
+    pub turn_id: String,
+    pub status: RuntimeTurnStatus,
+}
+
+/// One thread with at least one [`ActiveTurn`]. Archive state is ignored:
+/// archiving is a plain flag with no quiescence gate, so an archived thread
+/// can still carry live work and quit-accounting must count it.
+#[derive(Debug, Clone, Serialize)]
+pub struct RunningThread {
+    pub thread_id: String,
+    pub model: String,
+    pub title: Option<String>,
+    pub active_turns: Vec<ActiveTurn>,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct UsageBucket {
     pub key: String,
@@ -7201,6 +7222,43 @@ impl RuntimeThreadManager {
             threads.truncate(limit);
         }
         Ok(threads)
+    }
+
+    /// Threads with at least one queued or in-progress turn, for
+    /// running-work accounting (#6180). One turns scan grouped by thread
+    /// (never a scan per thread, #3757), joined against the thread rows in
+    /// store order. Archive state is ignored: see [`RunningThread`].
+    pub async fn running_threads(&self) -> Result<Vec<RunningThread>> {
+        let mut active_by_thread: std::collections::BTreeMap<String, Vec<ActiveTurn>> =
+            std::collections::BTreeMap::new();
+        for turn in self.store.list_all_turns()? {
+            if matches!(
+                turn.status,
+                RuntimeTurnStatus::Queued | RuntimeTurnStatus::InProgress
+            ) {
+                active_by_thread.entry(turn.thread_id.clone()).or_default().push(
+                    ActiveTurn {
+                        turn_id: turn.id.clone(),
+                        status: turn.status,
+                    },
+                );
+            }
+        }
+        if active_by_thread.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::with_capacity(active_by_thread.len());
+        for thread in self.store.list_threads()? {
+            if let Some(active_turns) = active_by_thread.remove(&thread.id) {
+                out.push(RunningThread {
+                    thread_id: thread.id.clone(),
+                    model: thread.model.clone(),
+                    title: thread.title.clone(),
+                    active_turns,
+                });
+            }
+        }
+        Ok(out)
     }
 
     /// Whether `/v1/threads/summary?search=` should keep this thread.

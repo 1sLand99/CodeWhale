@@ -1198,6 +1198,7 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .route("/v1/jobs", get(jobs::list_jobs))
         .route("/v1/threads", get(list_threads).post(create_thread))
         .route("/v1/threads/summary", get(list_threads_summary))
+        .route("/v1/threads/running", get(list_running_threads))
         .route("/v1/threads/{id}", get(get_thread).patch(update_thread))
         .route(
             "/v1/threads/{id}/jobs",
@@ -1744,6 +1745,19 @@ async fn list_threads(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
     Ok(Json(threads))
+}
+
+/// Threads with queued or in-progress turns, for quit/background
+/// accounting (#6180). One call, no inference from latest-turn status.
+async fn list_running_threads(
+    State(state): State<RuntimeApiState>,
+) -> Result<Json<Vec<crate::runtime_threads::RunningThread>>, ApiError> {
+    let running = state
+        .runtime_threads
+        .running_threads()
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Json(running))
 }
 
 async fn list_threads_summary(

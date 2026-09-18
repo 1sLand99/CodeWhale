@@ -679,6 +679,7 @@ and live state comes only from a resumed thread's SSE stream.
 **Threads** (durable runtime data model)
 - `GET /v1/threads?limit=50&include_archived=false&archived_only=false`
 - `GET /v1/threads/summary?limit=50&search=<optional>&include_archived=false&archived_only=false`
+- `GET /v1/threads/running`
 - `POST /v1/threads`
 - `GET /v1/threads/{id}`
 - `PATCH /v1/threads/{id}` (see body shape below)
@@ -744,6 +745,13 @@ forks may also include `backtrack_depth_from_tail` and `dropped_turn_id`.
 Thread list and summary responses remain flat in v0.8.40, so clients that need
 a graph should reconstruct it from events instead of assuming list order is a
 complete tree.
+
+`GET /v1/threads/running` is the running-work accounting surface
+(#6180): threads with at least one queued or in-progress turn, each with
+`thread_id`, `model`, `title`, and `active_turns` (`turn_id` + `status`).
+Background-capable clients use it for quit/background decisions — one call,
+no inference from latest-turn status. Archive state is ignored (archiving
+has no quiescence gate); an empty array means no owned work is live.
 
 `archived_only=true` returns archived threads only (mutually overrides
 `include_archived`). Default behavior is unchanged: `include_archived=false`

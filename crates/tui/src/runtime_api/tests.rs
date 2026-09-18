@@ -17422,3 +17422,83 @@ async fn agent_mail_cancel_withdraws_queued_mail() -> Result<()> {
     handle.abort();
     Ok(())
 }
+
+/// Running-work accounting (#6180): a watch-only client enumerates owned
+/// in-flight work in one call, with turn identity for targeting, and the
+/// listing clears when the work settles.
+#[tokio::test]
+async fn threads_running_lists_active_turns_and_clears_on_settle() -> Result<()> {
+    let Some((addr, manager, handle)) = spawn_test_server().await? else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+    let base = format!("http://{addr}");
+
+    let idle: serde_json::Value = client
+        .get(format!("{base}/v1/threads/running"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(idle, serde_json::json!([]));
+
+    let created: serde_json::Value = client
+        .post(format!("{base}/v1/threads"))
+        .json(&serde_json::json!({ "model": "test-model" }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let thread_id = created["id"].as_str().context("missing thread id")?;
+
+    client
+        .post(format!("{base}/v1/threads/{thread_id}/turns"))
+        .json(&serde_json::json!({ "prompt": "do the thing" }))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    // Pin the turn in-flight deterministically: a test server may settle a
+    // started turn on its own, which would make the listing below racy.
+    let mut started = manager
+        .test_store()
+        .list_turns_for_thread(thread_id)?
+        .pop()
+        .context("missing started turn")?;
+    started.status = crate::runtime_threads::RuntimeTurnStatus::InProgress;
+    manager.test_store().save_turn(&started)?;
+
+    let running: serde_json::Value = client
+        .get(format!("{base}/v1/threads/running"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(running.as_array().map(Vec::len), Some(1));
+    assert_eq!(running[0]["thread_id"], thread_id);
+    let active = running[0]["active_turns"]
+        .as_array()
+        .context("missing active_turns")?;
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0]["status"], "in_progress");
+    let turn_id = active[0]["turn_id"].as_str().context("missing turn id")?;
+
+    let mut turn = manager.test_store().load_turn(turn_id)?;
+    turn.status = crate::runtime_threads::RuntimeTurnStatus::Completed;
+    manager.test_store().save_turn(&turn)?;
+
+    let settled: serde_json::Value = client
+        .get(format!("{base}/v1/threads/running"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(settled, serde_json::json!([]));
+
+    handle.abort();
+    Ok(())
+}
