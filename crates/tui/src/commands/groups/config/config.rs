@@ -1167,6 +1167,9 @@ fn search_provider_display(config: &Config, locale: codewhale_localization::Loca
         // pin, so never name `TAVILY_API_KEY` (the winner may have been a
         // generic `tvly-` `[search] api_key`).
         SearchProviderSource::TavilyKey => "tavily key".to_string(),
+        // TinyFish publishes no key prefix, so the winner is always the
+        // dedicated env var — naming it is honest here.
+        SearchProviderSource::TinyfishKey => "TINYFISH_API_KEY".to_string(),
     };
     tr(locale, MessageId::ConfigCommandSource)
         .replace("{value}", resolved.provider.as_str())

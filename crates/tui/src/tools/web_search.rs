@@ -8,7 +8,9 @@
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec, optional_u64,
 };
-use crate::config::{SearchProvider, tavily_env_key, tavily_key_from};
+use crate::config::{
+    SearchProvider, tavily_env_key, tavily_key_from, tinyfish_env_key, tinyfish_key_from,
+};
 use crate::network_policy::{Decision, NetworkPolicyDecider};
 use async_trait::async_trait;
 use regex::Regex;
@@ -35,6 +37,7 @@ const BING_HOST: &str = "www.bing.com";
 const BING_ENDPOINT: &str = "https://www.bing.com/search";
 const FIRECRAWL_ENDPOINT: &str = "https://api.firecrawl.dev/v2/search";
 const TAVILY_ENDPOINT: &str = "https://api.tavily.com/search";
+const TINYFISH_ENDPOINT: &str = "https://api.search.tinyfish.ai";
 const BOCHA_ENDPOINT: &str = "https://api.bochaai.com/v1/web-search";
 const METASO_ENDPOINT: &str = "https://metaso.cn/api/v1";
 const BAIDU_ENDPOINT: &str = "https://qianfan.baidubce.com/v2/ai_search/web_search";
@@ -105,6 +108,7 @@ pub(crate) fn search_probe_target(
         SearchProvider::Volcengine => (VOLCENGINE_RESPONSES_ENDPOINT, false),
         SearchProvider::Sofya => (SOFYA_ENDPOINT, false),
         SearchProvider::Serply => (SERPLY_ENDPOINT, false),
+        SearchProvider::Tinyfish => (TINYFISH_ENDPOINT, false),
     };
 
     let mut url = reqwest::Url::parse(raw).map_err(|_| SearchProbeTargetError::Invalid)?;
@@ -180,7 +184,7 @@ impl ToolSpec for WebSearchTool {
     }
 
     fn description(&self) -> &'static str {
-        "Search the web and return ranked results with URLs, snippets, session-scoped ref_ids, and an execution receipt. Open a result ref_id with `web.run` when the short summary is not enough; fetch only the few sources needed. When the exact active route reports a documented first-party server-side search tool, it is tried first; otherwise keyless Firecrawl is the default. Configured API backends visibly degrade through DuckDuckGo then Bing when unavailable, and every hop is recorded. Configuration and network-policy errors fail closed. Explicit Bing and private DuckDuckGo-compatible routes do not cross providers. Set `[search] provider = \"firecrawl\" | \"bing\" | \"tavily\" | \"bocha\" | \"metaso\" | \"searxng\" | \"baidu\" | \"volcengine\" | \"sofya\" | \"serply\"` in config.toml. Firecrawl Cloud works keyless with a bounded quota. For a known canonical URL, prefer `fetch_url` directly."
+        "Search the web and return ranked results with URLs, snippets, session-scoped ref_ids, and an execution receipt. Open a result ref_id with `web.run` when the short summary is not enough; fetch only the few sources needed. When the exact active route reports a documented first-party server-side search tool, it is tried first; otherwise keyless Firecrawl is the default. Configured API backends visibly degrade through DuckDuckGo then Bing when unavailable, and every hop is recorded. Configuration and network-policy errors fail closed. Explicit Bing and private DuckDuckGo-compatible routes do not cross providers. Set `[search] provider = \"firecrawl\" | \"bing\" | \"tavily\" | \"bocha\" | \"metaso\" | \"searxng\" | \"baidu\" | \"volcengine\" | \"sofya\" | \"serply\" | \"tinyfish\"` in config.toml. Firecrawl Cloud works keyless with a bounded quota. A `TINYFISH_API_KEY` autodetects TinyFish (free search) without config. For a known canonical URL, prefer `fetch_url` directly."
     }
 
     fn input_schema(&self) -> Value {
@@ -474,6 +478,79 @@ impl WebSearchTool {
         })?;
 
         Ok(parse_tavily_results(&parsed, max_results))
+    }
+
+    /// Search via TinyFish Search API (<https://tinyfish.ai/search>). Free at
+    /// any wallet balance; requires `TINYFISH_API_KEY` or an explicit generic key.
+    async fn run_tinyfish_search(
+        &self,
+        query: &str,
+        max_results: usize,
+        timeout_ms: u64,
+        context: &ToolContext,
+    ) -> Result<Vec<WebSearchEntry>, ToolError> {
+        let api_key = tinyfish_key_from(context.search_api_key.as_deref())
+            .or_else(|| {
+                // Same explicit-pin fallback as Tavily: an explicit
+                // `provider = "tinyfish"` accepts any non-empty generic key.
+                context
+                    .search_api_key
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            })
+            .ok_or_else(|| {
+                ToolError::execution_failed(
+                    "TinyFish search requires an API key. Set `[search] api_key` in config.toml or the `TINYFISH_API_KEY` env var (free at https://agent.tinyfish.ai/api-keys).",
+                )
+            })?;
+
+        let client = crate::tls::reqwest_client_builder()
+            .timeout(Duration::from_millis(timeout_ms))
+            .build()
+            .map_err(|e| {
+                ToolError::execution_failed(format!("Failed to build HTTP client: {e}"))
+            })?;
+
+        let mut url = reqwest::Url::parse(TINYFISH_ENDPOINT)
+            .map_err(|e| ToolError::execution_failed(format!("Invalid TinyFish endpoint: {e}")))?;
+        url.query_pairs_mut().append_pair("query", query);
+        let resp = client
+            .get(url)
+            .header("X-API-Key", api_key)
+            .send()
+            .await
+            .map_err(|e| {
+                ToolError::execution_failed(format!("TinyFish search request failed: {e}"))
+            })?;
+
+        let status = resp.status();
+        let body = resp.text().await.map_err(|e| {
+            ToolError::execution_failed(format!("Failed to read TinyFish response: {e}"))
+        })?;
+
+        if !status.is_success() {
+            let detail = serde_json::from_str::<Value>(&body)
+                .ok()
+                .and_then(|parsed| {
+                    parsed
+                        .pointer("/error/message")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| truncate_error_body(&body));
+            return Err(ToolError::execution_failed(format!(
+                "TinyFish search failed: HTTP {} — {detail}",
+                status.as_u16()
+            )));
+        }
+
+        let parsed: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+            ToolError::execution_failed(format!("Failed to parse TinyFish response: {e}"))
+        })?;
+
+        Ok(parse_tinyfish_results(&parsed, max_results))
     }
 
     /// Search Sofya; it returns extracted content and accepts `SOFYA_API_KEY`.
@@ -1121,6 +1198,11 @@ fn preflight_search_provider(context: &ToolContext) -> Result<(), ToolError> {
         SearchProvider::Serply if !configured_key && !env_key("SERPLY_API_KEY") => not_configured(
             "Serply search is not configured: it requires an API key. Set `[search] api_key` in config.toml or the SERPLY_API_KEY env var.",
         ),
+        SearchProvider::Tinyfish if !configured_key && tinyfish_env_key().is_none() => {
+            not_configured(
+                "TinyFish search is not configured: it requires an API key. Set `[search] api_key` in config.toml or the `TINYFISH_API_KEY` env var (free at https://agent.tinyfish.ai/api-keys).",
+            )
+        }
         SearchProvider::Searxng
             if configured_search_base_url(context.search_base_url.as_deref()).is_none() =>
         {
@@ -1170,6 +1252,7 @@ const fn default_backend_host(backend: BackendId) -> Option<&'static str> {
         BackendId::Volcengine => Some("ark.cn-beijing.volces.com"),
         BackendId::Sofya => Some("sofya.co"),
         BackendId::Serply => Some("api.serply.io"),
+        BackendId::Tinyfish => Some("api.search.tinyfish.ai"),
     }
 }
 
@@ -1396,6 +1479,14 @@ pub(crate) async fn run_backend_search(
             Ok(simple(
                 BackendId::Serply,
                 tool.run_serply_search(&query.query, max_results, timeout_ms, context)
+                    .await?,
+            ))
+        }
+        SearchProvider::Tinyfish => {
+            check_policy(context.network_policy.as_ref(), "api.search.tinyfish.ai")?;
+            Ok(simple(
+                BackendId::Tinyfish,
+                tool.run_tinyfish_search(&query.query, max_results, timeout_ms, context)
                     .await?,
             ))
         }
@@ -1661,6 +1752,28 @@ fn parse_tavily_results(parsed: &Value, max_results: usize) -> Vec<WebSearchEntr
                 title: title.to_string(),
                 url: url.to_string(),
                 snippet: first_non_empty_string(item, &["content", "snippet"]),
+            })
+        })
+        .take(max_results)
+        .collect()
+}
+
+fn parse_tinyfish_results(parsed: &Value, max_results: usize) -> Vec<WebSearchEntry> {
+    parsed
+        .get("results")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let title = item.get("title")?.as_str()?.trim();
+            let url = item.get("url")?.as_str()?.trim();
+            if title.is_empty() || url.is_empty() {
+                return None;
+            }
+            Some(WebSearchEntry {
+                title: title.to_string(),
+                url: url.to_string(),
+                snippet: first_non_empty_string(item, &["snippet"]),
             })
         })
         .take(max_results)
@@ -2311,10 +2424,11 @@ mod tests {
         baidu_search_payload, bocha_error_message, domain_matches, duckduckgo_search_url,
         extract_search_query, finalize_search_response, optional_search_max_results,
         parse_baidu_results, parse_bocha_results, parse_metaso_results, parse_searxng_results,
-        parse_serply_results, parse_sofya_results, parse_tavily_results, parse_volcengine_results,
-        register_search_citations, rerank, run_scrape_search_with_endpoints, sanitize_error_body,
-        search_probe_target, search_timeout_budgets, searxng_score, searxng_search_url,
-        serply_search_url, truncate_error_body, volcengine_extract_text,
+        parse_serply_results, parse_sofya_results, parse_tavily_results, parse_tinyfish_results,
+        parse_volcengine_results, register_search_citations, rerank,
+        run_scrape_search_with_endpoints, sanitize_error_body, search_probe_target,
+        search_timeout_budgets, searxng_score, searxng_search_url, serply_search_url,
+        truncate_error_body, volcengine_extract_text,
     };
     use crate::config::SearchProvider;
     use crate::tools::web::contract::{
@@ -2863,11 +2977,22 @@ mod tests {
             r#"{"results":[{"title":"Volcengine result","url":"https://volc.example/result","snippet":"summary"}]}"#,
             5,
         );
+        let tinyfish = parse_tinyfish_results(
+            &json!({"query": "q", "total_results": 1, "page": 0, "results": [{
+                "position": 1,
+                "site_name": "tinyfish.example",
+                "title": " Tinyfish result ",
+                "snippet": " summary ",
+                "url": "https://tinyfish.example/result"
+            }]}),
+            5,
+        );
 
         for (entries, title, snippet) in [
             (tavily, "Tavily result", "content"),
             (metaso, "Metaso result", "summary"),
             (volcengine, "Volcengine result", "summary"),
+            (tinyfish, "Tinyfish result", "summary"),
         ] {
             assert_eq!(entries.len(), 1);
             assert_eq!(entries[0].title, title);
@@ -3526,6 +3651,39 @@ mod tests {
         match prev {
             Some(value) => unsafe { std::env::set_var("TAVILY_API_KEY", value) },
             None => unsafe { std::env::remove_var("TAVILY_API_KEY") },
+        }
+    }
+
+    #[test]
+    fn tinyfish_key_from_reads_dedicated_env_only_and_never_sniffs_generic() {
+        let _guard = crate::test_support::lock_test_env();
+        let prev = std::env::var_os("TINYFISH_API_KEY");
+
+        unsafe { std::env::set_var("TINYFISH_API_KEY", "tf-test") };
+        assert_eq!(
+            crate::config::tinyfish_key_from(Some("other-generic")).as_deref(),
+            Some("tf-test"),
+            "the dedicated env is the whole signal"
+        );
+        assert_eq!(
+            crate::config::tinyfish_env_key().as_deref(),
+            Some("tf-test")
+        );
+
+        unsafe { std::env::set_var("TINYFISH_API_KEY", "   ") };
+        assert_eq!(crate::config::tinyfish_env_key(), None);
+
+        unsafe { std::env::remove_var("TINYFISH_API_KEY") };
+        assert_eq!(
+            crate::config::tinyfish_key_from(Some("any-generic-key")),
+            None,
+            "no published prefix exists, so a generic key must never autodetect TinyFish"
+        );
+        assert_eq!(crate::config::tinyfish_key_from(None), None);
+
+        match prev {
+            Some(value) => unsafe { std::env::set_var("TINYFISH_API_KEY", value) },
+            None => unsafe { std::env::remove_var("TINYFISH_API_KEY") },
         }
     }
 

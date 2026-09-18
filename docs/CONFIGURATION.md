@@ -2967,9 +2967,18 @@ Firecrawl even with a Tavily key in the environment. Pinned `tavily` accepts
 any non-empty `[search] api_key` and is configured by that key or
 `TAVILY_API_KEY`; with both empty it fails closed.
 
+**TinyFish** ([tinyfish.ai](https://tinyfish.ai)) search is free at any wallet
+balance and needs only an API key. It autodetects from `TINYFISH_API_KEY` when
+no provider is pinned and no Tavily signal is present (a deliberate paid Tavily
+setup keeps winning when both keys exist). Doctor reports that as `source:
+tinyfish key`. Runtime-only, like Tavily: no disk write, no merge into
+`[search] api_key`. Pinned `tinyfish` accepts any non-empty `[search] api_key`
+and is configured by that key or `TINYFISH_API_KEY`; with both empty it fails
+closed.
+
 ```toml
 [search]
-provider = "firecrawl" # also duckduckgo | bing | tavily | bocha | metaso | searxng | baidu | volcengine | sofya | serply
+provider = "firecrawl" # also duckduckgo | bing | tavily | bocha | metaso | searxng | baidu | volcengine | sofya | serply | tinyfish
 # base_url = "https://search.example/" # optional with provider = "duckduckgo"; required with "searxng"
 # api_key = "YOUR_KEY" # optional for firecrawl; required by the other API providers
 ```

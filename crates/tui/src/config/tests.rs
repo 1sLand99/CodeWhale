@@ -1633,9 +1633,9 @@ fn window_title_config_parses_and_overlays() {
     assert_eq!(merged.title.as_deref(), Some("base-title"));
 }
 
-/// Run `body` with the three Tavily-resolution signals set exactly as given,
-/// restoring the ambient values afterwards. A `Default` pin (and the
-/// Firecrawl China-switch hint) means all three are absent, not just the
+/// Run `body` with the Tavily/TinyFish-resolution signals set exactly as
+/// given, restoring the ambient values afterwards. A `Default` pin (and the
+/// Firecrawl China-switch hint) means all four are absent, not just the
 /// legacy `DEEPSEEK_SEARCH_PROVIDER` alias.
 fn with_search_resolution_env<R>(set: &[(&str, &str)], body: impl FnOnce() -> R) -> R {
     let _guard = lock_test_env();
@@ -1643,6 +1643,7 @@ fn with_search_resolution_env<R>(set: &[(&str, &str)], body: impl FnOnce() -> R)
         "CODEWHALE_SEARCH_PROVIDER",
         "DEEPSEEK_SEARCH_PROVIDER",
         "TAVILY_API_KEY",
+        "TINYFISH_API_KEY",
     ];
     let previous: Vec<Option<OsString>> = keys.iter().map(env::var_os).collect();
     for key in keys {
@@ -1754,6 +1755,48 @@ fn search_provider_scenario() {
 
             assert_eq!(resolution.provider, SearchProvider::Firecrawl);
             assert_eq!(resolution.source, SearchProviderSource::Default);
+        },
+    );
+    // `TINYFISH_API_KEY=tf-test`, provider unset — autodetects TinyFish.
+    with_search_resolution_env(&[("TINYFISH_API_KEY", "tf-test")], || {
+        let config = Config::default();
+        let resolution = config.search_provider_resolution();
+
+        assert_eq!(resolution.provider, SearchProvider::Tinyfish);
+        assert_eq!(resolution.source, SearchProviderSource::TinyfishKey);
+        assert_eq!(resolution.source.as_str(), "tinyfish key");
+        assert_eq!(resolution.provider.as_str(), "tinyfish");
+        assert_eq!(
+            config.search.as_ref().and_then(|search| search.provider),
+            None
+        );
+    });
+    // A generic `[search] api_key` never autodetects TinyFish: no published
+    // key prefix exists to sniff against.
+    with_search_resolution_env(&[], || {
+        let config: Config = toml::from_str(
+            r#"
+            [search]
+            api_key = "any-generic-key"
+            "#,
+        )
+        .expect("search config");
+        let resolution = config.search_provider_resolution();
+
+        assert_eq!(resolution.provider, SearchProvider::Firecrawl);
+        assert_eq!(resolution.source, SearchProviderSource::Default);
+    });
+    // Both keys present: the deliberate paid Tavily setup keeps winning.
+    with_search_resolution_env(
+        &[
+            ("TAVILY_API_KEY", "tvly-test"),
+            ("TINYFISH_API_KEY", "tf-test"),
+        ],
+        || {
+            let resolution = Config::default().search_provider_resolution();
+
+            assert_eq!(resolution.provider, SearchProvider::Tavily);
+            assert_eq!(resolution.source, SearchProviderSource::TavilyKey);
         },
     );
     // Explicit Firecrawl wins over a Tavily key.
