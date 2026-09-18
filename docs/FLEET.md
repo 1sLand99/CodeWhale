@@ -27,7 +27,7 @@ existing workspaces, receipts, or scripts:
 - the durable ledger `.codewhale/fleet.jsonl` and the log directories
   `.codewhale/fleet/` and `.codewhale/fleet-host/`;
 - saved rosters `fleets/<name>.toml` and their `schema = "fleet"` header;
-- the `[fleet]` and `[fleets.*]` config tables;
+- the `[fleet]` config table (inline `[fleets.*]` tables were removed in 0.9.14; named fleets live in `fleets/<name>.toml` files);
 - the `codewhale workflow run --fleet <name>` flag;
 - wire, receipt, and control-plane operation ids such as `fleet.status`.
 

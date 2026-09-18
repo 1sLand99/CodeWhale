@@ -49,7 +49,7 @@ its own. Real work happens in sub-agents the script launches.
 - Up to **16 concurrent** live agents in one run (additional spawns wait for a slot).
 - Up to **1_000 agents per run** (VM lifetime spawn cap).
 - Configured `max_children` and `max_concurrent` can narrow these limits.
-- Soft auto-launch still uses a lower child soft-cap (`auto_start_child_limit`).
+- Automatic launch is model-judged on scope; the host enforces only the hard `max_children` / `max_depth` ceilings.
 
 See the Workflow JS sandbox tests for the fail-closed host surface inventory.
 

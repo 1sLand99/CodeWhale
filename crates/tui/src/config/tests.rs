@@ -1616,13 +1616,9 @@ fn workflow_config_defaults_when_omitted_and_overrides_round_trip() {
         automatic = false
         auto_start_read_only = false
         require_approval_for_writes = true
-        auto_start_child_limit = 4
         max_children = 32
         max_depth = 1
         default_token_budget = 90000
-        max_parallel_writes_without_worktree = 1
-        persist_completed_activity = false
-        persist_completed_across_restarts = false
         "#,
     )
     .expect("parse workflow config");
@@ -1631,13 +1627,9 @@ fn workflow_config_defaults_when_omitted_and_overrides_round_trip() {
     assert!(!workflow.automatic);
     assert!(!workflow.auto_start_read_only);
     assert!(workflow.require_approval_for_writes);
-    assert_eq!(workflow.auto_start_child_limit, 4);
     assert_eq!(workflow.max_children, 32);
     assert_eq!(workflow.max_depth, 1);
     assert_eq!(workflow.default_token_budget, 90_000);
-    assert_eq!(workflow.max_parallel_writes_without_worktree, 1);
-    assert!(!workflow.persist_completed_activity);
-    assert!(!workflow.persist_completed_across_restarts);
     assert_eq!(config.workflow_config(), workflow);
 
     let serialized = toml::to_string_pretty(&workflow).expect("serialize workflow");

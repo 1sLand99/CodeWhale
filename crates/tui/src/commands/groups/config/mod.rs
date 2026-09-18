@@ -267,25 +267,12 @@ pub(in crate::commands) fn workflow_settings(app: &App) -> CommandResult {
             on(cfg.require_approval_for_writes)
         ),
         format!(
-            "auto_start_child_limit = {}  · larger automatic plans ask first or use /workflow",
-            cfg.auto_start_child_limit
-        ),
-        format!(
             "max_children = {} · max_concurrent = {} · max_depth = {}  · hard ceilings for one run",
             cfg.max_children, cfg.max_concurrent, cfg.max_depth
         ),
         format!(
             "default_token_budget = {}  · shared admission cap for a run and its children (0 = none)",
             cfg.default_token_budget
-        ),
-        format!(
-            "max_parallel_writes_without_worktree = {}  · 0 forces worktree isolation for parallel writes",
-            cfg.max_parallel_writes_without_worktree
-        ),
-        format!(
-            "persist_completed_activity = {} · persist_completed_across_restarts = {}  · keep finished runs visible / across restarts (journal: .codewhale/workflow-runs.jsonl)",
-            on(cfg.persist_completed_activity),
-            on(cfg.persist_completed_across_restarts)
         ),
         String::new(),
         "[goal] — config.toml".to_string(),
