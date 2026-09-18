@@ -1302,6 +1302,7 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         )
         .route("/v1/threads/{id}/goal/complete", post(complete_thread_goal))
         .route("/v1/threads/{id}/goal/block", post(block_thread_goal))
+        .route("/v1/approvals", get(list_approvals))
         .route("/v1/approvals/{approval_id}", post(decide_approval))
         .route(
             "/v1/user-input/{thread_id}/{input_id}",
@@ -3622,6 +3623,98 @@ async fn audit_skill_api(
         ambiguous,
         skills: entries,
     }))
+}
+
+#[derive(Debug, Deserialize)]
+struct ApprovalsQuery {
+    limit: Option<usize>,
+}
+
+/// One row of the account-wide approval history: what the agent asked
+/// permission to do and what was decided. `decided_at` is `None` while the
+/// ask is still pending.
+#[derive(Debug, Serialize)]
+struct ApprovalHistoryRow {
+    approval_id: String,
+    tool_name: String,
+    outcome: String,
+    asked_at: chrono::DateTime<Utc>,
+    decided_at: Option<chrono::DateTime<Utc>>,
+}
+
+fn approval_outcome_label(outcome: &crate::approval_log::ApprovalOutcome) -> &'static str {
+    use crate::approval_log::ApprovalOutcome;
+    match outcome {
+        ApprovalOutcome::ApprovedOnce => "allowed_once",
+        ApprovalOutcome::Denied => "denied",
+        ApprovalOutcome::Timeout => "timeout",
+        ApprovalOutcome::Cancelled => "cancelled",
+        ApprovalOutcome::Unavailable => "unavailable",
+        ApprovalOutcome::RetryWithPolicy { .. } => "retry_with_policy",
+    }
+}
+
+/// Flatten one session's replay into history rows, newest ask first. Pending
+/// asks sort by asked time alongside decided rows — they are the newest
+/// entries while live, and sink into place once decided.
+fn approval_history_rows(replay: &crate::approval_log::ApprovalReplay) -> Vec<ApprovalHistoryRow> {
+    let mut rows: Vec<ApprovalHistoryRow> = replay
+        .completed
+        .iter()
+        .map(|completed| {
+            let asked_at = completed.ask.created_at();
+            ApprovalHistoryRow {
+                approval_id: completed.ask.approval_id().to_string(),
+                tool_name: completed.ask.tool_name().unwrap_or("unknown").to_string(),
+                outcome: approval_outcome_label(&completed.outcome).to_string(),
+                asked_at,
+                decided_at: Some(completed.decided_at),
+            }
+        })
+        .chain(replay.unmatched_asks.iter().map(|ask| ApprovalHistoryRow {
+            approval_id: ask.approval_id().to_string(),
+            tool_name: ask.tool_name().unwrap_or("unknown").to_string(),
+            outcome: "pending".to_string(),
+            asked_at: ask.created_at(),
+            decided_at: None,
+        }))
+        .collect();
+    rows.sort_by(|a, b| b.asked_at.cmp(&a.asked_at));
+    rows
+}
+
+/// `GET /v1/approvals` — the read-only history behind the approvals log:
+/// every decided approval plus every still-pending ask, newest first, across
+/// all sessions. A corrupt session log is skipped with a warning, never a
+/// 500 for the whole history; the warn names the file to inspect (#5931).
+async fn list_approvals(
+    State(state): State<RuntimeApiState>,
+    Query(query): Query<ApprovalsQuery>,
+) -> Result<Json<Vec<ApprovalHistoryRow>>, ApiError> {
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let sessions_dir = state.sessions_dir.clone();
+    let mut rows = tokio::task::spawn_blocking(move || {
+        let store = crate::approval_log::ApprovalReceiptStore::new(sessions_dir);
+        let mut rows = Vec::new();
+        for session_id in store.sessions_with_logs() {
+            match store.replay(&session_id) {
+                Ok(replay) => rows.extend(approval_history_rows(&replay)),
+                Err(error) => tracing::warn!(
+                    target: "approval",
+                    error_kind = ?error.kind(),
+                    %error,
+                    session_id,
+                    "skipping unreadable approval log in history listing",
+                ),
+            }
+        }
+        rows
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("approval history read failed: {error}")))?;
+    rows.sort_by(|a, b| b.asked_at.cmp(&a.asked_at));
+    rows.truncate(limit);
+    Ok(Json(rows))
 }
 
 async fn decide_approval(

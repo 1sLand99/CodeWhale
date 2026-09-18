@@ -6902,6 +6902,95 @@ async fn thread_usage_endpoint_scopes_totals_to_one_thread() -> Result<()> {
     Ok(())
 }
 
+/// `GET /v1/approvals` serves the account-wide approval history behind the
+/// approvals log: decided rows carry their outcome + decision time, pending
+/// asks read "pending" with no decision time, newest ask first. A corrupt
+/// session log is skipped (warned server-side), never a 500.
+#[tokio::test]
+async fn approvals_endpoint_lists_decided_and_pending_newest_first() -> Result<()> {
+    use crate::approval_log::{ApprovalOutcome, ApprovalReceipt, ApprovalReceiptStore};
+    use chrono::{DateTime, Utc};
+
+    let root = std::env::temp_dir().join(format!("codewhale-approvals-api-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    let Some((addr, _threads, handle)) =
+        spawn_test_server_with_root(root, sessions_dir.clone()).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+    let store = ApprovalReceiptStore::new(sessions_dir);
+
+    fn at(hour: u32) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(&format!("2026-09-10T{hour:02}:00:00Z"))
+            .expect("fixture time")
+            .to_utc()
+    }
+    // Decided pair in one session, a still-pending ask in another, a corrupt
+    // log in a third. Fixed stamps keep the newest-first order exact.
+    store.append(
+        "sess-decided",
+        &ApprovalReceipt::Asked {
+            approval_id: "tool-1".into(),
+            tool_call_id: "tool-1".into(),
+            tool_name: "exec_shell".into(),
+            created_at: at(10),
+        },
+    )?;
+    store.append(
+        "sess-decided",
+        &ApprovalReceipt::Decided {
+            approval_id: "tool-1".into(),
+            tool_call_id: "tool-1".into(),
+            outcome: ApprovalOutcome::Denied,
+            created_at: at(11),
+        },
+    )?;
+    store.append(
+        "sess-pending",
+        &ApprovalReceipt::Asked {
+            approval_id: "tool-2".into(),
+            tool_call_id: "tool-2".into(),
+            tool_name: "write_file".into(),
+            created_at: at(12),
+        },
+    )?;
+    let corrupt_dir = store.log_path("sess-corrupt")?;
+    fs::create_dir_all(corrupt_dir.parent().expect("log parent"))?;
+    fs::write(&corrupt_dir, "not-json\n")?;
+
+    let rows: serde_json::Value = client
+        .get(format!("http://{addr}/v1/approvals"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(rows.as_array().expect("rows").len(), 2);
+    assert_eq!(rows[0]["approval_id"], "tool-2");
+    assert_eq!(rows[0]["tool_name"], "write_file");
+    assert_eq!(rows[0]["outcome"], "pending");
+    assert!(rows[0]["decided_at"].is_null());
+    assert_eq!(rows[1]["approval_id"], "tool-1");
+    assert_eq!(rows[1]["tool_name"], "exec_shell");
+    assert_eq!(rows[1]["outcome"], "denied");
+    assert_eq!(rows[1]["asked_at"], "2026-09-10T10:00:00Z");
+    assert_eq!(rows[1]["decided_at"], "2026-09-10T11:00:00Z");
+
+    let one: serde_json::Value = client
+        .get(format!("http://{addr}/v1/approvals?limit=1"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(one.as_array().expect("rows").len(), 1);
+    assert_eq!(one[0]["approval_id"], "tool-2");
+
+    handle.abort();
+    Ok(())
+}
+
 /// `PUT /v1/sessions` persists the thread's audited cost with the same
 /// field semantics the TUI writer uses: parent-turn spend in
 /// `session_cost_*`, routed-child spend in `subagent_cost_*`, so a session
