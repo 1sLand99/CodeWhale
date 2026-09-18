@@ -21,8 +21,8 @@
   },
   "sourceCandidate": {
     "version": "0.9.14",
-    "providerCount": 47,
-    "toolCount": 78,
+    "providerCount": 49,
+    "toolCount": 80,
     "sandboxBackends": [
       "seatbelt (macOS, when available)",
       "bubblewrap (Linux, opt-in when installed)"

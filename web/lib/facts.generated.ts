@@ -37,7 +37,7 @@ export interface RepoFacts {
 }
 
 export const FACTS: RepoFacts = {
-  "generatedAt": "2026-09-16T18:38:00.930Z",
+  "generatedAt": "2026-09-18T18:49:13.339Z",
   "sourceRevision": null,
   "sourceCommittedAt": null,
   "version": "0.9.14",
@@ -270,6 +270,11 @@ export const FACTS: RepoFacts = {
       "env": "GOOGLE_API_KEY / GEMINI_API_KEY"
     },
     {
+      "id": "modelscope",
+      "label": "ModelScope",
+      "env": "MODELSCOPE_API_KEY"
+    },
+    {
       "id": "telecomjs",
       "label": "TelecomJS TokenHub",
       "env": "TELECOMJS_API_KEY"
@@ -278,6 +283,11 @@ export const FACTS: RepoFacts = {
       "id": "edenai",
       "label": "Eden AI",
       "env": "EDENAI_API_KEY"
+    },
+    {
+      "id": "zenmux",
+      "label": "ZenMux",
+      "env": "ZENMUX_API_KEY"
     },
     {
       "id": "concentrate",
@@ -906,7 +916,7 @@ export const FACTS: RepoFacts = {
   ],
   "defaultModel": "deepseek-flash",
   "nodeEngines": ">=18",
-  "toolCount": 78,
+  "toolCount": 80,
   "license": "MIT",
   "latestPublishedRelease": {
     "tag": "v0.9.13",
