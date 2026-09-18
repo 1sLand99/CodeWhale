@@ -960,7 +960,7 @@ mod tests {
         let ctx = ToolContext::new(dir.path().to_path_buf());
         let manager = new_shared_subagent_manager(dir.path().to_path_buf(), 2);
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let client = crate::client::DeepSeekClient::new(&crate::config::Config {
+        let client = crate::client::CodewhaleClient::new(&crate::config::Config {
             api_key: Some("test-key".to_string()),
             ..crate::config::Config::default()
         })

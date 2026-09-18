@@ -588,9 +588,9 @@ pub async fn capture_and_transcribe(
         return Err(tr(locale, MessageId::VoiceErrNoRecorder).to_string());
     }
     let api_key = config
-        .deepseek_api_key()
+        .active_route_api_key()
         .map_err(|_| tr(locale, MessageId::VoiceErrNoAuth).to_string())?;
-    let base_url = config.deepseek_base_url();
+    let base_url = config.active_route_base_url();
     let openrouter_vendor = config
         .openrouter_vendor()
         .map_err(|error| error.to_string())?;
@@ -656,11 +656,11 @@ pub async fn capture_and_transcribe(
             _ => {
                 // For provider ASR, reuse the same endpoint but don't block on interim if no key.
                 if let Ok(key) = config
-                    .deepseek_api_key()
+                    .active_route_api_key()
                     .map(|k: String| k)
                     .map_err(|_| String::new())
                 {
-                    let url = config.deepseek_base_url();
+                    let url = config.active_route_base_url();
                     transcribe(&key, &url, &snapshot, openrouter_vendor.as_deref())
                         .await
                         .unwrap_or_default()
@@ -851,13 +851,13 @@ pub async fn dictate_once(
         .ok_or(DictateError::NoSpeech)?;
 
     let (asr_kind, asr_model) = resolve_asr_choice(config);
-    let base_url = config.deepseek_base_url();
+    let base_url = config.active_route_base_url();
     let openrouter_vendor = config
         .openrouter_vendor()
         .map_err(|e| DictateError::Transcription(e.to_string()))?;
     let provider_key = || {
         config
-            .deepseek_api_key()
+            .active_route_api_key()
             .map_err(|_| DictateError::NoProviderAuth)
     };
 

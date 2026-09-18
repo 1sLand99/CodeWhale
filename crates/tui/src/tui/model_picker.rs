@@ -503,14 +503,14 @@ impl ModelPickerView {
             .unwrap_or(app.reasoning_effort);
         let effort_rows = picker_efforts_for_route(
             app.api_provider,
-            &config.deepseek_base_url(),
+            &config.active_route_base_url(),
             &initial_model,
             app.auto_model,
         );
         let normalized = normalize_picker_effort(
             selected_effort_request,
             app.api_provider,
-            &config.deepseek_base_url(),
+            &config.active_route_base_url(),
             &initial_model,
             app.auto_model,
         );
@@ -520,7 +520,7 @@ impl ModelPickerView {
             .unwrap_or_else(|| {
                 default_picker_effort_idx(
                     app.api_provider,
-                    &config.deepseek_base_url(),
+                    &config.active_route_base_url(),
                     &initial_model,
                     app.auto_model,
                 )

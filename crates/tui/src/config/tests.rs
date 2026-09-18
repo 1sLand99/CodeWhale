@@ -105,7 +105,7 @@ fn legacy_hosted_ollama_migration_keeps_the_existing_table_and_endpoint() {
     let after = Config::load(None, None).unwrap();
     assert_eq!(after.api_provider(), ApiProvider::OllamaCloud);
     assert_eq!(after.default_model(), "remembered-model");
-    assert_eq!(after.deepseek_base_url(), "https://ollama.com/v1");
+    assert_eq!(after.active_route_base_url(), "https://ollama.com/v1");
     assert_eq!(
         after
             .active_provider_identity(ApiProvider::OllamaCloud)
@@ -455,7 +455,7 @@ fn retired_antigravity_credentials_are_never_read_and_no_client_is_built() {
 
     // No transport can be constructed for the tombstone; the refusal happens
     // before any network or credential I/O.
-    let error = crate::client::DeepSeekClient::new(&config)
+    let error = crate::client::CodewhaleClient::new(&config)
         .err()
         .expect("constructing a client for the tombstone must fail")
         .to_string();
@@ -551,7 +551,7 @@ fn deepseek_api_key_reads_metadata_env_vars_for_newer_providers() -> Result<()> 
             ..Config::default()
         };
 
-        assert_eq!(config.deepseek_api_key()?, expected_key);
+        assert_eq!(config.active_route_api_key()?, expected_key);
     }
 
     Ok(())
@@ -690,7 +690,7 @@ mode = "coding-plan"
 
     assert_eq!(config.api_provider(), ApiProvider::ModelstudioTokenPlan);
     assert_eq!(
-        config.deepseek_base_url(),
+        config.active_route_base_url(),
         DEFAULT_MODELSTUDIO_CODING_PLAN_BASE_URL
     );
 }
@@ -2540,8 +2540,8 @@ struct EnvGuard {
     codewhale_secret_backend: Option<OsString>,
     deepseek_secret_backend: Option<OsString>,
     deepseek_provider: Option<OsString>,
-    deepseek_api_key: Option<OsString>,
-    deepseek_base_url: Option<OsString>,
+    active_route_api_key: Option<OsString>,
+    active_route_base_url: Option<OsString>,
     deepseek_http_headers: Option<OsString>,
     deepseek_model: Option<OsString>,
     deepseek_default_text_model: Option<OsString>,
@@ -2850,8 +2850,8 @@ impl EnvGuard {
             codewhale_secret_backend: codewhale_secret_backend_prev,
             deepseek_secret_backend: deepseek_secret_backend_prev,
             deepseek_provider: deepseek_provider_prev,
-            deepseek_api_key: api_key_prev,
-            deepseek_base_url: base_url_prev,
+            active_route_api_key: api_key_prev,
+            active_route_base_url: base_url_prev,
             deepseek_http_headers: http_headers_prev,
             deepseek_model: model_prev,
             deepseek_default_text_model: default_text_model_prev,
@@ -2962,8 +2962,8 @@ impl Drop for EnvGuard {
                 self.deepseek_secret_backend.take(),
             );
             Self::restore_var("DEEPSEEK_PROVIDER", self.deepseek_provider.take());
-            Self::restore_var("DEEPSEEK_API_KEY", self.deepseek_api_key.take());
-            Self::restore_var("DEEPSEEK_BASE_URL", self.deepseek_base_url.take());
+            Self::restore_var("DEEPSEEK_API_KEY", self.active_route_api_key.take());
+            Self::restore_var("DEEPSEEK_BASE_URL", self.active_route_base_url.take());
             Self::restore_var("DEEPSEEK_HTTP_HEADERS", self.deepseek_http_headers.take());
             Self::restore_var("DEEPSEEK_MODEL", self.deepseek_model.take());
             Self::restore_var(
@@ -4823,11 +4823,11 @@ fn relative_codewhale_home_key_save_creates_no_workspace_state() -> Result<()> {
 #[test]
 fn has_api_key_detects_in_memory_override_and_env_var() -> Result<()> {
     // Pins the v0.8.8 contract: `has_api_key` covers the prompt-free
-    // sources used by `Config::deepseek_api_key` (in-memory override,
+    // sources used by `Config::active_route_api_key` (in-memory override,
     // env var, config-file slot).
     let _lock = lock_test_env();
     // Explicit in-memory key wins over every other source per
-    // `Config::deepseek_api_key`'s "Path 0" override.
+    // `Config::active_route_api_key`'s "Path 0" override.
     let cfg = Config {
         api_key: Some("sk-in-memory-override".to_string()),
         ..Default::default()
@@ -4865,7 +4865,7 @@ fn deepseek_dispatcher_env_key_overrides_config_key() -> Result<()> {
         ..Default::default()
     };
 
-    assert_eq!(config.deepseek_api_key()?, "ark-dispatcher-key");
+    assert_eq!(config.active_route_api_key()?, "ark-dispatcher-key");
 
     unsafe {
         std::env::remove_var("DEEPSEEK_API_KEY");
@@ -4894,7 +4894,7 @@ fn provider_neutral_scenario() -> Result<()> {
             ..Default::default()
         };
 
-        assert_eq!(config.deepseek_api_key()?, "explicit-profile-key");
+        assert_eq!(config.active_route_api_key()?, "explicit-profile-key");
         assert!(has_api_key(&config));
         assert!(active_provider_has_env_api_key(&config));
     }
@@ -4913,7 +4913,7 @@ fn provider_neutral_scenario() -> Result<()> {
             ..Default::default()
         };
 
-        assert_eq!(config.deepseek_api_key()?, "saved-anthropic-key");
+        assert_eq!(config.active_route_api_key()?, "saved-anthropic-key");
     }
     Ok(())
 }
@@ -5584,7 +5584,7 @@ fn deepseek_api_key_prefers_explicit_in_memory_override() -> Result<()> {
         ..Config::default()
     };
     let resolved = config
-        .deepseek_api_key()
+        .active_route_api_key()
         .expect("explicit override must resolve");
     assert_eq!(resolved, "freshly-typed-key");
     Ok(())
@@ -5612,7 +5612,7 @@ fn deepseek_api_key_prefers_saved_config_over_stale_env() -> Result<()> {
         api_key: Some("fresh-config-key".to_string()),
         ..Config::default()
     };
-    assert_eq!(config.deepseek_api_key()?, "fresh-config-key");
+    assert_eq!(config.active_route_api_key()?, "fresh-config-key");
     unsafe {
         env::remove_var("DEEPSEEK_API_KEY");
     }
@@ -5634,7 +5634,7 @@ fn standalone_tui_reads_saved_secret_before_ambient_env() -> Result<()> {
     secrets.set("deepseek", "saved-secret-key")?;
 
     let config = Config::default();
-    assert_eq!(config.deepseek_api_key()?, "saved-secret-key");
+    assert_eq!(config.active_route_api_key()?, "saved-secret-key");
     assert!(has_api_key(&config));
     assert!(active_provider_has_config_api_key(&config));
 
@@ -5642,7 +5642,7 @@ fn standalone_tui_reads_saved_secret_before_ambient_env() -> Result<()> {
         api_key: Some("fresh-config-key".to_string()),
         ..Config::default()
     };
-    assert_eq!(configured.deepseek_api_key()?, "fresh-config-key");
+    assert_eq!(configured.active_route_api_key()?, "fresh-config-key");
     Ok(())
 }
 
@@ -5668,7 +5668,7 @@ fn authenticated_local_provider_reads_saved_secret() -> Result<()> {
         ..Config::default()
     };
 
-    assert_eq!(config.deepseek_api_key()?, "saved-local-secret");
+    assert_eq!(config.active_route_api_key()?, "saved-local-secret");
     assert!(has_api_key(&config));
     assert!(active_provider_has_config_api_key(&config));
     Ok(())
@@ -5705,7 +5705,7 @@ fn named_custom_provider_never_reuses_generic_custom_secret() -> Result<()> {
 
     assert!(config.should_skip_secret_store_for_provider(ApiProvider::Custom));
     assert!(provider_secret_store_api_key(&config, ApiProvider::Custom).is_none());
-    assert!(config.deepseek_api_key().is_err());
+    assert!(config.active_route_api_key().is_err());
     assert!(!has_api_key(&config));
     assert!(!active_provider_has_config_api_key(&config));
     Ok(())
@@ -5733,7 +5733,7 @@ fn built_in_provider_custom_endpoint_never_reuses_global_credentials() -> Result
 
     assert!(config.provider_uses_custom_endpoint(ApiProvider::Openrouter));
     assert!(config.should_skip_secret_store_for_provider(ApiProvider::Openrouter));
-    assert!(config.deepseek_api_key().is_err());
+    assert!(config.active_route_api_key().is_err());
     assert!(!has_api_key(&config));
     assert!(!active_provider_has_config_api_key(&config));
     assert!(!active_provider_has_env_api_key(&config));
@@ -5757,7 +5757,7 @@ fn custom_endpoint_accepts_route_bound_api_key_env_and_reports_ready() -> Result
         ..Config::default()
     };
 
-    assert_eq!(config.deepseek_api_key()?, "route-bound-key");
+    assert_eq!(config.active_route_api_key()?, "route-bound-key");
     assert!(has_api_key_for(&config, ApiProvider::Openrouter));
     assert!(active_provider_has_env_api_key(&config));
     assert!(active_provider_uses_env_only_api_key(&config));
@@ -5787,7 +5787,7 @@ default_text_model = "deepseek-chat"
         );
         let config = Config::load(Some(config_path.clone()), None)?;
         assert!(config.provider_uses_custom_endpoint(ApiProvider::Deepseek));
-        assert!(config.deepseek_api_key().is_err());
+        assert!(config.active_route_api_key().is_err());
         assert!(!active_provider_has_config_api_key(&config));
         assert!(!active_provider_has_env_api_key(&config));
         assert!(!has_api_key_for(&config, ApiProvider::Deepseek));
@@ -5815,9 +5815,9 @@ model = "openai/gpt-5"
     ] {
         let _base = EnvVarGuard::set(env_name, endpoint);
         let config = Config::load(Some(config_path.clone()), None)?;
-        assert_eq!(config.deepseek_base_url(), endpoint);
+        assert_eq!(config.active_route_base_url(), endpoint);
         assert!(config.provider_uses_custom_endpoint(ApiProvider::Openrouter));
-        assert!(config.deepseek_api_key().is_err());
+        assert!(config.active_route_api_key().is_err());
         assert!(!active_provider_has_config_api_key(&config));
         assert!(!active_provider_has_env_api_key(&config));
         assert!(!has_api_key_for(&config, ApiProvider::Openrouter));
@@ -5842,7 +5842,7 @@ default_text_model = "private-deepseek-model"
 "#,
     )?;
     let root = Config::load(Some(config_path.clone()), None)?;
-    assert_eq!(root.deepseek_api_key()?, "file-root-key");
+    assert_eq!(root.active_route_api_key()?, "file-root-key");
     assert!(active_provider_has_config_api_key(&root));
     assert!(has_api_key_for(&root, ApiProvider::Deepseek));
 
@@ -5857,7 +5857,7 @@ model = "private-openrouter-model"
 "#,
     )?;
     let provider_key = Config::load(Some(config_path.clone()), None)?;
-    assert_eq!(provider_key.deepseek_api_key()?, "file-provider-key");
+    assert_eq!(provider_key.active_route_api_key()?, "file-provider-key");
     assert!(active_provider_has_config_api_key(&provider_key));
     assert!(has_api_key_for(&provider_key, ApiProvider::Openrouter));
 
@@ -5872,7 +5872,7 @@ model = "private-openrouter-model"
 "#,
     )?;
     let route_env = Config::load(Some(config_path), None)?;
-    assert_eq!(route_env.deepseek_api_key()?, "file-env-route-key");
+    assert_eq!(route_env.active_route_api_key()?, "file-env-route-key");
     assert!(active_provider_has_env_api_key(&route_env));
     assert!(has_api_key_for(&route_env, ApiProvider::Openrouter));
     Ok(())
@@ -5913,7 +5913,7 @@ fn generic_base_url_override_never_reaches_pinned_child_routes() -> Result<()> {
 
         // Documented behavior for the active DeepSeek route is unchanged.
         assert_eq!(config.api_provider(), ApiProvider::Deepseek);
-        assert_eq!(config.deepseek_base_url(), session_host);
+        assert_eq!(config.active_route_base_url(), session_host);
         assert!(config.provider_uses_custom_endpoint(ApiProvider::Deepseek));
 
         for (provider, expected) in [
@@ -5935,7 +5935,7 @@ fn generic_base_url_override_never_reaches_pinned_child_routes() -> Result<()> {
                 .unwrap_or_else(|err| panic!("{env_name}: {provider:?} child route: {err}"));
             // The scoped config and the executable candidate must agree, and
             // neither may name the session host.
-            assert_eq!(route.config.deepseek_base_url(), expected);
+            assert_eq!(route.config.active_route_base_url(), expected);
             assert_eq!(route.candidate.endpoint().base_url, expected);
             assert_ne!(route.candidate.endpoint().base_url, session_host);
         }
@@ -5971,7 +5971,7 @@ fn provider_scoped_base_url_env_applies_only_to_its_own_route() -> Result<()> {
     // Without a generic override the active DeepSeek route keeps its default:
     // a provider-scoped variable names exactly one provider.
     let config = Config::load(Some(config_path.clone()), None)?;
-    assert_eq!(config.deepseek_base_url(), DEFAULT_DEEPSEEK_BASE_URL);
+    assert_eq!(config.active_route_base_url(), DEFAULT_DEEPSEEK_BASE_URL);
     assert_eq!(
         config.base_url_for_route(ApiProvider::Zai),
         DEFAULT_ZAI_BASE_URL
@@ -5988,7 +5988,7 @@ fn provider_scoped_base_url_env_applies_only_to_its_own_route() -> Result<()> {
     let session_host = "https://session-gateway.example.test/v1";
     let _base = EnvVarGuard::set("CODEWHALE_BASE_URL", session_host);
     let config = Config::load(Some(config_path), None)?;
-    assert_eq!(config.deepseek_base_url(), session_host);
+    assert_eq!(config.active_route_base_url(), session_host);
     assert_eq!(
         config.base_url_for_route(ApiProvider::Moonshot),
         moonshot_host
@@ -5999,7 +5999,7 @@ fn provider_scoped_base_url_env_applies_only_to_its_own_route() -> Result<()> {
     );
     let route = crate::route_runtime::resolve_runtime_route(&config, ApiProvider::Moonshot, None)
         .expect("Moonshot child route");
-    assert_eq!(route.config.deepseek_base_url(), moonshot_host);
+    assert_eq!(route.config.active_route_base_url(), moonshot_host);
     assert_eq!(route.candidate.endpoint().base_url, moonshot_host);
     assert_ne!(route.candidate.endpoint().base_url, session_host);
 
@@ -6027,7 +6027,7 @@ default_text_model = "deepseek-chat"
     let _cli_key = EnvVarGuard::set(codewhale_config::CLI_API_KEY_ENV, "explicit-cli-key");
 
     let config = Config::load(Some(config_path), None)?;
-    assert_eq!(config.deepseek_api_key()?, "explicit-cli-key");
+    assert_eq!(config.active_route_api_key()?, "explicit-cli-key");
     assert!(!active_provider_has_config_api_key(&config));
     assert!(active_provider_has_env_api_key(&config));
     assert!(active_provider_uses_env_only_api_key(&config));
@@ -6064,10 +6064,10 @@ model = "managed-model"
 
     let config = Config::load(Some(config_path), None)?;
     assert_eq!(
-        config.deepseek_base_url(),
+        config.active_route_base_url(),
         "https://managed-gateway.example.test/v1"
     );
-    assert_eq!(config.deepseek_api_key()?, "managed-route-key");
+    assert_eq!(config.active_route_api_key()?, "managed-route-key");
     assert!(active_provider_has_config_api_key(&config));
     assert!(has_api_key_for(&config, ApiProvider::Openrouter));
     Ok(())
@@ -6213,14 +6213,14 @@ model = "claude-sonnet-5"
     )?;
     let _base = EnvVarGuard::set("CODEWHALE_BASE_URL", "https://env-gateway.example.test/v1");
     let mut config = Config::load(Some(config_path), None)?;
-    assert!(config.deepseek_api_key().is_err());
+    assert!(config.active_route_api_key().is_err());
 
     config.provider = Some("openai".to_string());
     assert_eq!(
-        config.deepseek_base_url(),
+        config.active_route_base_url(),
         "https://file-openai-gateway.example.test/v1"
     );
-    assert_eq!(config.deepseek_api_key()?, "file-openai-key");
+    assert_eq!(config.active_route_api_key()?, "file-openai-key");
 
     // Anthropic was never the route the environment addressed. Under the
     // endpoint-ownership receipt the generic override does not follow a
@@ -6232,16 +6232,16 @@ model = "claude-sonnet-5"
     // legitimate route-bound credential rather than one following a foreign
     // host.
     config.provider = Some("anthropic".to_string());
-    assert_eq!(config.deepseek_base_url(), DEFAULT_ANTHROPIC_BASE_URL);
+    assert_eq!(config.active_route_base_url(), DEFAULT_ANTHROPIC_BASE_URL);
     assert_ne!(
-        config.deepseek_base_url(),
+        config.active_route_base_url(),
         "https://env-gateway.example.test/v1"
     );
-    assert_eq!(config.deepseek_api_key()?, "stale-anthropic-file-key");
+    assert_eq!(config.active_route_api_key()?, "stale-anthropic-file-key");
 
     config.provider = Some("openrouter".to_string());
     assert!(
-        config.deepseek_api_key().is_err(),
+        config.active_route_api_key().is_err(),
         "switching away and back must retain the env ownership receipt for that route"
     );
     Ok(())
@@ -6271,7 +6271,7 @@ fn named_custom_api_key_env_satisfies_runtime_and_onboarding_readiness() -> Resu
         ..Config::default()
     };
 
-    assert_eq!(config.deepseek_api_key()?, "named-route-key");
+    assert_eq!(config.active_route_api_key()?, "named-route-key");
     assert!(has_api_key_for(&config, ApiProvider::Custom));
     assert!(has_api_key(&config));
     Ok(())
@@ -6327,7 +6327,7 @@ fn auth_mode_none_suppresses_config_env_secret_and_oauth_credentials() -> Result
         ..Config::default()
     };
 
-    assert_eq!(config.deepseek_api_key()?, "");
+    assert_eq!(config.active_route_api_key()?, "");
     assert!(
         has_api_key(&config),
         "no-auth routes are ready without a key"
@@ -6408,7 +6408,7 @@ fn deepseek_api_key_ignores_sentinel_placeholder() -> Result<()> {
     // fall through to env / config-provider and ultimately bail out
     // with a "key not found" error.
     let _err = config
-        .deepseek_api_key()
+        .active_route_api_key()
         .expect_err("sentinel placeholder must not satisfy the API key check");
     Ok(())
 }
@@ -6443,7 +6443,7 @@ fn provider_sentinel_falls_through_to_route_env_then_fixture_store() -> Result<(
 
         secrets.set("openai", "FIXTURE-STORED-KEY")?;
         assert_eq!(
-            config.deepseek_api_key()?,
+            config.active_route_api_key()?,
             "FIXTURE-STORED-KEY",
             "{sentinel:?} must fall through to the allowed fixture store"
         );
@@ -6460,7 +6460,7 @@ fn provider_sentinel_falls_through_to_route_env_then_fixture_store() -> Result<(
         )?;
         let config = Config::load(Some(config_path.clone()), None)?;
         assert_eq!(
-            config.deepseek_api_key()?,
+            config.active_route_api_key()?,
             "FIXTURE-ENV-KEY",
             "route-bound api_key_env must outrank the store after {sentinel:?}"
         );
@@ -6473,7 +6473,7 @@ fn provider_sentinel_falls_through_to_route_env_then_fixture_store() -> Result<(
         assert!(!has_api_key_for(&root, ApiProvider::Deepseek));
         secrets.set("deepseek", "FIXTURE-DEEPSEEK-STORED-KEY")?;
         assert_eq!(
-            root.deepseek_api_key()?,
+            root.active_route_api_key()?,
             "FIXTURE-DEEPSEEK-STORED-KEY",
             "root {sentinel:?} must also fall through to the allowed fixture store"
         );
@@ -6500,7 +6500,7 @@ fn custom_route_sentinel_is_never_a_key_and_requires_a_route_binding() -> Result
         let config = Config::load(Some(config_path.clone()), None)?;
         assert!(config.should_skip_secret_store_for_provider(ApiProvider::Custom));
         let error = config
-            .deepseek_api_key()
+            .active_route_api_key()
             .expect_err("named custom sentinel must not become a bearer key");
         assert!(error.to_string().contains("must be bound explicitly"));
         assert!(!active_provider_has_config_api_key(&config));
@@ -6514,7 +6514,7 @@ fn custom_route_sentinel_is_never_a_key_and_requires_a_route_binding() -> Result
             ),
         )?;
         let config = Config::load(Some(config_path.clone()), None)?;
-        assert_eq!(config.deepseek_api_key()?, "FIXTURE-CUSTOM-ENV-KEY");
+        assert_eq!(config.active_route_api_key()?, "FIXTURE-CUSTOM-ENV-KEY");
         assert!(!active_provider_has_config_api_key(&config));
         assert!(active_provider_has_env_api_key(&config));
     }
@@ -6527,7 +6527,7 @@ fn custom_route_sentinel_is_never_a_key_and_requires_a_route_binding() -> Result
     )?;
     let custom_endpoint = Config::load(Some(config_path), None)?;
     assert!(custom_endpoint.should_skip_secret_store_for_provider(ApiProvider::Openrouter));
-    assert!(custom_endpoint.deepseek_api_key().is_err());
+    assert!(custom_endpoint.active_route_api_key().is_err());
     assert!(!active_provider_has_config_api_key(&custom_endpoint));
     assert!(!has_api_key_for(&custom_endpoint, ApiProvider::Openrouter));
     Ok(())
@@ -7038,7 +7038,7 @@ fn apply_env_overrides_does_not_copy_api_key_into_config() -> Result<()> {
     apply_env_overrides(&mut config, ConfigEnvironmentPolicy::Runtime);
 
     assert_eq!(config.api_key, None);
-    assert_eq!(config.deepseek_api_key()?, "env-key");
+    assert_eq!(config.active_route_api_key()?, "env-key");
     unsafe {
         env::remove_var("DEEPSEEK_API_KEY");
     }
@@ -7891,9 +7891,9 @@ model = "opencode-go/glm-5.2"
     )?;
 
     assert_eq!(config.api_provider(), ApiProvider::OpencodeGo);
-    assert_eq!(config.deepseek_base_url(), DEFAULT_OPENCODE_GO_BASE_URL);
+    assert_eq!(config.active_route_base_url(), DEFAULT_OPENCODE_GO_BASE_URL);
     assert_eq!(config.default_model(), "glm-5.2");
-    assert_eq!(config.deepseek_api_key()?, "go-config-key");
+    assert_eq!(config.active_route_api_key()?, "go-config-key");
     assert_eq!(
         wire_model_for_provider(ApiProvider::OpencodeGo, "opencode-go/mimo-v2.5-pro"),
         "mimo-v2.5-pro"
@@ -8054,7 +8054,7 @@ fn deepseek_provider_defaults_to_beta_endpoint() {
     let config = Config::default();
 
     assert_eq!(config.api_provider(), ApiProvider::Deepseek);
-    assert_eq!(config.deepseek_base_url(), DEFAULT_DEEPSEEK_BASE_URL);
+    assert_eq!(config.active_route_base_url(), DEFAULT_DEEPSEEK_BASE_URL);
 }
 
 #[test]
@@ -8065,7 +8065,7 @@ fn explicit_deepseek_base_url_overrides_beta_default() {
     };
 
     assert_eq!(config.api_provider(), ApiProvider::Deepseek);
-    assert_eq!(config.deepseek_base_url(), "https://api.deepseek.com");
+    assert_eq!(config.active_route_base_url(), "https://api.deepseek.com");
 }
 
 #[test]
@@ -8078,7 +8078,7 @@ fn loopback_deepseek_base_url_runs_without_api_key() -> Result<()> {
 
     assert_eq!(config.api_provider(), ApiProvider::Deepseek);
     assert!(has_api_key(&config));
-    assert_eq!(config.deepseek_api_key()?, "");
+    assert_eq!(config.active_route_api_key()?, "");
     Ok(())
 }
 
@@ -8277,7 +8277,7 @@ fn nvidia_nim_scenario() -> Result<()> {
         config.validate()?;
         assert_eq!(config.api_provider(), ApiProvider::NvidiaNim);
         assert_eq!(config.default_model(), DEFAULT_NVIDIA_NIM_MODEL);
-        assert_eq!(config.deepseek_base_url(), DEFAULT_NVIDIA_NIM_BASE_URL);
+        assert_eq!(config.active_route_base_url(), DEFAULT_NVIDIA_NIM_BASE_URL);
     }
     // from nvidia_nim_provider_normalizes_deepseek_v4_flash_alias
     {
@@ -8326,7 +8326,10 @@ fn nvidia_nim_scenario() -> Result<()> {
 
         let config = Config::load(None, None)?;
         assert_eq!(config.api_provider(), ApiProvider::NvidiaNim);
-        assert_eq!(config.deepseek_base_url(), "https://short-nim.example/v1");
+        assert_eq!(
+            config.active_route_base_url(),
+            "https://short-nim.example/v1"
+        );
     }
     Ok(())
 }
@@ -8473,7 +8476,7 @@ fn nvidia_nim_env_overrides_provider_and_credentials() -> Result<()> {
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::NvidiaNim);
-    assert_eq!(config.deepseek_api_key()?, "nim-env-key");
+    assert_eq!(config.active_route_api_key()?, "nim-env-key");
     assert_eq!(config.default_model(), DEFAULT_NVIDIA_NIM_MODEL);
     Ok(())
 }
@@ -8502,7 +8505,7 @@ fn nvidia_nim_env_accepts_facade_base_url_forwarding() -> Result<()> {
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::NvidiaNim);
     assert_eq!(
-        config.deepseek_base_url(),
+        config.active_route_base_url(),
         "https://forwarded-nim.example/v1"
     );
     Ok(())
@@ -8518,7 +8521,7 @@ fn openai_provider_uses_openai_compatible_defaults() -> Result<()> {
     config.validate()?;
     assert_eq!(config.api_provider(), ApiProvider::Openai);
     assert_eq!(config.default_model(), "gpt-5.6");
-    assert_eq!(config.deepseek_base_url(), "https://api.openai.com/v1");
+    assert_eq!(config.active_route_base_url(), "https://api.openai.com/v1");
     assert_eq!(
         codewhale_config::provider::provider_for_kind(codewhale_config::ProviderKind::Openai)
             .default_model(),
@@ -8643,7 +8646,7 @@ fn xiaomi_mimo_scenario() -> Result<()> {
         config.validate()?;
         assert_eq!(config.api_provider(), ApiProvider::XiaomiMimo);
         assert_eq!(config.default_model(), DEFAULT_XIAOMI_MIMO_MODEL);
-        assert_eq!(config.deepseek_base_url(), DEFAULT_XIAOMI_MIMO_BASE_URL);
+        assert_eq!(config.active_route_base_url(), DEFAULT_XIAOMI_MIMO_BASE_URL);
     }
     // from xiaomi_mimo_provider_honours_root_default_model_and_base_url
     {
@@ -8658,7 +8661,7 @@ fn xiaomi_mimo_scenario() -> Result<()> {
         assert_eq!(config.api_provider(), ApiProvider::XiaomiMimo);
         assert_eq!(config.default_model(), "mimo-v2.5");
         assert_eq!(
-            config.deepseek_base_url(),
+            config.active_route_base_url(),
             "https://token-plan-cn.xiaomimimo.com/v1"
         );
     }
@@ -8691,7 +8694,7 @@ fn xiaomi_mimo_scenario() -> Result<()> {
         config.validate()?;
         assert_eq!(config.api_provider(), ApiProvider::XiaomiMimo);
         assert_eq!(
-            config.deepseek_base_url(),
+            config.active_route_base_url(),
             XIAOMI_MIMO_TOKEN_PLAN_AMS_BASE_URL
         );
     }
@@ -8708,7 +8711,7 @@ fn xiaomi_mimo_scenario() -> Result<()> {
 
         config.validate()?;
         assert_eq!(config.api_provider(), ApiProvider::XiaomiMimo);
-        assert_eq!(config.deepseek_base_url(), DEFAULT_XIAOMI_MIMO_BASE_URL);
+        assert_eq!(config.active_route_base_url(), DEFAULT_XIAOMI_MIMO_BASE_URL);
     }
     Ok(())
 }
@@ -8728,7 +8731,10 @@ fn openai_codex_provider_ignores_legacy_root_base_url() -> Result<()> {
     config.validate()?;
     assert_eq!(config.api_provider(), ApiProvider::OpenaiCodex);
     assert_eq!(config.default_model(), "gpt-5.5");
-    assert_eq!(config.deepseek_base_url(), DEFAULT_OPENAI_CODEX_BASE_URL);
+    assert_eq!(
+        config.active_route_base_url(),
+        DEFAULT_OPENAI_CODEX_BASE_URL
+    );
     assert!(!config.provider_uses_custom_endpoint(ApiProvider::OpenaiCodex));
     Ok(())
 }
@@ -8749,9 +8755,9 @@ model = "mimo-v2.5-pro"
 
     config.validate()?;
     assert_eq!(config.api_provider(), ApiProvider::XiaomiMimo);
-    assert_eq!(config.deepseek_api_key()?, "mimo-table-key");
+    assert_eq!(config.active_route_api_key()?, "mimo-table-key");
     assert_eq!(
-        config.deepseek_base_url(),
+        config.active_route_base_url(),
         "https://token-plan-sgp.xiaomimimo.com/v1"
     );
     assert_eq!(config.default_model(), DEFAULT_XIAOMI_MIMO_MODEL);
@@ -8773,7 +8779,7 @@ model = "mimo-v2.5-pro"
 
     config.validate()?;
     assert_eq!(config.api_provider(), ApiProvider::XiaomiMimo);
-    assert_eq!(config.deepseek_base_url(), DEFAULT_XIAOMI_MIMO_BASE_URL);
+    assert_eq!(config.active_route_base_url(), DEFAULT_XIAOMI_MIMO_BASE_URL);
     assert_eq!(config.default_model(), DEFAULT_XIAOMI_MIMO_MODEL);
     Ok(())
 }
@@ -8804,12 +8810,12 @@ fn xiaomi_mimo_custom_env_url_does_not_inherit_ambient_key() -> Result<()> {
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::XiaomiMimo);
     let error = config
-        .deepseek_api_key()
+        .active_route_api_key()
         .expect_err("ambient key must not follow a custom endpoint");
     assert!(error.to_string().contains("must be bound explicitly"));
     assert!(!has_api_key(&config));
     assert_eq!(
-        config.deepseek_base_url(),
+        config.active_route_base_url(),
         "https://mimo-gateway.example/v1"
     );
     assert_eq!(config.default_model(), "mimo-v2.5");
@@ -8842,9 +8848,9 @@ fn xiaomi_mimo_env_token_plan_mode_uses_token_plan_key_and_endpoint() -> Result<
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::XiaomiMimo);
-    assert_eq!(config.deepseek_api_key()?, "tp-env-key");
+    assert_eq!(config.active_route_api_key()?, "tp-env-key");
     assert_eq!(
-        config.deepseek_base_url(),
+        config.active_route_base_url(),
         XIAOMI_MIMO_TOKEN_PLAN_CN_BASE_URL
     );
     assert_eq!(config.default_model(), "voiceclone");
@@ -8876,9 +8882,9 @@ fn xiaomi_mimo_env_pay_as_you_go_mode_prefers_standard_key() -> Result<()> {
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::XiaomiMimo);
-    assert_eq!(config.deepseek_api_key()?, "sk-env-key");
+    assert_eq!(config.active_route_api_key()?, "sk-env-key");
     assert_eq!(
-        config.deepseek_base_url(),
+        config.active_route_base_url(),
         XIAOMI_MIMO_PAY_AS_YOU_GO_BASE_URL
     );
     Ok(())
@@ -8894,7 +8900,7 @@ fn atlascloud_provider_uses_documented_defaults() -> Result<()> {
     config.validate()?;
     assert_eq!(config.api_provider(), ApiProvider::Atlascloud);
     assert_eq!(config.default_model(), DEFAULT_ATLASCLOUD_MODEL);
-    assert_eq!(config.deepseek_base_url(), DEFAULT_ATLASCLOUD_BASE_URL);
+    assert_eq!(config.active_route_base_url(), DEFAULT_ATLASCLOUD_BASE_URL);
     Ok(())
 }
 
@@ -8922,8 +8928,11 @@ fn atlascloud_env_overrides_provider_base_url_and_model() -> Result<()> {
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Atlascloud);
-    assert_eq!(config.deepseek_api_key()?, "atlascloud-env-key");
-    assert_eq!(config.deepseek_base_url(), "https://api.atlascloud.ai/v1");
+    assert_eq!(config.active_route_api_key()?, "atlascloud-env-key");
+    assert_eq!(
+        config.active_route_base_url(),
+        "https://api.atlascloud.ai/v1"
+    );
     assert_eq!(config.default_model(), "deepseek-ai/deepseek-v4-flash");
     Ok(())
 }
@@ -8938,7 +8947,7 @@ fn wanjie_ark_provider_uses_documented_defaults() -> Result<()> {
     config.validate()?;
     assert_eq!(config.api_provider(), ApiProvider::WanjieArk);
     assert_eq!(config.default_model(), DEFAULT_WANJIE_ARK_MODEL);
-    assert_eq!(config.deepseek_base_url(), DEFAULT_WANJIE_ARK_BASE_URL);
+    assert_eq!(config.active_route_base_url(), DEFAULT_WANJIE_ARK_BASE_URL);
     Ok(())
 }
 
@@ -8967,11 +8976,14 @@ fn wanjie_ark_custom_env_url_does_not_inherit_ambient_key() -> Result<()> {
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::WanjieArk);
     let error = config
-        .deepseek_api_key()
+        .active_route_api_key()
         .expect_err("ambient key must not follow a custom endpoint");
     assert!(error.to_string().contains("must be bound explicitly"));
     assert!(!has_api_key(&config));
-    assert_eq!(config.deepseek_base_url(), "https://wanjie.example/api/v1");
+    assert_eq!(
+        config.active_route_base_url(),
+        "https://wanjie.example/api/v1"
+    );
     assert_eq!(config.default_model(), "wanjie-model-id");
     Ok(())
 }
@@ -9006,9 +9018,9 @@ model = "account-model-id"
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::WanjieArk);
-    assert_eq!(config.deepseek_api_key()?, "wanjie-table-key");
+    assert_eq!(config.active_route_api_key()?, "wanjie-table-key");
     assert_eq!(
-        config.deepseek_base_url(),
+        config.active_route_base_url(),
         "https://maas-openapi.wanjiedata.com/api/v1"
     );
     assert_eq!(config.default_model(), "account-model-id");
@@ -9045,9 +9057,9 @@ model = "glm-5"
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Openai);
-    assert_eq!(config.deepseek_api_key()?, "openai-table-key");
+    assert_eq!(config.active_route_api_key()?, "openai-table-key");
     assert_eq!(
-        config.deepseek_base_url(),
+        config.active_route_base_url(),
         "https://openai-compatible.example/api/coding/paas/v4"
     );
     assert_eq!(config.default_model(), "glm-5");
@@ -9084,9 +9096,9 @@ model = "qwen-plus"
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Openai);
-    assert_eq!(config.deepseek_api_key()?, "dashscope-table-key");
+    assert_eq!(config.active_route_api_key()?, "dashscope-table-key");
     assert_eq!(
-        config.deepseek_base_url(),
+        config.active_route_base_url(),
         "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
     );
     assert_eq!(config.default_model(), "qwen-plus");
@@ -9123,9 +9135,9 @@ model = "custom-qianfan-service-id"
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Qianfan);
-    assert_eq!(config.deepseek_api_key()?, "qianfan-table-key");
+    assert_eq!(config.active_route_api_key()?, "qianfan-table-key");
     assert_eq!(
-        config.deepseek_base_url(),
+        config.active_route_base_url(),
         "https://qianfan.baidubce.com/v2"
     );
     assert_eq!(config.default_model(), "custom-qianfan-service-id");
@@ -9204,7 +9216,7 @@ fn deepseek_model_env_passes_custom_model_through_for_non_deepseek_providers() -
 
         let config = Config::load(None, None)?;
         assert_eq!(config.api_provider(), ApiProvider::Openai);
-        assert_eq!(config.deepseek_base_url(), DEFAULT_OPENAI_BASE_URL);
+        assert_eq!(config.active_route_base_url(), DEFAULT_OPENAI_BASE_URL);
         assert_eq!(config.default_model(), "MiniMax-M2.7");
     }
 
@@ -9222,7 +9234,7 @@ fn deepseek_model_env_passes_custom_model_through_for_non_deepseek_providers() -
 
         let config = Config::load(None, None)?;
         assert_eq!(config.api_provider(), ApiProvider::Novita);
-        assert_eq!(config.deepseek_base_url(), DEFAULT_NOVITA_BASE_URL);
+        assert_eq!(config.active_route_base_url(), DEFAULT_NOVITA_BASE_URL);
         assert_ne!(config.default_model(), DEFAULT_NOVITA_MODEL);
         assert_eq!(config.default_model(), "MiniMax-M2.7");
     }
@@ -9256,12 +9268,12 @@ fn openai_custom_env_url_does_not_inherit_ambient_key() -> Result<()> {
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Openai);
     let error = config
-        .deepseek_api_key()
+        .active_route_api_key()
         .expect_err("ambient key must not follow a custom endpoint");
     assert!(error.to_string().contains("must be bound explicitly"));
     assert!(!has_api_key(&config));
     assert_eq!(
-        config.deepseek_base_url(),
+        config.active_route_base_url(),
         "https://openai-compatible.example/v4"
     );
     assert_eq!(config.default_model(), "glm-5");
@@ -9294,12 +9306,12 @@ fn openai_facade_custom_url_does_not_inherit_ambient_key() -> Result<()> {
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Openai);
     let error = config
-        .deepseek_api_key()
+        .active_route_api_key()
         .expect_err("ambient key must not follow a custom endpoint");
     assert!(error.to_string().contains("must be bound explicitly"));
     assert!(!has_api_key(&config));
     assert_eq!(
-        config.deepseek_base_url(),
+        config.active_route_base_url(),
         "https://forwarded-openai.example/v4"
     );
     assert_eq!(config.default_model(), "glm-5");
@@ -9328,7 +9340,7 @@ fn openrouter_provider_uses_canonical_defaults() -> Result<()> {
     config.validate()?;
     assert_eq!(config.api_provider(), ApiProvider::Openrouter);
     assert_eq!(config.default_model(), DEFAULT_OPENROUTER_MODEL);
-    assert_eq!(config.deepseek_base_url(), DEFAULT_OPENROUTER_BASE_URL);
+    assert_eq!(config.active_route_base_url(), DEFAULT_OPENROUTER_BASE_URL);
     Ok(())
 }
 
@@ -9354,7 +9366,7 @@ fn novita_provider_uses_canonical_defaults() -> Result<()> {
     config.validate()?;
     assert_eq!(config.api_provider(), ApiProvider::Novita);
     assert_eq!(config.default_model(), DEFAULT_NOVITA_MODEL);
-    assert_eq!(config.deepseek_base_url(), DEFAULT_NOVITA_BASE_URL);
+    assert_eq!(config.active_route_base_url(), DEFAULT_NOVITA_BASE_URL);
     Ok(())
 }
 
@@ -9380,7 +9392,7 @@ fn fireworks_provider_uses_canonical_defaults() -> Result<()> {
     config.validate()?;
     assert_eq!(config.api_provider(), ApiProvider::Fireworks);
     assert_eq!(config.default_model(), DEFAULT_FIREWORKS_MODEL);
-    assert_eq!(config.deepseek_base_url(), DEFAULT_FIREWORKS_BASE_URL);
+    assert_eq!(config.active_route_base_url(), DEFAULT_FIREWORKS_BASE_URL);
     Ok(())
 }
 
@@ -9419,7 +9431,7 @@ fn volcengine_provider_requires_api_key() -> Result<()> {
     };
 
     config.validate()?;
-    let err = config.deepseek_api_key().expect_err("missing key");
+    let err = config.active_route_api_key().expect_err("missing key");
     assert!(err.to_string().contains("Volcengine Ark API key not found"));
     Ok(())
 }
@@ -9450,11 +9462,11 @@ fn volcengine_custom_env_url_does_not_inherit_ambient_key() -> Result<()> {
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Volcengine);
     let error = config
-        .deepseek_api_key()
+        .active_route_api_key()
         .expect_err("ambient key must not follow a custom endpoint");
     assert!(error.to_string().contains("must be bound explicitly"));
     assert!(!has_api_key(&config));
-    assert_eq!(config.deepseek_base_url(), "https://volc.example/v1");
+    assert_eq!(config.active_route_base_url(), "https://volc.example/v1");
     assert_eq!(config.default_model(), "DeepSeek-V4-Flash");
     Ok(())
 }
@@ -9481,7 +9493,7 @@ fn siliconflow_provider_uses_canonical_defaults() -> Result<()> {
     config.validate()?;
     assert_eq!(config.api_provider(), ApiProvider::Siliconflow);
     assert_eq!(config.default_model(), DEFAULT_SILICONFLOW_MODEL);
-    assert_eq!(config.deepseek_base_url(), DEFAULT_SILICONFLOW_BASE_URL);
+    assert_eq!(config.active_route_base_url(), DEFAULT_SILICONFLOW_BASE_URL);
     assert_eq!(
         model_completion_names_for_provider(ApiProvider::Siliconflow),
         vec![DEFAULT_SILICONFLOW_MODEL, DEFAULT_SILICONFLOW_FLASH_MODEL]
@@ -9511,8 +9523,8 @@ fn sglang_provider_works_without_api_key() -> Result<()> {
     config.validate()?;
     assert_eq!(config.api_provider(), ApiProvider::Sglang);
     assert_eq!(config.default_model(), DEFAULT_SGLANG_MODEL);
-    assert_eq!(config.deepseek_base_url(), DEFAULT_SGLANG_BASE_URL);
-    assert_eq!(config.deepseek_api_key()?, "");
+    assert_eq!(config.active_route_base_url(), DEFAULT_SGLANG_BASE_URL);
+    assert_eq!(config.active_route_api_key()?, "");
     assert!(has_api_key_for(&config, ApiProvider::Sglang));
     Ok(())
 }
@@ -9539,8 +9551,8 @@ fn ollama_provider_uses_local_defaults_without_api_key() -> Result<()> {
     config.validate()?;
     assert_eq!(config.api_provider(), ApiProvider::Ollama);
     assert_eq!(config.default_model(), DEFAULT_OLLAMA_MODEL);
-    assert_eq!(config.deepseek_base_url(), DEFAULT_OLLAMA_BASE_URL);
-    assert_eq!(config.deepseek_api_key()?, "");
+    assert_eq!(config.active_route_base_url(), DEFAULT_OLLAMA_BASE_URL);
+    assert_eq!(config.active_route_api_key()?, "");
     assert!(has_api_key_for(&config, ApiProvider::Ollama));
     Ok(())
 }
@@ -9577,9 +9589,9 @@ fn ollama_cloud_resolves_env_key_and_is_not_keyless() -> Result<()> {
     assert_eq!(config.api_provider(), ApiProvider::OllamaCloud);
     assert!(!provider_route_is_keyless_self_hosted(
         ApiProvider::OllamaCloud,
-        &config.deepseek_base_url()
+        &config.active_route_base_url()
     ));
-    assert_eq!(config.deepseek_api_key()?, "ollama-cloud-env-key");
+    assert_eq!(config.active_route_api_key()?, "ollama-cloud-env-key");
     assert!(has_api_key_for(&config, ApiProvider::OllamaCloud));
     Ok(())
 }
@@ -9608,7 +9620,7 @@ fn ollama_cloud_resolves_saved_provider_key() -> Result<()> {
     };
 
     assert_eq!(config.api_provider(), ApiProvider::OllamaCloud);
-    assert_eq!(config.deepseek_api_key()?, "ollama-cloud-saved-key");
+    assert_eq!(config.active_route_api_key()?, "ollama-cloud-saved-key");
     assert!(has_api_key_for(&config, ApiProvider::OllamaCloud));
     Ok(())
 }
@@ -9643,11 +9655,11 @@ fn explicit_ollama_cloud_uses_new_secret_slot_without_local_fallback() -> Result
         .expect("explicit Cloud identity");
     assert!(!identity.migrated_legacy_ollama_cloud_route);
     assert!(!has_api_key_for(&config, ApiProvider::OllamaCloud));
-    assert!(config.deepseek_api_key().is_err());
+    assert!(config.active_route_api_key().is_err());
 
     secrets.set("ollama-cloud", "cloud-slot-key")?;
     assert!(has_api_key_for(&config, ApiProvider::OllamaCloud));
-    assert_eq!(config.deepseek_api_key()?, "cloud-slot-key");
+    assert_eq!(config.active_route_api_key()?, "cloud-slot-key");
     Ok(())
 }
 
@@ -9667,10 +9679,10 @@ fn ollama_cloud_env_precedence_is_cloud_name_then_official_name() -> Result<()> 
         ..Config::default()
     };
 
-    assert_eq!(config.deepseek_api_key()?, "cloud-specific-key");
+    assert_eq!(config.active_route_api_key()?, "cloud-specific-key");
     // Safety: same serialized test and EnvGuard restore the prior value.
     unsafe { env::remove_var("OLLAMA_CLOUD_API_KEY") };
-    assert_eq!(config.deepseek_api_key()?, "official-fallback-key");
+    assert_eq!(config.active_route_api_key()?, "official-fallback-key");
     Ok(())
 }
 
@@ -9708,11 +9720,11 @@ fn migrated_ollama_cloud_scope_preserves_legacy_table_and_slot_read_only() -> Re
     scoped.scope_to_provider_identity(&identity);
     assert_eq!(scoped.api_provider(), ApiProvider::OllamaCloud);
     assert_eq!(
-        scoped.deepseek_base_url(),
+        scoped.active_route_base_url(),
         codewhale_config::provider::OLLAMA_CLOUD_BASE_URL
     );
     assert_eq!(scoped.default_model(), "legacy-cloud-model");
-    assert_eq!(scoped.deepseek_api_key()?, "legacy-cloud-key");
+    assert_eq!(scoped.active_route_api_key()?, "legacy-cloud-key");
     assert!(
         scoped
             .providers
@@ -9761,7 +9773,7 @@ fn ollama_cloud_without_key_fails_with_cloud_guidance() -> Result<()> {
     assert_eq!(config.api_provider(), ApiProvider::OllamaCloud);
     assert!(!has_api_key_for(&config, ApiProvider::OllamaCloud));
     let error = config
-        .deepseek_api_key()
+        .active_route_api_key()
         .expect_err("Ollama Cloud must require an API key");
     let message = error.to_string();
     assert!(message.contains("Ollama Cloud API key not found"));
@@ -9804,7 +9816,7 @@ fn ollama_custom_remote_does_not_inherit_cloud_env_key() -> Result<()> {
     assert!(config.provider_uses_custom_endpoint(ApiProvider::Ollama));
     assert!(!has_api_key_for(&config, ApiProvider::Ollama));
     let error = config
-        .deepseek_api_key()
+        .active_route_api_key()
         .expect_err("custom remote must bind its credential explicitly");
     assert!(
         error
@@ -9844,7 +9856,7 @@ model = "qwen2.5-coder:7b"
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Ollama);
     assert_eq!(config.default_model(), "qwen2.5-coder:7b");
-    assert_eq!(config.deepseek_base_url(), "http://127.0.0.1:11434/v1");
+    assert_eq!(config.active_route_base_url(), "http://127.0.0.1:11434/v1");
     Ok(())
 }
 
@@ -9870,7 +9882,10 @@ fn deepseek_base_url_env_scopes_to_self_hosted_providers() -> Result<()> {
     }
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Ollama);
-    assert_eq!(config.deepseek_base_url(), "http://ollama.remote:11434/v1");
+    assert_eq!(
+        config.active_route_base_url(),
+        "http://ollama.remote:11434/v1"
+    );
 
     // Safety: test-only environment mutation guarded by a global mutex.
     unsafe {
@@ -9879,7 +9894,7 @@ fn deepseek_base_url_env_scopes_to_self_hosted_providers() -> Result<()> {
     }
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Vllm);
-    assert_eq!(config.deepseek_base_url(), "http://vllm.remote:8000/v1");
+    assert_eq!(config.active_route_base_url(), "http://vllm.remote:8000/v1");
     Ok(())
 }
 
@@ -9907,7 +9922,10 @@ fn vllm_env_resolves_reported_lan_http_endpoint_and_model() -> Result<()> {
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Vllm);
-    assert_eq!(config.deepseek_base_url(), "http://192.168.0.110:8000/v1");
+    assert_eq!(
+        config.active_route_base_url(),
+        "http://192.168.0.110:8000/v1"
+    );
     assert_eq!(config.default_model(), "deepseek-v4-flash");
     Ok(())
 }
@@ -9936,7 +9954,7 @@ fn ollama_env_overrides_base_url_and_model() -> Result<()> {
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Ollama);
-    assert_eq!(config.deepseek_base_url(), "http://ollama.example/v1");
+    assert_eq!(config.active_route_base_url(), "http://ollama.example/v1");
     assert_eq!(config.default_model(), "deepseek-coder-v2:16b");
     Ok(())
 }
@@ -9965,7 +9983,7 @@ fn openrouter_env_api_key_resolves_via_deepseek_api_key() -> Result<()> {
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Openrouter);
-    assert_eq!(config.deepseek_api_key()?, "or-env-key");
+    assert_eq!(config.active_route_api_key()?, "or-env-key");
     assert_eq!(config.default_model(), DEFAULT_OPENROUTER_FLASH_MODEL);
     Ok(())
 }
@@ -9994,7 +10012,7 @@ fn novita_env_api_key_resolves_via_deepseek_api_key() -> Result<()> {
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Novita);
-    assert_eq!(config.deepseek_api_key()?, "novita-env-key");
+    assert_eq!(config.active_route_api_key()?, "novita-env-key");
     assert_eq!(config.default_model(), DEFAULT_NOVITA_FLASH_MODEL);
     Ok(())
 }
@@ -10026,7 +10044,7 @@ fn fireworks_env_overrides_key_and_model() -> Result<()> {
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Fireworks);
-    assert_eq!(config.deepseek_api_key()?, "fw-env-key");
+    assert_eq!(config.active_route_api_key()?, "fw-env-key");
     assert_eq!(
         config.default_model(),
         "accounts/fireworks/models/account-specific-model"
@@ -10060,11 +10078,14 @@ fn siliconflow_custom_env_url_does_not_inherit_ambient_key() -> Result<()> {
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Siliconflow);
     let error = config
-        .deepseek_api_key()
+        .active_route_api_key()
         .expect_err("ambient key must not follow a custom endpoint");
     assert!(error.to_string().contains("must be bound explicitly"));
     assert!(!has_api_key(&config));
-    assert_eq!(config.deepseek_base_url(), "https://sf-mirror.example/v1");
+    assert_eq!(
+        config.active_route_base_url(),
+        "https://sf-mirror.example/v1"
+    );
     assert_eq!(config.default_model(), "deepseek-v4-flash");
     Ok(())
 }
@@ -10091,8 +10112,8 @@ fn arcee_provider_uses_direct_defaults() -> Result<()> {
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Arcee);
-    assert_eq!(config.deepseek_api_key()?, "arcee-env-key");
-    assert_eq!(config.deepseek_base_url(), DEFAULT_ARCEE_BASE_URL);
+    assert_eq!(config.active_route_api_key()?, "arcee-env-key");
+    assert_eq!(config.active_route_base_url(), DEFAULT_ARCEE_BASE_URL);
     assert_eq!(config.default_model(), DEFAULT_ARCEE_MODEL);
     Ok(())
 }
@@ -10122,12 +10143,12 @@ fn arcee_custom_env_url_does_not_inherit_ambient_key() -> Result<()> {
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Arcee);
     let error = config
-        .deepseek_api_key()
+        .active_route_api_key()
         .expect_err("ambient key must not follow a custom endpoint");
     assert!(error.to_string().contains("must be bound explicitly"));
     assert!(!has_api_key(&config));
     assert_eq!(
-        config.deepseek_base_url(),
+        config.active_route_base_url(),
         "https://arcee-mirror.example/api/v1"
     );
     assert_eq!(config.default_model(), "arcee-trinity-large-preview");
@@ -10163,8 +10184,8 @@ model = "arcee-trinity-large-preview"
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Arcee);
-    assert_eq!(config.deepseek_api_key()?, "arcee-file-key");
-    assert_eq!(config.deepseek_base_url(), DEFAULT_ARCEE_BASE_URL);
+    assert_eq!(config.active_route_api_key()?, "arcee-file-key");
+    assert_eq!(config.active_route_base_url(), DEFAULT_ARCEE_BASE_URL);
     assert_eq!(config.default_model(), ARCEE_TRINITY_LARGE_PREVIEW_MODEL);
     Ok(())
 }
@@ -10194,8 +10215,11 @@ fn siliconflow_cn_base_url_env_normalizes_model_aliases() -> Result<()> {
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::SiliconflowCn);
-    assert_eq!(config.deepseek_api_key()?, "sf-env-key");
-    assert_eq!(config.deepseek_base_url(), "https://api.siliconflow.cn/v1");
+    assert_eq!(config.active_route_api_key()?, "sf-env-key");
+    assert_eq!(
+        config.active_route_base_url(),
+        "https://api.siliconflow.cn/v1"
+    );
     assert_eq!(config.default_model(), DEFAULT_SILICONFLOW_MODEL);
     Ok(())
 }
@@ -10223,7 +10247,10 @@ fn openrouter_base_url_env_overrides_default() -> Result<()> {
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Openrouter);
-    assert_eq!(config.deepseek_base_url(), "https://or-mirror.example/v1");
+    assert_eq!(
+        config.active_route_base_url(),
+        "https://or-mirror.example/v1"
+    );
     Ok(())
 }
 
@@ -10256,8 +10283,11 @@ base_url = "https://or-table.example/v1"
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Openrouter);
-    assert_eq!(config.deepseek_api_key()?, "or-table-key");
-    assert_eq!(config.deepseek_base_url(), "https://or-table.example/v1");
+    assert_eq!(config.active_route_api_key()?, "or-table-key");
+    assert_eq!(
+        config.active_route_base_url(),
+        "https://or-table.example/v1"
+    );
     Ok(())
 }
 
@@ -10290,8 +10320,8 @@ model = "deepseek-v4-flash"
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Siliconflow);
-    assert_eq!(config.deepseek_api_key()?, "sf-table-key");
-    assert_eq!(config.deepseek_base_url(), DEFAULT_SILICONFLOW_BASE_URL);
+    assert_eq!(config.active_route_api_key()?, "sf-table-key");
+    assert_eq!(config.active_route_base_url(), DEFAULT_SILICONFLOW_BASE_URL);
     assert_eq!(config.default_model(), DEFAULT_SILICONFLOW_FLASH_MODEL);
     Ok(())
 }
@@ -10326,8 +10356,11 @@ model = "deepseek-reasoner"
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::SiliconflowCn);
-    assert_eq!(config.deepseek_api_key()?, "sf-cn-table-key");
-    assert_eq!(config.deepseek_base_url(), DEFAULT_SILICONFLOW_CN_BASE_URL);
+    assert_eq!(config.active_route_api_key()?, "sf-cn-table-key");
+    assert_eq!(
+        config.active_route_base_url(),
+        DEFAULT_SILICONFLOW_CN_BASE_URL
+    );
     assert_eq!(config.default_model(), DEFAULT_SILICONFLOW_MODEL);
     assert!(has_api_key_for(&config, ApiProvider::SiliconflowCn));
     Ok(())
@@ -10364,8 +10397,11 @@ model = "deepseek-ai/DeepSeek-V4-Pro"
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::SiliconflowCn);
     assert_ne!(config.api_provider(), ApiProvider::Deepseek);
-    assert_eq!(config.deepseek_api_key()?, "sf-cn-table-key");
-    assert_eq!(config.deepseek_base_url(), DEFAULT_SILICONFLOW_CN_BASE_URL);
+    assert_eq!(config.active_route_api_key()?, "sf-cn-table-key");
+    assert_eq!(
+        config.active_route_base_url(),
+        DEFAULT_SILICONFLOW_CN_BASE_URL
+    );
     assert_eq!(config.default_model(), DEFAULT_SILICONFLOW_MODEL);
     assert_eq!(
         wire_model_for_provider(config.api_provider(), &config.default_model()),
@@ -10407,8 +10443,11 @@ base_url = "https://api.siliconflow.cn/v1"
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::SiliconflowCn);
-    assert_eq!(config.deepseek_api_key()?, "sf-shared-key");
-    assert_eq!(config.deepseek_base_url(), DEFAULT_SILICONFLOW_CN_BASE_URL);
+    assert_eq!(config.active_route_api_key()?, "sf-shared-key");
+    assert_eq!(
+        config.active_route_base_url(),
+        DEFAULT_SILICONFLOW_CN_BASE_URL
+    );
     assert_eq!(config.default_model(), DEFAULT_SILICONFLOW_FLASH_MODEL);
     assert!(active_provider_has_config_api_key(&config));
     Ok(())
@@ -10464,7 +10503,7 @@ model = "deepseek-reasoner"
         providers.siliconflow_cn.model.as_deref(),
         Some(DEFAULT_SILICONFLOW_FLASH_MODEL)
     );
-    assert_eq!(config.deepseek_api_key()?, "sf-shared-key");
+    assert_eq!(config.active_route_api_key()?, "sf-shared-key");
     assert_eq!(config.default_model(), DEFAULT_SILICONFLOW_FLASH_MODEL);
     Ok(())
 }
@@ -10499,8 +10538,11 @@ model = "DeepSeek-V4-Pro"
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Openrouter);
-    assert_eq!(config.deepseek_api_key()?, "or-table-key");
-    assert_eq!(config.deepseek_base_url(), "https://gateway.example.com/v1");
+    assert_eq!(config.active_route_api_key()?, "or-table-key");
+    assert_eq!(
+        config.active_route_base_url(),
+        "https://gateway.example.com/v1"
+    );
     assert_eq!(config.default_model(), "DeepSeek-V4-Pro");
     Ok(())
 }
@@ -10533,8 +10575,8 @@ api_key = "novita-table-key"
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Novita);
-    assert_eq!(config.deepseek_api_key()?, "novita-table-key");
-    assert_eq!(config.deepseek_base_url(), DEFAULT_NOVITA_BASE_URL);
+    assert_eq!(config.active_route_api_key()?, "novita-table-key");
+    assert_eq!(config.active_route_base_url(), DEFAULT_NOVITA_BASE_URL);
     Ok(())
 }
 
@@ -10586,10 +10628,10 @@ api_key = "stale-api-key"
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Moonshot);
-    assert_eq!(config.deepseek_base_url(), DEFAULT_KIMI_CODE_BASE_URL);
+    assert_eq!(config.active_route_base_url(), DEFAULT_KIMI_CODE_BASE_URL);
     assert_eq!(config.default_model(), DEFAULT_KIMI_CODE_MODEL);
     let error = config
-        .deepseek_api_key()
+        .active_route_api_key()
         .expect_err("Kimi external OAuth credentials are never imported");
     assert!(error.to_string().contains("does not impersonate"));
     assert!(
@@ -10671,7 +10713,7 @@ fn codex_external_credentials_are_disabled_by_default_and_managed_fails_before_i
     crate::external_credentials::reset_side_effect_trap();
     assert!(!has_api_key_for(&disabled, ApiProvider::OpenaiCodex));
     let error = disabled
-        .deepseek_api_key()
+        .active_route_api_key()
         .expect_err("external credentials default to disabled");
     assert!(error.to_string().contains("are disabled"));
     assert_eq!(disabled.codex_account_id(), None);
@@ -10701,7 +10743,7 @@ fn codex_external_credentials_are_disabled_by_default_and_managed_fails_before_i
     crate::external_credentials::reset_side_effect_trap();
     assert!(!has_api_key_for(&managed, ApiProvider::OpenaiCodex));
     let error = managed
-        .deepseek_api_key()
+        .active_route_api_key()
         .expect_err("managed access needs a preservation adapter");
     assert!(
         error
@@ -10790,7 +10832,7 @@ fn codex_read_only_consent_reads_exact_file_without_mutation() -> Result<()> {
     );
 
     crate::external_credentials::reset_side_effect_trap();
-    assert_eq!(config.deepseek_api_key()?, token);
+    assert_eq!(config.active_route_api_key()?, token);
     assert_eq!(
         crate::external_credentials::side_effect_trap_counts(),
         (1, 1)
@@ -10801,7 +10843,7 @@ fn codex_read_only_consent_reads_exact_file_without_mutation() -> Result<()> {
     drop(_access);
     let _process_access = EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "process-token");
     crate::external_credentials::reset_side_effect_trap();
-    assert_eq!(config.deepseek_api_key()?, "process-token");
+    assert_eq!(config.active_route_api_key()?, "process-token");
     assert_eq!(config.codex_account_id(), None);
     assert_eq!(
         crate::external_credentials::side_effect_trap_counts(),
@@ -10840,9 +10882,9 @@ base_url = "https://api.kimi.com/coding/v1"
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Moonshot);
-    assert_eq!(config.deepseek_base_url(), DEFAULT_KIMI_CODE_BASE_URL);
+    assert_eq!(config.active_route_base_url(), DEFAULT_KIMI_CODE_BASE_URL);
     assert_eq!(config.default_model(), DEFAULT_KIMI_CODE_MODEL);
-    assert_eq!(config.deepseek_api_key()?, "kimi-code-key");
+    assert_eq!(config.active_route_api_key()?, "kimi-code-key");
     assert!(has_api_key_for(&config, ApiProvider::Moonshot));
     Ok(())
 }
@@ -10866,7 +10908,7 @@ fn moonshot_kimi_code_missing_key_reports_membership_plan_console() -> Result<()
     };
 
     let error = config
-        .deepseek_api_key()
+        .active_route_api_key()
         .expect_err("Kimi Code route needs a membership-plan API key");
     let message = error.to_string();
     assert!(
@@ -10944,9 +10986,9 @@ api_key = "kimi-code-env-key"
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Moonshot);
-    assert_eq!(config.deepseek_base_url(), DEFAULT_KIMI_CODE_BASE_URL);
+    assert_eq!(config.active_route_base_url(), DEFAULT_KIMI_CODE_BASE_URL);
     assert_eq!(config.default_model(), DEFAULT_KIMI_CODE_MODEL);
-    assert_eq!(config.deepseek_api_key()?, "kimi-code-env-key");
+    assert_eq!(config.active_route_api_key()?, "kimi-code-env-key");
     assert!(has_api_key_for(&config, ApiProvider::Moonshot));
     Ok(())
 }
@@ -10989,7 +11031,7 @@ base_url = "https://api.kimi.com/coding/v1"
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Moonshot);
-    assert_eq!(config.deepseek_base_url(), DEFAULT_KIMI_CODE_BASE_URL);
+    assert_eq!(config.active_route_base_url(), DEFAULT_KIMI_CODE_BASE_URL);
     assert_eq!(config.default_model(), DEFAULT_KIMI_CODE_MODEL);
     Ok(())
 }
@@ -11031,7 +11073,7 @@ base_url = "https://api.kimi.com/coding/v1"
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Moonshot);
-    assert_eq!(config.deepseek_base_url(), DEFAULT_KIMI_CODE_BASE_URL);
+    assert_eq!(config.active_route_base_url(), DEFAULT_KIMI_CODE_BASE_URL);
     assert_eq!(config.default_model(), DEFAULT_KIMI_CODE_MODEL);
     Ok(())
 }
@@ -11101,9 +11143,9 @@ api_key = "moonshot-platform-key"
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Moonshot);
-    assert_eq!(config.deepseek_base_url(), DEFAULT_MOONSHOT_BASE_URL);
+    assert_eq!(config.active_route_base_url(), DEFAULT_MOONSHOT_BASE_URL);
     assert_eq!(config.default_model(), DEFAULT_MOONSHOT_MODEL);
-    assert_eq!(config.deepseek_api_key()?, "moonshot-platform-key");
+    assert_eq!(config.active_route_api_key()?, "moonshot-platform-key");
     Ok(())
 }
 
@@ -11199,7 +11241,7 @@ fn provider_auth_source_metadata_is_not_a_runtime_credential() -> Result<()> {
     };
 
     assert!(!has_api_key_for(&config, ApiProvider::Openai));
-    assert!(config.deepseek_api_key().is_err());
+    assert!(config.active_route_api_key().is_err());
     Ok(())
 }
 
@@ -11230,7 +11272,7 @@ fn xai_oauth_selection_falls_back_to_explicit_api_key_without_external_io() -> R
     };
     crate::external_credentials::reset_side_effect_trap();
     assert!(has_api_key_for(&api_key_config, ApiProvider::Xai));
-    assert_eq!(api_key_config.deepseek_api_key()?, "fake-xai-cfg-key");
+    assert_eq!(api_key_config.active_route_api_key()?, "fake-xai-cfg-key");
     assert_eq!(
         crate::external_credentials::side_effect_trap_counts(),
         (0, 0)
@@ -11276,7 +11318,7 @@ fn xai_invalid_owned_generation_blocks_external_and_uses_api_key_fallback() -> R
         !crate::oauth::credentials_present(crate::oauth::OAuthProvider::Xai, &config),
         "an invalid owned generation pointer must not resolve external OAuth"
     );
-    assert_eq!(config.deepseek_api_key()?, "fake-xai-cfg-key");
+    assert_eq!(config.active_route_api_key()?, "fake-xai-cfg-key");
     assert_eq!(
         crate::external_credentials::side_effect_trap_counts(),
         (0, 0),
@@ -11558,8 +11600,11 @@ model = "deepseek-v4-pro"
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::NvidiaNim);
-    assert_eq!(config.deepseek_api_key()?, "nim-table-key");
-    assert_eq!(config.deepseek_base_url(), "https://nim-table.example/v1");
+    assert_eq!(config.active_route_api_key()?, "nim-table-key");
+    assert_eq!(
+        config.active_route_base_url(),
+        "https://nim-table.example/v1"
+    );
     // Custom base URL preserves the user-specified model name; normalisation
     // is skipped because the gateway expects the model name as-provided.
     assert_eq!(config.default_model(), "deepseek-v4-pro");
@@ -11597,7 +11642,7 @@ model = "deepseek-ai/deepseek-v4-pro"
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::NvidiaNim);
-    assert_eq!(config.deepseek_api_key()?, "nim-table-key");
+    assert_eq!(config.active_route_api_key()?, "nim-table-key");
     Ok(())
 }
 
@@ -12432,8 +12477,8 @@ fn huggingface_provider_scenario() -> Result<()> {
 
         let config = Config::load(None, None)?;
         assert_eq!(config.api_provider(), ApiProvider::Huggingface);
-        assert_eq!(config.deepseek_api_key()?, "hf-env-key");
-        assert_eq!(config.deepseek_base_url(), DEFAULT_HUGGINGFACE_BASE_URL);
+        assert_eq!(config.active_route_api_key()?, "hf-env-key");
+        assert_eq!(config.active_route_base_url(), DEFAULT_HUGGINGFACE_BASE_URL);
         assert_eq!(config.default_model(), DEFAULT_HUGGINGFACE_MODEL);
     }
     Ok(())
@@ -12469,8 +12514,8 @@ fn modelscope_provider_scenario() -> Result<()> {
 
         let config = Config::load(None, None)?;
         assert_eq!(config.api_provider(), ApiProvider::Modelscope);
-        assert_eq!(config.deepseek_api_key()?, "ms-env-key");
-        assert_eq!(config.deepseek_base_url(), DEFAULT_MODELSCOPE_BASE_URL);
+        assert_eq!(config.active_route_api_key()?, "ms-env-key");
+        assert_eq!(config.active_route_base_url(), DEFAULT_MODELSCOPE_BASE_URL);
         assert_eq!(config.default_model(), DEFAULT_MODELSCOPE_MODEL);
     }
     Ok(())
@@ -12498,7 +12543,7 @@ fn huggingface_hf_token_env_api_key_resolves() -> Result<()> {
 
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Huggingface);
-    assert_eq!(config.deepseek_api_key()?, "hf-token-value");
+    assert_eq!(config.active_route_api_key()?, "hf-token-value");
     Ok(())
 }
 
@@ -12523,7 +12568,7 @@ fn huggingface_missing_key_error_mentions_env_fallbacks() -> Result<()> {
     };
 
     config.validate()?;
-    let err = config.deepseek_api_key().expect_err("missing key");
+    let err = config.active_route_api_key().expect_err("missing key");
     let message = err.to_string();
     assert!(message.contains("Hugging Face API key not found"));
     assert!(message.contains("https://huggingface.co/settings/tokens"));
@@ -12563,11 +12608,14 @@ fn huggingface_custom_env_urls_do_not_inherit_ambient_keys() -> Result<()> {
         let config = Config::load(None, None)?;
         assert_eq!(config.api_provider(), ApiProvider::Huggingface);
         let error = config
-            .deepseek_api_key()
+            .active_route_api_key()
             .expect_err("ambient key must not follow a custom endpoint");
         assert!(error.to_string().contains("must be bound explicitly"));
         assert!(!has_api_key(&config));
-        assert_eq!(config.deepseek_base_url(), "https://custom-hf.example/v1");
+        assert_eq!(
+            config.active_route_base_url(),
+            "https://custom-hf.example/v1"
+        );
         assert_eq!(config.default_model(), "meta-llama/Llama-3-70B");
     }
 
@@ -12586,11 +12634,14 @@ fn huggingface_custom_env_urls_do_not_inherit_ambient_keys() -> Result<()> {
         let config = Config::load(None, None)?;
         assert_eq!(config.api_provider(), ApiProvider::Huggingface);
         let error = config
-            .deepseek_api_key()
+            .active_route_api_key()
             .expect_err("ambient key must not follow a custom endpoint");
         assert!(error.to_string().contains("must be bound explicitly"));
         assert!(!has_api_key(&config));
-        assert_eq!(config.deepseek_base_url(), "https://custom-hf.example/v1");
+        assert_eq!(
+            config.active_route_base_url(),
+            "https://custom-hf.example/v1"
+        );
         assert_eq!(config.default_model(), "meta-llama/Llama-3-70B");
     }
     Ok(())
@@ -12726,11 +12777,14 @@ fn huggingface_short_custom_env_url_does_not_inherit_ambient_key() -> Result<()>
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Huggingface);
     let error = config
-        .deepseek_api_key()
+        .active_route_api_key()
         .expect_err("ambient key must not follow a custom endpoint");
     assert!(error.to_string().contains("must be bound explicitly"));
     assert!(!has_api_key(&config));
-    assert_eq!(config.deepseek_base_url(), "https://short-hf.example/v1");
+    assert_eq!(
+        config.active_route_base_url(),
+        "https://short-hf.example/v1"
+    );
     assert_eq!(config.default_model(), "org/short-model");
     Ok(())
 }
@@ -12865,7 +12919,7 @@ fn custom_provider_scenario() {
 
         // Resolution reads the named table, not a DeepSeek default.
         assert_eq!(config.api_provider(), ApiProvider::Custom);
-        assert_eq!(config.deepseek_base_url(), "https://api.example.com/v1");
+        assert_eq!(config.active_route_base_url(), "https://api.example.com/v1");
         assert_eq!(config.default_model(), "custom-model-v1");
     }
 }
@@ -13223,9 +13277,9 @@ fn legacy_literal_custom_identity_requires_one_valid_root_route() {
             migrated_legacy_ollama_cloud_route: false,
         }
     );
-    assert_eq!(legacy.deepseek_base_url(), "http://127.0.0.1:1234/v1");
+    assert_eq!(legacy.active_route_base_url(), "http://127.0.0.1:1234/v1");
     assert_eq!(legacy.default_model(), "local-legacy-model");
-    assert_eq!(legacy.deepseek_api_key().unwrap(), "legacy-root-key");
+    assert_eq!(legacy.active_route_api_key().unwrap(), "legacy-root-key");
 
     let mut named = session_custom_provider_config(
         "lm-studio",
@@ -13234,7 +13288,7 @@ fn legacy_literal_custom_identity_requires_one_valid_root_route() {
     );
     named.api_key = Some("must-not-leak-to-named-route".to_string());
     let named_key_error = named
-        .deepseek_api_key()
+        .active_route_api_key()
         .expect_err("root legacy key must never authorize a named custom route")
         .to_string();
     assert!(named_key_error.contains("lm-studio"), "{named_key_error}");
@@ -13357,10 +13411,10 @@ default_text_model = "legacy-model"
             .as_ref()
             .is_none_or(|providers| !providers.custom.contains_key("custom"))
     );
-    assert_eq!(config.deepseek_base_url(), "http://127.0.0.1:18185/v1");
+    assert_eq!(config.active_route_base_url(), "http://127.0.0.1:18185/v1");
     assert_eq!(config.default_model(), "env-legacy-model");
     assert_eq!(
-        config.deepseek_api_key()?,
+        config.active_route_api_key()?,
         "",
         "an env-selected keyless loopback route must not inherit the file-owned root key"
     );
@@ -13720,11 +13774,11 @@ fn cli_model_flag_selects_kimi_k3_on_the_moonshot_platform_route() -> Result<()>
 
     assert_eq!(config.api_provider(), ApiProvider::Moonshot);
     assert_eq!(config.default_model(), MOONSHOT_KIMI_K3_MODEL);
-    assert_eq!(config.deepseek_base_url(), DEFAULT_MOONSHOT_BASE_URL);
+    assert_eq!(config.active_route_base_url(), DEFAULT_MOONSHOT_BASE_URL);
     assert_eq!(
         wire_model_for_provider_route(
             ApiProvider::Moonshot,
-            &config.deepseek_base_url(),
+            &config.active_route_base_url(),
             &config.default_model(),
         ),
         MOONSHOT_KIMI_K3_MODEL,
@@ -13736,7 +13790,7 @@ fn cli_model_flag_selects_kimi_k3_on_the_moonshot_platform_route() -> Result<()>
         "an explicit --model must remain recognizable as an explicit request"
     );
     assert_eq!(
-        moonshot_k3_route_display_name(&config.deepseek_base_url(), &config.default_model()),
+        moonshot_k3_route_display_name(&config.active_route_base_url(), &config.default_model()),
         Some("Moonshot direct / kimi-k3")
     );
     Ok(())
@@ -13781,7 +13835,7 @@ fn env_owned_deepseek_root_base_url_does_not_reach_the_deepseek_cn_sibling() -> 
     // The env override owns the route it was addressed to.
     assert_eq!(config.api_provider(), ApiProvider::Deepseek);
     assert_eq!(
-        config.deepseek_base_url(),
+        config.active_route_base_url(),
         "https://env-gateway.example.test/v1"
     );
     assert!(config.provider_uses_custom_endpoint(ApiProvider::Deepseek));
@@ -13814,7 +13868,7 @@ fn env_owned_deepseek_cn_root_base_url_does_not_reach_the_deepseek_sibling() -> 
 
     assert_eq!(config.api_provider(), ApiProvider::DeepseekCN);
     assert_eq!(
-        config.deepseek_base_url(),
+        config.active_route_base_url(),
         "https://cn-env-gateway.example.test/v1"
     );
     assert!(config.provider_uses_custom_endpoint(ApiProvider::DeepseekCN));
@@ -13874,7 +13928,7 @@ fn managed_overlay_keeps_pinned_children_off_the_ambient_generic_host() -> Resul
     // Managed routing is authoritative for the active route.
     assert_eq!(config.api_provider(), ApiProvider::Openrouter);
     assert_eq!(
-        config.deepseek_base_url(),
+        config.active_route_base_url(),
         "https://managed-gateway.example.test/v1"
     );
 
@@ -13924,7 +13978,10 @@ model = "beta-1"
     let config = Config::load(Some(config_path), None)?;
 
     assert_eq!(config.api_provider(), ApiProvider::Custom);
-    assert_eq!(config.deepseek_base_url(), "https://acme.example.test/v1");
+    assert_eq!(
+        config.active_route_base_url(),
+        "https://acme.example.test/v1"
+    );
     // A pinned child of the other named custom table resolves its own host.
     assert_eq!(
         config.base_url_for_route_identity(ApiProvider::Custom, "beta"),
@@ -14022,13 +14079,13 @@ fn config_selects_bare_k3_on_the_kimi_code_route() {
     assert_eq!(
         wire_model_for_provider_route(
             ApiProvider::Moonshot,
-            &config.deepseek_base_url(),
+            &config.active_route_base_url(),
             &config.default_model(),
         ),
         KIMI_CODE_K3_MODEL
     );
     assert_eq!(
-        moonshot_k3_route_display_name(&config.deepseek_base_url(), &config.default_model()),
+        moonshot_k3_route_display_name(&config.active_route_base_url(), &config.default_model()),
         Some("Kimi Code membership / k3")
     );
 }
@@ -14115,7 +14172,7 @@ fn dispatch_endpoint_and_billing_receipts_agree_for_every_resolved_route() -> Re
     // endpoint the client is actually built from. After the resolver became
     // identity-aware these must not be able to disagree for the active route.
     let provider = config.api_provider();
-    let resolved = config.deepseek_base_url();
+    let resolved = config.active_route_base_url();
     assert_eq!(
         crate::route_billing::for_route(&config, provider),
         crate::route_billing::for_dispatched_route(
@@ -14181,7 +14238,7 @@ fn readiness_and_inventory_classify_the_resolved_route_not_the_session_host() ->
         DEFAULT_DEEPSEEKCN_BASE_URL
     );
     assert_eq!(
-        route.config.deepseek_base_url(),
+        route.config.active_route_base_url(),
         DEFAULT_DEEPSEEKCN_BASE_URL
     );
 
@@ -14449,7 +14506,7 @@ fn picker_and_request_path_disagree_when_the_secret_slot_marker_is_missing() -> 
         ..Config::default()
     };
     assert_eq!(
-        active_deepseek.deepseek_api_key().ok(),
+        active_deepseek.active_route_api_key().ok(),
         Some("deepseek-working-key".to_string()),
         "the request path still resolves the stored key"
     );
@@ -14582,7 +14639,7 @@ fn codewhale_route_resolves_its_key_from_every_documented_source() -> Result<()>
         {
             let _env = EnvVarGuard::set("CODEWHALE_API_KEY", "cwc_key_from_env");
             assert_eq!(
-                route(None).deepseek_api_key()?,
+                route(None).active_route_api_key()?,
                 "cwc_key_from_env",
                 "env key, declared base {declared:?}"
             );
@@ -14592,7 +14649,7 @@ fn codewhale_route_resolves_its_key_from_every_documented_source() -> Result<()>
         let secrets = codewhale_secrets::Secrets::auto_detect();
         secrets.set("codewhale", "cwc_key_from_slot")?;
         assert_eq!(
-            route(None).deepseek_api_key()?,
+            route(None).active_route_api_key()?,
             "cwc_key_from_slot",
             "secret store, declared base {declared:?}"
         );
@@ -14602,7 +14659,7 @@ fn codewhale_route_resolves_its_key_from_every_documented_source() -> Result<()>
             providers.codewhale.api_key = Some("cwc_key_from_config".to_string());
         }
         assert_eq!(
-            configured.deepseek_api_key()?,
+            configured.active_route_api_key()?,
             "cwc_key_from_config",
             "config api_key, declared base {declared:?}"
         );
@@ -14613,7 +14670,7 @@ fn codewhale_route_resolves_its_key_from_every_documented_source() -> Result<()>
         }
         let _bound_env = EnvVarGuard::set("MY_CODEWHALE_KEY", "cwc_key_from_api_key_env");
         assert_eq!(
-            bound.deepseek_api_key()?,
+            bound.active_route_api_key()?,
             "cwc_key_from_api_key_env",
             "api_key_env, declared base {declared:?}"
         );
@@ -14653,7 +14710,7 @@ fn codewhale_ambient_key_never_follows_an_undeclared_host() -> Result<()> {
         ..Config::default()
     };
     let error = config
-        .deepseek_api_key()
+        .active_route_api_key()
         .expect_err("an undeclared host must not inherit the account key");
     let text = error.to_string();
     assert!(!text.contains("cwc_key_must_not_travel"), "{text}");
@@ -14682,7 +14739,7 @@ fn codewhale_route_without_a_key_fails_before_any_request() -> Result<()> {
         ..Config::default()
     };
     let error = config
-        .deepseek_api_key()
+        .active_route_api_key()
         .expect_err("a keyless Codewhale route must not dispatch");
     let text = error.to_string();
     assert!(text.contains("CODEWHALE_API_KEY"), "{text}");

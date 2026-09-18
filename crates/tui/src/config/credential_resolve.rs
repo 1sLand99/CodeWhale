@@ -200,7 +200,7 @@ pub(crate) fn resolve_credential_source_with(
     if !auth_mode_requires_api_key(auth_mode.as_deref())
         && (provider_route_is_keyless_self_hosted(provider, &config.base_url_for_route(provider))
             || (provider == config.api_provider()
-                && base_url_uses_local_host(&config.deepseek_base_url())))
+                && base_url_uses_local_host(&config.active_route_base_url())))
     {
         return CredentialResolution::found(CredentialSource::KeylessRoute {
             base_url: config.base_url_for_route(provider),

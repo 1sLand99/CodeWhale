@@ -1043,11 +1043,11 @@ pub(crate) fn restore_loaded_session_provider(
             .reasoning_effort_preference
             .unwrap_or(app.reasoning_effort);
         app.reasoning_effort =
-            requested.normalize_for_route(provider, &config.deepseek_base_url(), &app.model);
+            requested.normalize_for_route(provider, &config.active_route_base_url(), &app.model);
     }
     app.set_active_context_window_override(config, provider);
     app.active_route_limits = app.context_window_override_limits();
-    app.active_route_base_url = config.deepseek_base_url();
+    app.active_route_base_url = config.active_route_base_url();
     app.active_context_window_source = app
         .configured_context_window_for(&app.model)
         .map(|resolution| resolution.source)
@@ -1058,7 +1058,7 @@ pub(crate) fn resolve_loaded_session_route(app: &mut App, config: &Config) {
     app.set_active_context_window_override(config, app.api_provider);
     if app.auto_model {
         app.active_route_limits = app.context_window_override_limits();
-        app.active_route_base_url = config.deepseek_base_url();
+        app.active_route_base_url = config.active_route_base_url();
         app.active_context_window_source = app
             .configured_context_window_for(&app.model)
             .map(|resolution| resolution.source)
@@ -1076,7 +1076,7 @@ pub(crate) fn resolve_loaded_session_route(app: &mut App, config: &Config) {
         }
         Err(_) => {
             app.active_route_limits = app.context_window_override_limits();
-            app.active_route_base_url = config.deepseek_base_url();
+            app.active_route_base_url = config.active_route_base_url();
             app.active_context_window_source = app
                 .configured_context_window_for(&app.model)
                 .map(|resolution| resolution.source)

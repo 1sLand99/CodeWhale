@@ -537,7 +537,7 @@ fn custom_route_identity_change_rebuilds_client_for_new_named_endpoint() {
     assert_eq!(engine.api_provider_identity, "custom-a");
     assert_eq!(
         engine
-            .deepseek_client
+            .codewhale_client
             .as_ref()
             .expect("custom A client")
             .base_url(),
@@ -555,7 +555,7 @@ fn custom_route_identity_change_rebuilds_client_for_new_named_endpoint() {
     assert_eq!(engine.api_provider_identity, "custom-b");
     assert_eq!(
         engine
-            .deepseek_client
+            .codewhale_client
             .as_ref()
             .expect("custom B client")
             .base_url(),
@@ -604,14 +604,14 @@ fn custom_route_config_reload_rebuilds_client_when_identity_is_unchanged() {
     assert_eq!(engine.api_provider_identity, "lm-studio");
     assert_eq!(
         engine
-            .deepseek_client
+            .codewhale_client
             .as_ref()
             .expect("reloaded custom client")
             .base_url(),
         "http://127.0.0.1:18182/v1"
     );
     assert_eq!(
-        engine.api_config.deepseek_base_url(),
+        engine.api_config.active_route_base_url(),
         "http://127.0.0.1:18182/v1"
     );
 }
@@ -638,7 +638,7 @@ fn failed_same_identity_route_preflight_leaves_old_client_untouched() {
         ..Config::default()
     };
     let (engine, _handle) = Engine::new(EngineConfig::default(), &config);
-    assert!(engine.deepseek_client.is_some());
+    assert!(engine.codewhale_client.is_some());
 
     let mut invalid = config;
     invalid
@@ -652,9 +652,9 @@ fn failed_same_identity_route_preflight_leaves_old_client_untouched() {
 
     assert!(err.contains("must be an http(s) URL with a host"), "{err}");
     assert_eq!(engine.api_provider_identity, "lm-studio");
-    assert!(engine.deepseek_client.is_some());
+    assert!(engine.codewhale_client.is_some());
     assert!(engine.model_client.is_some());
-    assert!(engine.deepseek_client_error.is_none());
+    assert!(engine.codewhale_client_error.is_none());
 }
 
 #[tokio::test]
@@ -725,7 +725,7 @@ async fn exact_turn_snapshot_restores_custom_endpoint_and_turn_receipt_after_bui
     assert_eq!(engine.api_provider, ApiProvider::Openai);
     assert_eq!(
         engine
-            .deepseek_client
+            .codewhale_client
             .as_ref()
             .expect("builtin client")
             .base_url(),
@@ -2276,7 +2276,7 @@ async fn queued_not_started_turn_cancels_older_goal_continuation() {
     );
     let goal_state = engine.config.goal_state.clone();
     engine.model_client = None;
-    engine.deepseek_client_error = Some("deterministic missing model client".to_string());
+    engine.codewhale_client_error = Some("deterministic missing model client".to_string());
 
     handle
         .send(active_goal_message_op(
@@ -11041,7 +11041,7 @@ async fn measure_production_mode_tool_catalogs() -> serde_json::Value {
             model: DEFAULT_TEXT_MODEL.to_string(),
             capabilities: codewhale_config::route::RouteCapabilities::default(),
             limits: None,
-            client: engine.deepseek_client.clone(),
+            client: engine.codewhale_client.clone(),
             api_config: Box::new(api_config.clone()),
             locale_tag: engine.config.locale_tag.clone(),
             role_models: engine.subagent_role_models(),
@@ -14214,7 +14214,7 @@ fn plan_mode_registry_can_expose_agent_launcher_without_shell_tools() {
     let tmp = tempdir().expect("tempdir");
     let (engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
     let context = engine.build_tool_context(AppMode::Plan, false);
-    let client = DeepSeekClient::new(&Config {
+    let client = CodewhaleClient::new(&Config {
         api_key: Some("test-key".to_string()),
         ..Config::default()
     })
@@ -14387,7 +14387,7 @@ fn mode_invariant_matrix_covers_context_catalog_subagents_and_prompt_metadata() 
             _ => panic!("{}: unexpected sandbox policy {sandbox:?}", case.name),
         }
 
-        let client = DeepSeekClient::new(&Config {
+        let client = CodewhaleClient::new(&Config {
             api_key: Some("test-key".to_string()),
             ..Config::default()
         })
@@ -22232,7 +22232,7 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
         model: DEFAULT_TEXT_MODEL.to_string(),
         capabilities: codewhale_config::route::RouteCapabilities::default(),
         limits: None,
-        client: engine.deepseek_client.clone(),
+        client: engine.codewhale_client.clone(),
         api_config: Box::new(api_config),
         locale_tag: engine.config.locale_tag.clone(),
         role_models: engine.subagent_role_models(),

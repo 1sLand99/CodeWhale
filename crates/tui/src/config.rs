@@ -5042,7 +5042,7 @@ impl Config {
         let active_provider = self.api_provider();
         match validate_kimi_code_api_model_id(
             active_provider,
-            &self.deepseek_base_url(),
+            &self.active_route_base_url(),
             &self.default_model(),
         ) {
             Err(error) if error == KIMI_CODE_CLAUDE_ALIAS_GUIDANCE => {
@@ -6205,7 +6205,7 @@ impl Config {
         // the previous proxy for it — "the wire id was rewritten" — also
         // excluded every id DeepSeek retires while still accepting, which is
         // exactly the V4 Pro case.
-        let base_url = self.deepseek_base_url();
+        let base_url = self.active_route_base_url();
         if base_url_is_custom_for_provider(provider, &base_url) {
             return None;
         }
@@ -6226,7 +6226,7 @@ impl Config {
                 self,
                 provider,
                 &self.provider_identity_for(provider),
-                &self.deepseek_base_url(),
+                &self.active_route_base_url(),
                 model,
             )
             .is_some()
@@ -6418,7 +6418,7 @@ impl Config {
 
     /// Return the configured API base URL (normalized) for the selected route.
     #[must_use]
-    pub fn deepseek_base_url(&self) -> String {
+    pub fn active_route_base_url(&self) -> String {
         self.base_url_for_route(self.api_provider())
     }
 
@@ -6930,7 +6930,7 @@ impl Config {
             // official provider's saved credential.
             let explicitly_authenticated_loopback = provider == self.api_provider()
                 && auth_mode_requires_api_key(auth_mode.as_deref())
-                && base_url_uses_local_host(&self.deepseek_base_url());
+                && base_url_uses_local_host(&self.active_route_base_url());
             if !explicitly_authenticated_loopback {
                 return true;
             }
@@ -6949,7 +6949,7 @@ impl Config {
 
         provider_route_is_keyless_self_hosted(provider, &self.base_url_for_route(provider))
             || (provider == self.api_provider()
-                && base_url_uses_local_host(&self.deepseek_base_url()))
+                && base_url_uses_local_host(&self.active_route_base_url()))
     }
 
     /// Read the API key.
@@ -6961,8 +6961,8 @@ impl Config {
     /// The in-memory `self.api_key` override is only honored when the user
     /// explicitly set the field (not the legacy `API_KEYRING_SENTINEL`
     /// placeholder, not empty whitespace).
-    pub fn deepseek_api_key(&self) -> Result<String> {
-        self.deepseek_api_key_with_secret_store_mode(false)
+    pub fn active_route_api_key(&self) -> Result<String> {
+        self.active_route_api_key_with_secret_store_mode(false)
     }
 
     /// Resolve an API key for a diagnostic without migrating a legacy secret
@@ -6971,10 +6971,10 @@ impl Config {
     /// This retains ordinary credential precedence, including a legacy
     /// file-backed secret as a fallback, but it must only be used by static
     /// diagnostic/reporting paths. Normal runtime and authentication paths use
-    /// [`Self::deepseek_api_key`] and preserve their existing migration
+    /// [`Self::active_route_api_key`] and preserve their existing migration
     /// behavior.
-    pub(crate) fn deepseek_api_key_read_only(&self) -> Result<String> {
-        self.deepseek_api_key_with_secret_store_mode(true)
+    pub(crate) fn active_route_api_key_read_only(&self) -> Result<String> {
+        self.active_route_api_key_with_secret_store_mode(true)
     }
 
     /// Clone this route with a diagnostic-only credential in its in-memory
@@ -6987,13 +6987,13 @@ impl Config {
     /// persisted.
     pub(crate) fn with_read_only_api_key_for_diagnostic(&self) -> Result<Self> {
         let provider = self.api_provider();
-        let api_key = self.deepseek_api_key_read_only()?;
+        let api_key = self.active_route_api_key_read_only()?;
         let mut diagnostic = self.clone();
         diagnostic.set_provider_api_key_override(provider, Some(api_key));
         Ok(diagnostic)
     }
 
-    fn deepseek_api_key_with_secret_store_mode(&self, read_only: bool) -> Result<String> {
+    fn active_route_api_key_with_secret_store_mode(&self, read_only: bool) -> Result<String> {
         let provider = self.api_provider();
         if provider == ApiProvider::Antigravity {
             anyhow::bail!(codewhale_config::LEGACY_ANTIGRAVITY_TOMBSTONE_MESSAGE);
@@ -7042,7 +7042,7 @@ impl Config {
                 .is_some_and(provider_config_uses_kimi_imported_token)
         {
             let credential_help =
-                credential_help_for_provider_route(provider, &self.deepseek_base_url());
+                credential_help_for_provider_route(provider, &self.active_route_base_url());
             anyhow::bail!(
                 "Kimi CLI credential import is unsupported. Codewhale does not impersonate or reuse Kimi OAuth clients; configure an API key from {} instead.",
                 credential_help
@@ -7166,7 +7166,7 @@ impl Config {
                 .provider_config_for(provider)
                 .and_then(|provider| provider.mode.as_deref());
             if let Some(value) =
-                xiaomi_mimo_env_api_key_for_runtime(mode, Some(&self.deepseek_base_url()))
+                xiaomi_mimo_env_api_key_for_runtime(mode, Some(&self.active_route_base_url()))
                 && !value.trim().is_empty()
             {
                 return Ok(value);
@@ -7203,8 +7203,8 @@ impl Config {
         // out with no `Authorization` header at all.
         if provider != ApiProvider::Codewhale
             && !auth_mode_requires_api_key(auth_mode.as_deref())
-            && (provider_route_is_keyless_self_hosted(provider, &self.deepseek_base_url())
-                || base_url_uses_local_host(&self.deepseek_base_url()))
+            && (provider_route_is_keyless_self_hosted(provider, &self.active_route_base_url())
+                || base_url_uses_local_host(&self.active_route_base_url()))
         {
             return Ok(String::new());
         }
@@ -7216,7 +7216,7 @@ impl Config {
                 .unwrap_or_else(|| provider.as_str());
             anyhow::bail!(
                 "Custom endpoint credentials for {route_name} must be bound explicitly. Ambient provider credentials are not sent to {}. Add api_key or api_key_env to this provider route, or pass --api-key with --base-url.",
-                self.deepseek_base_url()
+                self.active_route_base_url()
             );
         }
 
@@ -7265,8 +7265,8 @@ impl Config {
             ),
             ApiProvider::Moonshot => {
                 let credential_help =
-                    credential_help_for_provider_route(provider, &self.deepseek_base_url());
-                if moonshot_base_url_is_exact_kimi_code(&self.deepseek_base_url()) {
+                    credential_help_for_provider_route(provider, &self.active_route_base_url());
+                if moonshot_base_url_is_exact_kimi_code(&self.active_route_base_url()) {
                     anyhow::bail!(
                         "Kimi Code membership-plan API key not found. Get a plan key: {}. This route uses api.kimi.com/coding/v1 and does not import Kimi CLI credentials. Run 'codewhale auth set --provider moonshot', set {}, or add [{}] api_key.",
                         credential_help
@@ -7323,12 +7323,16 @@ impl Config {
             // Return an empty key and let the client omit the Authorization header.
             ApiProvider::Sglang | ApiProvider::Vllm => Ok(String::new()),
             ApiProvider::Ollama
-                if provider_route_is_keyless_self_hosted(provider, &self.deepseek_base_url()) =>
+                if provider_route_is_keyless_self_hosted(
+                    provider,
+                    &self.active_route_base_url(),
+                ) =>
             {
                 Ok(String::new())
             }
             ApiProvider::Ollama => {
-                let help = credential_help_for_provider_route(provider, &self.deepseek_base_url());
+                let help =
+                    credential_help_for_provider_route(provider, &self.active_route_base_url());
                 anyhow::bail!(
                     "Ollama Cloud API key not found. Get a key: {}. Run 'codewhale auth set --provider ollama', set OLLAMA_API_KEY, or add [providers.ollama] api_key in ~/.codewhale/config.toml.",
                     help.credential_url
@@ -9891,7 +9895,7 @@ fn normalize_model_config(config: &mut Config) {
         config.default_text_model.clone_from(&config.legacy_model);
     }
     let provider = config.api_provider();
-    let base_url = config.deepseek_base_url();
+    let base_url = config.active_route_base_url();
     let mut declared = Vec::new();
     for provider in ApiProvider::all()
         .iter()
@@ -13114,7 +13118,7 @@ fn missing_provider_api_key_message(provider: ApiProvider) -> Result<String> {
 ///
 /// Environment variables (`DEEPSEEK_API_KEY`, etc.) are intentionally
 /// **not** unset — they are managed by the user's shell and outside the
-/// CLI's purview. `Config::deepseek_api_key`'s explicit-override path
+/// CLI's purview. `Config::active_route_api_key`'s explicit-override path
 /// (Path 0) ensures a freshly-entered key still wins over a stale env
 /// var that lingers from a previous session.
 pub fn clear_api_key() -> Result<()> {

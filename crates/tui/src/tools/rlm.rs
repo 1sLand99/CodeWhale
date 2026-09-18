@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use crate::client::DeepSeekClient;
+use crate::client::CodewhaleClient;
 use crate::repl::PythonRuntime;
 use crate::rlm::RlmBridge;
 use crate::rlm::session::{
@@ -68,7 +68,7 @@ fn rlm_kernel_error_result(
 pub struct RlmTool {
     name: &'static str,
     forced_action: Option<&'static str>,
-    client: Option<DeepSeekClient>,
+    client: Option<CodewhaleClient>,
     /// Kept only for replay-compatible explicit RLM sessions. New normal
     /// agent work uses the session kernel and inherits its route there.
     root_model: String,
@@ -76,7 +76,7 @@ pub struct RlmTool {
 
 impl RlmTool {
     #[must_use]
-    pub fn new(name: &'static str, client: Option<DeepSeekClient>) -> Self {
+    pub fn new(name: &'static str, client: Option<CodewhaleClient>) -> Self {
         Self {
             name,
             forced_action: None,
@@ -96,7 +96,11 @@ impl RlmTool {
 
     #[cfg(test)]
     #[must_use]
-    pub fn alias(name: &'static str, action: &'static str, client: Option<DeepSeekClient>) -> Self {
+    pub fn alias(
+        name: &'static str,
+        action: &'static str,
+        client: Option<CodewhaleClient>,
+    ) -> Self {
         Self {
             name,
             forced_action: Some(action),

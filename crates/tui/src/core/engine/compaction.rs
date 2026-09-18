@@ -205,7 +205,7 @@ impl Engine {
             output_tokens: 0,
             ..Usage::default()
         };
-        let Some(client) = self.deepseek_client.clone() else {
+        let Some(client) = self.codewhale_client.clone() else {
             let message = "Manual compaction unavailable: API client not configured".to_string();
             self.finish_compaction(&id);
             self.emit_compaction_failed(id, false, message.clone())

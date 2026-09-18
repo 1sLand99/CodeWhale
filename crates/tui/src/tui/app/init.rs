@@ -373,7 +373,7 @@ impl App {
         push_enabled_provider_model(&mut enabled_provider_models, &provider_identity, &model);
         let active_context_window_override = config.context_window_for_provider_config(provider);
         let active_model_context_windows = config.model_context_windows_for(provider).cloned();
-        let configured_route_base_url = effective_auth_config.deepseek_base_url();
+        let configured_route_base_url = effective_auth_config.active_route_base_url();
         let (active_route_limits, active_route_base_url, active_context_window_source) =
             if auto_model {
                 (
@@ -468,7 +468,7 @@ impl App {
             && !reasoning_effort_explicit
             && let Some(effort) = crate::config::legacy_deepseek_alias_effort_for_route(
                 provider,
-                &effective_auth_config.deepseek_base_url(),
+                &effective_auth_config.active_route_base_url(),
                 &model,
             )
         {

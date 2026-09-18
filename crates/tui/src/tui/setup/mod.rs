@@ -360,7 +360,7 @@ impl SetupRuntimeFacts {
             )
         } else if let Some(url) = crate::config::credential_help_for_provider_route(
             app.api_provider,
-            &config.deepseek_base_url(),
+            &config.active_route_base_url(),
         )
         .credential_url
         {
@@ -374,7 +374,7 @@ impl SetupRuntimeFacts {
                 readiness.label(),
                 crate::config::credential_help_for_provider_route(
                     app.api_provider,
-                    &config.deepseek_base_url(),
+                    &config.active_route_base_url(),
                 )
                 .guidance
             )

@@ -1473,7 +1473,7 @@ async fn update_provider_catalog(
     }
     let mut route_config = config.clone();
     route_config.scope_to_provider_identity(identity);
-    let base_url = route_config.deepseek_base_url();
+    let base_url = route_config.active_route_base_url();
     let fingerprint = base_url_fingerprint(&base_url);
     let mut receipt = cached_receipt(&route_config, identity);
     if identity.provider == ApiProvider::Antigravity {
@@ -1504,7 +1504,7 @@ async fn update_provider_catalog(
     // the existing read-only resolver: no secret migration or OAuth refresh.
     let client = route_config
         .with_read_only_api_key_for_diagnostic()
-        .and_then(|config| crate::client::DeepSeekClient::for_catalog_refresh(&config));
+        .and_then(|config| crate::client::CodewhaleClient::for_catalog_refresh(&config));
     let client = match client {
         Ok(client) => client,
         Err(_) => {
@@ -1689,7 +1689,7 @@ pub(crate) async fn run_models(
         config,
         identity.provider,
         &identity.key,
-        &route_config.deepseek_base_url(),
+        &route_config.active_route_base_url(),
     );
     let default_model = route_config.default_model();
     if !default_model.is_empty() && !default_model.eq_ignore_ascii_case("auto") {

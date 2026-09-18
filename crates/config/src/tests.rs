@@ -1151,8 +1151,8 @@ fn permission_removal_rejects_stale_snapshot_without_writing() {
 }
 
 struct EnvGuard {
-    deepseek_api_key: Option<OsString>,
-    deepseek_base_url: Option<OsString>,
+    active_route_api_key: Option<OsString>,
+    active_route_base_url: Option<OsString>,
     deepseek_anthropic_base_url: Option<OsString>,
     deepseek_claude_base_url: Option<OsString>,
     deepseek_http_headers: Option<OsString>,
@@ -1294,8 +1294,8 @@ struct EnvGuard {
 impl EnvGuard {
     fn without_deepseek_runtime_overrides() -> Self {
         let guard = Self {
-            deepseek_api_key: env::var_os("DEEPSEEK_API_KEY"),
-            deepseek_base_url: env::var_os("DEEPSEEK_BASE_URL"),
+            active_route_api_key: env::var_os("DEEPSEEK_API_KEY"),
+            active_route_base_url: env::var_os("DEEPSEEK_BASE_URL"),
             deepseek_anthropic_base_url: env::var_os("DEEPSEEK_ANTHROPIC_BASE_URL"),
             deepseek_claude_base_url: env::var_os("DEEPSEEK_CLAUDE_BASE_URL"),
             deepseek_http_headers: env::var_os("DEEPSEEK_HTTP_HEADERS"),
@@ -1587,8 +1587,8 @@ impl Drop for EnvGuard {
     fn drop(&mut self) {
         // Safety: test-only environment mutation guarded by a module mutex.
         unsafe {
-            Self::restore_var("DEEPSEEK_API_KEY", self.deepseek_api_key.take());
-            Self::restore_var("DEEPSEEK_BASE_URL", self.deepseek_base_url.take());
+            Self::restore_var("DEEPSEEK_API_KEY", self.active_route_api_key.take());
+            Self::restore_var("DEEPSEEK_BASE_URL", self.active_route_base_url.take());
             Self::restore_var(
                 "DEEPSEEK_ANTHROPIC_BASE_URL",
                 self.deepseek_anthropic_base_url.take(),

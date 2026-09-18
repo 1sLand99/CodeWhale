@@ -1448,7 +1448,10 @@ async fn named_custom_thread_identity_round_trips_and_fails_closed_when_removed(
     assert_eq!(route.identity.provider, ApiProvider::Custom);
     assert_eq!(route.identity.key, "lm-studio");
     assert_eq!(route.model, "local-code-model");
-    assert_eq!(route.config.deepseek_base_url(), "http://127.0.0.1:1234/v1");
+    assert_eq!(
+        route.config.active_route_base_url(),
+        "http://127.0.0.1:1234/v1"
+    );
 
     let err = manager
         .resolved_route_for_thread(&Config::default(), &persisted)
@@ -1494,7 +1497,7 @@ fn legacy_literal_custom_thread_resume_requires_and_keeps_root_route() -> Result
     assert_eq!(route.identity.key, "custom");
     assert_eq!(route.model, "legacy-saved-model");
     assert_eq!(
-        route.config.deepseek_base_url(),
+        route.config.active_route_base_url(),
         "http://127.0.0.1:18180/v1"
     );
     assert!(
@@ -1521,7 +1524,7 @@ fn legacy_literal_custom_thread_resume_requires_and_keeps_root_route() -> Result
     assert_eq!(repeated.identity.key, "custom");
     assert_eq!(repeated.model, "legacy-saved-model");
     assert_eq!(
-        repeated.config.deepseek_base_url(),
+        repeated.config.active_route_base_url(),
         "http://127.0.0.1:18180/v1"
     );
 
@@ -1596,7 +1599,7 @@ async fn root_custom_thread_and_turn_writers_omit_exact_id() -> Result<()> {
             assert_eq!(route.identity.key, "custom");
             assert_eq!(route.identity.exact_id, None);
             assert_eq!(
-                route.config.deepseek_base_url(),
+                route.config.active_route_base_url(),
                 "http://127.0.0.1:18180/v1"
             );
         }
@@ -3095,7 +3098,10 @@ fn legacy_custom_thread_stays_on_root_when_literal_table_coexists() -> Result<()
     assert_eq!(root.identity.provider, ApiProvider::Custom);
     assert_eq!(root.identity.key, "custom");
     assert_eq!(root.identity.exact_id, None);
-    assert_eq!(root.config.deepseek_base_url(), "http://127.0.0.1:18181/v1");
+    assert_eq!(
+        root.config.active_route_base_url(),
+        "http://127.0.0.1:18181/v1"
+    );
 
     legacy.model_provider_id = Some("custom".to_string());
     let exact = manager.resolved_route_for_thread(&config, &legacy)?;
@@ -3103,7 +3109,7 @@ fn legacy_custom_thread_stays_on_root_when_literal_table_coexists() -> Result<()
     assert_eq!(exact.identity.key, "custom");
     assert_eq!(exact.identity.exact_id.as_deref(), Some("custom"));
     assert_eq!(
-        exact.config.deepseek_base_url(),
+        exact.config.active_route_base_url(),
         "http://127.0.0.1:18182/v1"
     );
     let root_only = Config {
@@ -3222,7 +3228,7 @@ async fn thread_records_and_create_requests_preserve_provider_kind_id_pairing() 
     assert_eq!(route.identity.provider, ApiProvider::Custom);
     assert_eq!(route.identity.key, "openai");
     assert_eq!(
-        route.config.deepseek_base_url(),
+        route.config.active_route_base_url(),
         "http://127.0.0.1:18183/v1"
     );
 
@@ -3331,7 +3337,7 @@ async fn config_reload_updates_next_turn_route_without_mutating_engine_route() -
     let refreshed = manager.resolved_route_for_thread(&manager.read_config(), &thread)?;
     assert_eq!(refreshed.identity.key, "lm-studio");
     assert_eq!(
-        refreshed.config.deepseek_base_url(),
+        refreshed.config.active_route_base_url(),
         "http://127.0.0.1:18182/v1"
     );
     for _ in 0..3 {
@@ -3366,7 +3372,7 @@ async fn config_reload_updates_next_turn_route_without_mutating_engine_route() -
         }) => {
             assert_eq!(route.identity.key, "lm-studio");
             assert_eq!(
-                route.config.deepseek_base_url(),
+                route.config.active_route_base_url(),
                 "http://127.0.0.1:18182/v1"
             );
             assert_eq!(compaction.model, "local-model");
@@ -3466,7 +3472,7 @@ async fn queued_reload_is_a_hard_boundary_for_a_concurrent_turn_start() -> Resul
         match harness.rx_op.recv().await {
             Some(Op::SendMessage(TurnSpec { route, .. })) => {
                 assert_eq!(
-                    route.config.deepseek_base_url(),
+                    route.config.active_route_base_url(),
                     "http://127.0.0.1:18182/v1"
                 );
                 break;
@@ -3558,7 +3564,7 @@ async fn queued_reload_is_a_hard_boundary_for_concurrent_compaction() -> Result<
         match harness.rx_op.recv().await {
             Some(Op::CompactContext { route, .. }) => {
                 assert_eq!(
-                    route.config.deepseek_base_url(),
+                    route.config.active_route_base_url(),
                     "http://127.0.0.1:18182/v1"
                 );
                 break;
@@ -3665,7 +3671,7 @@ async fn create_thread_uses_requested_named_custom_provider_default_model() -> R
     let route = manager.resolved_route_for_thread(&config, &thread)?;
     assert_eq!(route.identity.key, "custom-a");
     assert_eq!(
-        route.config.deepseek_base_url(),
+        route.config.active_route_base_url(),
         "http://127.0.0.1:18181/v1"
     );
     Ok(())

@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::client::DeepSeekClient;
+use crate::client::CodewhaleClient;
 use crate::config::{ApiProvider, Config, normalize_model_name_for_provider};
 use crate::cost_status::{
     EffectiveRouteEnvelope, EffectiveRouteUsage, RuntimeUsageDropRecord, RuntimeUsageRecord,
@@ -1054,7 +1054,7 @@ fn auto_route_attempt_with_dropped_response(
 
 /// Prove that the deterministic request seam accepts this classifier request
 /// before capturing a quote or entering any provider permit/network path.
-fn preflight_auto_route_request(client: &DeepSeekClient, request: &MessageRequest) -> Result<()> {
+fn preflight_auto_route_request(client: &CodewhaleClient, request: &MessageRequest) -> Result<()> {
     client.prepare_outbound_request(request.clone(), false)?;
     Ok(())
 }
@@ -1076,7 +1076,7 @@ async fn auto_route_inventory_recommendation(
     router_config.provider = Some(inventory.router_provider.as_str().to_string());
     router_config.default_text_model = Some(inventory.router_model.clone());
 
-    let client = DeepSeekClient::new(&router_config)?;
+    let client = CodewhaleClient::new(&router_config)?;
     let router_system = inventory_auto_router_system_prompt(inventory, config.auto_cost_saving());
     let router_prompt = classifier_prompt(
         &client,
@@ -1271,7 +1271,7 @@ fn auto_route_prompt(
 }
 
 fn classifier_prompt(
-    client: &DeepSeekClient,
+    client: &CodewhaleClient,
     latest_request: &str,
     recent_context: &str,
     session_mode: &str,
@@ -1430,7 +1430,7 @@ mod tests {
                 .candidate(ApiProvider::Openrouter, model)
                 .is_some()
         );
-        let client = DeepSeekClient::new(&config).expect("OpenRouter classifier client");
+        let client = CodewhaleClient::new(&config).expect("OpenRouter classifier client");
         let fingerprint = codewhale_config::catalog::base_url_fingerprint(
             crate::config::DEFAULT_OPENROUTER_BASE_URL,
         );
@@ -1657,7 +1657,7 @@ mod tests {
             api_key: Some(secret.to_string()),
             ..Default::default()
         };
-        let client = DeepSeekClient::new(&config).expect("classifier client");
+        let client = CodewhaleClient::new(&config).expect("classifier client");
         // `recent_auto_router_context` converts ToolResult blocks into ordinary
         // text before this boundary. Exercise that exact flattened shape.
         let recent_context = format!("assistant: [tool result] token={secret}");

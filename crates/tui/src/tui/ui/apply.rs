@@ -926,7 +926,7 @@ pub(crate) async fn apply_model_picker_choice(
 
     let model_changed = model != previous_model || app.auto_model != model_is_auto;
     let mut resolved_model = model.clone();
-    let mut route_base_url = config.deepseek_base_url();
+    let mut route_base_url = config.active_route_base_url();
     if !model_is_auto {
         match crate::route_runtime::resolve_runtime_route(config, app.api_provider, Some(&model)) {
             Ok(resolution) => {
@@ -1158,7 +1158,7 @@ pub(crate) async fn apply_provider_fallback_switch(
     let new_model = resolved_route.model;
     let context_window_source = resolved_route.context_window.source;
 
-    if let Err(err) = DeepSeekClient::from_candidate(&next_config, &resolved_route.candidate) {
+    if let Err(err) = CodewhaleClient::from_candidate(&next_config, &resolved_route.candidate) {
         app.set_provider_identity_record(previous_identity);
         app.provider_chain = previous_chain;
         app.last_fallback_reason = Some(format!(
@@ -1722,7 +1722,7 @@ pub(crate) async fn apply_command_result(
                         ),
                     });
                 } else {
-                    let api_key = config.deepseek_api_key().unwrap_or_default();
+                    let api_key = config.active_route_api_key().unwrap_or_default();
                     if api_key.trim().is_empty() {
                         app.add_message(HistoryCell::System {
                             content: format!(
@@ -1731,7 +1731,7 @@ pub(crate) async fn apply_command_result(
                             ),
                         });
                     } else {
-                        let base_url = config.deepseek_base_url();
+                        let base_url = config.active_route_base_url();
                         match fetch_provider_balance(provider, &api_key, &base_url).await {
                             Some(info) => {
                                 if let Ok(mut guard) = app.balance_cell.lock() {
@@ -1887,8 +1887,8 @@ pub(crate) async fn apply_command_result(
             }
             AppAction::SwitchProvider { provider, model } => {
                 switch_provider(app, engine_handle, config, provider, model).await;
-                let api_key = config.deepseek_api_key().unwrap_or_default();
-                let base_url = config.deepseek_base_url();
+                let api_key = config.active_route_api_key().unwrap_or_default();
+                let base_url = config.active_route_base_url();
                 schedule_balance_fetch(app, &api_key, &base_url, false);
             }
             AppAction::SwitchModelRoute { provider, model } => {
@@ -3155,7 +3155,7 @@ pub(crate) async fn apply_provider_picker_test_connection_with_verifier(
         reopen_provider_picker_list(app, engine_handle, config, selected_id, catalog_view).await;
         return;
     }
-    let api_key = match scoped_config.deepseek_api_key_read_only() {
+    let api_key = match scoped_config.active_route_api_key_read_only() {
         Ok(key) if !key.trim().is_empty() => key,
         _ => {
             app.push_status_toast(
@@ -3169,7 +3169,7 @@ pub(crate) async fn apply_provider_picker_test_connection_with_verifier(
             return;
         }
     };
-    let base_url = scoped_config.deepseek_base_url();
+    let base_url = scoped_config.active_route_base_url();
     let model = scoped_config.default_model();
     match verifier.verify(provider, &api_key, &base_url).await {
         Ok(()) => {
@@ -3246,7 +3246,7 @@ pub(crate) async fn apply_provider_picker_api_key_with_verifier(
     // endpoint is selected by auth mode (notably a legacy Kimi CLI import).
     // This prevents a replacement Kimi Code API key from being probed against
     // the ordinary Moonshot endpoint.
-    let base_url = scoped_config.deepseek_base_url();
+    let base_url = scoped_config.active_route_base_url();
     match verifier.verify(provider, &api_key, &base_url).await {
         Ok(()) => {
             // Keep the readiness row aligned with the live check the wizard
