@@ -102,6 +102,40 @@ tag, packages, checksums and release assets exist.
   rosters prove nothing and are counted as `unverifiable` rather than raising a
   false warning. Each row names the route and every owner of the pin; the pin
   is surfaced, never rewritten (#6035).
+- Background-capable clients can enumerate owned work and watch TUI-visible
+  conditions: `GET /v1/threads/running` lists threads with queued or
+  in-progress turns in one call (one turns scan grouped by thread), and
+  `GET /v1/threads/{id}/notices` serves active `subagent-terminal`,
+  `elevation-needed`, and `model-notify` notices with thread/turn identity,
+  cleared by ack or — for elevation — when the tool call completes (#6180,
+  #3757).
+- Sub-agent launches adapt to provider throttling: a `DynamicGate` replaces
+  the fixed semaphore so launch capacity adjusts at runtime, and a
+  `RateLimitGovernor` halves capacity on 429 pressure, pauses admissions
+  past the threshold, and recovers additively; 429 retries honor
+  `Retry-After` with jittered backoff, and quota exhaustion keeps the
+  failure path (#6055).
+- Turns record the mode they ran in, so mixed-mode sessions stay legible
+  after the fact (#6321).
+- Shell spawning refuses NUL bytes in command and cwd before spawn, and
+  sub-agent runs fall back loudly past credentialless profile provider
+  pins instead of misrouting silently (#5529, #6318, #6320).
+- Children land past a per-step context bound instead of burning
+  quadratically, and status rows surface live declared-vs-observed writes
+  (#6189, #6194).
+- Queued Agent Mail can be cancelled before delivery, and the TUI
+  suspend/resume handshake restores on stop and rebuilds on continue
+  (#6176, #6169).
+- MCP connections are supervised: dead servers are probed and reconnected
+  with transitions reported, and a failed reconnect keeps the last-good
+  catalog instead of dropping tools (#6187, #6142).
+- Web search autodetects Tavily from `TAVILY_API_KEY` (Firecrawl stays the
+  default), fleet refusals name the alternative, and verification runs on
+  a bounded Git fetch plus a `merge_tree` verify surface (#6298, #6296).
+- Fleet authority projects through one `ChildGrant`, and ModelScope joins
+  the built-in providers (#5633, #6299).
+- Child tool results are capped at capture time, and run
+  tests/verifiers accept a bounded cwd (#6282, #6294, #6296).
 
 ### Changed
 
