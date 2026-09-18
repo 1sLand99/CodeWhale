@@ -161,7 +161,7 @@ pub(crate) fn replace_matching_assistant_text(
     original_text: &str,
     translated_text: String,
 ) -> bool {
-    for message in app.api_messages.iter_mut().rev() {
+    for message in app.api_messages_mut().iter_mut().rev() {
         if message.role != "assistant"
             && message.role != codewhale_models::INTERRUPTED_ASSISTANT_ROLE
         {

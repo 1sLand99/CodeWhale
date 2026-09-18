@@ -507,7 +507,7 @@ async fn spawn_tui_engine_with_session(app: &mut App, config: &Config) -> Result
             handle
                 .send(Op::SyncSession {
                     session_id: app.current_session_id.clone(),
-                    messages: app.api_messages.clone(),
+                    messages: app.api_messages.as_ref().clone(),
                     system_prompt: app.system_prompt.clone(),
                     system_prompt_override: false,
                     model: app.model.clone(),

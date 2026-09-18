@@ -944,7 +944,7 @@ mod tests {
         app.history.push(HistoryCell::User {
             content: "test".to_string(),
         });
-        app.api_messages.push(Message {
+        app.api_messages_mut().push(Message {
             role: Role::User,
             content: vec![],
         });
@@ -1000,7 +1000,7 @@ mod tests {
         app.history.push(HistoryCell::User {
             content: "keep me".to_string(),
         });
-        app.api_messages.push(Message {
+        app.api_messages_mut().push(Message {
             role: Role::User,
             content: vec![],
         });
@@ -1026,7 +1026,7 @@ mod tests {
         app.history.push(HistoryCell::User {
             content: "keep active turn".to_string(),
         });
-        app.api_messages.push(Message {
+        app.api_messages_mut().push(Message {
             role: Role::User,
             content: vec![],
         });

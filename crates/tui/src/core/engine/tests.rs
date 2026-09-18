@@ -14901,7 +14901,7 @@ async fn session_update_preserves_reasoning_tool_only_turn() {
         panic!("expected session update event");
     };
 
-    assert_eq!(messages, vec![assistant]);
+    assert_eq!(*messages, vec![assistant]);
 }
 
 #[tokio::test]
@@ -20413,7 +20413,7 @@ async fn headless_turn_retries_mid_stream_network_drop_and_recovers() {
             Event::SessionUpdated { messages, .. } => Some(messages),
             _ => None,
         })
-        .flatten()
+        .flat_map(|messages| messages.iter())
         .flat_map(|message| message.content.iter())
         .filter_map(|block| match block {
             ContentBlock::Text { text, .. } => Some(text.as_str()),

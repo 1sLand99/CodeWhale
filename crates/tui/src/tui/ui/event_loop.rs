@@ -1369,7 +1369,7 @@ async fn submit_decided_composer_input(
             let _ = engine_handle
                 .send(Op::SyncSession {
                     session_id: app.current_session_id.clone(),
-                    messages: app.api_messages.clone(),
+                    messages: app.api_messages.as_ref().clone(),
                     system_prompt: app.system_prompt.clone(),
                     system_prompt_override: false,
                     model: app.model.clone(),
@@ -2836,7 +2836,8 @@ pub(crate) async fn run_event_loop(
                             });
                         if let Some(launch) = suggestion_launch {
                             let suggestion_cell = app.prompt_suggestion_cell.clone();
-                            let messages: Vec<codewhale_models::Message> = app.api_messages.clone();
+                            let messages: std::sync::Arc<Vec<codewhale_models::Message>> =
+                                app.api_messages.clone();
                             let gen_token = app
                                 .prompt_suggestion_gen
                                 .load(std::sync::atomic::Ordering::Relaxed);
@@ -4136,7 +4137,7 @@ pub(crate) async fn run_event_loop(
                 let _ = engine_handle
                     .send(Op::SyncSession {
                         session_id: app.current_session_id.clone(),
-                        messages: app.api_messages.clone(),
+                        messages: app.api_messages.as_ref().clone(),
                         system_prompt: app.system_prompt.clone(),
                         system_prompt_override: false,
                         model: app.model.clone(),
@@ -6889,7 +6890,7 @@ pub(crate) async fn run_cache_warmup(app: &App, config: &Config) -> Result<Cache
         .map(str::to_string);
     let request = MessageRequest {
         model: route.model.clone(),
-        messages: app.api_messages.clone(),
+        messages: app.api_messages.as_ref().clone(),
         max_tokens: CACHE_WARMUP_MAX_TOKENS,
         system: app.system_prompt.clone(),
         tools: app.session.last_tool_catalog.clone(),

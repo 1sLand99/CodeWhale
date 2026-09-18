@@ -2399,13 +2399,13 @@ mod tests {
         use codewhale_models::{ContentBlock, Message};
         let mut app =
             crate::test_support::test_app_with_options(crate::test_support::test_tui_options("."));
-        app.api_messages = vec![Message {
+        app.api_messages = std::sync::Arc::new(vec![Message {
             role: codewhale_models::Role::User,
             content: vec![ContentBlock::Text {
                 text: "context ".repeat(400),
                 cache_control: None,
             }],
-        }];
+        }]);
         let (used, _, _) =
             super::context_usage_snapshot(&app).expect("a conversation has a context reading");
         let window = (used as f64 * 100.0 / f64::from(pct)).round().max(1.0);

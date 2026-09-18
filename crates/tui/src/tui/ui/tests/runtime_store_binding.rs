@@ -508,7 +508,7 @@ async fn picker_recovers_missing_store_into_the_idle_host_and_persists_before_re
     let binding = tasks.session_store_binding().expect("current host");
     app.runtime_services.task_manager = Some(tasks.clone());
     app.current_session_id = Some("picker-current".into());
-    app.api_messages
+    app.api_messages_mut()
         .push(text_message("user", "current conversation"));
     let current_messages = app.api_messages.clone();
     let plan_state = app.plan_state.clone();

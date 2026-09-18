@@ -36,7 +36,7 @@ fn missing_api_stamps_never_drop_messages_or_shift_preserved_times() {
     let third = first + chrono::Duration::minutes(2);
     // Reproduce partial legacy/test state without going through restoration,
     // which already fills missing stamps. Reading it must preserve both rows.
-    app.api_messages = vec![message("first"), message("unstamped")];
+    app.api_messages = std::sync::Arc::new(vec![message("first"), message("unstamped")]);
     app.api_message_stamps = vec![first];
     let observed = app.api_messages_stamped().collect::<Vec<_>>();
     assert_eq!(observed.len(), 2);
@@ -53,6 +53,27 @@ fn missing_api_stamps_never_drop_messages_or_shift_preserved_times() {
     app.truncate_api_messages(1);
     assert_eq!(app.api_messages.len(), 1);
     assert_eq!(app.api_message_stamps, vec![first]);
+}
+
+#[test]
+fn set_api_messages_installs_the_shared_snapshot_without_copying() {
+    let mut app = App::new(test_options(false), &Config::default());
+    let snapshot = Arc::new(vec![Message {
+        role: codewhale_models::Role::User,
+        content: vec![codewhale_models::ContentBlock::Text {
+            text: "hello".to_string(),
+            cache_control: None,
+        }],
+    }]);
+    app.set_api_messages(Arc::clone(&snapshot));
+    assert!(Arc::ptr_eq(&app.api_messages, &snapshot));
+    // Mutating the mirror detaches; the engine snapshot is untouched.
+    app.push_api_message(Message {
+        role: codewhale_models::Role::Assistant,
+        content: vec![],
+    });
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(app.api_messages.len(), 2);
 }
 
 #[test]

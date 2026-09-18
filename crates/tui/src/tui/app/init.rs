@@ -784,7 +784,7 @@ impl App {
             history_revisions: Vec::new(),
             tool_run_cache: ToolRunCache::default(),
             next_history_revision: 1,
-            api_messages: Vec::new(),
+            api_messages: Arc::new(Vec::new()),
             api_message_stamps: Vec::new(),
             completed_assistant_outputs: Vec::new(),
             context_token_cache: std::cell::RefCell::new(Default::default()),

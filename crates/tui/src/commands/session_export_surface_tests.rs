@@ -283,10 +283,10 @@ fn public_dispatch_canonical_name_and_alias_are_byte_equivalent() {
     let last_copy = harness.last_copy_path();
     let app = &mut harness.app;
     app.current_session_id = Some("session-987654321".to_string());
-    app.api_messages = vec![
+    app.api_messages = std::sync::Arc::new(vec![
         text_message(Role::User, "Please export this conversation"),
         text_message(Role::Assistant, "Exported on request."),
-    ];
+    ]);
     app.clipboard = ClipboardHandler::for_test(false, false);
 
     let canonical = execute("/export clipboard", app);
@@ -337,7 +337,7 @@ fn public_dispatch_file_receipts_and_usage_errors_are_exact() {
     std::fs::create_dir_all(&workspace).expect("workspace");
     let app = &mut harness.app;
     app.workspace = workspace.clone();
-    app.api_messages = vec![text_message(Role::User, "file export body")];
+    app.api_messages = std::sync::Arc::new(vec![text_message(Role::User, "file export body")]);
 
     let resolved = std::fs::canonicalize(&workspace)
         .expect("canonical workspace")

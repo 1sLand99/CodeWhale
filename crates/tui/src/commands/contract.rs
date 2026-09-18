@@ -568,7 +568,7 @@ impl CommandSessionLifecycleContext for SessionLifecycleAdapter<'_> {
             fork_label,
             sync: SessionSyncPayload {
                 session_id: Some(fork_id),
-                messages: app.api_messages.clone(),
+                messages: app.api_messages.as_ref().clone(),
                 system_prompt: app.system_prompt.clone(),
                 model: app.model.clone(),
                 workspace: app.workspace.clone(),
@@ -1796,7 +1796,7 @@ impl CommandSessionContext for SessionAdapter<'_> {
     }
 
     fn api_messages(&self) -> Vec<Message> {
-        self.host.app.borrow().api_messages.clone()
+        self.host.app.borrow().api_messages.as_ref().clone()
     }
 
     fn add_message(&mut self, message: Message) {
@@ -5017,7 +5017,7 @@ mod tests {
         app.session.total_conversation_tokens = 2_000;
         app.goal_continuation_waiting = true;
         app.is_loading = false;
-        app.api_messages.push(codewhale_models::Message {
+        app.api_messages_mut().push(codewhale_models::Message {
             role: codewhale_models::Role::User,
             content: vec![codewhale_models::ContentBlock::Text {
                 text: "work".to_string(),
@@ -5927,7 +5927,7 @@ mod tests {
         let mut app = lifecycle_test_app(&tmpdir);
         app.is_loading = true;
         app.current_session_id = Some("active-session".to_string());
-        app.api_messages.push(user_message("in flight"));
+        app.api_messages_mut().push(user_message("in flight"));
 
         for (command, expected) in [
             ("/fork", "Cannot fork a session"),
@@ -5957,7 +5957,8 @@ mod tests {
         let _lock = crate::test_support::lock_test_env();
         let _home = lifecycle_home_guard(&tmpdir);
         let mut app = lifecycle_test_app(&tmpdir);
-        app.api_messages.push(user_message("try another path"));
+        app.api_messages_mut()
+            .push(user_message("try another path"));
 
         let save_path = tmpdir.path().join("parent.json");
         {
@@ -6009,7 +6010,7 @@ mod tests {
         let _lock = crate::test_support::lock_test_env();
         let _home = lifecycle_home_guard(&tmpdir);
         let mut app = lifecycle_test_app(&tmpdir);
-        app.api_messages.push(user_message("parent turn"));
+        app.api_messages_mut().push(user_message("parent turn"));
         {
             let mut bundle = app.command_contexts();
             let mut parts = bundle.parts();
@@ -6059,7 +6060,7 @@ mod tests {
         let _home = lifecycle_home_guard(&tmpdir);
         let mut app = lifecycle_test_app(&tmpdir);
         app.current_session_id = Some("current-session".to_string());
-        app.api_messages.push(user_message("work"));
+        app.api_messages_mut().push(user_message("work"));
         let todos = app.todos.clone();
         let _held = todos.try_lock().expect("hold todos lock");
 
@@ -6110,7 +6111,7 @@ mod tests {
         let _lock = crate::test_support::lock_test_env();
         let _home = lifecycle_home_guard(&tmpdir);
         let mut app = lifecycle_test_app(&tmpdir);
-        app.api_messages.push(user_message("checkpoint"));
+        app.api_messages_mut().push(user_message("checkpoint"));
         let save_path = tmpdir.path().join("checkpoint.json");
         {
             let mut bundle = app.command_contexts();
@@ -6229,7 +6230,7 @@ mod tests {
         let mut linear_app = lifecycle_test_app(&tmpdir);
         linear_app.current_session_id = Some("linear-session".to_string());
         linear_app
-            .api_messages
+            .api_messages_mut()
             .push(user_message("first message with a long tail"));
         {
             let mut bundle = linear_app.command_contexts();
@@ -6247,7 +6248,7 @@ mod tests {
         // Journal projection once the session is saved with messages.
         let mut journal_app = lifecycle_test_app(&tmpdir);
         journal_app
-            .api_messages
+            .api_messages_mut()
             .push(user_message("journaled turn"));
         {
             let mut bundle = journal_app.command_contexts();
@@ -6484,7 +6485,7 @@ mod tests {
 
         let mut app = control_test_app(&tmpdir);
         app.current_session_id = Some("midturn-1".to_string());
-        app.api_messages = vec![user_message("first turn still streaming")];
+        app.api_messages = std::sync::Arc::new(vec![user_message("first turn still streaming")]);
 
         let receipt = {
             let mut bundle = app.command_contexts();

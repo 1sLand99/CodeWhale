@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -1498,7 +1499,11 @@ pub struct App {
     pub(crate) tool_run_cache: ToolRunCache,
     /// Monotonic counter used to issue fresh per-cell revisions.
     pub next_history_revision: u64,
-    pub api_messages: Vec<Message>,
+    /// Engine transcript mirror, shared rather than copied per event
+    /// (#6214 T2). Reads dereference to the `Vec`; mutations go through
+    /// [`App::api_messages_mut`] and copy-on-write only while an engine
+    /// snapshot is outstanding.
+    pub api_messages: Arc<Vec<Message>>,
     /// When each `api_messages` entry landed, index-aligned. The persisted
     /// journal's `created_at` reads from these stamps, so a save rewrites
     /// neither an entry's content nor its time — appends during a turn stay
@@ -4827,13 +4832,20 @@ impl App {
         self.collapsed_cell_map.clear();
     }
 
+    /// Mutable access to the shared transcript mirror. Copy-on-write: an
+    /// exclusive `Arc` mutates in place, a shared one detaches first, so an
+    /// outstanding engine snapshot can never observe the mutation.
+    pub fn api_messages_mut(&mut self) -> &mut Vec<Message> {
+        Arc::make_mut(&mut self.api_messages)
+    }
+
     /// Append a message and stamp when it landed — the persisted journal's
     /// `created_at` reads this stamp, so an entry's time is append time, not
     /// save time.
     pub fn push_api_message(&mut self, message: Message) {
         self.api_message_stamps
             .resize_with(self.api_messages.len(), Utc::now);
-        self.api_messages.push(message);
+        self.api_messages_mut().push(message);
         self.api_message_stamps.push(Utc::now());
     }
 
@@ -4841,8 +4853,9 @@ impl App {
     /// unchanged prefix keeps the stamps it already earned — the engine
     /// mirrors the same messages back in the same order — and only entries
     /// that are new or were rewritten (compaction) are stamped now, which
-    /// lands within a turn-event of the real append.
-    pub fn set_api_messages(&mut self, messages: Vec<Message>) {
+    /// lands within a turn-event of the real append. The shared snapshot is
+    /// installed without copying.
+    pub fn set_api_messages(&mut self, messages: Arc<Vec<Message>>) {
         let keep = self
             .api_messages
             .iter()
@@ -4865,7 +4878,7 @@ impl App {
         self.api_message_stamps.extend_from_slice(stamps);
         self.api_message_stamps
             .resize_with(messages.len(), Utc::now);
-        self.api_messages = messages;
+        self.api_messages = Arc::new(messages);
     }
 
     /// Append a message with the stamp it earned earlier — used when an
@@ -4874,7 +4887,7 @@ impl App {
     pub fn push_api_message_stamped(&mut self, message: Message, stamp: DateTime<Utc>) {
         self.api_message_stamps
             .resize_with(self.api_messages.len(), Utc::now);
-        self.api_messages.push(message);
+        self.api_messages_mut().push(message);
         self.api_message_stamps.push(stamp);
     }
 
@@ -4882,7 +4895,7 @@ impl App {
         self.api_message_stamps
             .resize_with(self.api_messages.len(), Utc::now);
         self.api_message_stamps.pop();
-        self.api_messages.pop()
+        self.api_messages_mut().pop()
     }
 
     /// `created_at` of each `api_messages` entry, paired positionally.
@@ -4898,13 +4911,13 @@ impl App {
     }
 
     pub fn truncate_api_messages(&mut self, new_len: usize) {
-        self.api_messages.truncate(new_len);
+        self.api_messages_mut().truncate(new_len);
         self.api_message_stamps
             .resize_with(self.api_messages.len(), Utc::now);
     }
 
     pub fn clear_api_messages(&mut self) {
-        self.api_messages.clear();
+        self.api_messages_mut().clear();
         self.api_message_stamps.clear();
     }
 

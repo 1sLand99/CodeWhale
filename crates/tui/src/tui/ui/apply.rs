@@ -1205,7 +1205,7 @@ pub(crate) async fn apply_provider_fallback_switch(
         let _ = engine_handle
             .send(Op::SyncSession {
                 session_id: app.current_session_id.clone(),
-                messages: app.api_messages.clone(),
+                messages: app.api_messages.as_ref().clone(),
                 system_prompt: app.system_prompt.clone(),
                 system_prompt_override: false,
                 model: app.model.clone(),
@@ -1394,7 +1394,7 @@ pub(crate) async fn apply_command_result(
                 let _ = engine_handle
                     .send(Op::SyncSession {
                         session_id: app.current_session_id.clone(),
-                        messages: app.api_messages.clone(),
+                        messages: app.api_messages.as_ref().clone(),
                         system_prompt: app.system_prompt.clone(),
                         system_prompt_override: false,
                         model: app.model.clone(),
@@ -1565,7 +1565,7 @@ pub(crate) async fn apply_command_result(
                     let _ = engine_handle
                         .send(Op::SyncSession {
                             session_id: app.current_session_id.clone(),
-                            messages: app.api_messages.clone(),
+                            messages: app.api_messages.as_ref().clone(),
                             system_prompt: app.system_prompt.clone(),
                             system_prompt_override: false,
                             model: app.model.clone(),
@@ -2464,7 +2464,7 @@ pub(crate) async fn apply_command_result(
                             let _ = engine_handle
                                 .send(Op::SyncSession {
                                     session_id: app.current_session_id.clone(),
-                                    messages: app.api_messages.clone(),
+                                    messages: app.api_messages.as_ref().clone(),
                                     system_prompt: app.system_prompt.clone(),
                                     system_prompt_override: false,
                                     model: app.model.clone(),

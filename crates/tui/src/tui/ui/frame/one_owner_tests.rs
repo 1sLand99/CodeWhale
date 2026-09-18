@@ -826,13 +826,13 @@ fn statusline_full_frame_context_reading_updates_below_and_at_warning() {
             content: "Keep the context reading visible".to_string(),
         }];
         app.resync_history_revisions();
-        app.api_messages = vec![Message {
+        app.api_messages = std::sync::Arc::new(vec![Message {
             role: Role::User,
             content: vec![ContentBlock::Text {
                 text: "context ".repeat(400),
                 cache_control: None,
             }],
-        }];
+        }]);
         app.input = "next".to_string();
         app.cursor_position = app.input.chars().count();
         app.status_items = StatusItem::default_footer();

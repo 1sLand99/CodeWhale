@@ -106,7 +106,7 @@ fn text_message(role: Role, text: &str) -> Message {
 fn adapter_projects_authoritative_metadata_and_omits_hidden_payloads() {
     let mut harness = ExportHarness::new();
     harness.app.current_session_id = Some("session-123456789".to_string());
-    harness.app.api_messages = vec![
+    harness.app.api_messages = std::sync::Arc::new(vec![
         text_message(Role::System, "hidden policy must never export"),
         text_message(Role::User, "please inspect\nthe output"),
         Message {
@@ -139,7 +139,7 @@ fn adapter_projects_authoritative_metadata_and_omits_hidden_payloads() {
                 },
             ],
         },
-    ];
+    ]);
 
     let projection = conversation_projection(&mut harness.app);
 
@@ -203,7 +203,7 @@ fn adapter_projects_authoritative_metadata_and_omits_hidden_payloads() {
 #[test]
 fn adapter_projects_visible_history_fallback_with_baseline_markers() {
     let mut harness = ExportHarness::new();
-    harness.app.api_messages.clear();
+    harness.app.api_messages_mut().clear();
     harness.app.history = vec![
         HistoryCell::User {
             content: "user text".to_string(),
@@ -346,7 +346,7 @@ fn adapter_projects_user_identity_from_the_role_enum_not_the_string() {
     // the rendered role string would lose that distinction, because
     // `Role::Unrecognized("user")` renders as "user" but is not `Role::User`.
     let mut harness = ExportHarness::new();
-    harness.app.api_messages = vec![
+    harness.app.api_messages = std::sync::Arc::new(vec![
         Message {
             role: Role::Unrecognized("user".to_string()),
             content: vec![ContentBlock::Text {
@@ -355,7 +355,7 @@ fn adapter_projects_user_identity_from_the_role_enum_not_the_string() {
             }],
         },
         text_message(Role::User, "actually a user turn"),
-    ];
+    ]);
 
     let projection = conversation_projection(&mut harness.app);
     let TranscriptProjection::Authoritative(messages) = &projection.transcript else {
@@ -771,7 +771,7 @@ fn command_clipboard_export_matches_baseline_conversation_golden() {
     harness.app.workspace = PathBuf::from(BASELINE_WORKSPACE);
     harness.app.current_session_id = Some(BASELINE_SESSION.to_string());
     harness.app.clipboard = ClipboardHandler::for_test(false, false);
-    harness.app.api_messages = baseline_golden_messages();
+    harness.app.api_messages = std::sync::Arc::new(baseline_golden_messages());
 
     let result = dispatch(&mut harness.app, None);
     assert!(!result.is_error, "{:?}", result.message);
@@ -904,11 +904,11 @@ fn command_correlation_export_matches_baseline_recorded_golden() {
     harness.app.workspace = workspace;
     harness.app.current_session_id = Some("session-correlated".to_string());
     harness.app.clipboard = ClipboardHandler::for_test(false, false);
-    harness.app.api_messages = vec![
+    harness.app.api_messages = std::sync::Arc::new(vec![
         text_message(Role::User, "Fix the login test"),
         text_message(Role::Assistant, "Working on it."),
         text_message(Role::User, "unrelated question"),
-    ];
+    ]);
 
     let result = dispatch(&mut harness.app, None);
     assert!(!result.is_error, "{:?}", result.message);
@@ -964,7 +964,7 @@ fn command_clipboard_export_preserves_structure_and_redacts_secrets() {
     let mut harness = ExportHarness::new();
     let app = &mut harness.app;
     app.current_session_id = Some("session-123456789".to_string());
-    app.api_messages = vec![
+    app.api_messages = std::sync::Arc::new(vec![
         Message {
             role: Role::System,
             content: vec![ContentBlock::Text {
@@ -1023,7 +1023,7 @@ fn command_clipboard_export_preserves_structure_and_redacts_secrets() {
                 },
             }],
         },
-    ];
+    ]);
     {
         let mut todos = app.todos.try_lock().expect("todos lock");
         todos.add(
@@ -1136,7 +1136,7 @@ fn command_file_export_is_workspace_relative_private_and_no_overwrite_by_default
     std::fs::create_dir_all(&workspace).expect("workspace");
     let app = &mut harness.app;
     app.workspace = workspace.clone();
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
             text: "first export".to_string(),
@@ -1160,7 +1160,7 @@ fn command_file_export_is_workspace_relative_private_and_no_overwrite_by_default
         );
     }
 
-    app.api_messages[0].content = vec![ContentBlock::Text {
+    app.api_messages_mut()[0].content = vec![ContentBlock::Text {
         text: "replacement export".to_string(),
         cache_control: None,
     }];

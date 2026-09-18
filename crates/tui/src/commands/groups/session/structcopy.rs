@@ -343,7 +343,7 @@ fn block_payload(block: &ContentBlock) -> Value {
 fn tool_payload(app: &App, call_id: &str) -> Result<(&'static str, Value, Value), String> {
     let mut found_call: Option<(String, Value)> = None;
     let mut found_result: Option<(Option<bool>, String, Option<Vec<Value>>)> = None;
-    for message in &app.api_messages {
+    for message in app.api_messages.iter() {
         for block in &message.content {
             match block {
                 ContentBlock::ToolUse {
@@ -1275,7 +1275,7 @@ mod tests {
     }
 
     fn seed_transcript(app: &mut App) {
-        app.api_messages = vec![
+        app.api_messages = std::sync::Arc::new(vec![
             Message {
                 role: Role::User,
                 content: vec![ContentBlock::Text {
@@ -1315,7 +1315,7 @@ mod tests {
                     content_blocks: None,
                 }],
             },
-        ];
+        ]);
     }
 
     #[test]
@@ -1369,7 +1369,7 @@ mod tests {
     fn generated_omissions_are_language_neutral_codes() {
         let tmpdir = TempDir::new().expect("tempdir");
         let mut app = test_app(&tmpdir);
-        app.api_messages = vec![
+        app.api_messages = std::sync::Arc::new(vec![
             Message {
                 role: Role::System,
                 content: vec![ContentBlock::Text {
@@ -1385,7 +1385,7 @@ mod tests {
                     },
                 }],
             },
-        ];
+        ]);
 
         let internal = parsed(&stdout_json(&execute_structcopy(
             &mut app,
@@ -1432,13 +1432,15 @@ mod tests {
         assert!(!json.contains("result-secret-token"), "{json}");
 
         // A call without a result is honest, not fabricated.
-        app.api_messages[1].content.push(ContentBlock::ToolUse {
-            id: "call-lonely".to_string(),
-            name: "view_image".to_string(),
-            input: json!({}),
-            caller: None,
-            thought_signature: None,
-        });
+        app.api_messages_mut()[1]
+            .content
+            .push(ContentBlock::ToolUse {
+                id: "call-lonely".to_string(),
+                name: "view_image".to_string(),
+                input: json!({}),
+                caller: None,
+                thought_signature: None,
+            });
         let json = stdout_json(&execute_structcopy(
             &mut app,
             Some("tool call-lonely stdout"),
@@ -1457,7 +1459,7 @@ mod tests {
 
         let tmpdir = TempDir::new().expect("tempdir");
         let mut app = test_app(&tmpdir);
-        app.api_messages = vec![
+        app.api_messages = std::sync::Arc::new(vec![
             Message {
                 role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
@@ -1478,7 +1480,7 @@ mod tests {
                     content_blocks: None,
                 }],
             },
-        ];
+        ]);
 
         // Tool-pair projection.
         let json = stdout_json(&execute_structcopy(
@@ -1750,13 +1752,15 @@ mod tests {
 
         // Receipt path: a long but *available* selector is bounded too.
         let long_id = format!("call-{}", "z".repeat(4096));
-        app.api_messages[1].content.push(ContentBlock::ToolUse {
-            id: long_id.clone(),
-            name: "exec_command".to_string(),
-            input: json!({}),
-            caller: None,
-            thought_signature: None,
-        });
+        app.api_messages_mut()[1]
+            .content
+            .push(ContentBlock::ToolUse {
+                id: long_id.clone(),
+                name: "exec_command".to_string(),
+                input: json!({}),
+                caller: None,
+                thought_signature: None,
+            });
         let json = stdout_json(&execute_structcopy(
             &mut app,
             Some(&format!("tool {long_id} stdout")),
@@ -1776,13 +1780,15 @@ mod tests {
             "call-Bearer-abcdef1234567890",
             "call-Bearer=zyxwvutsrqponmlk",
         ] {
-            app.api_messages[1].content.push(ContentBlock::ToolUse {
-                id: bearer_id.to_string(),
-                name: "exec_command".to_string(),
-                input: json!({}),
-                caller: None,
-                thought_signature: None,
-            });
+            app.api_messages_mut()[1]
+                .content
+                .push(ContentBlock::ToolUse {
+                    id: bearer_id.to_string(),
+                    name: "exec_command".to_string(),
+                    input: json!({}),
+                    caller: None,
+                    thought_signature: None,
+                });
             let json = stdout_json(&execute_structcopy(
                 &mut app,
                 Some(&format!("tool {bearer_id} stdout")),
@@ -1814,7 +1820,7 @@ mod tests {
             "\u{1b}[31mansi\u{1b}[0m\nkey": 4,
             format!("at {workspace}/src"): 5,
         });
-        app.api_messages = vec![Message {
+        app.api_messages = std::sync::Arc::new(vec![Message {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
                 id: "call-keys".to_string(),
@@ -1823,7 +1829,7 @@ mod tests {
                 caller: None,
                 thought_signature: None,
             }],
-        }];
+        }]);
 
         let first = stdout_json(&execute_structcopy(&mut app, Some("tool call-keys stdout")));
         let second = stdout_json(&execute_structcopy(&mut app, Some("tool call-keys stdout")));
@@ -1883,7 +1889,7 @@ mod tests {
     fn sensitive_keys_are_classified_after_control_and_ansi_normalization() {
         let tmpdir = TempDir::new().expect("tempdir");
         let mut app = test_app(&tmpdir);
-        app.api_messages = vec![Message {
+        app.api_messages = std::sync::Arc::new(vec![Message {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
                 id: "call-obfuscated-keys".to_string(),
@@ -1895,7 +1901,7 @@ mod tests {
                 caller: None,
                 thought_signature: None,
             }],
-        }];
+        }]);
 
         let json = stdout_json(&execute_structcopy(
             &mut app,
@@ -1952,7 +1958,7 @@ mod tests {
         let mut app = test_app(&tmpdir);
         let exact = "x".repeat(MAX_KEY_BYTES);
         let same_after_flatten = format!("{exact}\n");
-        app.api_messages = vec![Message {
+        app.api_messages = std::sync::Arc::new(vec![Message {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
                 id: "call-reserve".to_string(),
@@ -1961,7 +1967,7 @@ mod tests {
                 caller: None,
                 thought_signature: None,
             }],
-        }];
+        }]);
 
         let json = stdout_json(&execute_structcopy(
             &mut app,
@@ -2034,7 +2040,7 @@ mod tests {
         let tmpdir = TempDir::new().expect("tempdir");
         let mut app = test_app(&tmpdir);
         let workspace = tmpdir.path().to_string_lossy().into_owned();
-        app.api_messages = vec![Message {
+        app.api_messages = std::sync::Arc::new(vec![Message {
             role: Role::User,
             content: vec![ContentBlock::Text {
                 text: format!(
@@ -2046,7 +2052,7 @@ mod tests {
                 ),
                 cache_control: None,
             }],
-        }];
+        }]);
 
         let json = stdout_json(&execute_structcopy(&mut app, Some("turn 1 stdout")));
         for forbidden in [
@@ -2264,7 +2270,7 @@ mod tests {
         let tmpdir = TempDir::new().expect("tempdir");
         let mut app = test_app(&tmpdir);
         let call_id = "call=/opt/customer/private-id";
-        app.api_messages = vec![Message {
+        app.api_messages = std::sync::Arc::new(vec![Message {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
                 id: call_id.to_string(),
@@ -2276,7 +2282,7 @@ mod tests {
                 caller: None,
                 thought_signature: None,
             }],
-        }];
+        }]);
 
         let json = stdout_json(&execute_structcopy(
             &mut app,
@@ -2299,13 +2305,13 @@ mod tests {
     fn string_bytes_cap_truncates_grapheme_safely() {
         let tmpdir = TempDir::new().expect("tempdir");
         let mut app = test_app(&tmpdir);
-        app.api_messages = vec![Message {
+        app.api_messages = std::sync::Arc::new(vec![Message {
             role: Role::User,
             content: vec![ContentBlock::Text {
                 text: "emoji cluster test: 👨‍👩‍👧‍👦🏳️‍🌈 repeated many times over".repeat(20),
                 cache_control: None,
             }],
-        }];
+        }]);
         let caps = Caps {
             max_string_bytes: 40,
             ..DEFAULT_CAPS
@@ -2368,13 +2374,13 @@ mod tests {
         // receipt still reports the truncation.
         let tmpdir = TempDir::new().expect("tempdir");
         let mut app = test_app(&tmpdir);
-        app.api_messages = vec![Message {
+        app.api_messages = std::sync::Arc::new(vec![Message {
             role: Role::User,
             content: vec![ContentBlock::Text {
                 text: "a longer body that cannot fit".to_string(),
                 cache_control: None,
             }],
-        }];
+        }]);
         let caps = Caps {
             max_string_bytes: 1,
             ..DEFAULT_CAPS
@@ -2425,7 +2431,7 @@ mod tests {
     fn depth_cap_omits_deep_subtrees() {
         let tmpdir = TempDir::new().expect("tempdir");
         let mut app = test_app(&tmpdir);
-        app.api_messages = vec![Message {
+        app.api_messages = std::sync::Arc::new(vec![Message {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
                 id: "call-deep".to_string(),
@@ -2434,7 +2440,7 @@ mod tests {
                 caller: None,
                 thought_signature: None,
             }],
-        }];
+        }]);
         let caps = Caps {
             max_depth: 3,
             ..DEFAULT_CAPS
@@ -2465,7 +2471,7 @@ mod tests {
         let mut app = test_app(&tmpdir);
         // Two strings and two array items live below the depth cut, plus one
         // string and one array item above it.
-        app.api_messages = vec![Message {
+        app.api_messages = std::sync::Arc::new(vec![Message {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
                 id: "call-counts".to_string(),
@@ -2477,7 +2483,7 @@ mod tests {
                 caller: None,
                 thought_signature: None,
             }],
-        }];
+        }]);
         let caps = Caps {
             max_depth: 3,
             ..DEFAULT_CAPS
@@ -2537,7 +2543,7 @@ mod tests {
         let mut app = test_app(&tmpdir);
         let long_a = format!("{}A", "private-key-name-".repeat(32));
         let long_b = format!("{}B", "private-key-name-".repeat(32));
-        app.api_messages = vec![Message {
+        app.api_messages = std::sync::Arc::new(vec![Message {
             role: Role::Assistant,
             content: vec![ContentBlock::ToolUse {
                 id: "call-deep-keys".to_string(),
@@ -2546,7 +2552,7 @@ mod tests {
                 caller: None,
                 thought_signature: None,
             }],
-        }];
+        }]);
         let caps = Caps {
             max_depth: 3,
             ..DEFAULT_CAPS

@@ -3430,7 +3430,7 @@ impl Engine {
             .tx_event
             .send(Event::SessionUpdated {
                 session_id: self.session.id.clone(),
-                messages: self.session.messages.clone().into(),
+                messages: self.session.messages.snapshot(),
                 system_prompt: self.session.system_prompt.clone(),
                 model: self.session.model.clone(),
                 workspace: self.session.workspace.clone(),
