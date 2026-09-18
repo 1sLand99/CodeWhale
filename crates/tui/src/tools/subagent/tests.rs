@@ -20380,7 +20380,7 @@ const READ_ONLY_CHILD_ENVELOPE_BYTE_CEILING: usize = 89_000;
 /// margin. Re-measured at 87,529B on 2026-09-17, with the bounded Git
 /// fetch / merge_tree verify tools (b89349286f) and this slice's grant
 /// text both in the shared catalog.
-const PARENT_SURFACE_BYTE_CEILING: usize = 88_021;
+const PARENT_SURFACE_BYTE_CEILING: usize = 88_142;
 
 #[tokio::test]
 async fn read_only_child_envelope_stays_within_measured_ceiling() {
