@@ -7260,12 +7260,13 @@ impl RuntimeThreadManager {
                 turn.status,
                 RuntimeTurnStatus::Queued | RuntimeTurnStatus::InProgress
             ) {
-                active_by_thread.entry(turn.thread_id.clone()).or_default().push(
-                    ActiveTurn {
+                active_by_thread
+                    .entry(turn.thread_id.clone())
+                    .or_default()
+                    .push(ActiveTurn {
                         turn_id: turn.id.clone(),
                         status: turn.status,
-                    },
-                );
+                    });
             }
         }
         if active_by_thread.is_empty() {
