@@ -9480,6 +9480,10 @@ impl ToolSpec for AgentTool {
                     "type": "boolean",
                     "description": "When true, create a fresh git worktree and branch for this child before it starts. Use for parallel edit tasks that must not collide with the parent checkout."
                 },
+                "cwd": {
+                    "type": "string",
+                    "description": "Working directory for this child. With worktree=true it becomes the worktree root; otherwise the child's workspace. Pass it when the parent directory holds several checkouts and the spawn names no single repository."
+                },
                 "write_roots": {
                     "type": "array",
                     "items": { "type": "string" },

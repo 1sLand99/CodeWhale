@@ -5694,6 +5694,7 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
         "all_parked",
         "allowed_tools",
         "coordination_contracts",
+        "cwd",
         "deliverables",
         "detail",
         "detached",
@@ -5731,7 +5732,8 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
         "worktree_base",
         "worktree_branch",
         "worktree_path",
-        "cwd",
+        // "cwd" deliberately advertised since #6314: the multi-checkout
+        // refusal names it as the remedy, so the schema must teach it.
         "deliberate",
         "dependencies",
         "acceptance",
@@ -5786,6 +5788,15 @@ fn agent_start_schema_documents_hidden_spawn_requirements() {
         model.contains("resolved route"),
         "model description should point at per-role resolved routes: {model}"
     );
+    // #6314: the multi-checkout refusal tells the caller to specify cwd,
+    // so the schema must advertise it before the first failure.
+    let cwd = schema_property_description(&schema, "cwd");
+    for needle in ["worktree", "several checkouts"] {
+        assert!(
+            cwd.contains(needle),
+            "cwd description should teach {needle:?}: {cwd}"
+        );
+    }
 }
 
 #[test]
