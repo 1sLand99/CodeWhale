@@ -2281,8 +2281,7 @@ pub async fn verify_provider_api_key(
         if matches!(
             provider,
             ApiProvider::Telecomjs | ApiProvider::Edenai | ApiProvider::Zenmux
-        )
-            && serde_json::from_str::<ModelsPage<'_>>(&body).is_ok_and(|page| !page.has_more)
+        ) && serde_json::from_str::<ModelsPage<'_>>(&body).is_ok_and(|page| !page.has_more)
             && let Some(kind) = provider.kind()
             && let Ok(offerings) = named_gateway_catalog_offerings_from_body(
                 &body,

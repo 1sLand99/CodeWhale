@@ -2303,7 +2303,10 @@ fn provider_catalog_receipt_for_route(
     // account-scoped roster no snapshot can serve (#6289).
     let owns_provider_catalog = matches!(
         provider,
-        ApiProvider::Openrouter | ApiProvider::Telecomjs | ApiProvider::Edenai | ApiProvider::Zenmux
+        ApiProvider::Openrouter
+            | ApiProvider::Telecomjs
+            | ApiProvider::Edenai
+            | ApiProvider::Zenmux
     ) || (provider == ApiProvider::Custom
         && codewhale_config::catalog::endpoint_is_baseten(
             &config.base_url_for_route_identity(provider, identity),
