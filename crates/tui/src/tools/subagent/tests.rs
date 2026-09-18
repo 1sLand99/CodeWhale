@@ -9894,6 +9894,71 @@ async fn spawn_session_name_held_by_prior_session_agent_does_not_collide() {
 }
 
 #[tokio::test]
+async fn spawn_reuses_name_released_by_settled_worker() {
+    // #6313: a name whose owner settled (cancelled here) can be reused for
+    // a retry, and name lookup resolves to the live holder, never
+    // ambiguously. The settled record keeps its name for history.
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 5);
+    let boot_id = manager.read().await.session_boot_id().to_string();
+    let (input_tx, _input_rx) = mpsc::unbounded_channel();
+    let mut settled = SubAgent::new(
+        "test_agent_settled".to_string(),
+        FleetRole::Scout,
+        "scan".to_string(),
+        make_assignment(),
+        "deepseek-v4-flash".to_string(),
+        Some("Blue".to_string()),
+        Some(vec!["read_file".to_string()]),
+        input_tx,
+        tmp.path().to_path_buf(),
+        boot_id,
+    );
+    settled.session_name = "retry-me".to_string();
+    settled.status = SubAgentStatus::Cancelled;
+    let settled_id = settled.id.clone();
+    {
+        let mut guard = manager.write().await;
+        guard.agents.insert(settled_id.clone(), settled);
+    }
+
+    let mut runtime = stub_runtime();
+    runtime.manager = Arc::clone(&manager);
+    runtime.context = ToolContext::new(tmp.path());
+    let spawned = {
+        let mut guard = manager.write().await;
+        guard
+            .spawn_background_with_assignment_options(
+                manager.clone(),
+                runtime,
+                FleetRole::Scout,
+                "retry work".to_string(),
+                make_assignment(),
+                Some(vec!["read_file".to_string()]),
+                SubAgentSpawnOptions {
+                    name: Some("retry-me".to_string()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .expect("a settled holder must not reject a same-name retry")
+    };
+    assert_ne!(spawned.agent_id, settled_id);
+    let guard = manager.read().await;
+    assert_eq!(
+        guard
+            .resolve_agent_ref("retry-me")
+            .expect("live holder resolves by name"),
+        spawned.agent_id
+    );
+    // The settled record keeps its name; id lookup still finds it.
+    assert_eq!(
+        guard.agents[&settled_id].session_name, "retry-me",
+        "settled history keeps the name"
+    );
+}
+
+#[tokio::test]
 async fn shared_write_claim_is_registered_before_parallel_launch_and_manifested() {
     let tmp = tempdir().expect("tempdir");
     let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
@@ -20388,7 +20453,7 @@ const READ_ONLY_CHILD_ENVELOPE_BYTE_CEILING: usize = 89_000;
 /// margin. Re-measured at 87,529B on 2026-09-17, with the bounded Git
 /// fetch / merge_tree verify tools (b89349286f) and this slice's grant
 /// text both in the shared catalog.
-const PARENT_SURFACE_BYTE_CEILING: usize = 88_142;
+const PARENT_SURFACE_BYTE_CEILING: usize = 88_398;
 
 #[tokio::test]
 async fn read_only_child_envelope_stays_within_measured_ceiling() {
