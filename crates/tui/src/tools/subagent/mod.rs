@@ -300,6 +300,36 @@ fn resolve_max_steps(role: FleetRole, explicit: Option<u32>, configured: Option<
     .min(MAX_SUBAGENT_STEPS)
 }
 
+/// Per-step billed-input guardrail for child runs (#6194 item 7). A long
+/// child re-sends its whole context every step, so cost grows
+/// quadratically; landing when one step's input passes this bound caps the
+/// tail instead of burning to wall/token death. This is deliberately not a
+/// cumulative cap — #6189 settled that token accounting never stops a run.
+/// Half the route's effective window tightens it for small-window models.
+const MAX_CHILD_STEP_INPUT_TOKENS: u64 = 100_000;
+
+fn child_step_input_bound(context_window: Option<u64>) -> u64 {
+    let half_window = context_window
+        .map(|window| window / 2)
+        .filter(|half| *half > 0);
+    half_window
+        .map(|half| half.min(MAX_CHILD_STEP_INPUT_TOKENS))
+        .unwrap_or(MAX_CHILD_STEP_INPUT_TOKENS)
+}
+
+/// Trip reason when one step's billed input passes the bound, or `None`
+/// while the step is affordable. Pure so the boundary is unit-tested
+/// without driving the run loop.
+fn child_context_trip(step_input_tokens: u64, bound: u64) -> Option<String> {
+    if step_input_tokens > bound {
+        Some(format!(
+            "child context budget exhausted: step billed {step_input_tokens} input tokens, over the {bound} per-step bound; landing with a hand-back report instead of growing quadratically. Narrow the task so turns stay focused."
+        ))
+    } else {
+        None
+    }
+}
+
 fn child_wall_time_exhausted_reason(limit: Duration) -> String {
     format!(
         "child wall-time budget exhausted (limit: {}s); partial work is preserved; narrow the task or have the operator raise the inherited limit",
@@ -319,6 +349,7 @@ fn child_runtime_budget_context(
     runtime: &SubAgentRuntime,
     max_steps: u32,
     work_max_steps: u32,
+    step_input_bound: u64,
 ) -> String {
     let wall = match runtime.worker_profile.wall_deadline_ms {
         Some(deadline_ms) => {
@@ -344,7 +375,7 @@ fn child_runtime_budget_context(
         format!("{max_steps} model turns")
     };
     format!(
-        "Runtime budget (host-enforced; you cannot raise it):\n- wall clock: {wall}.\n- model steps: {steps}.\nThere is no token cap; manage context with compaction. When a limit is reached, task work stops where it stands and only a small reserved hand-back turn remains to report it. Commit or checkpoint work-in-progress early rather than holding it, and keep a current partial report ready."
+        "Runtime budget (host-enforced; you cannot raise it):\n- wall clock: {wall}.\n- model steps: {steps}.\nThere is no cumulative token cap; manage context with compaction. A single step billing over {step_input_bound} input tokens ends the run with a hand-back report, so keep turns focused instead of accumulating unbounded history. When a limit is reached, task work stops where it stands and only a small reserved hand-back turn remains to report it. Commit or checkpoint work-in-progress early rather than holding it, and keep a current partial report ready."
     )
 }
 
@@ -11892,6 +11923,8 @@ fn subagent_failure_class(status: &SubAgentStatus, error: &str) -> &'static str 
         "step_budget"
     } else if error.contains("wall-time budget exhausted") {
         "wall_time_budget"
+    } else if error.contains("context budget exhausted") {
+        "context_budget"
     } else if matches!(status, SubAgentStatus::BudgetExhausted) {
         "budget_exhausted"
     } else if error.contains("authorization failed")
@@ -12748,12 +12781,20 @@ async fn run_subagent(
         max_steps
     };
     let (work_deadline, hard_deadline) = budget_handback::wall_deadlines(runtime);
+    // #6194 item 7: per-step context guardrail, disclosed below and enforced
+    // after every billed model step.
+    let step_input_bound = child_step_input_bound(
+        runtime
+            .client
+            .route_limits()
+            .and_then(|limits| limits.context_tokens),
+    );
     // #6194: the child sees what it is racing from the first turn — the
     // resolved budgets ride inside the task text so the transcript artifact
     // logs exactly what the model was told.
     let prompt = format!(
         "{prompt}\n\n{}",
-        child_runtime_budget_context(runtime, max_steps, work_max_steps)
+        child_runtime_budget_context(runtime, max_steps, work_max_steps, step_input_bound)
     );
     let mut messages = build_initial_subagent_messages_with_system(
         &prompt,
@@ -13281,6 +13322,16 @@ async fn run_subagent(
         .await;
 
         tokens_used = tokens_used.saturating_add(usage_total_tokens(&response.usage));
+
+        // #6194 item 7: one over-bound step lands the run through the normal
+        // budget-death path (digest + hand-back + preservation note) instead
+        // of burning quadratically to wall/token death.
+        if let Some(reason) =
+            child_context_trip(u64::from(response.usage.input_tokens), step_input_bound)
+        {
+            budget_failure_reason = Some(reason);
+            break;
+        }
 
         let mut current_response_text = None;
         for block in &response.content {

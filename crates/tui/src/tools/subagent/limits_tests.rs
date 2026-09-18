@@ -84,22 +84,25 @@ fn child_runtime_budget_context_reports_every_resolved_limit() {
     let mut runtime = stub_runtime();
     runtime.worker_profile.wall_time_secs = Some(1_800);
     runtime.worker_profile.wall_deadline_ms = Some(epoch_millis_now() + 1_700_000);
-    let context = child_runtime_budget_context(&runtime, 50, 49);
+    let context = child_runtime_budget_context(&runtime, 50, 49, 100_000);
     assert!(context.contains("Runtime budget (host-enforced"));
     assert!(context.contains("wall clock: task work stops about"));
     assert!(context.contains("total run budget 30m 00s"));
     assert!(context.contains("49 model turns of task work (limit 50"));
     assert!(context.contains("reserved hand-back turn"));
     assert!(context.contains("Commit or checkpoint work-in-progress early"));
+    assert!(context.contains("single step billing over 100000 input tokens"));
+    assert!(context.contains("There is no cumulative token cap"));
 }
 
 #[test]
 fn child_runtime_budget_context_names_unbounded_limits_honestly() {
     let runtime = stub_runtime();
-    let context = child_runtime_budget_context(&runtime, 0, 0);
+    let context = child_runtime_budget_context(&runtime, 0, 0, 32_000);
     assert!(context.contains("wall clock: no wall-clock limit."));
     assert!(context.contains("model steps: no per-run step cap."));
-    assert!(context.contains("There is no token cap"));
+    assert!(context.contains("There is no cumulative token cap"));
+    assert!(context.contains("single step billing over 32000 input tokens"));
     assert!(context.contains("reserved hand-back turn"));
 }
 
@@ -121,6 +124,43 @@ fn child_budget_pacing_notice_stays_silent_with_headroom() {
     assert!(child_budget_pacing_notice(started_at, Some(deadline), 10, 50).is_none());
     // No bound at all means there is nothing to pace against.
     assert!(child_budget_pacing_notice(started_at, None, 9_999, 0).is_none());
+}
+
+#[test]
+fn child_step_input_bound_prefers_half_window_capped_at_the_guardrail() {
+    assert_eq!(child_step_input_bound(None), 100_000);
+    assert_eq!(child_step_input_bound(Some(64_000)), 32_000);
+    assert_eq!(child_step_input_bound(Some(1_000_000)), 100_000);
+    // Degenerate windows fall back to the flat guardrail, never to zero.
+    assert_eq!(child_step_input_bound(Some(0)), 100_000);
+    assert_eq!(child_step_input_bound(Some(1)), 100_000);
+}
+
+#[test]
+fn child_context_trip_fires_only_past_the_bound() {
+    let reason = child_context_trip(100_001, 100_000).expect("over bound trips");
+    assert!(reason.contains("context budget exhausted"), "{reason}");
+    assert!(reason.contains("100001"), "{reason}");
+    assert!(child_context_trip(100_000, 100_000).is_none());
+    assert!(child_context_trip(71_000, 100_000).is_none());
+    assert!(child_context_trip(0, 100_000).is_none());
+}
+
+#[test]
+fn context_budget_death_classifies_distinctly_from_other_budgets() {
+    assert_eq!(
+        subagent_failure_class(
+            &SubAgentStatus::BudgetExhausted,
+            "child context budget exhausted: step billed 150000 input tokens"
+        ),
+        "context_budget"
+    );
+    // The generic budget-exhausted status still classifies when the cause is
+    // something else entirely.
+    assert_eq!(
+        subagent_failure_class(&SubAgentStatus::BudgetExhausted, "some other reason"),
+        "budget_exhausted"
+    );
 }
 
 #[test]

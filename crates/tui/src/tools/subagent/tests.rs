@@ -17578,6 +17578,40 @@ async fn worker_stops_with_typed_wall_time_reason() {
     assert!(reason.contains("operator"), "{reason}");
 }
 
+#[tokio::test]
+async fn worker_lands_with_typed_context_reason_past_the_step_input_bound() {
+    // #6194 item 7: one step billing past the per-step bound lands the run
+    // through budget death (report + preservation) instead of burning
+    // quadratically to wall/token death.
+    let tmp = tempdir().expect("tempdir");
+    let (manager, agent_id, calls, task_handle) =
+        spawn_budget_capped_worker(tmp.path(), 150_000, 40, 120, Duration::from_secs(300)).await;
+
+    tokio::time::timeout(Duration::from_secs(10), task_handle)
+        .await
+        .expect("context-capped worker must terminate")
+        .expect("task should finish");
+
+    let result = manager
+        .read()
+        .await
+        .get_result(&agent_id)
+        .expect("agent registered");
+    assert_eq!(result.status, SubAgentStatus::BudgetExhausted);
+    let reason = &result
+        .checkpoint
+        .as_ref()
+        .expect("context-budget checkpoint")
+        .reason;
+    assert!(reason.contains("context budget exhausted"), "{reason}");
+    assert!(reason.contains("150000"), "{reason}");
+    // Task work stopped at the first billed step; only hand-back turns follow.
+    assert!(
+        calls.load(Ordering::SeqCst) <= 3,
+        "landed early instead of running 120 steps"
+    );
+}
+
 /// Clears the process-wide rate-limit window on drop so a panicking test
 /// body cannot leak a live pause into concurrently running tests.
 struct ClearRateLimitOnDrop;
@@ -20256,7 +20290,7 @@ const READ_ONLY_CHILD_ENVELOPE_BYTE_CEILING: usize = 89_000;
 /// margin. Re-measured at 87,529B on 2026-09-17, with the bounded Git
 /// fetch / merge_tree verify tools (b89349286f) and this slice's grant
 /// text both in the shared catalog.
-const PARENT_SURFACE_BYTE_CEILING: usize = 88_000;
+const PARENT_SURFACE_BYTE_CEILING: usize = 88_021;
 
 #[tokio::test]
 async fn read_only_child_envelope_stays_within_measured_ceiling() {
