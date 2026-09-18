@@ -205,7 +205,7 @@ max_admitted = 12
 | 用途 | 字段 |
 |---|---|
 | 启动与路由 | `action`、`prompt`、`type`、`profile`、`name`、`model`、`model_strength`、`thinking` |
-| 作用域与交付 | `worktree`、`write_authority`、`write_roots`、`exact_files`、`coordination_contracts`、`deliverables`、`expected_artifact` |
+| 作用域与交付 | `worktree`、`cwd`、`write_authority`、`write_roots`、`exact_files`、`coordination_contracts`、`deliverables`、`expected_artifact` |
 | 收窄运行限制 | `max_steps`、`wall_time_secs` |
 | 协调与恢复 | `agent_id`、`agent_ids`、`all_parked`、`message`、`until`、`detached`、`resume_from` |
 | 检查 | `detail`、`offset`、`limit` |
@@ -218,7 +218,7 @@ max_admitted = 12
 
 费用类别仅描述当前未缓存文本输入和输出的费率，不代表未来任务的总费用。缺少费率或依赖路由的价格保持未知；订阅和本地路由标记为非按金额计费。查询不会向 provider 发送请求，可达性标记为未验证。
 
-**解析接受但未公布（兼容）。** 其他输入用于旧转录、客户端和内部/操作者兼容，仍须与实时权限求交：`max_depth`（以及 `maxDepth` / `max_spawn_depth`）、`workspace_policy`、`fork_context`、`cwd`、`worktree_path`、`worktree_branch`、`worktree_base`、`deliberate`、`dependencies`、`acceptance`、`allowed_tools`、`timeout_secs`、`reason` 和 `include_archived`。兼容深度值为 0..=8，只能收窄继承的绝对上限；兼容输入不能扩大权限或解除有限预算。
+**解析接受但未公布（兼容）。** 其他输入用于旧转录、客户端和内部/操作者兼容，仍须与实时权限求交：`max_depth`（以及 `maxDepth` / `max_spawn_depth`）、`workspace_policy`、`fork_context`、`worktree_path`、`worktree_branch`、`worktree_base`、`deliberate`、`dependencies`、`acceptance`、`allowed_tools`、`timeout_secs`、`reason` 和 `include_archived`。兼容深度值为 0..=8，只能收窄继承的绝对上限；兼容输入不能扩大权限或解除有限预算。
 
 ## 子代理预算（步数、墙钟时间、token）
 

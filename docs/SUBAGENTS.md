@@ -492,7 +492,7 @@ The model-facing `agent` schema exposes these controls:
 | Purpose | Fields |
 | --- | --- |
 | Launch and route | `action`, `prompt`, `type`, `profile`, `name`, `model`, `model_strength`, `thinking` |
-| Scope and outputs | `worktree`, `write_authority`, `write_roots`, `exact_files`, `coordination_contracts`, `deliverables`, `expected_artifact` |
+| Scope and outputs | `worktree`, `cwd`, `write_authority`, `write_roots`, `exact_files`, `coordination_contracts`, `deliverables`, `expected_artifact` |
 | Narrow run limits | `max_steps`, `wall_time_secs` |
 | Coordinate and recover | `agent_id`, `agent_ids`, `all_parked`, `message`, `until`, `detached`, `resume_from` |
 | Inspect | `detail`, `offset`, `limit` |
@@ -542,7 +542,7 @@ live policy:
   narrow the inherited absolute ceiling. Model-facing calls inherit depth
   from the operator and selected profile.
 - workspace/isolation: `workspace_policy`, `fork_context`,
-  `cwd`, `worktree_path`, `worktree_branch`, `worktree_base`
+  `worktree_path`, `worktree_branch`, `worktree_base`
 - spawn contract: `deliberate`, `dependencies`, `acceptance`, `allowed_tools`
 - lifecycle extras: `timeout_secs` (wait), `reason` (interrupt),
   `include_archived` (status)
