@@ -18,7 +18,7 @@
 use std::time::Duration;
 
 use super::qa_harness::{
-    harness::{Harness, make_sealed_workspace, SealedWorkspace},
+    harness::{Harness, SealedWorkspace, make_sealed_workspace},
     keys,
 };
 
@@ -111,7 +111,8 @@ fn theme_editor_survives_every_arrow_key() {
     assert_editor_open(&mut tui, "after Down");
     let (down_index, down_label) = highlighted_choice(&mut tui);
     assert_ne!(
-        down_index, opened_index,
+        down_index,
+        opened_index,
         "Down must move the theme highlight away from {opened_label:?}:\n{}",
         tui.frame().text()
     );
