@@ -5478,7 +5478,11 @@ impl Engine {
                 .await;
         }
         drop(turn_control);
-        let turn_complete_delivered = self
+        // `event_sent` means the TurnComplete event reached the UI channel —
+        // never that the user saw model output. (#6184: the old `delivered`
+        // name was read as user-visible delivery on Interrupted turns that
+        // rendered nothing.)
+        let turn_complete_event_sent = self
             .tx_event
             .send(Event::TurnComplete {
                 usage: turn.usage,
@@ -5494,7 +5498,7 @@ impl Engine {
         tracing::info!(
             target: "engine.turn",
             status = ?status,
-            delivered = turn_complete_delivered,
+            event_sent = turn_complete_event_sent,
             "engine turn completion settled"
         );
 
