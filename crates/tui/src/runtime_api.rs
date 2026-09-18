@@ -3679,7 +3679,7 @@ fn approval_history_rows(replay: &crate::approval_log::ApprovalReplay) -> Vec<Ap
             decided_at: None,
         }))
         .collect();
-    rows.sort_by(|a, b| b.asked_at.cmp(&a.asked_at));
+    rows.sort_by_key(|row| std::cmp::Reverse(row.asked_at));
     rows
 }
 
@@ -3712,7 +3712,7 @@ async fn list_approvals(
     })
     .await
     .map_err(|error| ApiError::internal(format!("approval history read failed: {error}")))?;
-    rows.sort_by(|a, b| b.asked_at.cmp(&a.asked_at));
+    rows.sort_by_key(|row| std::cmp::Reverse(row.asked_at));
     rows.truncate(limit);
     Ok(Json(rows))
 }
