@@ -11,7 +11,9 @@ import { readFileSync } from "node:fs";
  * and contrast, so this reads both files and flattens the alias chains
  * (`--whale-success` -> `--whale-working-green` -> `#9bd66f`,
  * `--paper` -> `--gpui-paper` -> `#f5f0e9`). The Blue Stage light preset's
- * `LIGHT_*` consts export as `--light-*` beside them.
+ * `LIGHT_*` consts export as `--light-*` beside them, and the Shoreline
+ * redesign's dark/light pair exports as `--shoreline-*` /
+ * `--shoreline-light-*`.
  *
  * Node-only (`node:fs`): imported by the contract tests, never by a component.
  */
@@ -19,14 +21,14 @@ const RAW: Record<string, string> = (() => {
   const generated = readFileSync(new URL("../app/tokens.css", import.meta.url), "utf8");
   const globals = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   const raw: Record<string, string> = {};
-  for (const match of generated.matchAll(/--((?:whale|light)-[\w-]+):\s*([^;]+);/g)) {
+  for (const match of generated.matchAll(/--((?:whale|light|shoreline-light|shoreline)-[\w-]+):\s*([^;]+);/g)) {
     raw[match[1]] = match[2].trim();
   }
   for (const match of globals.matchAll(/--(gpui-[\w-]+):\s*([^;]+);/g)) {
     raw[match[1]] = match[2].trim();
   }
   if (Object.keys(raw).length === 0) {
-    throw new Error("no --whale-*/--light-*/--gpui-* properties found in tokens.css/globals.css");
+    throw new Error("no palette properties found in tokens.css/globals.css");
   }
   return raw;
 })();
@@ -40,8 +42,8 @@ function flatten(name: string, seen = new Set<string>()): string {
   return flatten(alias[1], seen.add(name));
 }
 
-/** Resolve a `var(--whale-*)`, `var(--light-*)`, or `var(--gpui-*)` reference to its literal value; pass anything else through. */
+/** Resolve a `var(--whale-*)`, `var(--light-*)`, `var(--shoreline-*)`, or `var(--gpui-*)` reference to its literal value; pass anything else through. */
 export function resolveWhale(value: string): string {
-  const match = value.match(/^var\(--((?:whale|light|gpui)-[\w-]+)\)$/);
+  const match = value.match(/^var\(--((?:whale|light|shoreline-light|shoreline|gpui)-[\w-]+)\)$/);
   return match ? flatten(match[1]) : value;
 }
