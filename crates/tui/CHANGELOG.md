@@ -216,6 +216,14 @@ tag, packages, checksums and release assets exist.
 
 ### Fixed
 
+- `serve --acp` no longer ignores the approval posture. The ACP adapter
+  hardcoded `ApprovalMode::Suggest`, so `--yolo` (and any configured
+  `approval_policy`) never reached admission: every mutating tool parked
+  behind a permission request no unattended client answers, and sessions
+  executed zero tools. Posture now derives from server config — `--yolo`
+  pre-approves prompts and flows into the sandbox policy — while hard blocks
+  (safety floor, repo law, reviewer consult) and the Plan read-only guardrail
+  stay intact (#6337).
 - Plain agent spawns could not resolve. `built_in_members()` seeded both
   `general` and `worker`, and the role parse boundary migrates `worker` to
   `general`, so both canonicalized to the same role — and `role:general`, the
