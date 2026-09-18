@@ -2046,6 +2046,7 @@ fn new_run_record(
 fn automation_task_request(automation: &AutomationRecord) -> NewTaskRequest {
     NewTaskRequest {
         prompt: automation.prompt.clone(),
+        name: Some(automation.name.clone()),
         model: automation.model.clone(),
         model_provider: automation.model_provider.clone(),
         model_provider_id: automation.model_provider_id.clone(),
@@ -2420,6 +2421,7 @@ where
                     execution_scope: current.execution_scope.clone(),
                     request: NewTaskRequest {
                         prompt: current.message.clone(),
+                        name: None,
                         model: None,
                         model_provider: None,
                         model_provider_id: None,

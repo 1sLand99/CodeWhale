@@ -274,6 +274,8 @@ pub struct TaskRecord {
     pub schema_version: u32,
     pub id: String,
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_provider: Option<String>,
@@ -339,6 +341,8 @@ pub struct TaskSummary {
     pub id: String,
     pub status: TaskStatus,
     pub prompt_summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_provider: Option<String>,
@@ -371,6 +375,7 @@ impl From<&TaskRecord> for TaskSummary {
             id: value.id.clone(),
             status: value.status,
             prompt_summary: summarize_text(&value.prompt, TIMELINE_SUMMARY_LIMIT),
+            name: value.name.clone(),
             model: value.model.clone(),
             model_provider: value.model_provider.clone(),
             model_provider_id: value.model_provider_id.clone(),
@@ -406,6 +411,10 @@ pub struct TaskCounts {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewTaskRequest {
     pub prompt: String,
+    /// Caller-given run name, stored as-given. Absent names stay absent —
+    /// titles derived from the prompt are a presentation concern.
+    #[serde(default)]
+    pub name: Option<String>,
     pub model: Option<String>,
     #[serde(default)]
     pub model_provider: Option<String>,
@@ -424,6 +433,7 @@ impl NewTaskRequest {
     pub(crate) fn from_task(task: &TaskRecord) -> Self {
         Self {
             prompt: task.prompt.clone(),
+            name: task.name.clone(),
             model: Some(task.model.clone()),
             model_provider: task.model_provider.clone(),
             model_provider_id: task.model_provider_id.clone(),
@@ -441,6 +451,7 @@ impl NewTaskRequest {
     pub fn from_prompt(prompt: impl Into<String>) -> Self {
         Self {
             prompt: prompt.into(),
+            name: None,
             model: None,
             model_provider: None,
             model_provider_id: None,
@@ -1669,6 +1680,10 @@ impl TaskManager {
             // work.
             id: task_id,
             prompt,
+            name: req
+                .name
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty()),
             model: req.model.unwrap_or_else(|| self.cfg.default_model.clone()),
             model_provider: req.model_provider,
             model_provider_id: req.model_provider_id,
@@ -4199,6 +4214,7 @@ mod tests {
             schema_version: CURRENT_TASK_SCHEMA_VERSION,
             id: task_id.clone(),
             prompt: "long-running shell work".to_string(),
+            name: None,
             model: "deepseek-v4-flash".to_string(),
             model_provider: None,
             model_provider_id: None,
@@ -4400,6 +4416,7 @@ mod tests {
 
         let req = NewTaskRequest {
             prompt: "fix TODOs and write a README".to_string(),
+            name: None,
             model: None,
             model_provider: None,
             model_provider_id: None,
@@ -4842,6 +4859,7 @@ mod tests {
             schema_version: CURRENT_TASK_SCHEMA_VERSION,
             id: "task_0123456789abcdef".to_string(),
             prompt: "bound timeline".to_string(),
+            name: None,
             model: "deepseek-v4-flash".to_string(),
             model_provider: None,
             model_provider_id: None,

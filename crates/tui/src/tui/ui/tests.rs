@@ -25570,6 +25570,7 @@ mod work_sidebar_projection_tests {
             id: id.to_string(),
             status,
             prompt_summary: format!("task {id}"),
+            name: None,
             model: "deepseek-v4-flash".to_string(),
             model_provider: None,
             model_provider_id: None,

@@ -2318,6 +2318,7 @@ pub(crate) async fn apply_command_result(
                 app.current_session_id = Some(owner_session_id.clone());
                 let request = NewTaskRequest {
                     prompt: prompt.clone(),
+                    name: None,
                     model: Some(app.model.clone()),
                     model_provider: Some(app.api_provider.as_str().to_string()),
                     model_provider_id: Some(app.provider_identity_for_persistence().to_string()),

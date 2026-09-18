@@ -1585,6 +1585,63 @@ async fn health_and_tasks_endpoints_work() -> Result<()> {
     Ok(())
 }
 
+/// Created tasks keep their caller-given name through get and list; unnamed
+/// tasks omit the field so queues can fall back to the prompt summary.
+#[tokio::test]
+async fn created_tasks_keep_their_given_name() -> Result<()> {
+    let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let named: serde_json::Value = client
+        .post(format!("http://{addr}/v1/tasks"))
+        .json(&json!({ "prompt": "migrate the widget", "name": "Widget migration" }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(named["name"], "Widget migration");
+    let id = named["id"].as_str().expect("task id").to_string();
+
+    let unnamed: serde_json::Value = client
+        .post(format!("http://{addr}/v1/tasks"))
+        .json(&json!({ "prompt": "unnamed work" }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert!(unnamed.get("name").is_none());
+
+    let detail: serde_json::Value = client
+        .get(format!("http://{addr}/v1/tasks/{id}"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(detail["name"], "Widget migration");
+
+    let listed: serde_json::Value = client
+        .get(format!("http://{addr}/v1/tasks"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let rows = listed["tasks"].as_array().expect("task rows");
+    let row = rows
+        .iter()
+        .find(|row| row["id"] == id)
+        .expect("named row in list");
+    assert_eq!(row["name"], "Widget migration");
+
+    handle.abort();
+    Ok(())
+}
+
 #[tokio::test]
 async fn omitted_runtime_models_use_the_active_provider_default() -> Result<()> {
     let _env = lock_test_env();

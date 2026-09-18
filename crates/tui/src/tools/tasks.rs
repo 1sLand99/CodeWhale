@@ -225,6 +225,10 @@ impl ToolSpec for TasksTool {
                 json!({ "type": "string", "description": "Work prompt for the durable task (action=create)." }),
             );
             properties.insert(
+                "name".to_string(),
+                json!({ "type": "string", "description": "Short run name shown in queues; omit to derive from the prompt. (action=create)" }),
+            );
+            properties.insert(
                 "model_provider".to_string(),
                 json!({ "type": "string", "description": "Provider kind for the pinned model. Omit to inherit the configured provider." }),
             );
@@ -475,6 +479,7 @@ impl TasksTool {
         let prompt = required_str(input, "prompt")?.to_string();
         let req = NewTaskRequest {
             prompt: prompt.clone(),
+            name: optional_str(input, "name")?.map(ToString::to_string),
             model: optional_str(input, "model")?.map(ToString::to_string),
             model_provider: optional_str(input, "model_provider")?.map(ToString::to_string),
             model_provider_id: optional_str(input, "model_provider_id")?.map(ToString::to_string),
