@@ -142,7 +142,7 @@ impl DynamicGate {
 
     /// Free admission slots right now (`capacity - active`). Diagnostics and
     /// tests only; racy by design.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn available_permits(&self) -> usize {
         let inner = self.inner.lock().expect("launch gate poisoned");
         inner.capacity.saturating_sub(inner.active)
@@ -299,7 +299,7 @@ impl RateLimitGovernor {
     /// The governor's launch gate. `SubAgentManager` hands this to spawned
     /// tasks in place of the old fixed `Semaphore`. (Directly exercised by
     /// governor unit tests.)
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn gate(&self) -> std::sync::Arc<DynamicGate> {
         std::sync::Arc::clone(&self.gate)
     }
@@ -465,7 +465,7 @@ impl RateLimitGovernor {
     /// Observability snapshot: `(gate capacity, window limit events, paused)`.
     /// (Unit-test/diagnostics surface; wired into status events by the parent
     /// repo follow-up.)
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn snapshot(&self, now: Instant) -> GovernorSnapshot {
         let mut state = self.state.lock().expect("rate limit governor poisoned");
         Self::prune(&mut state, now);
@@ -480,7 +480,7 @@ impl RateLimitGovernor {
 }
 
 /// Point-in-time view of the governor for tests and diagnostics.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct GovernorSnapshot {
     pub(crate) launch_capacity: usize,
