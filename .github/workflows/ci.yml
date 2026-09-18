@@ -639,7 +639,7 @@ jobs:
           RUSTC_WRAPPER: ${{ matrix.os != 'windows-latest' && env.RUSTC_WRAPPER || '' }}
           # Give test threads the stack the product gives itself. main.rs runs
           # the owner thread and every tokio worker at
-          # CODEWHALE_MAIN_STACK_BYTES (16 MiB) because the engine and
+          # CODEWHALE_MAIN_STACK_BYTES (32 MiB) because the engine and
           # runtime-thread futures are genuinely deep. `#[tokio::test]` builds
           # its own runtime and never sees that, so tests ran the same code on
           # ~2 MiB (~1 MiB on Windows) — a configuration that never ships.
@@ -648,7 +648,11 @@ jobs:
           # environment_id, masking every other Windows result (78afd8d3d4
           # Box::pin'd that one frame; the mismatch itself remained). std reads
           # this for any thread spawned without an explicit size, which covers
-          # both libtest's per-test threads and tokio's workers.
+          # both libtest's per-test threads and tokio's workers. Test threads
+          # hold 16 MiB: the engine-only chains they run measured a ~2.5 MiB
+          # debug high-water, while the full ~16.5 MiB UI-loop chain that
+          # forced 32 MiB lives in spawned binaries, which size their own
+          # stacks explicitly and never read this variable.
           RUST_MIN_STACK: '16777216'
       - name: Run doctests
         if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
