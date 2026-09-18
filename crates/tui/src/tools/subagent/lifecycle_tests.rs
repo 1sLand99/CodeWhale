@@ -714,6 +714,7 @@ async fn lifecycle_detail_budget_keeps_the_transcript_handle_retrievable() {
         &id, "retained", &messages, 1, true,
     ));
     let projection = subagent_session_projection(
+        &new_shared_subagent_manager(dir.path().to_path_buf(), 1),
         manager.get_result(&id).unwrap(),
         false,
         &context,

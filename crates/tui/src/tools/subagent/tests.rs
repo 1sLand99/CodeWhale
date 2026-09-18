@@ -2181,6 +2181,7 @@ async fn detached_interactive_usage_after_mailbox_seal_reaches_session_accountin
         manager.write().await.register_worker_for_session(
             make_worker_spec(worker_id, tmp.path().to_path_buf()),
             "session-detached-usage",
+            None,
         );
     }
     let (release_usage_tx, release_usage_rx) = tokio::sync::oneshot::channel();
@@ -2266,6 +2267,7 @@ async fn child_guardian_usage_source_is_sanitized_and_replay_idempotent() {
     manager.write().await.register_worker_for_session(
         make_worker_spec("agent_guardian", tmp.path().to_path_buf()),
         "guardian-usage-session",
+        None,
     );
 
     let runtime_owner = "interactive:guardian-usage-session:turn-parent";
@@ -2352,6 +2354,7 @@ async fn ownerless_no_mailbox_provider_usage_reaches_accounting_once() {
     manager.write().await.register_worker_for_session(
         make_worker_spec("agent_direct", tmp.path().to_path_buf()),
         "direct-usage-session",
+        None,
     );
     let mut runtime = stub_runtime();
     runtime.manager = Arc::clone(&manager);
@@ -2446,6 +2449,7 @@ async fn ownerless_child_usage_crossing_new_settles_to_its_dispatch_origin_once(
     manager.write().await.register_worker_for_session(
         make_worker_spec(agent_id, tmp.path().to_path_buf()),
         origin_session_id,
+        None,
     );
 
     // Dispatch in the origin session: the engine's off-turn continuation
@@ -2567,6 +2571,7 @@ async fn provider_success_without_usage_records_one_route_aware_gap_and_no_zero_
     manager.write().await.register_worker_for_session(
         make_worker_spec("agent_missing_usage", tmp.path().to_path_buf()),
         "missing-usage-session",
+        None,
     );
 
     let runtime_owner = "interactive:missing-usage-session:turn-parent";
@@ -5158,7 +5163,8 @@ async fn session_projection_exposes_forked_prefix_cache_contract() {
     snapshot.fork_context = true;
 
     let ctx = ToolContext::new(".");
-    let projection = subagent_session_projection(snapshot, false, &ctx, None).await;
+    let manager = new_shared_subagent_manager(PathBuf::from("."), 1);
+    let projection = subagent_session_projection(&manager, snapshot, false, &ctx, None).await;
 
     assert_eq!(projection.name, "fanout_review");
     assert_eq!(projection.context_mode, "forked");
@@ -5204,7 +5210,8 @@ async fn terminal_session_projection_prefers_full_transcript_handle() {
         )
     };
 
-    let projection = subagent_session_projection(snapshot, false, &ctx, None).await;
+    let manager = new_shared_subagent_manager(PathBuf::from("."), 1);
+    let projection = subagent_session_projection(&manager, snapshot, false, &ctx, None).await;
 
     assert_eq!(projection.transcript_handle, full_handle);
     assert_eq!(projection.transcript_handle.name, "full_transcript");
@@ -5224,7 +5231,8 @@ async fn interrupted_projection_exposes_checkpoint_metadata_and_messages() {
     snapshot.checkpoint = Some(checkpoint.clone());
 
     let ctx = ToolContext::new(".");
-    let projection = subagent_session_projection(snapshot, false, &ctx, None).await;
+    let manager = new_shared_subagent_manager(PathBuf::from("."), 1);
+    let projection = subagent_session_projection(&manager, snapshot, false, &ctx, None).await;
 
     assert_eq!(projection.status, "waiting_for_user");
     assert!(projection.terminal);
@@ -5257,7 +5265,7 @@ async fn interrupted_projection_exposes_checkpoint_metadata_and_messages() {
     );
 
     let timed_out_projection =
-        subagent_session_projection(projection.snapshot.clone(), true, &ctx, None).await;
+        subagent_session_projection(&manager, projection.snapshot.clone(), true, &ctx, None).await;
     assert!(timed_out_projection.needs_continuation);
     assert!(timed_out_projection.timed_out);
     assert!(timed_out_projection.timed_out_with_checkpoint);
@@ -9274,7 +9282,8 @@ async fn api_timeout_preserves_checkpoint_and_returns_needs_input_without_parkin
         manager.get_worker_record(&agent_id)
     };
     let projection =
-        subagent_session_projection(interrupted.clone(), false, &ctx, worker_record).await;
+        subagent_session_projection(&manager, interrupted.clone(), false, &ctx, worker_record)
+            .await;
     assert_eq!(projection.status, "waiting_for_user");
     assert!(projection.continuable);
     assert!(projection.needs_continuation);
@@ -9665,6 +9674,7 @@ async fn spawn_duplicate_session_name_error_names_conflicting_agent() {
                     name: Some("researcher".to_string()),
                     ..Default::default()
                 },
+                None,
             )
             .expect_err("duplicate session name must error")
     };
@@ -9732,6 +9742,7 @@ async fn spawn_session_name_held_by_prior_session_agent_does_not_collide() {
                     name: Some("researcher".to_string()),
                     ..Default::default()
                 },
+                None,
             )
             .expect("a prior-session holder must not reject a fresh same-name spawn")
     };
@@ -9775,6 +9786,7 @@ async fn shared_write_claim_is_registered_before_parallel_launch_and_manifested(
                 make_assignment(),
                 Some(vec![]),
                 options,
+                None,
             )
             .expect("first writer admitted");
         let second = guard
@@ -9795,6 +9807,7 @@ async fn shared_write_claim_is_registered_before_parallel_launch_and_manifested(
                     }),
                     ..Default::default()
                 },
+                None,
             )
             .expect_err("overlapping live contract must contend");
         (first.agent_id, second.to_string())
@@ -9849,6 +9862,7 @@ async fn write_capable_agent_does_not_launch_when_durable_registration_fails() {
                 }),
                 ..Default::default()
             },
+            None,
         )
         .expect_err("writer must fail before spawn when its durable claim cannot commit")
         .to_string();
@@ -9930,6 +9944,7 @@ async fn write_scope_contention_covers_regular_agent_and_active_fleet_writer() {
                 }),
                 ..Default::default()
             },
+            None,
         )
         .expect_err("regular-agent launch must see active Fleet ownership");
     let launch = launch.to_string();
@@ -15013,6 +15028,7 @@ fn persist_round_trip_preserves_session_and_boot_ownership() {
         writer.register_worker_for_session(
             make_worker_spec("headless_persist", dir.path().to_path_buf()),
             "session-persist",
+            None,
         );
         writer
             .persist_state()
@@ -20301,8 +20317,8 @@ fn init_claim_repo(root: &Path) {
     assert!(output.status.success(), "git commit: {output:?}");
 }
 
-#[test]
-fn completed_claim_of_untouched_file_taints_verification() {
+#[tokio::test]
+async fn completed_claim_of_untouched_file_taints_verification() {
     // R7 (finish-operator 2026-08-02): the morning report caught a child
     // claiming edits git had never seen — by hand. At terminal delivery the
     // claimed changed-files are checked against git status in the child's
@@ -20313,15 +20329,29 @@ fn completed_claim_of_untouched_file_taints_verification() {
     let mut spec = make_worker_spec("agent_claims", tmp.path().to_path_buf());
     spec.runtime_profile.permissions.write = true;
     manager.register_worker(spec);
+    let manager = Arc::new(RwLock::new(manager));
 
     let mut snapshot = make_snapshot(SubAgentStatus::Completed);
     snapshot.agent_id = "agent_claims".to_string();
     snapshot.name = "agent_claims".to_string();
     snapshot.workspace = Some(tmp.path().to_path_buf());
     snapshot.result = Some("CHANGES: src/lib.rs".to_string());
-    manager.complete_worker_from_result("agent_claims", &snapshot);
+    // Deferred verification (#6210): the commit leaves it pending; `ensure`
+    // computes the taint off the lock.
+    {
+        let mut guard = manager.write().await;
+        guard.complete_worker_from_result("agent_claims", &snapshot);
+        assert!(
+            !guard.worker_records["agent_claims"]
+                .delivery_evidence
+                .checked
+        );
+    }
+    ensure_worker_delivery_verified(&manager, "agent_claims", &snapshot).await;
 
     let record = manager
+        .read()
+        .await
         .get_worker_record("agent_claims")
         .expect("worker record");
     assert_eq!(record.verification.status, "claim_mismatch");
@@ -20405,8 +20435,8 @@ fn resume_from_rejects_running_source() {
     );
 }
 
-#[test]
-fn completed_claim_matching_workspace_state_stays_untainted() {
+#[tokio::test]
+async fn completed_claim_matching_workspace_state_stays_untainted() {
     let tmp = tempdir().expect("tempdir");
     init_claim_repo(tmp.path());
 
@@ -20414,16 +20444,11 @@ fn completed_claim_matching_workspace_state_stays_untainted() {
     let mut manager = SubAgentManager::new(tmp.path().to_path_buf(), 2);
     manager.register_worker(make_worker_spec("agent_honest", tmp.path().to_path_buf()));
     std::fs::write(tmp.path().join("src/lib.rs"), "pub fn improved() {}\n").expect("edit file");
-    let mut snapshot = make_snapshot(SubAgentStatus::Completed);
-    snapshot.agent_id = "agent_honest".to_string();
-    snapshot.name = "agent_honest".to_string();
-    snapshot.workspace = Some(tmp.path().to_path_buf());
-    snapshot.result = Some("Updated src/lib.rs with the new implementation.".to_string());
-    manager.complete_worker_from_result("agent_honest", &snapshot);
-    let record = manager
-        .get_worker_record("agent_honest")
-        .expect("worker record");
-    assert_eq!(record.verification.status, "self_report_only");
+    let mut honest = make_snapshot(SubAgentStatus::Completed);
+    honest.agent_id = "agent_honest".to_string();
+    honest.name = "agent_honest".to_string();
+    honest.workspace = Some(tmp.path().to_path_buf());
+    honest.result = Some("Updated src/lib.rs with the new implementation.".to_string());
 
     // Honest committed claim: the child committed its work, so git status is
     // clean but the commit is newer than the worker record.
@@ -20447,20 +20472,33 @@ fn completed_claim_matching_workspace_state_stays_untainted() {
         // so the just-made commit is unambiguously after it.
         record.created_at_ms = record.created_at_ms.saturating_sub(60_000);
     }
-    let mut snapshot = make_snapshot(SubAgentStatus::Completed);
-    snapshot.agent_id = "agent_committer".to_string();
-    snapshot.name = "agent_committer".to_string();
-    snapshot.workspace = Some(tmp.path().to_path_buf());
-    snapshot.result = Some("Updated src/lib.rs and committed the change.".to_string());
-    manager.complete_worker_from_result("agent_committer", &snapshot);
-    let record = manager
-        .get_worker_record("agent_committer")
-        .expect("worker record");
-    assert_eq!(
-        record.verification.status, "self_report_only",
-        "{}",
-        record.verification.summary
-    );
+    let mut committer = make_snapshot(SubAgentStatus::Completed);
+    committer.agent_id = "agent_committer".to_string();
+    committer.name = "agent_committer".to_string();
+    committer.workspace = Some(tmp.path().to_path_buf());
+    committer.result = Some("Updated src/lib.rs and committed the change.".to_string());
+    let manager = Arc::new(RwLock::new(manager));
+    // Deferred verification (#6210): both commits leave verification
+    // pending; `ensure` computes the untainted verdicts off the lock.
+    {
+        let mut guard = manager.write().await;
+        guard.complete_worker_from_result("agent_honest", &honest);
+        guard.complete_worker_from_result("agent_committer", &committer);
+        for id in ["agent_honest", "agent_committer"] {
+            assert!(!guard.worker_records[id].delivery_evidence.checked);
+        }
+    }
+    ensure_worker_delivery_verified(&manager, "agent_honest", &honest).await;
+    ensure_worker_delivery_verified(&manager, "agent_committer", &committer).await;
+    let guard = manager.read().await;
+    for id in ["agent_honest", "agent_committer"] {
+        let record = guard.get_worker_record(id).expect("worker record");
+        assert_eq!(
+            record.verification.status, "self_report_only",
+            "{id}: {}",
+            record.verification.summary
+        );
+    }
 }
 
 #[tokio::test]
@@ -20496,8 +20534,9 @@ async fn spawn_receipt_compacts_and_verbose_restores_the_archive() {
     let snapshot = inner.get_result(&agent_id).expect("snapshot");
     let worker_record = inner.get_worker_record(&agent_id);
     let context = ToolContext::new(".");
+    let shared = new_shared_subagent_manager(PathBuf::from("."), 1);
     let mut projection =
-        subagent_session_projection(snapshot, false, &context, worker_record).await;
+        subagent_session_projection(&shared, snapshot, false, &context, worker_record).await;
     // The route receipt rides inside the budget rather than being exempt from
     // it (#5305), so measure the receipt that ships.
     let metadata = spawn_route_metadata("zai", "glm-5", "agent_profile.model");
@@ -20650,8 +20689,9 @@ async fn spawn_receipt_route_survives_compaction_for_a_type_only_spawn() {
     let snapshot = inner.get_result(&agent_id).expect("snapshot");
     let worker_record = inner.get_worker_record(&agent_id);
     let context = ToolContext::new(".");
+    let shared = new_shared_subagent_manager(PathBuf::from("."), 1);
     let mut projection =
-        subagent_session_projection(snapshot, false, &context, worker_record).await;
+        subagent_session_projection(&shared, snapshot, false, &context, worker_record).await;
     let metadata = spawn_route_metadata("deepseek", "deepseek-v4-flash", "run.model");
     projection.child_route = Some(spawn_child_route_projection(&metadata));
 
@@ -21681,6 +21721,7 @@ mod child_permission_gate {
             manager.register_worker_for_session(
                 make_worker_spec("agent_gate", workspace),
                 "guardian-test-session",
+                None,
             );
         }
         // Keep the tempdir alive for the registry's lifetime by leaking it
@@ -23075,4 +23116,54 @@ async fn test_disallowed_tools_resume_keeps_saved_and_current_ancestor_denials()
             .denied_tools,
         vec!["mcp_saved_*"]
     );
+}
+
+/// Precomputed spawn evidence (#6210) is adopted for write-capable workers:
+/// a baseline captured before the lock answers changed-path queries.
+#[test]
+fn precomputed_delivery_evidence_is_adopted_for_write_workers() {
+    let tmp = tempdir().expect("tempdir");
+    init_claim_repo(tmp.path());
+    let evidence = DeliveryEvidence::capture_for_handle(tmp.path(), true);
+    let mut manager = SubAgentManager::new(tmp.path().to_path_buf(), 2);
+    let spec = make_write_worker_spec("agent_precomputed", tmp.path().to_path_buf(), ".");
+    assert!(spec.runtime_profile.permissions.write);
+    manager.register_worker_for_session(spec, "workspace", Some(evidence));
+    let record = manager
+        .get_worker_record("agent_precomputed")
+        .expect("worker record");
+    assert!(record.delivery_evidence.changed_paths(tmp.path()).is_some());
+}
+
+/// The resolved spec permission is authoritative: a precomputed baseline for
+/// a read-only worker is discarded, never stored (#6210).
+#[test]
+fn precomputed_delivery_evidence_is_discarded_for_read_only_workers() {
+    let tmp = tempdir().expect("tempdir");
+    init_claim_repo(tmp.path());
+    let evidence = DeliveryEvidence::capture_for_handle(tmp.path(), true);
+    assert!(evidence.changed_paths(tmp.path()).is_some());
+    let mut manager = SubAgentManager::new(tmp.path().to_path_buf(), 2);
+    let mut spec = make_worker_spec("agent_reader", tmp.path().to_path_buf());
+    spec.runtime_profile.permissions.write = false;
+    manager.register_worker_for_session(spec, "workspace", Some(evidence));
+    let record = manager
+        .get_worker_record("agent_reader")
+        .expect("worker record");
+    assert!(record.delivery_evidence.changed_paths(tmp.path()).is_none());
+}
+
+/// Paths without precomputed evidence (resume, Fleet, tests) capture inline
+/// at registration, exactly as before (#6210).
+#[test]
+fn missing_precomputed_evidence_falls_back_to_inline_capture() {
+    let tmp = tempdir().expect("tempdir");
+    init_claim_repo(tmp.path());
+    let mut manager = SubAgentManager::new(tmp.path().to_path_buf(), 2);
+    let spec = make_write_worker_spec("agent_inline", tmp.path().to_path_buf(), ".");
+    manager.register_worker_for_session(spec, "workspace", None);
+    let record = manager
+        .get_worker_record("agent_inline")
+        .expect("worker record");
+    assert!(record.delivery_evidence.changed_paths(tmp.path()).is_some());
 }

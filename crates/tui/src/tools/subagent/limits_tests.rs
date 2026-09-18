@@ -195,6 +195,7 @@ async fn launch_narrows_all_limits_and_continuation_cannot_restart_deadline() {
             SubAgentAssignment::new("inspect".to_string(), None),
             Some(vec![]),
             options,
+            None,
         )
         .unwrap();
     let profile = &guard.worker_records[&child.agent_id].spec.runtime_profile;
@@ -218,6 +219,7 @@ async fn launch_narrows_all_limits_and_continuation_cannot_restart_deadline() {
             resume_from_agent_id: Some(child.agent_id),
             ..Default::default()
         },
+        None,
     );
     assert!(
         refused
@@ -257,6 +259,7 @@ async fn resume_intersects_saved_write_shell_and_tool_permissions_with_current_c
                 preserve_runtime_profile: Some(saved),
                 ..Default::default()
             },
+            None,
         )
         .unwrap();
     let profile = &guard.worker_records[&child.agent_id].spec.runtime_profile;
@@ -300,6 +303,7 @@ async fn root_fork_of_depth_two_leaf_cannot_regain_a_generation() {
                 resume_from_agent_id: Some("leaf".to_string()),
                 ..Default::default()
             },
+            None,
         )
         .unwrap();
     let spec = &guard.worker_records[&child.agent_id].spec;

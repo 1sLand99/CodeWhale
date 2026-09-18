@@ -174,7 +174,7 @@ async fn fixture(mode: &'static str, first_tokens: u64, max_steps: u32) -> Fixtu
     agent.status = SubAgentStatus::Running;
     {
         let mut guard = manager.write().await;
-        guard.register_worker_for_session(spec, &runtime.context.state_namespace);
+        guard.register_worker_for_session(spec, &runtime.context.state_namespace, None);
         guard.agents.insert("report-worker".to_string(), agent);
     }
     let task = tokio::spawn(run_subagent_task(SubAgentTask {

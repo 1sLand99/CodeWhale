@@ -1,7 +1,10 @@
 //! Delivery evidence replacing the old prose-verb/git-status heuristic.
 //! The worker ledger retains the spawn baseline; this module only reads files.
 
-use super::{AgentRunVerificationSummary, AgentWorkerSpec, normalize_claim_path};
+use super::{
+    AgentRunVerificationSummary, AgentWorkerSpec, default_agent_run_verification,
+    normalize_claim_path,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -120,14 +123,19 @@ fn fingerprint(root: &Path, relative: &str) -> Option<String> {
 
 impl DeliveryEvidence {
     pub(super) fn capture(spec: &AgentWorkerSpec) -> Self {
-        let baseline = spec
-            .runtime_profile
-            .permissions
-            .write
+        Self::capture_for_handle(&spec.workspace, spec.runtime_profile.permissions.write)
+    }
+
+    /// Baseline capture that needs only the workspace and write permission —
+    /// the two spec fields the baseline actually reads. The async spawn path
+    /// calls this in `spawn_blocking` BEFORE the manager write lock (#6210)
+    /// and threads the evidence through registration, so git + file
+    /// fingerprints never run under the lock.
+    pub(super) fn capture_for_handle(workspace: &Path, write: bool) -> Self {
+        let baseline = write
             .then(|| {
                 let root =
-                    String::from_utf8(git(&spec.workspace, &["rev-parse", "--show-toplevel"])?)
-                        .ok()?;
+                    String::from_utf8(git(workspace, &["rev-parse", "--show-toplevel"])?).ok()?;
                 let root = PathBuf::from(root.trim());
                 let head = git(&root, &["rev-parse", "--verify", "HEAD"])
                     .and_then(|bytes| String::from_utf8(bytes).ok())
@@ -482,4 +490,62 @@ pub(super) fn verify_changes(
         ),
         deliverables: Vec::new(),
     })
+}
+
+/// Everything delivery verification needs, snapshotted under a read lock.
+/// `allowed[i]` is the write-scope verdict for `deliverables[i]`. The compute
+/// half runs in `spawn_blocking` with no manager lock held (#6210).
+#[derive(Debug, Clone)]
+pub(super) struct DeliveryVerificationInputs {
+    pub evidence: DeliveryEvidence,
+    pub workspace: PathBuf,
+    pub result_text: String,
+    pub write_perm: bool,
+    pub deliverables: Vec<String>,
+    pub allowed: Vec<bool>,
+}
+
+/// Pure compute half of worker delivery verification: the git trio +
+/// fingerprints (`changed_paths`), claim comparison, and per-deliverable
+/// presence checks. Runs off the manager lock; the caller stores the summary.
+pub(super) fn compute_delivery_verification(
+    inputs: &DeliveryVerificationInputs,
+) -> AgentRunVerificationSummary {
+    let changed = inputs.evidence.changed_paths(&inputs.workspace);
+    let mut verification = verify_changes(
+        &inputs.result_text,
+        inputs.write_perm,
+        &inputs.evidence,
+        changed.as_ref(),
+        &inputs.deliverables.iter().cloned().collect(),
+    )
+    .unwrap_or_else(default_agent_run_verification);
+    verification.deliverables = inputs
+        .deliverables
+        .iter()
+        .zip(inputs.allowed.iter())
+        .map(|(path, allowed)| check_deliverable(&inputs.workspace, path, *allowed))
+        .collect();
+    let missing = verification
+        .deliverables
+        .iter()
+        .filter(|verdict| verdict.status != "present")
+        .map(|verdict| format!("{} ({})", verdict.path, verdict.status))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        let prior = if verification.status == "claim_mismatch" {
+            format!(" {}", verification.summary)
+        } else {
+            String::new()
+        };
+        verification.status = "deliverable_missing".to_string();
+        verification.summary = format!(
+            "Declared deliverables not produced as non-empty files in the worker write scope: {}.{prior}",
+            missing.join(", ")
+        );
+    } else if !inputs.deliverables.is_empty() && verification.status == "self_report_only" {
+        verification.status = "deliverables_present".to_string();
+        verification.summary = "Declared files exist and are non-empty inside the worker write scope; their contents remain a worker self-report.".to_string();
+    }
+    verification
 }

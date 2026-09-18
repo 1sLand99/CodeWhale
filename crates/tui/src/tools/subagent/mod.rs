@@ -974,15 +974,27 @@ impl AgentWorkerRecord {
     /// a hand-rolled struct literal that would drift from this one.
     #[cfg(test)]
     pub(crate) fn new(spec: AgentWorkerSpec, now_ms: u64) -> Self {
-        Self::new_for_session(spec, now_ms, String::new())
+        Self::new_for_session(spec, now_ms, String::new(), None)
     }
 
-    fn new_for_session(spec: AgentWorkerSpec, now_ms: u64, owner_session_id: String) -> Self {
+    fn new_for_session(
+        spec: AgentWorkerSpec,
+        now_ms: u64,
+        owner_session_id: String,
+        precomputed_evidence: Option<DeliveryEvidence>,
+    ) -> Self {
         let run_id = agent_worker_run_id(&spec);
         let artifacts = default_subagent_artifacts(&run_id);
         let follow_up = follow_up_target_for_spec(&spec);
         let takeover = takeover_target_for_spec(&spec);
-        let delivery_evidence = DeliveryEvidence::capture(&spec);
+        // #6210: the async spawn path fingerprints pre-lock assuming write
+        // capability; the resolved spec permission is authoritative, so a
+        // baseline for a read-only worker is discarded, never stored.
+        let delivery_evidence = match precomputed_evidence {
+            Some(evidence) if spec.runtime_profile.permissions.write => evidence,
+            Some(_) => DeliveryEvidence::default(),
+            None => DeliveryEvidence::capture(&spec),
+        };
         let mut verification = default_agent_run_verification();
         if let Some(manifest) = spec.launch_manifest.as_ref() {
             verification.deliverables = manifest
@@ -4806,16 +4818,22 @@ impl SubAgentManager {
     }
 
     pub fn register_worker(&mut self, spec: AgentWorkerSpec) {
-        self.register_worker_for_session(spec, "");
+        self.register_worker_for_session(spec, "", None);
     }
 
-    fn register_worker_for_session(&mut self, spec: AgentWorkerSpec, owner_session_id: &str) {
+    fn register_worker_for_session(
+        &mut self,
+        spec: AgentWorkerSpec,
+        owner_session_id: &str,
+        precomputed_evidence: Option<DeliveryEvidence>,
+    ) {
         let worker_id = spec.worker_id.clone();
         let now_ms = epoch_millis_now();
         let mut record = AgentWorkerRecord::new_for_session(
             normalize_worker_spec(spec),
             now_ms,
             owner_session_id.to_string(),
+            precomputed_evidence,
         );
         self.push_worker_event(
             &mut record,
@@ -5444,73 +5462,66 @@ impl SubAgentManager {
         }
     }
 
-    fn verify_worker_delivery(&mut self, worker_id: &str, result: &SubAgentResult) {
-        let Some(record) = self.worker_records.get(worker_id) else {
-            return;
-        };
-        if record.delivery_evidence.checked || result.status == SubAgentStatus::Running {
-            return;
+    /// Store a verification computed off the lock. Re-checks `checked` so a
+    /// racing `ensure_worker_delivery_verified` cannot overwrite a stored
+    /// verdict (#6210). Returns whether this call stored.
+    fn store_delivery_verification(
+        &mut self,
+        worker_id: &str,
+        verification: AgentRunVerificationSummary,
+    ) -> bool {
+        if let Some(record) = self.worker_records.get_mut(worker_id)
+            && !record.delivery_evidence.checked
+        {
+            record.verification = verification;
+            record.delivery_evidence.checked = true;
+            return true;
         }
-        let workspace = &record.spec.workspace;
-        let changed = record.delivery_evidence.changed_paths(workspace);
-        let mut verification = delivery::verify_changes(
-            result.result.as_deref().unwrap_or_default(),
-            record.spec.runtime_profile.permissions.write,
-            &record.delivery_evidence,
-            changed.as_ref(),
-            &record
-                .spec
-                .launch_manifest
-                .as_ref()
-                .map(|manifest| manifest.deliverables.iter().cloned().collect())
-                .unwrap_or_default(),
-        )
-        .unwrap_or_else(default_agent_run_verification);
-        let paths = record
+        false
+    }
+
+    /// Snapshot everything delivery verification needs. `None` when there is
+    /// no record, verification already ran, or the result is not terminal.
+    /// Pure reads for the read lock in `ensure_worker_delivery_verified`
+    /// (#6210).
+    fn delivery_verification_inputs(
+        &self,
+        worker_id: &str,
+        result: &SubAgentResult,
+    ) -> Option<delivery::DeliveryVerificationInputs> {
+        let record = self.worker_records.get(worker_id)?;
+        if record.delivery_evidence.checked || result.status == SubAgentStatus::Running {
+            return None;
+        }
+        let deliverables: Vec<String> = record
             .spec
             .launch_manifest
             .as_ref()
-            .map(|manifest| manifest.deliverables.as_slice())
+            .map(|manifest| manifest.deliverables.clone())
             .unwrap_or_default();
-        verification.deliverables = paths
+        let allowed = deliverables
             .iter()
             .map(|path| {
-                let allowed = record.spec.runtime_profile.permissions.write
+                record.spec.runtime_profile.permissions.write
                     && self
                         .validate_write_scope(worker_id, std::slice::from_ref(path))
-                        .is_ok();
-                delivery::check_deliverable(workspace, path, allowed)
+                        .is_ok()
             })
             .collect();
-        let missing = verification
-            .deliverables
-            .iter()
-            .filter(|verdict| verdict.status != "present")
-            .map(|verdict| format!("{} ({})", verdict.path, verdict.status))
-            .collect::<Vec<_>>();
-        if !missing.is_empty() {
-            let prior = if verification.status == "claim_mismatch" {
-                format!(" {}", verification.summary)
-            } else {
-                String::new()
-            };
-            verification.status = "deliverable_missing".to_string();
-            verification.summary = format!(
-                "Declared deliverables not produced as non-empty files in the worker write scope: {}.{prior}",
-                missing.join(", ")
-            );
-        } else if !paths.is_empty() && verification.status == "self_report_only" {
-            verification.status = "deliverables_present".to_string();
-            verification.summary = "Declared files exist and are non-empty inside the worker write scope; their contents remain a worker self-report.".to_string();
-        }
-        if let Some(record) = self.worker_records.get_mut(worker_id) {
-            record.verification = verification;
-            record.delivery_evidence.checked = true;
-        }
+        Some(delivery::DeliveryVerificationInputs {
+            evidence: record.delivery_evidence.clone(),
+            workspace: record.spec.workspace.clone(),
+            result_text: result.result.clone().unwrap_or_default(),
+            write_perm: record.spec.runtime_profile.permissions.write,
+            deliverables,
+            allowed,
+        })
     }
 
     fn complete_worker_from_result(&mut self, worker_id: &str, result: &SubAgentResult) {
-        self.verify_worker_delivery(worker_id, result);
+        // Delivery verification is deferred: `ensure_worker_delivery_verified`
+        // computes it off the lock before the terminal commit (natural and
+        // panic paths) or heals it on the next detail read (#6210).
         let status = worker_status_from_subagent_result(result);
         let message = match &result.status {
             SubAgentStatus::Completed => Some("completed".to_string()),
@@ -6228,6 +6239,9 @@ impl SubAgentManager {
             assignment,
             allowed_tools,
             options,
+            // Checkpoint resume replays under the write lock; the baseline
+            // captures inline there, as before (#6210).
+            None,
         )?;
         Ok(resumed)
     }
@@ -6538,7 +6552,7 @@ impl SubAgentManager {
             child_route: None,
             launch_manifest: None,
         };
-        self.register_worker_for_session(spec, "workspace");
+        self.register_worker_for_session(spec, "workspace", None);
         (agent_id, input_rx)
     }
 
@@ -6713,6 +6727,7 @@ impl SubAgentManager {
         assignment: SubAgentAssignment,
         allowed_tools: Option<Vec<String>>,
         options: SubAgentSpawnOptions,
+        precomputed_delivery_evidence: Option<DeliveryEvidence>,
     ) -> Result<SubAgentResult> {
         self.cleanup(COMPLETED_AGENT_RETENTION);
 
@@ -7114,7 +7129,11 @@ impl SubAgentManager {
             };
         agent.owner_session_id = runtime.context.state_namespace.clone();
         agent.terminal_delivery = Some(SubAgentTerminalDeliveryContext::from_runtime(&runtime));
-        self.register_worker_for_session(worker_spec, &runtime.context.state_namespace);
+        self.register_worker_for_session(
+            worker_spec,
+            &runtime.context.state_namespace,
+            precomputed_delivery_evidence,
+        );
 
         // Shared-workspace writers may execute only after their exact worker
         // identity and claim are durably replayable. Persist a Starting record
@@ -7874,7 +7893,6 @@ impl SubAgentManager {
             handle.abort();
         }
 
-        self.verify_worker_delivery(agent_id, &result);
         let delivery = self
             .agents
             .get(agent_id)
@@ -8149,11 +8167,30 @@ fn subagent_checkpoint_is_continuable(snapshot: &SubAgentResult) -> bool {
 }
 
 async fn subagent_session_projection(
+    manager: &SharedSubAgentManager,
     snapshot: SubAgentResult,
     timed_out: bool,
     context: &ToolContext,
     worker_record: Option<AgentWorkerRecord>,
 ) -> SubAgentSessionProjection {
+    // Deferred-verification backstop (#6210): terminal commits outside the
+    // natural/panic epilogues (Stop, interrupt, session close, stale cleanup)
+    // leave verification pending, so the first detail read heals it before
+    // the projection reports it. Re-fetch under the session gate afterwards.
+    let worker_record = if snapshot.status != SubAgentStatus::Running
+        && worker_record
+            .as_ref()
+            .is_some_and(|record| !record.delivery_evidence.checked)
+    {
+        ensure_worker_delivery_verified(manager, &snapshot.agent_id, &snapshot).await;
+        manager
+            .read()
+            .await
+            .get_worker_record_for_session(&context.state_namespace, &snapshot.agent_id)
+            .or(worker_record)
+    } else {
+        worker_record
+    };
     let transcript_session_id = format!("agent:{}", snapshot.agent_id);
     let continuable = subagent_checkpoint_is_continuable(&snapshot);
     let transcript_payload = json!({
@@ -9672,7 +9709,9 @@ impl ToolSpec for AgentTool {
             let manager = self.manager.read().await;
             manager.get_worker_record_for_session(&context.state_namespace, &snapshot.agent_id)
         };
-        let projection = subagent_session_projection(snapshot, false, context, worker_record).await;
+        let projection =
+            subagent_session_projection(&self.manager, snapshot, false, context, worker_record)
+                .await;
         let mut value = serde_json::to_value(&projection)
             .map_err(|e| ToolError::execution_failed(e.to_string()))?;
         compact_spawn_receipt(&mut value, verbose);
@@ -9914,7 +9953,7 @@ async fn inspect_agent_from_input(
         }
 
         let mut projection =
-            subagent_session_projection(snapshot, false, context, worker_record).await;
+            subagent_session_projection(&manager, snapshot, false, context, worker_record).await;
         projection.resumed_from = compact
             .get("resumed_from")
             .and_then(Value::as_str)
@@ -9979,7 +10018,8 @@ async fn cancel_agent_from_input(
             manager.get_worker_record_for_session(&context.state_namespace, &snapshot.agent_id);
         (snapshot, worker_record)
     };
-    let projection = subagent_session_projection(snapshot, false, context, worker_record).await;
+    let projection =
+        subagent_session_projection(&manager, snapshot, false, context, worker_record).await;
     let mut tool_result = ToolResult::json(&projection)
         .map_err(|err| ToolError::execution_failed(err.to_string()))?;
     tool_result.metadata = Some(json!({
@@ -10438,6 +10478,21 @@ async fn spawn_subagent_from_input(
     if let Some((lease_key, display_path)) = resident_lease.as_ref() {
         reserve_resident_lease(lease_key, display_path)?;
     }
+    // #6210: fingerprint the delivery baseline BEFORE the manager write
+    // lock. The child workspace is final here (worktree creation already
+    // ran); write capability resolves under the lock, so capture assuming
+    // write and let registration discard it for readers. Skipped only when
+    // the parent ceiling already denies writes — `derive_child` intersects,
+    // so that child is definitely read-only. A join failure falls back to
+    // the inline capture, exactly as before.
+    let precomputed_delivery_evidence = if child_runtime.worker_profile.permissions.write {
+        let workspace = child_runtime.context.workspace.clone();
+        tokio::task::spawn_blocking(move || DeliveryEvidence::capture_for_handle(&workspace, true))
+            .await
+            .ok()
+    } else {
+        None
+    };
     let mut manager_guard = manager.write().await;
 
     let result = manager_guard.spawn_background_with_assignment_options(
@@ -10468,6 +10523,7 @@ async fn spawn_subagent_from_input(
             claim_pre_namespaced: false,
             preserve_runtime_profile: None,
         },
+        precomputed_delivery_evidence,
     );
     let result = match result {
         Ok(result) => result,
@@ -11109,28 +11165,29 @@ async fn supervise_subagent_task_body(
         return;
     };
     let message = crate::utils::panic_message(&*panic);
+    let mut result = match manager_handle.read().await.get_result(&agent_id) {
+        Ok(result) => result,
+        Err(err) => {
+            tracing::error!(
+                target: "subagent",
+                agent_id = %agent_id,
+                ?err,
+                "panicked task no longer has a manager record"
+            );
+            std::panic::resume_unwind(panic);
+        }
+    };
+    result.status = SubAgentStatus::Failed(format!("sub-agent task panicked: {message}"));
+    result.result = None;
+    result.needs_input = None;
+    // Verification precedes the write lock like the natural epilogue (#6210).
+    ensure_worker_delivery_verified(&manager_handle, &agent_id, &result).await;
     {
         let mut manager = manager_handle.write().await;
-        match manager.get_result(&agent_id) {
-            Ok(mut result) => {
-                result.status =
-                    SubAgentStatus::Failed(format!("sub-agent task panicked: {message}"));
-                result.result = None;
-                result.needs_input = None;
-                // Arbitrated exactly like the natural terminal commit: when a
-                // cancel or another terminal outcome already won, this is a
-                // no-op rather than a second result.
-                manager.finish_terminal_result(&agent_id, result, false, true);
-            }
-            Err(err) => {
-                tracing::error!(
-                    target: "subagent",
-                    agent_id = %agent_id,
-                    ?err,
-                    "panicked task no longer has a manager record"
-                );
-            }
-        }
+        // Arbitrated exactly like the natural terminal commit: when a
+        // cancel or another terminal outcome already won, this is a
+        // no-op rather than a second result.
+        manager.finish_terminal_result(&agent_id, result, false, true);
     }
     std::panic::resume_unwind(panic);
 }
@@ -11198,6 +11255,41 @@ async fn budget_work_preservation_note(
             listed.join(", ")
         )
     })
+}
+
+/// Deferred delivery verification (#6210). Snapshots inputs under a read
+/// lock, runs the git-subprocess + fingerprint compute in `spawn_blocking`
+/// with no lock held, then stores under a follow-up write lock. Idempotent
+/// via `DeliveryEvidence.checked`: concurrent callers may duplicate the
+/// read-only computation, but only the first store wins.
+///
+/// A racing terminal commit can land between the compute and the store; the
+/// stored verdict is then based on this call's result text rather than the
+/// committed one. The deliverable-presence verdicts are text-independent, so
+/// only the claimed-path comparison can differ, and only in that race.
+async fn ensure_worker_delivery_verified(
+    manager: &SharedSubAgentManager,
+    worker_id: &str,
+    result: &SubAgentResult,
+) {
+    let inputs = {
+        let manager = manager.read().await;
+        let Some(inputs) = manager.delivery_verification_inputs(worker_id, result) else {
+            return;
+        };
+        inputs
+    };
+    let verification =
+        tokio::task::spawn_blocking(move || delivery::compute_delivery_verification(&inputs))
+            .await
+            .ok();
+    let Some(verification) = verification else {
+        return;
+    };
+    manager
+        .write()
+        .await
+        .store_delivery_verification(worker_id, verification);
 }
 
 fn budget_partial_result_with_note(
@@ -11384,40 +11476,48 @@ async fn run_subagent_task_inner(mut task: SubAgentTask) {
         None
     };
 
+    // The terminal result is built before the write lock: `get_result` takes
+    // `&self`, the error transforms are pure, and no live writer can change
+    // the agent's text between here and the commit — only a racing terminal
+    // claim, which leaves this epilogue with nothing to commit either way.
+    // Verification runs here too, so the fan-in completion and the terminal
+    // persist both carry fresh verdicts with no git subprocess under the lock
+    // (#6210).
+    let terminal = match result {
+        Ok(result) => result,
+        Err(_) => {
+            let mut result = match task.manager_handle.read().await.get_result(&agent_id) {
+                Ok(result) => result,
+                Err(err) => {
+                    tracing::error!(
+                        target: "subagent",
+                        agent_id = %agent_id,
+                        ?err,
+                        "failed task no longer has a manager record"
+                    );
+                    return;
+                }
+            };
+            let error = failure_error
+                .clone()
+                .expect("failed task should carry annotated error");
+            if error.contains("wall-time budget exhausted") {
+                budget_partial_result(result, &error, preservation_note.as_deref())
+            } else {
+                result.status = SubAgentStatus::Failed(error);
+                result.result = None;
+                result.needs_input = None;
+                result
+            }
+        }
+    };
+    ensure_worker_delivery_verified(&task.manager_handle, &agent_id, &terminal).await;
     // Every terminal path — successful/fatal model exit, explicit Stop,
     // coordination interrupt, and stale cleanup — arbitrates and publishes
     // through `finish_terminal_result`. Cancellation that already won leaves
     // this late epilogue with no claim and therefore no duplicate fan-in.
     let terminal_committed = {
         let mut manager = task.manager_handle.write().await;
-        let terminal = match result {
-            Ok(result) => result,
-            Err(_) => {
-                let mut result = match manager.get_result(&agent_id) {
-                    Ok(result) => result,
-                    Err(err) => {
-                        tracing::error!(
-                            target: "subagent",
-                            agent_id = %agent_id,
-                            ?err,
-                            "failed task no longer has a manager record"
-                        );
-                        return;
-                    }
-                };
-                let error = failure_error
-                    .clone()
-                    .expect("failed task should carry annotated error");
-                if error.contains("wall-time budget exhausted") {
-                    budget_partial_result(result, &error, preservation_note.as_deref())
-                } else {
-                    result.status = SubAgentStatus::Failed(error);
-                    result.result = None;
-                    result.needs_input = None;
-                    result
-                }
-            }
-        };
         manager.finish_terminal_result(&agent_id, terminal, false, true)
     };
     if !terminal_committed {

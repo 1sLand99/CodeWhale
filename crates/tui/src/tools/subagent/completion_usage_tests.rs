@@ -346,6 +346,7 @@ async fn completion_usage_counts_real_manifest_only_root_fork() {
                 checkpoint_continuation: false,
                 ..Default::default()
             },
+            None,
         )
         .unwrap();
     let record = guard.worker_records.get_mut(&fork.agent_id).unwrap();
