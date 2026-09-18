@@ -2278,8 +2278,10 @@ pub async fn verify_provider_api_key(
         let body = bounded_provider_catalog_text(response, PROVIDER_CATALOG_MAX_RESPONSE_BYTES)
             .await
             .unwrap_or_default();
-        if matches!(provider, ApiProvider::Telecomjs | ApiProvider::Edenai)
-            && serde_json::from_str::<ModelsPage<'_>>(&body).is_ok_and(|page| !page.has_more)
+        if matches!(
+            provider,
+            ApiProvider::Telecomjs | ApiProvider::Edenai | ApiProvider::Zenmux
+        ) && serde_json::from_str::<ModelsPage<'_>>(&body).is_ok_and(|page| !page.has_more)
             && let Some(kind) = provider.kind()
             && let Ok(offerings) = named_gateway_catalog_offerings_from_body(
                 &body,
@@ -3075,6 +3077,14 @@ impl DeepSeekClient {
                 &fingerprint,
                 fetched_at,
             )?
+        } else if self.api_provider == ApiProvider::Zenmux {
+            named_gateway_catalog_offerings_from_body(
+                &body,
+                codewhale_config::ProviderKind::Zenmux,
+                &provider,
+                &fingerprint,
+                fetched_at,
+            )?
         } else if provider == "codewhale" {
             // The Codewhale API's own listing states the wire protocol per
             // model, so it is the catalog authority for this route.
@@ -3214,6 +3224,7 @@ impl DeepSeekClient {
                 ApiProvider::Openrouter
                     | ApiProvider::Telecomjs
                     | ApiProvider::Edenai
+                    | ApiProvider::Zenmux
                     | ApiProvider::Concentrate
                     | ApiProvider::Codewhale
                     | ApiProvider::Ollama
@@ -4723,6 +4734,7 @@ pub(super) fn apply_reasoning_effort(
             // This gateway can route unrelated model families, so the generic
             // provider must not inject a model-specific reasoning dialect.
             ApiProvider::Edenai => {}
+            ApiProvider::Zenmux => {}
             // The Codewhale API is a passthrough to the account's own
             // connected provider; it documents no Codewhale-owned
             // reasoning-effort translation, so nothing is invented here.
@@ -4822,6 +4834,7 @@ pub(super) fn apply_reasoning_effort(
             // Chat Completions API does not support reasoning_effort or thinking.
             ApiProvider::Telecomjs => {}
             ApiProvider::Edenai => {}
+            ApiProvider::Zenmux => {}
             // The Codewhale API is a passthrough to the account's own
             // connected provider; it documents no Codewhale-owned
             // reasoning-effort translation, so nothing is invented here.
@@ -4946,6 +4959,7 @@ pub(super) fn apply_reasoning_effort(
             // Chat Completions API does not support reasoning_effort or thinking.
             ApiProvider::Telecomjs => {}
             ApiProvider::Edenai => {}
+            ApiProvider::Zenmux => {}
             // The Codewhale API is a passthrough to the account's own
             // connected provider; it documents no Codewhale-owned
             // reasoning-effort translation, so nothing is invented here.
@@ -13710,6 +13724,25 @@ mod tests {
                 .expect("pro rebind resolves")
                 .is_none(),
             "a matching protocol must not rebuild the client"
+        );
+    }
+
+    #[test]
+    fn untethered_cross_protocol_rebound_fails_closed_without_config() {
+        // #6320: the #5042 early-outs cover the already-exact route, but a
+        // cross-protocol rebound with no Config to rebuild from still fails
+        // closed — this is what still guards half-bound dispatch.
+        let (_config, route) =
+            deepseek_route_for_test("https://api.deepseek.com/beta", "deepseek-v4-pro");
+        let client = DeepSeekClient::new(&route.config).expect("pro client resolves");
+        assert_eq!(client.wire_format, WireFormat::ChatCompletions);
+        let err = match client.rebound_for_model_protocol(None, "deepseek-v4-flash") {
+            Ok(_) => panic!("cross-protocol rebound without config fails closed"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("no configuration is available"),
+            "{err}"
         );
     }
 

@@ -406,6 +406,7 @@ async fn completion_usage_dozen_child_status_measures_bytes_and_keeps_descendant
                 provider_id: "deepseek".into(),
                 model_id: "deepseek-v4-flash".into(),
                 route_source: "profile.model".into(),
+                fallback_note: None,
                 requested_reasoning: "inherit".into(),
                 effective_reasoning: Some("medium".into()),
                 runtime_version: "0.9.13".into(),

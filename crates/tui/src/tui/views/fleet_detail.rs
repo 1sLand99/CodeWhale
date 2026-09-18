@@ -45,7 +45,11 @@ const KNOWN_ROLES: [&str; 8] = [
     "test",
     "manager",
     "advisor",
-    "summarizer",
+    // "synthesizer", not "summarizer": the setup wizard's ROLES table owns
+    // this token's spelling (profile role_hint + file stem contract), and
+    // the whale table + docs agree. Both resolve to Planner posture, but
+    // the picker must offer the same word setup does (#6087 item 3).
+    "synthesizer",
     "general",
 ];
 
@@ -1806,6 +1810,17 @@ mod tests {
         let op = loaded.operator.expect("operator");
         assert_eq!(op.model, "deepseek-v4-pro");
         assert_eq!(op.reasoning.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn roster_picker_spells_roles_like_setup() {
+        // The setup wizard's ROLES table owns the "synthesizer" spelling
+        // (profile role_hint + file stem contract); the roster add-member
+        // picker must offer the same word, not the "summarizer" near-twin
+        // (#6087 item 3). Both resolve to Planner posture, so this pins
+        // the presented vocabulary, not behavior.
+        assert!(KNOWN_ROLES.contains(&"synthesizer"));
+        assert!(!KNOWN_ROLES.contains(&"summarizer"));
     }
 
     #[test]

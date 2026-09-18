@@ -172,7 +172,7 @@ allow_shell = true
 
 `codewhale login` 登录 Codewhale 账号——它与 `codewhale account login` 是同一个浏览器设备流(device flow)，不是 provider-key 命令。Provider 凭据完全通过 `codewhale auth set --provider <provider>` 配置。
 
-该 provider 凭据与可选的管理产品账号是分开的。`codewhale account login` 启动 Codewhale 浏览器设备流；`codewhale account status` 和 `codewhale account logout` 检查或移除所选 `--profile` 的会话。账号会话优先使用 OS 凭据管理器，在无凭据管理器可用时自动回退到私有 `0600` Codewhale secrets 文件(无头主机、SSH、容器)；旧的 `CODEWHALE_CLOUD_ALLOW_FILE_SESSION_STORE` 选择加入已弃用并被忽略。`codewhale account keys list|set|remove` 管理已登录账号的 BYOK 保险库(vault)，不显示秘密值。更旧的 `codewhale cloud ...` 拼写仍是命令别名。
+该 provider 凭据与可选的管理产品账号是分开的。`codewhale account login` 启动 Codewhale 浏览器设备流；`codewhale account status` 和 `codewhale account logout` 检查或移除所选 `--profile` 的会话。账号会话优先使用 OS 凭据管理器，在无凭据管理器可用时自动回退到私有 `0600` Codewhale secrets 文件(无头主机、SSH、容器)。`codewhale account keys list|set|remove` 管理已登录账号的 BYOK 保险库(vault)，不显示秘密值。更旧的 `codewhale cloud ...` 拼写仍是命令别名。
 
 ### 可移植配置包(Portable config bundles)
 
@@ -1146,7 +1146,6 @@ DeepSeek V4 前缀缓存让 token 标签变得重要。这些数量保持分离�
 - `tui.mouse_capture`(bool，可选，非 Windows 终端和备用屏幕活动时的 Windows Terminal/ConEmu/Cmder 上默认 `true`；旧 Windows 控制台和 JetBrains JediTerm 内部——PyCharm/IDEA/CLion 等——为 `false`，那里鼠标事件转义作为乱码文本漏进输入流，见 #878 / #898)：启用内部鼠标滚动、转录选择、右键上下文动作和转录滚动条拖动。TUI 拥有的拖拽选择只复制转录文本，从段落中移除视觉换行列断点，保持选择限于转录窗格。设为 `false` 或带 `--no-mouse-capture` 运行使用原始终端选择；设为 `true` 或带 `--mouse-capture` 运行可在任何默认关闭处选择加入。在原始终端选择上，尤其是旧 Windows 控制台或鼠标捕获禁用时，选择可能跨越右侧栏并包含视觉换行，因为选择由终端而不是 TUI 拥有。
 - `tui.terminal_probe_timeout_ms`(int，可选)：兼容旧配置而保留的设置，现已不再使用。启动时在检查终端所有权后直接设置原始模式，不再因工作线程调度延迟而中止启动。
 - `tui.stream_chunk_timeout_secs`(int，可选，默认 `900`)：流式模型响应的每 SSE 块空闲超时。慢的本地或兼容服务器可以用 `/config stream_chunk_timeout_secs <seconds>` 提高；`0` 映射到默认，显式值必须 `1..=3600`。省略该键时旧 `DEEPSEEK_STREAM_IDLE_TIMEOUT_SECS` 环境变量仍被遵循。
-- `tui.header_items`(字符串数组，可选，默认 `[]`)：选择加入的头部芯片。在 `[tui]` 下设置 `header_items = ["tokens"]` 显示会话输入、缓存命中和输出 token 数。窄终端省略可选芯片；宽终端把它与上下文利用率并排显示。
 - `tui.osc8_links`(bool，可选，macOS/Linux 默认开启，Windows 默认关闭)：在转录输出的 URL 周围发出 OSC 8 转义序列，这样支持的终端(iTerm2、Terminal.app 13+、Ghostty、Kitty、WezTerm、Alacritty、较新的 gnome-terminal/konsole)可以用终端的链接手势打开它们——通常是 macOS 上的 Cmd-click,Linux/Windows 上的 Ctrl-click。没有 OSC 8 支持的终端渲染普通标签并忽略转义。转义带外发出(不在缓冲区单元格内)，所以列损坏不是问题；只在终端错误渲染 OSC 8 终止符本身时设 `false`。Windows 旧控制台默认关闭；用 `true` 选择加入。
 - `transcript.prose_measure`(正整数，可选，默认缺省 = 全宽)：实时转录中散文单元格——用户消息、助手回答和推理/思考块——的换行上限，以列为单位(#5436)。缺省(或 `0`)使用全部内容宽度，与工具/状态单元格和 #5322 宽帧决策一致；前 105 列散文栏已移除。在超宽终端上设置正整数(例如 `[transcript]` 下的 `prose_measure = 120`)恢复有界的阅读度量。窄终端总是保持内容宽度——上限只从上方钳制。工具、diff 和状态单元格从不继承这个上限。无效值(负或非整数)在启动时以 `transcript.prose_measure` 配置错误被拒绝。每次渲染遍解析一次，所以主转录缓存和全屏覆盖层总是就有效宽度达成一致。
 - `hooks`(可选)：生命周期 hooks 配置(见 `config.example.toml`)。

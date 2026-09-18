@@ -577,7 +577,9 @@ pub enum Event {
     /// later `reasoning_content` replay.
     SessionUpdated {
         session_id: String,
-        messages: Vec<Message>,
+        /// Shared history snapshot (#6214 T2): the engine hands out an `Arc`
+        /// instead of deep-copying the transcript per event.
+        messages: Arc<Vec<Message>>,
         system_prompt: Option<SystemPrompt>,
         model: String,
         workspace: PathBuf,

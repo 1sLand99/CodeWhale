@@ -17,7 +17,7 @@ use axum::middleware;
 use axum::response::Html;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -1198,6 +1198,12 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .route("/v1/jobs", get(jobs::list_jobs))
         .route("/v1/threads", get(list_threads).post(create_thread))
         .route("/v1/threads/summary", get(list_threads_summary))
+        .route("/v1/threads/running", get(list_running_threads))
+        .route("/v1/threads/{id}/notices", get(list_thread_notices))
+        .route(
+            "/v1/threads/{id}/notices/{notice_id}",
+            delete(ack_thread_notice),
+        )
         .route("/v1/threads/{id}", get(get_thread).patch(update_thread))
         .route(
             "/v1/threads/{id}/jobs",
@@ -1302,6 +1308,7 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         )
         .route("/v1/threads/{id}/goal/complete", post(complete_thread_goal))
         .route("/v1/threads/{id}/goal/block", post(block_thread_goal))
+        .route("/v1/approvals", get(list_approvals))
         .route("/v1/approvals/{approval_id}", post(decide_approval))
         .route(
             "/v1/user-input/{thread_id}/{input_id}",
@@ -1743,6 +1750,53 @@ async fn list_threads(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
     Ok(Json(threads))
+}
+
+/// Threads with queued or in-progress turns, for quit/background
+/// accounting (#6180). One call, no inference from latest-turn status.
+async fn list_running_threads(
+    State(state): State<RuntimeApiState>,
+) -> Result<Json<Vec<crate::runtime_threads::RunningThread>>, ApiError> {
+    let running = state
+        .runtime_threads
+        .running_threads()
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Json(running))
+}
+
+/// Active notices on one thread (#6180): the TUI-visible conditions a
+/// watch-only client must surface — subagent-terminal, elevation-needed,
+/// model-notify — each with turn identity for targeting.
+async fn list_thread_notices(
+    State(state): State<RuntimeApiState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<crate::runtime_threads::ActiveNotice>>, ApiError> {
+    state
+        .runtime_threads
+        .get_thread(&id)
+        .await
+        .map_err(map_thread_err)?;
+    Ok(Json(state.runtime_threads.list_notices(&id)))
+}
+
+/// Acknowledge (clear) one notice. Terminal/notify kinds clear only here;
+/// elevation additionally auto-clears when its tool call completes.
+async fn ack_thread_notice(
+    State(state): State<RuntimeApiState>,
+    Path((id, notice_id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    state
+        .runtime_threads
+        .get_thread(&id)
+        .await
+        .map_err(map_thread_err)?;
+    if !state.runtime_threads.ack_notice(&id, &notice_id) {
+        return Err(ApiError::not_found(format!(
+            "thread '{id}' has no notice '{notice_id}'"
+        )));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_threads_summary(
@@ -3622,6 +3676,98 @@ async fn audit_skill_api(
         ambiguous,
         skills: entries,
     }))
+}
+
+#[derive(Debug, Deserialize)]
+struct ApprovalsQuery {
+    limit: Option<usize>,
+}
+
+/// One row of the account-wide approval history: what the agent asked
+/// permission to do and what was decided. `decided_at` is `None` while the
+/// ask is still pending.
+#[derive(Debug, Serialize)]
+struct ApprovalHistoryRow {
+    approval_id: String,
+    tool_name: String,
+    outcome: String,
+    asked_at: chrono::DateTime<Utc>,
+    decided_at: Option<chrono::DateTime<Utc>>,
+}
+
+fn approval_outcome_label(outcome: &crate::approval_log::ApprovalOutcome) -> &'static str {
+    use crate::approval_log::ApprovalOutcome;
+    match outcome {
+        ApprovalOutcome::ApprovedOnce => "allowed_once",
+        ApprovalOutcome::Denied => "denied",
+        ApprovalOutcome::Timeout => "timeout",
+        ApprovalOutcome::Cancelled => "cancelled",
+        ApprovalOutcome::Unavailable => "unavailable",
+        ApprovalOutcome::RetryWithPolicy { .. } => "retry_with_policy",
+    }
+}
+
+/// Flatten one session's replay into history rows, newest ask first. Pending
+/// asks sort by asked time alongside decided rows — they are the newest
+/// entries while live, and sink into place once decided.
+fn approval_history_rows(replay: &crate::approval_log::ApprovalReplay) -> Vec<ApprovalHistoryRow> {
+    let mut rows: Vec<ApprovalHistoryRow> = replay
+        .completed
+        .iter()
+        .map(|completed| {
+            let asked_at = completed.ask.created_at();
+            ApprovalHistoryRow {
+                approval_id: completed.ask.approval_id().to_string(),
+                tool_name: completed.ask.tool_name().unwrap_or("unknown").to_string(),
+                outcome: approval_outcome_label(&completed.outcome).to_string(),
+                asked_at,
+                decided_at: Some(completed.decided_at),
+            }
+        })
+        .chain(replay.unmatched_asks.iter().map(|ask| ApprovalHistoryRow {
+            approval_id: ask.approval_id().to_string(),
+            tool_name: ask.tool_name().unwrap_or("unknown").to_string(),
+            outcome: "pending".to_string(),
+            asked_at: ask.created_at(),
+            decided_at: None,
+        }))
+        .collect();
+    rows.sort_by_key(|row| std::cmp::Reverse(row.asked_at));
+    rows
+}
+
+/// `GET /v1/approvals` — the read-only history behind the approvals log:
+/// every decided approval plus every still-pending ask, newest first, across
+/// all sessions. A corrupt session log is skipped with a warning, never a
+/// 500 for the whole history; the warn names the file to inspect (#5931).
+async fn list_approvals(
+    State(state): State<RuntimeApiState>,
+    Query(query): Query<ApprovalsQuery>,
+) -> Result<Json<Vec<ApprovalHistoryRow>>, ApiError> {
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let sessions_dir = state.sessions_dir.clone();
+    let mut rows = tokio::task::spawn_blocking(move || {
+        let store = crate::approval_log::ApprovalReceiptStore::new(sessions_dir);
+        let mut rows = Vec::new();
+        for session_id in store.sessions_with_logs() {
+            match store.replay(&session_id) {
+                Ok(replay) => rows.extend(approval_history_rows(&replay)),
+                Err(error) => tracing::warn!(
+                    target: "approval",
+                    error_kind = ?error.kind(),
+                    %error,
+                    session_id,
+                    "skipping unreadable approval log in history listing",
+                ),
+            }
+        }
+        rows
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("approval history read failed: {error}")))?;
+    rows.sort_by_key(|row| std::cmp::Reverse(row.asked_at));
+    rows.truncate(limit);
+    Ok(Json(rows))
 }
 
 async fn decide_approval(

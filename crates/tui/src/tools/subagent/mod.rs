@@ -19,7 +19,7 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::{Mutex, RwLock, Semaphore};
+use tokio::sync::{Mutex, RwLock};
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -33,7 +33,7 @@ use uuid::Uuid;
 use crate::client::DeepSeekClient;
 use crate::config::{MAX_SUBAGENTS, SubagentModelOverride};
 use crate::core::engine::tool_catalog::{
-    TOOL_SEARCH_NAME, active_tools_for_request, apply_native_tool_deferral,
+    TOOL_SEARCH_NAME, ToolMode, active_tools_for_request, apply_native_tool_deferral,
     ensure_advanced_tooling, execute_tool_search_with_cache, initial_active_tools,
     is_tool_search_tool, remove_evicted_cache_activations, tool_denied,
     touch_cached_tool_after_execution,
@@ -93,6 +93,7 @@ pub mod advisor;
 mod budget_handback;
 pub mod coord;
 mod delivery;
+mod governor;
 mod lifecycle;
 pub mod mailbox;
 mod naming;
@@ -300,6 +301,36 @@ fn resolve_max_steps(role: FleetRole, explicit: Option<u32>, configured: Option<
     .min(MAX_SUBAGENT_STEPS)
 }
 
+/// Per-step billed-input guardrail for child runs (#6194 item 7). A long
+/// child re-sends its whole context every step, so cost grows
+/// quadratically; landing when one step's input passes this bound caps the
+/// tail instead of burning to wall/token death. This is deliberately not a
+/// cumulative cap — #6189 settled that token accounting never stops a run.
+/// Half the route's effective window tightens it for small-window models.
+const MAX_CHILD_STEP_INPUT_TOKENS: u64 = 100_000;
+
+fn child_step_input_bound(context_window: Option<u64>) -> u64 {
+    let half_window = context_window
+        .map(|window| window / 2)
+        .filter(|half| *half > 0);
+    half_window
+        .map(|half| half.min(MAX_CHILD_STEP_INPUT_TOKENS))
+        .unwrap_or(MAX_CHILD_STEP_INPUT_TOKENS)
+}
+
+/// Trip reason when one step's billed input passes the bound, or `None`
+/// while the step is affordable. Pure so the boundary is unit-tested
+/// without driving the run loop.
+fn child_context_trip(step_input_tokens: u64, bound: u64) -> Option<String> {
+    if step_input_tokens > bound {
+        Some(format!(
+            "child context budget exhausted: step billed {step_input_tokens} input tokens, over the {bound} per-step bound; landing with a hand-back report instead of growing quadratically. Narrow the task so turns stay focused."
+        ))
+    } else {
+        None
+    }
+}
+
 fn child_wall_time_exhausted_reason(limit: Duration) -> String {
     format!(
         "child wall-time budget exhausted (limit: {}s); partial work is preserved; narrow the task or have the operator raise the inherited limit",
@@ -319,6 +350,7 @@ fn child_runtime_budget_context(
     runtime: &SubAgentRuntime,
     max_steps: u32,
     work_max_steps: u32,
+    step_input_bound: u64,
 ) -> String {
     let wall = match runtime.worker_profile.wall_deadline_ms {
         Some(deadline_ms) => {
@@ -344,7 +376,7 @@ fn child_runtime_budget_context(
         format!("{max_steps} model turns")
     };
     format!(
-        "Runtime budget (host-enforced; you cannot raise it):\n- wall clock: {wall}.\n- model steps: {steps}.\nThere is no token cap; manage context with compaction. When a limit is reached, task work stops where it stands and only a small reserved hand-back turn remains to report it. Commit or checkpoint work-in-progress early rather than holding it, and keep a current partial report ready."
+        "Runtime budget (host-enforced; you cannot raise it):\n- wall clock: {wall}.\n- model steps: {steps}.\nThere is no cumulative token cap; manage context with compaction. A single step billing over {step_input_bound} input tokens ends the run with a hand-back report, so keep turns focused instead of accumulating unbounded history. When a limit is reached, task work stops where it stands and only a small reserved hand-back turn remains to report it. Commit or checkpoint work-in-progress early rather than holding it, and keep a current partial report ready."
     )
 }
 
@@ -483,6 +515,15 @@ const SUBAGENT_SESSION_CLOSED_REASON: &str = "Interrupted: parent session closed
 #[cfg(test)]
 const SUBAGENT_MODEL_WAIT_REASON: &str = "waiting for model response";
 const SUBAGENT_QUEUED_LAUNCH_REASON: &str = "queued: waiting for a sub-agent launch slot";
+/// Queued-reason variant used while the rate-limit governor has paused new
+/// sub-agent launches after sustained provider 429s.
+const SUBAGENT_QUEUED_RATE_LIMIT_REASON: &str = "queued: waiting for provider rate-limit recovery";
+/// While queued, probe the governor for a drained rate-limit window at this
+/// period (see `acquire_queued_launch_permit`).
+const LAUNCH_RECOVERY_PROBE_PERIOD: Duration = Duration::from_secs(5);
+/// Placeholder probe period when the runtime has no governor: the probe
+/// branch no-ops, and a queued child's wall-time deadline always fires first.
+const LAUNCH_RECOVERY_PROBE_PERIOD_WITHOUT_GOVERNOR: Duration = Duration::from_secs(3600);
 /// #freeze: minimum spacing between hot-path (per-step checkpoint) state
 /// persists. `update_checkpoint` fires on every step of every agent; at high
 /// fanout an unconditional full-fleet rewrite under the manager write lock
@@ -669,6 +710,10 @@ pub struct ChildRouteReceipt {
     pub provider_id: String,
     pub model_id: String,
     pub route_source: String,
+    /// Present only when the dispatch fell back past an unusable pinned
+    /// provider: names the pin and the reason (#5529 mode 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_note: Option<String>,
     pub requested_reasoning: String,
     pub effective_reasoning: Option<String>,
     pub runtime_version: String,
@@ -2670,6 +2715,14 @@ pub struct SubAgentRuntime {
     /// Durable approval evidence inherited from the parent session. Legacy
     /// runtimes that do not install a store cannot open child approval prompts.
     approval_receipt_store: Option<Result<crate::approval_log::ApprovalReceiptStore, String>>,
+    /// Shared rate-limit governor for the fleet that spawned this runtime.
+    /// Stamped by the spawning manager in
+    /// `spawn_background_with_assignment_options` (the single chokepoint all
+    /// spawn variants funnel through), so every descendant LLM attempt
+    /// reports 429s/successes to the fleet's adaptive scheduler; cloned into
+    /// child runtimes. `None` for runtimes built outside a manager (tests,
+    /// tool-only runtimes).
+    pub(crate) governor: Option<Arc<governor::RateLimitGovernor>>,
 }
 
 impl SubAgentRuntime {
@@ -2732,6 +2785,12 @@ impl SubAgentRuntime {
             ),
             parent_can_prompt: false,
             approval_receipt_store: None,
+            // Stamped by the spawning manager in
+            // `spawn_background_with_assignment_options`, so every descendant
+            // LLM attempt reports 429s/successes to the fleet's rate-limit
+            // governor. `None` for runtimes built outside a manager (tests,
+            // tool-only runtimes).
+            governor: None,
         }
     }
 
@@ -2782,6 +2841,19 @@ impl SubAgentRuntime {
     #[must_use]
     pub fn with_todos(mut self, todos: SharedTodoList) -> Self {
         self.todos = todos;
+        self
+    }
+
+    /// Stamp the fleet's rate-limit governor onto a root runtime. The manager
+    /// owns the governor (and its launch gate), but only runtimes carrying it
+    /// report 429s/successes; without this the whole descendant tree inherits
+    /// `None` and the AIMD scheduler never observes provider throttling.
+    #[must_use]
+    pub(crate) fn with_fleet_governor(
+        mut self,
+        governor: Arc<governor::RateLimitGovernor>,
+    ) -> Self {
+        self.governor = Some(governor);
         self
     }
 
@@ -3028,6 +3100,9 @@ impl SubAgentRuntime {
             // siblings' progress. Parent todo state is still visible to an
             // opt-in forked child as immutable `fork_context` text.
             todos: crate::tools::todo::new_shared_todo_list(),
+            // Inherit the fleet's rate-limit governor so every descendant
+            // LLM attempt reports 429s/successes to the adaptive scheduler.
+            governor: self.governor.clone(),
             parent_mode: self.parent_mode,
             approval_mode: self.approval_mode,
             auto_review_policy: Arc::clone(&self.auto_review_policy),
@@ -3455,7 +3530,20 @@ pub struct SubAgentManager {
     /// publishing a visible "queued" reason instead of bursting. Deeper
     /// descendants bypass the gate so a permit-holding parent waiting on
     /// its own children cannot deadlock the tree.
-    launch_gate: Arc<Semaphore>,
+    ///
+    /// The gate is a [`governor::DynamicGate`] rather than a
+    /// `tokio::sync::Semaphore` so the rate-limit governor can shrink its
+    /// capacity at runtime (even below the number of active children)
+    /// without replacing the `Arc` — a semaphore swap silently fails while
+    /// any child still holds a permit, which is why
+    /// `update_runtime_limits` previously only applied launch-concurrency
+    /// changes to an idle fleet.
+    launch_gate: Arc<governor::DynamicGate>,
+    /// Rate-limit aware scheduler feeding `launch_gate` (swarm-mode
+    /// adaptive throttling). Sub-agent LLM attempts report 429s and
+    /// successes through [`SubAgentRuntime::governor`]; the governor
+    /// shrinks/pauses admissions on sustained 429s and recovers via AIMD.
+    governor: Arc<governor::RateLimitGovernor>,
     /// #freeze: hot-path persist debounce bookkeeping (see
     /// `SUBAGENT_PERSIST_DEBOUNCE`). `last_persist_at` is the last time any
     /// state persist ran; `persist_pending` records that a hot-path write was
@@ -3563,6 +3651,9 @@ impl SubAgentManager {
     /// separately from its execution workspace.
     #[must_use]
     pub fn new_with_state_root(workspace: PathBuf, state_root: PathBuf, max_agents: usize) -> Self {
+        // The governor owns the launch gate it schedules, so manager builders
+        // and the runtime limiter adjust capacity through the pair.
+        let (governor, launch_gate) = governor::RateLimitGovernor::new(max_agents.max(1));
         Self {
             agents: HashMap::new(),
             worker_records: HashMap::new(),
@@ -3587,7 +3678,8 @@ impl SubAgentManager {
             current_session_boot_id: format!("boot_{}", &Uuid::new_v4().to_string()[..12]),
             // Default launch concurrency = the full agent cap; the gate only
             // throttles when a lower `launch_concurrency` is configured.
-            launch_gate: Arc::new(Semaphore::new(max_agents.max(1))),
+            launch_gate,
+            governor,
             last_persist_at: None,
             persist_pending: false,
             last_cleanup_at: None,
@@ -3603,10 +3695,23 @@ impl SubAgentManager {
 
     /// Set the number of direct children that may execute concurrently
     /// before further launches queue (#3095). Clamped to `1..=max_agents`.
+    /// Applied to the live gate capacity, so this also takes effect when
+    /// called after children have started. Routed through the governor so a
+    /// rate-limit pause is not silently lifted by a limit change.
     #[must_use]
-    pub fn with_launch_concurrency(mut self, limit: usize) -> Self {
-        self.launch_gate = Arc::new(Semaphore::new(limit.clamp(1, self.max_agents)));
+    pub fn with_launch_concurrency(self, limit: usize) -> Self {
+        let limit = limit.clamp(1, self.max_agents);
+        self.governor.set_max_capacity(limit);
         self
+    }
+
+    /// The rate-limit governor backing [`Self::launch_gate`]; exposed so the
+    /// engine can stamp it onto root runtimes and tests can drive the
+    /// adaptive scheduler. (Surfacing governor state in status events is a
+    /// parent-repo follow-up.)
+    #[must_use]
+    pub(crate) fn rate_limit_governor(&self) -> Arc<governor::RateLimitGovernor> {
+        Arc::clone(&self.governor)
     }
 
     /// Set the total queued + running admission ceiling for this manager.
@@ -4331,9 +4436,11 @@ impl SubAgentManager {
         self
     }
 
-    /// Apply live runtime limits. The launch semaphore is replaced only when
-    /// no sub-agent is currently running, because active tasks may still hold
-    /// permits from the previous semaphore.
+    /// Apply live runtime limits. The launch gate is a
+    /// [`governor::DynamicGate`], so the new launch concurrency applies to
+    /// the live capacity immediately — children already holding permits keep
+    /// running, and no admission above the new capacity is granted until the
+    /// active count drains. Always returns `true`.
     pub fn update_runtime_limits(
         &mut self,
         max_agents: usize,
@@ -4349,13 +4456,11 @@ impl SubAgentManager {
         } else {
             running_heartbeat_timeout
         };
-        if self.running_count() == 0 {
-            self.launch_gate =
-                Arc::new(Semaphore::new(launch_concurrency.clamp(1, self.max_agents)));
-            true
-        } else {
-            false
-        }
+        let launch_concurrency = launch_concurrency.clamp(1, self.max_agents);
+        // Routed through the governor so a rate-limit pause (gate capacity 0)
+        // is not silently lifted by a runtime limit change.
+        self.governor.set_max_capacity(launch_concurrency);
+        true
     }
 
     /// Build the [`PersistedSubAgentState`] snapshot from the current fleet.
@@ -6603,7 +6708,9 @@ impl SubAgentManager {
         (agent_id, handle)
     }
 
-    /// Count running agents.
+    /// Count running agents. Test-only since the governor harvest (#6055):
+    /// the live launch-concurrency path reads the gate, not this count.
+    #[cfg(test)]
     pub fn running_count(&self) -> usize {
         self.admitted_count()
     }
@@ -6729,6 +6836,12 @@ impl SubAgentManager {
         options: SubAgentSpawnOptions,
         precomputed_delivery_evidence: Option<DeliveryEvidence>,
     ) -> Result<SubAgentResult> {
+        // Every manager-spawned runtime carries the fleet governor, so the
+        // spawned agent and its whole descendant tree report 429s/successes
+        // to the adaptive scheduler. Runtimes built outside a manager (tests,
+        // tool-only runtimes) keep `governor: None`.
+        runtime.governor = Some(Arc::clone(&self.governor));
+
         self.cleanup(COMPLETED_AGENT_RETENTION);
 
         self.check_admission_capacity()?;
@@ -9353,11 +9466,16 @@ impl ToolSpec for AgentTool {
                 },
                 "profile": {
                     "type": "string",
-                    "description": "Saved member id or built-in role from action=roster. Saved instructions, route and depth bounds apply; conflicting model/type pins are refused. thinking may override the saved tier."
+                    "description": "Saved member id or built-in role from action=roster. Saved instructions, route and depth bounds apply; conflicting model/type pins are refused. thinking may override the saved tier. A role:NAME selector matching several members is refused as ambiguous — list exact member ids with action=roster and pass one."
+                },
+                "allowed_tools": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                    "description": "Tool names for this child. Required and non-empty for type=custom, which is refused without it; for other roles narrows the inherited registry. Blank entries are dropped and duplicates merged."
                 },
                 "model": {
                     "type": "string",
-                    "description": "For an unpinned role, choose an exact model or provider/model from roster models, plus the session model. A selected Fleet constrains task choices to those routes; saved profile and manual role pins remain exact. With no selected models, current-provider overrides remain available."
+                    "description": "For an unpinned role, choose an exact model or provider/model from roster models, plus the session model. Roster member rows show each role's resolved route, i.e. which models each role accepts. A selected Fleet constrains task choices to those routes; saved profile and manual role pins remain exact. With no selected models, current-provider overrides remain available."
                 },
                 "model_strength": {
                     "type": "string",
@@ -9401,7 +9519,7 @@ impl ToolSpec for AgentTool {
                 },
                 "write_authority": {
                     "type": "string", "enum": ["read_only", "workspace_write", "worktree_write"],
-                    "description": "Optional typed narrowing of the child's write permissions. read_only admits no write scope; worktree_write requires worktree isolation."
+                    "description": "Optional typed narrowing of the child's write permissions. read_only admits no write scope; worktree_write requires worktree isolation. type=custom declaring write_roots, exact_files, or coordination_contracts must pass workspace_write or worktree_write explicitly; custom without scopes defaults to read_only."
                 },
                 "exact_files": {
                     "type": "array", "items": {"type": "string", "minLength": 1},
@@ -10293,11 +10411,14 @@ async fn spawn_subagent_from_input(
         .map(|file_path| read_bounded_resident_context(&runtime.context, file_path))
         .transpose()?;
     let effective_prompt = assemble_spawn_prompt(&spawn_request, resident_context.as_ref());
-    let (model_route, route_source) = bind_spawn_model_route(
+    let (model_route, route_source, fallback_note) = bind_spawn_model_route(
         &mut child_runtime,
         &spawn_request,
         profile_member.as_ref(),
         true,
+        // Exact-bound spawns refuse provider substitution: their route is
+        // preflighted and "will not guess or fall back".
+        exact_fleet_binding.is_none(),
     )
     .await?;
     if let Some(binding) = exact_fleet_binding {
@@ -10323,6 +10444,7 @@ async fn spawn_subagent_from_input(
         &child_runtime,
         effective_model.clone(),
         route_source.as_str(),
+        fallback_note.as_deref(),
     )?;
 
     if spawn_request.worktree.is_some() {
@@ -10602,6 +10724,7 @@ fn mint_child_route_receipt(
     runtime: &SubAgentRuntime,
     model_id: String,
     route_source: &str,
+    fallback_note: Option<&str>,
 ) -> Result<ChildRouteReceipt, ToolError> {
     // Identity comes from the same member snapshot used to bind this child.
     let canonical_role = request
@@ -10624,6 +10747,7 @@ fn mint_child_route_receipt(
         provider_id,
         model_id,
         route_source: route_source.to_string(),
+        fallback_note: fallback_note.map(str::to_string),
         requested_reasoning: requested_route.requested_reasoning.clone(),
         effective_reasoning: runtime.reasoning_effort.clone(),
         runtime_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -11142,7 +11266,7 @@ struct SubAgentTask {
     /// children: the task acquires a permit before its first model step and
     /// holds it until completion, so a fanout burst beyond the limit queues
     /// with a visible reason instead of executing all at once.
-    launch_gate: Option<Arc<Semaphore>>,
+    launch_gate: Option<Arc<governor::DynamicGate>>,
     /// Releases the parent turn's settlement barrier after this turn-owned
     /// child or descendant has completed its terminal fan-in.
     _foreground_child_registration: Option<ForegroundChildRegistration>,
@@ -11228,8 +11352,9 @@ fn budget_partial_result(
 async fn budget_work_preservation_note(
     runtime: &SubAgentRuntime,
     agent_id: &str,
+    cause: &str,
 ) -> Option<String> {
-    let (evidence, workspace) = runtime
+    let (evidence, workspace, isolated_worktree) = runtime
         .manager
         .read()
         .await
@@ -11239,12 +11364,24 @@ async fn budget_work_preservation_note(
             (
                 record.delivery_evidence.clone(),
                 record.spec.workspace.clone(),
+                record
+                    .spec
+                    .launch_manifest
+                    .as_ref()
+                    .is_some_and(|manifest| manifest.worktree),
             )
         })?;
     let display = workspace.display().to_string();
-    let changed = tokio::task::spawn_blocking(move || evidence.changed_paths(&workspace))
-        .await
-        .ok()??;
+    let agent = agent_id.to_string();
+    let cause = cause.to_string();
+    let (changed, checkpoint) = tokio::task::spawn_blocking(move || {
+        let changed = evidence.changed_paths(&workspace)?;
+        let checkpoint =
+            evidence.checkpoint_uncommitted(&changed, &agent, &cause, isolated_worktree);
+        Some((changed, checkpoint))
+    })
+    .await
+    .ok()??;
     Some(if changed.is_empty() {
         format!("No workspace changes were recorded under {display}.")
     } else {
@@ -11259,12 +11396,28 @@ async fn budget_work_preservation_note(
         } else {
             String::new()
         };
-        format!(
-            "The worker left {} workspace change(s) under {display}: {}{suffix}. \
-             The files survive on disk; salvage them or re-dispatch the remaining task.",
+        let inventory = format!(
+            "The worker left {} workspace change(s) under {display}: {}{suffix}.",
             changed.len(),
             listed.join(", ")
-        )
+        );
+        let disposition = match checkpoint {
+            delivery::BudgetCheckpointOutcome::Committed { sha } => format!(
+                " They are checkpointed in commit {sha} on the worker branch; review before merging or re-dispatching."
+            ),
+            delivery::BudgetCheckpointOutcome::Clean => {
+                " The worker committed before death; the changes are already in the worker tree."
+                    .to_string()
+            }
+            delivery::BudgetCheckpointOutcome::Failed { reason } => format!(
+                " Checkpoint commit failed ({reason}); the files survive on disk; salvage them or re-dispatch the remaining task."
+            ),
+            delivery::BudgetCheckpointOutcome::SkippedNonIsolated => {
+                " The files survive on disk; salvage them or re-dispatch the remaining task."
+                    .to_string()
+            }
+        };
+        format!("{inventory}{disposition}")
     })
 }
 
@@ -11398,9 +11551,9 @@ async fn run_subagent_task_inner(mut task: SubAgentTask) {
     let mut _launch_permit = None;
     let mut launch_wait_timed_out = false;
     if let Some(gate) = task.launch_gate.as_ref() {
-        match Arc::clone(gate).try_acquire_owned() {
-            Ok(permit) => _launch_permit = Some(permit),
-            Err(tokio::sync::TryAcquireError::NoPermits) => {
+        match Arc::clone(gate).try_acquire() {
+            Some(permit) => _launch_permit = Some(permit),
+            None => {
                 match tokio::time::timeout_at(
                     deadline.into(),
                     acquire_queued_launch_permit(&task, Arc::clone(gate)),
@@ -11410,12 +11563,6 @@ async fn run_subagent_task_inner(mut task: SubAgentTask) {
                     Ok(permit) => _launch_permit = permit,
                     Err(_) => launch_wait_timed_out = true,
                 }
-            }
-            Err(tokio::sync::TryAcquireError::Closed) => {
-                crate::logging::warn(format!(
-                    "sub-agent launch gate closed for {}; proceeding without backpressure",
-                    task.agent_id
-                ));
             }
         }
     }
@@ -11482,7 +11629,14 @@ async fn run_subagent_task_inner(mut task: SubAgentTask) {
         .as_deref()
         .is_some_and(|error| error.contains("wall-time budget exhausted"))
     {
-        budget_work_preservation_note(&task.runtime, &agent_id).await
+        budget_work_preservation_note(
+            &task.runtime,
+            &agent_id,
+            failure_error
+                .as_deref()
+                .unwrap_or("wall-time budget exhausted"),
+        )
+        .await
     } else {
         None
     };
@@ -11542,28 +11696,69 @@ async fn run_subagent_task_inner(mut task: SubAgentTask) {
 
 async fn acquire_queued_launch_permit(
     task: &SubAgentTask,
-    gate: Arc<Semaphore>,
-) -> Option<tokio::sync::OwnedSemaphorePermit> {
-    record_queued_launch_progress(task).await;
-    tokio::select! {
-        biased;
-        () = task.runtime.cancel_token.cancelled() => {
-            None
-        }
-        permit = Arc::clone(&gate).acquire_owned() => {
-            permit.ok()
+    gate: Arc<governor::DynamicGate>,
+) -> Option<governor::DynamicGatePermit> {
+    // When the governor has paused launches over sustained provider 429s,
+    // surface the reason in the queued status instead of the generic
+    // "waiting for a launch slot" message.
+    let paused_for_rate_limit = task
+        .runtime
+        .governor
+        .as_ref()
+        .is_some_and(|governor| governor.is_paused(Instant::now()));
+    let queued_reason = if paused_for_rate_limit {
+        SUBAGENT_QUEUED_RATE_LIMIT_REASON
+    } else {
+        SUBAGENT_QUEUED_LAUNCH_REASON
+    };
+    record_queued_launch_progress(task, queued_reason).await;
+    // While queued, periodically probe the governor: if a rate-limit pause
+    // outlives its window (the in-flight fleet finished before any success
+    // could lift the pause), the probe resumes launches instead of leaving
+    // the queue frozen until each child's wall-time deadline.
+    let mut recovery_probe = tokio::time::interval(if task.runtime.governor.is_some() {
+        LAUNCH_RECOVERY_PROBE_PERIOD
+    } else {
+        LAUNCH_RECOVERY_PROBE_PERIOD_WITHOUT_GOVERNOR
+    });
+    // Hold the acquire future across select iterations. Re-creating it on
+    // every probe tick would leave one stale queue entry per tick per queued
+    // child inside the gate (purged only by the next grant wave), which adds
+    // up over a long pause with a full swarm queue.
+    let mut acquire_permit = std::pin::pin!(gate.acquire());
+    loop {
+        tokio::select! {
+            biased;
+            () = task.runtime.cancel_token.cancelled() => {
+                // No Cancelled progress event here: turn-end parking cancels
+                // queued children through the same token and must project as
+                // Interrupted-with-checkpoint, and genuine cancellation is
+                // reported by `run_subagent`'s first-step cancel check.
+                return None;
+            }
+            _ = recovery_probe.tick() => {
+                if let Some(governor) = task.runtime.governor.as_ref() {
+                    governor.recover_if_window_drained(Instant::now());
+                }
+                // If the probe lifted a pause it raised the gate capacity,
+                // which grants queued waiters; the pinned `acquire_permit`
+                // below observes the grant on the next poll.
+            }
+            permit = &mut acquire_permit => {
+                return Some(permit);
+            }
         }
     }
 }
 
-async fn record_queued_launch_progress(task: &SubAgentTask) {
+async fn record_queued_launch_progress(task: &SubAgentTask, queued_reason: &'static str) {
     {
         let mut manager = task.runtime.manager.write().await;
         manager.touch(&task.agent_id);
         manager.record_worker_event(
             &task.agent_id,
             AgentWorkerStatus::Queued,
-            Some(SUBAGENT_QUEUED_LAUNCH_REASON.to_string()),
+            Some(queued_reason.to_string()),
             None,
             None,
         );
@@ -11572,16 +11767,13 @@ async fn record_queued_launch_progress(task: &SubAgentTask) {
         task.runtime.event_tx.as_ref(),
         &task.runtime.context.state_namespace,
         &task.agent_id,
-        SUBAGENT_QUEUED_LAUNCH_REASON.to_string(),
+        queued_reason.to_string(),
         AgentProgressEventMeta::new(AgentWorkerStatus::Queued),
         task.runtime.parent_agent_id.clone(),
         task.runtime.spawn_depth,
     );
     if let Some(mailbox) = task.runtime.mailbox.as_ref() {
-        let _ = mailbox.send(MailboxMessage::progress(
-            &task.agent_id,
-            SUBAGENT_QUEUED_LAUNCH_REASON,
-        ));
+        let _ = mailbox.send(MailboxMessage::progress(&task.agent_id, queued_reason));
     }
 }
 
@@ -11862,6 +12054,8 @@ fn subagent_failure_class(status: &SubAgentStatus, error: &str) -> &'static str 
         "step_budget"
     } else if error.contains("wall-time budget exhausted") {
         "wall_time_budget"
+    } else if error.contains("context budget exhausted") {
+        "context_budget"
     } else if matches!(status, SubAgentStatus::BudgetExhausted) {
         "budget_exhausted"
     } else if error.contains("authorization failed")
@@ -12275,8 +12469,11 @@ fn retryable_subagent_provider_failure(
         return Some(RetryableSubAgentProviderFailure {
             label: "rate-limited provider response",
             checkpoint_reason: "api_rate_limited",
-            delay: retry_after
-                .unwrap_or_else(|| subagent_transient_provider_retry_delay(retry_number)),
+            // Honor the provider's `Retry-After` when present. Without it,
+            // back off exponentially with full jitter (capped at 120s) so a
+            // fan-out of children 429'd by the same provider response does
+            // not retry in lockstep (thundering herd).
+            delay: retry_after.unwrap_or_else(|| governor::rate_limit_retry_delay(retry_number)),
         });
     }
 
@@ -12354,14 +12551,36 @@ async fn request_subagent_model_response_with_retries(
             .client
             .effective_route_envelope(&runtime.model, chrono::Utc::now());
         request_attempted.store(true, std::sync::atomic::Ordering::Relaxed);
+        // Report the attempt to the fleet's rate-limit governor; the ratio
+        // denominator for the AIMD heuristic counts retried attempts too.
+        if let Some(governor) = runtime.governor.as_ref() {
+            governor.record_attempt(Instant::now());
+        }
         match tokio::time::timeout(
             runtime.step_api_timeout,
             runtime.client.create_message(request.clone()),
         )
         .await
         {
-            Ok(Ok(response)) => return Ok((response, usage_route)),
+            Ok(Ok(response)) => {
+                // A successful call signals recovery; drives AIMD additive
+                // increase and (once limits age out of the window) unpauses.
+                if let Some(governor) = runtime.governor.as_ref() {
+                    governor.record_success(Instant::now());
+                }
+                return Ok((response, usage_route));
+            }
             Ok(Err(err)) => {
+                // A provider 429 feeds the governor's sliding window (AIMD
+                // multiplicative decrease / pause). `QuotaExhausted` and all
+                // other errors keep their existing paths untouched.
+                if matches!(
+                    err.downcast_ref::<LlmError>(),
+                    Some(LlmError::RateLimited { .. })
+                ) && let Some(governor) = runtime.governor.as_ref()
+                {
+                    governor.record_rate_limited(Instant::now());
+                }
                 let retry_number = transient_failures.saturating_add(1);
                 let Some(retryable) = retryable_subagent_provider_failure(&err, retry_number)
                 else {
@@ -12718,12 +12937,20 @@ async fn run_subagent(
         max_steps
     };
     let (work_deadline, hard_deadline) = budget_handback::wall_deadlines(runtime);
+    // #6194 item 7: per-step context guardrail, disclosed below and enforced
+    // after every billed model step.
+    let step_input_bound = child_step_input_bound(
+        runtime
+            .client
+            .route_limits()
+            .and_then(|limits| limits.context_tokens),
+    );
     // #6194: the child sees what it is racing from the first turn — the
     // resolved budgets ride inside the task text so the transcript artifact
     // logs exactly what the model was told.
     let prompt = format!(
         "{prompt}\n\n{}",
-        child_runtime_budget_context(runtime, max_steps, work_max_steps)
+        child_runtime_budget_context(runtime, max_steps, work_max_steps, step_input_bound)
     );
     let mut messages = build_initial_subagent_messages_with_system(
         &prompt,
@@ -13252,6 +13479,16 @@ async fn run_subagent(
 
         tokens_used = tokens_used.saturating_add(usage_total_tokens(&response.usage));
 
+        // #6194 item 7: one over-bound step lands the run through the normal
+        // budget-death path (digest + hand-back + preservation note) instead
+        // of burning quadratically to wall/token death.
+        if let Some(reason) =
+            child_context_trip(u64::from(response.usage.input_tokens), step_input_bound)
+        {
+            budget_failure_reason = Some(reason);
+            break;
+        }
+
         let mut current_response_text = None;
         for block in &response.content {
             match block {
@@ -13719,7 +13956,7 @@ async fn run_subagent(
         // describes what the model remembered; this names the on-disk changes
         // the worker actually left, so the parent can salvage them without
         // trusting the partial report.
-        if let Some(preservation) = budget_work_preservation_note(runtime, &agent_id).await {
+        if let Some(preservation) = budget_work_preservation_note(runtime, &agent_id, cause).await {
             let note = handback_note.get_or_insert_with(String::new);
             if !note.is_empty() {
                 note.push(' ');
@@ -14735,12 +14972,12 @@ fn apply_spawn_profile(
 fn bind_profile_provider(
     runtime: &mut SubAgentRuntime,
     member: Option<&crate::fleet::profile::AgentProfile>,
-) -> Result<(), ToolError> {
+) -> Result<MemberProviderBind, ToolError> {
     let Some(provider_id) = crate::fleet::worker_runtime::explicit_fleet_provider_id(member) else {
-        return Ok(());
+        return Ok(MemberProviderBind::Bound);
     };
     if provider_pin_matches_session(runtime, &provider_id) {
-        return Ok(());
+        return Ok(MemberProviderBind::Bound);
     }
     if member
         .and_then(|member| member.profile.model.as_deref())
@@ -14750,12 +14987,39 @@ fn bind_profile_provider(
             "A saved cross-provider route must pin an exact model as well as its provider.",
         ));
     }
-    bind_spawn_provider(runtime, &provider_id)
+    try_bind_spawn_provider(runtime, &provider_id)
+}
+
+/// Outcome of binding a saved profile's provider pin (#5529 mode 2).
+enum MemberProviderBind {
+    /// No pin, a session-identical pin, or bound successfully.
+    Bound,
+    /// The pin names a real provider whose client cannot be built
+    /// (missing credentials, unusable route). The dispatch may fall back
+    /// to the session route loudly instead of failing. Unknown provider
+    /// ids stay a hard fail-closed error — running elsewhere on a typo'd
+    /// pin would be guessing, not falling back.
+    Unavailable { provider_id: String, reason: String },
 }
 
 fn bind_spawn_provider(runtime: &mut SubAgentRuntime, provider_id: &str) -> Result<(), ToolError> {
+    match try_bind_spawn_provider(runtime, provider_id)? {
+        MemberProviderBind::Bound => Ok(()),
+        MemberProviderBind::Unavailable {
+            provider_id,
+            reason,
+        } => Err(ToolError::execution_failed(format!(
+            "Saved provider '{provider_id}' is unavailable: {reason}"
+        ))),
+    }
+}
+
+fn try_bind_spawn_provider(
+    runtime: &mut SubAgentRuntime,
+    provider_id: &str,
+) -> Result<MemberProviderBind, ToolError> {
     if provider_pin_matches_session(runtime, provider_id) {
-        return Ok(());
+        return Ok(MemberProviderBind::Bound);
     }
     let config = runtime.api_config.as_deref().ok_or_else(|| ToolError::execution_failed(
         "An exact provider choice needs the session Config; the child cannot safely change providers without it."
@@ -14765,14 +15029,30 @@ fn bind_spawn_provider(runtime: &mut SubAgentRuntime, provider_id: &str) -> Resu
         .map_err(ToolError::invalid_input)?;
     let mut scoped = config.clone();
     scoped.scope_to_provider_identity(&identity);
-    runtime.client = DeepSeekClient::new(&scoped).map_err(|error| {
-        ToolError::execution_failed(format!(
-            "Saved provider '{provider_id}' is unavailable: {}",
-            runtime.client.redact_model_bound_text(&error.to_string())
-        ))
-    })?;
-    runtime.api_config = Some(Arc::new(scoped));
-    Ok(())
+    match DeepSeekClient::new(&scoped) {
+        Ok(client) => {
+            // #5529 mode 2: a bound client with unresolvable credentials
+            // dies on its first request; probe servability now so the
+            // dispatch can fall back loudly instead. Read-only probe: real
+            // requests still own secret migration.
+            if let Err(error) = scoped.deepseek_api_key_read_only() {
+                return Ok(MemberProviderBind::Unavailable {
+                    provider_id: provider_id.to_string(),
+                    reason: format!(
+                        "credentials unresolvable: {}",
+                        runtime.client.redact_model_bound_text(&error.to_string())
+                    ),
+                });
+            }
+            runtime.client = client;
+            runtime.api_config = Some(Arc::new(scoped));
+            Ok(MemberProviderBind::Bound)
+        }
+        Err(error) => Ok(MemberProviderBind::Unavailable {
+            provider_id: provider_id.to_string(),
+            reason: runtime.client.redact_model_bound_text(&error.to_string()),
+        }),
+    }
 }
 
 fn provider_pin_matches_session(runtime: &SubAgentRuntime, provider_id: &str) -> bool {
@@ -14921,6 +15201,10 @@ enum SpawnRouteSource {
     TaskModelStrength,
     RoleDefault,
     RunModel,
+    /// The profile's pinned provider was unusable, so the dispatch fell
+    /// back to the session route loudly (receipt note names the pin and
+    /// the reason) instead of failing (#5529 mode 2).
+    SessionFallback,
 }
 
 impl SpawnRouteSource {
@@ -14932,6 +15216,7 @@ impl SpawnRouteSource {
             Self::TaskModelStrength => "task.model_strength",
             Self::RoleDefault => "role.default",
             Self::RunModel => "run.model",
+            Self::SessionFallback => "session.fallback",
         }
     }
 }
@@ -15110,8 +15395,35 @@ async fn bind_spawn_model_route(
     request: &SpawnRequest,
     member: Option<&crate::fleet::profile::AgentProfile>,
     apply_role_pins: bool,
-) -> Result<(ModelRoute, SpawnRouteSource), ToolError> {
-    bind_profile_provider(runtime, member)?;
+    allow_provider_fallback: bool,
+) -> Result<(ModelRoute, SpawnRouteSource, Option<String>), ToolError> {
+    // #5529 mode 2: a profile pin to an unusable provider falls back to the
+    // session route loudly instead of failing the dispatch. Exact-bound
+    // spawns refuse the substitution (their route is preflighted), and
+    // task-level pins stay exact — only saved-profile rot falls back.
+    let mut member = member;
+    let mut fallback_note = None;
+    match bind_profile_provider(runtime, member)? {
+        MemberProviderBind::Bound => {}
+        MemberProviderBind::Unavailable {
+            provider_id,
+            reason,
+        } if allow_provider_fallback => {
+            let reason: String = reason.chars().take(160).collect();
+            fallback_note = Some(format!(
+                "pinned provider '{provider_id}' unavailable ({reason}); fell back to the session route"
+            ));
+            member = None;
+        }
+        MemberProviderBind::Unavailable {
+            provider_id,
+            reason,
+        } => {
+            return Err(ToolError::execution_failed(format!(
+                "Saved provider '{provider_id}' is unavailable: {reason}"
+            )));
+        }
+    }
     let mut shortlisted = false;
     let mut manual_pin = None;
     let mut selection = if let Some(member) = member
@@ -15210,7 +15522,12 @@ async fn bind_spawn_model_route(
     runtime.model = model;
     runtime.reasoning_effort = route.reasoning_effort;
     runtime.reasoning_effort_auto = false;
-    Ok((route.model_route, selection.source))
+    let source = if fallback_note.is_some() {
+        SpawnRouteSource::SessionFallback
+    } else {
+        selection.source
+    };
+    Ok((route.model_route, source, fallback_note))
 }
 
 fn validate_spawn_pin_request(
@@ -15328,12 +15645,13 @@ async fn resolved_spawn_roster_entry(
     let mut child = runtime.child_runtime();
     let resolved = match request {
         Ok((request, member)) => {
-            bind_spawn_model_route(&mut child, &request, member.as_ref(), apply_role_pins).await
+            bind_spawn_model_route(&mut child, &request, member.as_ref(), apply_role_pins, true)
+                .await
         }
         Err(error) => Err(error),
     };
     match resolved {
-        Ok((_, source)) => {
+        Ok((_, source, _)) => {
             let envelope = child
                 .client
                 .effective_route_envelope(&child.model, chrono::Utc::now())
@@ -17514,6 +17832,9 @@ impl SubAgentToolRegistry {
             &mut catalog,
             AppMode::Agent,
             &std::collections::HashSet::new(),
+            // Children run under a worker envelope, which refuses
+            // execute_tools at dispatch; never advertise it eagerly here.
+            ToolMode::Direct,
         );
         // A tool-free child (explicit empty scope) has nothing to discover:
         // drop tool_search as well so the wire request genuinely omits tools.
@@ -18372,7 +18693,7 @@ const GENERAL_AGENT_INTRO: &str = concat!(
 
 const EXPLORE_AGENT_INTRO: &str = concat!(
     "You are a trusted Fleet scout (role: `scout`). Your job is to map the relevant code quickly and stay strictly read-only.\n",
-    "Default to `EFFORT: quick`: aim for about 3-5 tool calls unless the brief explicitly asks for more.\n",
+    "Default to `EFFORT: quick`: stop at decisive evidence, not at a number — there is no per-agent call cap to save.\n",
     "Orient first: confirm the workspace/project root, read relevant AGENTS.md/README guidance when the tree is unfamiliar, then search only the likely scope.\n",
     "Use `read` for bounded file reads and `bash` only for the allowed read-only inspection subset: navigation/rg, safe Git reads (for example `git log -n 5`), and read-only GitHub views such as `gh issue view`. Builds, tests, writes, and shell control actions are unavailable.\n",
     "Use your private `todo_write` list as editable working notes when useful; it is agent-owned state, not permission to write project files. Those tool calls remain in the complete transcript artifact returned to the parent.\n",
@@ -18599,10 +18920,11 @@ async fn configured_model_subagent_full_bind_preserves_task_profile_and_role_ids
                 _ => unreachable!(),
             }
             let request = parse_spawn_request(&input).unwrap();
-            let (route, _) = bind_spawn_model_route(
+            let (route, _, _) = bind_spawn_model_route(
                 &mut runtime,
                 &request,
                 (source == "profile").then_some(&member),
+                true,
                 true,
             )
             .await
@@ -18761,9 +19083,10 @@ mod declared_shortlist_tests {
                         &json!({"prompt":"fixture", "type":"reviewer", "model":requested}),
                     )
                     .unwrap();
-                    let (route, _) = bind_spawn_model_route(&mut runtime, &request, None, true)
-                        .await
-                        .unwrap();
+                    let (route, _, _) =
+                        bind_spawn_model_route(&mut runtime, &request, None, true, true)
+                            .await
+                            .unwrap();
                     assert_eq!(route, ModelRoute::Fixed(model.into()));
                     assert_eq!(runtime.model, model);
                     assert_eq!(
@@ -18826,6 +19149,7 @@ mod declared_shortlist_tests {
                         &request,
                         (source == "profile").then_some(&member),
                         true,
+                        true,
                     )
                     .await;
                     if requested_model == upper {
@@ -18849,7 +19173,7 @@ mod declared_shortlist_tests {
         )
         .unwrap();
         assert!(
-            bind_spawn_model_route(&mut runtime, &request, None, true)
+            bind_spawn_model_route(&mut runtime, &request, None, true, true)
                 .await
                 .unwrap_err()
                 .to_string()
@@ -18875,7 +19199,7 @@ mod declared_shortlist_tests {
             parse_spawn_request(&json!({"prompt":"fixture", "type":"reviewer", "model":lower}))
                 .unwrap();
         assert!(
-            bind_spawn_model_route(&mut runtime, &request, None, true)
+            bind_spawn_model_route(&mut runtime, &request, None, true, true)
                 .await
                 .is_err()
         );
@@ -18887,7 +19211,7 @@ mod declared_shortlist_tests {
         )
         .unwrap();
         assert_eq!(
-            bind_spawn_model_route(&mut runtime, &request, None, true)
+            bind_spawn_model_route(&mut runtime, &request, None, true, true)
                 .await
                 .unwrap()
                 .0,

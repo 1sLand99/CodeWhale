@@ -14,6 +14,7 @@ pub mod arg_repair;
 pub mod automation;
 pub mod canonical_action;
 pub mod cargo_failure_summary;
+pub mod codemode;
 pub mod dev_server_readiness;
 pub mod diagnostics;
 pub mod diff_format;

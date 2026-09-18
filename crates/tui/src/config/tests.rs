@@ -304,57 +304,6 @@ fn provider_environment_model_outranks_startup_memory() {
     );
 }
 
-#[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-struct HeaderItemsTestConfig {
-    #[serde(default, deserialize_with = "deser_header_items")]
-    header_items: Option<Vec<HeaderItem>>,
-}
-
-#[test]
-fn parses_header_tokens_item() {
-    let config: HeaderItemsTestConfig = toml::from_str(
-        r#"
-header_items = ["tokens"]
-"#,
-    )
-    .expect("header_items should parse");
-
-    assert_eq!(config.header_items, Some(vec![HeaderItem::Tokens]));
-}
-
-#[test]
-fn ignores_unknown_header_items() {
-    let config: HeaderItemsTestConfig = toml::from_str(
-        r#"
-header_items = ["tokens", "future_item"]
-"#,
-    )
-    .expect("unknown header items should not reject the config");
-
-    assert_eq!(config.header_items, Some(vec![HeaderItem::Tokens]));
-}
-
-#[test]
-fn header_items_scenario() {
-    // Scenario consolidation of: header_items_round_trip, header_items_are_opt_in_by_default
-    // from header_items_round_trip
-    {
-        let original = HeaderItemsTestConfig {
-            header_items: Some(vec![HeaderItem::Tokens]),
-        };
-
-        let serialized = toml::to_string(&original).expect("config should serialize");
-        let decoded: HeaderItemsTestConfig =
-            toml::from_str(&serialized).expect("serialized config should parse");
-
-        assert_eq!(decoded, original);
-    }
-    // from header_items_are_opt_in_by_default
-    {
-        assert!(HeaderItem::default_header().is_empty());
-    }
-}
-
 #[test]
 fn malformed_config_error_omits_secret_contents_and_keys() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1616,13 +1565,9 @@ fn workflow_config_defaults_when_omitted_and_overrides_round_trip() {
         automatic = false
         auto_start_read_only = false
         require_approval_for_writes = true
-        auto_start_child_limit = 4
         max_children = 32
         max_depth = 1
         default_token_budget = 90000
-        max_parallel_writes_without_worktree = 1
-        persist_completed_activity = false
-        persist_completed_across_restarts = false
         "#,
     )
     .expect("parse workflow config");
@@ -1631,13 +1576,9 @@ fn workflow_config_defaults_when_omitted_and_overrides_round_trip() {
     assert!(!workflow.automatic);
     assert!(!workflow.auto_start_read_only);
     assert!(workflow.require_approval_for_writes);
-    assert_eq!(workflow.auto_start_child_limit, 4);
     assert_eq!(workflow.max_children, 32);
     assert_eq!(workflow.max_depth, 1);
     assert_eq!(workflow.default_token_budget, 90_000);
-    assert_eq!(workflow.max_parallel_writes_without_worktree, 1);
-    assert!(!workflow.persist_completed_activity);
-    assert!(!workflow.persist_completed_across_restarts);
     assert_eq!(config.workflow_config(), workflow);
 
     let serialized = toml::to_string_pretty(&workflow).expect("serialize workflow");

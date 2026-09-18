@@ -269,10 +269,12 @@ async fn issue_5305_unbuildable_route_refuses_before_worktree_admission() {
 }
 
 #[tokio::test]
-async fn issue_5305_untethered_runtime_fails_closed_before_admission() {
-    // Role-only dispatch builds no provider client, but the wire-protocol
-    // bind still needs the session `Config`: without it the spawn fails
-    // closed before admission instead of dispatching half-bound.
+async fn issue_6320_untethered_runtime_binds_exact_route() {
+    // #6320 decision: binding to the already-exact route is acceptable. The
+    // runtime keeps its fully-constructed client; `api_config = None` only
+    // matters when a cross-protocol rebuild is needed, and that path still
+    // fails closed (see untethered_cross_protocol_rebound_fails_closed_without_config).
+    // Untethered means "no Config to rebuild from", not "no client at all".
     let workspace = tempfile::tempdir().expect("workspace tempdir");
     let manager = new_shared_subagent_manager(workspace.path().to_path_buf(), 1);
     let mut runtime = stub_runtime();
@@ -280,18 +282,17 @@ async fn issue_5305_untethered_runtime_fails_closed_before_admission() {
     runtime.manager = manager.clone();
     runtime.api_config = None;
     let context = runtime.context.clone();
-    let err = AgentTool::new(manager.clone(), runtime)
+    let start = AgentTool::new(manager.clone(), runtime)
         .execute(
             json!({"action":"start", "type":"consultant", "prompt":"untethered spawn"}),
             &context,
         )
         .await
-        .expect_err("untethered runtime must fail closed");
-    assert!(
-        err.to_string().contains("no configuration is available"),
-        "{err}"
-    );
-    assert!(manager.read().await.list_filtered(true).is_empty());
+        .expect("untethered runtime binds its exact route");
+    let receipt = receipt_from(&start);
+    assert_eq!(receipt["model_id"], json!("deepseek-v4-flash"));
+    assert!(!manager.read().await.list_filtered(true).is_empty());
+    cancel_started(&manager, &start).await;
 }
 
 #[test]
@@ -312,6 +313,7 @@ fn issue_5305_builtin_inheritance_and_redaction_are_bounded() {
         &runtime,
         "deepseek-v4-flash".to_string(),
         "run.model",
+        None,
     )
     .expect("bounded receipt");
     let encoded = serde_json::to_string(&receipt).expect("receipt json");
@@ -326,6 +328,24 @@ fn issue_5305_builtin_inheritance_and_redaction_are_bounded() {
             "receipt leaked {forbidden}: {encoded}"
         );
     }
+    // #5529 mode 2: the fallback note rides the receipt inside the same
+    // byte ceiling.
+    let fallback = mint_child_route_receipt(
+        &requested_route,
+        &request,
+        None,
+        &runtime,
+        "deepseek-v4-flash".to_string(),
+        "session.fallback",
+        Some("pinned provider 'xai' unavailable (no credentials); fell back to the session route"),
+    )
+    .expect("bounded receipt");
+    assert_eq!(
+        fallback.fallback_note.as_deref(),
+        Some("pinned provider 'xai' unavailable (no credentials); fell back to the session route")
+    );
+    let fallback_encoded = serde_json::to_string(&fallback).expect("receipt json");
+    assert!(fallback_encoded.len() <= CHILD_ROUTE_RECEIPT_MAX_BYTES);
 }
 
 #[tokio::test]
@@ -341,6 +361,7 @@ async fn issue_5305_receipt_survives_ledger_interruption_completion_and_resume()
         provider_id: "openai-codex".to_string(),
         model_id: "gpt-5.6-sol".to_string(),
         route_source: "agent_profile.model".to_string(),
+        fallback_note: None,
         requested_reasoning: "inherit".to_string(),
         effective_reasoning: Some("high".to_string()),
         runtime_version: "test".to_string(),

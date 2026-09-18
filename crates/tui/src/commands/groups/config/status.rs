@@ -664,7 +664,7 @@ mod tests {
         app.session.last_completion_tokens = Some(25);
         app.session.last_prompt_cache_hit_tokens = Some(70);
         app.session.last_prompt_cache_miss_tokens = Some(30);
-        app.api_messages.push(Message {
+        app.api_messages_mut().push(Message {
             role: Role::User,
             content: vec![ContentBlock::Text {
                 text: "hello".to_string(),
@@ -995,7 +995,7 @@ mod tests {
         let tmpdir = TempDir::new().expect("temp dir");
         let mut app = create_test_app(tmpdir.path().to_path_buf());
         let raw = "RAW_STATUS_PRESSURE\n".repeat(2_000);
-        app.api_messages.push(Message {
+        app.api_messages_mut().push(Message {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: "call-big".to_string(),

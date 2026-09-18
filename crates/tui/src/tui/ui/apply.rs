@@ -1205,7 +1205,7 @@ pub(crate) async fn apply_provider_fallback_switch(
         let _ = engine_handle
             .send(Op::SyncSession {
                 session_id: app.current_session_id.clone(),
-                messages: app.api_messages.clone(),
+                messages: app.api_messages.as_ref().clone(),
                 system_prompt: app.system_prompt.clone(),
                 system_prompt_override: false,
                 model: app.model.clone(),
@@ -1394,7 +1394,7 @@ pub(crate) async fn apply_command_result(
                 let _ = engine_handle
                     .send(Op::SyncSession {
                         session_id: app.current_session_id.clone(),
-                        messages: app.api_messages.clone(),
+                        messages: app.api_messages.as_ref().clone(),
                         system_prompt: app.system_prompt.clone(),
                         system_prompt_override: false,
                         model: app.model.clone(),
@@ -1565,7 +1565,7 @@ pub(crate) async fn apply_command_result(
                     let _ = engine_handle
                         .send(Op::SyncSession {
                             session_id: app.current_session_id.clone(),
-                            messages: app.api_messages.clone(),
+                            messages: app.api_messages.as_ref().clone(),
                             system_prompt: app.system_prompt.clone(),
                             system_prompt_override: false,
                             model: app.model.clone(),
@@ -2318,6 +2318,7 @@ pub(crate) async fn apply_command_result(
                 app.current_session_id = Some(owner_session_id.clone());
                 let request = NewTaskRequest {
                     prompt: prompt.clone(),
+                    name: None,
                     model: Some(app.model.clone()),
                     model_provider: Some(app.api_provider.as_str().to_string()),
                     model_provider_id: Some(app.provider_identity_for_persistence().to_string()),
@@ -2464,7 +2465,7 @@ pub(crate) async fn apply_command_result(
                             let _ = engine_handle
                                 .send(Op::SyncSession {
                                     session_id: app.current_session_id.clone(),
-                                    messages: app.api_messages.clone(),
+                                    messages: app.api_messages.as_ref().clone(),
                                     system_prompt: app.system_prompt.clone(),
                                     system_prompt_override: false,
                                     model: app.model.clone(),
@@ -3580,7 +3581,22 @@ pub(crate) fn apply_loaded_session_with_goal(
             recovered_binding = tasks.session_store_binding();
         }
         if recovered_binding.is_none() {
-            return Err("This session belongs to another Runtime host. Resume it in a new Codewhale process to reopen its saved store.".into());
+            // Name the real condition and the path that actually works. The
+            // old wording ("resume it in a new Codewhale process") sent users
+            // in circles: starting a new process and then picking the session
+            // from `/resume` lands here again, because that is this same
+            // switch path. Opening the session *at launch* is a different
+            // route — `TaskManager::start` passes the saved binding through to
+            // `open_for_session`, which validates the existing store and
+            // adopts it (runtime_threads.rs, `validate_existing_store` then
+            // `open_inner`). So the advice has to say which one (#6207, #6225).
+            return Err(format!(
+                "This session's saved Runtime store belongs to a different host. \
+                 Switching to it from inside a running session cannot carry that \
+                 store's queued work across, but opening it directly can: run \
+                 `codewhale resume {}` from your shell.",
+                session.metadata.id
+            ));
         }
     }
     if app.session_transition_blocked() {

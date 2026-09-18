@@ -626,7 +626,7 @@ async fn run_death_preservation_note_names_surviving_workspace_changes() {
     let mut runtime = stub_runtime();
     runtime.manager = Arc::clone(&manager);
 
-    let note = budget_work_preservation_note(&runtime, "preserve-worker")
+    let note = budget_work_preservation_note(&runtime, "preserve-worker", "wall_time_budget")
         .await
         .expect("write-scoped worker has a baseline");
     assert!(
@@ -641,7 +641,7 @@ async fn run_death_preservation_note_names_surviving_workspace_changes() {
     scout_spec.runtime_profile.permissions.write = false;
     manager.write().await.register_worker(scout_spec);
     assert!(
-        budget_work_preservation_note(&runtime, "scout-worker")
+        budget_work_preservation_note(&runtime, "scout-worker", "wall_time_budget")
             .await
             .is_none()
     );
@@ -664,10 +664,159 @@ async fn run_death_preservation_note_names_surviving_workspace_changes() {
     git(clean_path, &["commit", "--quiet", "-m", "baseline"]);
     clean_spec.workspace = clean_path.to_path_buf();
     manager.write().await.register_worker(clean_spec);
-    let note = budget_work_preservation_note(&runtime, "clean-worker")
+    let note = budget_work_preservation_note(&runtime, "clean-worker", "wall_time_budget")
         .await
         .expect("baseline exists");
     assert!(note.contains("No workspace changes"), "{note}");
+}
+
+fn git_out(root: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .expect("git");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// #6194 item 4 / #5529: on an isolated worktree a budget death commits the
+/// worker's uncommitted changes as labeled salvage instead of leaving them
+/// for manual recovery.
+#[tokio::test]
+async fn budget_death_checkpoint_commits_uncommitted_work_on_isolated_worktree() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    git(root, &["init", "--quiet"]);
+    git(root, &["config", "user.name", "Budget test"]);
+    git(root, &["config", "user.email", "budget@example.invalid"]);
+    fs::write(root.join("src.rs"), "baseline\n").unwrap();
+    git(root, &["add", "--", "src.rs"]);
+    git(root, &["commit", "--quiet", "-m", "baseline"]);
+
+    let manager = Arc::new(RwLock::new(SubAgentManager::new(root.to_path_buf(), 2)));
+    let mut spec = make_worker_spec("checkpoint-worker", root.to_path_buf());
+    spec.runtime_profile.permissions.write = true;
+    spec.launch_manifest = Some(ChildLaunchManifest {
+        owner_session: "root".to_string(),
+        child_id: "checkpoint-worker".to_string(),
+        profile: spec.runtime_profile.clone(),
+        prompt: spec.objective.clone(),
+        cwd: Some(root.display().to_string()),
+        worktree: true,
+        writable_roots: vec![root.display().to_string()],
+        writable_files: Vec::new(),
+        coordination_contracts: Vec::new(),
+        expected_artifact: None,
+        deliverables: Vec::new(),
+        resume_identity: None,
+        generation: 1,
+        resume_from_agent_id: None,
+    });
+    manager.write().await.register_worker(spec);
+    fs::write(root.join("src.rs"), "baseline\nuncommitted fix\n").unwrap();
+    fs::write(root.join("new.rs"), "wip\n").unwrap();
+
+    let mut runtime = stub_runtime();
+    runtime.manager = Arc::clone(&manager);
+    let note = budget_work_preservation_note(&runtime, "checkpoint-worker", "wall_time_budget")
+        .await
+        .expect("note");
+    assert!(
+        note.contains("checkpointed in commit"),
+        "note should name the salvage commit: {note}"
+    );
+    let subject = git_out(root, &["log", "--format=%s", "-1"]);
+    assert!(
+        subject.starts_with("checkpoint: checkpoint-worker (wall_time_budget)"),
+        "marker message names the worker and cause: {subject}"
+    );
+    assert!(
+        git_out(root, &["status", "--porcelain=v1", "--"]).is_empty(),
+        "checkpoint leaves a clean tree"
+    );
+}
+
+/// A shared checkout may hold the parent's or a sibling's dirty files, so no
+/// auto-commit happens there — the note keeps the manual-salvage wording.
+#[tokio::test]
+async fn budget_death_checkpoint_skips_shared_checkout() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    git(root, &["init", "--quiet"]);
+    git(root, &["config", "user.name", "Budget test"]);
+    git(root, &["config", "user.email", "budget@example.invalid"]);
+    fs::write(root.join("src.rs"), "baseline\n").unwrap();
+    git(root, &["add", "--", "src.rs"]);
+    git(root, &["commit", "--quiet", "-m", "baseline"]);
+
+    let manager = Arc::new(RwLock::new(SubAgentManager::new(root.to_path_buf(), 2)));
+    let mut spec = make_worker_spec("shared-worker", root.to_path_buf());
+    spec.runtime_profile.permissions.write = true;
+    manager.write().await.register_worker(spec);
+    fs::write(root.join("src.rs"), "baseline\nuncommitted fix\n").unwrap();
+
+    let mut runtime = stub_runtime();
+    runtime.manager = Arc::clone(&manager);
+    let note = budget_work_preservation_note(&runtime, "shared-worker", "wall_time_budget")
+        .await
+        .expect("note");
+    assert!(!note.contains("checkpointed in commit"), "{note}");
+    assert!(note.contains("survive on disk"), "{note}");
+    assert!(
+        !git_out(root, &["status", "--porcelain=v1", "--"]).is_empty(),
+        "shared checkout stays dirty"
+    );
+}
+
+/// When the worker committed everything itself before death, the note says so
+/// instead of claiming a checkpoint or manual salvage.
+#[tokio::test]
+async fn budget_death_checkpoint_reports_worker_committed_tree() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    git(root, &["init", "--quiet"]);
+    git(root, &["config", "user.name", "Budget test"]);
+    git(root, &["config", "user.email", "budget@example.invalid"]);
+    fs::write(root.join("src.rs"), "baseline\n").unwrap();
+    git(root, &["add", "--", "src.rs"]);
+    git(root, &["commit", "--quiet", "-m", "baseline"]);
+
+    let manager = Arc::new(RwLock::new(SubAgentManager::new(root.to_path_buf(), 2)));
+    let mut spec = make_worker_spec("tidy-worker", root.to_path_buf());
+    spec.runtime_profile.permissions.write = true;
+    spec.launch_manifest = Some(ChildLaunchManifest {
+        owner_session: "root".to_string(),
+        child_id: "tidy-worker".to_string(),
+        profile: spec.runtime_profile.clone(),
+        prompt: spec.objective.clone(),
+        cwd: Some(root.display().to_string()),
+        worktree: true,
+        writable_roots: vec![root.display().to_string()],
+        writable_files: Vec::new(),
+        coordination_contracts: Vec::new(),
+        expected_artifact: None,
+        deliverables: Vec::new(),
+        resume_identity: None,
+        generation: 1,
+        resume_from_agent_id: None,
+    });
+    manager.write().await.register_worker(spec);
+    fs::write(root.join("src.rs"), "baseline\nworker fix\n").unwrap();
+    git(root, &["add", "--", "src.rs"]);
+    git(root, &["commit", "--quiet", "-m", "worker fix"]);
+
+    let mut runtime = stub_runtime();
+    runtime.manager = Arc::clone(&manager);
+    let note = budget_work_preservation_note(&runtime, "tidy-worker", "wall_time_budget")
+        .await
+        .expect("note");
+    assert!(note.contains("committed before death"), "{note}");
 }
 
 fn assistant_message(content: Vec<ContentBlock>) -> Message {

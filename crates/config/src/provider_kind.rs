@@ -226,6 +226,13 @@ pub enum ProviderKind {
     /// namespaced wire ids over the OpenAI Chat Completions protocol.
     #[serde(alias = "eden-ai", alias = "eden_ai", alias = "edenai")]
     Edenai,
+    /// ZenMux — OpenAI-compatible AI gateway (aggregator).
+    ///
+    /// Serves ~200 upstream models under `provider/model` namespaced wire
+    /// ids over the OpenAI Chat Completions protocol at
+    /// `https://zenmux.ai/api/v1`. The `/models` catalog is keyless-readable.
+    #[serde(alias = "zen-mux", alias = "zen_mux")]
+    Zenmux,
     /// Concentrate — OpenAI Responses-compatible AI gateway (aggregator).
     ///
     /// Serves a broad catalog of upstream models over the OpenAI Responses
@@ -274,7 +281,7 @@ impl ProviderKind {
     /// stay on the enum for serde and `provider_for_kind`, but they are not
     /// first-class catalog rows. Plan is `mode` / base_url; dialect is
     /// `wire = openai|anthropic` on the primary provider config.
-    pub const ALL: [Self; 44] = [
+    pub const ALL: [Self; 45] = [
         Self::Deepseek,
         Self::NvidiaNim,
         Self::Openai,
@@ -316,6 +323,7 @@ impl ProviderKind {
         Self::Modelscope,
         Self::Google,
         Self::Edenai,
+        Self::Zenmux,
         Self::Concentrate,
         Self::Codewhale,
         Self::Custom,

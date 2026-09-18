@@ -122,6 +122,8 @@ pub enum ApiProvider {
     Telecomjs,
     /// Eden AI — OpenAI-compatible AI gateway (aggregator).
     Edenai,
+    /// ZenMux — OpenAI-compatible AI gateway (aggregator).
+    Zenmux,
     /// Concentrate — OpenAI Responses-compatible AI gateway (aggregator; BYOK only).
     Concentrate,
     /// Codewhale API — account-backed model access over connected provider keys.
@@ -369,7 +371,7 @@ impl ApiProvider {
 
     /// `ApiProvider` discriminant → `ProviderKind` lookup.
     /// Index 1 is `None` for the legacy `DeepseekCN` variant.
-    const KIND_LOOKUP: [Option<codewhale_config::ProviderKind>; 51] = [
+    const KIND_LOOKUP: [Option<codewhale_config::ProviderKind>; 52] = [
         Some(codewhale_config::ProviderKind::Deepseek),
         None, // DeepseekCN
         Some(codewhale_config::ProviderKind::DeepseekAnthropic),
@@ -414,6 +416,7 @@ impl ApiProvider {
         Some(codewhale_config::ProviderKind::Modelscope),
         Some(codewhale_config::ProviderKind::Telecomjs),
         Some(codewhale_config::ProviderKind::Edenai),
+        Some(codewhale_config::ProviderKind::Zenmux),
         Some(codewhale_config::ProviderKind::Concentrate),
         Some(codewhale_config::ProviderKind::Codewhale),
         Some(codewhale_config::ProviderKind::ModelstudioTokenPlan),
@@ -424,7 +427,7 @@ impl ApiProvider {
     ];
 
     /// `ProviderKind` discriminant → `ApiProvider` lookup.
-    const FROM_KIND_LOOKUP: [Self; 50] = [
+    const FROM_KIND_LOOKUP: [Self; 51] = [
         Self::Deepseek,
         Self::DeepseekAnthropic,
         Self::NvidiaNim,
@@ -472,6 +475,7 @@ impl ApiProvider {
         Self::Modelscope,
         Self::Google,
         Self::Edenai,
+        Self::Zenmux,
         Self::Concentrate,
         Self::Codewhale,
         Self::Custom,
@@ -542,6 +546,7 @@ fn subagent_provider_key_matches(key: &str, provider: ApiProvider) -> bool {
         ApiProvider::Openrouter => matches!(normalized.as_str(), "openrouter" | "open_router"),
         ApiProvider::Orcarouter => matches!(normalized.as_str(), "orcarouter" | "orca_router"),
         ApiProvider::Edenai => matches!(normalized.as_str(), "edenai" | "eden_ai"),
+        ApiProvider::Zenmux => matches!(normalized.as_str(), "zenmux" | "zen_mux"),
         ApiProvider::Concentrate => matches!(
             normalized.as_str(),
             "concentrate" | "concentrate_ai" | "concentrateai"
@@ -1707,6 +1712,7 @@ pub fn model_completion_names_for_provider(provider: ApiProvider) -> Vec<&'stati
         // Legacy tombstone only; never advertise a runnable model.
         ApiProvider::Antigravity => Vec::new(),
         ApiProvider::Edenai => vec![DEFAULT_EDENAI_MODEL],
+        ApiProvider::Zenmux => vec![DEFAULT_ZENMUX_MODEL],
         ApiProvider::Concentrate => vec![DEFAULT_CONCENTRATE_MODEL],
         // Bootstrap rows only. The account's authenticated `GET /v1/models`
         // lists exactly the providers this customer connected and replaces
@@ -1745,31 +1751,6 @@ where
             .filter_map(|s| {
                 StatusItem::from_key(&s).or_else(|| {
                     tracing::warn!("ignoring unknown status item {s:?} in config");
-                    None
-                })
-            })
-            .collect()
-    }))
-}
-
-/// Deserialize `header_items` tolerantly: skip keys unknown to this build
-/// instead of failing with an "unknown variant" error.
-///
-/// This keeps configuration files forward-compatible. For example, a newer
-/// CodeWhale build may write a header item that an older build does not yet
-/// understand; the older build will ignore that item while preserving the
-/// remaining supported entries.
-fn deser_header_items<'de, D>(deserializer: D) -> Result<Option<Vec<HeaderItem>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let raw: Option<Vec<String>> = Option::deserialize(deserializer)?;
-    Ok(raw.map(|strings| {
-        strings
-            .into_iter()
-            .filter_map(|s| {
-                HeaderItem::from_key(&s).or_else(|| {
-                    tracing::warn!("ignoring unknown header item {s:?} in config");
                     None
                 })
             })
@@ -1833,22 +1814,6 @@ pub struct TuiConfig {
     /// balance and drops the telemetry and the help hint (#5950).
     #[serde(default)]
     pub metrics_line: Option<ChromeRowPreset>,
-    /// Ordered list of optional header items the user wants visible.
-    ///
-    /// `None` (the field missing from `config.toml`) preserves the built-in
-    /// header unchanged. An empty `Some(vec![])` likewise enables no additional
-    /// header items, while configured entries enable their corresponding
-    /// optional header content.
-    ///
-    /// The existing context-utilisation display remains part of the built-in
-    /// header and is not controlled by this list.
-    ///
-    /// Unknown items are ignored during deserialization so configurations written
-    /// by newer CodeWhale versions remain loadable by older versions.
-    ///
-    /// Persisted to `tui.header_items` in `~/.deepseek/config.toml`.
-    #[serde(default, deserialize_with = "deser_header_items")]
-    pub header_items: Option<Vec<HeaderItem>>,
     /// Emit OSC 8 hyperlink escape sequences around URLs in the transcript so
     /// supporting terminals (iTerm2, Terminal.app 13+, Ghostty, Kitty,
     /// WezTerm, Alacritty, recent gnome-terminal/konsole) make them clickable
@@ -2321,43 +2286,6 @@ pub fn provider_has_balance_api(provider: ApiProvider) -> bool {
             | ApiProvider::Siliconflow
             | ApiProvider::SiliconflowCn
     )
-}
-
-/// One configurable header item
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum HeaderItem {
-    /// Session token usage: input / cache-hit / output.
-    Tokens,
-}
-
-impl HeaderItem {
-    /// Default header composition for the always-on status line. Used when
-    /// `tui.header_items` is missing from `config.toml` so upgraders see a
-    /// concise header by default; diagnostic chips remain available through
-    /// explicit configuration without crowding the main UI.
-    #[must_use]
-    pub fn default_header() -> Vec<HeaderItem> {
-        Vec::new()
-    }
-
-    /// Stable canonical name used in TOML.
-    #[must_use]
-    pub fn key(self) -> &'static str {
-        match self {
-            HeaderItem::Tokens => "tokens",
-        }
-    }
-
-    /// Parse a config string while ignoring unknown items.
-    #[must_use]
-    pub fn from_key(key: &str) -> Option<Self> {
-        match key {
-            "tokens" => Some(Self::Tokens),
-            _ => None,
-        }
-    }
 }
 
 /// Resolved retry policy with defaults applied.
@@ -3993,6 +3921,9 @@ pub struct ProvidersConfig {
     /// Eden AI — OpenAI-compatible AI gateway (aggregator).
     #[serde(default, alias = "eden-ai", alias = "eden_ai")]
     pub edenai: ProviderConfig,
+    /// ZenMux — OpenAI-compatible AI gateway (aggregator).
+    #[serde(default, alias = "zen-mux", alias = "zen_mux")]
+    pub zenmux: ProviderConfig,
     /// Concentrate — OpenAI Responses-compatible AI gateway (aggregator).
     #[serde(
         default,
@@ -5891,6 +5822,7 @@ impl Config {
             ApiProvider::Antigravity => &providers.antigravity,
             ApiProvider::Telecomjs => &providers.telecomjs,
             ApiProvider::Edenai => &providers.edenai,
+            ApiProvider::Zenmux => &providers.zenmux,
             ApiProvider::Concentrate => &providers.concentrate,
             ApiProvider::Codewhale => &providers.codewhale,
             ApiProvider::ModelstudioTokenPlan => &providers.modelstudio_token_plan,
@@ -5993,6 +5925,7 @@ impl Config {
             ApiProvider::Antigravity => &mut providers.antigravity,
             ApiProvider::Telecomjs => &mut providers.telecomjs,
             ApiProvider::Edenai => &mut providers.edenai,
+            ApiProvider::Zenmux => &mut providers.zenmux,
             ApiProvider::Concentrate => &mut providers.concentrate,
             ApiProvider::Codewhale => &mut providers.codewhale,
             ApiProvider::ModelstudioTokenPlan => &mut providers.modelstudio_token_plan,
@@ -6467,6 +6400,7 @@ impl Config {
             ApiProvider::Antigravity => DEFAULT_ANTIGRAVITY_MODEL,
             ApiProvider::Telecomjs => DEFAULT_TELECOMJS_MODEL,
             ApiProvider::Edenai => DEFAULT_EDENAI_MODEL,
+            ApiProvider::Zenmux => DEFAULT_ZENMUX_MODEL,
             ApiProvider::Concentrate => DEFAULT_CONCENTRATE_MODEL,
             ApiProvider::Codewhale => DEFAULT_CODEWHALE_MODEL,
             ApiProvider::ModelstudioTokenPlan
@@ -6593,6 +6527,7 @@ impl Config {
             | ApiProvider::Antigravity
             | ApiProvider::Telecomjs
             | ApiProvider::Edenai
+            | ApiProvider::Zenmux
             | ApiProvider::Concentrate
             | ApiProvider::Codewhale
             | ApiProvider::ModelstudioTokenPlan
@@ -6706,6 +6641,7 @@ impl Config {
                         ApiProvider::Antigravity => DEFAULT_ANTIGRAVITY_BASE_URL,
                         ApiProvider::Telecomjs => DEFAULT_TELECOMJS_BASE_URL,
                         ApiProvider::Edenai => DEFAULT_EDENAI_BASE_URL,
+                        ApiProvider::Zenmux => DEFAULT_ZENMUX_BASE_URL,
                         ApiProvider::Concentrate => DEFAULT_CONCENTRATE_BASE_URL,
                         ApiProvider::Codewhale => DEFAULT_CODEWHALE_BASE_URL,
                         ApiProvider::ModelstudioTokenPlan
@@ -8614,6 +8550,7 @@ fn provider_env_base_url_override(provider: ApiProvider) -> Option<String> {
         ApiProvider::Antigravity => &[],
         ApiProvider::Telecomjs => &["TELECOMJS_BASE_URL"],
         ApiProvider::Edenai => &["EDENAI_BASE_URL"],
+        ApiProvider::Zenmux => &["ZENMUX_BASE_URL"],
         ApiProvider::Concentrate => &["CONCENTRATE_BASE_URL"],
         ApiProvider::Codewhale => &["CODEWHALE_API_BASE"],
         ApiProvider::ModelstudioTokenPlan | ApiProvider::ModelstudioTokenPlanAnthropic => {
@@ -9007,6 +8944,13 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
                     .edenai
                     .base_url = Some(value);
             }
+            ApiProvider::Zenmux => {
+                config
+                    .providers
+                    .get_or_insert_with(ProvidersConfig::default)
+                    .zenmux
+                    .base_url = Some(value);
+            }
             ApiProvider::Concentrate => {
                 config
                     .providers
@@ -9288,6 +9232,16 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
             .edenai
             .base_url = Some(value);
     }
+    if matches!(config.api_provider(), ApiProvider::Zenmux)
+        && let Ok(value) = std::env::var("ZENMUX_BASE_URL")
+        && !value.trim().is_empty()
+    {
+        config
+            .providers
+            .get_or_insert_with(ProvidersConfig::default)
+            .zenmux
+            .base_url = Some(value);
+    }
     // Concentrate has no inline block here on purpose: CONCENTRATE_BASE_URL
     // is already served by `provider_env_base_url_override`, which the route
     // resolver consults — a second inline assignment was a duplicate.
@@ -9404,6 +9358,7 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
                 ApiProvider::Antigravity => &mut providers.antigravity,
                 ApiProvider::Telecomjs => &mut providers.telecomjs,
                 ApiProvider::Edenai => &mut providers.edenai,
+                ApiProvider::Zenmux => &mut providers.zenmux,
                 ApiProvider::Concentrate => &mut providers.concentrate,
                 ApiProvider::Codewhale => &mut providers.codewhale,
                 ApiProvider::ModelstudioTokenPlan => &mut providers.modelstudio_token_plan,
@@ -9692,6 +9647,17 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
             .providers
             .get_or_insert_with(ProvidersConfig::default)
             .edenai
+            .model = Some(value);
+        config.environment_model_applied = true;
+    }
+    if matches!(config.api_provider(), ApiProvider::Zenmux)
+        && let Ok(value) = std::env::var("ZENMUX_MODEL")
+        && !value.trim().is_empty()
+    {
+        config
+            .providers
+            .get_or_insert_with(ProvidersConfig::default)
+            .zenmux
             .model = Some(value);
         config.environment_model_applied = true;
     }
@@ -10129,6 +10095,7 @@ pub(crate) fn provider_passes_model_through(provider: ApiProvider) -> bool {
             | ApiProvider::Xai
             | ApiProvider::Telecomjs
             | ApiProvider::Edenai
+            | ApiProvider::Zenmux
             // Concentrate ids are gateway-owned (plain, `provider/model`, or the
             // gateway's own `auto`); the resolver strips only `concentrate/`.
             | ApiProvider::Concentrate
@@ -11412,6 +11379,7 @@ fn merge_providers(
             antigravity: merge_provider_config(base.antigravity, override_cfg.antigravity),
             telecomjs: merge_provider_config(base.telecomjs, override_cfg.telecomjs),
             edenai: merge_provider_config(base.edenai, override_cfg.edenai),
+            zenmux: merge_provider_config(base.zenmux, override_cfg.zenmux),
             concentrate: merge_provider_config(base.concentrate, override_cfg.concentrate),
             codewhale: merge_provider_config(base.codewhale, override_cfg.codewhale),
             modelstudio_token_plan: merge_provider_config(

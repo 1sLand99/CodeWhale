@@ -784,7 +784,7 @@ impl App {
             history_revisions: Vec::new(),
             tool_run_cache: ToolRunCache::default(),
             next_history_revision: 1,
-            api_messages: Vec::new(),
+            api_messages: Arc::new(Vec::new()),
             api_message_stamps: Vec::new(),
             completed_assistant_outputs: Vec::new(),
             context_token_cache: std::cell::RefCell::new(Default::default()),
@@ -1021,11 +1021,6 @@ impl App {
             // once here so every render pass — main cache and full-screen
             // overlay — shares one effective width; `None` = full width.
             prose_measure: config.prose_measure(),
-            header_items: config
-                .tui
-                .as_ref()
-                .and_then(|tui| tui.header_items.clone())
-                .unwrap_or_else(crate::config::HeaderItem::default_header),
             project_doc: None,
             plan_state,
             todos,

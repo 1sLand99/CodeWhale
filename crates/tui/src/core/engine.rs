@@ -3430,7 +3430,7 @@ impl Engine {
             .tx_event
             .send(Event::SessionUpdated {
                 session_id: self.session.id.clone(),
-                messages: self.session.messages.clone().into(),
+                messages: self.session.messages.snapshot(),
                 system_prompt: self.session.system_prompt.clone(),
                 model: self.session.model.clone(),
                 workspace: self.session.workspace.clone(),
@@ -4493,6 +4493,7 @@ impl Engine {
                     None,
                     Some(0),
                     input_policy.approval_mode_for_session(),
+                    tool_catalog::ToolMode::Direct,
                 ),
                 mcp_tool_names: Vec::new(),
                 mcp: McpToolState::Disabled,
@@ -4748,6 +4749,9 @@ impl Engine {
             self.config.disallowed_tools.clone(),
             self.config.max_tool_calls,
             input_policy.approval_mode_for_session(),
+            // Model metadata wins once wired; today the hint is always None
+            // and the [features] flags decide (model_registry follow-up).
+            tool_catalog::requested_tool_mode(None, &self.config.features),
         );
         TurnToolBuild {
             surface,
@@ -5474,7 +5478,11 @@ impl Engine {
                 .await;
         }
         drop(turn_control);
-        let turn_complete_delivered = self
+        // `event_sent` means the TurnComplete event reached the UI channel —
+        // never that the user saw model output. (#6184: the old `delivered`
+        // name was read as user-visible delivery on Interrupted turns that
+        // rendered nothing.)
+        let turn_complete_event_sent = self
             .tx_event
             .send(Event::TurnComplete {
                 usage: turn.usage,
@@ -5490,7 +5498,7 @@ impl Engine {
         tracing::info!(
             target: "engine.turn",
             status = ?status,
-            delivered = turn_complete_delivered,
+            event_sent = turn_complete_event_sent,
             "engine turn completion settled"
         );
 
@@ -8099,8 +8107,8 @@ use self::streaming::{
     sleep_gap_detected, stream_read_error_user_message,
 };
 use self::tool_catalog::{
-    CODE_EXECUTION_TOOL_NAME, JS_EXECUTION_TOOL_NAME, MULTI_TOOL_PARALLEL_NAME,
-    REQUEST_USER_INPUT_NAME, ToolSurfacePolicy, active_tools_for_request,
+    CODE_EXECUTION_TOOL_NAME, EXECUTE_TOOLS_TOOL_NAME, JS_EXECUTION_TOOL_NAME,
+    MULTI_TOOL_PARALLEL_NAME, REQUEST_USER_INPUT_NAME, ToolSurfacePolicy, active_tools_for_request,
     build_model_tool_catalog_with_surface, default_synthetic_catalog_tool_names,
     execute_code_execution_tool, is_tool_search_tool, maybe_hydrate_requested_deferred_tool,
     missing_tool_error_message,

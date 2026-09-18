@@ -321,6 +321,7 @@ test('macOS window-record key receipts carry the interference accounting', async
 test('macOS open_application reports launched only when it actually launched the app', async t => {
   const bundle=fs.mkdtempSync(path.join(os.tmpdir(),'cu-launch-flag-'));
   const old=process.env.CODEWHALE_CU_APP_BUNDLE;
+  process.env.CODEWHALE_CU_APP_BUNDLE=bundle;
   t.after(()=>{ if(old===undefined) delete process.env.CODEWHALE_CU_APP_BUNDLE; else process.env.CODEWHALE_CU_APP_BUNDLE=old; fs.rmSync(bundle,{recursive:true,force:true}); });
   fs.mkdirSync(path.join(bundle,'Contents','MacOS'),{recursive:true});
   fs.writeFileSync(path.join(bundle,'Contents','MacOS','accessibility'),'');

@@ -455,6 +455,7 @@ fn messages_from_thread_detail_batches_tool_results() {
         routing_settlement: false,
         effective_route_usage: None,
         permission_posture: Some("ask".to_string()),
+        mode: None,
         effective_provider: None,
         effective_provider_id: None,
         effective_openrouter_vendor: None,
@@ -1580,6 +1581,63 @@ async fn health_and_tasks_endpoints_work() -> Result<()> {
         .error_for_status()?
         .json()
         .await?;
+
+    handle.abort();
+    Ok(())
+}
+
+/// Created tasks keep their caller-given name through get and list; unnamed
+/// tasks omit the field so queues can fall back to the prompt summary.
+#[tokio::test]
+async fn created_tasks_keep_their_given_name() -> Result<()> {
+    let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let named: serde_json::Value = client
+        .post(format!("http://{addr}/v1/tasks"))
+        .json(&json!({ "prompt": "migrate the widget", "name": "Widget migration" }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(named["name"], "Widget migration");
+    let id = named["id"].as_str().expect("task id").to_string();
+
+    let unnamed: serde_json::Value = client
+        .post(format!("http://{addr}/v1/tasks"))
+        .json(&json!({ "prompt": "unnamed work" }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert!(unnamed.get("name").is_none());
+
+    let detail: serde_json::Value = client
+        .get(format!("http://{addr}/v1/tasks/{id}"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(detail["name"], "Widget migration");
+
+    let listed: serde_json::Value = client
+        .get(format!("http://{addr}/v1/tasks"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let rows = listed["tasks"].as_array().expect("task rows");
+    let row = rows
+        .iter()
+        .find(|row| row["id"] == id)
+        .expect("named row in list");
+    assert_eq!(row["name"], "Widget migration");
 
     handle.abort();
     Ok(())
@@ -6902,6 +6960,95 @@ async fn thread_usage_endpoint_scopes_totals_to_one_thread() -> Result<()> {
     Ok(())
 }
 
+/// `GET /v1/approvals` serves the account-wide approval history behind the
+/// approvals log: decided rows carry their outcome + decision time, pending
+/// asks read "pending" with no decision time, newest ask first. A corrupt
+/// session log is skipped (warned server-side), never a 500.
+#[tokio::test]
+async fn approvals_endpoint_lists_decided_and_pending_newest_first() -> Result<()> {
+    use crate::approval_log::{ApprovalOutcome, ApprovalReceipt, ApprovalReceiptStore};
+    use chrono::{DateTime, Utc};
+
+    let root = std::env::temp_dir().join(format!("codewhale-approvals-api-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    let Some((addr, _threads, handle)) =
+        spawn_test_server_with_root(root, sessions_dir.clone()).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+    let store = ApprovalReceiptStore::new(sessions_dir);
+
+    fn at(hour: u32) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(&format!("2026-09-10T{hour:02}:00:00Z"))
+            .expect("fixture time")
+            .to_utc()
+    }
+    // Decided pair in one session, a still-pending ask in another, a corrupt
+    // log in a third. Fixed stamps keep the newest-first order exact.
+    store.append(
+        "sess-decided",
+        &ApprovalReceipt::Asked {
+            approval_id: "tool-1".into(),
+            tool_call_id: "tool-1".into(),
+            tool_name: "exec_shell".into(),
+            created_at: at(10),
+        },
+    )?;
+    store.append(
+        "sess-decided",
+        &ApprovalReceipt::Decided {
+            approval_id: "tool-1".into(),
+            tool_call_id: "tool-1".into(),
+            outcome: ApprovalOutcome::Denied,
+            created_at: at(11),
+        },
+    )?;
+    store.append(
+        "sess-pending",
+        &ApprovalReceipt::Asked {
+            approval_id: "tool-2".into(),
+            tool_call_id: "tool-2".into(),
+            tool_name: "write_file".into(),
+            created_at: at(12),
+        },
+    )?;
+    let corrupt_dir = store.log_path("sess-corrupt")?;
+    fs::create_dir_all(corrupt_dir.parent().expect("log parent"))?;
+    fs::write(&corrupt_dir, "not-json\n")?;
+
+    let rows: serde_json::Value = client
+        .get(format!("http://{addr}/v1/approvals"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(rows.as_array().expect("rows").len(), 2);
+    assert_eq!(rows[0]["approval_id"], "tool-2");
+    assert_eq!(rows[0]["tool_name"], "write_file");
+    assert_eq!(rows[0]["outcome"], "pending");
+    assert!(rows[0]["decided_at"].is_null());
+    assert_eq!(rows[1]["approval_id"], "tool-1");
+    assert_eq!(rows[1]["tool_name"], "exec_shell");
+    assert_eq!(rows[1]["outcome"], "denied");
+    assert_eq!(rows[1]["asked_at"], "2026-09-10T10:00:00Z");
+    assert_eq!(rows[1]["decided_at"], "2026-09-10T11:00:00Z");
+
+    let one: serde_json::Value = client
+        .get(format!("http://{addr}/v1/approvals?limit=1"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(one.as_array().expect("rows").len(), 1);
+    assert_eq!(one[0]["approval_id"], "tool-2");
+
+    handle.abort();
+    Ok(())
+}
+
 /// `PUT /v1/sessions` persists the thread's audited cost with the same
 /// field semantics the TUI writer uses: parent-turn spend in
 /// `session_cost_*`, routed-child spend in `subagent_cost_*`, so a session
@@ -6960,6 +7107,7 @@ async fn session_save_merges_thread_cost_split_and_records_coverage() -> Result<
         routing_settlement: false,
         effective_route_usage: None,
         permission_posture: None,
+        mode: None,
         effective_provider: None,
         effective_provider_id: None,
         effective_openrouter_vendor: None,
@@ -7154,6 +7302,7 @@ async fn session_save_persists_parent_cny_unpriced_reasons_without_double_count(
         routing_settlement: false,
         effective_route_usage: None,
         permission_posture: None,
+        mode: None,
         effective_provider: None,
         effective_provider_id: None,
         effective_openrouter_vendor: None,
@@ -7489,6 +7638,53 @@ async fn start_turn_accepts_dynamic_tools_and_environment_id() -> Result<()> {
             .json()
             .await?;
         assert_eq!(stored["turns"][0]["permission_posture"], "auto_review");
+
+        handle.abort();
+        Ok(())
+    })
+    .await
+}
+
+/// A turn receipts the mode it ran in, not the thread's mode: a client reading
+/// the thread when the turn finishes would otherwise learn how the thread is
+/// set up *now*, which is a different question as soon as the mode is switched
+/// mid-run.
+#[tokio::test]
+async fn turn_record_reports_the_mode_it_ran_in() -> Result<()> {
+    Box::pin(async {
+        let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
+            return Ok(());
+        };
+        let client = crate::tls::reqwest_client();
+
+        let created: serde_json::Value = client
+            .post(format!("http://{addr}/v1/threads"))
+            .json(&json!({ "model": "test-model" }))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let thread_id = created["id"].as_str().context("missing thread id")?;
+
+        let started: serde_json::Value = client
+            .post(format!("http://{addr}/v1/threads/{thread_id}/turns"))
+            .json(&json!({ "prompt": "plan it", "mode": "plan" }))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(started["turn"]["mode"], "plan");
+
+        let stored: serde_json::Value = client
+            .get(format!("http://{addr}/v1/threads/{thread_id}"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(stored["turns"][0]["mode"], "plan");
 
         handle.abort();
         Ok(())
@@ -8168,6 +8364,7 @@ fn seed_summary_search_transcript(
             routing_settlement: false,
             effective_route_usage: None,
             permission_posture: None,
+            mode: None,
             effective_provider: None,
             effective_provider_id: None,
             effective_openrouter_vendor: None,
@@ -17221,6 +17418,166 @@ async fn agent_mail_cancel_withdraws_queued_mail() -> Result<()> {
         .send()
         .await?;
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    handle.abort();
+    Ok(())
+}
+
+/// Running-work accounting (#6180): a watch-only client enumerates owned
+/// in-flight work in one call, with turn identity for targeting, and the
+/// listing clears when the work settles.
+#[tokio::test]
+async fn threads_running_lists_active_turns_and_clears_on_settle() -> Result<()> {
+    let Some((addr, manager, handle)) = spawn_test_server().await? else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+    let base = format!("http://{addr}");
+
+    let idle: serde_json::Value = client
+        .get(format!("{base}/v1/threads/running"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(idle, serde_json::json!([]));
+
+    let created: serde_json::Value = client
+        .post(format!("{base}/v1/threads"))
+        .json(&serde_json::json!({ "model": "test-model" }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let thread_id = created["id"].as_str().context("missing thread id")?;
+
+    client
+        .post(format!("{base}/v1/threads/{thread_id}/turns"))
+        .json(&serde_json::json!({ "prompt": "do the thing" }))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    // Pin the turn in-flight deterministically: a test server may settle a
+    // started turn on its own, which would make the listing below racy.
+    let mut started = manager
+        .test_store()
+        .list_turns_for_thread(thread_id)?
+        .pop()
+        .context("missing started turn")?;
+    started.status = crate::runtime_threads::RuntimeTurnStatus::InProgress;
+    manager.test_store().save_turn(&started)?;
+
+    let running: serde_json::Value = client
+        .get(format!("{base}/v1/threads/running"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(running.as_array().map(Vec::len), Some(1));
+    assert_eq!(running[0]["thread_id"], thread_id);
+    let active = running[0]["active_turns"]
+        .as_array()
+        .context("missing active_turns")?;
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0]["status"], "in_progress");
+    let turn_id = active[0]["turn_id"].as_str().context("missing turn id")?;
+
+    let mut turn = manager.test_store().load_turn(turn_id)?;
+    turn.status = crate::runtime_threads::RuntimeTurnStatus::Completed;
+    manager.test_store().save_turn(&turn)?;
+
+    let settled: serde_json::Value = client
+        .get(format!("{base}/v1/threads/running"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(settled, serde_json::json!([]));
+
+    handle.abort();
+    Ok(())
+}
+
+/// Notice serving (#6180): GET lists raised notices with thread/turn
+/// identity, DELETE acks one, unknown notices and threads 404.
+#[tokio::test]
+async fn thread_notices_serve_list_and_ack() -> Result<()> {
+    let Some((addr, manager, handle)) = spawn_test_server().await? else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+    let base = format!("http://{addr}");
+
+    let created: serde_json::Value = client
+        .post(format!("{base}/v1/threads"))
+        .json(&serde_json::json!({ "model": "test-model" }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let thread_id = created["id"].as_str().context("missing thread id")?;
+
+    let empty: serde_json::Value = client
+        .get(format!("{base}/v1/threads/{thread_id}/notices"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(empty, serde_json::json!([]));
+
+    let notice_id = manager.raise_notice(
+        thread_id,
+        "model-notify",
+        "turn_1",
+        "tool_1",
+        "come back".to_string(),
+    );
+    let listed: serde_json::Value = client
+        .get(format!("{base}/v1/threads/{thread_id}/notices"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(listed.as_array().map(Vec::len), Some(1));
+    assert_eq!(listed[0]["id"], notice_id);
+    assert_eq!(listed[0]["kind"], "model-notify");
+    assert_eq!(listed[0]["turn_id"], "turn_1");
+    assert_eq!(listed[0]["subject"], "tool_1");
+
+    let ack = client
+        .delete(format!("{base}/v1/threads/{thread_id}/notices/{notice_id}"))
+        .send()
+        .await?;
+    assert_eq!(ack.status(), reqwest::StatusCode::NO_CONTENT);
+
+    let cleared: serde_json::Value = client
+        .get(format!("{base}/v1/threads/{thread_id}/notices"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(cleared, serde_json::json!([]));
+
+    let again = client
+        .delete(format!("{base}/v1/threads/{thread_id}/notices/{notice_id}"))
+        .send()
+        .await?;
+    assert_eq!(again.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let unknown = client
+        .get(format!("{base}/v1/threads/nope/notices"))
+        .send()
+        .await?;
+    assert_eq!(unknown.status(), reqwest::StatusCode::NOT_FOUND);
 
     handle.abort();
     Ok(())

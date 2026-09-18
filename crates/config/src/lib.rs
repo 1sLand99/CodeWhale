@@ -69,7 +69,6 @@ use std::fs;
 use std::io::Read;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::sync::OnceLock;
 
 use anyhow::{Context, Result, bail};
 pub use app_mode::AppMode;
@@ -526,6 +525,14 @@ pub struct ProvidersToml {
         alias = "eden_ai"
     )]
     pub edenai: ProviderConfigToml,
+    /// ZenMux — OpenAI-compatible AI gateway (aggregator).
+    #[serde(
+        default,
+        skip_serializing_if = "ProviderConfigToml::is_empty",
+        alias = "zen-mux",
+        alias = "zen_mux"
+    )]
+    pub zenmux: ProviderConfigToml,
     /// Concentrate — OpenAI Responses-compatible AI gateway (aggregator).
     #[serde(
         default,
@@ -771,6 +778,7 @@ impl ProvidersToml {
             ProviderKind::Antigravity => &self.antigravity,
             ProviderKind::Telecomjs => &self.telecomjs,
             ProviderKind::Edenai => &self.edenai,
+            ProviderKind::Zenmux => &self.zenmux,
             ProviderKind::Concentrate => &self.concentrate,
             ProviderKind::Codewhale => &self.codewhale,
             ProviderKind::ModelstudioTokenPlan => &self.modelstudio_token_plan,
@@ -826,6 +834,7 @@ impl ProvidersToml {
             ProviderKind::Antigravity => &mut self.antigravity,
             ProviderKind::Telecomjs => &mut self.telecomjs,
             ProviderKind::Edenai => &mut self.edenai,
+            ProviderKind::Zenmux => &mut self.zenmux,
             ProviderKind::Concentrate => &mut self.concentrate,
             ProviderKind::Codewhale => &mut self.codewhale,
             ProviderKind::ModelstudioTokenPlan => &mut self.modelstudio_token_plan,
@@ -957,17 +966,6 @@ pub struct ConfigToml {
     /// workers inherit conservative Sandbox defaults.
     #[serde(default)]
     pub fleet: Option<FleetConfigToml>,
-    /// Multiple named operator-scoped Fleet configurations (#5039).
-    ///
-    /// Each key is a unique fleet name; the associated value is a
-    /// [`NamedFleetConfigToml`] that carries the operator identity and its
-    /// own trust/role/profile/exec policy. The existing `[fleet]` table is the
-    /// backward-compatible default and is always accessible without a name.
-    ///
-    /// Use [`ConfigToml::resolve_fleet`] to select a fleet by name,
-    /// [`ConfigToml::resolve_fleet_for_operator`] to select by operator identity.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub fleets: BTreeMap<String, NamedFleetConfigToml>,
     /// Workflow automatic-launch, approval, isolation, and activity
     /// persistence knobs (#4128 / Section 2.11). When absent, consumers use
     /// [`WorkflowConfigToml::default`].
@@ -1379,82 +1377,6 @@ impl ConfigToml {
     pub fn resolve_hotbar_bindings(&self, known_action_ids: &[&str]) -> HotbarConfigResolution {
         resolve_hotbar_bindings(self.hotbar.as_deref(), known_action_ids)
     }
-
-    /// Resolve a named Fleet configuration by fleet name (#5039).
-    ///
-    /// # Precedence
-    ///
-    /// 1. If `name` matches a key in `[fleets.*]`, returns that fleet.
-    /// 2. Returns [`FleetResolutionError::UnknownFleet`] with the list of
-    ///    available fleet names so the user can correct the reference.
-    ///
-    /// To access the global default fleet use `config.fleet` directly.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FleetResolutionError::UnknownFleet`] if `name` is not defined.
-    pub fn resolve_fleet(&self, name: &str) -> Result<&NamedFleetConfigToml, FleetResolutionError> {
-        self.fleets
-            .get(name)
-            .ok_or_else(|| FleetResolutionError::UnknownFleet {
-                name: name.to_string(),
-                available: self.fleets.keys().cloned().collect(),
-            })
-    }
-
-    /// Resolve the unique Fleet owned by `operator` (#5039).
-    ///
-    /// # Precedence
-    ///
-    /// 1. Collects every `[fleets.*]` entry whose `operator` field matches
-    ///    (case-sensitive).
-    /// 2. If exactly one fleet matches, returns it.
-    /// 3. If zero match, returns [`FleetResolutionError::UnknownOperator`] with
-    ///    the list of operators that do own a fleet.
-    /// 4. If more than one match, returns [`FleetResolutionError::AmbiguousOperator`]
-    ///    with the fleet names so the caller can request a specific one.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FleetResolutionError::UnknownOperator`] or
-    /// [`FleetResolutionError::AmbiguousOperator`] on failure.
-    pub fn resolve_fleet_for_operator(
-        &self,
-        operator: &str,
-    ) -> Result<(&str, &NamedFleetConfigToml), FleetResolutionError> {
-        let matches: Vec<(&str, &NamedFleetConfigToml)> = self
-            .fleets
-            .iter()
-            .filter(|(_, fleet)| fleet.operator == operator)
-            .map(|(name, fleet)| (name.as_str(), fleet))
-            .collect();
-
-        match matches.len() {
-            0 => {
-                let mut available: Vec<String> = self
-                    .fleets
-                    .values()
-                    .map(|f| f.operator.clone())
-                    .filter(|op| !op.is_empty())
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .into_iter()
-                    .collect();
-                available.sort();
-                Err(FleetResolutionError::UnknownOperator {
-                    operator: operator.to_string(),
-                    available,
-                })
-            }
-            1 => Ok(matches.into_iter().next().unwrap()),
-            _ => Err(FleetResolutionError::AmbiguousOperator {
-                operator: operator.to_string(),
-                fleet_names: matches
-                    .iter()
-                    .map(|(name, _)| (*name).to_string())
-                    .collect(),
-            }),
-        }
-    }
 }
 
 /// Ordered primary-plus-fallback provider list for future provider routing.
@@ -1810,108 +1732,10 @@ impl Default for SnapshotsToml {
     }
 }
 
-/// Error returned when a named Fleet or operator cannot be resolved (#5039).
-///
-/// Every variant carries a self-contained, human-readable `guidance` string so
-/// callers can surface actionable help without inspecting error details.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FleetResolutionError {
-    /// The requested fleet name is not defined under `[fleets.<name>]`.
-    UnknownFleet {
-        /// The fleet name that was requested.
-        name: String,
-        /// Names of all fleets currently defined.
-        available: Vec<String>,
-    },
-    /// The requested operator has no fleets under `[fleets.*]`.
-    UnknownOperator {
-        /// The operator name that was requested.
-        operator: String,
-        /// All operators that currently own at least one fleet.
-        available: Vec<String>,
-    },
-    /// The operator owns more than one fleet and no fleet name was given.
-    AmbiguousOperator {
-        /// The operator with multiple fleets.
-        operator: String,
-        /// All fleet names owned by that operator.
-        fleet_names: Vec<String>,
-    },
-}
-
-impl std::fmt::Display for FleetResolutionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::UnknownFleet { name, available } => {
-                write!(f, "fleet `{name}` is not defined")?;
-                if available.is_empty() {
-                    write!(
-                        f,
-                        ". No named fleets are configured. Add `[fleets.{name}]` to your \
-                         config.toml or use the default `[fleet]` table."
-                    )
-                } else {
-                    write!(
-                        f,
-                        ". Available named fleets: {}. Check your config.toml `[fleets.*]` \
-                         tables.",
-                        available.join(", ")
-                    )
-                }
-            }
-            Self::UnknownOperator {
-                operator,
-                available,
-            } => {
-                write!(f, "no fleet is owned by operator `{operator}`")?;
-                if available.is_empty() {
-                    write!(
-                        f,
-                        ". No named fleets define an operator. Add \
-                         `operator = \"{operator}\"` inside a `[fleets.<name>]` table."
-                    )
-                } else {
-                    write!(
-                        f,
-                        ". Operators with configured fleets: {}.",
-                        available.join(", ")
-                    )
-                }
-            }
-            Self::AmbiguousOperator {
-                operator,
-                fleet_names,
-            } => {
-                write!(
-                    f,
-                    "operator `{operator}` owns multiple fleets ({}); specify a fleet name \
-                     explicitly.",
-                    fleet_names.join(", ")
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for FleetResolutionError {}
-
 /// On-disk schema for the `[fleet]` table (#3165). See `config.example.toml`
 /// and `docs/FLEET.md` for documentation.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FleetConfigToml {
-    /// Legacy ignored input retained only so pre-0.9.11 configuration can be
-    /// read without failing. Fleet does not own Runtime trust or authority.
-    #[doc(hidden)]
-    #[serde(default, skip_serializing)]
-    pub default_trust_level: String,
-    /// Legacy ignored input; host identity verification belongs to Runtime.
-    #[doc(hidden)]
-    #[serde(default, skip_serializing)]
-    pub require_identity_verification: bool,
-    /// Legacy ignored input; Fleet membership never grants Runtime trust.
-    #[doc(hidden)]
-    #[serde(default, skip_serializing)]
-    pub max_trust_level: String,
     /// User-defined and built-in role presets.
     ///
     /// Each role defines default tool profiles, capabilities, and execution
@@ -2337,11 +2161,6 @@ pub struct FleetRolePreset {
     /// Default timeout in seconds for tasks using this role.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_seconds: Option<u64>,
-    /// Legacy ignored input retained for old config deserialization. Runtime
-    /// derives execution authority independently of Fleet role identity.
-    #[doc(hidden)]
-    #[serde(default, skip_serializing)]
-    pub trust_level: Option<String>,
 }
 
 impl FleetConfigToml {
@@ -2353,83 +2172,6 @@ impl FleetConfigToml {
             .get(name)
             .cloned()
             .or_else(|| built_in_role_presets().get(name).cloned())
-    }
-}
-
-/// On-disk schema for a single named Fleet entry under `[fleets.<name>]` (#5039).
-///
-/// A named Fleet carries a mandatory `operator` identity plus independently
-/// configured roles, profiles, and execution requests. Multiple named Fleets
-/// may coexist; each is uniquely addressed by its TOML key. Runtime trust and
-/// authority are deliberately not Fleet variables.
-///
-/// # TOML example
-///
-/// ```toml
-/// [fleets.alice-team]
-/// operator = "alice"
-/// [fleets.alice-team.exec]
-/// max_turns = 200
-///
-/// [fleets.alice-team.profiles.fast-verifier]
-/// slot = "verifier"
-/// loadout = "fast"
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NamedFleetConfigToml {
-    /// The operator/leader identity for this Fleet.
-    ///
-    /// Used to scope fleet selection: `config.resolve_fleet_for_operator("alice")`
-    /// returns the fleet whose `operator` field matches. Must be non-empty.
-    pub operator: String,
-    /// Legacy ignored input retained only for pre-0.9.11 config reads.
-    #[doc(hidden)]
-    #[serde(default, skip_serializing)]
-    pub default_trust_level: String,
-    /// Legacy ignored input; Runtime owns host identity verification.
-    #[doc(hidden)]
-    #[serde(default, skip_serializing)]
-    pub require_identity_verification: bool,
-    /// Legacy ignored input; Fleet identity never grants Runtime trust.
-    #[doc(hidden)]
-    #[serde(default, skip_serializing)]
-    pub max_trust_level: String,
-    /// User-defined and built-in role presets for this fleet.
-    #[serde(default)]
-    pub roles: BTreeMap<String, FleetRolePreset>,
-    /// Fleet profile vocabulary for this fleet.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub profiles: BTreeMap<String, FleetProfile>,
-    /// Headless worker execution constraints for this fleet.
-    #[serde(default)]
-    pub exec: FleetExecConfig,
-}
-
-impl NamedFleetConfigToml {
-    /// Resolve a role preset by name. Checks user-defined roles first,
-    /// then falls back to built-in role defaults.
-    #[must_use]
-    pub fn resolve_role(&self, name: &str) -> Option<FleetRolePreset> {
-        self.roles
-            .get(name)
-            .cloned()
-            .or_else(|| built_in_role_presets().get(name).cloned())
-    }
-
-    /// Borrow this named Fleet's settings as a `FleetConfigToml` view.
-    ///
-    /// Useful when callers need a unified type regardless of whether the fleet
-    /// was selected by name or the legacy `[fleet]` default was used.
-    #[must_use]
-    pub fn as_fleet_config(&self) -> FleetConfigToml {
-        FleetConfigToml {
-            default_trust_level: self.default_trust_level.clone(),
-            require_identity_verification: self.require_identity_verification,
-            max_trust_level: self.max_trust_level.clone(),
-            roles: self.roles.clone(),
-            profiles: self.profiles.clone(),
-            exec: self.exec.clone(),
-        }
     }
 }
 
@@ -2454,10 +2196,6 @@ pub struct WorkflowConfigToml {
     /// elevate shell/network, or otherwise leave the read-only envelope.
     #[serde(default = "default_workflow_require_approval_for_writes")]
     pub require_approval_for_writes: bool,
-    /// Soft upper bound on children admitted by automatic launch. Larger plans
-    /// should ask the operator or use explicit `/workflow`.
-    #[serde(default = "default_workflow_auto_start_child_limit")]
-    pub auto_start_child_limit: u32,
     /// Hard ceiling on total children in one Workflow run (product: 1000).
     #[serde(default = "default_workflow_max_children")]
     pub max_children: u32,
@@ -2475,18 +2213,6 @@ pub struct WorkflowConfigToml {
     /// turn loop — while any positive value is enforced across the run.
     #[serde(default = "default_workflow_default_token_budget")]
     pub default_token_budget: u64,
-    /// How many parallel write children may share the parent worktree without
-    /// isolation. `0` forces worktree isolation for parallel writes.
-    #[serde(default = "default_workflow_max_parallel_writes_without_worktree")]
-    pub max_parallel_writes_without_worktree: u32,
-    /// Keep completed Workflow activity visible in the session activity surface
-    /// until the next run (or explicit clear).
-    #[serde(default = "default_workflow_persist_completed_activity")]
-    pub persist_completed_activity: bool,
-    /// Persist completed Workflow activity across process restarts via the
-    /// durable run journal.
-    #[serde(default = "default_workflow_persist_completed_across_restarts")]
-    pub persist_completed_across_restarts: bool,
 }
 
 fn default_workflow_automatic() -> bool {
@@ -2499,11 +2225,6 @@ fn default_workflow_auto_start_read_only() -> bool {
 
 fn default_workflow_require_approval_for_writes() -> bool {
     true
-}
-
-fn default_workflow_auto_start_child_limit() -> u32 {
-    // Soft auto stays small; explicit launches may use the full concurrent cap.
-    16
 }
 
 fn default_workflow_max_children() -> u32 {
@@ -2526,33 +2247,16 @@ fn default_workflow_default_token_budget() -> u64 {
     0
 }
 
-fn default_workflow_max_parallel_writes_without_worktree() -> u32 {
-    0
-}
-
-fn default_workflow_persist_completed_activity() -> bool {
-    true
-}
-
-fn default_workflow_persist_completed_across_restarts() -> bool {
-    true
-}
-
 impl Default for WorkflowConfigToml {
     fn default() -> Self {
         Self {
             automatic: default_workflow_automatic(),
             auto_start_read_only: default_workflow_auto_start_read_only(),
             require_approval_for_writes: default_workflow_require_approval_for_writes(),
-            auto_start_child_limit: default_workflow_auto_start_child_limit(),
             max_children: default_workflow_max_children(),
             max_concurrent: default_workflow_max_concurrent(),
             max_depth: default_workflow_max_depth(),
             default_token_budget: default_workflow_default_token_budget(),
-            max_parallel_writes_without_worktree:
-                default_workflow_max_parallel_writes_without_worktree(),
-            persist_completed_activity: default_workflow_persist_completed_activity(),
-            persist_completed_across_restarts: default_workflow_persist_completed_across_restarts(),
         }
     }
 }
@@ -2569,7 +2273,6 @@ pub fn built_in_role_presets() -> BTreeMap<String, FleetRolePreset> {
                 tools: vec![],
                 capabilities: vec![],
                 timeout_seconds: Some(300),
-                trust_level: None,
             },
         ),
         (
@@ -2580,7 +2283,6 @@ pub fn built_in_role_presets() -> BTreeMap<String, FleetRolePreset> {
                 tools: vec![],
                 capabilities: vec![],
                 timeout_seconds: Some(600),
-                trust_level: None,
             },
         ),
         (
@@ -2593,7 +2295,6 @@ pub fn built_in_role_presets() -> BTreeMap<String, FleetRolePreset> {
                 tools: vec![],
                 capabilities: vec![],
                 timeout_seconds: Some(1800),
-                trust_level: None,
             },
         ),
         (
@@ -2606,7 +2307,6 @@ pub fn built_in_role_presets() -> BTreeMap<String, FleetRolePreset> {
                 tools: vec![],
                 capabilities: vec![],
                 timeout_seconds: Some(300),
-                trust_level: None,
             },
         ),
     ]
@@ -3054,51 +2754,6 @@ impl ConfigToml {
                 || self.providers.extras.contains_key(provider_id)))
         .then(|| provider_id.to_string());
         Ok(())
-    }
-
-    /// Merge safe project-level overrides from `$WORKSPACE/.codewhale/config.toml`
-    /// or legacy `$WORKSPACE/.deepseek/config.toml`.
-    ///
-    /// Repo-local config is untrusted input. This helper intentionally ignores
-    /// credentials, endpoints, provider selection, auth/session values, telemetry,
-    /// network policy, skill registry, LSP command tables, and unknown extras.
-    /// Approval and sandbox values may only tighten the existing user/global
-    /// posture.
-    pub fn merge_project_overrides(&mut self, project: ConfigToml) {
-        if project.default_text_model.is_some() {
-            self.default_text_model = project.default_text_model;
-        }
-        if project.model.is_some() {
-            self.model = project.model;
-        }
-        if project.output_mode.is_some() {
-            self.output_mode = project.output_mode;
-        }
-        if project.verbosity.is_some() {
-            self.verbosity = project.verbosity;
-        }
-        if project.log_level.is_some() {
-            self.log_level = project.log_level;
-        }
-        if let Some(policy) = project.approval_policy
-            && project_approval_policy_is_allowed(self.approval_policy.as_deref(), &policy)
-        {
-            self.approval_policy = Some(policy);
-        }
-        if let Some(mode) = project.sandbox_mode
-            && project_sandbox_mode_is_allowed(self.sandbox_mode.as_deref(), &mode)
-        {
-            self.sandbox_mode = Some(mode);
-        }
-        if project.tools.is_some() {
-            self.tools = project.tools;
-        }
-        for provider in provider::all_providers().iter().map(|p| p.kind()) {
-            merge_project_provider_config(
-                self.providers.for_provider_mut(provider),
-                project.providers.for_provider(provider),
-            );
-        }
     }
 
     #[must_use]
@@ -3881,12 +3536,6 @@ fn descriptor_fallback_base_url(provider: ProviderKind, auth_mode: Option<&str>)
         .to_string()
 }
 
-fn merge_project_provider_config(target: &mut ProviderConfigToml, source: &ProviderConfigToml) {
-    if source.model.is_some() {
-        target.model = source.model.clone();
-    }
-}
-
 /// Where an enabled session's batches go when nobody has said otherwise.
 ///
 /// The first-party ingest service — a Cloudflare Worker that appends to Workers
@@ -4280,6 +3929,7 @@ fn provider_passes_model_through(provider: ProviderKind) -> bool {
             | ProviderKind::Xai
             | ProviderKind::Telecomjs
             | ProviderKind::Edenai
+            | ProviderKind::Zenmux
             | ProviderKind::Concentrate
             | ProviderKind::ModelstudioTokenPlan
             | ProviderKind::ModelstudioTokenPlanAnthropic
@@ -4817,6 +4467,7 @@ fn default_model_for_provider(provider: ProviderKind) -> &'static str {
         ProviderKind::Antigravity => DEFAULT_ANTIGRAVITY_MODEL,
         ProviderKind::Telecomjs => DEFAULT_TELECOMJS_MODEL,
         ProviderKind::Edenai => DEFAULT_EDENAI_MODEL,
+        ProviderKind::Zenmux => DEFAULT_ZENMUX_MODEL,
         ProviderKind::Concentrate => DEFAULT_CONCENTRATE_MODEL,
         ProviderKind::Codewhale => DEFAULT_CODEWHALE_MODEL,
         ProviderKind::ModelstudioTokenPlan
@@ -4873,6 +4524,7 @@ fn default_base_url_for_provider(provider: ProviderKind) -> &'static str {
         ProviderKind::Antigravity => DEFAULT_ANTIGRAVITY_BASE_URL,
         ProviderKind::Telecomjs => DEFAULT_TELECOMJS_BASE_URL,
         ProviderKind::Edenai => DEFAULT_EDENAI_BASE_URL,
+        ProviderKind::Zenmux => DEFAULT_ZENMUX_BASE_URL,
         ProviderKind::Concentrate => DEFAULT_CONCENTRATE_BASE_URL,
         ProviderKind::Codewhale => DEFAULT_CODEWHALE_BASE_URL,
         ProviderKind::ModelstudioTokenPlan => DEFAULT_MODELSTUDIO_TOKEN_PLAN_BASE_URL,
@@ -5173,6 +4825,7 @@ pub fn provider_base_url_is_official(provider: ProviderKind, base_url: &str) -> 
             normalized.as_str(),
             "https://api.edenai.run/v3" | "https://api.eu.edenai.run/v3"
         ),
+        ProviderKind::Zenmux => normalized == DEFAULT_ZENMUX_BASE_URL,
         ProviderKind::Concentrate => normalized == DEFAULT_CONCENTRATE_BASE_URL,
         // The Codewhale API's official endpoint family is its default base
         // plus whatever the operator declared in `CODEWHALE_API_BASE` — the
@@ -6008,30 +5661,6 @@ fn copy_item_decor_table(target: &mut toml_edit::Table, source: &toml_edit::Tabl
     *target.decor_mut() = source.decor().clone();
 }
 
-/// Process-wide default [`Secrets`] façade. The first caller wins; the
-/// lock is exposed so test or CLI code can install an explicit
-/// backend (e.g. an [`codewhale_secrets::InMemoryKeyringStore`]) before
-/// any resolver runs.
-pub fn default_secrets() -> &'static Secrets {
-    static SECRETS: OnceLock<Secrets> = OnceLock::new();
-    SECRETS.get_or_init(|| {
-        // Tests should never poke real platform credential stores. Cargo sets the
-        // `RUST_TEST_*` family of env vars (and `CARGO_PKG_NAME` is
-        // always populated), but the `cfg(test)` flag is the canonical
-        // signal here. See `install_test_secrets` for explicit installs.
-        #[cfg(test)]
-        {
-            Secrets::new(std::sync::Arc::new(
-                codewhale_secrets::InMemoryKeyringStore::new(),
-            ))
-        }
-        #[cfg(not(test))]
-        {
-            Secrets::auto_detect()
-        }
-    })
-}
-
 // ── CodeWhale state root (v0.8.44) ──────────────────────────────────
 //
 // v0.8.44 migrates product-owned app state from ~/.deepseek/ to
@@ -6617,12 +6246,6 @@ pub fn remove_permission_rule(
         write_permissions_atomic(path, body.as_bytes())?;
         Ok(rule)
     })
-}
-
-/// Read a resolved `permissions.toml` path using the same checked/no-follow
-/// path handling as config loading.
-pub fn read_permissions_file(path: &Path) -> Result<String> {
-    read_checked_permissions_file(path)
 }
 
 fn load_sibling_permissions(config_path: &Path) -> Result<PermissionsToml> {
@@ -7373,6 +6996,8 @@ struct EnvRuntimeOverrides {
     telecomjs_model: Option<String>,
     edenai_base_url: Option<String>,
     edenai_model: Option<String>,
+    zenmux_base_url: Option<String>,
+    zenmux_model: Option<String>,
     concentrate_base_url: Option<String>,
     concentrate_model: Option<String>,
     codewhale_base_url: Option<String>,
@@ -7735,6 +7360,12 @@ impl EnvRuntimeOverrides {
             edenai_model: std::env::var("EDENAI_MODEL")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
+            zenmux_base_url: std::env::var("ZENMUX_BASE_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            zenmux_model: std::env::var("ZENMUX_MODEL")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
             concentrate_base_url: std::env::var("CONCENTRATE_BASE_URL")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
@@ -7831,6 +7462,7 @@ impl EnvRuntimeOverrides {
             ProviderKind::Antigravity => None,
             ProviderKind::Telecomjs => self.telecomjs_base_url.clone(),
             ProviderKind::Edenai => self.edenai_base_url.clone(),
+            ProviderKind::Zenmux => self.zenmux_base_url.clone(),
             ProviderKind::Concentrate => self.concentrate_base_url.clone(),
             ProviderKind::Codewhale => self.codewhale_base_url.clone(),
             ProviderKind::ModelstudioTokenPlan | ProviderKind::ModelstudioTokenPlanAnthropic => {
@@ -7881,6 +7513,7 @@ impl EnvRuntimeOverrides {
             ProviderKind::Antigravity => None,
             ProviderKind::Telecomjs => self.telecomjs_model.clone(),
             ProviderKind::Edenai => self.edenai_model.clone(),
+            ProviderKind::Zenmux => self.zenmux_model.clone(),
             ProviderKind::Concentrate => self.concentrate_model.clone(),
             ProviderKind::Codewhale => self.codewhale_model.clone(),
             ProviderKind::ModelstudioTokenPlan | ProviderKind::ModelstudioTokenPlanAnthropic => {

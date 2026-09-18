@@ -103,6 +103,9 @@ pub fn motion_while_typing(key: &KeyEvent) -> Option<Motion> {
         KeyCode::Left => Some(Motion::RegionPrev),
         KeyCode::Right => Some(Motion::RegionNext),
         KeyCode::BackTab => Some(Motion::RegionPrev),
+        // Some terminals report shift+tab as Tab carrying SHIFT rather than
+        // as BackTab; both are the same "previous region" motion.
+        KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => Some(Motion::RegionPrev),
         KeyCode::Tab => Some(Motion::RegionNext),
         _ => None,
     }

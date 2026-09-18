@@ -281,7 +281,18 @@ async fn runtime_store_binding_survives_launch_snapshot_and_resume() -> anyhow::
     let old_id = other_app.current_session_id.clone();
     let error = apply_loaded_session_with_goal(&mut other_app, &mut resumed_config, &loaded, None)
         .unwrap_err();
-    assert!(error.contains("Resume it in a new Codewhale process"));
+    // The refusal must name the route that actually works. "Resume it in a new
+    // Codewhale process" was true but unactionable: starting a new process and
+    // then picking the session from `/resume` returns here, because that is
+    // this same switch path (#6207, #6225).
+    assert!(
+        error.contains("codewhale resume"),
+        "the refusal must point at the direct-open path: {error}"
+    );
+    assert!(
+        error.contains(&loaded.metadata.id),
+        "the refusal must name the session to open: {error}"
+    );
     assert_eq!(other_app.current_session_id, old_id);
     assert_eq!(other_app.input, "preserve pending input");
     foreign.shutdown_and_wait().await?;
@@ -508,7 +519,7 @@ async fn picker_recovers_missing_store_into_the_idle_host_and_persists_before_re
     let binding = tasks.session_store_binding().expect("current host");
     app.runtime_services.task_manager = Some(tasks.clone());
     app.current_session_id = Some("picker-current".into());
-    app.api_messages
+    app.api_messages_mut()
         .push(text_message("user", "current conversation"));
     let current_messages = app.api_messages.clone();
     let plan_state = app.plan_state.clone();

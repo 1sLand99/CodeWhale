@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -912,23 +913,6 @@ impl Default for ComposerState {
     }
 }
 
-/// Compatibility name retained for the first Tideline header slice. New
-/// surfaces register [`crate::tui::tideline::InteractionAction`] directly.
-#[cfg_attr(not(test), expect(dead_code))]
-pub type HeaderActionTarget = crate::tui::tideline::InteractionAction;
-
-/// A header target painted in the latest frame.
-///
-/// The visible chrome owns placement; input owns dispatch. Keeping the
-/// rectangular target alongside its typed action gives mouse and keyboard
-/// routes one shared destination without a second navigation system.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), expect(dead_code))]
-pub struct HeaderHitbox {
-    pub area: Rect,
-    pub target: HeaderActionTarget,
-}
-
 /// Viewport/scroll state — fields related to transcript scrolling and caching.
 pub struct ViewportState {
     pub transcript_scroll: TranscriptScroll,
@@ -1498,7 +1482,11 @@ pub struct App {
     pub(crate) tool_run_cache: ToolRunCache,
     /// Monotonic counter used to issue fresh per-cell revisions.
     pub next_history_revision: u64,
-    pub api_messages: Vec<Message>,
+    /// Engine transcript mirror, shared rather than copied per event
+    /// (#6214 T2). Reads dereference to the `Vec`; mutations go through
+    /// [`App::api_messages_mut`] and copy-on-write only while an engine
+    /// snapshot is outstanding.
+    pub api_messages: Arc<Vec<Message>>,
     /// When each `api_messages` entry landed, index-aligned. The persisted
     /// journal's `created_at` reads from these stamps, so a save rewrites
     /// neither an entry's content nor its time — appends during a turn stay
@@ -2113,14 +2101,6 @@ pub struct App {
     /// `compact` keeps the route, context, cost and balance and drops the
     /// telemetry and the help hint.
     pub metrics_line: crate::config::ChromeRowPreset,
-    /// Optional header items enabled from `tui.header_items` in `config.toml`
-    /// at startup. Built-in header content remains independent of this list.
-    /// Unread since the classic header was superseded by the Tideline info
-    /// line (2026-08-29): the info line carries the context meter by default and the
-    /// token breakdown lives behind `/cost` (spec §3). The field stays so the
-    /// config surface keeps parsing; its reader returns with the classic
-    /// renderer deletion slice.
-    pub header_items: Vec<crate::config::HeaderItem>,
     /// Project documentation (AGENTS.md or CLAUDE.md)
     #[expect(dead_code)]
     pub project_doc: Option<String>,
@@ -4827,13 +4807,20 @@ impl App {
         self.collapsed_cell_map.clear();
     }
 
+    /// Mutable access to the shared transcript mirror. Copy-on-write: an
+    /// exclusive `Arc` mutates in place, a shared one detaches first, so an
+    /// outstanding engine snapshot can never observe the mutation.
+    pub fn api_messages_mut(&mut self) -> &mut Vec<Message> {
+        Arc::make_mut(&mut self.api_messages)
+    }
+
     /// Append a message and stamp when it landed — the persisted journal's
     /// `created_at` reads this stamp, so an entry's time is append time, not
     /// save time.
     pub fn push_api_message(&mut self, message: Message) {
         self.api_message_stamps
             .resize_with(self.api_messages.len(), Utc::now);
-        self.api_messages.push(message);
+        self.api_messages_mut().push(message);
         self.api_message_stamps.push(Utc::now());
     }
 
@@ -4841,8 +4828,9 @@ impl App {
     /// unchanged prefix keeps the stamps it already earned — the engine
     /// mirrors the same messages back in the same order — and only entries
     /// that are new or were rewritten (compaction) are stamped now, which
-    /// lands within a turn-event of the real append.
-    pub fn set_api_messages(&mut self, messages: Vec<Message>) {
+    /// lands within a turn-event of the real append. The shared snapshot is
+    /// installed without copying.
+    pub fn set_api_messages(&mut self, messages: Arc<Vec<Message>>) {
         let keep = self
             .api_messages
             .iter()
@@ -4865,7 +4853,7 @@ impl App {
         self.api_message_stamps.extend_from_slice(stamps);
         self.api_message_stamps
             .resize_with(messages.len(), Utc::now);
-        self.api_messages = messages;
+        self.api_messages = Arc::new(messages);
     }
 
     /// Append a message with the stamp it earned earlier — used when an
@@ -4874,7 +4862,7 @@ impl App {
     pub fn push_api_message_stamped(&mut self, message: Message, stamp: DateTime<Utc>) {
         self.api_message_stamps
             .resize_with(self.api_messages.len(), Utc::now);
-        self.api_messages.push(message);
+        self.api_messages_mut().push(message);
         self.api_message_stamps.push(stamp);
     }
 
@@ -4882,7 +4870,7 @@ impl App {
         self.api_message_stamps
             .resize_with(self.api_messages.len(), Utc::now);
         self.api_message_stamps.pop();
-        self.api_messages.pop()
+        self.api_messages_mut().pop()
     }
 
     /// `created_at` of each `api_messages` entry, paired positionally.
@@ -4898,13 +4886,13 @@ impl App {
     }
 
     pub fn truncate_api_messages(&mut self, new_len: usize) {
-        self.api_messages.truncate(new_len);
+        self.api_messages_mut().truncate(new_len);
         self.api_message_stamps
             .resize_with(self.api_messages.len(), Utc::now);
     }
 
     pub fn clear_api_messages(&mut self) {
-        self.api_messages.clear();
+        self.api_messages_mut().clear();
         self.api_message_stamps.clear();
     }
 

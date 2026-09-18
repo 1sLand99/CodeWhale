@@ -16,7 +16,7 @@ tag, packages, checksums and release assets exist.
 
 - **[@aboimpinto](https://github.com/aboimpinto)** — moved the TUI session-export slice onto shared command contracts (FEAT-025): a session-export contract facet with one shared sanitizer, `/export` routed through the facet, pinned with baseline-captured goldens and gates ([#6096](https://github.com/Hmbown/Codewhale/pull/6096)).
 - **[@BX166](https://github.com/BX166)** — contributed the AICraft provider template and its documentation ([#6171](https://github.com/Hmbown/Codewhale/pull/6171)). It was closed unmerged, but it is what surfaced the decision to stop special-casing named OpenAI-compatible hosts ([#6289](https://github.com/Hmbown/Codewhale/issues/6289)).
-- **[@7jrxt42BxFZo4iAnN4CX](https://github.com/7jrxt42BxFZo4iAnN4CX)** — reported the session-retention defects behind archive-past-the-cap and empty-session cap occupancy ([#6136](https://github.com/Hmbown/Codewhale/issues/6136), [#6137](https://github.com/Hmbown/Codewhale/issues/6137)), the resume-failure design behind durable transcript errors ([#6138](https://github.com/Hmbown/Codewhale/issues/6138)), and the gaps behind the opt-in approval timeout ([#6101](https://github.com/Hmbown/Codewhale/issues/6101)), `codewhale exec --hooks` ([#6099](https://github.com/Hmbown/Codewhale/issues/6099)), Markdown drag-copy ([#6156](https://github.com/Hmbown/Codewhale/issues/6156)), and the browsable, current-aware session picker ([#6014](https://github.com/Hmbown/Codewhale/issues/6014)); the goal token-budget hard stop ([#6013](https://github.com/Hmbown/Codewhale/issues/6013)) and the fleet no-progress guard shared with child workers ([#6015](https://github.com/Hmbown/Codewhale/issues/6015)) landed as first slices of two larger proposals, and the runtime-store session refusal ([#6207](https://github.com/Hmbown/Codewhale/issues/6207)) stays open after the first fix was reverted on a race.
+- **[@7jrxt42BxFZo4iAnN4CX](https://github.com/7jrxt42BxFZo4iAnN4CX)** — reported the session-retention defects behind archive-past-the-cap and empty-session cap occupancy ([#6136](https://github.com/Hmbown/Codewhale/issues/6136), [#6137](https://github.com/Hmbown/Codewhale/issues/6137)), the resume-failure design behind durable transcript errors ([#6138](https://github.com/Hmbown/Codewhale/issues/6138)), and the gaps behind the opt-in approval timeout ([#6101](https://github.com/Hmbown/Codewhale/issues/6101)), `codewhale exec --hooks` ([#6099](https://github.com/Hmbown/Codewhale/issues/6099)), Markdown drag-copy ([#6156](https://github.com/Hmbown/Codewhale/issues/6156)), and the browsable, current-aware session picker ([#6014](https://github.com/Hmbown/Codewhale/issues/6014)); the goal token-budget hard stop ([#6013](https://github.com/Hmbown/Codewhale/issues/6013)) and the fleet no-progress guard shared with child workers ([#6015](https://github.com/Hmbown/Codewhale/issues/6015)) landed as first slices of two larger proposals, and the runtime-store session refusal ([#6207](https://github.com/Hmbown/Codewhale/issues/6207)).
 - **[@Lstarsky0](https://github.com/Lstarsky0)** — reported TUI tests reading machine state instead of hermetic fixtures; the `lock_test_env` remedy from that report shaped two more hermetic fixes, for the shared UI fixtures and the compaction budget test ([#5359](https://github.com/Hmbown/Codewhale/issues/5359)).
 - **[@Lujc0523](https://github.com/Lujc0523)** — reported `/hooks edit` splitting keystrokes between the editor and the composer, fixed by pausing the TUI input pump inside the editor handoff ([#6165](https://github.com/Hmbown/Codewhale/issues/6165)).
 - **[@Statter](https://github.com/Statter)** — reported the Gemini `/models` failure that now surfaces the provider's reason instead of an empty error ([#6173](https://github.com/Hmbown/Codewhale/issues/6173)).
@@ -38,6 +38,10 @@ tag, packages, checksums and release assets exist.
 
 ### Added
 
+- `read` responses now always report the file's byte size, line count, and
+  whether output was truncated, and truncation footers name the total size
+  alongside the continuation offset — so paging through a large file is
+  deliberate instead of a surprise (#6283).
 - File edits are parse-gated before the write lands: Rust goes through
   `syn::parse_file` for a grammar-exact `line:column`, and `.toml` / `.json`
   through the parsers already vendored. An edit is refused only when the file
@@ -98,6 +102,40 @@ tag, packages, checksums and release assets exist.
   rosters prove nothing and are counted as `unverifiable` rather than raising a
   false warning. Each row names the route and every owner of the pin; the pin
   is surfaced, never rewritten (#6035).
+- Background-capable clients can enumerate owned work and watch TUI-visible
+  conditions: `GET /v1/threads/running` lists threads with queued or
+  in-progress turns in one call (one turns scan grouped by thread), and
+  `GET /v1/threads/{id}/notices` serves active `subagent-terminal`,
+  `elevation-needed`, and `model-notify` notices with thread/turn identity,
+  cleared by ack or — for elevation — when the tool call completes (#6180,
+  #3757).
+- Sub-agent launches adapt to provider throttling: a `DynamicGate` replaces
+  the fixed semaphore so launch capacity adjusts at runtime, and a
+  `RateLimitGovernor` halves capacity on 429 pressure, pauses admissions
+  past the threshold, and recovers additively; 429 retries honor
+  `Retry-After` with jittered backoff, and quota exhaustion keeps the
+  failure path (#6055).
+- Turns record the mode they ran in, so mixed-mode sessions stay legible
+  after the fact (#6321).
+- Shell spawning refuses NUL bytes in command and cwd before spawn, and
+  sub-agent runs fall back loudly past credentialless profile provider
+  pins instead of misrouting silently (#5529, #6318, #6320).
+- Children land past a per-step context bound instead of burning
+  quadratically, and status rows surface live declared-vs-observed writes
+  (#6189, #6194).
+- Queued Agent Mail can be cancelled before delivery, and the TUI
+  suspend/resume handshake restores on stop and rebuilds on continue
+  (#6176, #6169).
+- MCP connections are supervised: dead servers are probed and reconnected
+  with transitions reported, and a failed reconnect keeps the last-good
+  catalog instead of dropping tools (#6187, #6142).
+- Web search autodetects Tavily from `TAVILY_API_KEY` (Firecrawl stays the
+  default), fleet refusals name the alternative, and verification runs on
+  a bounded Git fetch plus a `merge_tree` verify surface (#6298, #6296).
+- Fleet authority projects through one `ChildGrant`, and ModelScope joins
+  the built-in providers (#5633, #6299).
+- Child tool results are capped at capture time, and run
+  tests/verifiers accept a bounded cwd (#6282, #6294, #6296).
 
 ### Changed
 
@@ -197,6 +235,38 @@ tag, packages, checksums and release assets exist.
   it would have been worse, because `release` only clears claims whose owner is
   no longer running while a contention refusal names a live one. The refusal
   itself now says to wait for that owner to settle or cancel it (#6272).
+- The session picker no longer refuses a saved session whose Runtime store
+  exists but holds nothing. A force-quit leaves the store on disk, ownerless
+  and empty, and the switch path refused it because recovery only covered a
+  *missing* store. A switch now also adopts a store that is provably empty
+  (every work directory, plus the event sequence that remembers pruned
+  appends) *and* provably unheld (the process-owner lock, which a live
+  manager holds from open to close), with no automation pinned to its
+  execution scope — and the save gate treats that shape as abandonable too,
+  so the repaired binding persists. The first fix was reverted on a race
+  (emptiness without liveness); this reland checks the lock first (#6207).
+- Double-tap Enter now sends every queued follow-up into the running turn,
+  oldest first. The second Enter used to steer only the most recent message
+  and leave older ones queued; a failed steer restores the failed message
+  plus everything unattempted in original order, so nothing is lost or
+  reordered.
+- Only the most recently sent prompt carries the elevated-surface background
+  now; every older prompt renders on the bare ground. The fill used to sit
+  behind every user row (striping), then behind none; newest-only keeps the
+  eye on the turn in play. Sending a new prompt moves the highlight and
+  un-highlights its predecessor.
+- Diff rows tint whole: added/deleted line numbers now share the row's green
+  / red background instead of sitting bare next to a painted body. Context
+  rows stay on the bare ground.
+- MCP connections are supervised now: a background task notices a dead
+  server within one sweep, reconnects on the existing backoff ladder, and
+  reports each transition, so Extensions rows flip with liveness instead
+  of parking on stale-ready or a silent [reconnect]. Five consecutive
+  failures park the server with a notice naming `/mcp retry`; an explicit
+  retry or a fresh connection resumes watching. Tool calls also retry
+  once across a dead pipe/socket (not just stale sessions), and a
+  reconnect that fails reports both errors instead of swallowing the
+  original (#6187; `list_changed` catalog refresh stays open).
 
 - A steer the engine never delivered is no longer reported as sent. The runtime
   API persisted the steer item as already-`Completed` and emitted

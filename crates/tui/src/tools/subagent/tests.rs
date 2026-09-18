@@ -3153,7 +3153,7 @@ fn explore_prompt_orients_before_searching() {
 fn explore_prompt_is_quick_bounded_and_read_only() {
     let prompt = FleetRole::Scout.system_prompt();
     assert!(prompt.contains("Default to `EFFORT: quick`"));
-    assert!(prompt.contains("3-5 tool calls"));
+    assert!(prompt.contains("stop at decisive evidence, not at a number"));
     assert!(prompt.contains("strictly read-only"));
     assert!(prompt.contains("ALREADY_KNOWN"));
     assert!(prompt.contains("STOP_CONDITION"));
@@ -4426,7 +4426,7 @@ async fn manual_config_role_pin_refuses_task_model_and_strength_before_binding()
             selection.model_route,
             ModelRoute::Fixed("deepseek-v4-flash".into())
         );
-        let error = bind_spawn_model_route(&mut runtime, &request, None, true)
+        let error = bind_spawn_model_route(&mut runtime, &request, None, true, true)
             .await
             .expect_err("task choices cannot replace a current Config pin");
         let message = error.to_string();
@@ -4455,7 +4455,7 @@ async fn manual_role_pin_accepts_only_its_exact_qualified_provider_selector() {
         let request =
             parse_spawn_request(&json!({"prompt":"review", "type":"reviewer", "model":model}))
                 .unwrap();
-        let (route, source) = bind_spawn_model_route(&mut runtime, &request, None, true)
+        let (route, source, _) = bind_spawn_model_route(&mut runtime, &request, None, true, true)
             .await
             .expect("the task may restate the same exact route");
         assert_eq!(route, ModelRoute::Fixed("deepseek-v4-flash".into()));
@@ -4466,7 +4466,7 @@ async fn manual_role_pin_accepts_only_its_exact_qualified_provider_selector() {
         "prompt":"review", "type":"reviewer", "model":"moonshot/deepseek-v4-flash"
     }))
     .unwrap();
-    let error = bind_spawn_model_route(&mut runtime, &request, None, true)
+    let error = bind_spawn_model_route(&mut runtime, &request, None, true, true)
         .await
         .expect_err("a provider prefix cannot retarget the saved pin");
     assert!(error.to_string().contains("conflicts"), "{error}");
@@ -4493,7 +4493,7 @@ async fn structured_role_pin_rejects_incomplete_auto_and_unknown_provider_pairs(
             .unwrap(),
         );
         let request = parse_spawn_request(&json!({"prompt":"review", "type":"reviewer"})).unwrap();
-        let error = bind_spawn_model_route(&mut runtime, &request, None, true)
+        let error = bind_spawn_model_route(&mut runtime, &request, None, true, true)
             .await
             .expect_err("an invalid explicit route cannot inherit a usable default");
         assert!(!error.to_string().is_empty(), "{value:?}: {error}");
@@ -4507,6 +4507,86 @@ async fn structured_role_pin_rejects_incomplete_auto_and_unknown_provider_pairs(
             "{value:?}: no other provider was selected"
         );
     }
+}
+#[tokio::test]
+async fn xai_pin_without_credentials_falls_back_to_the_session_route_loudly() {
+    // #5529 mode 2: a saved profile pinning a real provider whose client
+    // cannot be built (no credentials) must not fail the dispatch — the
+    // child runs on the session route and the receipt names the
+    // substitution.
+    let _env = crate::test_support::lock_test_env();
+    let _xai_key = crate::test_support::EnvVarGuard::remove("XAI_API_KEY");
+    let _cli_key = crate::test_support::EnvVarGuard::remove("CODEWHALE_CLI_API_KEY");
+    let mut runtime = credentialless_xai_runtime();
+    let member = credentialless_xai_member();
+    let request = parse_spawn_request(&json!({"prompt": "fixture", "type": "reviewer"})).unwrap();
+    let session_provider = runtime.client.api_provider();
+    let (_route, source, note) =
+        bind_spawn_model_route(&mut runtime, &request, Some(&member), true, true)
+            .await
+            .expect("credentialless pin falls back instead of failing");
+    assert!(matches!(source, SpawnRouteSource::SessionFallback));
+    assert_eq!(source.as_str(), "session.fallback");
+    let note = note.expect("fallback note");
+    assert!(note.contains("xai"), "{note}");
+    assert!(note.contains("session route"), "{note}");
+    assert_eq!(
+        runtime.client.api_provider(),
+        session_provider,
+        "session client kept"
+    );
+}
+
+#[tokio::test]
+async fn xai_pin_without_credentials_fails_closed_without_fallback() {
+    // Exact-bound spawns refuse provider substitution: their route is
+    // preflighted and must not be silently replaced.
+    let _env = crate::test_support::lock_test_env();
+    let _xai_key = crate::test_support::EnvVarGuard::remove("XAI_API_KEY");
+    let _cli_key = crate::test_support::EnvVarGuard::remove("CODEWHALE_CLI_API_KEY");
+    let mut runtime = credentialless_xai_runtime();
+    let member = credentialless_xai_member();
+    let request = parse_spawn_request(&json!({"prompt": "fixture", "type": "reviewer"})).unwrap();
+    let error = bind_spawn_model_route(&mut runtime, &request, Some(&member), true, false)
+        .await
+        .expect_err("exact-bound spawns refuse substitution");
+    assert!(error.to_string().contains("xai"), "{error}");
+    assert!(error.to_string().contains("unavailable"), "{error}");
+}
+
+fn credentialless_xai_member() -> crate::fleet::profile::AgentProfile {
+    crate::fleet::profile::AgentProfile {
+        id: "xai-pin".to_string(),
+        display_name: None,
+        description: None,
+        requires: Vec::new(),
+        profile: codewhale_config::FleetProfile {
+            provider: Some("xai".to_string()),
+            model: Some("grok-4-6".to_string()),
+            ..Default::default()
+        },
+        source: std::path::PathBuf::new(),
+        origin: crate::fleet::profile::ProfileOrigin::Config,
+        plugin_authority: None,
+    }
+}
+
+/// Session runtime whose config offers xAI no credential sources at all: no
+/// xai table, no root key, ambient key env removed by the caller. The
+/// credential store is cfg(test)-excluded, so the pinned client build fails
+/// deterministically and offline.
+fn credentialless_xai_runtime() -> SubAgentRuntime {
+    let mut runtime = stub_runtime();
+    let mut config = runtime
+        .api_config
+        .as_ref()
+        .expect("stub config")
+        .as_ref()
+        .clone();
+    config.api_key = None;
+    config.providers = None;
+    runtime.api_config = Some(std::sync::Arc::new(config));
+    runtime
 }
 
 #[tokio::test]
@@ -4560,7 +4640,7 @@ async fn manual_role_pin_keeps_case_distinct_custom_provider_identity() {
             "prompt":"review", "type":"reviewer", "model":selector
         }))
         .unwrap();
-        let result = bind_spawn_model_route(&mut runtime, &request, None, true).await;
+        let result = bind_spawn_model_route(&mut runtime, &request, None, true, true).await;
         if succeeds {
             assert_eq!(result.unwrap().1, SpawnRouteSource::RolePin);
         } else {
@@ -4602,7 +4682,7 @@ async fn foreign_manual_role_pin_is_not_downgraded_to_an_implicit_default() {
     assert!(error.to_string().contains("moonshot"), "{error}");
     assert_eq!(selected.source, SpawnRouteSource::RolePin);
     assert!(matches!(selected.model_route, ModelRoute::Fixed(_)));
-    bind_spawn_model_route(&mut runtime, &request, None, true)
+    bind_spawn_model_route(&mut runtime, &request, None, true, true)
         .await
         .expect_err("the actual bind must keep the same known-foreign refusal");
     assert_eq!(runtime.model, "kimi-k2.6");
@@ -4659,7 +4739,7 @@ async fn structured_custom_pin_refuses_named_provider_migration_but_accepts_lite
             "prompt":"review", "type":"reviewer", "model":"custom/model-x"
         }))
         .unwrap();
-        let result = bind_spawn_model_route(&mut runtime, &request, None, true).await;
+        let result = bind_spawn_model_route(&mut runtime, &request, None, true, true).await;
         if should_bind {
             assert_eq!(result.unwrap().1, SpawnRouteSource::RolePin);
             assert_eq!(runtime.model, "model-x");
@@ -5612,6 +5692,7 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
         "agent_id",
         "agent_ids",
         "all_parked",
+        "allowed_tools",
         "coordination_contracts",
         "deliverables",
         "detail",
@@ -5669,6 +5750,41 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
     assert!(
         worktree.contains("git worktree") && worktree.contains("parallel edit"),
         "worktree description should teach isolated parallel edits: {worktree}"
+    );
+}
+
+#[test]
+fn agent_start_schema_documents_hidden_spawn_requirements() {
+    // #6194 item 6: every spawn-time refusal must be discoverable before the
+    // call — the parent burned dispatches learning these from errors.
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 1);
+    let schema = AgentTool::new(manager, stub_runtime()).input_schema();
+    let allowed = schema_property_description(&schema, "allowed_tools");
+    for needle in ["type=custom", "non-empty", "narrows"] {
+        assert!(
+            allowed.contains(needle),
+            "allowed_tools description should teach {needle:?}: {allowed}"
+        );
+    }
+    let profile = schema_property_description(&schema, "profile");
+    for needle in ["ambiguous", "action=roster"] {
+        assert!(
+            profile.contains(needle),
+            "profile description should teach {needle:?}: {profile}"
+        );
+    }
+    let authority = schema_property_description(&schema, "write_authority");
+    for needle in ["type=custom", "workspace_write"] {
+        assert!(
+            authority.contains(needle),
+            "write_authority description should teach {needle:?}: {authority}"
+        );
+    }
+    let model = schema_property_description(&schema, "model");
+    assert!(
+        model.contains("resolved route"),
+        "model description should point at per-role resolved routes: {model}"
     );
 }
 
@@ -7925,7 +8041,12 @@ fn small_surface_caches_are_independent_bounded_and_revalidated() {
     let mut catalog = (0..9)
         .map(|index| synthetic_deferred_tool(&format!("deferred_{index}"), 8))
         .collect::<Vec<_>>();
-    ensure_advanced_tooling(&mut catalog, AppMode::Agent, &HashSet::new());
+    ensure_advanced_tooling(
+        &mut catalog,
+        AppMode::Agent,
+        &HashSet::new(),
+        crate::core::engine::tool_catalog::ToolMode::Direct,
+    );
     catalog.retain(|tool| tool.name == TOOL_SEARCH_NAME || tool.name.starts_with("deferred_"));
     let warm = (0..9)
         .map(|index| format!("deferred_{index}"))
@@ -7947,7 +8068,12 @@ fn small_surface_caches_are_independent_bounded_and_revalidated() {
     let mut byte_catalog = (0..3)
         .map(|index| synthetic_deferred_tool(&format!("bytes_{index}"), 6 * 1024))
         .collect::<Vec<_>>();
-    ensure_advanced_tooling(&mut byte_catalog, AppMode::Agent, &HashSet::new());
+    ensure_advanced_tooling(
+        &mut byte_catalog,
+        AppMode::Agent,
+        &HashSet::new(),
+        crate::core::engine::tool_catalog::ToolMode::Direct,
+    );
     byte_catalog.retain(|tool| tool.name == TOOL_SEARCH_NAME || tool.name.starts_with("bytes_"));
     let byte_warm = (0..3)
         .map(|index| format!("bytes_{index}"))
@@ -14199,6 +14325,9 @@ pub(crate) fn stub_runtime() -> SubAgentRuntime {
         max_output_tokens: None,
         speech_output_dir: None,
         todos: crate::tools::todo::new_shared_todo_list(),
+        // Test stubs run without a manager-stamped governor; the LLM call
+        // path treats `None` as "report nothing".
+        governor: None,
     }
 }
 
@@ -16687,7 +16816,6 @@ fn launch_gate_defaults_to_launch_concurrency_capped_by_max_agents() {
 
 #[tokio::test]
 async fn launch_gate_queues_extra_direct_children() {
-    use tokio::sync::Semaphore;
     use tokio_util::sync::CancellationToken;
 
     let tmp = tempdir().expect("tempdir");
@@ -16704,12 +16832,11 @@ async fn launch_gate_queues_extra_direct_children() {
     runtime.context = ToolContext::new(tmp.path());
     runtime.mailbox = Some(mailbox);
 
-    let gate = Arc::new(Semaphore::new(1));
+    let gate = Arc::new(governor::DynamicGate::new(1));
     let held_launch_permit = Arc::clone(&gate)
-        .acquire_owned()
-        .await
+        .try_acquire()
         .expect("test holds the single launch permit");
-    let spawn = |agent_id: &str, gate: Option<Arc<Semaphore>>| {
+    let spawn = |agent_id: &str, gate: Option<Arc<governor::DynamicGate>>| {
         let (input_tx, input_rx) = mpsc::unbounded_channel();
         let agent = SubAgent::new(
             agent_id.to_string(),
@@ -16836,7 +16963,6 @@ async fn launch_gate_queues_extra_direct_children() {
 
 #[tokio::test]
 async fn queued_turn_owned_child_parks_without_a_false_start_transition() {
-    use tokio::sync::Semaphore;
     use tokio_util::sync::CancellationToken;
 
     let tmp = tempdir().expect("tempdir");
@@ -16874,10 +17000,9 @@ async fn queued_turn_owned_child_parks_without_a_false_start_transition() {
     let registration = foreground_children
         .register(runtime.cancel_token.clone(), &agent_id)
         .expect("turn-owned queued child registers before settlement");
-    let gate = Arc::new(Semaphore::new(1));
+    let gate = Arc::new(governor::DynamicGate::new(1));
     let held_launch_permit = Arc::clone(&gate)
-        .acquire_owned()
-        .await
+        .try_acquire()
         .expect("test holds the only launch permit");
     let task = SubAgentTask {
         manager_handle: Arc::clone(&manager),
@@ -16992,7 +17117,6 @@ async fn queued_turn_owned_child_parks_without_a_false_start_transition() {
 
 #[tokio::test]
 async fn launch_gate_wait_counts_against_child_wall_timeout() {
-    use tokio::sync::Semaphore;
     use tokio_util::sync::CancellationToken;
 
     const WALL_TIME: Duration = Duration::from_millis(150);
@@ -17024,10 +17148,9 @@ async fn launch_gate_wait_counts_against_child_wall_timeout() {
     runtime.context = ToolContext::new(tmp.path());
     runtime.mailbox = Some(mailbox);
 
-    let gate = Arc::new(Semaphore::new(1));
+    let gate = Arc::new(governor::DynamicGate::new(1));
     let held_launch_permit = Arc::clone(&gate)
-        .acquire_owned()
-        .await
+        .try_acquire()
         .expect("test holds the single launch permit past the wall timeout");
     let task = SubAgentTask {
         manager_handle: Arc::clone(&manager),
@@ -17540,6 +17663,40 @@ async fn worker_stops_with_typed_wall_time_reason() {
     assert!(reason.contains("wall-time budget exhausted"), "{reason}");
     assert!(reason.contains("wall-time limit"), "{reason}");
     assert!(reason.contains("operator"), "{reason}");
+}
+
+#[tokio::test]
+async fn worker_lands_with_typed_context_reason_past_the_step_input_bound() {
+    // #6194 item 7: one step billing past the per-step bound lands the run
+    // through budget death (report + preservation) instead of burning
+    // quadratically to wall/token death.
+    let tmp = tempdir().expect("tempdir");
+    let (manager, agent_id, calls, task_handle) =
+        spawn_budget_capped_worker(tmp.path(), 150_000, 40, 120, Duration::from_secs(300)).await;
+
+    tokio::time::timeout(Duration::from_secs(10), task_handle)
+        .await
+        .expect("context-capped worker must terminate")
+        .expect("task should finish");
+
+    let result = manager
+        .read()
+        .await
+        .get_result(&agent_id)
+        .expect("agent registered");
+    assert_eq!(result.status, SubAgentStatus::BudgetExhausted);
+    let reason = &result
+        .checkpoint
+        .as_ref()
+        .expect("context-budget checkpoint")
+        .reason;
+    assert!(reason.contains("context budget exhausted"), "{reason}");
+    assert!(reason.contains("150000"), "{reason}");
+    // Task work stopped at the first billed step; only hand-back turns follow.
+    assert!(
+        calls.load(Ordering::SeqCst) <= 3,
+        "landed early instead of running 120 steps"
+    );
 }
 
 /// Clears the process-wide rate-limit window on drop so a panicking test
@@ -20220,7 +20377,7 @@ const READ_ONLY_CHILD_ENVELOPE_BYTE_CEILING: usize = 89_000;
 /// margin. Re-measured at 87,529B on 2026-09-17, with the bounded Git
 /// fetch / merge_tree verify tools (b89349286f) and this slice's grant
 /// text both in the shared catalog.
-const PARENT_SURFACE_BYTE_CEILING: usize = 88_000;
+const PARENT_SURFACE_BYTE_CEILING: usize = 88_142;
 
 #[tokio::test]
 async fn read_only_child_envelope_stays_within_measured_ceiling() {
@@ -20594,6 +20751,7 @@ fn spawn_route_metadata(provider: &str, model: &str, source: &str) -> WorkflowTa
         provider_id: provider.to_string(),
         model_id: model.to_string(),
         route_source: source.to_string(),
+        fallback_note: None,
         requested_reasoning: "inherit".to_string(),
         effective_reasoning: None,
         runtime_version: "test".to_string(),
@@ -21114,6 +21272,7 @@ async fn parked_followup_reuses_successor_and_preserves_route_authority_and_line
         provider_id: "deepseek".into(),
         model_id: "deepseek-v4-flash".into(),
         route_source: "role.pin".into(),
+        fallback_note: None,
         requested_reasoning: "inherit".into(),
         effective_reasoning: None,
         runtime_version: "fixture".into(),
@@ -21289,6 +21448,7 @@ async fn parked_followup_executes_on_the_saved_cross_provider_route() {
         provider_id: "zai".into(),
         model_id: "glm-5".into(),
         route_source: "role.pin".into(),
+        fallback_note: None,
         requested_reasoning: "inherit".into(),
         effective_reasoning: None,
         runtime_version: "fixture".into(),
@@ -21468,6 +21628,7 @@ async fn resume_keeps_recorded_reasoning_in_manifest_and_request_after_parent_ch
                 provider_id: "deepseek".into(),
                 model_id: "deepseek-v4-flash".into(),
                 route_source: "role.pin".into(),
+                fallback_note: None,
                 requested_reasoning: "inherit".into(),
                 effective_reasoning: tier.map(str::to_string),
                 runtime_version: "fixture".into(),

@@ -742,7 +742,7 @@ pub(crate) async fn switch_workspace(
         let _ = engine_handle
             .send(Op::SyncSession {
                 session_id: app.current_session_id.clone(),
-                messages: app.api_messages.clone(),
+                messages: app.api_messages.as_ref().clone(),
                 system_prompt: app.system_prompt.clone(),
                 system_prompt_override: false,
                 model: app.model.clone(),
@@ -986,6 +986,7 @@ pub(crate) fn mirror_saved_api_key_in_config(
         ApiProvider::Antigravity => &mut providers.antigravity,
         ApiProvider::Telecomjs => &mut providers.telecomjs,
         ApiProvider::Edenai => &mut providers.edenai,
+        ApiProvider::Zenmux => &mut providers.zenmux,
         ApiProvider::Concentrate => &mut providers.concentrate,
         ApiProvider::Codewhale => &mut providers.codewhale,
         ApiProvider::ModelstudioTokenPlan => &mut providers.modelstudio_token_plan,

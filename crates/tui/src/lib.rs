@@ -12645,6 +12645,7 @@ async fn build_direct_workflow_tool(
     } else {
         None
     };
+    let fleet_governor = manager.read().await.rate_limit_governor();
     let runtime = SubAgentRuntime::new(
         client,
         route.model.clone(),
@@ -12653,6 +12654,7 @@ async fn build_direct_workflow_tool(
         Some(event_tx),
         manager.clone(),
     )
+    .with_fleet_governor(fleet_governor)
     .with_locale_tag(
         codewhale_localization::resolve_locale(
             &crate::settings::Settings::load_persisted()
@@ -18812,7 +18814,6 @@ api_key = "test-only-key"
                 osc8_links: None,
                 composer_arrows_scroll: None,
                 notification_condition: None,
-                header_items: None,
             }),
             ..Config::default()
         };
@@ -18914,7 +18915,6 @@ api_key = "test-only-key"
                 osc8_links: None,
                 composer_arrows_scroll: None,
                 notification_condition: None,
-                header_items: None,
             }),
             ..Config::default()
         };
@@ -18954,7 +18954,6 @@ api_key = "test-only-key"
                 osc8_links: None,
                 composer_arrows_scroll: None,
                 notification_condition: None,
-                header_items: None,
             }),
             ..Config::default()
         };
@@ -19048,7 +19047,6 @@ api_key = "test-only-key"
                 osc8_links: None,
                 composer_arrows_scroll: None,
                 notification_condition: None,
-                header_items: None,
             }),
             ..Config::default()
         };

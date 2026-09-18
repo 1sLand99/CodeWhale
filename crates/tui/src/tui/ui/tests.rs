@@ -3173,6 +3173,31 @@ fn focus_gained_forces_terminal_viewport_recapture() {
     assert!(!terminal_event_needs_viewport_recapture(&Event::FocusLost));
 }
 
+/// #6311: focus loss defers frame emission (occluded VTE replays every
+/// emitted frame as flicker backlog); focus gain or any input re-arms.
+#[test]
+fn focus_loss_defers_frames_until_focus_or_input_returns() {
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
+    let key = || Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+    let mouse = || {
+        Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+    assert!(next_unfocused(false, &Event::FocusLost));
+    assert!(next_unfocused(true, &Event::Resize(80, 24)));
+    assert!(!next_unfocused(true, &Event::FocusGained));
+    assert!(!next_unfocused(true, &key()));
+    assert!(!next_unfocused(true, &mouse()));
+    assert!(!next_unfocused(true, &Event::Paste("x".to_string())));
+    assert!(!next_unfocused(false, &key()));
+}
+
 // ANSI byte sequences are only written on platforms where crossterm uses the
 // ANSI execution path. On Windows the same logical commands route through the
 // WinAPI console backend and never reach the writer, so byte-level assertions
@@ -7915,7 +7940,7 @@ fn setup_presets_cannot_override_managed_runtime_requirements() {
 #[tokio::test]
 async fn tool_result_api_content_never_advertises_unowned_live_output_as_retrievable() {
     let mut app = App::new(create_test_options(), &Config::default());
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::Assistant,
         content: vec![ContentBlock::ToolUse {
             id: "call-live-big".to_string(),
@@ -7948,7 +7973,7 @@ async fn tool_result_api_content_never_advertises_unowned_live_output_as_retriev
 #[test]
 fn live_tool_receipt_messages_clones_only_matching_tool_use() {
     let mut app = App::new(create_test_options(), &Config::default());
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::Assistant,
         content: vec![ContentBlock::ToolUse {
             id: "call-old".to_string(),
@@ -7958,7 +7983,7 @@ fn live_tool_receipt_messages_clones_only_matching_tool_use() {
             thought_signature: None,
         }],
     });
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::User,
         content: vec![ContentBlock::ToolResult {
             tool_use_id: "call-old".to_string(),
@@ -7967,7 +7992,7 @@ fn live_tool_receipt_messages_clones_only_matching_tool_use() {
             content_blocks: None,
         }],
     });
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::Assistant,
         content: vec![ContentBlock::ToolUse {
             id: "call-new".to_string(),
@@ -8089,7 +8114,7 @@ fn apply_loaded_session_keeps_submitted_user_tail_in_history() {
 
     apply_loaded_session(&mut app, &mut Config::default(), &session).expect("restore session");
 
-    assert_eq!(app.api_messages, vec![submitted]);
+    assert_eq!(*app.api_messages, vec![submitted]);
     assert!(app.input.is_empty());
     assert!(app.queued_draft.is_none());
     assert!(app.history.iter().any(|cell| {
@@ -8212,7 +8237,7 @@ fn apply_loaded_session_keeps_user_authored_shell_event_lookalikes() {
         let session = saved_session_with_messages(vec![user]);
         let mut app = create_test_app();
         apply_loaded_session(&mut app, &mut Config::default(), &session).expect("restore session");
-        assert_eq!(app.api_messages, session.messages);
+        assert_eq!(*app.api_messages, session.messages);
         assert!(matches!(
             app.history.as_slice(),
             [HistoryCell::User { content }] if content == literal
@@ -8698,7 +8723,7 @@ fn backtrack_prefill_rehydrates_attachment_rows() {
     app.add_message(HistoryCell::User {
         content: user_text.to_string(),
     });
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
             text: user_text.to_string(),
@@ -8709,7 +8734,7 @@ fn backtrack_prefill_rehydrates_attachment_rows() {
         content: "done".to_string(),
         streaming: false,
     });
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::Assistant,
         content: vec![ContentBlock::Text {
             text: "done".to_string(),
@@ -10566,21 +10591,19 @@ async fn auto_dispatch_keeps_last_and_pending_receipts_aligned() {
         app.pending_turn_route
             .as_ref()
             .map(|(provider, model, auto)| (*provider, model.as_str(), *auto)),
-        Some((
-            ApiProvider::Zai,
-            crate::config::ZAI_GLM_5_3_FLASH_MODEL,
-            true,
-        ))
+        Some((ApiProvider::Zai, crate::config::DEFAULT_ZAI_MODEL, true,))
     );
     assert_eq!(
         app.last_auto_route_receipt, app.pending_auto_route_receipt,
         "the fallback inspector must never pair a newly resolved route with a stale receipt"
     );
+    // Declared-default fallback (72b028e5e): the receipt tier is the default
+    // model's own tier (GLM-5.3 is strong), never a content-heuristic guess.
     assert_eq!(
         app.last_auto_route_receipt
             .as_ref()
             .map(|receipt| receipt.tier),
-        Some(crate::model_routing::AutoRouteTier::Fast)
+        Some(crate::model_routing::AutoRouteTier::Strong)
     );
     assert_eq!(
         app.last_effective_reasoning_effort,
@@ -10600,7 +10623,7 @@ async fn failed_paused_dispatch_preserves_app_checkpoint_state_and_engine_gate()
     app.goal.tokens_used = 7;
     app.goal.time_used_seconds = 11;
     app.goal.continuation_count = 2;
-    app.api_messages
+    app.api_messages_mut()
         .push(text_message("assistant", "existing conversation"));
     app.add_message(HistoryCell::System {
         content: "existing transcript".to_string(),
@@ -10655,7 +10678,8 @@ async fn paused_dispatch_at_compaction_threshold_enqueues_one_atomic_send() {
     app.auto_compact_user_configured = true;
     app.auto_compact = true;
     app.auto_compact_threshold_percent = 10.0;
-    app.api_messages = vec![text_message("assistant", &"context ".repeat(240_000))];
+    app.api_messages =
+        std::sync::Arc::new(vec![text_message("assistant", &"context ".repeat(240_000))]);
     let planned_compaction =
         app.compaction_config_for_route(app.api_provider, &app.model, app.active_route_limits);
     let fixture_used =
@@ -11532,13 +11556,13 @@ fn context_override_drives_compaction_meter_and_preflight_budget() {
             )
     );
 
-    app.api_messages = vec![Message {
+    app.api_messages = std::sync::Arc::new(vec![Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
             text: "context ".repeat(2_000),
             cache_control: None,
         }],
-    }];
+    }]);
     let (_, meter_window, _) = context_usage_snapshot(&app).expect("context meter");
     assert_eq!(meter_window, 262_144);
 
@@ -11597,13 +11621,13 @@ fn compaction_trigger_meter_and_ladder_share_the_resolved_window() {
         )
     );
 
-    app.api_messages = vec![Message {
+    app.api_messages = std::sync::Arc::new(vec![Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
             text: "context ".repeat(100_000),
             cache_control: None,
         }],
-    }];
+    }]);
     let (used, meter_window, _) = context_usage_snapshot(&app).expect("context meter");
     assert_eq!(meter_window, ladder.tokens);
 
@@ -11769,7 +11793,7 @@ async fn steer_becomes_the_newest_transcript_entry_only_when_the_engine_records_
     let _environment = crate::test_support::lock_test_env();
     let mut app = create_test_app();
     let session = super::event_loop::ensure_runtime_session_id(&mut app);
-    app.api_messages = vec![text_message("user", "original request")];
+    app.api_messages = std::sync::Arc::new(vec![text_message("user", "original request")]);
     app.add_message(HistoryCell::Assistant {
         content: "work produced before the steer arrived".to_string(),
         streaming: false,
@@ -11815,11 +11839,11 @@ async fn steer_becomes_the_newest_transcript_entry_only_when_the_engine_records_
         &Config::default(),
         EngineEvent::SessionUpdated {
             session_id: session,
-            messages: vec![
+            messages: std::sync::Arc::new(vec![
                 text_message("user", "original request"),
                 text_message("assistant", "work produced before the steer arrived"),
                 text_message("user", "actually use the other file"),
-            ],
+            ]),
             system_prompt: None,
             model,
             workspace,
@@ -11926,7 +11950,7 @@ async fn denied_steer_restores_queued_draft_and_keeps_active_turn() {
 #[tokio::test]
 async fn lost_strict_message_submit_executor_keeps_dispatch_atomic_and_recoverable() {
     let mut app = create_test_app();
-    app.api_messages
+    app.api_messages_mut()
         .push(text_message("assistant", "existing conversation"));
     app.add_message(HistoryCell::System {
         content: "existing receipt".to_string(),
@@ -12359,7 +12383,7 @@ async fn reserved_dispatch_replaced_engine_or_session_leaves_current_state_untou
         if !replace_engine {
             let _ = crate::cost_status::close_current_scope();
         }
-        app.api_messages = vec![text_message("user", "replacement session")];
+        app.api_messages = std::sync::Arc::new(vec![text_message("user", "replacement session")]);
         app.input = "new draft".to_string();
         assert!(app.dispatch_in_flight, "old admission is still outstanding");
         app.is_loading = false;
@@ -12626,7 +12650,7 @@ async fn dispatch_route_failure_leaves_loading_and_transcript_unchanged() {
     let mut app = create_test_app();
     app.set_provider_identity(ApiProvider::Custom, "lm-studio");
     app.set_model_selection("local-model".to_string());
-    app.api_messages
+    app.api_messages_mut()
         .push(text_message("assistant", "existing conversation"));
     app.add_message(HistoryCell::System {
         content: "existing receipt".to_string(),
@@ -15490,13 +15514,13 @@ fn slow_external_url_command() -> Command {
 fn context_usage_snapshot_prefers_estimate_when_reported_exceeds_window() {
     let mut app = create_test_app();
     app.session.last_prompt_tokens = Some(1_200_000);
-    app.api_messages = vec![Message {
+    app.api_messages = std::sync::Arc::new(vec![Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
         }],
-    }];
+    }]);
 
     let (used, max, percent) =
         context_usage_snapshot(&app).expect("context usage should be available");
@@ -15509,17 +15533,17 @@ fn context_usage_snapshot_prefers_estimate_when_reported_exceeds_window() {
 #[test]
 fn context_usage_cache_tracks_append_and_compaction_lengths() {
     let mut app = create_test_app();
-    app.api_messages = vec![Message {
+    app.api_messages = std::sync::Arc::new(vec![Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
             text: "first".to_string(),
             cache_control: None,
         }],
-    }];
+    }]);
     context_usage_snapshot(&app).expect("context usage should be available");
     assert_eq!(app.context_token_cache.borrow().message_tokens.len(), 1);
 
-    app.api_messages.push(Message {
+    app.api_messages_mut().push(Message {
         role: Role::Assistant,
         content: vec![ContentBlock::Text {
             text: "second".to_string(),
@@ -15529,7 +15553,7 @@ fn context_usage_cache_tracks_append_and_compaction_lengths() {
     context_usage_snapshot(&app).expect("context usage should be available");
     assert_eq!(app.context_token_cache.borrow().message_tokens.len(), 2);
 
-    app.api_messages.truncate(1);
+    app.api_messages_mut().truncate(1);
     context_usage_snapshot(&app).expect("context usage should be available");
     assert_eq!(app.context_token_cache.borrow().message_tokens.len(), 1);
 }
@@ -15537,24 +15561,26 @@ fn context_usage_cache_tracks_append_and_compaction_lengths() {
 #[test]
 fn context_usage_cache_refreshes_after_compaction_replaces_messages() {
     let mut app = create_test_app();
-    app.api_messages = (0..3)
-        .map(|_| Message {
-            role: Role::User,
-            content: vec![ContentBlock::Text {
-                text: "context ".repeat(2_000),
-                cache_control: None,
-            }],
-        })
-        .collect();
+    app.api_messages = std::sync::Arc::new(
+        (0..3)
+            .map(|_| Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "context ".repeat(2_000),
+                    cache_control: None,
+                }],
+            })
+            .collect(),
+    );
     let (before, _, _) = context_usage_snapshot(&app).expect("context usage should be available");
 
-    app.api_messages = vec![Message {
+    app.api_messages = std::sync::Arc::new(vec![Message {
         role: Role::Assistant,
         content: vec![ContentBlock::Text {
             text: "compact summary".to_string(),
             cache_control: None,
         }],
-    }];
+    }]);
     app.context_token_cache.borrow_mut().clear();
     let (after, _, _) =
         context_usage_snapshot(&app).expect("compacted context usage should be available");
@@ -15569,13 +15595,13 @@ fn context_usage_cache_refreshes_after_compaction_replaces_messages() {
 fn context_usage_snapshot_prefers_estimate_when_reported_is_inflated_by_old_reasoning() {
     let mut app = create_test_app();
     app.session.last_prompt_tokens = Some(980_000);
-    app.api_messages = vec![Message {
+    app.api_messages = std::sync::Arc::new(vec![Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
             text: "small current context".to_string(),
             cache_control: None,
         }],
-    }];
+    }]);
 
     let (used, max, percent) =
         context_usage_snapshot(&app).expect("context usage should be available");
@@ -15594,13 +15620,13 @@ fn context_usage_snapshot_prefers_estimate_when_reported_is_inflated_by_old_reas
 #[test]
 fn context_usage_does_not_drop_when_reported_shrinks_after_multi_round_turn() {
     let mut app = create_test_app();
-    app.api_messages = vec![Message {
+    app.api_messages = std::sync::Arc::new(vec![Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
             text: "context ".repeat(2_000), // ~14k tokens estimated
             cache_control: None,
         }],
-    }];
+    }]);
 
     // Simulate a multi-round turn that summed two rounds' input_tokens
     // (e.g., 200k + 210k from a long thinking + tool-call sequence).
@@ -15628,13 +15654,13 @@ fn context_usage_snapshot_prefers_live_estimate_while_loading() {
     let mut app = create_test_app();
     app.is_loading = true;
     app.session.last_prompt_tokens = Some(128);
-    app.api_messages = vec![Message {
+    app.api_messages = std::sync::Arc::new(vec![Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
             text: "context ".repeat(6_000),
             cache_control: None,
         }],
-    }];
+    }]);
 
     let estimated = estimated_context_tokens(&app).expect("estimated context should be available");
     let (used, max, percent) =
@@ -15653,7 +15679,7 @@ fn context_usage_snapshot_prefers_live_estimate_while_loading() {
 #[test]
 fn context_meter_and_compaction_gate_share_one_estimator() {
     let mut app = create_test_app();
-    app.api_messages = vec![
+    app.api_messages = std::sync::Arc::new(vec![
         Message {
             role: Role::User,
             content: vec![ContentBlock::Text {
@@ -15668,7 +15694,7 @@ fn context_meter_and_compaction_gate_share_one_estimator() {
                 cache_control: None,
             }],
         },
-    ];
+    ]);
 
     let meter = estimated_context_tokens(&app).expect("context meter");
     let gate = i64::try_from(crate::compaction::estimate_input_tokens_for_pressure(
@@ -15685,13 +15711,13 @@ fn context_meter_and_compaction_gate_share_one_estimator() {
 #[test]
 fn automatic_compaction_does_not_warn_at_its_threshold() {
     let mut app = create_test_app();
-    app.api_messages = vec![Message {
+    app.api_messages = std::sync::Arc::new(vec![Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
             text: "context ".repeat(240_000),
             cache_control: None,
         }],
-    }];
+    }]);
     app.auto_compact = true;
     app.auto_compact_threshold_percent = 100.0;
     let (used, _, percent) = context_usage_snapshot(&app).expect("context snapshot");
@@ -15710,7 +15736,7 @@ fn automatic_compaction_does_not_warn_at_its_threshold() {
 #[test]
 fn context_pressure_warning_survives_later_status_and_can_be_dismissed() {
     let mut app = create_test_app();
-    app.api_messages = vec![Message {
+    app.api_messages = std::sync::Arc::new(vec![Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
             // Sized for the honest (non-inflated) meter: ~66% of a 1M window,
@@ -15719,7 +15745,7 @@ fn context_pressure_warning_survives_later_status_and_can_be_dismissed() {
             text: "context ".repeat(330_000),
             cache_control: None,
         }],
-    }];
+    }]);
     app.auto_compact = false;
     app.auto_compact_threshold_percent = 100.0;
     let (used, _, _) = context_usage_snapshot(&app).expect("context snapshot");
@@ -15755,14 +15781,14 @@ fn context_pressure_warning_survives_later_status_and_can_be_dismissed() {
 #[test]
 fn context_pressure_warning_clears_when_compaction_starts() {
     let mut app = create_test_app();
-    app.api_messages = vec![Message {
+    app.api_messages = std::sync::Arc::new(vec![Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
             // ~66% of a 1M window under the honest (non-inflated) estimator.
             text: "context ".repeat(330_000),
             cache_control: None,
         }],
-    }];
+    }]);
     app.auto_compact = false;
     app.auto_compact_threshold_percent = 100.0;
     let (used, _, _) = context_usage_snapshot(&app).expect("context snapshot");
@@ -15960,7 +15986,7 @@ fn local_cancel_marks_late_stream_events_for_suppression() {
     assert!(suppress_engine_event_after_local_cancel(
         &EngineEvent::SessionUpdated {
             session_id: "session".to_string(),
-            messages: Vec::new(),
+            messages: std::sync::Arc::new(Vec::new()),
             system_prompt: None,
             model: "deepseek-v4-flash".to_string(),
             workspace: PathBuf::from("."),
@@ -16205,9 +16231,9 @@ fn issue_2739_stalled_turn_snapshot_preserves_api_messages() {
     let manager =
         crate::session_manager::SessionManager::new(tmp.path().join("sessions")).expect("manager");
     let mut app = create_test_app();
-    app.api_messages
+    app.api_messages_mut()
         .push(text_message("user", "hello from user"));
-    app.api_messages
+    app.api_messages_mut()
         .push(text_message("assistant", "partial reply"));
     // Simulate a running turn that stalls.
     app.is_loading = true;
@@ -16219,9 +16245,15 @@ fn issue_2739_stalled_turn_snapshot_preserves_api_messages() {
     // may fail in tests (no real home dir), we verify directly that
     // build_session_snapshot captures the in-progress messages.
     let snapshot = build_session_snapshot(&mut app, &manager).expect("session snapshot");
-    assert_eq!(snapshot.messages.len(), 2);
-    assert_eq!(snapshot.messages[0].role, "user");
-    assert_eq!(snapshot.messages[1].role, "assistant");
+    // Snapshots are journal-only (#6214 T3); the projection rehydrates at save.
+    let journal_messages = snapshot
+        .journal
+        .as_ref()
+        .expect("snapshot journal")
+        .to_messages();
+    assert_eq!(journal_messages.len(), 2);
+    assert_eq!(journal_messages[0].role, "user");
+    assert_eq!(journal_messages[1].role, "assistant");
 }
 
 #[test]
@@ -16231,9 +16263,9 @@ fn issue_2739_esc_cancel_preserves_session_messages_before_clear() {
     let manager =
         crate::session_manager::SessionManager::new(tmp.path().join("sessions")).expect("manager");
     let mut app = create_test_app();
-    app.api_messages
+    app.api_messages_mut()
         .push(text_message("user", "esc cancel test"));
-    app.api_messages
+    app.api_messages_mut()
         .push(text_message("assistant", "interrupted by esc"));
     app.is_loading = true;
     app.turn_started_at = Some(Instant::now());
@@ -16249,9 +16281,15 @@ fn issue_2739_esc_cancel_preserves_session_messages_before_clear() {
         "local cancel should create a resumable session snapshot"
     );
     let snapshot = build_session_snapshot(&mut app, &manager).expect("session snapshot");
-    assert_eq!(snapshot.messages.len(), 2);
-    assert_eq!(snapshot.messages[0].role, "user");
-    assert_eq!(snapshot.messages[1].role, "assistant");
+    // Snapshots are journal-only (#6214 T3); the projection rehydrates at save.
+    let journal_messages = snapshot
+        .journal
+        .as_ref()
+        .expect("snapshot journal")
+        .to_messages();
+    assert_eq!(journal_messages.len(), 2);
+    assert_eq!(journal_messages[0].role, "user");
+    assert_eq!(journal_messages[1].role, "assistant");
     // Turn-level bookkeeping must be cleared after cancel.
     assert!(!app.is_loading);
     assert!(app.turn_started_at.is_none());
@@ -16264,7 +16302,7 @@ fn issue_2739_dispatch_timeout_preserves_user_prompt() {
     let manager =
         crate::session_manager::SessionManager::new(tmp.path().join("sessions")).expect("manager");
     let mut app = create_test_app();
-    app.api_messages
+    app.api_messages_mut()
         .push(text_message("user", "prompt that never dispatched"));
     // Dispatch stalled before the turn ever reached `in_progress`
     // (runtime_turn_status stays None), so only the dispatch-timeout branch
@@ -16284,8 +16322,14 @@ fn issue_2739_dispatch_timeout_preserves_user_prompt() {
     // snapshot (and therefore --continue) still has it instead of loading the
     // previous save.
     let snapshot = build_session_snapshot(&mut app, &manager).expect("session snapshot");
-    assert_eq!(snapshot.messages.len(), 1);
-    assert_eq!(snapshot.messages[0].role, "user");
+    // Snapshots are journal-only (#6214 T3); the projection rehydrates at save.
+    let journal_messages = snapshot
+        .journal
+        .as_ref()
+        .expect("snapshot journal")
+        .to_messages();
+    assert_eq!(journal_messages.len(), 1);
+    assert_eq!(journal_messages[0].role, "user");
 }
 
 #[test]
@@ -17390,7 +17434,7 @@ async fn redaction_confirmation_restores_history_before_first_local_provider_req
     app.onboarding = OnboardingState::None;
     app.redaction_gate = true;
     app.current_session_id = Some("local-consent-resumed-session".to_string());
-    app.api_messages = vec![
+    app.api_messages = std::sync::Arc::new(vec![
         Message {
             role: Role::User,
             content: vec![ContentBlock::Text {
@@ -17405,7 +17449,7 @@ async fn redaction_confirmation_restores_history_before_first_local_provider_req
                 cache_control: None,
             }],
         },
-    ];
+    ]);
     let expected_history = serde_json::to_value(&app.api_messages).unwrap();
     app.input = "What color did I give you?".to_string();
     app.cursor_position = app.input.chars().count();
@@ -17806,7 +17850,7 @@ fn throttled_recovery_snapshot_persists_during_loading_turns() {
     let manager =
         crate::session_manager::SessionManager::new(tmp.path().join("sessions")).expect("manager");
     let mut app = create_test_app();
-    app.api_messages
+    app.api_messages_mut()
         .push(text_message("user", "in-progress turn"));
     app.is_loading = true;
     app.runtime_turn_status = Some("in_progress".to_string());
@@ -17816,7 +17860,13 @@ fn throttled_recovery_snapshot_persists_during_loading_turns() {
     maybe_throttled_recovery_snapshot(&mut app, t0, &mut last_snapshot_at);
     assert!(last_snapshot_at.is_some());
     let snapshot = build_session_snapshot(&mut app, &manager).expect("session snapshot");
-    assert_eq!(snapshot.messages.len(), 1);
+    // Snapshots are journal-only (#6214 T3); the projection rehydrates at save.
+    let journal_messages = snapshot
+        .journal
+        .as_ref()
+        .expect("snapshot journal")
+        .to_messages();
+    assert_eq!(journal_messages.len(), 1);
 
     maybe_throttled_recovery_snapshot(
         &mut app,
@@ -19892,7 +19942,7 @@ fn stale_cached_placeholder_title_does_not_override_generated_title() {
     let mut app = create_test_app();
     let manager = SessionManager::new(tempfile::tempdir().expect("tempdir").path().to_path_buf())
         .expect("session manager");
-    app.api_messages.push(codewhale_models::Message {
+    app.api_messages_mut().push(codewhale_models::Message {
         role: Role::User,
         content: vec![codewhale_models::ContentBlock::Text {
             text: "Please fix the login bug".to_string(),
@@ -19945,7 +19995,7 @@ fn persisted_placeholder_title_yields_to_computed_title_when_conversation_has_co
     );
     assert_eq!(stale.metadata.title, "New Session");
     manager.save_session(&stale).expect("save stale session");
-    app.api_messages.push(codewhale_models::Message {
+    app.api_messages_mut().push(codewhale_models::Message {
         role: Role::User,
         content: vec![codewhale_models::ContentBlock::Text {
             text: "fix me".to_string(),
@@ -20067,7 +20117,7 @@ fn first_snapshot_preserves_current_session_id_for_artifact_ownership() {
         crate::session_manager::SessionManager::new(tmp.path().join("sessions")).expect("manager");
     let mut app = create_test_app();
     app.current_session_id = Some("session-123".to_string());
-    app.api_messages.push(text_message("user", "hello"));
+    app.api_messages_mut().push(text_message("user", "hello"));
 
     let snapshot = build_session_snapshot(&mut app, &manager).expect("session snapshot");
 
@@ -20087,7 +20137,7 @@ fn existing_session_snapshot_updates_model_selection() {
 
     let mut app = create_test_app();
     app.current_session_id = Some(existing.metadata.id.clone());
-    app.api_messages.push(text_message("user", "hello"));
+    app.api_messages_mut().push(text_message("user", "hello"));
     app.set_model_selection("deepseek-v4-flash".to_string());
 
     let snapshot = build_session_snapshot(&mut app, &manager).expect("session snapshot");
@@ -20110,7 +20160,8 @@ fn automatic_session_snapshot_keeps_named_custom_identity_secret_free() {
         .expect("custom provider")
         .api_key = Some("super-secret-local-key".to_string());
     let mut app = App::new(create_test_options(), &config);
-    app.api_messages.push(text_message("user", "persist me"));
+    app.api_messages_mut()
+        .push(text_message("user", "persist me"));
 
     let snapshot = build_session_snapshot(&mut app, &manager).expect("session snapshot");
     let serialized = serde_json::to_string(&snapshot).expect("serialize session");
@@ -20138,7 +20189,8 @@ fn automatic_session_snapshot_omits_id_for_legacy_root_custom_route() {
         ..Config::default()
     };
     let mut app = App::new(create_test_options(), &config);
-    app.api_messages.push(text_message("user", "persist root"));
+    app.api_messages_mut()
+        .push(text_message("user", "persist root"));
 
     let snapshot = build_session_snapshot(&mut app, &manager).expect("session snapshot");
     let serialized = serde_json::to_string(&snapshot).expect("serialize session");
@@ -20154,8 +20206,9 @@ fn session_snapshot_and_resume_round_trip_work_state() {
     let manager =
         crate::session_manager::SessionManager::new(tmp.path().join("sessions")).expect("manager");
     let mut app = create_test_app();
-    app.api_messages.push(text_message("user", "keep my work"));
-    app.api_messages
+    app.api_messages_mut()
+        .push(text_message("user", "keep my work"));
+    app.api_messages_mut()
         .push(text_message("assistant", "continuity captured"));
     {
         let mut todos = app.todos.try_lock().expect("todos lock");
@@ -20271,7 +20324,7 @@ fn automatic_session_snapshot_never_reloads_existing_json_on_ui_thread() {
         crate::session_manager::SessionManager::new(sessions_dir.clone()).expect("manager");
     let mut app = create_test_app();
     app.current_session_id = Some("nonblocking-snapshot".to_string());
-    app.api_messages
+    app.api_messages_mut()
         .push(text_message("user", "first in-memory checkpoint"));
     let initial = build_session_snapshot(&mut app, &manager).expect("initial snapshot");
     manager.save_session(&initial).expect("save initial");
@@ -20280,13 +20333,22 @@ fn automatic_session_snapshot_never_reloads_existing_json_on_ui_thread() {
         "{ intentionally malformed and never read",
     )
     .expect("corrupt disk fixture");
-    app.api_messages
+    app.api_messages_mut()
         .push(text_message("assistant", "newer in-memory state"));
 
     let snapshot = build_session_snapshot(&mut app, &manager).expect("nonblocking snapshot");
 
     assert_eq!(snapshot.metadata.id, "nonblocking-snapshot");
-    assert_eq!(snapshot.messages.len(), 2);
+    // Snapshots are journal-only (#6214 T3); the projection rehydrates at save.
+    assert_eq!(
+        snapshot
+            .journal
+            .as_ref()
+            .expect("snapshot journal")
+            .to_messages()
+            .len(),
+        2
+    );
     assert_eq!(snapshot.metadata.created_at, initial.metadata.created_at);
 }
 
@@ -20301,7 +20363,7 @@ fn renamed_title_survives_next_in_memory_automatic_snapshot() {
     manager.save_session(&session).expect("save session");
     let mut app = create_test_app();
     app.current_session_id = Some(session.metadata.id.clone());
-    app.api_messages.clone_from(&session.messages);
+    app.api_messages = std::sync::Arc::new(session.messages.clone());
 
     let renamed = crate::commands::execute("/rename Renamed In Memory", &mut app);
     assert!(!renamed.is_error, "{:?}", renamed.message);
@@ -20323,7 +20385,7 @@ fn session_snapshot_uses_last_known_work_before_first_file_flush() {
     let initial = build_session_snapshot(&mut app, &manager).expect("initial snapshot");
     let expected = initial.work_state.clone();
     app.current_session_id = Some(initial.metadata.id);
-    app.api_messages
+    app.api_messages_mut()
         .push(text_message("user", "new transcript content"));
 
     let todos = app.todos.clone();
@@ -20331,7 +20393,16 @@ fn session_snapshot_uses_last_known_work_before_first_file_flush() {
     let contended = build_session_snapshot(&mut app, &manager).expect("cached snapshot");
 
     assert_eq!(contended.work_state, expected);
-    assert_eq!(contended.messages.len(), 1);
+    // Snapshots are journal-only (#6214 T3); the projection rehydrates at save.
+    assert_eq!(
+        contended
+            .journal
+            .as_ref()
+            .expect("snapshot journal")
+            .to_messages()
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -20369,7 +20440,7 @@ fn legacy_session_without_work_state_clears_previous_todo_on_load() {
 #[test]
 fn contended_work_restore_leaves_current_session_wholly_unchanged() {
     let mut app = create_test_app();
-    app.api_messages
+    app.api_messages_mut()
         .push(text_message("user", "current conversation"));
     app.current_session_id = Some("current-session".to_string());
     let mut session = saved_session_with_messages(vec![text_message("user", "replacement")]);
@@ -20399,7 +20470,7 @@ fn contended_work_restore_leaves_current_session_wholly_unchanged() {
 #[test]
 fn missing_named_custom_provider_resume_leaves_current_session_wholly_unchanged() {
     let mut app = create_test_app();
-    app.api_messages
+    app.api_messages_mut()
         .push(text_message("user", "keep the current conversation"));
     app.current_session_id = Some("current-session".to_string());
     app.workspace = PathBuf::from("/tmp/current-workspace");
@@ -20447,7 +20518,7 @@ fn missing_named_custom_provider_resume_leaves_current_session_wholly_unchanged(
 #[test]
 fn custom_session_resume_requires_structural_route_not_client_construction() {
     let mut app = create_test_app();
-    app.api_messages
+    app.api_messages_mut()
         .push(text_message("user", "keep the current conversation"));
     app.current_session_id = Some("current-session".to_string());
     app.workspace = PathBuf::from("/tmp/current-workspace");
@@ -20479,7 +20550,7 @@ fn custom_session_resume_requires_structural_route_not_client_construction() {
         app.current_session_id.as_deref(),
         Some(session.metadata.id.as_str())
     );
-    assert_eq!(app.api_messages, session.messages);
+    assert_eq!(*app.api_messages, session.messages);
     assert!(app.input.is_empty());
     assert!(app.queued_draft.is_none());
     assert_eq!(app.workspace, PathBuf::from("/tmp/other-workspace"));
@@ -20577,7 +20648,7 @@ fn file_load_uses_one_fresh_config_snapshot_for_custom_route_and_app_state() {
     app.workspace.clone_from(&workspace);
     app.set_provider_identity(ApiProvider::Custom, "custom-a");
     app.set_model_selection("model-a".to_string());
-    app.api_messages
+    app.api_messages_mut()
         .push(text_message("user", "old conversation"));
     let mut session = saved_session_with_messages(vec![
         text_message("user", "new conversation"),
@@ -20599,7 +20670,7 @@ fn file_load_uses_one_fresh_config_snapshot_for_custom_route_and_app_state() {
     assert!(respawn);
     assert_eq!(app.provider_identity_for_persistence(), "custom-b");
     assert_eq!(app.model_selection_for_persistence(), "model-b");
-    assert_eq!(app.api_messages, session.messages);
+    assert_eq!(*app.api_messages, session.messages);
     assert_eq!(stale_config.provider.as_deref(), Some("custom-b"));
     assert_eq!(
         stale_config.deepseek_base_url(),
@@ -20614,7 +20685,7 @@ fn session_load_keeps_idless_custom_record_on_root_when_table_coexists() {
     config.base_url = Some("http://127.0.0.1:18181/v1".to_string());
     config.default_text_model = Some("legacy-root-model".to_string());
     let mut app = create_test_app();
-    app.api_messages
+    app.api_messages_mut()
         .push(text_message("user", "current conversation"));
     let mut session = saved_session_with_messages(vec![
         text_message("user", "legacy custom conversation"),
@@ -20626,7 +20697,7 @@ fn session_load_keeps_idless_custom_record_on_root_when_table_coexists() {
 
     apply_loaded_session(&mut app, &mut config, &session)
         .expect("id-less custom record must retain root provenance");
-    assert_eq!(app.api_messages, session.messages);
+    assert_eq!(*app.api_messages, session.messages);
     assert_eq!(app.api_provider, ApiProvider::Custom);
     assert_eq!(app.provider_identity_for_persistence(), "custom");
     assert_eq!(app.provider_id_for_persistence(), None);
@@ -20648,7 +20719,7 @@ fn session_load_rejects_exact_custom_table_record_when_only_root_remains() {
         ..Config::default()
     };
     let mut app = create_test_app();
-    app.api_messages
+    app.api_messages_mut()
         .push(text_message("user", "current conversation"));
     let previous_messages = app.api_messages.clone();
     let previous_identity = app.provider_identity_for_persistence().to_string();
@@ -20676,7 +20747,7 @@ fn session_load_rejects_empty_custom_id_when_root_and_table_coexist() {
     config.base_url = Some("http://127.0.0.1:18181/v1".to_string());
     config.default_text_model = Some("legacy-root-model".to_string());
     let mut app = create_test_app();
-    app.api_messages
+    app.api_messages_mut()
         .push(text_message("user", "current conversation"));
     app.set_provider_identity(ApiProvider::Deepseek, "deepseek");
     app.set_model_selection("deepseek-v4-pro".to_string());
@@ -20834,7 +20905,7 @@ fn file_load_route_refresh_preserves_effective_permission_and_feature_overlays()
 #[test]
 fn session_picker_restore_rejects_active_turn_before_mutating() {
     let mut app = create_test_app();
-    app.api_messages
+    app.api_messages_mut()
         .push(text_message("user", "current active conversation"));
     app.current_session_id = Some("current-session".to_string());
     app.is_loading = true;
@@ -20986,7 +21057,7 @@ fn auto_route_receipt_survives_session_snapshot_and_restore() {
     app.last_auto_route_receipt = Some(receipt.clone());
     app.last_effective_reasoning_effort =
         Some(EffectiveReasoningEffort::Tier(ReasoningEffort::High));
-    app.api_messages
+    app.api_messages_mut()
         .push(text_message("user", "inspect this route"));
 
     let snapshot = build_session_snapshot(&mut app, &manager).expect("session snapshot");
@@ -25168,21 +25239,21 @@ fn completed_turn_notification_uses_streaming_text() {
 #[test]
 fn completed_turn_notification_falls_back_to_latest_assistant_message() {
     let mut app = create_test_app();
-    app.api_messages.push(codewhale_models::Message {
+    app.api_messages_mut().push(codewhale_models::Message {
         role: Role::Assistant,
         content: vec![codewhale_models::ContentBlock::Text {
             text: "Earlier turn".to_string(),
             cache_control: None,
         }],
     });
-    app.api_messages.push(codewhale_models::Message {
+    app.api_messages_mut().push(codewhale_models::Message {
         role: Role::User,
         content: vec![codewhale_models::ContentBlock::Text {
             text: "next".to_string(),
             cache_control: None,
         }],
     });
-    app.api_messages.push(codewhale_models::Message {
+    app.api_messages_mut().push(codewhale_models::Message {
         role: Role::Assistant,
         content: vec![codewhale_models::ContentBlock::Text {
             text: "Latest reply".to_string(),
@@ -25499,6 +25570,7 @@ mod work_sidebar_projection_tests {
             id: id.to_string(),
             status,
             prompt_summary: format!("task {id}"),
+            name: None,
             model: "deepseek-v4-flash".to_string(),
             model_provider: None,
             model_provider_id: None,
@@ -27594,7 +27666,7 @@ fn fresh_session_turn_lifecycle_leaves_no_orphan_checkpoint() {
         crate::core::engine::Engine::new(build_engine_config(&app, &config), &config);
 
     // Turn start (dispatch.rs): crash checkpoint under the App id.
-    app.api_messages.push(codewhale_models::Message {
+    app.api_messages_mut().push(codewhale_models::Message {
         role: Role::User,
         content: vec![codewhale_models::ContentBlock::Text {
             text: "please answer".to_string(),
@@ -27612,7 +27684,7 @@ fn fresh_session_turn_lifecycle_leaves_no_orphan_checkpoint() {
 
     // Turn completion (`PersistRequest::CompletedCommit`): save the session,
     // then clear the checkpoint of the id the snapshot carries.
-    app.api_messages.push(codewhale_models::Message {
+    app.api_messages_mut().push(codewhale_models::Message {
         role: Role::Assistant,
         content: vec![codewhale_models::ContentBlock::Text {
             text: "answer".to_string(),
@@ -28172,7 +28244,7 @@ fn stale_session_projection_cannot_rewind_a_host_launch() {
     assert!(!result.is_error, "{:?}", result.message);
     let current = app.current_session_id.clone().unwrap();
     assert_ne!(current, previous);
-    app.api_messages = vec![text_message("user", "current host transcript")];
+    app.api_messages = std::sync::Arc::new(vec![text_message("user", "current host transcript")]);
     app.system_prompt = Some(SystemPrompt::Text("current prompt".into()));
     app.input = "typing remains responsive".into();
     let workspace = app.workspace.clone();
@@ -28184,7 +28256,7 @@ fn stale_session_projection_cannot_rewind_a_host_launch() {
         &Config::default(),
         EngineEvent::SessionUpdated {
             session_id: previous,
-            messages: vec![text_message("user", "stale transcript")],
+            messages: std::sync::Arc::new(vec![text_message("user", "stale transcript")]),
             system_prompt: Some(SystemPrompt::Text("stale prompt".into())),
             model: "stale-model".into(),
             workspace: PathBuf::from("/must-not-be-adopted"),
@@ -28192,7 +28264,7 @@ fn stale_session_projection_cannot_rewind_a_host_launch() {
     ));
     assert_eq!(app.current_session_id.as_deref(), Some(current.as_str()));
     assert_eq!(
-        app.api_messages,
+        *app.api_messages,
         vec![text_message("user", "current host transcript")]
     );
     assert_eq!(
@@ -28209,7 +28281,9 @@ fn stale_session_projection_cannot_rewind_a_host_launch() {
         &Config::default(),
         EngineEvent::SessionUpdated {
             session_id: current.clone(),
-            messages: vec![text_message("user", "expected engine transcript")],
+            messages: std::sync::Arc::new(vec![
+                text_message("user", "expected engine transcript",)
+            ]),
             system_prompt: None,
             model,
             workspace,
@@ -28217,7 +28291,7 @@ fn stale_session_projection_cannot_rewind_a_host_launch() {
     ));
     assert_eq!(app.current_session_id.as_deref(), Some(current.as_str()));
     assert_eq!(
-        app.api_messages,
+        *app.api_messages,
         vec![text_message("user", "expected engine transcript")]
     );
     assert_eq!(app.input, "typing remains responsive");

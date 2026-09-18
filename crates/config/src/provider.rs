@@ -35,9 +35,9 @@ use super::{
     DEFAULT_VLLM_BASE_URL, DEFAULT_VLLM_MODEL, DEFAULT_VOLCENGINE_BASE_URL,
     DEFAULT_VOLCENGINE_MODEL, DEFAULT_WANJIE_ARK_BASE_URL, DEFAULT_WANJIE_ARK_MODEL,
     DEFAULT_XAI_BASE_URL, DEFAULT_XAI_MODEL, DEFAULT_XIAOMI_MIMO_BASE_URL,
-    DEFAULT_XIAOMI_MIMO_MODEL, DEFAULT_ZAI_BASE_URL, DEFAULT_ZAI_MODEL,
-    MODELSTUDIO_CODING_PLAN_ANTHROPIC_BASE_URL, MODELSTUDIO_TOKEN_PLAN_ANTHROPIC_BASE_URL,
-    ProviderKind,
+    DEFAULT_XIAOMI_MIMO_MODEL, DEFAULT_ZAI_BASE_URL, DEFAULT_ZAI_MODEL, DEFAULT_ZENMUX_BASE_URL,
+    DEFAULT_ZENMUX_MODEL, MODELSTUDIO_CODING_PLAN_ANTHROPIC_BASE_URL,
+    MODELSTUDIO_TOKEN_PLAN_ANTHROPIC_BASE_URL, ProviderKind,
 };
 
 /// Wire protocol spoken by a provider.
@@ -487,6 +487,12 @@ pub const fn credential_help(kind: ProviderKind) -> CredentialHelp {
             credential_url: Some("https://app.edenai.run/settings/api-keys"),
             docs_url: Some("https://www.edenai.co/docs"),
             guidance: "Create an Eden AI API key from the Eden AI dashboard, then select models by their provider/model namespaced id.",
+        },
+        ProviderKind::Zenmux => CredentialHelp {
+            acquisition: ApiKey,
+            credential_url: Some("https://zenmux.ai/platform/pay-as-you-go"),
+            docs_url: Some("https://zenmux.ai/docs/"),
+            guidance: "Create a ZenMux API key from the Pay As You Go management page, then select models by their provider/model namespaced id. The catalog at https://zenmux.ai/api/v1/models is keyless-readable.",
         },
         ProviderKind::Codewhale => CredentialHelp {
             acquisition: ApiKey,
@@ -1551,6 +1557,17 @@ provider!(
     "edenai",
     aliases: ["eden-ai", "eden_ai"]
 );
+provider!(
+    Zenmux,
+    Zenmux,
+    "zenmux",
+    "ZenMux",
+    DEFAULT_ZENMUX_BASE_URL,
+    DEFAULT_ZENMUX_MODEL,
+    ["ZENMUX_API_KEY"],
+    "zenmux",
+    aliases: ["zen-mux", "zen_mux"]
+);
 
 /// Concentrate — OpenAI Responses-compatible AI gateway (aggregator).
 ///
@@ -1895,6 +1912,7 @@ static MISTRAL: Mistral = Mistral;
 static ANTIGRAVITY: Antigravity = Antigravity;
 static TELECOMJS: Telecomjs = Telecomjs;
 static EDENAI: Edenai = Edenai;
+static ZENMUX: Zenmux = Zenmux;
 static CONCENTRATE: Concentrate = Concentrate;
 static CODEWHALE: Codewhale = Codewhale;
 static MODELSTUDIO_TOKEN_PLAN: ModelstudioTokenPlan = ModelstudioTokenPlan;
@@ -1905,7 +1923,7 @@ static MODELSTUDIO_CODING_PLAN_ANTHROPIC: ModelstudioCodingPlanAnthropic =
     ModelstudioCodingPlanAnthropic;
 static CUSTOM: Custom = Custom;
 
-static PROVIDER_REGISTRY: [&dyn Provider; 50] = [
+static PROVIDER_REGISTRY: [&dyn Provider; 51] = [
     &DEEPSEEK,
     &DEEPSEEK_ANTHROPIC,
     &NVIDIA_NIM,
@@ -1947,6 +1965,7 @@ static PROVIDER_REGISTRY: [&dyn Provider; 50] = [
     &MISTRAL,
     &TELECOMJS,
     &EDENAI,
+    &ZENMUX,
     &CONCENTRATE,
     &CODEWHALE,
     &MODELSTUDIO_TOKEN_PLAN,

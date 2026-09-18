@@ -407,8 +407,8 @@ walks through fleet task specs, monitoring, and Workflow authoring.
 Fleet is the public noun for the durable roster. `codewhale fleet …` is
 the command and `/fleet` the slash command. The Fleet name is
 shared by what has to stay stable across versions: the durable ledger
-`.codewhale/fleet.jsonl`, saved rosters `fleets/<name>.toml`, the `[fleet]` and
-`[fleets.*]` config tables, and the `codewhale workflow run --fleet` flag.
+`.codewhale/fleet.jsonl`, saved rosters `fleets/<name>.toml`, the `[fleet]`
+config table, and the `codewhale workflow run --fleet` flag.
 
 Use `/model auto` when you want Codewhale to choose the model and thinking
 level per turn. When the DeepSeek routing model is available, Auto may select

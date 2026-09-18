@@ -911,6 +911,16 @@ pub struct TurnRecord {
     /// this receipt; old records deserialize with no fabricated value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_posture: Option<String>,
+    /// Canonical mode this turn ran in (`agent` / `plan` / `operate`), resolved
+    /// from the same policy projection as `permission_posture`. It is the
+    /// per-turn record of the mode, which the thread cannot answer: `mode` may
+    /// have been switched since, so a client reading the thread at completion
+    /// learns how the thread is set up *now*, not how the run it is looking at
+    /// ran. New records always carry it; records this runtime did not run (an
+    /// imported conversation, a failed settlement for an unaccepted turn) and
+    /// pre-existing records have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
     /// Concrete generic provider kind selected for this turn.
     #[serde(
         default,
@@ -1273,6 +1283,8 @@ fn settle_unaccepted_routed_usage(
             routing_settlement: true,
             effective_route_usage: None,
             permission_posture: None,
+            // No turn ran: this settles a turn that was never accepted.
+            mode: None,
             effective_provider: None,
             effective_provider_id: None,
             effective_openrouter_vendor: None,
@@ -3586,6 +3598,49 @@ pub struct UsageTotals {
     pub turns: u64,
 }
 
+/// One in-flight or queued turn, for running-work accounting. Served by
+/// `GET /v1/threads/running` so background-capable clients (quit,
+/// backgrounding) can enumerate owned work without inferring it from
+/// per-thread latest-turn status (#6180, codewhale-apps#573).
+#[derive(Debug, Clone, Serialize)]
+pub struct ActiveTurn {
+    pub turn_id: String,
+    pub status: RuntimeTurnStatus,
+}
+
+/// One thread with at least one [`ActiveTurn`]. Archive state is ignored:
+/// archiving is a plain flag with no quiescence gate, so an archived thread
+/// can still carry live work and quit-accounting must count it.
+#[derive(Debug, Clone, Serialize)]
+pub struct RunningThread {
+    pub thread_id: String,
+    pub model: String,
+    pub title: Option<String>,
+    pub active_turns: Vec<ActiveTurn>,
+}
+
+/// One watchable notice on a thread, projected from engine events so
+/// watch-only clients see what the TUI shows (#6180, codewhale-apps#573).
+/// `kind` is a [`codewhale_config::notifications::NotificationEvent`] name
+/// (`subagent-terminal`, `elevation-needed`, `model-notify`); `subject` is
+/// the agent, tool-call, or tool id the notice is about, for targeted
+/// clearing. Notices are in-memory session state, bounded per thread, and
+/// never persisted: terminal/notify kinds clear on client ack, elevation
+/// clears when its tool call completes.
+#[derive(Debug, Clone, Serialize)]
+pub struct ActiveNotice {
+    pub id: String,
+    pub kind: String,
+    pub turn_id: String,
+    pub subject: String,
+    pub detail: String,
+    pub raised_at: DateTime<Utc>,
+}
+
+/// Per-thread notice bound. Oldest-first eviction keeps a chatty child from
+/// growing a watch-only client's banner list without bound.
+pub(crate) const MAX_NOTICES_PER_THREAD: usize = 32;
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct UsageBucket {
     pub key: String,
@@ -4304,6 +4359,7 @@ pub struct RuntimeThreadManager {
     pending_user_inputs: Arc<parking_lot::Mutex<HashMap<(String, String), PendingUserInputEntry>>>,
     pending_dynamic_tools: Arc<parking_lot::Mutex<HashMap<String, PendingDynamicToolEntry>>>,
     recovery_receipts: Arc<parking_lot::Mutex<HashMap<String, Vec<RecoveredTurnReceipt>>>>,
+    notices: Arc<parking_lot::Mutex<HashMap<String, Vec<ActiveNotice>>>>,
     recovery_flush: Arc<Mutex<()>>,
     #[cfg(test)]
     snapshot_test_hook: Arc<parking_lot::Mutex<Option<mpsc::UnboundedSender<SnapshotTestPoint>>>>,
@@ -4883,6 +4939,7 @@ impl RuntimeThreadManager {
             pending_user_inputs: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             pending_dynamic_tools: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             recovery_receipts: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            notices: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             recovery_flush: Arc::new(Mutex::new(())),
             #[cfg(test)]
             snapshot_test_hook: Arc::new(parking_lot::Mutex::new(None)),
@@ -7191,6 +7248,108 @@ impl RuntimeThreadManager {
         Ok(threads)
     }
 
+    /// Threads with at least one queued or in-progress turn, for
+    /// running-work accounting (#6180). One turns scan grouped by thread
+    /// (never a scan per thread, #3757), joined against the thread rows in
+    /// store order. Archive state is ignored: see [`RunningThread`].
+    pub async fn running_threads(&self) -> Result<Vec<RunningThread>> {
+        let mut active_by_thread: std::collections::BTreeMap<String, Vec<ActiveTurn>> =
+            std::collections::BTreeMap::new();
+        for turn in self.store.list_all_turns()? {
+            if matches!(
+                turn.status,
+                RuntimeTurnStatus::Queued | RuntimeTurnStatus::InProgress
+            ) {
+                active_by_thread
+                    .entry(turn.thread_id.clone())
+                    .or_default()
+                    .push(ActiveTurn {
+                        turn_id: turn.id.clone(),
+                        status: turn.status,
+                    });
+            }
+        }
+        if active_by_thread.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::with_capacity(active_by_thread.len());
+        for thread in self.store.list_threads()? {
+            if let Some(active_turns) = active_by_thread.remove(&thread.id) {
+                out.push(RunningThread {
+                    thread_id: thread.id.clone(),
+                    model: thread.model.clone(),
+                    title: thread.title.clone(),
+                    active_turns,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Raise a watchable notice on a thread (#6180). Kind names must stay in
+    /// the [`codewhale_config::notifications::NotificationEvent`] vocabulary
+    /// so clients and `[notifications.events]` gates agree. Oldest-first
+    /// eviction past [`MAX_NOTICES_PER_THREAD`] keeps the list bounded.
+    pub(crate) fn raise_notice(
+        &self,
+        thread_id: &str,
+        kind: &str,
+        turn_id: &str,
+        subject: &str,
+        detail: String,
+    ) -> String {
+        debug_assert!(
+            codewhale_config::notifications::NotificationEvent::parse(kind).is_some(),
+            "notice kind must be a NotificationEvent name: {kind}"
+        );
+        let id = format!("notice_{}", &Uuid::new_v4().to_string()[..8]);
+        let mut notices = self.notices.lock();
+        let list = notices.entry(thread_id.to_string()).or_default();
+        list.push(ActiveNotice {
+            id: id.clone(),
+            kind: kind.to_string(),
+            turn_id: turn_id.to_string(),
+            subject: subject.to_string(),
+            detail,
+            raised_at: Utc::now(),
+        });
+        if list.len() > MAX_NOTICES_PER_THREAD {
+            list.drain(..list.len() - MAX_NOTICES_PER_THREAD);
+        }
+        id
+    }
+
+    /// Notices currently raised on a thread, oldest first. Unknown threads
+    /// simply have none; the API layer maps thread existence to 404.
+    pub(crate) fn list_notices(&self, thread_id: &str) -> Vec<ActiveNotice> {
+        self.notices
+            .lock()
+            .get(thread_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Acknowledge one notice. Returns false when the notice (or thread) is
+    /// unknown; acking is idempotent from the client's view via GET.
+    pub(crate) fn ack_notice(&self, thread_id: &str, notice_id: &str) -> bool {
+        let mut notices = self.notices.lock();
+        let Some(list) = notices.get_mut(thread_id) else {
+            return false;
+        };
+        let before = list.len();
+        list.retain(|notice| notice.id != notice_id);
+        list.len() != before
+    }
+
+    /// Drop every notice about one subject on a thread. Elevation notices
+    /// clear this way when their tool call completes, however it completed.
+    pub(crate) fn clear_notices_for_subject(&self, thread_id: &str, subject: &str) {
+        let mut notices = self.notices.lock();
+        if let Some(list) = notices.get_mut(thread_id) {
+            list.retain(|notice| notice.subject != subject);
+        }
+    }
+
     /// Whether `/v1/threads/summary?search=` should keep this thread.
     ///
     /// Matches fields already on the thread record (`id`, explicit `title`,
@@ -8480,6 +8639,9 @@ impl RuntimeThreadManager {
                     routing_settlement: false,
                     effective_route_usage: None,
                     permission_posture: None,
+                    // An imported conversation: this runtime never selected a
+                    // mode for it, and inventing one would be a guess.
+                    mode: None,
                     effective_provider: None,
                     effective_provider_id: None,
                     effective_openrouter_vendor: None,
@@ -9571,6 +9733,7 @@ impl RuntimeThreadManager {
             routing_settlement: false,
             effective_route_usage: None,
             permission_posture: Some(policy.permission_wire().to_string()),
+            mode: Some(mode.as_setting().to_string()),
             effective_provider: Some(provider.as_str().to_string()),
             effective_provider_id: provider_identity
                 .exact_id
@@ -10018,6 +10181,13 @@ impl RuntimeThreadManager {
         let turn_id = format!("turn_{}", &Uuid::new_v4().to_string()[..8]);
         let compaction_id = format!("compact_{}", &Uuid::new_v4().to_string()[..8]);
         compaction.runtime_cost_owner = Some(turn_id.clone());
+        // The same projection the turn record receipts, computed once: the
+        // compaction runs under the thread's persisted policy.
+        let projection = RuntimePolicyProjection::from_persisted(
+            &thread.mode,
+            thread.permission_posture.as_deref(),
+            thread.auto_approve,
+        );
         let turn = TurnRecord {
             max_output_tokens: None,
             schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
@@ -10036,15 +10206,8 @@ impl RuntimeThreadManager {
             usage: None,
             routing_settlement: false,
             effective_route_usage: None,
-            permission_posture: Some(
-                RuntimePolicyProjection::from_persisted(
-                    &thread.mode,
-                    thread.permission_posture.as_deref(),
-                    thread.auto_approve,
-                )
-                .permission_wire()
-                .to_string(),
-            ),
+            permission_posture: Some(projection.permission_wire().to_string()),
+            mode: Some(projection.mode.as_setting().to_string()),
             effective_provider: Some(route_provider.as_str().to_string()),
             effective_provider_id: route_identity
                 .exact_id
@@ -11283,6 +11446,24 @@ impl RuntimeThreadManager {
                     .await?;
                 }
                 EngineEvent::ToolCallComplete { id, name, result } => {
+                    // An elevation question is over once its tool call
+                    // completes, however it completed. Clear before the
+                    // notify raise below: a notify call of its own settles
+                    // its elevation and still raises its notice.
+                    self.clear_notices_for_subject(&thread_id, &id);
+                    // Model-notify projection (#6180): the notify tool has no
+                    // thread context of its own, so its completion is the
+                    // watchable "come back" signal.
+                    if name == "notify" {
+                        self.raise_notice(
+                            &thread_id,
+                            codewhale_config::notifications::NotificationEvent::ModelNotify
+                                .as_str(),
+                            &turn_id,
+                            &id,
+                            "model asked the user to come back".to_string(),
+                        );
+                    }
                     if let Ok(output) = &result
                         && let Some(metadata) = output.metadata.as_ref()
                     {
@@ -11661,6 +11842,18 @@ impl RuntimeThreadManager {
                             "spawn_depth": spawn_depth, "continuable": continuable }),
                     )
                     .await?;
+                    self.raise_notice(
+                        &thread_id,
+                        codewhale_config::notifications::NotificationEvent::SubagentTerminal
+                            .as_str(),
+                        &turn_id,
+                        &id,
+                        format!(
+                            "sub-agent {} {}",
+                            id,
+                            worker_status.unwrap_or("settled (outcome unconfirmed)")
+                        ),
+                    );
                 }
                 EngineEvent::AgentList {
                     owner_session_id,
@@ -11950,6 +12143,14 @@ impl RuntimeThreadManager {
                         }),
                     )
                     .await?;
+                    self.raise_notice(
+                        &thread_id,
+                        codewhale_config::notifications::NotificationEvent::ElevationNeeded
+                            .as_str(),
+                        &turn_id,
+                        &tool_id,
+                        format!("{tool_name} needs elevation: {denial_reason}"),
+                    );
                     let authority = self
                         .active_turn_authority(&thread_id, &turn_id, &engine)
                         .await
@@ -12956,85 +13157,6 @@ fn tool_kind_for_name(name: &str) -> TurnItemKind {
         return TurnItemKind::FileChange;
     }
     TurnItemKind::ToolCall
-}
-
-/// One sub-agent rebind hint extracted from a thread's persisted event
-/// timeline (issue #128). When the TUI resumes a session that was
-/// mid-fanout, the in-transcript card stack is empty — these hints let the
-/// UI know which agent_ids were live (or recently terminal) so it can
-/// reconstruct the matching `DelegateCard` / `FanoutCard` placeholders
-/// before fresh mailbox envelopes arrive on a re-attached engine.
-///
-/// The helper is the testable contract here — actual TUI wire-up to the
-/// resume flow is a follow-up.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg(test)] // consumed by #128 follow-up TUI resume wiring; tested here.
-pub struct AgentRebindHint {
-    pub agent_id: String,
-    pub status: AgentRebindStatus,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg(test)]
-pub enum AgentRebindStatus {
-    Spawned,
-    InProgress,
-    Completed,
-    Failed,
-    Interrupted,
-    Cancelled,
-    BudgetExhausted,
-    Unconfirmed,
-}
-
-/// Collapse a chronologically ordered slice of `RuntimeEventRecord` into
-/// the latest known status per `agent_id`. Drops entries that aren't in
-/// the `agent.*` family. Cards built from these hints are immediately
-/// open to mutation by subsequent live mailbox envelopes (each envelope's
-/// `agent_id` matches one already in the rebind map).
-#[must_use]
-#[cfg(test)]
-pub fn collect_agent_rebind_hints(events: &[RuntimeEventRecord]) -> Vec<AgentRebindHint> {
-    use std::collections::BTreeMap;
-    let mut latest: BTreeMap<String, (AgentRebindStatus, u64, bool)> = BTreeMap::new();
-    let mut ordered = events.iter().collect::<Vec<_>>();
-    ordered.sort_by_key(|event| event.seq);
-    for event in ordered {
-        let id = match event.payload.get("agent_id").and_then(|v| v.as_str()) {
-            Some(id) => id.to_string(),
-            None => continue,
-        };
-        let next_status = match event.event.as_str() {
-            "agent.spawned" => Some(AgentRebindStatus::Spawned),
-            "agent.progress" => Some(AgentRebindStatus::InProgress),
-            "agent.completed" => Some(
-                match event.payload.get("worker_status").and_then(Value::as_str) {
-                    Some("completed") => AgentRebindStatus::Completed,
-                    Some("failed") => AgentRebindStatus::Failed,
-                    Some("interrupted") => AgentRebindStatus::Interrupted,
-                    Some("cancelled") => AgentRebindStatus::Cancelled,
-                    Some("budget_exhausted") => AgentRebindStatus::BudgetExhausted,
-                    _ => AgentRebindStatus::Unconfirmed,
-                },
-            ),
-            _ => None,
-        };
-        if let Some(status) = next_status {
-            let terminal = event.event == "agent.completed";
-            let entry = latest.entry(id).or_insert((status, event.seq, terminal));
-            // An attempt cannot revive on duplicate/stale progress. A later
-            // typed terminal receipt may clarify a legacy unknown outcome.
-            if event.seq > entry.1
-                && (!entry.2 || (terminal && entry.0 == AgentRebindStatus::Unconfirmed))
-            {
-                *entry = (status, event.seq, terminal);
-            }
-        }
-    }
-    latest
-        .into_iter()
-        .map(|(agent_id, (status, _, _))| AgentRebindHint { agent_id, status })
-        .collect()
 }
 
 pub fn summarize_text(text: &str, limit: usize) -> String {

@@ -354,7 +354,7 @@ this; the table maps each integration need to where a local client reads it.
 | Integration need | Where it comes from | Status |
 |---|---|---|
 | Route / effective model / billing surface | `TurnRecord` + thread `model`; per-run `--provider`/`--model` overrides | available |
-| Permission / sandbox / approval profile | thread `auto_approve`, sandbox + approval policy | available |
+| Permission / sandbox / approval profile | thread `auto_approve`, sandbox + approval policy; `TurnRecord.permission_posture` + `TurnRecord.mode` for how *that* run was governed (the thread's own `mode` may have been switched since) | available |
 | Run / thread / turn IDs | `thread_id`, `turn_id`, SSE event envelope | available |
 | Event stream | `GET /v1/threads/{id}/events` (replay + live SSE) | available |
 | Turn status / terminal classification | `TurnRecord.status` + error summary | available |
@@ -405,10 +405,14 @@ Prompt requests are routed through the configured Codewhale client and current
 default model. Responses are emitted as `session/update` agent message chunks
 followed by a `session/prompt` response with `stopReason: "end_turn"`.
 
-The adapter is intentionally conservative: it does not yet expose shell tools,
-file-write tools, checkpoint replay, or session loading through ACP. Use
-`codewhale serve --http` for the full local runtime API and `codewhale serve --mcp`
-when another client needs Codewhale's tools as MCP tools.
+Each session executes tool calls locally through a registry built from the
+same file/search/git/patch/shell tools as the CLI exec agent, gated by
+`session/request_permission` and reported as `tool_call` / `tool_call_update`
+session updates. What ACP sessions still lack is the full thread/turn
+runtime: no durable threads, snapshots, steering, or approval parity with
+`/v1/*` (tracked by #5835). Use `codewhale serve --http` for the full local
+runtime API and `codewhale serve --mcp` when another client needs
+Codewhale's tools as MCP tools.
 
 ## Capability endpoint: `codewhale doctor --json`
 
@@ -679,6 +683,9 @@ and live state comes only from a resumed thread's SSE stream.
 **Threads** (durable runtime data model)
 - `GET /v1/threads?limit=50&include_archived=false&archived_only=false`
 - `GET /v1/threads/summary?limit=50&search=<optional>&include_archived=false&archived_only=false`
+- `GET /v1/threads/running`
+- `GET /v1/threads/{id}/notices`
+- `DELETE /v1/threads/{id}/notices/{notice_id}`
 - `POST /v1/threads`
 - `GET /v1/threads/{id}`
 - `PATCH /v1/threads/{id}` (see body shape below)
@@ -744,6 +751,23 @@ forks may also include `backtrack_depth_from_tail` and `dropped_turn_id`.
 Thread list and summary responses remain flat in v0.8.40, so clients that need
 a graph should reconstruct it from events instead of assuming list order is a
 complete tree.
+
+`GET /v1/threads/running` is the running-work accounting surface
+(#6180): threads with at least one queued or in-progress turn, each with
+`thread_id`, `model`, `title`, and `active_turns` (`turn_id` + `status`).
+Background-capable clients use it for quit/background decisions — one call,
+no inference from latest-turn status. Archive state is ignored (archiving
+has no quiescence gate); an empty array means no owned work is live.
+
+`GET /v1/threads/{id}/notices` is the per-thread active-notice surface
+(#6180): the TUI-visible conditions a watch-only client must surface —
+`subagent-terminal` (a child settled), `elevation-needed` (a tool call is
+blocked on elevation), `model-notify` (the model asked the user to come
+back) — each with `turn_id` and a `subject` id for targeting. Notices are
+in-memory session state, bounded to 32 per thread (oldest evicted), and
+never persisted. Clearing: elevation auto-clears when its tool call
+completes; terminal/notify clear on `DELETE .../notices/{notice_id}`
+(204, unknown ids 404). Unknown threads 404 on both endpoints.
 
 `archived_only=true` returns archived threads only (mutually overrides
 `include_archived`). Default behavior is unchanged: `include_archived=false`

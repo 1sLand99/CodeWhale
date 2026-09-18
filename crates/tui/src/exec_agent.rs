@@ -752,7 +752,7 @@ pub(crate) async fn run_exec_agent(
 
     let should_persist_session = resuming_session || output_format == ExecOutputFormat::StreamJson;
     let mut latest_session_id = loaded_session_id;
-    let mut latest_messages: Vec<Message> = Vec::new();
+    let mut latest_messages: Arc<Vec<Message>> = Arc::new(Vec::new());
     let mut latest_system_prompt: Option<SystemPrompt> = None;
     let mut latest_model = effective_model;
     let mut latest_workspace = workspace.clone();

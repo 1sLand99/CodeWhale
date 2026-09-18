@@ -3229,6 +3229,62 @@ pub fn create_saved_session_with_id_mode_and_stamps(
     system_prompt: Option<&SystemPrompt>,
     mode: Option<&str>,
 ) -> SavedSession {
+    create_saved_session_inner(
+        id,
+        messages,
+        message_stamps,
+        model,
+        workspace,
+        total_tokens,
+        system_prompt,
+        mode,
+        true,
+    )
+}
+
+/// Create a snapshot whose `messages` projection is left empty (#6214 T3).
+///
+/// The journal still carries every message, and every serialization path
+/// rehydrates the projection (`serialize_saved_session` runs
+/// `make_storage_compatible`), so the on-disk bytes are identical to the
+/// filled form. The persistence queue drops the projection anyway
+/// (`compact_for_persistence_queue`), so building it first is one full
+/// history copy per debounced flush for nothing. Callers that serialize a
+/// journal-only snapshot directly must run `make_storage_compatible` first.
+pub fn create_saved_session_journal_only(
+    id: String,
+    messages: &[Message],
+    message_stamps: &[DateTime<Utc>],
+    model: &str,
+    workspace: &Path,
+    total_tokens: u64,
+    system_prompt: Option<&SystemPrompt>,
+    mode: Option<&str>,
+) -> SavedSession {
+    create_saved_session_inner(
+        id,
+        messages,
+        message_stamps,
+        model,
+        workspace,
+        total_tokens,
+        system_prompt,
+        mode,
+        false,
+    )
+}
+
+fn create_saved_session_inner(
+    id: String,
+    messages: &[Message],
+    message_stamps: &[DateTime<Utc>],
+    model: &str,
+    workspace: &Path,
+    total_tokens: u64,
+    system_prompt: Option<&SystemPrompt>,
+    mode: Option<&str>,
+    fill_messages: bool,
+) -> SavedSession {
     let now = Utc::now();
 
     // Generate title from the first real user message (runtime-owned control
@@ -3261,7 +3317,11 @@ pub fn create_saved_session_with_id_mode_and_stamps(
             archived: false,
             spawn_depth: 0,
         },
-        messages: messages.to_vec(),
+        messages: if fill_messages {
+            messages.to_vec()
+        } else {
+            Vec::new()
+        },
         journal: Some(journal),
         leaf_id,
         system_prompt: system_prompt_to_string(system_prompt),
@@ -7758,6 +7818,38 @@ mod storage_compatible_tests {
                 cache_control: None,
             }],
         }
+    }
+
+    /// Journal-only snapshots (#6214 T3) skip building the `messages`
+    /// projection, but a save still lands full history: serialization
+    /// rehydrates the projection from the journal, so a reload is whole.
+    #[test]
+    fn journal_only_snapshot_saves_and_reloads_full_history() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let messages = vec![user("first"), user("answer")];
+        let sparse = create_saved_session_journal_only(
+            "roundtrip".to_string(),
+            &messages,
+            &[],
+            "test-model",
+            tmp.path(),
+            7,
+            None,
+            None,
+        );
+        assert!(
+            sparse.messages.is_empty(),
+            "journal-only snapshots carry no messages projection"
+        );
+        assert_eq!(
+            sparse.journal.as_ref().expect("journal").to_messages(),
+            messages,
+            "the journal still carries every message"
+        );
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+        manager.save_session_owned(sparse).expect("save sparse");
+        let reloaded = manager.load_session("roundtrip").expect("reload");
+        assert_eq!(reloaded.messages, messages);
     }
 
     /// The no-op cases must stay no-ops, byte for byte.

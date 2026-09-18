@@ -1088,6 +1088,7 @@ mod tests {
             id: id.to_string(),
             status,
             prompt_summary: "Fix task list output".to_string(),
+            name: None,
             model: "deepseek-v4-pro".to_string(),
             model_provider: None,
             model_provider_id: None,

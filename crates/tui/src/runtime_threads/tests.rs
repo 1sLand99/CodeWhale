@@ -1123,6 +1123,7 @@ fn sample_turn(thread_id: &str, turn_id: &str, status: RuntimeTurnStatus) -> Tur
         routing_settlement: false,
         effective_route_usage: None,
         permission_posture: None,
+        mode: None,
         effective_provider: None,
         effective_provider_id: None,
         effective_openrouter_vendor: None,
@@ -14456,6 +14457,7 @@ fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
         routing_settlement: false,
         effective_route_usage: None,
         permission_posture: None,
+        mode: None,
         effective_provider: None,
         effective_provider_id: None,
         effective_openrouter_vendor: None,
@@ -14490,6 +14492,7 @@ fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
         routing_settlement: false,
         effective_route_usage: None,
         permission_posture: None,
+        mode: None,
         effective_provider: None,
         effective_provider_id: None,
         effective_openrouter_vendor: None,
@@ -14622,123 +14625,6 @@ fn mode_only_override_preserves_legacy_full_access_posture() -> Result<()> {
     Ok(())
 }
 
-fn rebind_event(event: &str, agent_id: &str, seq: u64) -> RuntimeEventRecord {
-    RuntimeEventRecord {
-        schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
-        seq,
-        timestamp: Utc::now(),
-        thread_id: "thr_test".to_string(),
-        turn_id: Some("turn_test".to_string()),
-        item_id: None,
-        event: event.to_string(),
-        payload: json!({ "agent_id": agent_id,
-            "worker_status": if event == "agent.completed" { Some("completed") } else { None } }),
-    }
-}
-
-#[test]
-fn collect_agent_rebind_hints_resumes_a_mid_fanout_session() {
-    // Mirror what runtime_threads persists during a real fanout: three
-    // workers spawned, two finished, one still running when the session
-    // was killed. The TUI re-attach must rebuild placeholders for the
-    // running worker AND the two completed workers (the fanout card
-    // tracks all of them so the dot-grid stays accurate post-resume).
-    let events = vec![
-        rebind_event("agent.spawned", "agent_a", 1),
-        rebind_event("agent.spawned", "agent_b", 2),
-        rebind_event("agent.spawned", "agent_c", 3),
-        rebind_event("agent.progress", "agent_a", 4),
-        rebind_event("agent.completed", "agent_a", 5),
-        rebind_event("agent.progress", "agent_b", 6),
-        rebind_event("agent.completed", "agent_b", 7),
-        rebind_event("agent.progress", "agent_c", 8),
-    ];
-    let hints = collect_agent_rebind_hints(&events);
-    assert_eq!(hints.len(), 3, "every fanout worker must be rebound");
-    let by_id: std::collections::BTreeMap<&str, AgentRebindStatus> = hints
-        .iter()
-        .map(|h| (h.agent_id.as_str(), h.status))
-        .collect();
-    assert_eq!(by_id.get("agent_a"), Some(&AgentRebindStatus::Completed));
-    assert_eq!(by_id.get("agent_b"), Some(&AgentRebindStatus::Completed));
-    assert_eq!(
-        by_id.get("agent_c"),
-        Some(&AgentRebindStatus::InProgress),
-        "in-flight worker must rebind in InProgress, not downgrade"
-    );
-}
-
-#[test]
-fn collect_agent_rebind_hints_ignores_unrelated_events() {
-    // Status / tool events should not produce phantom hints — only the
-    // agent.* family carries the contract we re-bind from.
-    let events = vec![
-        RuntimeEventRecord {
-            schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
-            seq: 1,
-            timestamp: Utc::now(),
-            thread_id: "thr".to_string(),
-            turn_id: None,
-            item_id: None,
-            event: "tool.completed".to_string(),
-            payload: json!({"name": "read_file"}),
-        },
-        rebind_event("agent.spawned", "agent_x", 2),
-        RuntimeEventRecord {
-            schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
-            seq: 3,
-            timestamp: Utc::now(),
-            thread_id: "thr".to_string(),
-            turn_id: None,
-            item_id: None,
-            event: "compaction.completed".to_string(),
-            payload: json!({"messages_after": 12}),
-        },
-    ];
-    let hints = collect_agent_rebind_hints(&events);
-    assert_eq!(hints.len(), 1);
-    assert_eq!(hints[0].agent_id, "agent_x");
-}
-
-#[test]
-fn collect_agent_rebind_hints_does_not_downgrade_completed_to_in_progress() {
-    // Out-of-order replay: a stale `agent.progress` arriving after the
-    // completed event must NOT clobber the terminal status. This matters
-    // when an event log is concatenated from interrupted segments.
-    let events = vec![
-        rebind_event("agent.spawned", "agent_y", 1),
-        rebind_event("agent.completed", "agent_y", 2),
-        rebind_event("agent.progress", "agent_y", 3),
-    ];
-    let hints = collect_agent_rebind_hints(&events);
-    assert_eq!(hints.len(), 1);
-    assert_eq!(hints[0].status, AgentRebindStatus::Completed);
-}
-
-#[test]
-fn collect_agent_rebind_hints_preserves_typed_failures_and_legacy_uncertainty() {
-    let cases = [
-        (Some("failed"), AgentRebindStatus::Failed),
-        (Some("interrupted"), AgentRebindStatus::Interrupted),
-        (Some("cancelled"), AgentRebindStatus::Cancelled),
-        (Some("budget_exhausted"), AgentRebindStatus::BudgetExhausted),
-        (None, AgentRebindStatus::Unconfirmed),
-    ];
-    for (worker_status, expected) in cases {
-        let mut terminal = rebind_event("agent.completed", "worker", 2);
-        terminal.payload = json!({"agent_id": "worker", "worker_status": worker_status,
-            "status": "completed", "result": "Completed successfully"});
-        let hints = collect_agent_rebind_hints(&[
-            rebind_event("agent.progress", "worker", 3),
-            terminal.clone(),
-            rebind_event("agent.spawned", "worker", 1),
-            terminal,
-        ]);
-        assert_eq!(hints.len(), 1);
-        assert_eq!(hints[0].status, expected);
-    }
-}
-
 /// Helper for the `fork_at_user_message` tests: write a sequence of
 /// (user, assistant) turns under the given thread id. Each turn gets
 /// one UserMessage item carrying `user_text` in `detail` plus one
@@ -14797,6 +14683,7 @@ fn seed_turns_with_user_messages(
             routing_settlement: false,
             effective_route_usage: None,
             permission_posture: None,
+            mode: None,
             effective_provider: None,
             effective_provider_id: None,
             effective_openrouter_vendor: None,
@@ -15438,6 +15325,7 @@ fn restart_rebuild_restores_tool_call_identity_from_persisted_items() -> Result<
         routing_settlement: false,
         effective_route_usage: None,
         permission_posture: None,
+        mode: None,
         effective_provider: None,
         effective_provider_id: None,
         effective_openrouter_vendor: None,
@@ -15538,6 +15426,7 @@ fn restart_rebuild_keeps_in_flight_tool_call_identity() -> Result<()> {
         routing_settlement: false,
         effective_route_usage: None,
         permission_posture: None,
+        mode: None,
         effective_provider: None,
         effective_provider_id: None,
         effective_openrouter_vendor: None,
@@ -15633,6 +15522,7 @@ fn restart_rebuild_skips_steers_the_engine_never_delivered() -> Result<()> {
         routing_settlement: false,
         effective_route_usage: None,
         permission_posture: None,
+        mode: None,
         effective_provider: None,
         effective_provider_id: None,
         effective_openrouter_vendor: None,
@@ -15728,6 +15618,7 @@ fn restart_rebuild_skips_legacy_tool_items_without_identity() -> Result<()> {
         routing_settlement: false,
         effective_route_usage: None,
         permission_posture: None,
+        mode: None,
         effective_provider: None,
         effective_provider_id: None,
         effective_openrouter_vendor: None,
@@ -16507,5 +16398,162 @@ fn output_cap_wire_requires_positive_integer_and_preserves_legacy_absence() -> R
     let valid: StartTurnRequest =
         serde_json::from_value(json!({"prompt":"review","maxOutputTokens":1500}))?;
     assert_eq!(valid.max_output_tokens.unwrap().get(), 1500);
+    Ok(())
+}
+
+/// Notice projection (#6180): engine events raise watchable notices with
+/// thread/turn identity; elevation clears when its tool call completes and
+/// the rest clear on ack.
+#[tokio::test]
+async fn notices_raise_from_engine_events_and_clear_on_settle_or_ack() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            model: None,
+            workspace: None,
+            mode: None,
+            allow_shell: None,
+            trust_mode: Some(true),
+            auto_approve: Some(true),
+            archived: false,
+            system_prompt: None,
+            task_id: None,
+            ..Default::default()
+        })
+        .await?;
+    let mut harness = install_mock_engine(&manager, &thread.id).await;
+    let turn = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "raise notices".to_string(),
+                ..Default::default()
+            },
+        )
+        .await?;
+    assert!(matches!(
+        harness.rx_op.recv().await,
+        Some(Op::SendMessage(TurnSpec { .. }))
+    ));
+    // Agent-scoped events before TurnStarted are control-plane receipts and
+    // are skipped; the turn must start before completions count.
+    harness
+        .tx_event
+        .send(EngineEvent::TurnStarted {
+            turn_id: turn.id.clone(),
+            created_at: Utc::now(),
+            route: None,
+        })
+        .await?;
+
+    // Event projection runs on the engine task; wait (bounded) for each
+    // notice rather than sleeping a fixed span.
+    async fn wait_for_notices(
+        manager: &RuntimeThreadManager,
+        thread_id: &str,
+        count: usize,
+    ) -> Vec<ActiveNotice> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let notices = manager.list_notices(thread_id);
+            if notices.len() == count || tokio::time::Instant::now() >= deadline {
+                return notices;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    harness
+        .tx_event
+        .send(EngineEvent::AgentComplete {
+            owner_session_id: thread.id.clone(),
+            id: "agent_done".to_string(),
+            result: "did the thing".to_string(),
+            outcome: Some(crate::tools::subagent::SubAgentStatus::Completed),
+            parent_run_id: None,
+            spawn_depth: None,
+            continuable: None,
+        })
+        .await?;
+    let notices = wait_for_notices(&manager, &thread.id, 1).await;
+    assert_eq!(notices.len(), 1, "agent completion raises: {notices:?}");
+
+    harness
+        .tx_event
+        .send(EngineEvent::ToolCallComplete {
+            id: "tool_notify_1".to_string(),
+            name: "notify".to_string(),
+            result: Ok(crate::tools::spec::ToolResult::success("pinged")),
+        })
+        .await?;
+    let notices = wait_for_notices(&manager, &thread.id, 2).await;
+    assert_eq!(notices.len(), 2, "model notify raises: {notices:?}");
+
+    harness
+        .tx_event
+        .send(EngineEvent::ElevationRequired {
+            tool_id: "tool_needs_elev".to_string(),
+            tool_name: "exec_command".to_string(),
+            command: None,
+            denial_reason: "sandbox denied".to_string(),
+            blocked_network: false,
+            blocked_write: false,
+        })
+        .await?;
+    assert!(matches!(
+        harness.recv_approval_event().await,
+        Some(crate::core::engine::MockApprovalEvent::RetryWithPolicy { .. })
+    ));
+    let notices = wait_for_notices(&manager, &thread.id, 3).await;
+    let kinds: Vec<&str> = notices.iter().map(|n| n.kind.as_str()).collect();
+    assert_eq!(notices.len(), 3, "all three kinds raise: {kinds:?}");
+    assert!(kinds.contains(&"elevation-needed"));
+    assert!(kinds.contains(&"subagent-terminal"));
+    assert!(kinds.contains(&"model-notify"));
+    assert!(notices.iter().all(|n| n.turn_id == turn.id));
+    let notify_id = notices
+        .iter()
+        .find(|n| n.kind == "model-notify")
+        .map(|n| n.id.clone())
+        .context("missing model-notify")?;
+
+    // The elevation question ends when its tool call completes.
+    harness
+        .tx_event
+        .send(EngineEvent::ToolCallComplete {
+            id: "tool_needs_elev".to_string(),
+            name: "exec_command".to_string(),
+            result: Ok(crate::tools::spec::ToolResult::success("elevated ok")),
+        })
+        .await?;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let notices = manager.list_notices(&thread.id);
+        if notices.len() == 2 || tokio::time::Instant::now() >= deadline {
+            assert_eq!(notices.len(), 2, "elevation clears on settle");
+            assert!(notices.iter().all(|n| n.kind != "elevation-needed"));
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    // Terminal/notify kinds clear on ack; unknown acks report false.
+    assert!(manager.ack_notice(&thread.id, &notify_id));
+    assert!(!manager.ack_notice(&thread.id, &notify_id));
+    assert!(!manager.ack_notice(&thread.id, "notice_nope"));
+    assert_eq!(manager.list_notices(&thread.id).len(), 1);
+
+    harness
+        .tx_event
+        .send(EngineEvent::TurnComplete {
+            usage: Usage::default(),
+            parent_route_usage: Usage::default(),
+            routed_usage_dropped_records: 0,
+            status: TurnOutcomeStatus::Completed,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        })
+        .await?;
     Ok(())
 }

@@ -518,6 +518,57 @@ async fn lifecycle_deliverable_preview_reports_omissions_and_detail_pages_the_fu
 }
 
 #[tokio::test]
+async fn lifecycle_running_row_reports_declared_vs_observed_writes() {
+    // #6194 item 5: the parent sees the declared/observed write diff while
+    // the child is still alive, not only in the post-mortem receipt.
+    let dir = tempdir().unwrap();
+    let mut manager = SubAgentManager::new(dir.path().to_path_buf(), 2);
+    let id = manager.insert_test_running_agent("writer", dir.path());
+    {
+        let record = manager.worker_records.get_mut(&id).unwrap();
+        record.spec.runtime_profile.permissions.write = true;
+        record.spec.launch_manifest = Some(ChildLaunchManifest {
+            owner_session: "root".to_string(),
+            child_id: id.clone(),
+            profile: record.spec.runtime_profile.clone(),
+            prompt: record.spec.objective.clone(),
+            cwd: None,
+            worktree: false,
+            writable_roots: Vec::new(),
+            writable_files: Vec::new(),
+            coordination_contracts: Vec::new(),
+            expected_artifact: None,
+            deliverables: vec!["a.rs".to_string(), "b.rs".to_string()],
+            resume_identity: None,
+            generation: 1,
+            resume_from_agent_id: None,
+        });
+        record
+            .delivery_evidence
+            .observed_writes
+            .insert("b.rs".to_string());
+        record
+            .delivery_evidence
+            .observed_writes
+            .insert("surprise.rs".to_string());
+    }
+    let row = lifecycle::compact_row(&manager, &manager.agents[&id]);
+    assert_eq!(row["write_progress"]["declared_total"], 2);
+    assert_eq!(row["write_progress"]["observed_total"], 2);
+    assert_eq!(row["write_progress"]["declared"][0], "a.rs");
+    assert_eq!(row["write_progress"]["observed"][1], "surprise.rs");
+}
+
+#[tokio::test]
+async fn lifecycle_read_only_row_omits_write_progress() {
+    let dir = tempdir().unwrap();
+    let mut manager = SubAgentManager::new(dir.path().to_path_buf(), 2);
+    let id = manager.insert_test_running_agent("scout", dir.path());
+    let row = lifecycle::compact_row(&manager, &manager.agents[&id]);
+    assert!(row.get("write_progress").is_none());
+}
+
+#[tokio::test]
 async fn lifecycle_continuation_link_is_durable_before_the_child_can_run() {
     let dir = tempdir().unwrap();
     let base = dir.path().canonicalize().unwrap();

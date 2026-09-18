@@ -5042,6 +5042,7 @@ fn policy_for_catalog(
         disallowed_tools,
         None,
         approval_mode,
+        crate::core::engine::tool_catalog::ToolMode::Direct,
     )
 }
 
@@ -6193,6 +6194,7 @@ fn test_tool_surface(
         engine.config.disallowed_tools.clone(),
         engine.config.max_tool_calls,
         engine.session.approval_mode,
+        crate::core::engine::tool_catalog::ToolMode::Direct,
     )
 }
 
@@ -10584,7 +10586,12 @@ fn default_active_contract_keeps_discovery_and_core_tools_eager() {
         AppMode::Agent,
         &always_load,
     );
-    ensure_advanced_tooling(&mut catalog, AppMode::Agent, &always_load);
+    ensure_advanced_tooling(
+        &mut catalog,
+        AppMode::Agent,
+        &always_load,
+        crate::core::engine::tool_catalog::ToolMode::Direct,
+    );
     let active = initial_active_tools(&catalog);
     let expected = EXPECTED_NATIVE
         .into_iter()
@@ -10813,7 +10820,12 @@ fn plugin_or_benchmark_tools_remain_searchable_not_eager() {
         &always_load,
     );
 
-    ensure_advanced_tooling(&mut catalog, AppMode::Agent, &always_load);
+    ensure_advanced_tooling(
+        &mut catalog,
+        AppMode::Agent,
+        &always_load,
+        crate::core::engine::tool_catalog::ToolMode::Direct,
+    );
 
     let active = initial_active_tools(&catalog);
     assert!(!active.contains("KB_search"));
@@ -14901,7 +14913,7 @@ async fn session_update_preserves_reasoning_tool_only_turn() {
         panic!("expected session update event");
     };
 
-    assert_eq!(messages, vec![assistant]);
+    assert_eq!(*messages, vec![assistant]);
 }
 
 #[tokio::test]
@@ -19127,7 +19139,12 @@ fn tool_search_activates_discovered_deferred_tools() {
         },
     ];
     let always_load = HashSet::new();
-    ensure_advanced_tooling(&mut catalog, AppMode::Agent, &always_load);
+    ensure_advanced_tooling(
+        &mut catalog,
+        AppMode::Agent,
+        &always_load,
+        crate::core::engine::tool_catalog::ToolMode::Direct,
+    );
     let mut active = initial_active_tools(&catalog);
     let result = execute_tool_search(
         TOOL_SEARCH_NAME,
@@ -19152,7 +19169,12 @@ fn tool_search_scenario() {
             AppMode::Agent,
             &always_load,
         );
-        ensure_advanced_tooling(&mut catalog, AppMode::Agent, &always_load);
+        ensure_advanced_tooling(
+            &mut catalog,
+            AppMode::Agent,
+            &always_load,
+            crate::core::engine::tool_catalog::ToolMode::Direct,
+        );
 
         let mut active = initial_active_tools(&catalog);
         assert!(!active.contains(REQUEST_USER_INPUT_NAME));
@@ -19213,7 +19235,12 @@ fn tool_search_scenario() {
     {
         let mut catalog = Vec::new();
         let always_load = HashSet::new();
-        ensure_advanced_tooling(&mut catalog, AppMode::Agent, &always_load);
+        ensure_advanced_tooling(
+            &mut catalog,
+            AppMode::Agent,
+            &always_load,
+            crate::core::engine::tool_catalog::ToolMode::Direct,
+        );
 
         let tool = catalog
             .iter()
@@ -19243,7 +19270,12 @@ fn tool_search_catalog_with_matches(count: usize) -> Vec<Tool> {
         })
         .collect::<Vec<_>>();
     let always_load = HashSet::new();
-    ensure_advanced_tooling(&mut catalog, AppMode::Agent, &always_load);
+    ensure_advanced_tooling(
+        &mut catalog,
+        AppMode::Agent,
+        &always_load,
+        crate::core::engine::tool_catalog::ToolMode::Direct,
+    );
     catalog
 }
 
@@ -19254,6 +19286,46 @@ fn tool_search_reference_count(result: &ToolResult) -> usize {
         .and_then(|metadata| metadata.get("tool_references"))
         .and_then(|references| references.as_array())
         .map_or(0, Vec::len)
+}
+
+#[tokio::test]
+async fn execute_tools_dispatches_through_common_executor() {
+    use crate::tools::file_tool::ReadTool;
+    use crate::tools::registry::ToolRegistryBuilder;
+    use crate::tools::spec::ToolContext;
+
+    let tmp = tempdir().expect("tempdir");
+    std::fs::write(tmp.path().join("note.txt"), "alpha\n").expect("write note");
+    let context = ToolContext::new(tmp.path());
+    let registry = ToolRegistryBuilder::new()
+        .with_tool(Arc::new(ReadTool))
+        .build(context.clone());
+    let path = tmp
+        .path()
+        .join("note.txt")
+        .to_string_lossy()
+        .replace('\\', "\\\\");
+    let code = format!(
+        "const r = await tools.call('read', {{ path: '{path}' }}); return JSON.stringify(r).includes('alpha');"
+    );
+    let (tx_event, _rx_event) = mpsc::channel(8);
+    let result = Engine::execute_tool_with_lock(
+        Arc::new(RwLock::new(())),
+        false,
+        false,
+        tx_event,
+        None,
+        EXECUTE_TOOLS_TOOL_NAME.to_string(),
+        json!({"code": code}),
+        tmp.path().to_path_buf(),
+        Some(&registry),
+        None,
+        Some(context),
+    )
+    .await
+    .expect("execute_tools should dispatch");
+    assert!(result.content.contains("\"nested_calls\":1"));
+    assert!(result.content.contains("true"));
 }
 
 #[tokio::test]
@@ -19300,7 +19372,12 @@ async fn code_execution_scenario() {
 fn plan_mode_catalog_skips_code_execution_tool_but_agent_keeps_it() {
     let mut plan_catalog = vec![api_tool("read_file")];
     let always_load = HashSet::new();
-    ensure_advanced_tooling(&mut plan_catalog, AppMode::Plan, &always_load);
+    ensure_advanced_tooling(
+        &mut plan_catalog,
+        AppMode::Plan,
+        &always_load,
+        crate::core::engine::tool_catalog::ToolMode::Direct,
+    );
     assert!(
         !plan_catalog
             .iter()
@@ -19309,7 +19386,12 @@ fn plan_mode_catalog_skips_code_execution_tool_but_agent_keeps_it() {
     );
 
     let mut agent_catalog = vec![api_tool("read_file")];
-    ensure_advanced_tooling(&mut agent_catalog, AppMode::Agent, &always_load);
+    ensure_advanced_tooling(
+        &mut agent_catalog,
+        AppMode::Agent,
+        &always_load,
+        crate::core::engine::tool_catalog::ToolMode::Direct,
+    );
     assert!(
         agent_catalog
             .iter()
@@ -20413,7 +20495,7 @@ async fn headless_turn_retries_mid_stream_network_drop_and_recovers() {
             Event::SessionUpdated { messages, .. } => Some(messages),
             _ => None,
         })
-        .flatten()
+        .flat_map(|messages| messages.iter())
         .flat_map(|message| message.content.iter())
         .filter_map(|block| match block {
             ContentBlock::Text { text, .. } => Some(text.as_str()),
@@ -22249,6 +22331,7 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
         Some(vec!["mcp_slow_denied".into()]),
         None,
         ApprovalMode::Suggest,
+        crate::core::engine::tool_catalog::ToolMode::Direct,
     );
     let mut catalog = policy.catalog.clone();
     let mut active = policy.active_names.clone();

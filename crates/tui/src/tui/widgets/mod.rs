@@ -1,12 +1,10 @@
 pub mod agent_card;
-mod header;
 pub mod key_hint;
 pub mod pending_input_preview;
 mod renderable;
 pub mod tool_card;
 pub mod workflow_panel;
 
-pub use header::header_status_indicator_frame;
 pub use renderable::Renderable;
 
 use std::borrow::Cow;
