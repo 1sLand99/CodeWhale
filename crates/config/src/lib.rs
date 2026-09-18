@@ -65,7 +65,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
-#[cfg(unix)]
 use std::io::Read;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
