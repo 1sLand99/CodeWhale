@@ -2286,7 +2286,9 @@ mod tests {
         assert!(!route.provider_id.is_empty());
         assert!(!route.provider_kind.is_empty());
         assert!(!route.wire_model_id.is_empty());
-        assert_eq!(route.protocol, "chat_completions");
+        // DeepSeek Flash rides Responses since a1c1741afa (see bundled_offerings):
+        // the default route follows the shipped transport, not the old pin.
+        assert_eq!(route.protocol, "responses");
         assert_eq!(route.role.as_deref(), Some("implement"));
         assert_eq!(route.loadout.as_deref(), Some("fast"));
         assert_eq!(route.model_class, None);

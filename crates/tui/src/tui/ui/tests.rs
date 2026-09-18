@@ -10566,21 +10566,19 @@ async fn auto_dispatch_keeps_last_and_pending_receipts_aligned() {
         app.pending_turn_route
             .as_ref()
             .map(|(provider, model, auto)| (*provider, model.as_str(), *auto)),
-        Some((
-            ApiProvider::Zai,
-            crate::config::ZAI_GLM_5_3_FLASH_MODEL,
-            true,
-        ))
+        Some((ApiProvider::Zai, crate::config::DEFAULT_ZAI_MODEL, true,))
     );
     assert_eq!(
         app.last_auto_route_receipt, app.pending_auto_route_receipt,
         "the fallback inspector must never pair a newly resolved route with a stale receipt"
     );
+    // Declared-default fallback (72b028e5e): the receipt tier is the default
+    // model's own tier (GLM-5.3 is strong), never a content-heuristic guess.
     assert_eq!(
         app.last_auto_route_receipt
             .as_ref()
             .map(|receipt| receipt.tier),
-        Some(crate::model_routing::AutoRouteTier::Fast)
+        Some(crate::model_routing::AutoRouteTier::Strong)
     );
     assert_eq!(
         app.last_effective_reasoning_effort,
