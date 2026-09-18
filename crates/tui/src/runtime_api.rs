@@ -1288,6 +1288,10 @@ pub fn build_router(state: RuntimeApiState) -> Router {
             post(mark_agent_mail_read),
         )
         .route(
+            "/v1/threads/{id}/agent-mail/{message_id}/cancel",
+            post(cancel_agent_mail),
+        )
+        .route(
             "/v1/threads/{id}/goal",
             get(get_thread_goal)
                 .put(upsert_thread_goal)
@@ -5276,6 +5280,23 @@ async fn mark_agent_mail_read(
     Ok(Json(envelope))
 }
 
+/// Withdraw a queued envelope before delivery (#6176). Idempotent: a
+/// re-cancel returns the stored envelope; mail that already left `queued`
+/// is a 409, never silently dropped.
+async fn cancel_agent_mail(
+    State(state): State<RuntimeApiState>,
+    Path((id, message_id)): Path<(String, String)>,
+) -> Result<Json<AgentMailEnvelope>, ApiError> {
+    let message_id = AgentMailMessageId::parse(message_id)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let envelope = state
+        .runtime_threads
+        .cancel_agent_mail(&id, &message_id)
+        .await
+        .map_err(map_agent_mail_err)?;
+    Ok(Json(envelope))
+}
+
 async fn steer_thread_turn(
     State(state): State<RuntimeApiState>,
     Path((id, turn_id)): Path<(String, String)>,
@@ -8785,10 +8806,17 @@ fn map_agent_mail_err(err: anyhow::Error) -> ApiError {
     let lower = message.to_ascii_lowercase();
     if lower.contains("ownership denied") {
         ApiError::forbidden(message)
-    } else if lower.contains("already exists with different delivery intent") {
+    } else if lower.contains("already exists with different delivery intent")
+        || lower.contains("can be canceled only while queued")
+    {
         ApiError::conflict(message)
     } else if (lower.contains("failed to read agent mail envelope")
-        && lower.contains("no such file"))
+        && (lower.contains("no such file")
+            || err.chain().skip(1).any(|cause| {
+                cause
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+            })))
         || (lower.starts_with("thread '") && lower.ends_with("' not found"))
     {
         ApiError::not_found(message)

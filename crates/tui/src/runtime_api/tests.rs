@@ -17057,3 +17057,171 @@ async fn provider_key_clear_round_trips_and_reports_writability() -> Result<()> 
     handle.abort();
     Ok(())
 }
+
+#[test]
+fn agent_mail_cancel_conflict_maps_to_409() {
+    let conflict = map_agent_mail_err(anyhow::anyhow!(
+        "Agent Mail can be canceled only while queued (status: Delivered)"
+    ));
+    assert_eq!(conflict.status, StatusCode::CONFLICT);
+}
+
+/// #6176: Agent Mail is the durable "submit while running" queue (nothing
+/// ever produces a `Queued` turn record — POST /turns rejects a busy
+/// thread). Withdrawing a queued envelope is idempotent, delivery after
+/// cancel starts no turn, and mail that already left `queued` is an
+/// explicit conflict rather than a silent drop.
+#[tokio::test]
+async fn agent_mail_cancel_withdraws_queued_mail() -> Result<()> {
+    let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+    let base = format!("http://{addr}");
+
+    // Agent Mail addressability needs task-bound threads, and the sender
+    // identity must be the source thread's task id.
+    let new_thread = |task_id: &str| {
+        let client = &client;
+        let base = base.clone();
+        let task_id = task_id.to_string();
+        async move {
+            let thread: Value = client
+                .post(format!("{base}/v1/threads"))
+                .json(&json!({ "task_id": task_id }))
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            anyhow::Ok(thread["id"].as_str().expect("thread id").to_string())
+        }
+    };
+    let source = new_thread("task_a").await?;
+    let destination = new_thread("task_b").await?;
+
+    let send = |message_id: &str| {
+        let client = &client;
+        let base = base.clone();
+        let source = source.clone();
+        let destination = destination.clone();
+        let message_id = message_id.to_string();
+        async move {
+            let sent = client
+                .post(format!("{base}/v1/agent-mail"))
+                .json(&json!({
+                    "message_id": message_id,
+                    "source_thread_id": source,
+                    "destination_thread_id": destination,
+                    "sender": {"identity": "task_a", "display_label": "Test Sender"},
+                    "summary": "handoff: review the queued work",
+                    "delivery_mode": "queue_only",
+                    "trigger_turn": false,
+                }))
+                .send()
+                .await?;
+            anyhow::Ok(sent)
+        }
+    };
+
+    let sent = send("mail_queue_1").await?;
+    assert_eq!(sent.status(), StatusCode::CREATED);
+    let body: Value = sent.json().await?;
+    assert_eq!(body["envelope"]["status"], "queued");
+
+    let inbox: Value = client
+        .get(format!("{base}/v1/threads/{destination}/agent-mail"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert!(inbox.as_array().is_some_and(|mail| {
+        mail.iter()
+            .any(|item| item["message_id"] == "mail_queue_1" && item["status"] == "queued")
+    }));
+
+    let canceled: Value = client
+        .post(format!(
+            "{base}/v1/threads/{destination}/agent-mail/mail_queue_1/cancel"
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(canceled["status"], "canceled");
+
+    // Re-cancel is an idempotent no-op returning the stored envelope.
+    let recanceled: Value = client
+        .post(format!(
+            "{base}/v1/threads/{destination}/agent-mail/mail_queue_1/cancel"
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(recanceled, canceled);
+
+    // Delivery after cancel starts no turn.
+    let delivered: Value = client
+        .post(format!(
+            "{base}/v1/threads/{destination}/agent-mail/mail_queue_1/deliver"
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(delivered["envelope"]["status"], "canceled");
+    assert!(delivered.get("turn").is_none());
+
+    // Mail that already left `queued` is an explicit conflict.
+    let sent = send("mail_queue_2").await?;
+    assert_eq!(sent.status(), StatusCode::CREATED);
+    let delivered: Value = client
+        .post(format!(
+            "{base}/v1/threads/{destination}/agent-mail/mail_queue_2/deliver"
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(delivered["envelope"]["status"], "delivered");
+    let conflict = client
+        .post(format!(
+            "{base}/v1/threads/{destination}/agent-mail/mail_queue_2/cancel"
+        ))
+        .send()
+        .await?;
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    assert!(
+        conflict
+            .text()
+            .await?
+            .contains("can be canceled only while queued")
+    );
+
+    // A message addressed elsewhere is a foreign-destination rejection.
+    let foreign = client
+        .post(format!(
+            "{base}/v1/threads/{source}/agent-mail/mail_queue_1/cancel"
+        ))
+        .send()
+        .await?;
+    assert_eq!(foreign.status(), StatusCode::FORBIDDEN);
+
+    // An unknown message id is a 404, never a silent success.
+    let missing = client
+        .post(format!(
+            "{base}/v1/threads/{destination}/agent-mail/mail_nope/cancel"
+        ))
+        .send()
+        .await?;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    handle.abort();
+    Ok(())
+}

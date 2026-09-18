@@ -60,11 +60,12 @@ use codewhale_execpolicy::ApprovalMode;
 use codewhale_models::Role;
 use codewhale_models::{ContentBlock, Message, SystemPrompt, Usage};
 use codewhale_protocol::agent_mail::{
-    AGENT_MAIL_EVENT_DELIVERED, AGENT_MAIL_EVENT_DELIVERING, AGENT_MAIL_EVENT_DELIVERY_FAILED,
-    AGENT_MAIL_EVENT_QUEUED, AGENT_MAIL_EVENT_READ, AGENT_MAIL_SCHEMA_VERSION, AgentMailAddress,
-    AgentMailDeliveryMode, AgentMailEnvelope, AgentMailEventPayload, AgentMailFailureCode,
-    AgentMailFailureReceipt, AgentMailMessageId, AgentMailSendRequest, AgentMailSendResponse,
-    AgentMailStatus, MAX_AGENT_MAIL_DELIVERY_ATTEMPTS, MAX_AGENT_MAIL_SUMMARY_BYTES,
+    AGENT_MAIL_EVENT_CANCELED, AGENT_MAIL_EVENT_DELIVERED, AGENT_MAIL_EVENT_DELIVERING,
+    AGENT_MAIL_EVENT_DELIVERY_FAILED, AGENT_MAIL_EVENT_QUEUED, AGENT_MAIL_EVENT_READ,
+    AGENT_MAIL_SCHEMA_VERSION, AgentMailAddress, AgentMailDeliveryMode, AgentMailEnvelope,
+    AgentMailEventPayload, AgentMailFailureCode, AgentMailFailureReceipt, AgentMailMessageId,
+    AgentMailSendRequest, AgentMailSendResponse, AgentMailStatus, MAX_AGENT_MAIL_DELIVERY_ATTEMPTS,
+    MAX_AGENT_MAIL_SUMMARY_BYTES,
 };
 use codewhale_protocol::runtime::{
     DynamicToolCallContent, DynamicToolCallParams, DynamicToolCallResult, DynamicToolSpec,
@@ -499,6 +500,7 @@ fn agent_mail_event_for_status(status: AgentMailStatus) -> &'static str {
         AgentMailStatus::Delivered => AGENT_MAIL_EVENT_DELIVERED,
         AgentMailStatus::Read => AGENT_MAIL_EVENT_READ,
         AgentMailStatus::Failed => AGENT_MAIL_EVENT_DELIVERY_FAILED,
+        AgentMailStatus::Canceled => AGENT_MAIL_EVENT_CANCELED,
     }
 }
 
@@ -6246,6 +6248,41 @@ impl RuntimeThreadManager {
         Ok(envelope)
     }
 
+    /// Withdraw a queued envelope before it starts delivery (#6176). Only
+    /// `Queued` mail can be canceled; anything that reached delivery keeps
+    /// its receipt. Re-canceling an already-canceled envelope is an
+    /// idempotent no-op returning the stored envelope.
+    pub async fn cancel_agent_mail(
+        &self,
+        thread_id: &str,
+        message_id: &AgentMailMessageId,
+    ) -> Result<AgentMailEnvelope> {
+        let thread = self.get_thread(thread_id).await?;
+        let address = agent_mail_address(&self.store.owner_id, &thread)?;
+        let envelope = {
+            let _mail_mutation = self.store.mail_mutation.lock();
+            let mut envelope = self.store.load_agent_mail(message_id)?;
+            if envelope.destination != address {
+                bail!("Agent Mail ownership denied: message does not belong to this destination");
+            }
+            match envelope.status {
+                AgentMailStatus::Canceled => envelope,
+                AgentMailStatus::Queued => {
+                    envelope.status = AgentMailStatus::Canceled;
+                    self.store.save_agent_mail(&envelope)?;
+                    envelope
+                }
+                _ => bail!(
+                    "Agent Mail can be canceled only while queued (status: {:?})",
+                    envelope.status
+                ),
+            }
+        };
+        self.emit_agent_mail_event(AGENT_MAIL_EVENT_CANCELED, &envelope)
+            .await?;
+        Ok(envelope)
+    }
+
     /// Claim and project one envelope into the existing destination turn
     /// queue. A busy thread keeps queued mail untouched; retryable failures are
     /// claimed again only below the bounded attempt ceiling.
@@ -6286,6 +6323,9 @@ impl RuntimeThreadManager {
                 AgentMailStatus::Delivered => Some(AGENT_MAIL_EVENT_DELIVERED),
                 AgentMailStatus::Read => Some(AGENT_MAIL_EVENT_READ),
                 AgentMailStatus::Delivering => Some(AGENT_MAIL_EVENT_DELIVERING),
+                // Canceled mail is terminal: a later deliver returns the
+                // envelope with no turn rather than claiming it (#6176).
+                AgentMailStatus::Canceled => Some(AGENT_MAIL_EVENT_CANCELED),
                 AgentMailStatus::Failed
                     if envelope
                         .failure
