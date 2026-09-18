@@ -413,7 +413,11 @@ impl CommandSessionLifecycleContext for SessionLifecycleAdapter<'_> {
             .map_err(|error| format!("Failed to snapshot Work state: {error}"))?;
         let manager = crate::session_manager::SessionManager::default_location()
             .map_err(|error| format!("could not open sessions directory: {error}"))?;
-        let session = crate::tui::ui::build_session_snapshot(&mut app, &manager)?;
+        let mut session = crate::tui::ui::build_session_snapshot(&mut app, &manager)?;
+        // Snapshots are journal-only (#6214 T3); this path serializes
+        // directly instead of through `save_session`, so rehydrate the
+        // `messages` projection first — otherwise the file loses history.
+        session.make_storage_compatible();
         let queue_transition =
             crate::tui::ui::prepare_offline_queue_transition(&app, &session.metadata.id)?;
         let save_path = explicit_save_path.unwrap_or_else(|| {

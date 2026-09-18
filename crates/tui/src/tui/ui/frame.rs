@@ -1061,6 +1061,11 @@ pub(crate) fn build_app_system_prompt_with_goal(
     )
 }
 
+/// Build the session snapshot every product caller queues into the
+/// persistence actor. Journal-only (#6214 T3): the `messages` projection is
+/// left empty because the queue drops it anyway, and serialization rehydrates
+/// it from the journal — the on-disk bytes are unchanged. Callers must not
+/// read `.messages` off the returned snapshot; save or serialize it.
 pub(crate) fn build_session_snapshot(
     app: &mut App,
     manager: &SessionManager,
@@ -1073,7 +1078,7 @@ pub(crate) fn build_session_snapshot(
         })?,
     };
     let mut session = if let Some(existing_id) = app.current_session_id.as_ref() {
-        crate::session_manager::create_saved_session_with_id_mode_and_stamps(
+        crate::session_manager::create_saved_session_journal_only(
             existing_id.clone(),
             &app.api_messages,
             &app.api_message_stamps,
@@ -1084,7 +1089,7 @@ pub(crate) fn build_session_snapshot(
             Some(app.mode.as_setting()),
         )
     } else {
-        crate::session_manager::create_saved_session_with_id_mode_and_stamps(
+        crate::session_manager::create_saved_session_journal_only(
             uuid::Uuid::new_v4().to_string(),
             &app.api_messages,
             &app.api_message_stamps,

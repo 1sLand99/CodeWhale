@@ -16222,9 +16222,15 @@ fn issue_2739_stalled_turn_snapshot_preserves_api_messages() {
     // may fail in tests (no real home dir), we verify directly that
     // build_session_snapshot captures the in-progress messages.
     let snapshot = build_session_snapshot(&mut app, &manager).expect("session snapshot");
-    assert_eq!(snapshot.messages.len(), 2);
-    assert_eq!(snapshot.messages[0].role, "user");
-    assert_eq!(snapshot.messages[1].role, "assistant");
+    // Snapshots are journal-only (#6214 T3); the projection rehydrates at save.
+    let journal_messages = snapshot
+        .journal
+        .as_ref()
+        .expect("snapshot journal")
+        .to_messages();
+    assert_eq!(journal_messages.len(), 2);
+    assert_eq!(journal_messages[0].role, "user");
+    assert_eq!(journal_messages[1].role, "assistant");
 }
 
 #[test]
@@ -16252,9 +16258,15 @@ fn issue_2739_esc_cancel_preserves_session_messages_before_clear() {
         "local cancel should create a resumable session snapshot"
     );
     let snapshot = build_session_snapshot(&mut app, &manager).expect("session snapshot");
-    assert_eq!(snapshot.messages.len(), 2);
-    assert_eq!(snapshot.messages[0].role, "user");
-    assert_eq!(snapshot.messages[1].role, "assistant");
+    // Snapshots are journal-only (#6214 T3); the projection rehydrates at save.
+    let journal_messages = snapshot
+        .journal
+        .as_ref()
+        .expect("snapshot journal")
+        .to_messages();
+    assert_eq!(journal_messages.len(), 2);
+    assert_eq!(journal_messages[0].role, "user");
+    assert_eq!(journal_messages[1].role, "assistant");
     // Turn-level bookkeeping must be cleared after cancel.
     assert!(!app.is_loading);
     assert!(app.turn_started_at.is_none());
@@ -16287,8 +16299,14 @@ fn issue_2739_dispatch_timeout_preserves_user_prompt() {
     // snapshot (and therefore --continue) still has it instead of loading the
     // previous save.
     let snapshot = build_session_snapshot(&mut app, &manager).expect("session snapshot");
-    assert_eq!(snapshot.messages.len(), 1);
-    assert_eq!(snapshot.messages[0].role, "user");
+    // Snapshots are journal-only (#6214 T3); the projection rehydrates at save.
+    let journal_messages = snapshot
+        .journal
+        .as_ref()
+        .expect("snapshot journal")
+        .to_messages();
+    assert_eq!(journal_messages.len(), 1);
+    assert_eq!(journal_messages[0].role, "user");
 }
 
 #[test]
@@ -17819,7 +17837,13 @@ fn throttled_recovery_snapshot_persists_during_loading_turns() {
     maybe_throttled_recovery_snapshot(&mut app, t0, &mut last_snapshot_at);
     assert!(last_snapshot_at.is_some());
     let snapshot = build_session_snapshot(&mut app, &manager).expect("session snapshot");
-    assert_eq!(snapshot.messages.len(), 1);
+    // Snapshots are journal-only (#6214 T3); the projection rehydrates at save.
+    let journal_messages = snapshot
+        .journal
+        .as_ref()
+        .expect("snapshot journal")
+        .to_messages();
+    assert_eq!(journal_messages.len(), 1);
 
     maybe_throttled_recovery_snapshot(
         &mut app,
@@ -20292,7 +20316,16 @@ fn automatic_session_snapshot_never_reloads_existing_json_on_ui_thread() {
     let snapshot = build_session_snapshot(&mut app, &manager).expect("nonblocking snapshot");
 
     assert_eq!(snapshot.metadata.id, "nonblocking-snapshot");
-    assert_eq!(snapshot.messages.len(), 2);
+    // Snapshots are journal-only (#6214 T3); the projection rehydrates at save.
+    assert_eq!(
+        snapshot
+            .journal
+            .as_ref()
+            .expect("snapshot journal")
+            .to_messages()
+            .len(),
+        2
+    );
     assert_eq!(snapshot.metadata.created_at, initial.metadata.created_at);
 }
 
@@ -20337,7 +20370,16 @@ fn session_snapshot_uses_last_known_work_before_first_file_flush() {
     let contended = build_session_snapshot(&mut app, &manager).expect("cached snapshot");
 
     assert_eq!(contended.work_state, expected);
-    assert_eq!(contended.messages.len(), 1);
+    // Snapshots are journal-only (#6214 T3); the projection rehydrates at save.
+    assert_eq!(
+        contended
+            .journal
+            .as_ref()
+            .expect("snapshot journal")
+            .to_messages()
+            .len(),
+        1
+    );
 }
 
 #[test]
