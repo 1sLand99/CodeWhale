@@ -524,13 +524,23 @@ fn load_state(path: &Path) -> Result<PluginStateFile, String> {
     load_state_unlocked(path)
 }
 
+/// Maximum bytes read from the plugin state file.
+const MAX_PLUGIN_STATE_BYTES: u64 = 1024 * 1024;
+
 fn load_state_unlocked(path: &Path) -> Result<PluginStateFile, String> {
-    let Some(mut file) = open_existing_regular_file(path, false)? else {
+    let Some(file) = open_existing_regular_file(path, false)? else {
         return Ok(PluginStateFile::default());
     };
     let mut raw = String::new();
-    file.read_to_string(&mut raw)
+    file.take(MAX_PLUGIN_STATE_BYTES + 1)
+        .read_to_string(&mut raw)
         .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    if raw.len() as u64 > MAX_PLUGIN_STATE_BYTES {
+        return Err(format!(
+            "plugin state {} exceeds the 1 MiB limit",
+            path.display()
+        ));
+    }
     let state: PluginStateFile = serde_json::from_str(&raw)
         .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
     if state.schema_version != STATE_SCHEMA_VERSION {
@@ -648,6 +658,7 @@ fn persist_plugin_state(mut temporary: tempfile::TempPath, path: &Path) -> Resul
     // NamedTempFile marks the source as temporary. Clear only that temporary
     // caching hint before publication, matching tempfile's own persistence
     // contract while retaining the owner-only DACL applied above.
+    // SAFETY: `temporary_wide` is NUL-terminated and live.
     unsafe {
         SetFileAttributesW(
             PCWSTR::from_raw(temporary_wide.as_ptr()),
@@ -658,6 +669,7 @@ fn persist_plugin_state(mut temporary: tempfile::TempPath, path: &Path) -> Resul
         format!("failed to prepare private plugin state temp file for publication: {error}")
     })?;
 
+    // SAFETY: both paths are NUL-terminated and live.
     if let Err(error) = unsafe {
         MoveFileExW(
             PCWSTR::from_raw(temporary_wide.as_ptr()),
@@ -667,6 +679,7 @@ fn persist_plugin_state(mut temporary: tempfile::TempPath, path: &Path) -> Resul
     } {
         // Restore tempfile's cleanup hint on the still-private source. The
         // stable state path remains untouched when MoveFileExW fails.
+        // SAFETY: `temporary_wide` is NUL-terminated and live.
         let _ = unsafe {
             SetFileAttributesW(
                 PCWSTR::from_raw(temporary_wide.as_ptr()),
@@ -1755,6 +1768,7 @@ fn apply_windows_owner_only_acl(
     let result = (|| {
         let mut required = 0_u32;
         // The first call intentionally obtains the required byte count.
+        // SAFETY: null buffer queries size; `required` is live.
         let _ = unsafe { GetTokenInformation(token, TokenUser, None, 0, &mut required) };
         if required < size_of::<TOKEN_USER>() as u32 {
             return Err("Windows token did not expose a current-user SID".to_string());
@@ -1897,6 +1911,7 @@ fn ensure_windows_plugin_target_owner(
             status.0
         ));
     }
+    // SAFETY: `owner` is non-null from GetSecurityInfo; `expected_owner` is the caller's SID.
     let owner_matches = !owner.0.is_null() && unsafe { EqualSid(owner, expected_owner) }.is_ok();
     if !descriptor.0.is_null() {
         // SAFETY: the successful GetSecurityInfo allocation is released only

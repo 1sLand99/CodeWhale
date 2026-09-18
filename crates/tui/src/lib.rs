@@ -178,6 +178,7 @@ fn configure_windows_console_utf8() {
     use windows::Win32::System::Console::{SetConsoleCP, SetConsoleOutputCP};
 
     const CP_UTF8: u32 = 65001;
+    // SAFETY: integer argument only; failures discarded.
     unsafe {
         let _ = SetConsoleCP(CP_UTF8);
         let _ = SetConsoleOutputCP(CP_UTF8);
@@ -1711,6 +1712,7 @@ fn run_with_args(args: Vec<String>) -> Result<()> {
     // Match the dispatcher entrypoint: Unix shells and supervisors may inherit
     // SIGPIPE ignored, which turns short pipelines such as `codewhale doctor |
     // head` into BrokenPipe panics once this delegated TUI binary prints.
+    // SAFETY: first call at startup; no threads or handlers yet.
     #[cfg(unix)]
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
@@ -4513,7 +4515,7 @@ async fn run_doctor(
     println!("{}", "Configuration:".bold());
     let config_path = &doctor_paths.config;
 
-    if config_path.exists() {
+    if tokio::fs::try_exists(config_path).await.unwrap_or(false) {
         println!(
             "  {} config.toml found at {}",
             "✓".truecolor(aqua_r, aqua_g, aqua_b),
@@ -9941,13 +9943,22 @@ fn run_apply(args: ApplyArgs) -> Result<()> {
     Ok(())
 }
 
+/// Maximum bytes read for a patch on stdin. Generous for large diffs;
+/// anything larger is not a patch.
+const MAX_STDIN_PATCH_BYTES: u64 = 16 * 1024 * 1024;
+
 fn read_patch_from_stdin() -> Result<String> {
-    let mut stdin = io::stdin();
+    let stdin = io::stdin();
     if stdin.is_terminal() {
         bail!("No patch file provided and stdin is empty.");
     }
     let mut buffer = String::new();
-    stdin.read_to_string(&mut buffer)?;
+    stdin
+        .take(MAX_STDIN_PATCH_BYTES + 1)
+        .read_to_string(&mut buffer)?;
+    if buffer.len() as u64 > MAX_STDIN_PATCH_BYTES {
+        bail!("patch on stdin exceeds the 16 MiB limit");
+    }
     Ok(buffer)
 }
 
@@ -11186,6 +11197,9 @@ fn merge_project_config_with_approval_baseline(
     }
 }
 
+/// Maximum bytes read from a project config file. Configs are kilobytes.
+const MAX_PROJECT_CONFIG_BYTES: u64 = 1024 * 1024;
+
 fn read_project_config_file(path: &Path) -> io::Result<Option<String>> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -11203,9 +11217,16 @@ fn read_project_config_file(path: &Path) -> io::Result<Option<String>> {
         return Ok(None);
     }
 
-    let mut file = open_project_config_file(path)?;
+    let file = open_project_config_file(path)?;
     let mut raw = String::new();
-    file.read_to_string(&mut raw)?;
+    file.take(MAX_PROJECT_CONFIG_BYTES + 1)
+        .read_to_string(&mut raw)?;
+    if raw.len() as u64 > MAX_PROJECT_CONFIG_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("project config {} exceeds the 1 MiB limit", path.display()),
+        ));
+    }
     Ok(Some(raw))
 }
 

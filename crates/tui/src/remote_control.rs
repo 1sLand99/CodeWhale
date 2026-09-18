@@ -335,6 +335,7 @@ impl ClassicSessionOwnerLock {
         #[cfg(unix)]
         {
             use std::os::fd::AsRawFd as _;
+            // SAFETY: `file` is open and live.
             if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
                 return Err(CLASSIC_LEASE_SCOPE_ERROR.to_string());
             }
@@ -343,6 +344,7 @@ impl ClassicSessionOwnerLock {
         {
             use std::os::windows::io::AsRawHandle as _;
             use windows_sys::Win32::Storage::FileSystem::LockFile;
+            // SAFETY: `file` is open and live.
             if unsafe { LockFile(file.as_raw_handle() as _, 0, 0, u32::MAX, u32::MAX) } == 0 {
                 return Err(CLASSIC_LEASE_SCOPE_ERROR.to_string());
             }

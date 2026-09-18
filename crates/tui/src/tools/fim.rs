@@ -6,8 +6,6 @@
 //! (`crates/tui/src/client.rs:3484`), so this works on any ChatCompletions
 //! provider — it is not DeepSeek-specific.
 
-use std::fs;
-
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -117,7 +115,7 @@ impl ToolSpec for FimEditTool {
 
         // 1. Read the file
         let resolved = context.resolve_path(path)?;
-        let content = fs::read_to_string(&resolved).map_err(|e| {
+        let content = tokio::fs::read_to_string(&resolved).await.map_err(|e| {
             ToolError::execution_failed(format!("Failed to read {}: {}", resolved.display(), e))
         })?;
 

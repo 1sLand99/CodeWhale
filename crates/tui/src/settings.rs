@@ -2456,6 +2456,7 @@ fn replace_existing_settings_file(path: &Path, replacement: &Path) -> std::io::R
 
     let path_wide = wide_path(path);
     let replacement_wide = wide_path(replacement);
+    // SAFETY: both paths are NUL-terminated and live; reserved params are null.
     unsafe {
         // NamedTempFile marks its source with the temporary caching hint.
         // Clear it before publication, matching tempfile's persistence path.

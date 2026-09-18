@@ -585,6 +585,22 @@ async fn acquire_file_mutation(
     }
 }
 
+/// Atomic workspace write on the blocking pool: temp create plus fsync plus
+/// rename (and a retry loop on Windows) must not park a Tokio worker
+/// (blocking-call convention, #6149). Error shape matches the historical
+/// inline call.
+async fn run_blocking_write_atomic(path: &Path, contents: Vec<u8>) -> Result<(), ToolError> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        crate::utils::write_atomic_workspace(&path, &contents).map_err(|e| {
+            ToolError::execution_failed(format!("Failed to write {}: {e}", path.display()))
+        })
+    })
+    .await
+    .map_err(|e| ToolError::execution_failed(format!("File write task: {e}")))??;
+    Ok(())
+}
+
 fn check_file_operation_cancelled(context: &ToolContext) -> Result<(), ToolError> {
     if context
         .cancel_token
@@ -757,7 +773,7 @@ impl ReadFileTool {
         }
         enforce_read_denylist(&file_path, "read")?;
         check_file_operation_cancelled(context)?;
-        let bytes = fs::read(&file_path).map_err(|error| {
+        let bytes = tokio::fs::read(&file_path).await.map_err(|error| {
             ToolError::execution_failed(format!("Failed to read {}: {error}", file_path.display()))
         })?;
         // #6283: every read response carries the file's byte size, line
@@ -946,16 +962,38 @@ impl ToolSpec for ReadFileTool {
             return Ok(result);
         }
         if is_image_for_ocr(&file_path) {
-            return read_image_via_ocr(&file_path, path_str);
+            // OCR shells out to tesseract (or runs a Vision pass): the blocking
+            // subprocess call stays on the blocking pool (blocking-call
+            // convention, #6149).
+            let file_path = file_path.clone();
+            let requested_path = path_str.to_string();
+            return tokio::task::spawn_blocking(move || {
+                read_image_via_ocr(&file_path, &requested_path)
+            })
+            .await
+            .map_err(|e| ToolError::execution_failed(format!("Image OCR task: {e}")))?;
         }
 
         // Open before parameter parsing so a missing file keeps the
         // historical "Failed to read …" error shape regardless of the other
-        // arguments.
-        let file = fs::File::open(&file_path).map_err(|e| {
-            ToolError::execution_failed(format!("Failed to read {}: {}", file_path.display(), e))
-        })?;
-        let file_bytes = file.metadata().map(|meta| meta.len()).unwrap_or(u64::MAX);
+        // arguments. The open and size probe run on the blocking pool —
+        // tool handlers execute on the Tokio runtime (blocking-call
+        // convention, #6149).
+        let file_bytes = tokio::task::spawn_blocking({
+            let file_path = file_path.clone();
+            move || {
+                let file = fs::File::open(&file_path).map_err(|e| {
+                    ToolError::execution_failed(format!(
+                        "Failed to read {}: {}",
+                        file_path.display(),
+                        e
+                    ))
+                })?;
+                Ok::<_, ToolError>(file.metadata().map(|meta| meta.len()).unwrap_or(u64::MAX))
+            }
+        })
+        .await
+        .map_err(|e| ToolError::execution_failed(format!("File open task: {e}")))??;
 
         let explicit_range = input
             .get("start_line")
@@ -966,8 +1004,7 @@ impl ToolSpec for ReadFileTool {
         // explicit range — otherwise an explicit `start_line = 5` on a
         // tiny file would silently ignore the request.
         if !explicit_range && file_bytes <= SMALL_FILE_BYTES as u64 {
-            drop(file);
-            let contents = fs::read_to_string(&file_path).map_err(|e| {
+            let contents = tokio::fs::read_to_string(&file_path).await.map_err(|e| {
                 ToolError::execution_failed(format!(
                     "Failed to read {}: {}",
                     file_path.display(),
@@ -1045,28 +1082,44 @@ impl ToolSpec for ReadFileTool {
         // Bounded read for ranged/large files: skip and take lines through a
         // BufReader instead of materializing the whole file. The stream still
         // runs to EOF so the total line count and whole-file UTF-8 validation
-        // match the historical read_to_string behavior.
-        let (window, total_lines) =
-            read_window_streaming(file, start_line, max_lines).map_err(|e| {
-                ToolError::execution_failed(format!(
-                    "Failed to read {}: {}",
-                    file_path.display(),
-                    e
-                ))
-            })?;
+        // match the historical read_to_string behavior. Open, stream, and hash
+        // all run on the blocking pool (blocking-call convention, #6149).
+        let (window, total_lines, hash) = tokio::task::spawn_blocking({
+            let file_path = file_path.clone();
+            move || {
+                let file = fs::File::open(&file_path).map_err(|e| {
+                    ToolError::execution_failed(format!(
+                        "Failed to read {}: {}",
+                        file_path.display(),
+                        e
+                    ))
+                })?;
+                let (window, total_lines) = read_window_streaming(file, start_line, max_lines)
+                    .map_err(|e| {
+                        ToolError::execution_failed(format!(
+                            "Failed to read {}: {}",
+                            file_path.display(),
+                            e
+                        ))
+                    })?;
+                // The window is a slice; the guard needs the whole file. A
+                // second streaming pass digests the rest without ever
+                // materializing it. A failure here only costs the guard — the
+                // read itself already succeeded, so the window is still
+                // returned, just without a hash to pass back to `edit`.
+                // Special files are skipped: reopening a FIFO or device can
+                // block indefinitely (or re-consume a one-shot stream), and a
+                // stream has no stable content an edit guard could pin.
+                let hash = match fs::metadata(&file_path) {
+                    Ok(meta) if meta.is_file() => hash_file_streaming(&file_path).ok(),
+                    _ => None,
+                };
+                Ok::<_, ToolError>((window, total_lines, hash))
+            }
+        })
+        .await
+        .map_err(|e| ToolError::execution_failed(format!("File read task: {e}")))??;
         context.note_file_read(&file_path);
-
-        // The window is a slice; the guard needs the whole file. A second
-        // streaming pass digests the rest without ever materializing it. A
-        // failure here only costs the guard — the read itself already
-        // succeeded, so the window is still returned, just without a hash to
-        // pass back to `edit`. Special files are skipped: reopening a FIFO or
-        // device can block indefinitely (or re-consume a one-shot stream),
-        // and a stream has no stable content an edit guard could pin.
-        let hash = match fs::metadata(&file_path) {
-            Ok(meta) if meta.is_file() => hash_file_streaming(&file_path).ok(),
-            _ => None,
-        };
 
         // `start_line > total_lines` is not an error — it lets the model
         // page past the end without raising. Returns an empty-content
@@ -1292,20 +1345,20 @@ fn read_image_via_ocr(path: &Path, requested_path: &str) -> Result<ToolResult, T
 }
 
 /// Detect an existing PDF by extension or by sniffing `%PDF` magic bytes.
-fn is_pdf(path: &Path) -> Result<bool, ToolError> {
+async fn is_pdf(path: &Path) -> Result<bool, ToolError> {
     let extension_matches = path
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"));
-    let mut file = fs::File::open(path).map_err(|error| {
+    let mut file = tokio::fs::File::open(path).await.map_err(|error| {
         ToolError::execution_failed(format!("Failed to read {}: {error}", path.display()))
     })?;
     if extension_matches {
         return Ok(true);
     }
     let mut buf = [0u8; 4];
-    use std::io::Read;
-    Ok(file.read_exact(&mut buf).is_ok() && &buf == b"%PDF")
+    use tokio::io::AsyncReadExt;
+    Ok(file.read_exact(&mut buf).await.is_ok() && &buf == b"%PDF")
 }
 
 fn is_image_for_ocr(path: &Path) -> bool {
@@ -1390,7 +1443,7 @@ async fn read_pdf_if_detected(
     pages: Option<&str>,
     command: super::pdf::PdfTextCommand<'_>,
 ) -> Result<Option<ToolResult>, ToolError> {
-    if !is_pdf(path)? {
+    if !is_pdf(path).await? {
         return Ok(None);
     }
     // Validate the `pages` spec once, up front, so both extractor paths
@@ -1442,16 +1495,16 @@ impl WriteFileTool {
         let mutation_guard = acquire_file_mutation(&file_path, context).await?;
         check_file_operation_cancelled(context)?;
 
-        let existed_before = file_path.exists();
+        let existed_before = tokio::fs::try_exists(&file_path).await.unwrap_or(false);
         let prior_bytes = if existed_before {
-            fs::read(&file_path).unwrap_or_default()
+            tokio::fs::read(&file_path).await.unwrap_or_default()
         } else {
             Vec::new()
         };
         let prior_contents = String::from_utf8_lossy(&prior_bytes);
 
         if let Some(parent) = file_path.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
+            tokio::fs::create_dir_all(parent).await.map_err(|error| {
                 ToolError::execution_failed(format!(
                     "Failed to create directory {}: {error}",
                     parent.display()
@@ -1474,9 +1527,7 @@ impl WriteFileTool {
         {
             written = normalized;
         }
-        crate::utils::write_atomic_workspace(&file_path, written.as_bytes()).map_err(|error| {
-            ToolError::execution_failed(format!("Failed to write {}: {error}", file_path.display()))
-        })?;
+        run_blocking_write_atomic(&file_path, written.clone().into_bytes()).await?;
         check_file_operation_cancelled(context)?;
         context.note_file_read(&file_path);
         drop(mutation_guard);
@@ -1556,9 +1607,11 @@ impl ToolSpec for WriteFileTool {
 
         // Snapshot the existing contents (if any) before we overwrite — used
         // to render an inline diff in the tool result.
-        let existed_before = file_path.exists();
+        let existed_before = tokio::fs::try_exists(&file_path).await.unwrap_or(false);
         let prior_contents = if existed_before {
-            fs::read_to_string(&file_path).unwrap_or_default()
+            tokio::fs::read_to_string(&file_path)
+                .await
+                .unwrap_or_default()
         } else {
             String::new()
         };
@@ -1579,7 +1632,7 @@ impl ToolSpec for WriteFileTool {
 
         // Create parent directories if needed
         if let Some(parent) = file_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
                 ToolError::execution_failed(format!(
                     "Failed to create directory {}: {}",
                     parent.display(),
@@ -1605,9 +1658,7 @@ impl ToolSpec for WriteFileTool {
             written = normalized;
         }
 
-        crate::utils::write_atomic_workspace(&file_path, written.as_bytes()).map_err(|e| {
-            ToolError::execution_failed(format!("Failed to write {}: {}", file_path.display(), e))
-        })?;
+        run_blocking_write_atomic(&file_path, written.clone().into_bytes()).await?;
         context.note_file_read(&file_path);
 
         let display = file_path.display().to_string();
@@ -2023,17 +2074,18 @@ impl EditFileTool {
         let mutation_guard = acquire_file_mutation(&file_path, context).await?;
         check_file_operation_cancelled(context)?;
 
-        fs::OpenOptions::new()
+        tokio::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(&file_path)
+            .await
             .map_err(|error| {
                 ToolError::execution_failed(format!(
                     "Could not edit file {path_str}: target must be readable and writable ({error})"
                 ))
             })?;
         check_file_operation_cancelled(context)?;
-        let raw_bytes = fs::read(&file_path).map_err(|error| {
+        let raw_bytes = tokio::fs::read(&file_path).await.map_err(|error| {
             ToolError::execution_failed(format!("Could not edit file {path_str}: {error}"))
         })?;
         check_file_operation_cancelled(context)?;
@@ -2051,14 +2103,7 @@ impl EditFileTool {
             final_content = normalized;
         }
 
-        crate::utils::write_atomic_workspace(&file_path, final_content.as_bytes()).map_err(
-            |error| {
-                ToolError::execution_failed(format!(
-                    "Failed to write {}: {error}",
-                    file_path.display()
-                ))
-            },
-        )?;
+        run_blocking_write_atomic(&file_path, final_content.clone().into_bytes()).await?;
         check_file_operation_cancelled(context)?;
         context.note_file_read(&file_path);
         drop(mutation_guard);
@@ -2170,7 +2215,7 @@ impl ToolSpec for EditFileTool {
         let file_path = context.resolve_path(path_str)?;
         context.require_fresh_file_read(&file_path, path_str)?;
 
-        let contents = fs::read_to_string(&file_path).map_err(|e| {
+        let contents = tokio::fs::read_to_string(&file_path).await.map_err(|e| {
             ToolError::execution_failed(format!("Failed to read {}: {}", file_path.display(), e))
         })?;
 
@@ -2302,15 +2347,13 @@ impl ToolSpec for EditFileTool {
             None => false,
         };
 
-        crate::utils::write_atomic_workspace(&file_path, updated.as_bytes()).map_err(|e| {
-            ToolError::execution_failed(format!("Failed to write {}: {}", file_path.display(), e))
-        })?;
+        run_blocking_write_atomic(&file_path, updated.clone().into_bytes()).await?;
 
         // #5209 — never emit a success receipt unless the on-disk write
         // actually applied. A fabricated "Replaced 1 occurrence" + diff is
         // worse than a hard error: models trust it and re-edit the same
         // span 3–5× before noticing nothing changed.
-        let on_disk = fs::read_to_string(&file_path).map_err(|e| {
+        let on_disk = tokio::fs::read_to_string(&file_path).await.map_err(|e| {
             ToolError::execution_failed(format!(
                 "Failed to verify write to {}: {}",
                 file_path.display(),

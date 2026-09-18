@@ -5324,6 +5324,9 @@ pub fn load_config(path: &Path) -> Result<McpConfig> {
     })
 }
 
+/// Maximum bytes read from an MCP config file. Configs are kilobytes.
+const MAX_MCP_CONFIG_BYTES: u64 = 1024 * 1024;
+
 fn read_mcp_config_file(path: &Path) -> Result<Option<String>> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -5338,11 +5341,15 @@ fn read_mcp_config_file(path: &Path) -> Result<Option<String>> {
         anyhow::bail!("MCP config path must be a regular file: {}", path.display());
     }
 
-    let mut file = open_mcp_config_file(path)
+    let file = open_mcp_config_file(path)
         .with_context(|| format!("Failed to read MCP config {}", path.display()))?;
     let mut contents = String::new();
-    file.read_to_string(&mut contents)
+    file.take(MAX_MCP_CONFIG_BYTES + 1)
+        .read_to_string(&mut contents)
         .with_context(|| format!("Failed to read MCP config {}", path.display()))?;
+    if contents.len() as u64 > MAX_MCP_CONFIG_BYTES {
+        anyhow::bail!("MCP config {} exceeds the 1 MiB limit", path.display());
+    }
     Ok(Some(contents))
 }
 

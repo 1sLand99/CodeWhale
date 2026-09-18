@@ -555,28 +555,28 @@ async fn test_read_file_missing_path() {
     );
 }
 
-#[test]
-fn pdf_detected_by_extension() {
+#[tokio::test]
+async fn pdf_detected_by_extension() {
     let tmp = tempdir().expect("tempdir");
     let path = tmp.path().join("paper.PDF");
     fs::write(&path, b"not really a pdf, but extension says yes").unwrap();
-    assert!(is_pdf(&path).unwrap());
+    assert!(is_pdf(&path).await.unwrap());
 }
 
-#[test]
-fn pdf_detected_by_magic_bytes_without_extension() {
+#[tokio::test]
+async fn pdf_detected_by_magic_bytes_without_extension() {
     let tmp = tempdir().expect("tempdir");
     let path = tmp.path().join("blob");
     fs::write(&path, b"%PDF-1.7\nrest of bytes").unwrap();
-    assert!(is_pdf(&path).unwrap());
+    assert!(is_pdf(&path).await.unwrap());
 }
 
-#[test]
-fn non_pdf_not_detected() {
+#[tokio::test]
+async fn non_pdf_not_detected() {
     let tmp = tempdir().expect("tempdir");
     let path = tmp.path().join("notes.txt");
     fs::write(&path, "hello").unwrap();
-    assert!(!is_pdf(&path).unwrap());
+    assert!(!is_pdf(&path).await.unwrap());
 }
 
 #[test]

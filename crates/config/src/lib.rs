@@ -65,7 +65,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
-#[cfg(unix)]
 use std::io::Read;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -6847,20 +6846,41 @@ fn read_checked_toml_file(path: &Path, label: &str) -> Result<String> {
         .with_context(|| format!("failed to read {label} at {}", path.display()))
 }
 
+/// Maximum bytes read from a config file. Configs are kilobytes; anything
+/// larger is not a config file.
+const MAX_CONFIG_FILE_BYTES: u64 = 1024 * 1024;
+
 #[cfg(unix)]
 fn read_string_no_follow(path: &Path) -> std::io::Result<String> {
-    let mut file = fs::OpenOptions::new()
+    let file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)?;
     let mut raw = String::new();
-    file.read_to_string(&mut raw)?;
+    file.take(MAX_CONFIG_FILE_BYTES + 1)
+        .read_to_string(&mut raw)?;
+    if raw.len() as u64 > MAX_CONFIG_FILE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("config file {} exceeds the 1 MiB limit", path.display()),
+        ));
+    }
     Ok(raw)
 }
 
 #[cfg(not(unix))]
 fn read_string_no_follow(path: &Path) -> std::io::Result<String> {
-    fs::read_to_string(path)
+    let file = fs::File::open(path)?;
+    let mut raw = String::new();
+    file.take(MAX_CONFIG_FILE_BYTES + 1)
+        .read_to_string(&mut raw)?;
+    if raw.len() as u64 > MAX_CONFIG_FILE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("config file {} exceeds the 1 MiB limit", path.display()),
+        ));
+    }
+    Ok(raw)
 }
 
 fn reject_path_symlink(path: &Path) -> Result<()> {

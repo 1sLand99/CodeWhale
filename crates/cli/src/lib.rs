@@ -5371,6 +5371,22 @@ fn tui_argv(cli: &Cli, passthrough: Vec<String>) -> Vec<String> {
     args
 }
 
+/// Set one process environment variable for the CLI-to-TUI bridge.
+///
+/// Callers must guarantee no concurrent environment access: production
+/// callers run pre-runtime on the main thread, and tests serialize on the
+/// shared env lock. All current callers are inside [`apply_tui_env`].
+fn set_tui_env(key: impl AsRef<std::ffi::OsStr>, value: impl AsRef<std::ffi::OsStr>) {
+    // SAFETY: no concurrent environment access. Production setters run on
+    // the main thread before the TUI runtime starts, and the only other
+    // thread that may be alive is the detached telemetry writer, which
+    // never reads or writes the process environment. Tests serialize on
+    // the shared env lock instead.
+    unsafe {
+        std::env::set_var(key, value);
+    }
+}
+
 fn apply_tui_env(cli: &Cli, resolved_runtime: &ResolvedRuntimeOptions, passthrough: &[String]) {
     let mut verbosity = if cli.profile.is_some() {
         cli.verbosity.clone()
@@ -5396,10 +5412,8 @@ fn apply_tui_env(cli: &Cli, resolved_runtime: &ResolvedRuntimeOptions, passthrou
             || provider.to_string(),
             |provider| provider.as_str().to_string(),
         );
-        unsafe {
-            std::env::set_var("CODEWHALE_PROVIDER", &provider);
-            std::env::set_var("DEEPSEEK_PROVIDER", provider);
-        }
+        set_tui_env("CODEWHALE_PROVIDER", &provider);
+        set_tui_env("DEEPSEEK_PROVIDER", provider);
     }
     if !(uses_raw_tui_provider
         || (cli.profile.is_some()
@@ -5407,95 +5421,65 @@ fn apply_tui_env(cli: &Cli, resolved_runtime: &ResolvedRuntimeOptions, passthrou
         && matches!(keyring_bridge_source, Some(RuntimeApiKeySource::Keyring))
         && let Some(api_key) = keyring_bridge_api_key
     {
-        unsafe {
-            for var in provider_env_vars(keyring_bridge_provider) {
-                std::env::set_var(var, api_key);
-            }
-            std::env::set_var(
-                codewhale_config::CLI_API_KEY_SOURCE_ENV,
-                RuntimeApiKeySource::Keyring.as_env_value(),
-            );
+        for var in provider_env_vars(keyring_bridge_provider) {
+            set_tui_env(var, api_key);
         }
-    }
-    if let Some(model) = cli.model.as_ref() {
-        unsafe {
-            std::env::set_var("CODEWHALE_MODEL", model);
-            std::env::set_var("DEEPSEEK_MODEL", model);
-        }
-    }
-    if let Some(output_mode) = cli.output_mode.as_ref() {
-        unsafe {
-            std::env::set_var("CODEWHALE_OUTPUT_MODE", output_mode);
-            std::env::set_var("DEEPSEEK_OUTPUT_MODE", output_mode);
-        }
-    }
-    if let Some(v) = verbosity.as_ref() {
-        unsafe {
-            std::env::set_var("CODEWHALE_VERBOSITY", v);
-            std::env::set_var("DEEPSEEK_VERBOSITY", v);
-        }
-    }
-    if let Some(log_level) = cli.log_level.as_ref() {
-        unsafe {
-            std::env::set_var("CODEWHALE_LOG_LEVEL", log_level);
-            std::env::set_var("DEEPSEEK_LOG_LEVEL", log_level);
-        }
-    }
-    let telemetry = resolved_runtime.telemetry.to_string();
-    unsafe {
-        std::env::set_var("CODEWHALE_TELEMETRY", &telemetry);
-        std::env::set_var("DEEPSEEK_TELEMETRY", &telemetry);
-    }
-    let floor = cli.telemetry == Some(false) || codewhale_config::telemetry_floor_in_force();
-    unsafe {
-        std::env::set_var(
-            codewhale_config::TELEMETRY_FLOOR_ENV,
-            if floor { "1" } else { "0" },
+        set_tui_env(
+            codewhale_config::CLI_API_KEY_SOURCE_ENV,
+            RuntimeApiKeySource::Keyring.as_env_value(),
         );
     }
+    if let Some(model) = cli.model.as_ref() {
+        set_tui_env("CODEWHALE_MODEL", model);
+        set_tui_env("DEEPSEEK_MODEL", model);
+    }
+    if let Some(output_mode) = cli.output_mode.as_ref() {
+        set_tui_env("CODEWHALE_OUTPUT_MODE", output_mode);
+        set_tui_env("DEEPSEEK_OUTPUT_MODE", output_mode);
+    }
+    if let Some(v) = verbosity.as_ref() {
+        set_tui_env("CODEWHALE_VERBOSITY", v);
+        set_tui_env("DEEPSEEK_VERBOSITY", v);
+    }
+    if let Some(log_level) = cli.log_level.as_ref() {
+        set_tui_env("CODEWHALE_LOG_LEVEL", log_level);
+        set_tui_env("DEEPSEEK_LOG_LEVEL", log_level);
+    }
+    let telemetry = resolved_runtime.telemetry.to_string();
+    set_tui_env("CODEWHALE_TELEMETRY", &telemetry);
+    set_tui_env("DEEPSEEK_TELEMETRY", &telemetry);
+    let floor = cli.telemetry == Some(false) || codewhale_config::telemetry_floor_in_force();
+    set_tui_env(
+        codewhale_config::TELEMETRY_FLOOR_ENV,
+        if floor { "1" } else { "0" },
+    );
     if let Some(endpoint) = resolved_runtime.telemetry_endpoint.as_ref() {
-        unsafe {
-            std::env::set_var("CODEWHALE_TELEMETRY_ENDPOINT", endpoint);
-            std::env::set_var("DEEPSEEK_TELEMETRY_ENDPOINT", endpoint);
-        }
+        set_tui_env("CODEWHALE_TELEMETRY_ENDPOINT", endpoint);
+        set_tui_env("DEEPSEEK_TELEMETRY_ENDPOINT", endpoint);
     }
     if let Some(policy) = cli.approval_policy.as_ref() {
-        unsafe {
-            std::env::set_var("CODEWHALE_APPROVAL_POLICY", policy);
-            std::env::set_var("DEEPSEEK_APPROVAL_POLICY", policy);
-        }
+        set_tui_env("CODEWHALE_APPROVAL_POLICY", policy);
+        set_tui_env("DEEPSEEK_APPROVAL_POLICY", policy);
     }
     if let Some(mode) = cli.sandbox_mode.as_ref() {
-        unsafe {
-            std::env::set_var("CODEWHALE_SANDBOX_MODE", mode);
-            std::env::set_var("DEEPSEEK_SANDBOX_MODE", mode);
-        }
+        set_tui_env("CODEWHALE_SANDBOX_MODE", mode);
+        set_tui_env("DEEPSEEK_SANDBOX_MODE", mode);
     }
     if cli.yolo {
-        unsafe {
-            std::env::set_var("CODEWHALE_YOLO", "true");
-        }
+        set_tui_env("CODEWHALE_YOLO", "true");
     }
     if let Some(api_key) = cli.api_key.as_ref() {
-        unsafe {
-            std::env::set_var(codewhale_config::CLI_API_KEY_ENV, api_key);
-        }
+        set_tui_env(codewhale_config::CLI_API_KEY_ENV, api_key);
         if !uses_raw_tui_provider && (cli.profile.is_none() || cli.provider.is_some()) {
-            unsafe {
-                for var in provider_env_vars(resolved_runtime.provider) {
-                    std::env::set_var(var, api_key);
-                }
+            for var in provider_env_vars(resolved_runtime.provider) {
+                set_tui_env(var, api_key);
             }
         }
-        unsafe {
-            std::env::set_var(codewhale_config::CLI_API_KEY_SOURCE_ENV, "cli");
-        }
+        set_tui_env(codewhale_config::CLI_API_KEY_SOURCE_ENV, "cli");
     }
     if let Some(base_url) = cli.base_url.as_ref() {
-        unsafe {
-            std::env::set_var("CODEWHALE_BASE_URL", base_url);
-            std::env::set_var("DEEPSEEK_BASE_URL", base_url);
-        }
+        set_tui_env("CODEWHALE_BASE_URL", base_url);
+        set_tui_env("DEEPSEEK_BASE_URL", base_url);
     }
 }
 
@@ -5534,11 +5518,19 @@ fn run_metrics_command(args: MetricsArgs) -> Result<()> {
     })
 }
 
+/// Maximum bytes read for an API key on stdin. Keys are short; anything
+/// larger is a piped file, not a key.
+const MAX_STDIN_API_KEY_BYTES: u64 = 8 * 1024;
+
 fn read_api_key_from_stdin() -> Result<String> {
     let mut input = String::new();
     io::stdin()
+        .take(MAX_STDIN_API_KEY_BYTES + 1)
         .read_to_string(&mut input)
         .context("failed to read api key from stdin")?;
+    if input.len() as u64 > MAX_STDIN_API_KEY_BYTES {
+        bail!("API key on stdin exceeds the 8 KiB limit");
+    }
     let key = input.trim().to_string();
     if key.is_empty() {
         bail!("empty API key provided");

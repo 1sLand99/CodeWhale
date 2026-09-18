@@ -937,6 +937,7 @@ impl HookProcessTree {
     fn terminate(&self, child: &mut Child) {
         #[cfg(unix)]
         {
+            // SAFETY: kill(2) dereferences no pointers.
             let result = unsafe { libc::kill(-self.pgid, libc::SIGKILL) };
             if result != 0 {
                 let error = std::io::Error::last_os_error();
@@ -972,6 +973,7 @@ impl HookProcessTree {
 impl Drop for HookProcessTree {
     fn drop(&mut self) {
         #[cfg(unix)]
+        // SAFETY: kill(2) dereferences no pointers.
         unsafe {
             // The shell may have exited while one of its descendants still
             // holds a captured pipe. Reaping the process group keeps hook
@@ -991,11 +993,13 @@ struct WindowsHookJob {
 #[cfg(windows)]
 impl WindowsHookJob {
     fn attach(child: &Child) -> std::io::Result<Self> {
+        // SAFETY: returned handle is owned by the new wrapper.
         let handle = unsafe { CreateJobObjectW(None, PCWSTR::null()).map_err(windows_io_error)? };
         let job = Self { handle };
         let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
 
+        // SAFETY: `limits` is live with matching size; both handles are live.
         unsafe {
             SetInformationJobObject(
                 job.handle,
@@ -1011,6 +1015,7 @@ impl WindowsHookJob {
     }
 
     fn terminate(&self) -> std::io::Result<()> {
+        // SAFETY: `self.handle` is a live owned job handle.
         unsafe { TerminateJobObject(self.handle, 1).map_err(windows_io_error) }
     }
 }
@@ -1018,6 +1023,7 @@ impl WindowsHookJob {
 #[cfg(windows)]
 impl Drop for WindowsHookJob {
     fn drop(&mut self) {
+        // SAFETY: `self.handle` is owned here; Drop runs once.
         unsafe {
             let _ = CloseHandle(self.handle);
         }
@@ -1032,21 +1038,26 @@ fn windows_io_error(error: windows::core::Error) -> std::io::Error {
 #[cfg(windows)]
 fn resume_windows_process(child: &Child) -> std::io::Result<()> {
     let snapshot =
+        // SAFETY: returned handle is owned here; closed before return.
         unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0).map_err(windows_io_error)? };
     let result = (|| {
         let mut entry = THREADENTRY32 {
             dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
             ..Default::default()
         };
+        // SAFETY: `entry` is live with dwSize initialized above.
         let mut next = unsafe { Thread32First(snapshot, &mut entry) };
         let mut resumed = 0usize;
         while next.is_ok() {
             if entry.th32OwnerProcessID == child.id() {
+                // SAFETY: returned handle is owned here; closed below.
                 let thread = unsafe {
                     OpenThread(THREAD_SUSPEND_RESUME, false, entry.th32ThreadID)
                         .map_err(windows_io_error)?
                 };
+                // SAFETY: `thread` is a live owned handle.
                 let resume_result = unsafe { ResumeThread(thread) };
+                // SAFETY: `thread` is owned here and not used after.
                 let close_result = unsafe { CloseHandle(thread).map_err(windows_io_error) };
                 if resume_result == u32::MAX {
                     return Err(std::io::Error::last_os_error());
@@ -1054,6 +1065,7 @@ fn resume_windows_process(child: &Child) -> std::io::Result<()> {
                 close_result?;
                 resumed += 1;
             }
+            // SAFETY: `entry` is live with dwSize initialized above.
             next = unsafe { Thread32Next(snapshot, &mut entry) };
         }
         if resumed == 0 {
@@ -1063,6 +1075,7 @@ fn resume_windows_process(child: &Child) -> std::io::Result<()> {
         }
         Ok(())
     })();
+    // SAFETY: `snapshot` is owned here and not used after.
     let close_result = unsafe { CloseHandle(snapshot).map_err(windows_io_error) };
     result?;
     close_result

@@ -1460,14 +1460,17 @@ impl TaskManager {
         let tasks_dir = cfg.data_dir.join("tasks");
         let artifacts_dir = cfg.data_dir.join("artifacts");
         let queue_path = cfg.data_dir.join("queue.json");
-        fs::create_dir_all(&tasks_dir)
+        tokio::fs::create_dir_all(&tasks_dir)
+            .await
             .with_context(|| format!("Failed to create tasks dir {}", tasks_dir.display()))?;
-        fs::create_dir_all(&artifacts_dir).with_context(|| {
-            format!(
-                "Failed to create task artifacts dir {}",
-                artifacts_dir.display()
-            )
-        })?;
+        tokio::fs::create_dir_all(&artifacts_dir)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to create task artifacts dir {}",
+                    artifacts_dir.display()
+                )
+            })?;
 
         let execution_lease = TaskExecutionLease::new(&cfg.data_dir, identity.0, identity.1)?;
         let cancel_token = CancellationToken::new();
@@ -1780,7 +1783,9 @@ impl TaskManager {
                 write_json_atomic(&staged_task_path, &task)?;
             }
             if let Err(err) = self.persist_queue_locked(&next_queue) {
-                if !recover_stage && let Err(cleanup_err) = fs::remove_file(&staged_task_path) {
+                if !recover_stage
+                    && let Err(cleanup_err) = tokio::fs::remove_file(&staged_task_path).await
+                {
                     tracing::warn!(
                         task_id = %task.id,
                         error = %cleanup_err,
@@ -1789,12 +1794,12 @@ impl TaskManager {
                 }
                 return Err(err);
             }
-            if let Err(promote_err) = fs::rename(&staged_task_path, &task_path) {
+            if let Err(promote_err) = tokio::fs::rename(&staged_task_path, &task_path).await {
                 let rollback_error = self.persist_queue_locked(&state.queue).err();
                 let cleanup_error = if recover_stage {
                     None
                 } else {
-                    fs::remove_file(&staged_task_path).err()
+                    tokio::fs::remove_file(&staged_task_path).await.err()
                 };
                 let mut message =
                     format!("Failed to promote staged task {}: {promote_err}", task.id);
