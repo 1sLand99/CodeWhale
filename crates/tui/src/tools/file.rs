@@ -585,6 +585,22 @@ async fn acquire_file_mutation(
     }
 }
 
+/// Atomic workspace write on the blocking pool: temp create plus fsync plus
+/// rename (and a retry loop on Windows) must not park a Tokio worker
+/// (blocking-call convention, #6149). Error shape matches the historical
+/// inline call.
+async fn run_blocking_write_atomic(path: &Path, contents: Vec<u8>) -> Result<(), ToolError> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        crate::utils::write_atomic_workspace(&path, &contents).map_err(|e| {
+            ToolError::execution_failed(format!("Failed to write {}: {e}", path.display()))
+        })
+    })
+    .await
+    .map_err(|e| ToolError::execution_failed(format!("File write task: {e}")))??;
+    Ok(())
+}
+
 fn check_file_operation_cancelled(context: &ToolContext) -> Result<(), ToolError> {
     if context
         .cancel_token
@@ -946,7 +962,16 @@ impl ToolSpec for ReadFileTool {
             return Ok(result);
         }
         if is_image_for_ocr(&file_path) {
-            return read_image_via_ocr(&file_path, path_str);
+            // OCR shells out to tesseract (or runs a Vision pass): the blocking
+            // subprocess call stays on the blocking pool (blocking-call
+            // convention, #6149).
+            let file_path = file_path.clone();
+            let requested_path = path_str.to_string();
+            return tokio::task::spawn_blocking(move || {
+                read_image_via_ocr(&file_path, &requested_path)
+            })
+            .await
+            .map_err(|e| ToolError::execution_failed(format!("Image OCR task: {e}")))?;
         }
 
         // Open before parameter parsing so a missing file keeps the
@@ -1320,20 +1345,20 @@ fn read_image_via_ocr(path: &Path, requested_path: &str) -> Result<ToolResult, T
 }
 
 /// Detect an existing PDF by extension or by sniffing `%PDF` magic bytes.
-fn is_pdf(path: &Path) -> Result<bool, ToolError> {
+async fn is_pdf(path: &Path) -> Result<bool, ToolError> {
     let extension_matches = path
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"));
-    let mut file = fs::File::open(path).map_err(|error| {
+    let mut file = tokio::fs::File::open(path).await.map_err(|error| {
         ToolError::execution_failed(format!("Failed to read {}: {error}", path.display()))
     })?;
     if extension_matches {
         return Ok(true);
     }
     let mut buf = [0u8; 4];
-    use std::io::Read;
-    Ok(file.read_exact(&mut buf).is_ok() && &buf == b"%PDF")
+    use tokio::io::AsyncReadExt;
+    Ok(file.read_exact(&mut buf).await.is_ok() && &buf == b"%PDF")
 }
 
 fn is_image_for_ocr(path: &Path) -> bool {
@@ -1418,7 +1443,7 @@ async fn read_pdf_if_detected(
     pages: Option<&str>,
     command: super::pdf::PdfTextCommand<'_>,
 ) -> Result<Option<ToolResult>, ToolError> {
-    if !is_pdf(path)? {
+    if !is_pdf(path).await? {
         return Ok(None);
     }
     // Validate the `pages` spec once, up front, so both extractor paths
@@ -1502,9 +1527,7 @@ impl WriteFileTool {
         {
             written = normalized;
         }
-        crate::utils::write_atomic_workspace(&file_path, written.as_bytes()).map_err(|error| {
-            ToolError::execution_failed(format!("Failed to write {}: {error}", file_path.display()))
-        })?;
+        run_blocking_write_atomic(&file_path, written.clone().into_bytes()).await?;
         check_file_operation_cancelled(context)?;
         context.note_file_read(&file_path);
         drop(mutation_guard);
@@ -1635,9 +1658,7 @@ impl ToolSpec for WriteFileTool {
             written = normalized;
         }
 
-        crate::utils::write_atomic_workspace(&file_path, written.as_bytes()).map_err(|e| {
-            ToolError::execution_failed(format!("Failed to write {}: {}", file_path.display(), e))
-        })?;
+        run_blocking_write_atomic(&file_path, written.clone().into_bytes()).await?;
         context.note_file_read(&file_path);
 
         let display = file_path.display().to_string();
@@ -2082,14 +2103,7 @@ impl EditFileTool {
             final_content = normalized;
         }
 
-        crate::utils::write_atomic_workspace(&file_path, final_content.as_bytes()).map_err(
-            |error| {
-                ToolError::execution_failed(format!(
-                    "Failed to write {}: {error}",
-                    file_path.display()
-                ))
-            },
-        )?;
+        run_blocking_write_atomic(&file_path, final_content.clone().into_bytes()).await?;
         check_file_operation_cancelled(context)?;
         context.note_file_read(&file_path);
         drop(mutation_guard);
@@ -2333,9 +2347,7 @@ impl ToolSpec for EditFileTool {
             None => false,
         };
 
-        crate::utils::write_atomic_workspace(&file_path, updated.as_bytes()).map_err(|e| {
-            ToolError::execution_failed(format!("Failed to write {}: {}", file_path.display(), e))
-        })?;
+        run_blocking_write_atomic(&file_path, updated.clone().into_bytes()).await?;
 
         // #5209 — never emit a success receipt unless the on-disk write
         // actually applied. A fabricated "Replaced 1 occurrence" + diff is

@@ -55,14 +55,20 @@ impl ToolSpec for ImageOcrTool {
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
         let path_str = required_str(&input, "path")?;
         let image_path = context.resolve_path(path_str)?;
-        if !image_path.exists() {
-            return Err(ToolError::execution_failed(format!(
-                "image_ocr: source path does not exist: {}",
-                image_path.display()
-            )));
-        }
-
-        let text = ocr_image_path(&image_path)?;
+        // OCR shells out to tesseract (or runs a Vision pass): the blocking
+        // subprocess call stays on the blocking pool (blocking-call
+        // convention, #6149).
+        let text = tokio::task::spawn_blocking(move || {
+            if !image_path.exists() {
+                return Err(ToolError::execution_failed(format!(
+                    "image_ocr: source path does not exist: {}",
+                    image_path.display()
+                )));
+            }
+            ocr_image_path(&image_path)
+        })
+        .await
+        .map_err(|e| ToolError::execution_failed(format!("Image OCR task: {e}")))??;
         Ok(ToolResult::success(text))
     }
 }
