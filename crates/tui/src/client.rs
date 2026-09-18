@@ -1,7 +1,7 @@
-//! HTTP client for DeepSeek's OpenAI-compatible Chat Completions API.
+//! HTTP client for the resolved provider route.
 //!
-//! DeepSeek documents `/chat/completions` as the primary endpoint, and this
-//! client now routes all normal traffic through that surface.
+//! Routes reach the provider through its OpenAI-compatible or native wire
+//! surface; `/chat/completions` is the common primary endpoint.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -263,7 +263,7 @@ pub(crate) struct TranslationProviderResponse {
     pub(crate) usage: Option<Usage>,
 }
 
-/// Client for DeepSeek's OpenAI-compatible APIs.
+/// Universal client for the resolved provider route.
 #[must_use]
 pub struct CodewhaleClient {
     pub(super) http_client: reqwest::Client,
