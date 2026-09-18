@@ -1588,11 +1588,30 @@ impl PendingAuthorityWatch {
         reason_slot: Arc<std::sync::Mutex<Option<String>>>,
     ) -> Self {
         let task_cancel = cancel.clone();
+        // The watch stays per-connection by design (#6211 R7a): it is born
+        // with the connect attempt (covering the pre-insertion window) and
+        // dies with the connection, so a watched server can neither be
+        // missed nor leak. A pool-level task would need the pool lock —
+        // held across in-flight calls — and regress the mid-call trip this
+        // exists for. What moves is the check itself: synchronous
+        // state fs has no place on the executor at 20Hz, so it runs on the
+        // blocking pool while the 50ms revocation cadence is unchanged.
+        let source = Arc::new(source);
         let handle = tokio::spawn(async move {
             loop {
-                if let Err(reason) =
+                let source = Arc::clone(&source);
+                let check = tokio::task::spawn_blocking(move || {
                     crate::plugins::registry::verify_plugin_state_authority(&source.authority)
-                {
+                })
+                .await;
+                let reason = match check {
+                    Ok(Err(reason)) => Some(reason),
+                    Ok(Ok(())) => None,
+                    Err(_) => {
+                        Some("plugin authority check failed to run; failing closed".to_string())
+                    }
+                };
+                if let Some(reason) = reason {
                     if let Ok(mut slot) = reason_slot.lock() {
                         *slot = Some(reason);
                     }

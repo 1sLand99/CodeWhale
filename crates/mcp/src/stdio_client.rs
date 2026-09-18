@@ -542,25 +542,23 @@ impl ChildProcessMcpClient {
             }
         };
         let (sender, responses) = sync_channel(MAX_PENDING_CHILD_MESSAGES);
+        let mut child = child;
+        let stdin = child
+            .stdin
+            .take()
+            .with_context(|| format!("MCP server '{server_name}': child stdin unavailable"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .with_context(|| format!("MCP server '{server_name}': child stdout unavailable"))?;
         let mut connection = Connection {
-            child,
+            child: Some(child),
             stdin: None,
             responses,
             next_id: 1,
             #[cfg(windows)]
             _job: job,
         };
-
-        let stdin = connection
-            .child
-            .stdin
-            .take()
-            .with_context(|| format!("MCP server '{server_name}': child stdin unavailable"))?;
-        let stdout = connection
-            .child
-            .stdout
-            .take()
-            .with_context(|| format!("MCP server '{server_name}': child stdout unavailable"))?;
 
         // A dedicated reader thread keeps `recv_timeout` able to bound a wait
         // that a blocking read on the child would not. The custom line reader
@@ -775,7 +773,8 @@ impl McpManagedClient for ChildProcessMcpClient {
 }
 
 struct Connection {
-    child: Child,
+    /// `None` once `Drop` hands the child to the reaper thread.
+    child: Option<Child>,
     stdin: Option<Arc<Mutex<ChildStdin>>>,
     responses: Receiver<ChildStdoutMessage>,
     next_id: u64,
@@ -939,9 +938,12 @@ impl Connection {
     /// so the cost buys a real diagnostic ("exited with status 127" is the
     /// difference between a crashed server and a missing one).
     fn exit_note(&mut self) -> String {
+        let Some(child) = self.child.as_mut() else {
+            return String::new();
+        };
         let deadline = Instant::now() + EXIT_STATUS_GRACE;
         loop {
-            match self.child.try_wait() {
+            match child.try_wait() {
                 Ok(Some(status)) => return format!(" (process exited with {status})"),
                 Ok(None) if Instant::now() < deadline => {
                     thread::sleep(Duration::from_millis(5));
@@ -962,30 +964,66 @@ fn is_broken_pipe(err: &anyhow::Error) -> bool {
     })
 }
 
+/// Reap stdio children off the dropping thread (#6211 R4). `Drop` runs on
+/// whichever thread drops the client — manager reload, pool rebuild — and
+/// the half-second grace wait must not stall it, least of all an executor
+/// thread. One shared thread reaps every child; drops only send. What this
+/// does not do: join the reaper at process exit, so a child that ignores
+/// EOF can outlive a racing shutdown where the old synchronous `Drop`
+/// would have killed it first.
+fn child_reaper() -> &'static std::sync::mpsc::Sender<Child> {
+    static REAPER: std::sync::OnceLock<std::sync::mpsc::Sender<Child>> = std::sync::OnceLock::new();
+    REAPER.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<Child>();
+        thread::Builder::new()
+            .name("mcp-stdio-reaper".to_string())
+            .spawn(move || {
+                for mut child in rx {
+                    reap_child(&mut child);
+                }
+            })
+            .expect("MCP stdio reaper thread spawns");
+        tx
+    })
+}
+
+/// Grace-wait a child, then kill what ignores stdin-close. Runs on the
+/// reaper thread, or inline in `Drop` if the reaper is gone.
+fn reap_child(child: &mut Child) {
+    let deadline = Instant::now() + SHUTDOWN_GRACE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            _ => break,
+        }
+    }
+    #[cfg(unix)]
+    unsafe {
+        // Also run after the immediate launcher exited. Descendants can
+        // still own the group and the stdout/stderr pipe descriptors.
+        let _ = libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 impl Drop for Connection {
     fn drop(&mut self) {
         // Closing stdin is the protocol-level shutdown signal for a stdio MCP
         // server; kill only the ones that ignore it, so servers get a chance
         // to flush state.
         self.stdin.take();
-        let deadline = Instant::now() + SHUTDOWN_GRACE;
-        loop {
-            match self.child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) if Instant::now() < deadline => {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                _ => break,
-            }
+        // The grace wait leaves the dropping thread: the child is reaped on
+        // the shared reaper thread. If the reaper itself is gone, reap
+        // inline — today's behavior — rather than leak the child.
+        if let Some(child) = self.child.take()
+            && let Err(mut failed) = child_reaper().send(child)
+        {
+            reap_child(&mut failed.0);
         }
-        #[cfg(unix)]
-        unsafe {
-            // Also run after the immediate launcher exited. Descendants can
-            // still own the group and the stdout/stderr pipe descriptors.
-            let _ = libc::kill(-(self.child.id() as libc::pid_t), libc::SIGKILL);
-        }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
     }
 }
 
@@ -1347,6 +1385,60 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn reaper_kills_a_child_that_ignores_stdin_close() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "sleep 30"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Close stdin like `Drop` does, then reap: the sleeper ignores it.
+        drop(child.stdin.take());
+        reap_child(&mut child);
+        assert!(
+            child.try_wait().unwrap().is_some(),
+            "reaper must have killed the child"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_a_connection_with_a_live_child_returns_before_the_grace() {
+        let child = Command::new("/bin/sh")
+            .args(["-c", "sleep 30"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let (_tx, responses) = sync_channel(1);
+        let connection = Connection {
+            child: Some(child),
+            stdin: None,
+            responses,
+            next_id: 1,
+        };
+        let started = Instant::now();
+        drop(connection);
+        assert!(
+            started.elapsed() < SHUTDOWN_GRACE,
+            "drop must hand off instead of grace-waiting"
+        );
+        // The reaper owns the child now: it must die without anyone waiting
+        // inline, so the handoff leaks nothing.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+            if !alive {
+                break;
+            }
+            assert!(Instant::now() < deadline, "reaper never reaped pid {pid}");
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    #[cfg(unix)]
     fn assert_descendant_cleanup(handshake: bool, launcher_exits: bool) {
         use std::io::Read;
 
@@ -1406,6 +1498,8 @@ IFS= read -r initialized
                             .lock()
                             .unwrap()
                             .child
+                            .as_mut()
+                            .expect("child present before drop")
                             .try_wait()
                             .unwrap()
                             .is_some()
@@ -1589,9 +1683,22 @@ printf 'stdin closed\n' > "$CODEWHALE_MCP_TEST_MARKER"
 
         // The reader owns only a weak stdin handle. Dropping the client must
         // therefore still deliver EOF to the child and let it exit cleanly;
-        // a strong reader-thread handle would force Drop's kill fallback.
+        // a strong reader-thread handle would force the kill fallback. Drop
+        // hands the child to the reaper thread instead of waiting, so poll
+        // for the marker the clean exit writes.
         drop(client);
-        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "stdin closed\n");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(body) = std::fs::read_to_string(&marker) {
+                assert_eq!(body, "stdin closed\n");
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "dropped client never delivered stdin EOF"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
         std::fs::remove_file(marker).unwrap();
     }
 
