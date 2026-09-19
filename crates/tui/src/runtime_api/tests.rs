@@ -3759,9 +3759,19 @@ async fn turn_endpoint_operation_key_returns_original_and_conflicts_on_mismatch(
     assert!(!serde_json::to_string(&first)?.contains("cwc-http-operation-1"));
 
     let replay_response = client.post(&url).json(&request).send().await?;
-    assert_eq!(replay_response.status(), StatusCode::CREATED);
+    // A replay acknowledges work already accepted rather than admitting new
+    // work: 200 plus an explicit flag, so a client that retried an ambiguous
+    // submit can tell it is looking at the turn it already started (#76).
+    assert_eq!(replay_response.status(), StatusCode::OK);
     let replay: serde_json::Value = replay_response.json().await?;
     assert_eq!(replay["turn"]["id"], first_turn_id);
+    assert_eq!(replay["idempotent_replay"], true);
+    // A fresh admission carries no flag, so the response every existing client
+    // already parses is byte-identical to before.
+    assert!(
+        first.get("idempotent_replay").is_none(),
+        "only a replay is marked as one: {first}"
+    );
 
     let mismatch = client
         .post(&url)

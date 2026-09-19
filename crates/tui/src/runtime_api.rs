@@ -848,6 +848,16 @@ struct FleetEventsQuery {
 struct StartTurnResponse {
     thread: ThreadRecord,
     turn: TurnRecord,
+    /// Present only when the durable `operation_key` made this submission a
+    /// replay of one already accepted: the turn is the original and nothing
+    /// new was admitted. Omitted otherwise so every existing response stays
+    /// byte-identical — a client that never sends a key sees no change.
+    #[serde(skip_serializing_if = "replay_flag_is_absent")]
+    idempotent_replay: bool,
+}
+
+fn replay_flag_is_absent(replayed: &bool) -> bool {
+    !*replayed
 }
 
 fn install_runtime_server_workshop_budgets(
@@ -5353,9 +5363,9 @@ async fn start_thread_turn(
     Path(id): Path<String>,
     Json(req): Json<StartTurnRequest>,
 ) -> Result<(StatusCode, Json<StartTurnResponse>), ApiError> {
-    let turn = state
+    let (turn, replayed) = state
         .runtime_threads
-        .start_turn(&id, req)
+        .start_turn_reporting_replay(&id, req)
         .await
         .map_err(map_thread_err)?;
     let thread = state
@@ -5363,9 +5373,22 @@ async fn start_thread_turn(
         .get_thread(&id)
         .await
         .map_err(map_thread_err)?;
+    // A replay acknowledges work already accepted rather than admitting new
+    // work: 200 tells the client "this is the turn I already started", which
+    // is what lets an ambiguous submit resolve without duplicate messages or
+    // tools. A fresh admission stays 201.
+    let status = if replayed {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
     Ok((
-        StatusCode::CREATED,
-        Json(StartTurnResponse { thread, turn }),
+        status,
+        Json(StartTurnResponse {
+            thread,
+            turn,
+            idempotent_replay: replayed,
+        }),
     ))
 }
 
@@ -5548,7 +5571,11 @@ async fn compact_thread(
         .map_err(map_thread_err)?;
     Ok((
         StatusCode::ACCEPTED,
-        Json(StartTurnResponse { thread, turn }),
+        Json(StartTurnResponse {
+            thread,
+            turn,
+            idempotent_replay: false,
+        }),
     ))
 }
 
