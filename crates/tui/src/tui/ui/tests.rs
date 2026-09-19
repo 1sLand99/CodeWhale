@@ -4168,6 +4168,92 @@ fn mouse_selection_autocopies_on_release_without_ctrl_c() {
 }
 
 #[test]
+fn mouse_selection_fragment_drag_copies_exact_text() {
+    // A drag that cuts a cell in half must copy the fragment's exact text,
+    // not round out to the whole cell. The receipt stays
+    // the pre-existing text-fallback status line (shared with the
+    // `selection_copy_markdown = false` path) rather than the Markdown toast;
+    // migrating copy receipts to toasts is broader than this fix.
+    let mut app = create_test_app();
+    app.history = vec![HistoryCell::Assistant {
+        content: "alpha beta".to_string(),
+        streaming: false,
+    }];
+    app.resync_history_revisions();
+    app.viewport.transcript_cache.ensure(
+        &app.history,
+        &app.history_revisions,
+        80,
+        app.transcript_render_options(),
+    );
+    app.viewport.last_transcript_area = Some(Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 8,
+    });
+    app.viewport.last_transcript_top = 0;
+    app.viewport.last_transcript_total = app.viewport.transcript_cache.total_lines();
+    app.viewport.last_transcript_padding_top = 0;
+
+    handle_mouse_event(
+        &mut app,
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        },
+    );
+    // Fragment coverage: "alpha beta" spans columns 0-10, so releasing at
+    // column 4 cuts the cell in half and the Markdown path must decline.
+    handle_mouse_event(
+        &mut app,
+        MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 4,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        },
+    );
+    handle_mouse_event(
+        &mut app,
+        MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 4,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        },
+    );
+
+    let copied = app
+        .clipboard
+        .last_written_text()
+        .expect("fragment drag must copy");
+    // Mouse columns include the 2-wide rail/prefix before content, so
+    // releasing at column 4 selects the leading 2 content chars.
+    assert_eq!(
+        copied, "al",
+        "fragment drag must copy exact text without rounding out"
+    );
+    assert!(
+        !copied.contains("beta"),
+        "must not round out to the whole cell, got {copied:?}"
+    );
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Selection copied"),
+        "fragment copy reports through the text-fallback receipt"
+    );
+    assert!(
+        !app.status_toasts
+            .iter()
+            .any(|toast| toast.text.contains("Markdown")),
+        "fragment copy takes the text fallback, not the Markdown toast"
+    );
+}
+
+#[test]
 fn loading_mouse_filter_keeps_hover_and_active_drags() {
     let mut app = create_test_app();
     app.is_loading = true;
