@@ -24,6 +24,7 @@ use super::{
     render_underwater_surface, truncate_view_text,
 };
 use crate::tui::app::App;
+use crate::tui::menu_style;
 use codewhale_localization::{Locale, MessageId, tr};
 use codewhale_palette as palette;
 
@@ -1477,6 +1478,8 @@ pub struct ExtensionsView {
     /// grammar the rest of the chrome uses instead of raw palette constants.
     theme: codewhale_palette::UiTheme,
     hits: RefCell<HitAreas>,
+    hovered_row: Option<usize>,
+    hovered_tab: Option<ExtensionsTab>,
     /// Last time `tick` asked the host for a fresh snapshot. Bounds the poll
     /// so a per-frame tick cannot turn into a rebuild every frame.
     last_poll: std::time::Instant,
@@ -1510,6 +1513,8 @@ impl ExtensionsView {
             folded_groups: BTreeSet::new(),
             theme: codewhale_palette::UI_THEME,
             hits: RefCell::new(HitAreas::default()),
+            hovered_row: None,
+            hovered_tab: None,
             last_poll: std::time::Instant::now(),
             pending_remove: None,
         };
@@ -1687,6 +1692,8 @@ impl ExtensionsView {
     }
 
     fn set_tab(&mut self, tab: ExtensionsTab) {
+        self.hovered_row = None;
+        self.hovered_tab = None;
         self.pending_remove = None;
         self.active_tab = tab;
         self.clamp_selection();
@@ -1741,6 +1748,8 @@ impl ModalView for ExtensionsView {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> ViewAction {
+        self.hovered_row = None;
+        self.hovered_tab = None;
         // One navigation grammar (grokbuild, the stated authority): Tab and
         // Shift+Tab / BackTab move across the tab bar, always — even during
         // a search, which keeps its query on the new tab. `/` searches, Esc
@@ -1841,6 +1850,19 @@ impl ModalView for ExtensionsView {
 
     fn handle_mouse(&mut self, mouse: MouseEvent) -> ViewAction {
         match mouse.kind {
+            MouseEventKind::Moved => {
+                let hits = self.hits.borrow();
+                let point = (mouse.column, mouse.row).into();
+                self.hovered_row = hits
+                    .rows
+                    .iter()
+                    .find_map(|(rect, row)| rect.contains(point).then_some(*row));
+                self.hovered_tab = hits
+                    .tabs
+                    .iter()
+                    .find_map(|(rect, tab)| rect.contains(point).then_some(*tab));
+                return ViewAction::None;
+            }
             // The wheel moves this list, not the transcript behind it.
             MouseEventKind::ScrollUp => {
                 self.pending_remove = None;
@@ -1913,6 +1935,7 @@ impl ModalView for ExtensionsView {
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
+        *self.hits.borrow_mut() = HitAreas::default();
         let body = render_underwater_surface(
             area,
             buf,
@@ -1949,10 +1972,9 @@ impl ModalView for ExtensionsView {
             let active = tab == self.active_tab;
             let focused = active && self.focus == ExtensionsFocus::Tabs;
             let style = if focused {
-                Style::default()
-                    .fg(palette::WHALE_BG)
-                    .bg(palette::WHALE_ACTION)
-                    .add_modifier(Modifier::BOLD)
+                menu_style::selected_row_style()
+            } else if self.hovered_tab == Some(tab) {
+                menu_style::hovered_row_style().fg(palette::TEXT_PRIMARY)
             } else if active {
                 Style::default()
                     .fg(palette::WHALE_ACTION)
@@ -2015,10 +2037,11 @@ impl ModalView for ExtensionsView {
                 1,
             );
             let is_selected = entry_index == selected;
+            let hovered = self.hovered_row == Some(entry_index);
             let style = if is_selected && self.focus == ExtensionsFocus::List {
-                Style::default()
-                    .fg(palette::WHALE_BG)
-                    .bg(palette::WHALE_ACTION)
+                menu_style::selected_row_style()
+            } else if hovered {
+                menu_style::hovered_row_style().fg(palette::TEXT_PRIMARY)
             } else if is_selected {
                 Style::default()
                     .fg(palette::WHALE_ACTION)
@@ -2092,7 +2115,7 @@ impl ModalView for ExtensionsView {
                 .map(|(text, _)| text.as_str())
                 .collect::<String>();
             let clipped = truncate_view_text(&joined, usize::from(row_area.width));
-            let spans = if is_selected || clipped.len() != joined.len() {
+            let spans = if is_selected || hovered || clipped.len() != joined.len() {
                 vec![Span::styled(clipped, style)]
             } else {
                 parts
@@ -2107,7 +2130,9 @@ impl ModalView for ExtensionsView {
                     })
                     .collect()
             };
-            Paragraph::new(Line::from(spans)).render(row_area, buf);
+            Paragraph::new(Line::from(spans))
+                .style(style)
+                .render(row_area, buf);
             hits.rows.push((row_area, entry_index));
         }
 
@@ -2194,6 +2219,34 @@ impl ModalView for ExtensionsView {
 mod tests {
     use super::*;
     use crate::mcp::McpRecoveryKind;
+
+    #[test]
+    fn workbench_extension_hover_preserves_selection_and_small_resize_clears_targets() {
+        let mut view = view_on_item(ExtensionAction::Command {
+            label: "enable".into(),
+            command: "/plugin enable demo".into(),
+            disposition: RowActionDisposition::InPlace,
+        });
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        view.render(area, &mut buf);
+        let (hit, row) = view.hits.borrow().rows[0];
+        let selected = view.selected;
+        view.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: hit.x,
+            row: hit.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(view.hovered_row, Some(row));
+        assert_eq!(view.selected, selected);
+        view.render(area, &mut buf);
+        assert_eq!(buf[(hit.right() - 1, hit.y)].bg, palette::SURFACE_ELEVATED);
+        let tiny = Rect::new(0, 0, 20, 4);
+        view.render(tiny, &mut Buffer::empty(tiny));
+        assert!(view.hits.borrow().rows.is_empty());
+        assert!(view.hits.borrow().tabs.is_empty());
+    }
 
     #[test]
     fn a_plugin_contributed_server_is_not_mutable_from_this_panel() {

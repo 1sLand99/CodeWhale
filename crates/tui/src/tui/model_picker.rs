@@ -244,6 +244,7 @@ pub struct ModelPickerView {
     configured_providers: Vec<ApiProvider>,
     row_hitboxes: RefCell<Vec<(Rect, Pane, usize)>>,
     last_mouse_selected: Option<(Pane, usize)>,
+    hovered_row: Option<(Pane, usize)>,
     /// UI locale captured from the app at construction (#4057 wave 2).
     locale: Locale,
     pinned_models: Vec<PinnedModel>,
@@ -546,6 +547,7 @@ impl ModelPickerView {
             configured_providers,
             row_hitboxes: RefCell::new(Vec::new()),
             last_mouse_selected: None,
+            hovered_row: None,
             locale: app.ui_locale,
             pinned_models: pins,
             projection: RefCell::new(None),
@@ -1318,6 +1320,26 @@ impl ModelPickerView {
         state: PaneRenderState,
     ) {
         self.pane_hitboxes.borrow_mut().push((area, state.pane));
+        // A short stacked picker gives the focused pane the working space.
+        // The other pane remains a clickable summary with its actual choice.
+        if area.height == 1 && !state.focused {
+            let summary = rows.get(state.selected).map_or_else(
+                || title.to_string(),
+                |row| format!("{title}: {}", row.primary),
+            );
+            Paragraph::new(crate::tui::ui_text::semantic_truncate(
+                &summary,
+                usize::from(area.width),
+            ))
+            .style(Style::default().fg(palette::TEXT_MUTED))
+            .render(area, buf);
+            if !rows.is_empty() {
+                self.row_hitboxes
+                    .borrow_mut()
+                    .push((area, state.pane, state.selected));
+            }
+            return;
+        }
         let header_height = if state.pane == Pane::Model && area.height >= 3 {
             2
         } else {
@@ -1403,10 +1425,20 @@ impl ModelPickerView {
             } else {
                 " "
             };
-            let label_style = if is_selected && !locked {
+            let focused = is_selected && state.focused;
+            let hovered = self.hovered_row == Some((state.pane, idx)) && !focused;
+            let label_style = if focused && !locked {
                 menu_style::selected_row_style()
-            } else if is_selected && locked {
+            } else if focused && locked {
                 menu_style::disabled_selected_row_style()
+            } else if hovered {
+                menu_style::hovered_row_style().fg(if locked {
+                    palette::TEXT_MUTED
+                } else {
+                    palette::TEXT_PRIMARY
+                })
+            } else if is_selected {
+                Style::default().fg(palette::WHALE_ACTION).bold()
             } else if locked {
                 Style::default()
                     .fg(palette::TEXT_MUTED)
@@ -1414,8 +1446,10 @@ impl ModelPickerView {
             } else {
                 Style::default().fg(palette::TEXT_PRIMARY)
             };
-            let hint_style = if is_selected && !locked {
+            let hint_style = if focused && !locked {
                 menu_style::selected_row_bg_style().fg(palette::SELECTION_TEXT)
+            } else if hovered {
+                menu_style::hovered_row_style().fg(palette::TEXT_MUTED)
             } else {
                 Style::default().fg(palette::TEXT_MUTED)
             };
@@ -1437,6 +1471,9 @@ impl ModelPickerView {
                 state.pane,
                 idx,
             ));
+            if focused || hovered {
+                buf.set_style(Rect::new(inner.x, row_y, inner.width, 1), label_style);
+            }
             let spans = picker_row_spans(
                 row,
                 marker,
@@ -1445,7 +1482,11 @@ impl ModelPickerView {
                 label_style,
                 hint_style,
             );
-            lines.push(Line::from(spans));
+            lines.push(Line::from(spans).style(if focused || hovered {
+                label_style
+            } else {
+                Style::default()
+            }));
         }
         if rows.is_empty() {
             // A search that matches nothing must say so, not render a bare
@@ -3632,6 +3673,7 @@ impl ModalView for ModelPickerView {
 
     fn handle_key(&mut self, key: KeyEvent) -> ViewAction {
         self.last_mouse_selected = None;
+        self.hovered_row = None;
         // Movement keys come from the shared vocabulary (#6290); the match
         // below owns only the picker's own verbs. The live filter means the
         // typing-safe set — no letter aliases to eat the query.
@@ -3758,8 +3800,20 @@ impl ModalView for ModelPickerView {
 
     fn handle_mouse(&mut self, mouse: MouseEvent) -> ViewAction {
         match mouse.kind {
+            MouseEventKind::Moved => {
+                self.hovered_row =
+                    self.row_hitboxes
+                        .borrow()
+                        .iter()
+                        .find_map(|(rect, pane, idx)| {
+                            rect.contains((mouse.column, mouse.row).into())
+                                .then_some((*pane, *idx))
+                        });
+                ViewAction::None
+            }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 self.last_mouse_selected = None;
+                self.hovered_row = None;
                 let pane = self.pane_hitboxes.borrow().iter().find_map(|(rect, pane)| {
                     rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
                         .then_some(*pane)
@@ -3866,14 +3920,19 @@ impl ModelPickerView {
             ),
             ActionHint::new("Enter", tr(self.locale, self.apply_action_id())),
             ActionHint::new("⇧A", view_action),
-            ActionHint::new("Ctrl+S", tr(self.locale, MessageId::SessionsActionSort)),
         ];
+        if inner.height >= 16 {
+            footer_hints.push(ActionHint::new(
+                "Ctrl+S",
+                tr(self.locale, MessageId::SessionsActionSort),
+            ));
+        }
         if !self.can_edit_effort() {
             footer_hints.remove(1);
         }
         // A Fleet row has no startup default to save; the chord is a
         // session-route action only.
-        if self.purpose == ModelPickerPurpose::Session {
+        if self.purpose == ModelPickerPurpose::Session && inner.height >= 16 {
             footer_hints.insert(
                 4,
                 ActionHint::new(
@@ -3884,7 +3943,7 @@ impl ModelPickerView {
         }
         // Keep compact route modals focused on the core browse/apply actions;
         // wider shells have room to disclose the pin action too.
-        if inner.width >= 72 {
+        if inner.width >= 72 && inner.height >= 16 {
             if self.purpose == ModelPickerPurpose::Session {
                 footer_hints.push(ActionHint::new(
                     "⇧F",
@@ -3905,56 +3964,44 @@ impl ModelPickerView {
         let shell = ratatui::layout::Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
             .constraints([
-                ratatui::layout::Constraint::Length(3),
+                ratatui::layout::Constraint::Length(1),
                 ratatui::layout::Constraint::Min(1),
             ])
             .split(content);
-        Paragraph::new(vec![
-            Line::from(vec![
-                Span::styled(
-                    format!("─ {} ", tr(self.locale, MessageId::RoutePanelHeader)),
-                    Style::default().fg(palette::WHALE_ACTION).bold(),
-                ),
-                Span::styled(
-                    "──────────────────────── ",
-                    Style::default().fg(palette::BORDER_COLOR),
-                ),
-                Span::styled(
-                    format!(
-                        "{}{}",
-                        self.view.title_label(),
-                        catalog_freshness_title_suffix()
-                    ),
-                    Style::default().fg(palette::TEXT_MUTED),
-                ),
-                Span::styled(
-                    " ─────────────────",
-                    Style::default().fg(palette::BORDER_COLOR),
-                ),
-            ]),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled(
-                    format!("  {} ", tr(self.locale, MessageId::RouteProviderLabel)),
-                    Style::default().fg(palette::WHALE_ACTION),
-                ),
-                Span::styled(
-                    self.resolved_provider()
-                        .unwrap_or(self.initial_provider)
-                        .display_name(),
-                    Style::default().fg(palette::TEXT_PRIMARY),
-                ),
-                Span::styled(
-                    format!(" · {}", tr(self.locale, MessageId::RouteModelFirstAtomic)),
-                    Style::default().fg(palette::TEXT_MUTED),
-                ),
-            ]),
-        ])
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!("{} ", tr(self.locale, MessageId::RouteProviderLabel)),
+                Style::default().fg(palette::TEXT_MUTED),
+            ),
+            Span::styled(
+                self.resolved_provider()
+                    .unwrap_or(self.initial_provider)
+                    .display_name(),
+                Style::default().fg(palette::TEXT_PRIMARY),
+            ),
+            Span::styled(
+                catalog_freshness_title_suffix(),
+                Style::default().fg(palette::TEXT_MUTED),
+            ),
+        ]))
         .render(shell[0], buf);
 
         let mut layout = widen_model_pane(ListDetailLayout::split(shell[1], 24));
         if !self.can_edit_effort() {
             layout.list = shell[1];
+        } else if layout.stacked && shell[1].height < 12 {
+            let model_height = if self.focus == Pane::Model {
+                shell[1].height.saturating_sub(1)
+            } else {
+                u16::from(shell[1].height > 0)
+            };
+            layout.list = Rect::new(shell[1].x, shell[1].y, shell[1].width, model_height);
+            layout.detail = Rect::new(
+                shell[1].x,
+                shell[1].y + model_height,
+                shell[1].width,
+                shell[1].height.saturating_sub(model_height),
+            );
         }
 
         self.ensure_projection();
@@ -4313,6 +4360,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn workbench_hover_preserves_model_selection_and_clears_on_keyboard_input() {
+        let mut picker = test_picker();
+        picker
+            .model_rows
+            .push(model_row(ApiProvider::Deepseek, true));
+        let area = Rect::new(0, 0, 100, 32);
+        let mut buf = Buffer::empty(area);
+        picker.render(area, &mut buf);
+        let hit = picker
+            .row_hitboxes
+            .borrow()
+            .iter()
+            .find(|(_, pane, idx)| *pane == Pane::Model && *idx == 1)
+            .unwrap()
+            .0;
+        picker.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: hit.x,
+            row: hit.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(picker.hovered_row, Some((Pane::Model, 1)));
+        assert_eq!(picker.selected_model_idx, 0);
+        picker.render(area, &mut buf);
+        assert_eq!(buf[(hit.right() - 1, hit.y)].bg, palette::SURFACE_ELEVATED);
+        picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(picker.hovered_row, None);
+    }
+
     fn test_picker() -> ModelPickerView {
         ModelPickerView {
             initial_model: "model".to_string(),
@@ -4334,6 +4411,7 @@ mod tests {
             configured_providers: Vec::new(),
             row_hitboxes: RefCell::new(Vec::new()),
             last_mouse_selected: None,
+            hovered_row: None,
             locale: Locale::En,
             pinned_models: Vec::new(),
             projection: RefCell::new(None),

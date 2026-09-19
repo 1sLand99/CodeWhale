@@ -51,7 +51,7 @@ use crate::tui::list_nav::{self, Motion};
 use crate::tui::menu_style;
 use crate::tui::views::{
     ActionHint, EmptyState, ListDetailLayout, ModalKind, ModalView, ViewAction, ViewEvent,
-    centered_modal_area, render_modal_footer, render_modal_surface,
+    centered_modal_area, render_modal_footer, render_modal_surface, render_underwater_surface,
 };
 use codewhale_config::catalog::{CatalogOffering, CatalogSnapshot};
 use codewhale_config::provider::{CredentialAcquisition, WireFormat};
@@ -225,6 +225,9 @@ pub struct ProviderPickerView {
     list_row_hitboxes: RefCell<Vec<(Rect, usize)>>,
     model_row_hitboxes: RefCell<Vec<(Rect, usize)>>,
     consent_row_hitboxes: RefCell<Vec<(Rect, usize)>>,
+    choice_row_hitboxes: RefCell<Vec<(Rect, char)>>,
+    hovered_choice: Option<char>,
+    last_choice_mouse_selected: Option<(Stage, char)>,
     /// Pointer hover positions. Advisory only — hover never moves the
     /// keyboard selection; it renders with the shared
     /// [`crate::tui::menu_style::hovered_row_style`] primitive.
@@ -1767,6 +1770,9 @@ impl ProviderPickerView {
             list_row_hitboxes: RefCell::new(Vec::new()),
             model_row_hitboxes: RefCell::new(Vec::new()),
             consent_row_hitboxes: RefCell::new(Vec::new()),
+            choice_row_hitboxes: RefCell::new(Vec::new()),
+            hovered_choice: None,
+            last_choice_mouse_selected: None,
             hovered_list_idx: None,
             hovered_model_idx: None,
             hovered_consent_idx: None,
@@ -2540,18 +2546,23 @@ impl ProviderPickerView {
                 (false, ProviderListView::Local) => " Provider · local only ".to_string(),
             }
         };
-        let outer = Block::default()
-            .title(Line::from(Span::styled(
-                title,
-                Style::default()
-                    .fg(palette::WHALE_ACTION)
-                    .add_modifier(Modifier::BOLD),
-            )))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(palette::BORDER_COLOR))
-            .style(Style::default().bg(palette::WHALE_BG));
-        let inner = outer.inner(area);
-        outer.render(area, buf);
+        let inner = if self.onboarding_mode {
+            let outer = Block::default()
+                .title(Line::from(Span::styled(
+                    title,
+                    Style::default()
+                        .fg(palette::WHALE_ACTION)
+                        .add_modifier(Modifier::BOLD),
+                )))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(palette::BORDER_COLOR))
+                .style(Style::default().bg(palette::WHALE_BG));
+            let inner = outer.inner(area);
+            outer.render(area, buf);
+            inner
+        } else {
+            render_underwater_surface(area, buf, title.trim())
+        };
 
         let view_action = match self.view {
             ProviderListView::Configured => self.tr(MessageId::PickerActionBrowseAll),
@@ -2595,6 +2606,21 @@ impl ProviderPickerView {
                     ActionHint::new("↑↓", self.tr(MessageId::PickerActionMove)),
                     ActionHint::new("Enter", enter_action),
                     ActionHint::new("A", view_action.clone()),
+                ],
+            )
+        } else if inner.height < 16 {
+            // Keep the selection and recovery actions visible before teaching
+            // secondary shortcuts; the full rail returns with vertical room.
+            render_modal_footer(
+                inner,
+                buf,
+                &[
+                    ActionHint::new("↑↓", self.tr(MessageId::PickerActionMove)),
+                    ActionHint::new("Enter", enter_action),
+                    ActionHint::new("R", self.tr(MessageId::PickerActionEditKey)),
+                    ActionHint::new("M", self.tr(MessageId::PickerActionModels)),
+                    ActionHint::new("A", view_action),
+                    ActionHint::new("Esc", self.tr(MessageId::PickerActionCancel)),
                 ],
             )
         } else {
@@ -2701,12 +2727,9 @@ impl ProviderPickerView {
                     | CredentialState::Legacy
             );
             let hint_style = if is_selected {
-                let hint_fg = if has_usable_auth {
-                    palette::TEXT_MUTED
-                } else {
-                    palette::STATUS_WARNING
-                };
-                menu_style::selected_row_style_with_fg(hint_fg)
+                // The credential label carries its meaning in text; focus
+                // ink must remain readable against the selection background.
+                menu_style::selected_row_style_with_fg(palette::SELECTION_TEXT)
             } else if has_usable_auth {
                 Style::default().fg(palette::TEXT_MUTED)
             } else {
@@ -2728,6 +2751,9 @@ impl ProviderPickerView {
                 Span::styled("  ", spacer_style),
                 Span::styled(hint, hint_style),
             ]);
+            if is_hovered && !is_selected {
+                line.style = menu_style::hovered_row_style();
+            }
             if is_selected {
                 line.style = menu_style::selected_row_bg_style();
                 let target_width = usize::from(layout.list.width);
@@ -2740,6 +2766,12 @@ impl ProviderPickerView {
                 }
             }
             let row_y = layout.list.y.saturating_add(lines.len() as u16);
+            if is_hovered && !is_selected {
+                buf.set_style(
+                    Rect::new(layout.list.x, row_y, layout.list.width, 1),
+                    menu_style::hovered_row_style(),
+                );
+            }
             self.list_row_hitboxes
                 .borrow_mut()
                 .push((Rect::new(layout.list.x, row_y, layout.list.width, 1), *idx));
@@ -2810,6 +2842,11 @@ impl ProviderPickerView {
                 format!("Endpoint: {}", row.base_url),
                 Style::default().fg(palette::TEXT_MUTED),
             )),
+        ];
+        // Protocol/capability details explain a route, but must not crowd out
+        // its model choices and prices. Credential warnings and consent stay
+        // ahead of the model inventory; technical diagnostics follow it.
+        let diagnostics = vec![
             Line::from(Span::styled(
                 format!("Protocol: {}", row.supported_protocols.join("+")),
                 Style::default().fg(palette::TEXT_MUTED),
@@ -2903,8 +2940,8 @@ impl ProviderPickerView {
         }
         // Slice D two-pane picker: the selected provider's models live
         // beside (wide) or under (narrow) the provider strip, each with its
-        // own $/mtok in/out from the catalog. Last on purpose: when the pane
-        // is short, clipping eats models — never the consent block above.
+        // own $/mtok in/out from the catalog. Credential and consent facts
+        // lead; model choices come before low-level route diagnostics.
         // Display-only — choosing a model happens in the model picker (`M`)
         // or the guided setup flow.
         lines.push(Line::from(""));
@@ -2947,6 +2984,8 @@ impl ProviderPickerView {
                 Style::default().fg(palette::TEXT_MUTED),
             )));
         }
+        lines.push(Line::from(""));
+        lines.extend(diagnostics);
         Paragraph::new(lines)
             .wrap(Wrap { trim: true })
             .render(inner, buf);
@@ -2975,23 +3014,17 @@ impl ProviderPickerView {
                 ActionHint::new("Esc", self.tr(MessageId::SetupActionBack)),
             ],
         );
-        let marker = |choice| crate::tui::glyphs::selection_marker(self.xai_auth_choice == choice);
-        Paragraph::new(vec![
-            Line::from(self.tr(MessageId::XaiAuthChoiceIntro)),
-            Line::from(""),
-            Line::from(format!(
-                "{} 1. {}",
-                marker(XaiAuthChoice::ApiKey),
-                self.tr(MessageId::XaiAuthChoiceApiKeyOption),
-            )),
-            Line::from(format!(
-                "{} 2. {}",
-                marker(XaiAuthChoice::DeviceOAuth),
-                self.tr(MessageId::XaiAuthChoiceDeviceOAuthOption),
-            )),
-        ])
-        .wrap(Wrap { trim: false })
-        .render(content, buf);
+        self.render_setup_choices(
+            content,
+            buf,
+            vec![Line::from(self.tr(MessageId::XaiAuthChoiceIntro))],
+            [
+                self.tr(MessageId::XaiAuthChoiceApiKeyOption).into_owned(),
+                self.tr(MessageId::XaiAuthChoiceDeviceOAuthOption)
+                    .into_owned(),
+            ],
+            usize::from(self.xai_auth_choice == XaiAuthChoice::DeviceOAuth),
+        );
     }
 
     fn render_chatgpt_auth_choice(&self, area: Rect, buf: &mut Buffer) {
@@ -3017,24 +3050,17 @@ impl ProviderPickerView {
                 ActionHint::new("Esc", self.tr(MessageId::SetupActionBack)),
             ],
         );
-        let marker =
-            |choice| crate::tui::glyphs::selection_marker(self.chatgpt_auth_choice == choice);
-        Paragraph::new(vec![
-            Line::from(self.tr(MessageId::ChatgptAuthChoiceIntro)),
-            Line::from(""),
-            Line::from(format!(
-                "{} 1. {}",
-                marker(ChatgptAuthChoice::SignInWithChatgpt),
-                self.tr(MessageId::ChatgptAuthChoicePkceOption),
-            )),
-            Line::from(format!(
-                "{} 2. {}",
-                marker(ChatgptAuthChoice::ImportCodexCli),
-                self.tr(MessageId::ChatgptAuthChoiceImportOption),
-            )),
-        ])
-        .wrap(Wrap { trim: false })
-        .render(content, buf);
+        self.render_setup_choices(
+            content,
+            buf,
+            vec![Line::from(self.tr(MessageId::ChatgptAuthChoiceIntro))],
+            [
+                self.tr(MessageId::ChatgptAuthChoicePkceOption).into_owned(),
+                self.tr(MessageId::ChatgptAuthChoiceImportOption)
+                    .into_owned(),
+            ],
+            usize::from(self.chatgpt_auth_choice == ChatgptAuthChoice::ImportCodexCli),
+        );
     }
 
     fn render_key_entry(&self, area: Rect, buf: &mut Buffer) {
@@ -3588,23 +3614,21 @@ impl ProviderPickerView {
                 ActionHint::new("Esc", "back"),
             ],
         );
-        let selected = self.kimi_code_plan_tier;
-        let marker = |tier| crate::tui::glyphs::selection_marker(selected == tier);
-        Paragraph::new(vec![
-            Line::from("Kimi Code plan limits determine the context window used for k3."),
-            Line::from("Choose the tier you actually have; the safe floor is selected by default."),
-            Line::from(""),
-            Line::from(format!(
-                "{} 1. 262K context (safe default)",
-                marker(KimiCodePlanTier::Safe262k)
-            )),
-            Line::from(format!(
-                "{} 2. 1M context (only with an eligible plan)",
-                marker(KimiCodePlanTier::OneMillion)
-            )),
-        ])
-        .wrap(Wrap { trim: false })
-        .render(content, buf);
+        self.render_setup_choices(
+            content,
+            buf,
+            vec![
+                Line::from("Kimi Code plan limits determine the context window used for k3."),
+                Line::from(
+                    "Choose the tier you actually have; the safe floor is selected by default.",
+                ),
+            ],
+            [
+                "262K context (safe default)".into(),
+                "1M context (only with an eligible plan)".into(),
+            ],
+            usize::from(self.kimi_code_plan_tier == KimiCodePlanTier::OneMillion),
+        );
     }
 
     fn render_stepfun_billing_route(&self, area: Rect, buf: &mut Buffer) {
@@ -3629,29 +3653,89 @@ impl ProviderPickerView {
                 ActionHint::new("Esc", "back"),
             ],
         );
-        let selected = self.stepfun_billing_route;
-        let marker = |route| crate::tui::glyphs::selection_marker(selected == route);
-        // The endpoint is shown next to each choice: it is the whole
-        // difference between the two billing tracks, and it is what gets
-        // written to `[providers.stepfun] base_url` on confirm.
-        Paragraph::new(vec![
-            Line::from(self.tr(MessageId::StepfunBillingRouteIntro).to_string()),
-            Line::from(""),
-            Line::from(format!(
-                "{} 1. {} — {}",
-                marker(StepfunBillingRoute::PayAsYouGo),
-                self.tr(MessageId::StepfunBillingRoutePaygOption),
-                StepfunBillingRoute::PayAsYouGo.base_url(),
-            )),
-            Line::from(format!(
-                "{} 2. {} — {}",
-                marker(StepfunBillingRoute::StepPlan),
-                self.tr(MessageId::StepfunBillingRoutePlanOption),
-                StepfunBillingRoute::StepPlan.base_url(),
-            )),
-        ])
-        .wrap(Wrap { trim: false })
-        .render(content, buf);
+        // Keep the actual endpoint with each route; choosing only stages
+        // the value and still follows the existing confirmation flow.
+        self.render_setup_choices(
+            content,
+            buf,
+            vec![Line::from(self.tr(MessageId::StepfunBillingRouteIntro))],
+            [
+                format!(
+                    "{} — {}",
+                    self.tr(MessageId::StepfunBillingRoutePaygOption),
+                    StepfunBillingRoute::PayAsYouGo.base_url()
+                ),
+                format!(
+                    "{} — {}",
+                    self.tr(MessageId::StepfunBillingRoutePlanOption),
+                    StepfunBillingRoute::StepPlan.base_url()
+                ),
+            ],
+            usize::from(self.stepfun_billing_route == StepfunBillingRoute::StepPlan),
+        );
+    }
+
+    /// One geometry for the four two-choice setup screens. Pointer hitboxes
+    /// cover only painted rows, including wrapped labels; no auth or billing
+    /// action lives here. Small terminals give options room before prose.
+    fn render_setup_choices(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        intro: Vec<Line<'static>>,
+        labels: [String; 2],
+        selected: usize,
+    ) {
+        self.choice_row_hitboxes.borrow_mut().clear();
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        let choices: Vec<_> = labels
+            .into_iter()
+            .enumerate()
+            .map(|(idx, label)| {
+                let key = if idx == 0 { '1' } else { '2' };
+                let style = if selected == idx {
+                    menu_style::selected_row_style()
+                } else if self.hovered_choice == Some(key) {
+                    menu_style::hovered_row_style().fg(palette::TEXT_PRIMARY)
+                } else {
+                    Style::default().fg(palette::TEXT_PRIMARY)
+                };
+                Paragraph::new(format!(
+                    "{} {key}. {label}",
+                    crate::tui::glyphs::selection_marker(selected == idx)
+                ))
+                .style(style)
+                .wrap(Wrap { trim: false })
+            })
+            .collect();
+        let needed = choices
+            .iter()
+            .map(|p| p.line_count(area.width) as u16)
+            .sum::<u16>();
+        let intro = Paragraph::new(intro)
+            .style(Style::default().fg(palette::TEXT_MUTED))
+            .wrap(Wrap { trim: false });
+        let intro_height =
+            (intro.line_count(area.width) as u16).min(area.height.saturating_sub(needed));
+        intro.render(Rect::new(area.x, area.y, area.width, intro_height), buf);
+        let mut y = area.y + intro_height;
+        for (idx, choice) in choices.into_iter().enumerate() {
+            let remaining = area.bottom().saturating_sub(y);
+            let reserve = u16::from(idx == 0 && remaining > 1);
+            let height =
+                (choice.line_count(area.width) as u16).min(remaining.saturating_sub(reserve));
+            if height == 0 {
+                continue;
+            }
+            let row = Rect::new(area.x, y, area.width, height);
+            choice.render(row, buf);
+            self.choice_row_hitboxes
+                .borrow_mut()
+                .push((row, if idx == 0 { '1' } else { '2' }));
+            y += height;
+        }
     }
 
     fn render_confirm(&self, area: Rect, buf: &mut Buffer) {
@@ -4009,6 +4093,8 @@ impl ModalView for ProviderPickerView {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> ViewAction {
+        self.last_choice_mouse_selected = None;
+        self.hovered_choice = None;
         match self.stage {
             Stage::List => match key.code {
                 KeyCode::Esc if !self.query.is_empty() => {
@@ -4564,8 +4650,36 @@ impl ModalView for ProviderPickerView {
             Stage::PlanTier
             | Stage::StepfunBillingRoute
             | Stage::XaiAuthChoice
-            | Stage::ChatgptAuthChoice
-            | Stage::KeyEntry
+            | Stage::ChatgptAuthChoice => {
+                let hit = self
+                    .choice_row_hitboxes
+                    .borrow()
+                    .iter()
+                    .find_map(|(rect, key)| {
+                        rect.contains((mouse.column, mouse.row).into())
+                            .then_some(*key)
+                    });
+                match mouse.kind {
+                    MouseEventKind::Moved => self.hovered_choice = hit,
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        if let Some(key) = hit {
+                            let stage = self.stage;
+                            let activate = self.last_choice_mouse_selected == Some((stage, key));
+                            let _ = self
+                                .handle_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE));
+                            self.last_choice_mouse_selected = Some((stage, key));
+                            if activate {
+                                return self
+                                    .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                            }
+                        } else {
+                            self.last_choice_mouse_selected = None;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Stage::KeyEntry
             | Stage::ExternalConsentConfirm
             | Stage::ExternalConsentRevokeConfirm
             | Stage::Confirm
@@ -4575,6 +4689,14 @@ impl ModalView for ProviderPickerView {
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
+        self.choice_row_hitboxes.borrow_mut().clear();
+        // Managing routes needs room for both options and their explanation,
+        // even with only one configured provider. First-run questions and
+        // credential/consent flows retain their bounded modal presentation.
+        if matches!(self.stage, Stage::List) && !self.onboarding_mode {
+            self.render_list(area, buf);
+            return;
+        }
         let preferred_height = match self.stage {
             Stage::List => (self.rows.len() as u16).saturating_add(2),
             Stage::XaiAuthChoice => 12,
@@ -4663,6 +4785,53 @@ mod tests {
     // against the rest of the suite, so sibling tests raced on shared
     // provider env vars (EXAMPLE_API_KEY, OPENROUTER_API_KEY, ...) and a panic
     // while holding it cascaded PoisonError failures into unrelated tests.
+
+    #[test]
+    fn workbench_setup_choice_clicks_share_keyboard_confirmation_paths() {
+        let _env = crate::test_support::lock_test_env();
+        for stage in [
+            Stage::PlanTier,
+            Stage::StepfunBillingRoute,
+            Stage::XaiAuthChoice,
+            Stage::ChatgptAuthChoice,
+        ] {
+            for (width, height) in [(40, 12), (60, 16), (80, 24), (100, 32), (140, 40)] {
+                let config = Config::default();
+                let mut pointer = ProviderPickerView::new(ApiProvider::Deepseek, &config);
+                let mut keyboard = ProviderPickerView::new(ApiProvider::Deepseek, &config);
+                pointer.stage = stage;
+                keyboard.stage = stage;
+                let area = Rect::new(0, 0, width, height);
+                let mut buf = Buffer::empty(area);
+                pointer.render(area, &mut buf);
+                let hit = pointer
+                    .choice_row_hitboxes
+                    .borrow()
+                    .iter()
+                    .find(|(_, key)| *key == '2')
+                    .expect("both choices visible")
+                    .0;
+                let event = MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: hit.x,
+                    row: hit.y,
+                    modifiers: KeyModifiers::NONE,
+                };
+                assert!(matches!(pointer.handle_mouse(event), ViewAction::None));
+                assert_eq!(pointer.stage, stage, "first click only selects");
+                keyboard.handle_key(key(KeyCode::Char('2')));
+                let actual = pointer.handle_mouse(event);
+                let expected = keyboard.handle_key(key(KeyCode::Enter));
+                assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+                assert_eq!(pointer.stage, keyboard.stage);
+                assert_eq!(pointer.pending_base_url, keyboard.pending_base_url);
+                assert_eq!(
+                    pointer.selected_context_window,
+                    keyboard.selected_context_window
+                );
+            }
+        }
+    }
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)

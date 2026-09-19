@@ -4093,8 +4093,12 @@ impl ModalView for ConfigView {
             // Spacer rows are secondary chrome: give them up before the
             // editable value line falls below the wrapped footer on compact
             // terminals (#40x12).
-            let spacious =
-                usize::from(inner.height).saturating_sub(reserved_footer_lines + CONTROL_ROWS) >= 8;
+            let body_rows =
+                usize::from(inner.height).saturating_sub(reserved_footer_lines + CONTROL_ROWS);
+            // The expanded header costs six rows before the options. Reserve
+            // at least three choices plus their detail before adding spacers;
+            // a slightly taller compact shell must not show fewer options.
+            let spacious = body_rows >= if edit.choices.is_some() { 10 } else { 8 };
             let mut lines: Vec<Line> = Vec::new();
             let edit_label = config_label_for_key_for_locale(self.locale, &edit.key);
             let edit_title = if edit_label == edit.key {

@@ -24,9 +24,9 @@
                     │                                                         │Enter or click again: Enter opens        
                     │                                                         │choices                                  
                     │                                                         │                                         
+                    │                                                         │                                         
   system | terminal | shoreline | shoreline-light | underwater | underwater-retro | dark | light | grayscale |…         
   Preview: ▶▶ ask · agent                                                                                               
   type=filter, Up/Down=select, Enter=edit, Esc=close                                                                    
-                                                                                                                        
  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── 
                                                                                                                         

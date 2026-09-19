@@ -69,6 +69,8 @@ fn view_with_overrides() -> FleetRosterView {
         row_hitboxes: RefCell::new(Vec::new()),
         last_mouse_selected: None,
         hovered_row: Cell::new(None),
+        workers_hitbox: Cell::new(None),
+        hovered_workers: Cell::new(false),
         surface_bg: palette::UI_THEME.surface_bg,
         locale: Locale::En,
     }
@@ -793,4 +795,26 @@ fn selection_stays_visible_when_list_scrolls() {
     );
     let text = rows.join("\n");
     assert!(text.contains("▸ · ·▰ custom"), "{text}");
+}
+
+#[test]
+fn workbench_workers_header_is_clickable_without_moving_selection() {
+    for (width, height) in [(40, 12), (60, 16), (80, 24), (100, 32), (140, 40)] {
+        let mut view = built_in_view();
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        view.render(area, &mut buf);
+        let hit = view
+            .workers_hitbox
+            .get()
+            .expect("visible Workers destination");
+        assert!(area.contains((hit.x, hit.y).into()));
+        view.handle_mouse(mouse(MouseEventKind::Moved, hit));
+        assert!(view.hovered_workers.get());
+        assert_eq!(view.selected, 0);
+        assert!(matches!(
+            view.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), hit)),
+            ViewAction::Emit(ViewEvent::FleetRosterOpenWorkersRequested)
+        ));
+    }
 }
