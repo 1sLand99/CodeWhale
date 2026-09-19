@@ -132,6 +132,9 @@ fn launch_recent_click_then_enter_resumes_without_another_mouse_event() {
         tui.send(keys::key::enter()).unwrap();
         // No pointer motion follows Enter: the accepted action must run now.
         wait(&mut tui, SAVED_TEXT);
+        if cols >= 80 {
+            wait(&mut tui, "Resumed:");
+        }
         assert!(
             !tui.frame().contains("Session loaded from"),
             "resume should not add a technical path receipt to the conversation"

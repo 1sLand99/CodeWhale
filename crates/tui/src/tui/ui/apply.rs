@@ -1408,6 +1408,10 @@ pub(crate) async fn apply_command_result(
                     })
                     .await;
                 let title = crate::session_manager::sanitize_session_title(&session.metadata.title);
+                // Restore may have queued a legacy configuration notice.
+                // Admit it first so the confirmed resume remains the latest
+                // toast instead of being immediately covered on the next draw.
+                app.sync_status_message_to_toasts();
                 app.push_status_toast_record(
                     StatusToast::new(
                         app.tr(MessageId::SessionsResumed)
