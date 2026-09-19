@@ -26,7 +26,7 @@
 //! - **Live sessions only.** Persistence is identity and lifecycle, never
 //!   output, so a restarted Engine reports no session rather than pretending to
 //!   reattach (#34 acceptance: "Restart truthfully reports lost live PTYs").
-//! - **Unix only.** The owner is `#[cfg(unix)]` end to end; on Windows these
+//! - **Unix only.** The owner is `#[cfg(all(unix, not(target_env = "ohos")))]` end to end; on Windows these
 //!   routes do not exist yet. ConPTY qualification is its own slice.
 
 use axum::Json;
@@ -34,6 +34,9 @@ use axum::extract::{Path, Query, State};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
+// The owner does not exist on ohos (`tools/mod.rs`), so neither does any
+// handler that drives it; the stubs below answer there instead.
+#[cfg(all(unix, not(target_env = "ohos")))]
 use crate::tools::terminal_session;
 
 use super::{ApiError, RuntimeApiState};
@@ -115,7 +118,7 @@ pub(super) struct TerminalKillResponse {
 }
 
 /// `base64` keeps bytes exact; `text` is the lossy convenience form.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_env = "ohos")))]
 fn chunk_encoding(format: &str) -> Result<&'static str, ApiError> {
     match format {
         "base64" => Ok("base64"),
@@ -124,7 +127,7 @@ fn chunk_encoding(format: &str) -> Result<&'static str, ApiError> {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_env = "ohos")))]
 fn encode_bytes(bytes: &[u8], encoding: &str) -> String {
     if encoding == "base64" {
         base64::engine::general_purpose::STANDARD.encode(bytes)
@@ -133,7 +136,7 @@ fn encode_bytes(bytes: &[u8], encoding: &str) -> String {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_env = "ohos")))]
 fn decode_bytes(data: &str, encoding: &str) -> Result<Vec<u8>, ApiError> {
     let bytes = match encoding {
         "base64" => base64::engine::general_purpose::STANDARD
@@ -150,7 +153,7 @@ fn decode_bytes(data: &str, encoding: &str) -> Result<Vec<u8>, ApiError> {
     Ok(bytes)
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_env = "ohos")))]
 fn bounded_max_bytes(requested: Option<usize>) -> Result<usize, ApiError> {
     let max_bytes = requested.unwrap_or(TERMINAL_CHUNK_DEFAULT);
     if !(1..=terminal_session::READ_LIMIT).contains(&max_bytes) {
@@ -162,7 +165,7 @@ fn bounded_max_bytes(requested: Option<usize>) -> Result<usize, ApiError> {
     Ok(max_bytes)
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_env = "ohos")))]
 fn bounded_dimension(value: u16, field: &str) -> Result<u16, ApiError> {
     if !(1..=TERMINAL_DIMENSION_MAX).contains(&value) {
         return Err(ApiError::bad_request(format!(
@@ -173,7 +176,7 @@ fn bounded_dimension(value: u16, field: &str) -> Result<u16, ApiError> {
 }
 
 /// Resolve a live session or 404. Never creates one — see the module docs.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_env = "ohos")))]
 fn open_session(
     state: &RuntimeApiState,
     name: &str,
@@ -185,7 +188,7 @@ fn open_session(
         .ok_or_else(|| ApiError::not_found(format!("no live terminal session named '{name}'")))
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_env = "ohos")))]
 fn lock_session(
     session: &terminal_session::SharedSession,
 ) -> Result<std::sync::MutexGuard<'_, terminal_session::TerminalSession>, ApiError> {
@@ -198,7 +201,7 @@ fn lock_session(
 ///
 /// Reads are non-consuming: several clients may hold independent cursors, and
 /// polling here never steals output from the agent's own consuming read.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_env = "ohos")))]
 pub(super) async fn terminal_output(
     State(state): State<RuntimeApiState>,
     Path(name): Path<String>,
@@ -233,7 +236,7 @@ pub(super) async fn terminal_output(
 /// Input attribution is the caller's: this route is the client's writer, and
 /// the agent's writer is `terminal_send`. Nothing here re-labels one as the
 /// other.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_env = "ohos")))]
 pub(super) async fn terminal_input(
     State(state): State<RuntimeApiState>,
     Path(name): Path<String>,
@@ -253,7 +256,7 @@ pub(super) async fn terminal_input(
 }
 
 /// `POST /v1/terminal/{name}/resize` — the window the child should draw for.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_env = "ohos")))]
 pub(super) async fn terminal_resize(
     State(state): State<RuntimeApiState>,
     Path(name): Path<String>,
@@ -272,7 +275,7 @@ pub(super) async fn terminal_resize(
 /// The exit itself is observed through `output` (`running` / `exit_code`),
 /// so a client that kills and then polls learns the truth instead of an
 /// optimistic acknowledgement.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_env = "ohos")))]
 pub(super) async fn terminal_kill(
     State(state): State<RuntimeApiState>,
     Path(name): Path<String>,
@@ -283,11 +286,11 @@ pub(super) async fn terminal_kill(
     Ok(Json(TerminalKillResponse { name, killed: true }))
 }
 
-/// Windows build: the owner is `#[cfg(unix)]` end to end, so the contract
+/// Windows build: the owner is `#[cfg(all(unix, not(target_env = "ohos")))]` end to end, so the contract
 /// exists but cannot be served. These answer 501 rather than 404 so a client
 /// can tell "this Engine build cannot do terminals" apart from "that session
 /// is gone" — and so the ConPTY slice has one place to replace.
-#[cfg(not(unix))]
+#[cfg(any(not(unix), target_env = "ohos"))]
 mod platform {
     use super::*;
 
@@ -329,10 +332,10 @@ mod platform {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(any(not(unix), target_env = "ohos"))]
 pub(super) use platform::{terminal_input, terminal_kill, terminal_output, terminal_resize};
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, unix, not(target_env = "ohos")))]
 mod tests {
     use super::*;
 
