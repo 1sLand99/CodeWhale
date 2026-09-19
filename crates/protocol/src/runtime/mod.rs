@@ -114,6 +114,19 @@ pub struct RuntimeCapabilities {
     /// Durable, workspace-scoped cross-task Agent Mail endpoints and events.
     #[serde(default)]
     pub agent_mail: bool,
+    /// `GET /v1/terminal/{name}/output` — the resumable byte stream over a
+    /// persistent Engine-owned terminal session, with absolute cursors.
+    #[serde(default)]
+    pub terminal_stream: bool,
+    /// `POST /v1/terminal/{name}/input` — bytes into the live session.
+    #[serde(default)]
+    pub terminal_input: bool,
+    /// `POST /v1/terminal/{name}/resize` — the window the child draws for.
+    #[serde(default)]
+    pub terminal_resize: bool,
+    /// `POST /v1/terminal/{name}/kill` — end the live session.
+    #[serde(default)]
+    pub terminal_kill: bool,
 }
 
 /// Experimental opt-in flags advertised by `GET /v1/runtime/info`.
@@ -420,6 +433,10 @@ mod tests {
             skill_lifecycle: false,
             plugin_management: false,
             agent_mail: true,
+            terminal_stream: false,
+            terminal_input: false,
+            terminal_resize: false,
+            terminal_kill: false,
         };
         let value = serde_json::to_value(&caps).unwrap();
         let obj = value.as_object().unwrap();

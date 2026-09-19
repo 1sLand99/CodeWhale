@@ -108,6 +108,7 @@ mod plugins;
 mod secrets;
 mod sessions;
 mod targets;
+mod terminal;
 mod voice;
 mod web;
 mod workspace;
@@ -587,6 +588,13 @@ fn default_runtime_capabilities() -> RuntimeCapabilities {
         skill_lifecycle: true,
         plugin_management: true,
         agent_mail: true,
+        // The terminal family is Unix-only in this build: the owner is
+        // `#[cfg(unix)]` end to end and the Windows routes answer 501. A
+        // client must be able to feature-detect that before it offers a pane.
+        terminal_stream: cfg!(unix),
+        terminal_input: cfg!(unix),
+        terminal_resize: cfg!(unix),
+        terminal_kill: cfg!(unix),
     }
 }
 
@@ -1118,6 +1126,15 @@ pub fn build_router(state: RuntimeApiState) -> Router {
             get(read_session_artifact),
         )
         .route("/v1/workspace/status", get(workspace_status))
+        // The Engine's terminal byte stream (#34). Auth is the route layer's,
+        // not this module's; these never create a session — see terminal.rs.
+        .route("/v1/terminal/{name}/output", get(terminal::terminal_output))
+        .route("/v1/terminal/{name}/input", post(terminal::terminal_input))
+        .route(
+            "/v1/terminal/{name}/resize",
+            post(terminal::terminal_resize),
+        )
+        .route("/v1/terminal/{name}/kill", post(terminal::terminal_kill))
         .route("/v1/workspace/files/search", get(workspace_file_search))
         .route(
             "/v1/workspace/files",

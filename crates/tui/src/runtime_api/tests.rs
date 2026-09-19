@@ -13735,6 +13735,205 @@ async fn runtime_info_advertises_plugin_management_capability() -> Result<()> {
 }
 
 #[tokio::test]
+async fn runtime_info_advertises_terminal_capabilities() -> Result<()> {
+    let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let info: serde_json::Value = client
+        .get(format!("http://{addr}/v1/runtime/info"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    // A GPUI client gates its terminal pane on these; on Unix they are the
+    // four routes in runtime_api::terminal.
+    for capability in [
+        "terminal_stream",
+        "terminal_input",
+        "terminal_resize",
+        "terminal_kill",
+    ] {
+        assert_eq!(
+            info["capabilities"][capability], true,
+            "runtime/info must advertise {capability}"
+        );
+    }
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn terminal_routes_serve_a_live_engine_session_over_http() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("runtime");
+    let workspace = tmp.path().join("ws");
+    fs::create_dir_all(&root)?;
+    fs::create_dir_all(&workspace)?;
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_root_token_mobile_workspace(
+            root.clone(),
+            root.join("sessions"),
+            None,
+            false,
+            workspace.clone(),
+        )
+        .await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+    let base = format!("http://{addr}/v1/terminal/pane");
+
+    // The agent's terminal tools own session creation; stand in for that
+    // producer on the same workspace the server was started with, which is
+    // what makes this the Engine's own shell rather than a second one.
+    let _session = crate::tools::terminal_session::get_or_create(
+        "pane",
+        &workspace,
+        crate::sandbox::SandboxPolicy::DangerFullAccess,
+    )
+    .map_err(anyhow::Error::msg)?;
+
+    // Input through the route, then the shell's own echo back through the
+    // route. Bytes in, bytes out, no direct access to the session object.
+    let write: serde_json::Value = client
+        .post(format!("{base}/input"))
+        .json(&serde_json::json!({
+            "data": "printf 'terminal-route-proof\\n'\n",
+            "encoding": "text"
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert!(write["written"].as_u64().unwrap_or_default() > 0);
+
+    let read_chunk = |base: String, client: reqwest::Client| async move {
+        let chunk: serde_json::Value = client
+            .get(format!("{base}/output?cursor=0&format=text"))
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        Some(chunk)
+    };
+
+    let deadline = std::time::Instant::now() + ci_scaled(Duration::from_secs(10));
+    loop {
+        let chunk = read_chunk(base.clone(), client.clone())
+            .await
+            .expect("terminal output route answers");
+        let data = chunk["data"].as_str().unwrap_or_default();
+        if data.contains("terminal-route-proof") {
+            // Reads are non-consuming: the same cursor returns the same bytes.
+            let again = read_chunk(base.clone(), client.clone())
+                .await
+                .expect("terminal output route answers");
+            assert_eq!(again["data"], chunk["data"]);
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "route never delivered the shell's output: {data}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Resize is checked through the shell, not the handler: `stty size` reads
+    // the kernel's window, so a handler that only stored the numbers fails.
+    client
+        .post(format!("{base}/resize"))
+        .json(&serde_json::json!({"rows": 40, "cols": 100}))
+        .send()
+        .await?
+        .error_for_status()?;
+    client
+        .post(format!("{base}/input"))
+        .json(&serde_json::json!({"data": "stty size\n", "encoding": "text"}))
+        .send()
+        .await?
+        .error_for_status()?;
+    let deadline = std::time::Instant::now() + ci_scaled(Duration::from_secs(10));
+    loop {
+        let chunk = read_chunk(base.clone(), client.clone())
+            .await
+            .expect("terminal output route answers");
+        let data = chunk["data"].as_str().unwrap_or_default();
+        if data.contains("40 100") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "resize never reached the shell: {data}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Kill, then learn the truth from the stream rather than the ack.
+    client
+        .post(format!("{base}/kill"))
+        .send()
+        .await?
+        .error_for_status()?;
+    let deadline = std::time::Instant::now() + ci_scaled(Duration::from_secs(10));
+    loop {
+        let chunk = read_chunk(base.clone(), client.clone())
+            .await
+            .expect("terminal output route answers");
+        if chunk["running"] == serde_json::json!(false) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "killed session still reports running: {chunk}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn terminal_output_for_an_unknown_session_is_not_found_and_creates_nothing() -> Result<()> {
+    let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+    let base = format!("http://{addr}/v1/terminal");
+
+    // The route exists and answers for a name that has no live session: the
+    // Engine attaches to shells it owns, it does not conjure one per request.
+    let missing = client
+        .get(format!("{base}/no-such-session/output"))
+        .send()
+        .await?;
+    assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // An over-long name is rejected as a miss too, so the registry is never
+    // asked to allocate for it.
+    let long_name = "n".repeat(200);
+    let oversized = client
+        .get(format!("{base}/{long_name}/output"))
+        .send()
+        .await?;
+    assert_eq!(oversized.status(), reqwest::StatusCode::NOT_FOUND);
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn plugin_lifecycle_over_http_installs_reviews_enables_and_uninstalls() -> Result<()> {
     let tmp = tempfile::tempdir()?;
     let root = tmp.path().join("runtime");
