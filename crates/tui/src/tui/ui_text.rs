@@ -212,28 +212,6 @@ pub(crate) fn text_display_width(text: &str) -> usize {
     text.graphemes(true).map(grapheme_display_width).sum()
 }
 
-pub(super) fn slice_text(text: &str, start: usize, end: usize) -> String {
-    if end <= start {
-        return String::new();
-    }
-
-    let mut out = String::new();
-    let mut col = 0usize;
-    for grapheme in text.graphemes(true) {
-        let grapheme_width = grapheme_display_width(grapheme);
-        let grapheme_start = col;
-        let grapheme_end = col.saturating_add(grapheme_width);
-        if grapheme_end > start && grapheme_start < end {
-            out.push_str(grapheme);
-        }
-        col = grapheme_end;
-        if col >= end {
-            break;
-        }
-    }
-    out
-}
-
 /// Tab-stop width of one grapheme at absolute column `col`: a tab advances to
 /// the next 8-column stop, matching the terminal and the markdown renderer.
 /// Every other grapheme keeps the shared [`grapheme_display_width`] contract.
@@ -265,13 +243,12 @@ pub(crate) fn text_display_width_tab_stops(text: &str) -> usize {
     text_display_width_tab_stops_from(text, 0)
 }
 
-/// Slice `[start, end)` in terminal columns with tab stops, like
-/// [`slice_text`] but in the column space the mouse reports.
+/// Slice `[start, end)` in terminal columns with tab stops, in the column
+/// space the mouse reports.
 ///
 /// `start`/`end` are relative to `text`; `base_col` is the absolute column
 /// of its first grapheme. A grapheme overlapping the window is kept whole,
-/// tabs included, so copied indentation stays tabs. Agrees with
-/// [`slice_text`] on tab-free text.
+/// tabs included, so copied indentation stays tabs.
 pub(crate) fn slice_text_tab_stops(
     text: &str,
     start: usize,
@@ -385,23 +362,39 @@ mod tests {
     #[test]
     fn slice_text_respects_column_bounds() {
         let text = "hello world";
-        assert_eq!(slice_text(text, 0, 5), "hello");
-        assert_eq!(slice_text(text, 6, 11), "world");
-        assert_eq!(slice_text(text, 0, 0), "");
-        assert_eq!(slice_text(text, 0, 100), text);
+        assert_eq!(slice_text_tab_stops(text, 0, 5, 0), "hello");
+        assert_eq!(slice_text_tab_stops(text, 6, 11, 0), "world");
+        assert_eq!(slice_text_tab_stops(text, 0, 0, 0), "");
+        assert_eq!(slice_text_tab_stops(text, 0, 100, 0), text);
     }
 
     #[test]
     fn slice_text_handles_multibyte_characters() {
         let text = "a─b"; // U+2500 is 1 display column on supported terminals
-        assert_eq!(slice_text(text, 1, 2), "─");
-        assert_eq!(slice_text(text, 0, 3), text);
+        assert_eq!(slice_text_tab_stops(text, 1, 2, 0), "─");
+        assert_eq!(slice_text_tab_stops(text, 0, 3, 0), text);
     }
 
     #[test]
     fn slice_text_truncates_at_end() {
         let text = "ab";
-        assert_eq!(slice_text(text, 1, 5), "b");
+        assert_eq!(slice_text_tab_stops(text, 1, 5, 0), "b");
+    }
+
+    #[test]
+    fn tab_stop_width_advances_to_next_stop() {
+        assert_eq!(text_display_width_tab_stops("\t"), 8);
+        assert_eq!(text_display_width_tab_stops("\ta"), 9);
+        assert_eq!(text_display_width_tab_stops("ab\t"), 8);
+        assert_eq!(text_display_width_tab_stops_from("\t", 4), 4);
+        assert_eq!(text_display_width_tab_stops_from("xy", 6), 2);
+    }
+
+    #[test]
+    fn tab_stop_slice_preserves_tabs_and_base() {
+        assert_eq!(slice_text_tab_stops("\tindented", 8, 14, 0), "indent");
+        assert_eq!(slice_text_tab_stops("\t\txy", 4, 12, 4), "\t");
+        assert_eq!(slice_text_tab_stops("ab", 0, 2, 0), "ab");
     }
 
     // --- Unicode / CJK / terminal-width QA (issue #3488) -------------------
@@ -492,9 +485,9 @@ mod tests {
     fn slice_text_slices_cjk_by_display_column() {
         // Columns:  中=[0,2) 文=[2,4) a=[4,5) b=[5,6)
         let text = "中文ab";
-        assert_eq!(slice_text(text, 0, 2), "中");
-        assert_eq!(slice_text(text, 2, 4), "文");
-        assert_eq!(slice_text(text, 4, 6), "ab");
+        assert_eq!(slice_text_tab_stops(text, 0, 2, 0), "中");
+        assert_eq!(slice_text_tab_stops(text, 2, 4, 0), "文");
+        assert_eq!(slice_text_tab_stops(text, 4, 6, 0), "ab");
     }
 
     // --- New #3488 fixtures: CJK/wide-glyph truncation on selector-style rows.
@@ -610,7 +603,7 @@ mod tests {
         // The keycap occupies columns [5, 7). Any overlapping selection keeps
         // the complete grapheme; no isolated FE0F/U+20E3 mark may escape.
         for (start, end) in [(0, 7), (5, 6), (6, 7)] {
-            let sliced = slice_text(row, start, end);
+            let sliced = slice_text_tab_stops(row, start, end, 0);
             assert!(
                 sliced.contains("1\u{fe0f}\u{20e3}"),
                 "range=({start}, {end}) split keycap: {sliced:?}"
