@@ -4278,16 +4278,9 @@ impl ConfigView {
                 // The filled Apply control answers hover with an underline:
                 // a bg tint would erase its button fill.
                 if self.hovered_editor == Some(EditorControl::Apply) {
-                    Style::default()
-                        .fg(palette::SELECTION_TEXT)
-                        .bg(palette::WHALE_ACTION)
-                        .add_modifier(Modifier::BOLD)
-                        .add_modifier(Modifier::UNDERLINED)
+                    menu_style::selected_row_style().add_modifier(Modifier::UNDERLINED)
                 } else {
-                    Style::default()
-                        .fg(palette::SELECTION_TEXT)
-                        .bg(palette::WHALE_ACTION)
-                        .add_modifier(Modifier::BOLD)
+                    menu_style::selected_row_style()
                 },
             ),
             (
@@ -5132,10 +5125,7 @@ impl ConfigView {
             };
             {
                 let strip_style = CategoryNavStyle {
-                    selected: Style::default()
-                        .fg(palette::SELECTION_TEXT)
-                        .bg(palette::WHALE_ACTION)
-                        .add_modifier(Modifier::BOLD),
+                    selected: menu_style::selected_row_style(),
                     normal: Style::default().fg(palette::TEXT_MUTED),
                     marker: Style::default().fg(palette::TEXT_HINT),
                     ascii_safe: false,
@@ -5246,16 +5236,18 @@ impl ConfigView {
                     let mut line = Line::from(vec![
                         Span::styled(
                             rail,
-                            Style::default().fg(if selected {
-                                palette::WHALE_ACTION
+                            if selected {
+                                style
                             } else {
-                                palette::TEXT_DIM
-                            }),
+                                Style::default().fg(palette::TEXT_DIM)
+                            },
                         ),
                         Span::styled(format!("{key}  {value}  "), style),
                         Span::styled(
                             format!("{affordance:<3}  "),
-                            if row.editable {
+                            if selected {
+                                style
+                            } else if row.editable {
                                 Style::default().fg(palette::WHALE_ACTION)
                             } else {
                                 Style::default()
@@ -5265,9 +5257,13 @@ impl ConfigView {
                         ),
                         Span::styled(
                             badge.into_owned(),
-                            Style::default()
-                                .fg(palette::TEXT_HINT)
-                                .add_modifier(Modifier::DIM),
+                            if selected {
+                                style
+                            } else {
+                                Style::default()
+                                    .fg(palette::TEXT_HINT)
+                                    .add_modifier(Modifier::DIM)
+                            },
                         ),
                     ]);
                     if selected {
