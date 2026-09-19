@@ -8312,12 +8312,16 @@ async fn get_settings_schema(
 
     // Raw config.toml for `persisted` on config-owned rows. A missing or
     // unparsable file means nothing was persisted there — the live config
-    // still serves defaults through `value`.
-    let config_document = state
-        .config_path
-        .as_deref()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|body| toml::from_str::<toml::Value>(&body).ok());
+    // still serves defaults through `value`. This is an async axum route, so
+    // the read rides the blocking pool instead of parking a Tokio worker
+    // (#6149).
+    let config_document = match state.config_path.as_deref() {
+        Some(path) => tokio::fs::read_to_string(path)
+            .await
+            .ok()
+            .and_then(|body| toml::from_str::<toml::Value>(&body).ok()),
+        None => None,
+    };
     let notifications_persisted = |key: &str| -> Option<bool> {
         let setting = NotificationSetting::parse(key)?;
         let document = config_document.as_ref()?;

@@ -237,6 +237,9 @@
   "crates/tui/src/plugins/marketplace/document.rs": {
     "std_fs": 1
   },
+  "crates/tui/src/plugins/marketplace/store.rs": {
+    "std_fs": 1
+  },
   "crates/tui/src/plugins/path_identity.rs": {
     "std_fs": 1
   },
