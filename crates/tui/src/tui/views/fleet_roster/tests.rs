@@ -156,7 +156,24 @@ fn operator_row_is_pinned_first_with_the_session_model() {
     );
     assert!(text.contains("deepseek-v4-pro"), "session model shown");
     assert!(text.contains("full session access"), "{text}");
-    assert!(text.contains("leads the Fleet"), "{text}");
+    // Inline field labels can wrap the role at this width. Read just the
+    // inspector columns, excluding the independently positioned member list.
+    let detail_start = rows
+        .iter()
+        .find_map(|row| row.find("Role  ").map(|index| row[..index].chars().count()))
+        .expect("role field rendered");
+    let detail = rows
+        .iter()
+        .map(|row| {
+            row.chars()
+                .skip(detail_start)
+                .collect::<String>()
+                .trim()
+                .to_owned()
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(detail.contains("leads the Fleet"), "{text}");
 }
 
 #[test]
@@ -730,12 +747,12 @@ fn fleet_roster_is_usable_and_opaque_at_blocker_sizes() {
     }
 }
 
-/// Whale Teams: member rows carry the species badge and the detail pane
-/// opens with the identity block (badge plus `Name · species · job`) with no
+/// Whale Teams: the selected member's detail pane carries the identity
+/// block (badge plus `Name · species · job`) with no
 /// caption labels and no state claim. The hand-drawn portrait art was
 /// deleted per the 2026-08-29 founder directive, so no tier ever draws it.
 #[test]
-fn roster_rows_and_detail_carry_whale_identity_without_claiming_state() {
+fn roster_detail_carries_whale_identity_without_claiming_state() {
     let wide = render_through_stack(
         || {
             let mut v = built_in_view();
@@ -746,9 +763,7 @@ fn roster_rows_and_detail_carry_whale_identity_without_claiming_state() {
         32,
     )
     .join("\n");
-    assert!(wide.contains("◂▰ scout"), "{wide}");
-    assert!(wide.contains("▰] builder"), "{wide}");
-    assert!(wide.contains("◇▰ reviewer"), "{wide}");
+    assert!(wide.contains("◂▰ Scout"), "{wide}");
     assert!(wide.contains("Scout · beaked whale · research"), "{wide}");
     assert!(
         !wide.contains("Whale identity"),
@@ -794,7 +809,7 @@ fn selection_stays_visible_when_list_scrolls() {
         24,
     );
     let text = rows.join("\n");
-    assert!(text.contains("▸ · ·▰ custom"), "{text}");
+    assert!(text.contains("▸ · custom"), "{text}");
 }
 
 #[test]

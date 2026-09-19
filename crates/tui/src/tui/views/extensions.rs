@@ -16,7 +16,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Paragraph, Widget},
+    widgets::{Paragraph, Widget, Wrap},
 };
 
 use super::{
@@ -1530,6 +1530,17 @@ impl ExtensionsView {
         {
             view.selected[tab.index()] = 1;
         }
+        // A plugin manager opens on an actual plugin's inspect/action row;
+        // group headings remain reachable above it for folding.
+        if tab == ExtensionsTab::Plugins {
+            let first_item = view
+                .visible_entries()
+                .iter()
+                .position(|entry| matches!(entry, VisibleEntry::Item(_, _)));
+            if let Some(index) = first_item {
+                view.selected[tab.index()] = index;
+            }
+        }
         view
     }
 
@@ -1950,7 +1961,7 @@ impl ModalView for ExtensionsView {
                 Constraint::Length(1),
                 Constraint::Length(1),
                 Constraint::Min(1),
-                Constraint::Length(1),
+                Constraint::Length(if body.height >= 16 { 3 } else { 1 }),
                 Constraint::Length(1),
             ])
             .split(body);
@@ -2022,7 +2033,6 @@ impl ModalView for ExtensionsView {
         } else if selected >= scroll.saturating_add(list_height.max(1)) {
             scroll = selected.saturating_sub(list_height.saturating_sub(1));
         }
-        let spacious = area.width >= 64 && area.height >= 16;
         for (visible_offset, (entry_index, entry)) in entries
             .iter()
             .enumerate()
@@ -2083,12 +2093,6 @@ impl ModalView for ExtensionsView {
                     }
                     parts.push((item.label.clone(), None));
                     parts.push((format!(" [{}]", item.state), Some(item.tone.ink())));
-                    if spacious && !item.description.is_empty() {
-                        parts.push((
-                            format!(" — {}", item.description),
-                            Some(codewhale_palette::ChromeInk::MetadataHint),
-                        ));
-                    }
                 }
                 VisibleEntry::Problem(problem) => parts.push((
                     format!("! {problem}"),
@@ -2136,12 +2140,27 @@ impl ModalView for ExtensionsView {
             hits.rows.push((row_area, entry_index));
         }
 
-        let status = truncate_view_text(&self.selected_status(), usize::from(rows[3].width));
-        Paragraph::new(Line::from(Span::styled(
-            status,
-            Style::default().fg(palette::TEXT_MUTED),
-        )))
-        .render(rows[3], buf);
+        let status = if rows[3].height > 1 && self.pending_remove.is_none() {
+            self.selected_item().map_or_else(
+                || self.selected_status(),
+                |item| {
+                    format!(
+                        "{} · {}\n{}\n{}",
+                        item.label, item.state, item.description, item.detail
+                    )
+                },
+            )
+        } else {
+            self.selected_status()
+        };
+        Paragraph::new(status)
+            .style(Style::default().fg(if self.pending_remove.is_some() {
+                palette::STATUS_WARNING
+            } else {
+                palette::TEXT_MUTED
+            }))
+            .wrap(Wrap { trim: false })
+            .render(rows[3], buf);
         let compact_hints = [
             super::ActionHint::new("Tab", tr(self.locale, MessageId::ExtensionsActionTabs)),
             super::ActionHint::new("/", tr(self.locale, MessageId::SessionsActionSearch)),

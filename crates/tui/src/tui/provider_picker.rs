@@ -226,6 +226,8 @@ pub struct ProviderPickerView {
     model_row_hitboxes: RefCell<Vec<(Rect, usize)>>,
     consent_row_hitboxes: RefCell<Vec<(Rect, usize)>>,
     choice_row_hitboxes: RefCell<Vec<(Rect, char)>>,
+    detail_action_hitbox: RefCell<Option<Rect>>,
+    detail_action_hovered: bool,
     hovered_choice: Option<char>,
     last_choice_mouse_selected: Option<(Stage, char)>,
     /// Pointer hover positions. Advisory only — hover never moves the
@@ -1771,6 +1773,8 @@ impl ProviderPickerView {
             model_row_hitboxes: RefCell::new(Vec::new()),
             consent_row_hitboxes: RefCell::new(Vec::new()),
             choice_row_hitboxes: RefCell::new(Vec::new()),
+            detail_action_hitbox: RefCell::new(None),
+            detail_action_hovered: false,
             hovered_choice: None,
             last_choice_mouse_selected: None,
             hovered_list_idx: None,
@@ -2784,22 +2788,91 @@ impl ProviderPickerView {
     }
 
     fn render_provider_detail(&self, area: Rect, buf: &mut Buffer, row: &ProviderDashboardRow) {
+        *self.detail_action_hitbox.borrow_mut() = None;
         if area.width == 0 || area.height == 0 {
             return;
         }
-        let block = Block::default()
-            .title(Line::from(Span::styled(
-                " Details ",
-                Style::default()
-                    .fg(palette::TEXT_PRIMARY)
-                    .add_modifier(Modifier::BOLD),
-            )))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(palette::BORDER_COLOR))
-            .style(Style::default());
-        let inner = block.inner(area);
-        block.render(area, buf);
+        // A quiet inspector shares the canvas with the list. The explicit
+        // details action opens the existing pager for complete diagnostics.
+        let action_label = format!(
+            "{} {}",
+            crate::tui::shell_key_routing::tool_details_chord(),
+            self.tr(MessageId::CtxMenuOpenDetails)
+        );
+        let action_width =
+            (unicode_width::UnicodeWidthStr::width(action_label.as_str()) as u16).min(area.width);
+        let action = Rect::new(
+            area.right().saturating_sub(action_width),
+            area.y,
+            action_width,
+            1,
+        );
+        *self.detail_action_hitbox.borrow_mut() = Some(action);
+        let action_style = if self.detail_action_hovered {
+            menu_style::hovered_row_style().fg(palette::WHALE_ACTION)
+        } else {
+            Style::default()
+                .fg(palette::WHALE_ACTION)
+                .add_modifier(Modifier::UNDERLINED)
+        };
+        Paragraph::new(action_label)
+            .style(action_style)
+            .render(action, buf);
+        let title = Rect::new(
+            area.x,
+            area.y,
+            area.width.saturating_sub(action_width + 1),
+            1,
+        );
+        Paragraph::new(crate::tui::ui_text::semantic_truncate(
+            &row.display_name,
+            usize::from(title.width),
+        ))
+        .style(Style::default().fg(palette::TEXT_PRIMARY).bold())
+        .render(title, buf);
+        let inner = Rect::new(
+            area.x,
+            area.y.saturating_add(2),
+            area.width,
+            area.height.saturating_sub(2),
+        );
+        Paragraph::new(self.provider_detail_lines(row, inner.width, false))
+            .wrap(Wrap { trim: true })
+            .render(inner, buf);
+    }
 
+    fn open_provider_details(&self) -> ViewAction {
+        if !self.row_visible(self.selected_idx) {
+            return ViewAction::None;
+        }
+        let row = &self.rows[self.selected_idx];
+        let content = self
+            .provider_detail_lines(row, u16::MAX, true)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        ViewAction::Emit(ViewEvent::OpenTextPager {
+            title: format!(
+                "{} · {}",
+                row.display_name,
+                self.tr(MessageId::CtxMenuOpenDetails)
+            ),
+            content,
+        })
+    }
+
+    fn provider_detail_lines(
+        &self,
+        row: &ProviderDashboardRow,
+        width: u16,
+        full: bool,
+    ) -> Vec<Line<'static>> {
         let route = if row.default_route.logical_model == row.default_route.wire_model {
             row.default_route.logical_model.clone()
         } else {
@@ -2809,12 +2882,6 @@ impl ProviderPickerView {
             )
         };
         let mut lines = vec![
-            Line::from(Span::styled(
-                row.display_name.clone(),
-                Style::default()
-                    .fg(palette::TEXT_PRIMARY)
-                    .add_modifier(Modifier::BOLD),
-            )),
             Line::from(Span::styled(
                 // The maturity tag used to ride the list row's pipe dump. The
                 // row is short now, so the fact lives here, with the rest of
@@ -2866,11 +2933,19 @@ impl ProviderPickerView {
                 Style::default().fg(palette::TEXT_MUTED),
             )));
         }
-        for message in row.messages.iter().take(2) {
-            lines.push(Line::from(Span::styled(
-                format!("Note: {message}"),
-                Style::default().fg(palette::STATUS_WARNING),
-            )));
+        for message in row.messages.iter().take(if full { usize::MAX } else { 2 }) {
+            let message = if full {
+                message.clone()
+            } else {
+                crate::tui::ui_text::semantic_truncate(
+                    message,
+                    usize::from(width.saturating_sub(2)),
+                )
+            };
+            lines.push(Line::from(vec![
+                Span::styled("! ", Style::default().fg(palette::STATUS_WARNING)),
+                Span::styled(message, Style::default().fg(palette::TEXT_PRIMARY)),
+            ]));
         }
         // #5772: the external block exists only for a persisted consent record
         // (see the row constructor), and it names the owning CLI without the
@@ -2952,7 +3027,7 @@ impl ProviderPickerView {
                 .add_modifier(Modifier::BOLD),
         )));
         let pane_models = provider_pane_models(&self.route_config, row, 8);
-        let name_budget = usize::from(inner.width).saturating_sub(22).max(8);
+        let name_budget = usize::from(width).saturating_sub(22).max(8);
         for (model, price, is_default) in &pane_models {
             let name = crate::tui::ui_text::truncate_line_to_width(model, name_budget);
             let mut spans = vec![
@@ -2984,11 +3059,11 @@ impl ProviderPickerView {
                 Style::default().fg(palette::TEXT_MUTED),
             )));
         }
-        lines.push(Line::from(""));
-        lines.extend(diagnostics);
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: true })
-            .render(inner, buf);
+        if full {
+            lines.push(Line::from(""));
+            lines.extend(diagnostics);
+        }
+        lines
     }
 
     fn render_xai_auth_choice(&self, area: Rect, buf: &mut Buffer) {
@@ -4097,6 +4172,9 @@ impl ModalView for ProviderPickerView {
         self.hovered_choice = None;
         match self.stage {
             Stage::List => match key.code {
+                _ if crate::tui::shell_key_routing::is_tool_details_shortcut(&key) => {
+                    self.open_provider_details()
+                }
                 KeyCode::Esc if !self.query.is_empty() => {
                     self.update_query(String::new());
                     ViewAction::None
@@ -4603,6 +4681,19 @@ impl ModalView for ProviderPickerView {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) -> ViewAction {
+        if matches!(self.stage, Stage::List) {
+            let over_details = self
+                .detail_action_hitbox
+                .borrow()
+                .is_some_and(|rect| rect.contains((mouse.column, mouse.row).into()));
+            if matches!(mouse.kind, MouseEventKind::Moved) {
+                self.detail_action_hovered = over_details;
+            }
+            if over_details && mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                return self.open_provider_details();
+            }
+        }
+
         match self.stage {
             Stage::List => match mouse.kind {
                 MouseEventKind::ScrollUp => {
@@ -4690,6 +4781,7 @@ impl ModalView for ProviderPickerView {
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
         self.choice_row_hitboxes.borrow_mut().clear();
+        *self.detail_action_hitbox.borrow_mut() = None;
         // Managing routes needs room for both options and their explanation,
         // even with only one configured provider. First-run questions and
         // credential/consent flows retain their bounded modal presentation.
@@ -4785,6 +4877,51 @@ mod tests {
     // against the rest of the suite, so sibling tests raced on shared
     // provider env vars (EXAMPLE_API_KEY, OPENROUTER_API_KEY, ...) and a panic
     // while holding it cascaded PoisonError failures into unrelated tests.
+
+    #[test]
+    fn provider_inspector_keeps_exact_diagnostics_in_clickable_keyboard_pager() {
+        let _env = crate::test_support::lock_test_env();
+        let config = Config::default();
+        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
+        let message = "Recovery fixture · exact diagnostic source ".repeat(12);
+        let selected = picker.selected_idx;
+        picker.rows[selected].messages = vec![
+            message.clone(),
+            "second diagnostic".into(),
+            "third diagnostic".into(),
+        ];
+        for (width, height) in [(40, 12), (60, 16), (80, 24), (100, 32), (140, 40)] {
+            let overview = render_text(&picker, width, height);
+            assert!(!overview.contains(&message));
+            let hit = picker
+                .detail_action_hitbox
+                .borrow()
+                .expect("visible details action");
+            let ViewAction::Emit(ViewEvent::OpenTextPager { title, content }) =
+                picker.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT))
+            else {
+                panic!("the shared details shortcut must open the existing pager")
+            };
+            assert!(content.contains(&message));
+            assert!(content.contains("third diagnostic"));
+            assert!(content.contains("Protocol:"));
+            let ViewAction::Emit(ViewEvent::OpenTextPager {
+                title: clicked_title,
+                content: clicked_content,
+            }) = picker.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: hit.x,
+                row: hit.y,
+                modifiers: KeyModifiers::NONE,
+            })
+            else {
+                panic!("click must open the same pager")
+            };
+            assert_eq!(clicked_title, title);
+            assert_eq!(clicked_content, content);
+            assert_eq!(picker.selected_idx, selected);
+        }
+    }
 
     #[test]
     fn workbench_setup_choice_clicks_share_keyboard_confirmation_paths() {
@@ -6869,7 +7006,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_dashboard_render_includes_route_protocol_usage_and_base_url() {
+    fn provider_dashboard_keeps_route_and_prices_visible_with_protocol_in_details() {
         let config = Config {
             providers: Some(crate::config::ProvidersConfig {
                 openai: crate::config::ProviderConfig {
@@ -6889,7 +7026,13 @@ mod tests {
         assert!(rendered.contains("key:configured"));
         assert!(!rendered.contains("auth:configured"));
         assert!(rendered.contains("Route: custom-model"));
-        assert!(rendered.contains("chat"));
+        let ViewAction::Emit(ViewEvent::OpenTextPager { content, .. }) =
+            picker.open_provider_details()
+        else {
+            panic!("protocol details must remain accessible")
+        };
+        assert!(content.contains("Protocol: chat"));
+        assert!(rendered.contains(picker.tr(MessageId::CtxMenuOpenDetails).as_ref()));
         // Slice D: provider detail carries no cost; the models pane does.
         assert!(!rendered.contains("cost:"));
         assert!(!rendered.contains("Usage:"));
@@ -9083,7 +9226,7 @@ mod tests {
         let rendered = render_text(&picker, 80, 23);
 
         assert!(rendered.contains("DeepSeek *"));
-        assert!(rendered.contains("Details"));
+        assert!(rendered.contains(picker.tr(MessageId::CtxMenuOpenDetails).as_ref()));
         assert!(rendered.contains("Route:"));
     }
 

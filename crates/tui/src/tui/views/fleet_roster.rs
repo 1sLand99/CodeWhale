@@ -615,25 +615,15 @@ impl FleetRosterView {
             let (text, base_style) = if idx == 0 {
                 (
                     format!(
-                        "{pointer}@ {}  {}",
-                        tr(self.locale, MessageId::FleetRosterOperatorRow),
-                        self.operator.model
+                        "{pointer}@ {}",
+                        tr(self.locale, MessageId::FleetRosterOperatorRow)
                     ),
-                    Style::default()
-                        .fg(palette::WHALE_ACTION)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(palette::TEXT_PRIMARY).bold(),
                 )
             } else {
                 let member = &self.members[idx - 1];
                 let mark = member_role_mark(member);
-                // #5098: badge rows whose id exists in more than one layer
-                // so a higher-layer win is visible from the list.
                 let shadow_badge = member_shadow_badge(self.locale, member, &self.shadowed);
-                // Whale Teams: the species badge sits between the charter role
-                // mark and the id, so a Scout, Patch, or Lantern reads at a
-                // glance even before the detail pane opens.
-                let species = member_species(member);
-                let badge_cells = whales::BADGE_WIDTH + 1;
                 let edit_marker = if is_selected && self.selected_fleet.is_some() {
                     "[edit] "
                 } else {
@@ -648,46 +638,27 @@ impl FleetRosterView {
                         || member.id.clone(),
                         |name| format!("{name} ({})", member.id),
                     );
-                let text = format!(
-                    "{pointer}{edit_marker}{mark} {}{}  {}",
-                    member_name,
-                    shadow_badge.as_deref().unwrap_or(""),
-                    member_routing(member)
-                );
-                let text = truncate_view_text(&text, list_width.saturating_sub(badge_cells));
-                let base_style = if is_selected {
-                    menu_style::selected_row_style()
-                } else if hovered {
-                    Style::default()
-                        .fg(palette::TEXT_PRIMARY)
-                        .patch(hover_tint())
+                // The list identifies a member. Repeating inherited session
+                // routing on every row buries that identity; the selected
+                // inspector always states the full route. Only overrides earn
+                // secondary list ink. Whale identity lives in that inspector.
+                let has_model_override = member
+                    .profile
+                    .model
+                    .as_deref()
+                    .is_some_and(|model| !model.trim().is_empty());
+                let route = if has_model_override || member.profile.loadout.as_str() != "inherit" {
+                    format!(" · {}", member_routing(member))
                 } else {
-                    Style::default().fg(palette::TEXT_PRIMARY)
+                    String::new()
                 };
-                let split = pointer.len() + edit_marker.len() + mark.len() + 1;
-                let (head, tail) = if text.len() >= split && text.is_char_boundary(split) {
-                    text.split_at(split)
-                } else {
-                    (text.as_str(), "")
-                };
-                let mut spans = vec![Span::styled(head.to_string(), base_style)];
-                for span in whales::badge(species, &palette::UI_THEME) {
-                    spans.push(if is_selected {
-                        Span::styled(
-                            span.content,
-                            span.style
-                                .bg(palette::SELECTION_BG)
-                                .add_modifier(Modifier::BOLD),
-                        )
-                    } else if hovered {
-                        Span::styled(span.content, span.style.patch(hover_tint()))
-                    } else {
-                        span
-                    });
-                }
-                spans.push(Span::styled(format!(" {tail}"), base_style));
-                list_lines.push(Line::from(spans));
-                continue;
+                (
+                    format!(
+                        "{pointer}{edit_marker}{mark} {member_name}{}{route}",
+                        shadow_badge.as_deref().unwrap_or("")
+                    ),
+                    Style::default().fg(palette::TEXT_PRIMARY),
+                )
             };
             let style = if is_selected {
                 menu_style::selected_row_style()
@@ -696,6 +667,17 @@ impl FleetRosterView {
             } else {
                 base_style
             };
+            if is_selected || hovered {
+                buf.set_style(
+                    Rect::new(
+                        list_area.x,
+                        list_area.y + line_offset as u16,
+                        list_area.width,
+                        1,
+                    ),
+                    style,
+                );
+            }
             list_lines.push(Line::from(Span::styled(
                 truncate_view_text(&text, list_width),
                 style,
@@ -799,14 +781,13 @@ fn member_role_mark(member: &AgentProfile) -> &'static str {
 
 /// Shared field renderer for the detail pane.
 fn detail_field(lines: &mut Vec<Line<'static>>, label: &str, body: String) {
-    lines.push(Line::from(Span::styled(
-        label.to_string(),
-        Style::default().fg(palette::WHALE_ACTION).bold(),
-    )));
-    lines.push(Line::from(Span::styled(
-        body,
-        Style::default().fg(palette::TEXT_PRIMARY),
-    )));
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("{label}  "),
+            Style::default().fg(palette::TEXT_MUTED).bold(),
+        ),
+        Span::styled(body, Style::default().fg(palette::TEXT_PRIMARY)),
+    ]));
     lines.push(Line::from(""));
 }
 
