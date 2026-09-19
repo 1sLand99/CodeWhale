@@ -17811,14 +17811,30 @@ async fn threads_running_lists_active_turns_and_clears_on_settle() -> Result<()>
     turn.status = crate::runtime_threads::RuntimeTurnStatus::Completed;
     manager.test_store().save_turn(&turn)?;
 
-    let settled: serde_json::Value = client
-        .get(format!("{base}/v1/threads/running"))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    assert_eq!(settled, serde_json::json!([]));
+    // The listing above is read from the durable store, and the engine still
+    // owns this record: it can persist its own status after the write above,
+    // which puts the turn back in flight and made a single read flaky on a
+    // loaded macOS runner. That is not a defect — the engine is entitled to
+    // finish its turn. What must hold is that a settled turn stops being
+    // listed, so poll for that instead of assuming the first read is final.
+    let deadline = std::time::Instant::now() + ci_scaled(Duration::from_secs(5));
+    loop {
+        let settled: serde_json::Value = client
+            .get(format!("{base}/v1/threads/running"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        if settled == serde_json::json!([]) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a settled turn must leave the running list: {settled}"
+        );
+        sleep(Duration::from_millis(50)).await;
+    }
 
     handle.abort();
     Ok(())
