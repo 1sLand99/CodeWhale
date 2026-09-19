@@ -36,7 +36,7 @@ use crate::tui::provider_picker::ProviderPickerView;
 use crate::tui::shell_key_routing::{
     Focus, SHELL_BINDINGS, ShellBindingId, is_permission_cycle_shortcut,
 };
-use crate::tui::ui_text::truncate_line_to_width;
+use crate::tui::ui_text::{line_to_plain, truncate_line_to_width};
 use crate::tui::views::ConfigView;
 use crate::tui::views::{HelpView, ModalView, ViewAction};
 use crate::working_set::Workspace;
@@ -4250,6 +4250,120 @@ fn mouse_selection_fragment_drag_copies_exact_text() {
             .iter()
             .any(|toast| toast.text.contains("Markdown")),
         "fragment copy takes the text fallback, not the Markdown toast"
+    );
+}
+
+#[test]
+fn tab_line_partial_selection_copies_exact_fragment_not_whole_cells() {
+    // Mouse columns are terminal cells, where a tab advances to the next
+    // 8-column stop. The 2-wide rail puts content at absolute column 2, so
+    // the tab below sits at absolute 10 and spans 6 cells (10..16) while a
+    // fixed-4 tab would span 4. A selection ending inside that divergence
+    // zone is a fragment: the Markdown path must decline and the text
+    // fallback must slice in stop space, keeping the tab itself.
+    let mut app = create_test_app();
+    app.history = vec![HistoryCell::Assistant {
+        content: "abcdefgh\tcdefghij".to_string(),
+        streaming: false,
+    }];
+    app.resync_history_revisions();
+    app.viewport.transcript_cache.ensure(
+        &app.history,
+        &app.history_revisions,
+        80,
+        app.transcript_render_options(),
+    );
+    let line_index = 0;
+    let head = app.viewport.transcript_cache.rail_prefix_width(line_index)
+        + app
+            .viewport
+            .transcript_cache
+            .line_meta()
+            .get(line_index)
+            .map(|meta| meta.copy_prefix_width())
+            .unwrap_or(0);
+    assert_eq!(head, 2, "paragraph line carries the 2-wide rail only");
+    app.viewport.transcript_selection.anchor = Some(TranscriptSelectionPoint {
+        line_index,
+        column: head,
+    });
+    app.viewport.transcript_selection.head = Some(TranscriptSelectionPoint {
+        line_index,
+        column: head + 20,
+    });
+
+    assert_eq!(
+        selection_to_markdown(&app),
+        None,
+        "partial tab-line selection must not project whole cells"
+    );
+    copy_active_selection(&mut app);
+    assert_eq!(
+        app.clipboard.last_written_text(),
+        Some("abcdefgh\tcdefgh"),
+        "fragment keeps the tab and stops inside the stop span"
+    );
+
+    // Covering the line end to end still projects Markdown source.
+    app.viewport.transcript_selection.head = Some(TranscriptSelectionPoint {
+        line_index,
+        column: head + 24,
+    });
+    let (text, cells) = selection_to_markdown(&app).expect("full tab line keeps markdown");
+    assert_eq!(cells, 1);
+    assert_eq!(text, "abcdefgh\tcdefghij");
+}
+
+#[test]
+fn tab_indented_code_fragment_copies_shifted_exact_text() {
+    // Double-indented code: with the 2-wide rail plus the 2-wide code
+    // prefix, the first tab spans absolute 4..8 and the second spans 8..16
+    // under tab stops (8..12 under a fixed-4 tab). A window covering
+    // exactly the second tab's rendered span must copy just that tab.
+    let mut app = create_test_app();
+    app.history = vec![HistoryCell::Assistant {
+        content: "```\n\t\txy\n```".to_string(),
+        streaming: false,
+    }];
+    app.resync_history_revisions();
+    app.viewport.transcript_cache.ensure(
+        &app.history,
+        &app.history_revisions,
+        80,
+        app.transcript_render_options(),
+    );
+    let cache = &app.viewport.transcript_cache;
+    let line_index = cache
+        .lines()
+        .iter()
+        .position(|line| line_to_plain(line).contains("xy"))
+        .expect("code line renders");
+    let head = cache.rail_prefix_width(line_index)
+        + cache
+            .line_meta()
+            .get(line_index)
+            .map(|meta| meta.copy_prefix_width())
+            .unwrap_or(0);
+    assert_eq!(head, 4, "code line carries rail plus code prefix");
+    app.viewport.transcript_selection.anchor = Some(TranscriptSelectionPoint {
+        line_index,
+        column: head + 4,
+    });
+    app.viewport.transcript_selection.head = Some(TranscriptSelectionPoint {
+        line_index,
+        column: head + 12,
+    });
+
+    assert_eq!(
+        selection_to_markdown(&app),
+        None,
+        "mid-line code fragment is not whole cells"
+    );
+    copy_active_selection(&mut app);
+    assert_eq!(
+        app.clipboard.last_written_text(),
+        Some("\t"),
+        "window covers the second tab stop exactly, excluding neighbors"
     );
 }
 

@@ -111,8 +111,9 @@ use crate::tui::scrolling::{ScrollDirection, TranscriptScroll};
 use crate::tui::selection::{SelectionAutoscroll, TranscriptSelectionPoint};
 use crate::tui::tideline::InteractionAction;
 use crate::tui::ui_text::{
-    history_cell_to_clipboard_text, history_cell_to_text, line_to_plain, slice_text,
-    text_display_width, truncate_line_to_width,
+    history_cell_to_clipboard_text, history_cell_to_text, line_to_plain, slice_text_tab_stops,
+    text_display_width, text_display_width_tab_stops, text_display_width_tab_stops_from,
+    truncate_line_to_width,
 };
 use crate::tui::views::{ContextMenuAction, HelpView, ModalKind, ViewEvent};
 use codewhale_localization::MessageId;
@@ -1945,7 +1946,7 @@ fn selection_covers_cells_fully(
 /// to that width plus the content's display width.
 fn content_column_span(app: &App, line_index: usize) -> Option<(usize, usize)> {
     let cache = &app.viewport.transcript_cache;
-    let full_width = text_display_width(&line_to_plain(cache.lines().get(line_index)?));
+    let full_width = text_display_width_tab_stops(&line_to_plain(cache.lines().get(line_index)?));
     let rail_width = cache.rail_prefix_width(line_index).min(full_width);
     let copy_prefix = cache
         .line_meta()
@@ -2052,24 +2053,40 @@ pub(crate) fn selection_to_text(app: &App) -> Option<String> {
         // slice off the rail prefix so subsequent column offsets operate
         // on content-only text.
         let full_text = line_to_plain(&lines[line_index]);
+        // Selection columns are terminal cells, where a tab advances to the
+        // next 8-column stop. Measure and slice in that space so columns
+        // after a tab stay aligned with what the user dragged over; the
+        // fixed-width fallback would shift every downstream column.
+        // Prefixes are renderer chrome without tabs, so stripping them in
+        // either space lands on the same boundary.
         let line_after_rail = if rail_width > 0 {
-            slice_text(&full_text, rail_width, text_display_width(&full_text))
+            slice_text_tab_stops(
+                &full_text,
+                rail_width,
+                text_display_width_tab_stops(&full_text),
+                0,
+            )
         } else {
             full_text
         };
-        let line_after_rail_width = text_display_width(&line_after_rail);
+        let line_after_rail_width = text_display_width_tab_stops_from(&line_after_rail, rail_width);
         let copy_prefix_width = line_meta
             .get(line_index)
             .map(|meta| meta.copy_prefix_width())
             .unwrap_or(0)
             .min(line_after_rail_width);
         let line_text = if copy_prefix_width > 0 {
-            slice_text(&line_after_rail, copy_prefix_width, line_after_rail_width)
+            slice_text_tab_stops(
+                &line_after_rail,
+                copy_prefix_width,
+                line_after_rail_width,
+                rail_width,
+            )
         } else {
             line_after_rail
         };
-        let line_width = text_display_width(&line_text);
         let visual_prefix_width = rail_width.saturating_add(copy_prefix_width);
+        let line_width = text_display_width_tab_stops_from(&line_text, visual_prefix_width);
         // Selection coordinates are recorded in rendered-column space, which
         // includes visual prefixes. Add them back so the column window maps
         // correctly into copy-only text.
@@ -2090,7 +2107,7 @@ pub(crate) fn selection_to_text(app: &App) -> Option<String> {
             .saturating_sub(visual_prefix_width)
             .min(line_width);
 
-        let slice = slice_text(&line_text, col_start, col_end);
+        let slice = slice_text_tab_stops(&line_text, col_start, col_end, visual_prefix_width);
         selected.push_str(&slice);
         separator_before = line_meta
             .get(line_index)

@@ -234,6 +234,72 @@ pub(super) fn slice_text(text: &str, start: usize, end: usize) -> String {
     out
 }
 
+/// Tab-stop width of one grapheme at absolute column `col`: a tab advances to
+/// the next 8-column stop, matching the terminal and the markdown renderer.
+/// Every other grapheme keeps the shared [`grapheme_display_width`] contract.
+fn tab_stop_width(grapheme: &str, col: usize) -> usize {
+    if grapheme == "\t" {
+        8usize.saturating_sub(col % 8)
+    } else {
+        grapheme_display_width(grapheme)
+    }
+}
+
+/// Display width in terminal columns, with tabs advancing to 8-column stops.
+///
+/// Mouse selection coordinates are terminal cells, so the copy path must
+/// measure in this space: the fixed-4 [`text_display_width`] would shift
+/// every column after a tab away from what the user dragged over. `base_col`
+/// is the absolute column of the first grapheme, for text already stripped of
+/// its (tab-free) rail and copy prefixes. The two agree on tab-free text.
+pub(crate) fn text_display_width_tab_stops_from(text: &str, base_col: usize) -> usize {
+    let mut col = base_col;
+    for grapheme in text.graphemes(true) {
+        col = col.saturating_add(tab_stop_width(grapheme, col));
+    }
+    col.saturating_sub(base_col)
+}
+
+/// [`text_display_width_tab_stops_from`] for text starting at column zero.
+pub(crate) fn text_display_width_tab_stops(text: &str) -> usize {
+    text_display_width_tab_stops_from(text, 0)
+}
+
+/// Slice `[start, end)` in terminal columns with tab stops, like
+/// [`slice_text`] but in the column space the mouse reports.
+///
+/// `start`/`end` are relative to `text`; `base_col` is the absolute column
+/// of its first grapheme. A grapheme overlapping the window is kept whole,
+/// tabs included, so copied indentation stays tabs. Agrees with
+/// [`slice_text`] on tab-free text.
+pub(crate) fn slice_text_tab_stops(
+    text: &str,
+    start: usize,
+    end: usize,
+    base_col: usize,
+) -> String {
+    if end <= start {
+        return String::new();
+    }
+    let abs_start = base_col.saturating_add(start);
+    let abs_end = base_col.saturating_add(end);
+
+    let mut out = String::new();
+    let mut col = base_col;
+    for grapheme in text.graphemes(true) {
+        let grapheme_start = col;
+        let grapheme_end = col.saturating_add(tab_stop_width(grapheme, col));
+        if grapheme_end > abs_start && grapheme_start < abs_end {
+            out.push_str(grapheme);
+        }
+        col = grapheme_end;
+        if col >= abs_end {
+            break;
+        }
+    }
+    out
+}
+
 pub(super) fn char_display_width(ch: char) -> usize {
     match ch {
         '\t' => 4,
