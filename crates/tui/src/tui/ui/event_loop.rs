@@ -4859,6 +4859,10 @@ pub(crate) async fn run_event_loop(
                         crate::tui::underwater::LaunchAction::McpRemedy => {
                             type_launch_mcp_remedy(app);
                         }
+                        crate::tui::underwater::LaunchAction::McpManager => {
+                            app.launch.dissolve_card(app.ambient_clock_ms);
+                            open_mcp_extensions(app);
+                        }
                         crate::tui::underwater::LaunchAction::Help => {
                             toggle_help_view(app);
                         }
@@ -5519,19 +5523,7 @@ pub(crate) async fn run_event_loop(
                             }
                         }
                         crate::tui::underwater::LaunchAction::ResumeSession(session_id) => {
-                            let result = resume_launch_session(app, &session_id);
-                            if apply_command_result(
-                                terminal,
-                                app,
-                                &mut engine_handle,
-                                &task_manager,
-                                config,
-                                result,
-                            )
-                            .await?
-                            {
-                                return Ok(());
-                            }
+                            crate::tui::underwater::open_launch_resume_confirm(app, &session_id);
                         }
                         crate::tui::underwater::LaunchAction::BrowseSessions => {
                             // A launched command dissolves the card; Esc
@@ -5544,6 +5536,10 @@ pub(crate) async fn run_event_loop(
                         }
                         crate::tui::underwater::LaunchAction::McpRemedy => {
                             type_launch_mcp_remedy(app);
+                        }
+                        crate::tui::underwater::LaunchAction::McpManager => {
+                            app.launch.dissolve_card(app.ambient_clock_ms);
+                            open_mcp_extensions(app);
                         }
                         crate::tui::underwater::LaunchAction::Help => {
                             toggle_help_view(app);

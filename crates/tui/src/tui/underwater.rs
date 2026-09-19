@@ -51,6 +51,8 @@ pub enum LaunchAction {
     ResumeSession(String),
     /// The see-all overflow: open the full session picker.
     BrowseSessions,
+    /// Inspect and manage the servers counted by the MCP summary.
+    McpManager,
     /// The MCP problems row: type the remedy it prints into the composer
     /// (`/mcp login <name>` or `/mcp`). Typing beats copying — it works over
     /// SSH where a clipboard may not exist, and the user sees the command
@@ -182,15 +184,18 @@ pub fn launch_rows_for_app(app: &App) -> Vec<LaunchCardRow> {
         return launch_card_rows(app.ui_locale, &recent, has_more);
     }
     let mut superset = launch_card_rows(app.ui_locale, &recent, true);
-    // The MCP problems row is painted by the boot block, not the card-row
-    // loop, but it joins the same selection ordering when it painted: the
-    // hitbox intersection below is what keeps it out when it did not.
-    superset.push(LaunchCardRow {
-        id: crate::tui::app::LaunchRowId::McpRemedy,
-        label: String::new(),
-        detail: String::new(),
-        prominent: false,
-    });
+    // MCP rows join the same ordering only when the boot block painted them.
+    for id in [
+        crate::tui::app::LaunchRowId::McpManager,
+        crate::tui::app::LaunchRowId::McpRemedy,
+    ] {
+        superset.push(LaunchCardRow {
+            id,
+            label: String::new(),
+            detail: String::new(),
+            prominent: false,
+        });
+    }
     app.launch
         .row_hitboxes
         .iter()
@@ -204,13 +209,16 @@ pub fn launch_rows_for_app(app: &App) -> Vec<LaunchCardRow> {
 /// the row list keyboard and mouse read back cannot describe a row the
 /// transcript did not draw.
 pub fn refresh_launch_row_hitboxes(app: &mut App, area: Rect) {
-    app.launch.row_hitboxes = launch_empty_state(app, area)
+    let state = launch_empty_state(app, area);
+    app.launch.row_hitboxes = state
         .rows
         .into_iter()
         .filter_map(|(id, row)| {
             let y = area.y.checked_add(u16::try_from(row).ok()?)?;
-            (y < area.y.saturating_add(area.height))
-                .then_some((id, Rect::new(area.x, y, area.width, 1)))
+            (y < area.y.saturating_add(area.height)).then_some((
+                id,
+                Rect::new(area.x + state.text_column.x, y, state.text_column.width, 1),
+            ))
         })
         .collect();
     // A pane that shrank can leave the highlight past the last painted row.
@@ -240,6 +248,7 @@ pub fn launch_row_click_action(id: &crate::tui::app::LaunchRowId) -> LaunchActio
             LaunchAction::ResumeSession(session_id.clone())
         }
         crate::tui::app::LaunchRowId::SeeAll => LaunchAction::BrowseSessions,
+        crate::tui::app::LaunchRowId::McpManager => LaunchAction::McpManager,
         crate::tui::app::LaunchRowId::McpRemedy => LaunchAction::McpRemedy,
     }
 }
@@ -286,12 +295,7 @@ pub fn run_launch_card_row(rows: &[LaunchCardRow], menu_selected: Option<usize>)
     };
     match rows.get(selected) {
         None => LaunchAction::None,
-        Some(row) => match &row.id {
-            crate::tui::app::LaunchRowId::NewSession => LaunchAction::NewSession,
-            crate::tui::app::LaunchRowId::Recent(id) => LaunchAction::ResumeSession(id.clone()),
-            crate::tui::app::LaunchRowId::SeeAll => LaunchAction::BrowseSessions,
-            crate::tui::app::LaunchRowId::McpRemedy => LaunchAction::McpRemedy,
-        },
+        Some(row) => launch_row_click_action(&row.id),
     }
 }
 
@@ -1101,6 +1105,9 @@ fn empty_state_caption(
 /// real one.
 pub struct LaunchEmptyState {
     pub lines: Vec<Line<'static>>,
+    /// Text lane relative to the paint area; the whale and outer whitespace
+    /// are not controls. Selection and pointer targets share this lane.
+    text_column: Rect,
     /// Clickable rows as `(id, row index within `lines`)`. The caller turns
     /// these into rects against the painted area, so hitboxes and glyphs
     /// cannot drift apart.
@@ -1542,6 +1549,7 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
         return LaunchEmptyState {
             lines: Vec::new(),
             rows: Vec::new(),
+            text_column: Rect::default(),
         };
     }
     let width = usize::from(area.width);
@@ -1587,6 +1595,7 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
         return LaunchEmptyState {
             lines: Vec::new(),
             rows: Vec::new(),
+            text_column: Rect::default(),
         };
     }
 
@@ -1743,13 +1752,33 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
             if offset >= fit.mcp {
                 break;
             }
-            // The problems row gets a hitbox like a card row: it is the
-            // last row in the shared ordering, so Enter/click on it runs
-            // the remedy it prints (#6085).
-            if mcp_block.problems_row == Some(offset) {
+            if offset == 0 {
+                rows.push((crate::tui::app::LaunchRowId::McpManager, text.len()));
+            } else if mcp_block.problems_row == Some(offset) {
                 rows.push((crate::tui::app::LaunchRowId::McpRemedy, text.len()));
             }
             text.push(Some(line));
+        }
+    }
+
+    // Paint the state mouse/keyboard navigation already records. Restrict the
+    // band to the text lane so selecting a session never highlights the whale.
+    for (index, (_, row)) in rows.iter().enumerate() {
+        let style = if app.launch.menu_selected == Some(index) {
+            Some(crate::tui::menu_style::selected_row_style())
+        } else if app.launch.hovered_row == Some(index) {
+            Some(crate::tui::menu_style::hovered_row_style())
+        } else {
+            None
+        };
+        if let Some(style) = style
+            && let Some(Some(line)) = text.get_mut(*row)
+        {
+            let padding = text_width.saturating_sub(line.width());
+            line.spans.push(Span::raw(" ".repeat(padding)));
+            for span in &mut line.spans {
+                span.style = span.style.patch(style);
+            }
         }
     }
 
@@ -1793,7 +1822,11 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
         .filter_map(|(id, text_row)| row_offsets.get(text_row).map(|y| (id, *y)))
         .collect();
 
-    LaunchEmptyState { lines, rows }
+    LaunchEmptyState {
+        lines,
+        rows,
+        text_column: Rect::new(text_indent as u16, 0, text_width as u16, area.height),
+    }
 }
 
 #[cfg(test)]
@@ -2284,6 +2317,56 @@ mod launch_card_tests {
             LaunchAction::McpRemedy,
             "click and Enter share one contract"
         );
+    }
+
+    #[test]
+    fn launch_healthy_mcp_and_recent_rows_have_visible_focus_in_their_click_lane() {
+        let mut app = with_mcp(app_with_recent(&["Recent proof"], 1));
+        app.mcp_snapshot
+            .as_mut()
+            .unwrap()
+            .servers
+            .retain(|s| s.connected);
+        app.mcp_configured_count = 5;
+        for (width, height) in [(40, 12), (60, 16), (80, 24), (100, 32), (140, 40)] {
+            let area = Rect::new(3, 2, width, height);
+            refresh_launch_row_hitboxes(&mut app, area);
+            let rows = launch_rows_for_app(&app);
+            let mcp = rows
+                .iter()
+                .position(|r| r.id == LaunchRowId::McpManager)
+                .unwrap();
+            assert_eq!(
+                run_launch_card_row(&rows, Some(mcp)),
+                LaunchAction::McpManager
+            );
+            assert!(!row_ids(&app).contains(&LaunchRowId::McpRemedy));
+
+            for index in [1, mcp] {
+                app.launch.menu_selected = None;
+                app.launch.hovered_row = Some(index);
+                let hovered = launch_empty_state(&app, area);
+                let (_, y) = hovered.rows[index];
+                let hit = app.launch.row_hitboxes[index].1;
+                assert_eq!(hit.x, area.x + hovered.text_column.x);
+                assert_eq!(hit.y, area.y + y as u16);
+                assert!(hit.right() <= area.right());
+                let text = hovered.lines[y].spans.last().unwrap();
+                assert_eq!(
+                    text.style.bg,
+                    crate::tui::menu_style::hovered_row_style().bg
+                );
+
+                app.launch.menu_selected = Some(index);
+                let selected = launch_empty_state(&app, area);
+                assert_eq!(
+                    selected.lines[y].spans.last().unwrap().style,
+                    crate::tui::menu_style::selected_row_style()
+                );
+                // Neither the whale nor the leading whitespace changes color.
+                assert_eq!(selected.lines[y].spans[0].style.bg, None);
+            }
+        }
     }
 
     #[test]

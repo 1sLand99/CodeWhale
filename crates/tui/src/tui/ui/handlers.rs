@@ -2584,13 +2584,16 @@ pub(crate) async fn handle_view_events(
                     update_backtrack_overlay_selection(app, idx);
                 }
             }
-            // The launch card's resume confirmation was accepted. Hand it to
-            // the same pending-action path the card's own Enter uses, so the
-            // resume runs through one code path rather than two.
+            // Apply the accepted choice now, for keyboard and mouse alike.
+            // Parking it in pending_launch_action left keyboard confirmation
+            // waiting for an unrelated mouse event to drain that queue.
             ViewEvent::LaunchResumeConfirmed { session_id } => {
-                app.pending_launch_action = Some(
-                    crate::tui::underwater::LaunchAction::ResumeSession(session_id),
-                );
+                let result = resume_launch_session(app, &session_id);
+                if apply_command_result(terminal, app, engine_handle, task_manager, config, result)
+                    .await?
+                {
+                    return Ok(true);
+                }
                 app.needs_redraw = true;
             }
             ViewEvent::BacktrackConfirm => {

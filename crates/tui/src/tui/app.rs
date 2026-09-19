@@ -590,6 +590,8 @@ pub enum LaunchRowId {
     NewSession,
     Recent(String),
     SeeAll,
+    /// Open the MCP manager from the status summary, including healthy servers.
+    McpManager,
     /// The MCP problems row: Enter/click types the remedy command into the
     /// composer (`/mcp login <name>` or `/mcp`) instead of making the user
     /// retype what the card printed (#6085).
