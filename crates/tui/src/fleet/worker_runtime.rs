@@ -297,7 +297,7 @@ pub fn validate_fleet_task_routes(
         }
         if pinned_model && explicit_provider.is_none() {
             let config = config.expect("provider authority checked above");
-            let (provider, base_url) = (config.api_provider(), config.deepseek_base_url());
+            let (provider, base_url) = (config.api_provider(), config.active_route_base_url());
             if let Err(reason) =
                 crate::route_runtime::validate_unpinned_model_provider(provider, &model, &base_url)
             {

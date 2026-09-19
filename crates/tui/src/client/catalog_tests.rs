@@ -14,8 +14,8 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 const KEY: &str = "catalog-key-canary-7f092";
 const CURSOR: &str = "cursor/second +?&=雪-canary";
 
-fn anthropic_client(base_url: &str) -> DeepSeekClient {
-    let mut client = DeepSeekClient::new(&Config {
+fn anthropic_client(base_url: &str) -> CodewhaleClient {
+    let mut client = CodewhaleClient::new(&Config {
         provider: Some("anthropic".into()),
         providers: Some(ProvidersConfig {
             anthropic: ProviderConfig {
@@ -258,7 +258,7 @@ async fn opencode_go_published_unpaginated_roster_keeps_documented_protocols() {
         )
         .mount(&server)
         .await;
-    let mut client = DeepSeekClient::new(&Config {
+    let mut client = CodewhaleClient::new(&Config {
         provider: Some("opencode-go".into()),
         providers: Some(ProvidersConfig {
             opencode_go: ProviderConfig {

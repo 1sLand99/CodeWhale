@@ -289,7 +289,7 @@ pub(crate) async fn handle_setup_constitution_model_draft(
     // timeout. The loop polls constitution_draft_cell and delivers the result.
     const DRAFT_TIMEOUT: Duration = Duration::from_secs(20);
     let model_label = app.model_display_label();
-    let client = match DeepSeekClient::new(config) {
+    let client = match CodewhaleClient::new(config) {
         Ok(client) => client,
         Err(err) => {
             deliver_constitution_draft_result(
@@ -365,7 +365,7 @@ pub(crate) async fn handle_fleet_profile_model_draft(
     // the wizard interactive with a drafting status.
     const DRAFT_TIMEOUT: Duration = Duration::from_secs(20);
     let model_label = app.model_display_label();
-    let client = match DeepSeekClient::new(config) {
+    let client = match CodewhaleClient::new(config) {
         Ok(client) => client,
         Err(err) => {
             deliver_fleet_draft_result(

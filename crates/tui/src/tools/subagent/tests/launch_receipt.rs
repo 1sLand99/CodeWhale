@@ -17,7 +17,7 @@ fn consultant_runtime(
             api_key: Some("codex-test-key".to_string()),
             // A custom endpoint lets a pinned codex client construct from the
             // table key alone (see the codex_credentials fallback in
-            // DeepSeekClient::new) instead of requiring machine-local OAuth
+            // CodewhaleClient::new) instead of requiring machine-local OAuth
             // consent. The endpoint is never contacted: these fixtures cancel
             // their children before a model step, and 127.0.0.1:9 refuses
             // instantly if one ever races.
@@ -32,7 +32,7 @@ fn consultant_runtime(
         providers: Some(providers),
         ..Default::default()
     };
-    let client = DeepSeekClient::new(&config).expect("DeepSeek parent client");
+    let client = CodewhaleClient::new(&config).expect("DeepSeek parent client");
     SubAgentRuntime::new(
         client,
         "deepseek-v4-flash".to_string(),

@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use thiserror::Error;
 
-use crate::client::DeepSeekClient;
+use crate::client::CodewhaleClient;
 
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
@@ -29,16 +29,16 @@ pub struct FimEditResult {
 }
 
 /// Tool for performing Fill-in-the-Middle edits via the active route's FIM API.
-/// (`DeepSeekClient` is the historical name of the shared provider client; it is
+/// (`CodewhaleClient` is the historical name of the shared provider client; it is
 /// not a DeepSeek-only type.)
 pub struct FimEditTool {
-    pub client: Option<DeepSeekClient>,
+    pub client: Option<CodewhaleClient>,
     pub model: String,
 }
 
 impl FimEditTool {
     #[must_use]
-    pub fn new(client: Option<DeepSeekClient>, model: String) -> Self {
+    pub fn new(client: Option<CodewhaleClient>, model: String) -> Self {
         Self { client, model }
     }
 }

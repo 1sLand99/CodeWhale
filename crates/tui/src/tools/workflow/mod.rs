@@ -5838,7 +5838,7 @@ pub(crate) fn reconcile_persisted_workflow_bindings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::DeepSeekClient;
+    use crate::client::CodewhaleClient;
     use crate::tools::ToolRegistryBuilder;
     use crate::tools::subagent::{SubAgentRuntime, new_shared_subagent_manager};
     use axum::{Json, Router, routing::post};
@@ -11996,7 +11996,7 @@ FINAL RECEIPT
             let (completion_tx, mut completion_rx) = mpsc::channel(16);
             let (event_tx, mut event_rx) = mpsc::channel(128);
             let runtime = SubAgentRuntime::new(
-                DeepSeekClient::new(&config).expect("journal probe client"),
+                CodewhaleClient::new(&config).expect("journal probe client"),
                 "deepseek-v4-flash".to_string(),
                 context.clone(),
                 true,
@@ -12620,36 +12620,36 @@ FINAL RECEIPT
         );
     }
 
-    fn stub_client() -> DeepSeekClient {
+    fn stub_client() -> CodewhaleClient {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let config = crate::config::Config {
             api_key: Some("test-key".to_string()),
             ..crate::config::Config::default()
         };
-        DeepSeekClient::new(&config).expect("stub client should construct")
+        CodewhaleClient::new(&config).expect("stub client should construct")
     }
 
-    async fn fake_chat_client(response_text: &str) -> (DeepSeekClient, Arc<AtomicUsize>) {
+    async fn fake_chat_client(response_text: &str) -> (CodewhaleClient, Arc<AtomicUsize>) {
         let (client, calls, _) = fake_chat_client_capturing(response_text).await;
         (client, calls)
     }
 
     async fn fake_chat_client_responses(
         response_texts: &[&str],
-    ) -> (DeepSeekClient, Arc<AtomicUsize>) {
+    ) -> (CodewhaleClient, Arc<AtomicUsize>) {
         let (client, calls, _) = fake_chat_client_capturing_responses(response_texts).await;
         (client, calls)
     }
 
     pub(super) async fn fake_chat_client_capturing(
         response_text: &str,
-    ) -> (DeepSeekClient, Arc<AtomicUsize>, Arc<Mutex<Vec<Value>>>) {
+    ) -> (CodewhaleClient, Arc<AtomicUsize>, Arc<Mutex<Vec<Value>>>) {
         fake_chat_client_capturing_responses(&[response_text]).await
     }
 
     async fn fake_chat_client_capturing_responses(
         response_texts: &[&str],
-    ) -> (DeepSeekClient, Arc<AtomicUsize>, Arc<Mutex<Vec<Value>>>) {
+    ) -> (CodewhaleClient, Arc<AtomicUsize>, Arc<Mutex<Vec<Value>>>) {
         assert!(
             !response_texts.is_empty(),
             "fake chat client needs at least one response"
@@ -12724,7 +12724,7 @@ FINAL RECEIPT
             ..crate::config::Config::default()
         };
         (
-            DeepSeekClient::new(&config).expect("fake chat client"),
+            CodewhaleClient::new(&config).expect("fake chat client"),
             calls,
             bodies,
         )

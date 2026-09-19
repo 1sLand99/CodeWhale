@@ -135,7 +135,7 @@ async fn fixture(mode: &'static str, first_tokens: u64, max_steps: u32) -> Fixtu
         spec.launch_manifest.as_mut().unwrap().deliverables.clear();
     }
     let mut runtime = stub_runtime();
-    runtime.client = DeepSeekClient::new(&config).unwrap();
+    runtime.client = CodewhaleClient::new(&config).unwrap();
     runtime.api_config = Some(Arc::new(config));
     runtime.context = ToolContext::new(workspace.path().to_path_buf());
     runtime.accounting_origin = SubAgentAccountingOrigin::capture(&runtime.context);

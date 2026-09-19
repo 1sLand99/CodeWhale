@@ -1003,7 +1003,7 @@ fn publish_exact_scope_for_identity(
 pub fn maybe_load_persisted_cache_for_config(config: &Config) -> usize {
     let provider = config.api_provider();
     let provider_identity = canonical_provider_scope(&config.provider_identity_for(provider));
-    let fingerprint = base_url_fingerprint(&config.deepseek_base_url());
+    let fingerprint = base_url_fingerprint(&config.active_route_base_url());
     if is_account_scoped_scope(
         &storage_provider(provider, &provider_identity),
         &fingerprint,
@@ -2076,7 +2076,7 @@ mod tests {
             ..Config::default()
         };
         let provider = config.provider_identity_for(config.api_provider());
-        let fingerprint = base_url_fingerprint(&config.deepseek_base_url());
+        let fingerprint = base_url_fingerprint(&config.active_route_base_url());
         let fetched_at = now_unix();
         let ids: Vec<String> = (0..600)
             .map(|index| format!("synthetic/openrouter-model-{index:03}"))
@@ -2092,7 +2092,7 @@ mod tests {
                     wire_model_id: id.clone(),
                     endpoint_key: "chat".to_string(),
                     source: CatalogSource::Live {
-                        base_url_fingerprint: base_url_fingerprint(&config.deepseek_base_url()),
+                        base_url_fingerprint: base_url_fingerprint(&config.active_route_base_url()),
                         fetched_at,
                     },
                     ..CatalogOffering::default()

@@ -2039,7 +2039,7 @@ pub(super) async fn delayed_chat_client(
     first_delay: Duration,
     response_text: &str,
 ) -> (
-    DeepSeekClient,
+    CodewhaleClient,
     Arc<AtomicUsize>,
     Arc<std::sync::Mutex<Vec<Value>>>,
 ) {
@@ -2099,7 +2099,7 @@ pub(super) async fn delayed_chat_client(
         base_url: Some(format!("http://{addr}/v1")),
         ..crate::config::Config::default()
     };
-    let client = DeepSeekClient::new(&config).expect("fake chat client");
+    let client = CodewhaleClient::new(&config).expect("fake chat client");
     (client, calls, bodies)
 }
 
@@ -2641,7 +2641,7 @@ async fn provider_success_without_usage_records_one_route_aware_gap_and_no_zero_
 async fn always_delayed_chat_client(
     delay: Duration,
     response_text: &str,
-) -> (DeepSeekClient, Arc<AtomicUsize>) {
+) -> (CodewhaleClient, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
     let response_text = response_text.to_string();
     let app = Router::new().route(
@@ -2689,7 +2689,7 @@ async fn always_delayed_chat_client(
         base_url: Some(format!("http://{addr}/v1")),
         ..crate::config::Config::default()
     };
-    let client = DeepSeekClient::new(&config).expect("fake always-slow chat client");
+    let client = CodewhaleClient::new(&config).expect("fake always-slow chat client");
     (client, calls)
 }
 
@@ -2736,7 +2736,7 @@ async fn tool_free_subagent_omits_chat_tools_and_tool_choice() {
 
 async fn transient_header_timeout_then_success_chat_client(
     response_text: &str,
-) -> (DeepSeekClient, Arc<AtomicUsize>) {
+) -> (CodewhaleClient, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
     let response_text = response_text.to_string();
     let app = Router::new().route(
@@ -2795,11 +2795,11 @@ async fn transient_header_timeout_then_success_chat_client(
         base_url: Some(format!("http://{addr}/v1")),
         ..crate::config::Config::default()
     };
-    let client = DeepSeekClient::new(&config).expect("fake transient chat client");
+    let client = CodewhaleClient::new(&config).expect("fake transient chat client");
     (client, calls)
 }
 
-async fn always_rate_limited_chat_client() -> (DeepSeekClient, Arc<AtomicUsize>) {
+async fn always_rate_limited_chat_client() -> (CodewhaleClient, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
     let app = Router::new().route(
         "/{*path}",
@@ -2844,11 +2844,11 @@ async fn always_rate_limited_chat_client() -> (DeepSeekClient, Arc<AtomicUsize>)
         }),
         ..crate::config::Config::default()
     };
-    let client = DeepSeekClient::new(&config).expect("fake rate-limited chat client");
+    let client = CodewhaleClient::new(&config).expect("fake rate-limited chat client");
     (client, calls)
 }
 
-async fn always_invalid_request_chat_client() -> (DeepSeekClient, Arc<AtomicUsize>) {
+async fn always_invalid_request_chat_client() -> (CodewhaleClient, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
     let app = Router::new().route(
         "/{*path}",
@@ -2894,7 +2894,7 @@ async fn always_invalid_request_chat_client() -> (DeepSeekClient, Arc<AtomicUsiz
         }),
         ..crate::config::Config::default()
     };
-    let client = DeepSeekClient::new(&config).expect("fake invalid-request chat client");
+    let client = CodewhaleClient::new(&config).expect("fake invalid-request chat client");
     (client, calls)
 }
 
@@ -4632,7 +4632,7 @@ async fn manual_role_pin_keeps_case_distinct_custom_provider_identity() {
         config.resolve_provider_pin_identity("teama").unwrap().key,
         "the fixture represents two separately configured provider identities"
     );
-    runtime.client = DeepSeekClient::new(&config).unwrap();
+    runtime.client = CodewhaleClient::new(&config).unwrap();
     runtime.api_config = Some(Arc::new(config));
     runtime.model = "model-x".into();
     for (selector, succeeds) in [("TeamA/model-x", true), ("teama/model-x", false)] {
@@ -4671,7 +4671,7 @@ async fn foreign_manual_role_pin_is_not_downgraded_to_an_implicit_default() {
         ),
         ..Default::default()
     };
-    runtime.client = DeepSeekClient::new(&config).unwrap();
+    runtime.client = CodewhaleClient::new(&config).unwrap();
     runtime.api_config = Some(Arc::new(config));
     runtime.model = "kimi-k2.6".into();
     let request = parse_spawn_request(&json!({"prompt":"review", "type":"reviewer"})).unwrap();
@@ -4731,7 +4731,7 @@ async fn structured_custom_pin_refuses_named_provider_migration_but_accepts_lite
     };
     for (config, should_bind) in [(named, false), (literal, true)] {
         let mut runtime = stub_runtime();
-        runtime.client = DeepSeekClient::new(&config).unwrap();
+        runtime.client = CodewhaleClient::new(&config).unwrap();
         runtime.api_config = Some(Arc::new(config));
         runtime.model = "parent-model".into();
         let endpoint = runtime.client.base_url().to_string();
@@ -14604,8 +14604,8 @@ fn worker_lifecycle_records_direct_operate_approval_without_delegating_authority
 
 /// A minimal stub client. Test helpers below only ever check struct fields
 /// (depth, cancel_token, context); they don't call the network. We need a
-/// *some* `DeepSeekClient` because `SubAgentRuntime.client` isn't
-/// `Option<...>`. `Config::default()` is enough — `DeepSeekClient::new`
+/// *some* `CodewhaleClient` because `SubAgentRuntime.client` isn't
+/// `Option<...>`. `Config::default()` is enough — `CodewhaleClient::new`
 /// only validates that an API key field exists, not that the key works.
 fn stub_runtime_for_provider(provider: &str) -> SubAgentRuntime {
     let mut runtime = stub_runtime();
@@ -14613,7 +14613,7 @@ fn stub_runtime_for_provider(provider: &str) -> SubAgentRuntime {
     runtime
 }
 
-fn stub_client_for_provider(provider: &str) -> DeepSeekClient {
+fn stub_client_for_provider(provider: &str) -> CodewhaleClient {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let mut providers = crate::config::ProvidersConfig::default();
     match provider {
@@ -14661,16 +14661,16 @@ fn stub_client_for_provider(provider: &str) -> DeepSeekClient {
         providers: Some(providers),
         ..crate::config::Config::default()
     };
-    DeepSeekClient::new(&config).expect("stub client should construct")
+    CodewhaleClient::new(&config).expect("stub client should construct")
 }
 
-fn stub_client() -> DeepSeekClient {
+fn stub_client() -> CodewhaleClient {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let config = crate::config::Config {
         api_key: Some("test-key".to_string()),
         ..crate::config::Config::default()
     };
-    DeepSeekClient::new(&config).expect("stub client should construct")
+    CodewhaleClient::new(&config).expect("stub client should construct")
 }
 
 // ---- Role-only dispatch inherits the session client ----
@@ -14701,7 +14701,7 @@ fn cross_provider_runtime() -> SubAgentRuntime {
         providers: Some(providers),
         ..crate::config::Config::default()
     };
-    let client = DeepSeekClient::new(&config).expect("session client builds");
+    let client = CodewhaleClient::new(&config).expect("session client builds");
     let mut runtime = stub_runtime().with_api_config(config);
     runtime.client = client;
     runtime
@@ -15665,7 +15665,7 @@ async fn cancellation_wins_task_race_but_still_fans_in_exactly_once() {
 
 /// Call 1 answers with a tool call (so the child banks a real step);
 /// every later call fails with a non-retryable 400.
-async fn tool_call_then_invalid_request_chat_client() -> (DeepSeekClient, Arc<AtomicUsize>) {
+async fn tool_call_then_invalid_request_chat_client() -> (CodewhaleClient, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
     let app = Router::new().route(
         "/{*path}",
@@ -15738,7 +15738,7 @@ async fn tool_call_then_invalid_request_chat_client() -> (DeepSeekClient, Arc<At
         }),
         ..crate::config::Config::default()
     };
-    let client = DeepSeekClient::new(&config).expect("fatal-midrun chat client");
+    let client = CodewhaleClient::new(&config).expect("fatal-midrun chat client");
     (client, calls)
 }
 
@@ -15912,7 +15912,7 @@ async fn fatal_provider_failure_mid_run_parks_a_continuable_checkpoint() {
 /// Six responses re-issuing the same role-denied call, then a text report —
 /// the exact stall #6015 guards: three denied rounds trigger the strategy
 /// switch, three held rounds the report-only response.
-async fn denied_call_then_report_chat_client() -> (DeepSeekClient, Arc<AtomicUsize>) {
+async fn denied_call_then_report_chat_client() -> (CodewhaleClient, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
     let app = Router::new().route(
         "/{*path}",
@@ -15994,7 +15994,7 @@ async fn denied_call_then_report_chat_client() -> (DeepSeekClient, Arc<AtomicUsi
         }),
         ..crate::config::Config::default()
     };
-    let client = DeepSeekClient::new(&config).expect("denial-stall chat client");
+    let client = CodewhaleClient::new(&config).expect("denial-stall chat client");
     (client, calls)
 }
 
@@ -17328,7 +17328,7 @@ async fn token_heavy_chat_client(
     prompt_tokens: u64,
     completion_tokens: u64,
     response_text: &str,
-) -> (DeepSeekClient, Arc<AtomicUsize>) {
+) -> (CodewhaleClient, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
     let response_text = response_text.to_string();
     let app = Router::new().route(
@@ -17376,7 +17376,7 @@ async fn token_heavy_chat_client(
         base_url: Some(format!("http://{addr}/v1")),
         ..crate::config::Config::default()
     };
-    let client = DeepSeekClient::new(&config).expect("fake chat client");
+    let client = CodewhaleClient::new(&config).expect("fake chat client");
     (client, calls)
 }
 
@@ -17385,7 +17385,7 @@ async fn token_heavy_chat_client(
 /// allowed to retry, completes normally.
 async fn incomplete_then_complete_chat_client(
     first_stop_reason: &str,
-) -> (DeepSeekClient, Arc<AtomicUsize>) {
+) -> (CodewhaleClient, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
     let first_stop_reason = first_stop_reason.to_string();
     let app = Router::new().route(
@@ -17452,7 +17452,7 @@ async fn incomplete_then_complete_chat_client(
         base_url: Some(format!("http://{addr}/v1")),
         ..crate::config::Config::default()
     };
-    let client = DeepSeekClient::new(&config).expect("fake incomplete-response client");
+    let client = CodewhaleClient::new(&config).expect("fake incomplete-response client");
     (client, calls)
 }
 
@@ -21507,7 +21507,7 @@ async fn parked_followup_executes_on_the_saved_cross_provider_route() {
         ..Default::default()
     };
     let mut runtime = stub_runtime().with_api_config(config.clone());
-    runtime.client = DeepSeekClient::new(&config).expect("session client builds");
+    runtime.client = CodewhaleClient::new(&config).expect("session client builds");
     runtime.manager = Arc::clone(&manager);
     assert_eq!(
         runtime.client.api_provider(),
@@ -21924,7 +21924,7 @@ mod child_permission_gate {
         approval_mode: ApprovalMode,
         auto_approve: bool,
         parent_can_prompt: bool,
-        client: Option<DeepSeekClient>,
+        client: Option<CodewhaleClient>,
     ) -> (
         SubAgentToolRegistry,
         tokio::sync::mpsc::Receiver<Event>,
@@ -22038,7 +22038,7 @@ mod child_permission_gate {
     async fn guardian_mock_with_stop(
         content: &str,
         finish_reason: &str,
-    ) -> (wiremock::MockServer, DeepSeekClient) {
+    ) -> (wiremock::MockServer, CodewhaleClient) {
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -22062,15 +22062,15 @@ mod child_permission_gate {
             base_url: Some(server.uri()),
             ..crate::config::Config::default()
         };
-        let client = DeepSeekClient::new(&config).expect("mock-backed client");
+        let client = CodewhaleClient::new(&config).expect("mock-backed client");
         (server, client)
     }
 
-    async fn guardian_mock(content: &str) -> (wiremock::MockServer, DeepSeekClient) {
+    async fn guardian_mock(content: &str) -> (wiremock::MockServer, CodewhaleClient) {
         guardian_mock_with_stop(content, "stop").await
     }
 
-    async fn guardian_mock_without_usage(content: &str) -> (wiremock::MockServer, DeepSeekClient) {
+    async fn guardian_mock_without_usage(content: &str) -> (wiremock::MockServer, CodewhaleClient) {
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -22093,18 +22093,18 @@ mod child_permission_gate {
             base_url: Some(server.uri()),
             ..crate::config::Config::default()
         };
-        let client = DeepSeekClient::new(&config).expect("mock-backed client");
+        let client = CodewhaleClient::new(&config).expect("mock-backed client");
         (server, client)
     }
 
-    fn unreachable_client() -> DeepSeekClient {
+    fn unreachable_client() -> CodewhaleClient {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let config = crate::config::Config {
             api_key: Some("test-key".to_string()),
             base_url: Some("http://127.0.0.1:1".to_string()),
             ..crate::config::Config::default()
         };
-        DeepSeekClient::new(&config).expect("unreachable client")
+        CodewhaleClient::new(&config).expect("unreachable client")
     }
 
     fn typed_deny_rules(rules: Vec<ToolAskRule>) -> Ruleset {
@@ -22773,7 +22773,7 @@ mod child_permission_gate {
             })
             .mount(&server)
             .await;
-        let client = DeepSeekClient::new(&crate::config::Config {
+        let client = CodewhaleClient::new(&crate::config::Config {
             api_key: Some("test-guardian-fresh-key".to_string()),
             base_url: Some(server.uri()),
             ..Default::default()

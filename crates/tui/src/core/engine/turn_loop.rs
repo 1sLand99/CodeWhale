@@ -1248,7 +1248,7 @@ impl Engine {
             let effective_reasoning_effort = resolve_auto_effort(
                 self.session.reasoning_effort.as_deref(),
                 self.api_provider,
-                &self.api_config.deepseek_base_url(),
+                &self.api_config.active_route_base_url(),
                 &self.config.model,
             );
 

@@ -2227,7 +2227,7 @@ mod tests {
             crate::route_runtime::resolve_runtime_route(&config, ApiProvider::Deepseek, Some(id))
                 .unwrap();
         let client =
-            crate::client::DeepSeekClient::from_candidate(&config, &route.candidate).unwrap();
+            crate::client::CodewhaleClient::from_candidate(&config, &route.candidate).unwrap();
         config.custom_models.as_mut().unwrap()[0]
             .cost
             .as_mut()

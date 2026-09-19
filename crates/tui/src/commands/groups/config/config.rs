@@ -284,7 +284,7 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
                     return CommandResult::error(format!("Failed to load config: {err}"));
                 }
             };
-            Some(config.deepseek_base_url())
+            Some(config.active_route_base_url())
         }
         // `/config title` reports the config-level default, not a session's
         // `/title` override. The latter is intentionally a separate setting
@@ -305,7 +305,7 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
                     return CommandResult::error(format!("Failed to load config: {err}"));
                 }
             };
-            Some(config.deepseek_base_url())
+            Some(config.active_route_base_url())
         }
         "context_window" | "context_window_tokens" => Some(format!(
             "{} (effective {} from {})",
@@ -1015,14 +1015,14 @@ fn config_editability_audit(app: &App) -> CommandResult {
         ),
         (
             "base_url",
-            config.deepseek_base_url(),
+            config.active_route_base_url(),
             "persisted restart",
             "/config base_url <url> --save",
             "Writes top-level base_url; model clients read it on startup.",
         ),
         (
             "providers.<active>.base_url",
-            provider_config.deepseek_base_url(),
+            provider_config.active_route_base_url(),
             "persisted restart",
             "/config provider_url <url> --save",
             "Writes the active provider table; model clients read it on startup.",

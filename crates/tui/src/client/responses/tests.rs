@@ -113,7 +113,7 @@ async fn responses_stream_retries_rate_limited_request() {
         let _codex_token =
             crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
         let _legacy_codex_token = crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
-        DeepSeekClient::new(&test_codex_config(&server)).unwrap()
+        CodewhaleClient::new(&test_codex_config(&server)).unwrap()
     };
     let mut request = minimal_responses_request();
     request.max_tokens = 384_000;
@@ -168,7 +168,7 @@ async fn responses_stream_retries_transient_server_error() {
         let _codex_token =
             crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
         let _legacy_codex_token = crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
-        DeepSeekClient::new(&test_codex_config(&server)).unwrap()
+        CodewhaleClient::new(&test_codex_config(&server)).unwrap()
     };
     let mut stream = client
         .handle_responses_stream(
@@ -209,7 +209,7 @@ async fn responses_stream_retries_upstream_499_before_streaming() {
         let _codex_token =
             crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
         let _legacy_codex_token = crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
-        DeepSeekClient::new(&test_codex_config(&server)).unwrap()
+        CodewhaleClient::new(&test_codex_config(&server)).unwrap()
     };
     let mut stream = client
         .handle_responses_stream(
@@ -253,7 +253,7 @@ async fn responses_stream_finishes_on_semantic_terminal_event_without_done_marke
         let _codex_token =
             crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
         let _legacy_codex_token = crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
-        DeepSeekClient::new(&test_codex_config(&server)).unwrap()
+        CodewhaleClient::new(&test_codex_config(&server)).unwrap()
     };
     let mut stream = client
         .handle_responses_stream(
@@ -301,7 +301,7 @@ async fn responses_stream_surfaces_notice_for_web_search_call_items() {
         let _codex_token =
             crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
         let _legacy_codex_token = crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
-        DeepSeekClient::new(&test_codex_config(&server)).unwrap()
+        CodewhaleClient::new(&test_codex_config(&server)).unwrap()
     };
     let mut stream = client
         .handle_responses_stream(
@@ -349,7 +349,7 @@ async fn responses_stream_fails_fast_on_non_retryable_provider_error() {
         let _codex_token =
             crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
         let _legacy_codex_token = crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
-        DeepSeekClient::new(&test_codex_config(&server)).unwrap()
+        CodewhaleClient::new(&test_codex_config(&server)).unwrap()
     };
 
     let err = match client
@@ -446,7 +446,7 @@ async fn responses_stream_open_preserves_wire_headers_through_shared_seam() {
         let _codex_token =
             crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
         let _legacy_codex_token = crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
-        DeepSeekClient::new(&test_codex_config(&server)).unwrap()
+        CodewhaleClient::new(&test_codex_config(&server)).unwrap()
     };
     let mut stream = client
         .handle_responses_stream(
@@ -493,7 +493,7 @@ async fn responses_stream_inserts_boundary_between_reasoning_summary_parts() {
         let _codex_token =
             crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
         let _legacy_codex_token = crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
-        DeepSeekClient::new(&test_codex_config(&server)).unwrap()
+        CodewhaleClient::new(&test_codex_config(&server)).unwrap()
     };
     let mut stream = client
         .handle_responses_stream(
@@ -559,7 +559,7 @@ async fn codex_selected_effort_reaches_preview_wire_and_restored_receipt_unchang
         let _token =
             crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
         let _legacy = crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
-        DeepSeekClient::new(&test_codex_config(&server)).unwrap()
+        CodewhaleClient::new(&test_codex_config(&server)).unwrap()
     };
     let receipts = tempfile::tempdir().unwrap();
     for effort in ["low", "medium", "high", "xhigh", "max", "ultra"] {
@@ -860,7 +860,7 @@ async fn codex_stream_captures_encrypted_reasoning_as_opaque_state() {
         let _codex_token =
             crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
         let _legacy_codex_token = crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
-        DeepSeekClient::new(&test_codex_config(&server)).unwrap()
+        CodewhaleClient::new(&test_codex_config(&server)).unwrap()
     };
     let mut stream = client
         .handle_responses_stream(

@@ -10155,7 +10155,10 @@ api_key = "arcee-key"
     // The on-disk config still resolves to the OLD provider's endpoint —
     // nothing changed for a restart or another folder.
     assert_eq!(reloaded.api_provider(), ApiProvider::Arcee);
-    assert_eq!(reloaded.deepseek_base_url(), "https://api.arcee.ai/api/v1");
+    assert_eq!(
+        reloaded.active_route_base_url(),
+        "https://api.arcee.ai/api/v1"
+    );
 
     let settings = crate::settings::Settings::load().expect("load settings");
     assert_eq!(settings.default_provider.as_deref(), None);
@@ -11119,7 +11122,7 @@ async fn dispatch_uses_app_owned_exact_custom_identity_when_config_selector_drif
             assert_eq!(route.identity.exact_id.as_deref(), Some("custom-a"));
             assert_eq!(route.model, "model-a");
             assert_eq!(
-                route.config.deepseek_base_url(),
+                route.config.active_route_base_url(),
                 "http://127.0.0.1:18181/v1"
             );
         }
@@ -11171,7 +11174,7 @@ async fn dispatch_idless_custom_identity_keeps_legacy_root_over_literal_table() 
             assert_eq!(route.identity.exact_id, None);
             assert_eq!(route.model, "legacy-root-model");
             assert_eq!(
-                route.config.deepseek_base_url(),
+                route.config.active_route_base_url(),
                 "http://127.0.0.1:18180/v1"
             );
             assert!(
@@ -20762,7 +20765,7 @@ fn file_load_uses_one_fresh_config_snapshot_for_custom_route_and_app_state() {
     assert_eq!(*app.api_messages, session.messages);
     assert_eq!(stale_config.provider.as_deref(), Some("custom-b"));
     assert_eq!(
-        stale_config.deepseek_base_url(),
+        stale_config.active_route_base_url(),
         "http://127.0.0.1:18182/v1"
     );
 }
@@ -20790,7 +20793,7 @@ fn session_load_keeps_idless_custom_record_on_root_when_table_coexists() {
     assert_eq!(app.api_provider, ApiProvider::Custom);
     assert_eq!(app.provider_identity_for_persistence(), "custom");
     assert_eq!(app.provider_id_for_persistence(), None);
-    assert_eq!(config.deepseek_base_url(), "http://127.0.0.1:18181/v1");
+    assert_eq!(config.active_route_base_url(), "http://127.0.0.1:18181/v1");
     assert!(
         config
             .providers
@@ -20867,7 +20870,7 @@ fn session_load_rejects_empty_custom_id_when_root_and_table_coexist() {
     );
     assert_eq!(app.model, previous_model);
     assert_eq!(config.provider, previous_config_provider);
-    assert_eq!(config.deepseek_base_url(), "http://127.0.0.1:18182/v1");
+    assert_eq!(config.active_route_base_url(), "http://127.0.0.1:18182/v1");
 }
 
 #[test]
@@ -20911,7 +20914,7 @@ fn file_load_respawns_engine_when_same_custom_identity_changes_endpoint() {
     assert!(respawn, "file loads must install the fresh engine config");
     assert_eq!(app.provider_identity_for_persistence(), "custom-a");
     assert_eq!(
-        stale_config.deepseek_base_url(),
+        stale_config.active_route_base_url(),
         "http://127.0.0.1:18199/v1"
     );
     let entry = stale_config
@@ -20977,7 +20980,7 @@ fn file_load_route_refresh_preserves_effective_permission_and_feature_overlays()
 
     assert!(respawn);
     assert_eq!(
-        effective_config.deepseek_base_url(),
+        effective_config.active_route_base_url(),
         "http://127.0.0.1:18199/v1"
     );
     assert_eq!(effective_config.approval_policy.as_deref(), Some("never"));
@@ -21775,7 +21778,7 @@ async fn model_picker_switches_between_exact_named_custom_routes() {
     assert_eq!(app.provider_identity_for_persistence(), "custom-b");
     assert_eq!(app.model_selection_for_persistence(), "model-b");
     assert_eq!(config.provider.as_deref(), Some("custom-b"));
-    assert_eq!(config.deepseek_base_url(), "http://127.0.0.1:18182/v1");
+    assert_eq!(config.active_route_base_url(), "http://127.0.0.1:18182/v1");
 }
 
 #[tokio::test]
@@ -21833,7 +21836,7 @@ async fn model_picker_auto_switches_exact_named_custom_route_transactionally() {
     assert_eq!(app.model_selection_for_persistence(), "auto");
     assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
     assert_eq!(config.provider.as_deref(), Some("custom-b"));
-    assert_eq!(config.deepseek_base_url(), "http://127.0.0.1:18182/v1");
+    assert_eq!(config.active_route_base_url(), "http://127.0.0.1:18182/v1");
     // Session-local: the effort tier is not written to settings.
     assert_eq!(
         crate::settings::Settings::load()

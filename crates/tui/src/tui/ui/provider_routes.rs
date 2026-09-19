@@ -383,9 +383,9 @@ pub(crate) fn paste_provider_picker_from_clipboard(app: &mut App) -> bool {
 }
 
 pub(crate) async fn fetch_available_models(config: &Config) -> Result<Vec<String>> {
-    use crate::client::DeepSeekClient;
+    use crate::client::CodewhaleClient;
 
-    let client = DeepSeekClient::new(config)?;
+    let client = CodewhaleClient::new(config)?;
     let models = tokio::time::timeout(Duration::from_secs(20), client.list_models()).await??;
     let mut ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
     ids.sort();
@@ -735,7 +735,7 @@ pub(crate) async fn switch_provider(
     // A successful in-session switch must refresh the same key-scoped live
     // catalog as startup. TelecomJS is currently the only provider using this
     // seam; failures preserve the existing/static rows.
-    crate::client::DeepSeekClient::spawn_active_provider_catalog_refresh(config);
+    crate::client::CodewhaleClient::spawn_active_provider_catalog_refresh(config);
 
     if !app.api_messages.is_empty() {
         let _ = engine_handle

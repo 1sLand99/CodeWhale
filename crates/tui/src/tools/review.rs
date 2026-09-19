@@ -9,7 +9,7 @@ use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::client::DeepSeekClient;
+use crate::client::CodewhaleClient;
 #[cfg(test)]
 use crate::dependencies::ExternalTool;
 use crate::llm_client::LlmClient;
@@ -1321,13 +1321,13 @@ fn valid_sha256_fingerprint(value: &str) -> bool {
 }
 
 pub struct ReviewTool {
-    client: Option<DeepSeekClient>,
+    client: Option<CodewhaleClient>,
     model: String,
 }
 
 impl ReviewTool {
     #[must_use]
-    pub fn new(client: Option<DeepSeekClient>, model: String) -> Self {
+    pub fn new(client: Option<CodewhaleClient>, model: String) -> Self {
         Self { client, model }
     }
 }

@@ -1859,7 +1859,7 @@ fn run_with_args(args: Vec<String>) -> Result<()> {
     // 16 MiB stopped being enough: in a debug build the deepest measured
     // chain — the event-loop poll stack down to the trust-confirm engine
     // respawn (`handle_view_events` → `apply_command_result` →
-    // `spawn_tui_engine` → `Engine::new` → `DeepSeekClient::new` →
+    // `spawn_tui_engine` → `Engine::new` → `CodewhaleClient::new` →
     // `resolve_runtime_route` → `Config::clone`) — consumed ~16.5 MiB and
     // aborted on the guard page (the plugin_toml_binary cucumber acceptance
     // on the ubuntu CI leg). The fat frames are the debug poll functions of
@@ -2357,7 +2357,7 @@ async fn run_async_main_dispatch(
                 // provider identity (`config.provider`); credentials/base URL
                 // still resolve from the worker's own env/config, and for a
                 // non-DeepSeek provider the legacy root `base_url` above is
-                // ignored by `deepseek_base_url()`. Must precede model
+                // ignored by `active_route_base_url()`. Must precede model
                 // resolution so an `auto`/default model resolves to the
                 // overridden provider's default.
                 let explicit_provider = args
@@ -4042,7 +4042,7 @@ impl CredentialDiagnostic {
 
 fn resolve_credential_diagnostic(config: &Config) -> CredentialDiagnostic {
     let provider = config.api_provider();
-    let base_url = config.deepseek_base_url();
+    let base_url = config.active_route_base_url();
     let auth_mode = config.auth_mode_for_provider(provider);
     if crate::config::auth_mode_disables_api_key(auth_mode.as_deref()) {
         return CredentialDiagnostic::new(
@@ -4267,7 +4267,7 @@ fn run_setup_status(
     );
     println!(
         "  · base_url: {}",
-        crate::doctor::structural_url_authority(&config.deepseek_base_url())
+        crate::doctor::structural_url_authority(&config.active_route_base_url())
     );
     let model = config
         .default_text_model
@@ -7491,7 +7491,7 @@ fn doctor_auth_scheme(config: &Config) -> &'static str {
     } else if provider == crate::config::ApiProvider::Anthropic {
         "x-api-key"
     } else if provider == crate::config::ApiProvider::XiaomiMimo
-        && doctor_xiaomi_mimo_base_url_uses_token_plan(&config.deepseek_base_url())
+        && doctor_xiaomi_mimo_base_url_uses_token_plan(&config.active_route_base_url())
     {
         "api-key"
     } else if provider == crate::config::ApiProvider::XiaomiMimo {
@@ -7643,7 +7643,7 @@ fn doctor_api_target(config: &Config) -> DoctorApiTarget {
         };
     DoctorApiTarget {
         provider: config.provider_identity_for(provider),
-        base_url: config.deepseek_base_url(),
+        base_url: config.active_route_base_url(),
         model,
         resolution,
     }
@@ -7809,7 +7809,7 @@ async fn run_models(config: &Config, args: ModelsArgs) -> Result<()> {
 }
 
 async fn run_speech(config: &Config, args: SpeechArgs) -> Result<()> {
-    use crate::client::{DeepSeekClient, SpeechSynthesisRequest};
+    use crate::client::{CodewhaleClient, SpeechSynthesisRequest};
     use crate::config::ApiProvider;
     use crate::tools::speech::{
         DEFAULT_VOICE, SPEECH_MODEL_EXAMPLES, combine_speech_instructions,
@@ -7894,7 +7894,7 @@ async fn run_speech(config: &Config, args: SpeechArgs) -> Result<()> {
             .join(default_speech_output_name(&format))
     });
 
-    let client = DeepSeekClient::new(config)?;
+    let client = CodewhaleClient::new(config)?;
     let response = client
         .synthesize_speech(SpeechSynthesisRequest {
             model: model.clone(),
@@ -8004,10 +8004,10 @@ mod speech_cli_tests {
 
 /// Test API connectivity by making a minimal request
 async fn test_api_connectivity(config: &Config) -> Result<()> {
-    use crate::client::DeepSeekClient;
+    use crate::client::CodewhaleClient;
     use codewhale_models::{ContentBlock, Message, MessageRequest};
 
-    let client = DeepSeekClient::new(config)?;
+    let client = CodewhaleClient::new(config)?;
     let model = client.model().to_string();
 
     if crate::doctor::is_keyless_ds4_route(config) {
@@ -8612,7 +8612,7 @@ fn pick_session_id() -> Result<String> {
 
 async fn run_review(config: &Config, args: ReviewArgs) -> Result<()> {
     initialize_cloud_facts(config);
-    use crate::client::DeepSeekClient;
+    use crate::client::CodewhaleClient;
 
     // Resolved before anything is fetched or billed so an unknown
     // `--provider` fails fast with the provider vocabulary hint.
@@ -8679,7 +8679,7 @@ Provide findings ordered by severity with file references, then open questions, 
     let execution_config = config_for_cli_route(config, &route);
     let route_provider = execution_config.provider_identity_for(route.provider);
     let model = route.model.clone();
-    let client = DeepSeekClient::new(&execution_config)?;
+    let client = CodewhaleClient::new(&execution_config)?;
     let request_route = client.effective_route_envelope(&model, chrono::Utc::now());
     let planned_passes = prompts.len();
     let mut usage = codewhale_models::Usage::default();
@@ -11507,7 +11507,7 @@ async fn run_interactive_with_notice(
     // own /v1/models endpoint and merges live rows into the provider lake
     // alongside the Models.dev snapshot. Currently active for TelecomJS, whose
     // model list is not covered by the Models.dev catalog.
-    crate::client::DeepSeekClient::spawn_active_provider_catalog_refresh(config);
+    crate::client::CodewhaleClient::spawn_active_provider_catalog_refresh(config);
 
     // Boot janitors — snapshot prune (7-day default), spillover prune
     // (#422), and managed-session cleanup (v0.8.44) — are best-effort disk
@@ -11621,7 +11621,11 @@ fn cli_reasoning_effort_value(
     effort: crate::reasoning_preference::ReasoningEffort,
 ) -> Option<String> {
     effort
-        .api_value_for_route(config.api_provider(), &config.deepseek_base_url(), model)
+        .api_value_for_route(
+            config.api_provider(),
+            &config.active_route_base_url(),
+            model,
+        )
         .map(str::to_string)
 }
 
@@ -11802,14 +11806,14 @@ async fn run_one_shot(
     prompt: &str,
     force_configured_route: bool,
 ) -> Result<()> {
-    use crate::client::DeepSeekClient;
+    use crate::client::CodewhaleClient;
     use codewhale_models::{
         ContentBlock, Message, MessageRequest, is_incomplete_stop_reason, stop_reason_detail,
     };
 
     let route = resolve_cli_exec_route(config, model, prompt, force_configured_route).await?;
     let execution_config = config_for_cli_route(config, &route);
-    let client = DeepSeekClient::new(&execution_config)?;
+    let client = CodewhaleClient::new(&execution_config)?;
     let reasoning_effort = route.reasoning_effort.and_then(|effort| {
         cli_reasoning_effort_value_for_prompt(&execution_config, &route.model, effort)
     });
@@ -11862,7 +11866,7 @@ async fn run_one_shot_json(
     prompt: &str,
     force_configured_route: bool,
 ) -> Result<()> {
-    use crate::client::DeepSeekClient;
+    use crate::client::CodewhaleClient;
     use codewhale_models::{
         ContentBlock, Message, MessageRequest, SystemPrompt, is_incomplete_stop_reason,
         stop_reason_detail,
@@ -11871,7 +11875,7 @@ async fn run_one_shot_json(
     let route = resolve_cli_exec_route(config, model, prompt, force_configured_route).await?;
     let execution_config = config_for_cli_route(config, &route);
     let provider = execution_config.provider_identity_for(route.provider);
-    let client = DeepSeekClient::new(&execution_config)?;
+    let client = CodewhaleClient::new(&execution_config)?;
     let model = route.model.clone();
     let reasoning_effort = route.reasoning_effort.and_then(|effort| {
         cli_reasoning_effort_value_for_prompt(&execution_config, &model, effort)
@@ -12528,7 +12532,7 @@ async fn build_direct_workflow_tool(
 )> {
     use std::sync::Arc;
 
-    use crate::client::DeepSeekClient;
+    use crate::client::CodewhaleClient;
     use crate::core::authority::shell_policy_for_mode;
     use crate::tools::AgentToolSurfaceOptions;
     use crate::tools::goal::new_shared_goal_state;
@@ -12631,7 +12635,7 @@ async fn build_direct_workflow_tool(
     surface.speech_output_dir = config.speech_output_dir();
     surface.goal_state = Some(new_shared_goal_state());
 
-    let client = DeepSeekClient::new(config)?;
+    let client = CodewhaleClient::new(config)?;
     // A FIXED model with `reasoning_effort = auto` (the shape a Fleet worker
     // subprocess launches with: `--model <exact> --reasoning-effort auto`) is
     // still Auto. Deriving the auto flag from `route.auto_model` alone left it
@@ -15886,8 +15890,11 @@ reasoning = "high"
         );
         assert_eq!(execution.provider.as_deref(), Some("custom"));
         assert_eq!(execution.default_model(), "routed-legacy-model");
-        assert_eq!(execution.deepseek_base_url(), "http://127.0.0.1:18183/v1");
-        assert_eq!(execution.deepseek_api_key().unwrap(), "legacy-root-key");
+        assert_eq!(
+            execution.active_route_base_url(),
+            "http://127.0.0.1:18183/v1"
+        );
+        assert_eq!(execution.active_route_api_key().unwrap(), "legacy-root-key");
         for _ in 0..2 {
             let identity = execution
                 .resolve_provider_identity("custom")
@@ -15895,7 +15902,7 @@ reasoning = "high"
             assert_eq!(identity.key, "custom");
         }
         let client =
-            crate::client::DeepSeekClient::new(&execution).expect("legacy execution client");
+            crate::client::CodewhaleClient::new(&execution).expect("legacy execution client");
         assert_eq!(client.base_url(), "http://127.0.0.1:18183/v1");
     }
 
@@ -16338,7 +16345,10 @@ api_key = "test-only-key"
 
         assert_eq!(route.provider, crate::config::ApiProvider::Custom);
         assert_eq!(provider, "custom-a");
-        assert_eq!(execution.deepseek_base_url(), "http://127.0.0.1:18181/v1");
+        assert_eq!(
+            execution.active_route_base_url(),
+            "http://127.0.0.1:18181/v1"
+        );
         let output = crate::tools::review::ReviewOutput::from_str("{}");
         let receipt = crate::tools::review::build_review_receipt(
             "working tree",
@@ -17293,8 +17303,11 @@ api_key = "test-only-key"
 
         assert_eq!(route.provider, crate::config::ApiProvider::Custom);
         assert_eq!(execution.provider_identity_for(route.provider), "custom-a");
-        assert_eq!(execution.deepseek_base_url(), "http://127.0.0.1:18181/v1");
-        let client = crate::client::DeepSeekClient::new(&execution).expect("workflow client");
+        assert_eq!(
+            execution.active_route_base_url(),
+            "http://127.0.0.1:18181/v1"
+        );
+        let client = crate::client::CodewhaleClient::new(&execution).expect("workflow client");
         assert_eq!(client.base_url(), "http://127.0.0.1:18181/v1");
     }
 
@@ -20765,7 +20778,7 @@ mod setup_helper_tests {
 
         assert_eq!(resolve_api_key_source(&config), ApiKeySource::EnvDeclared);
         assert_eq!(
-            config.deepseek_api_key().expect("custom key"),
+            config.active_route_api_key().expect("custom key"),
             "declared-env-key"
         );
     }
@@ -20806,7 +20819,7 @@ mod setup_helper_tests {
         };
 
         assert_eq!(resolve_api_key_source(&config), ApiKeySource::Unknown);
-        assert!(config.deepseek_api_key().is_err());
+        assert!(config.active_route_api_key().is_err());
     }
 
     #[test]
@@ -20825,7 +20838,7 @@ mod setup_helper_tests {
         };
 
         assert_eq!(resolve_api_key_source(&config), ApiKeySource::Unknown);
-        assert!(config.deepseek_api_key().is_err());
+        assert!(config.active_route_api_key().is_err());
     }
 
     #[test]
@@ -20897,7 +20910,7 @@ mod setup_helper_tests {
         assert_eq!(resolve_api_key_source(&config), ApiKeySource::NoAuth);
         assert_eq!(doctor_api_key_source_label(ApiKeySource::NoAuth), "none");
         assert_eq!(doctor_auth_scheme(&config), "none");
-        assert_eq!(config.deepseek_api_key().expect("no-auth route"), "");
+        assert_eq!(config.active_route_api_key().expect("no-auth route"), "");
     }
 
     #[test]
@@ -20964,7 +20977,7 @@ mod setup_helper_tests {
         let source = resolve_api_key_source(&cfg);
 
         assert_eq!(source, ApiKeySource::ExternalAuthDeclared);
-        assert!(cfg.deepseek_api_key().is_err());
+        assert!(cfg.active_route_api_key().is_err());
     }
 
     #[test]
@@ -20989,7 +21002,7 @@ mod setup_helper_tests {
         let source = resolve_api_key_source(&cfg);
 
         assert_eq!(source, ApiKeySource::ExternalAuthDeclared);
-        assert!(cfg.deepseek_api_key().is_err());
+        assert!(cfg.active_route_api_key().is_err());
     }
 
     #[test]

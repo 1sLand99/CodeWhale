@@ -30,7 +30,7 @@ use tokio_util::sync::CancellationToken;
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
-use crate::client::DeepSeekClient;
+use crate::client::CodewhaleClient;
 use crate::config::{MAX_SUBAGENTS, SubagentModelOverride};
 use crate::core::engine::tool_catalog::{
     TOOL_SEARCH_NAME, ToolMode, active_tools_for_request, apply_native_tool_deferral,
@@ -2576,7 +2576,7 @@ impl Drop for ForegroundChildRegistration {
 
 #[derive(Clone)]
 pub struct SubAgentRuntime {
-    pub client: DeepSeekClient,
+    pub client: CodewhaleClient,
     /// Session `Config` snapshot, used for role-model defaults,
     /// provider-identity receipts, model routing, and inherited typed deny rules. The engine
     /// threads it in via [`SubAgentRuntime::with_api_config`];
@@ -2733,7 +2733,7 @@ impl SubAgentRuntime {
     /// runtime via `Self::child_runtime` instead.
     #[must_use]
     pub fn new(
-        client: DeepSeekClient,
+        client: CodewhaleClient,
         model: String,
         context: ToolContext,
         allow_shell: bool,
@@ -15050,13 +15050,13 @@ fn try_bind_spawn_provider(
         .map_err(ToolError::invalid_input)?;
     let mut scoped = config.clone();
     scoped.scope_to_provider_identity(&identity);
-    match DeepSeekClient::new(&scoped) {
+    match CodewhaleClient::new(&scoped) {
         Ok(client) => {
             // #5529 mode 2: a bound client with unresolvable credentials
             // dies on its first request; probe servability now so the
             // dispatch can fall back loudly instead. Read-only probe: real
             // requests still own secret migration.
-            if let Err(error) = scoped.deepseek_api_key_read_only() {
+            if let Err(error) = scoped.active_route_api_key_read_only() {
                 return Ok(MemberProviderBind::Unavailable {
                     provider_id: provider_id.to_string(),
                     reason: format!(
@@ -15980,7 +15980,7 @@ fn requested_spawn_model_matches_pin(
 
 // Reuse the bound client's immutable route snapshot before legacy name
 // normalization can turn an exact declaration into a different wire ID.
-fn is_declared_subagent_model(client: &DeepSeekClient, model: &str) -> bool {
+fn is_declared_subagent_model(client: &CodewhaleClient, model: &str) -> bool {
     client.resolve_model_route(model).is_ok_and(|candidate| {
         candidate.wire_model_id().as_str() == model
             && candidate.applied_limit_overrides().iter().any(|entry| {
@@ -15992,7 +15992,7 @@ fn is_declared_subagent_model(client: &DeepSeekClient, model: &str) -> bool {
 fn normalize_bound_subagent_model(
     value: &str,
     field: &str,
-    client: &DeepSeekClient,
+    client: &CodewhaleClient,
 ) -> Result<String, ToolError> {
     let model = value.trim();
     if is_declared_subagent_model(client, model) {
@@ -18846,7 +18846,7 @@ fn configured_model_subagent_keeps_exact_id_and_negative_capability() {
         crate::config::ApiProvider::Deepseek,
         Some("https://api.deepseek.com".into()),
     );
-    runtime.client = DeepSeekClient::new(&config).unwrap();
+    runtime.client = CodewhaleClient::new(&config).unwrap();
     config.custom_models.as_mut().unwrap()[0]
         .modalities
         .as_mut()
@@ -18927,7 +18927,7 @@ async fn configured_model_subagent_full_bind_preserves_task_profile_and_role_ids
         for source in ["task", "profile", "role", "default"] {
             let mut runtime = tests::stub_runtime();
             runtime.context = ToolContext::new(workspace.path().to_path_buf());
-            runtime.client = DeepSeekClient::new(&config).unwrap();
+            runtime.client = CodewhaleClient::new(&config).unwrap();
             runtime.api_config = Some(std::sync::Arc::new(config.clone()));
             let mut member = crate::fleet::profile::AgentProfile {
                 id: "metadata-fixture".into(),
@@ -18982,7 +18982,7 @@ async fn configured_model_subagent_full_bind_preserves_task_profile_and_role_ids
             crate::config::ApiProvider::Deepseek,
             Some("https://different.example.test/v1".into()),
         );
-        let wrong_endpoint = DeepSeekClient::new(&config).unwrap();
+        let wrong_endpoint = CodewhaleClient::new(&config).unwrap();
         assert!(!is_declared_subagent_model(&wrong_endpoint, id));
         assert!(
             normalize_bound_subagent_model(id, "model", &wrong_endpoint)
@@ -19003,7 +19003,7 @@ mod declared_shortlist_tests {
         config.set_provider_model_override(ApiProvider::Deepseek, Some(current.into()));
         let mut runtime = tests::stub_runtime();
         runtime.context = ToolContext::new(workspace.to_path_buf());
-        runtime.client = DeepSeekClient::new(&config).unwrap();
+        runtime.client = CodewhaleClient::new(&config).unwrap();
         runtime.model = current.into();
         runtime.api_config = Some(Arc::new(config));
         runtime

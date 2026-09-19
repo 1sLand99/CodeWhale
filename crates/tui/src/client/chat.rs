@@ -51,7 +51,7 @@ use super::prepared::WireDialect;
 use super::role_placement::{RolePlacement, role_placement};
 use super::wire::{extract_sse_data_value, flush_sse_line, take_sse_line};
 use super::{
-    DeepSeekClient, ERROR_BODY_MAX_BYTES, SSE_BACKPRESSURE_HIGH_WATERMARK,
+    CodewhaleClient, ERROR_BODY_MAX_BYTES, SSE_BACKPRESSURE_HIGH_WATERMARK,
     SSE_BACKPRESSURE_SLEEP_MS, SSE_MAX_LINES_PER_CHUNK, acquire_stream_buffer,
     apply_reasoning_effort, bounded_error_text, from_api_tool_name, parse_usage,
     release_stream_buffer, system_to_instructions, to_api_tool_name,
@@ -1092,7 +1092,7 @@ fn sanitize_moonshot_chat_tools(chat_tools: &mut Vec<Value>) -> Vec<String> {
 ///
 /// Produced by [`build_chat_wire_body`], the single place where a
 /// `MessageRequest` becomes Chat-shaped JSON. It is reached only through
-/// [`super::DeepSeekClient::prepare_outbound_request`], the shared outbound
+/// [`super::CodewhaleClient::prepare_outbound_request`], the shared outbound
 /// seam that the blocking transport, the streaming transport, and
 /// `/preview-request` all consume — so a preview cannot drift from what would
 /// be sent, and no other dialect is projected through this builder.
@@ -1259,7 +1259,7 @@ pub(crate) fn build_chat_wire_body(
     })
 }
 
-impl DeepSeekClient {
+impl CodewhaleClient {
     pub(super) async fn create_message_chat(
         &self,
         prepared: &super::PreparedOutboundRequest,
@@ -1320,7 +1320,7 @@ impl DeepSeekClient {
     }
 }
 
-impl DeepSeekClient {
+impl CodewhaleClient {
     async fn open_chat_stream_response(
         &self,
         url: &str,
@@ -7753,7 +7753,7 @@ mod google_thought_signature_tests {
                     .mount(&server)
                     .await;
 
-                let mut client = DeepSeekClient::new(&crate::config::Config {
+                let mut client = CodewhaleClient::new(&crate::config::Config {
                     provider: Some("openai".to_string()),
                     providers: Some(crate::config::ProvidersConfig {
                         openai: crate::config::ProviderConfig {

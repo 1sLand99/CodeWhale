@@ -7765,7 +7765,7 @@ async fn get_config(
     let mut deepseek_config = config.clone();
     deepseek_config.scope_to_provider_identity(&identity);
     let default_model = deepseek_config.default_model();
-    let base_url = config.deepseek_base_url().to_string();
+    let base_url = config.active_route_base_url().to_string();
 
     Ok(Json(GuiConfigResponse {
         model,
@@ -7931,7 +7931,7 @@ async fn set_config(
             }
             "base_url" => config_persistence::persist_root_string_key(
                 config_path,
-                "deepseek_base_url",
+                "active_route_base_url",
                 &value,
             ),
             "provider" => {

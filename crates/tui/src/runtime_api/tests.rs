@@ -14240,7 +14240,7 @@ vendor = "{vendor}"
         let old_config = manager.read_config().clone();
         let old_vendor = old_config.openrouter_vendor()?;
         let old_client = if old_config.api_provider() == crate::config::ApiProvider::Openrouter {
-            Some(crate::client::DeepSeekClient::new(&old_config)?)
+            Some(crate::client::CodewhaleClient::new(&old_config)?)
         } else {
             None
         };
@@ -14249,7 +14249,7 @@ vendor = "{vendor}"
             .send()
             .await?;
         assert_eq!(reload.status(), StatusCode::OK);
-        let fresh = crate::client::DeepSeekClient::new(&manager.read_config())?;
+        let fresh = crate::client::CodewhaleClient::new(&manager.read_config())?;
         assert_eq!(
             fresh.openrouter_vendor(),
             (!vendor.is_empty()).then_some(vendor)

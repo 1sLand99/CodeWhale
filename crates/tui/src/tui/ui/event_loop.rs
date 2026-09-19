@@ -291,7 +291,7 @@ fn translation_session_is_current(app: &App, origin_session_fingerprint: Option<
 fn exact_translation_client(
     config: &Config,
     route: &crate::core::events::TurnRoute,
-) -> anyhow::Result<Arc<DeepSeekClient>> {
+) -> anyhow::Result<Arc<CodewhaleClient>> {
     let identity = config
         .resolve_persisted_provider_identity(
             Some(route.provider.as_str()),
@@ -945,7 +945,7 @@ pub async fn run_tui(
     // startup, even when the API key is missing, the base URL is malformed,
     // or the network is unavailable.
     // Translations are skipped with a logged warning until a key is saved.
-    let translation_client = match DeepSeekClient::new(config) {
+    let translation_client = match CodewhaleClient::new(config) {
         Ok(client) => Some(Arc::new(client)),
         Err(err) => {
             if app.onboarding == OnboardingState::None {
@@ -1392,7 +1392,7 @@ pub(crate) async fn run_event_loop(
     mut engine_handle: EngineHandle,
     task_manager: SharedTaskManager,
     event_broker: &EventBroker,
-    translation_client: Option<Arc<DeepSeekClient>>,
+    translation_client: Option<Arc<CodewhaleClient>>,
     mut pending_telemetry_notice: Option<crate::telemetry_notice::PendingTelemetryNotice>,
     mut dispatch_completion_rx: tokio::sync::mpsc::Receiver<crate::tui::app::DispatchApplyFn>,
 ) -> Result<()> {
@@ -1522,8 +1522,8 @@ pub(crate) async fn run_event_loop(
     // providers so the footer chip can show on the first frame without
     // waiting for a turn to complete.
     if !app.balance_initiated {
-        let api_key = config.deepseek_api_key().unwrap_or_default();
-        let base_url = config.deepseek_base_url();
+        let api_key = config.active_route_api_key().unwrap_or_default();
+        let base_url = config.active_route_base_url();
         schedule_balance_fetch(app, &api_key, &base_url, false);
         app.balance_initiated = true;
     }
@@ -2944,8 +2944,8 @@ pub(crate) async fn run_event_loop(
                         // Refresh prepaid remaining credit after each completed
                         // turn so the footer balance chip stays current without
                         // adding latency to any request path.
-                        let api_key = config.deepseek_api_key().unwrap_or_default();
-                        let base_url = config.deepseek_base_url();
+                        let api_key = config.active_route_api_key().unwrap_or_default();
+                        let base_url = config.active_route_base_url();
                         schedule_balance_fetch(app, &api_key, &base_url, false);
 
                         // Legacy pending-steer recovery. Current keyboard

@@ -43,7 +43,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, Lines};
 use tokio_util::sync::CancellationToken;
 
-use crate::client::DeepSeekClient;
+use crate::client::CodewhaleClient;
 use crate::config::{ApiProvider, Config};
 use crate::core::engine::turn_loop::run_tool_call_before_hooks;
 use crate::core::engine::{
@@ -1948,7 +1948,7 @@ impl AcpServer {
             .unwrap_or("");
         let route = crate::resolve_cli_auto_route(config, selected_model, last_user_text).await?;
         let execution_config = crate::config_for_cli_route(config, &route);
-        let client = DeepSeekClient::new(&execution_config)?;
+        let client = CodewhaleClient::new(&execution_config)?;
         let model = route.model;
         let request_route = client.effective_route_envelope(&model, chrono::Utc::now());
         let reasoning_effort = route
@@ -1956,7 +1956,7 @@ impl AcpServer {
             .and_then(|effort| {
                 effort.api_value_for_route(
                     execution_config.api_provider(),
-                    &execution_config.deepseek_base_url(),
+                    &execution_config.active_route_base_url(),
                     &model,
                 )
             })

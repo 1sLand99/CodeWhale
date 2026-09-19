@@ -601,7 +601,7 @@ async fn planned_route_builds_subagent_catalog_without_installed_client() {
     engine.config.features.disable(Feature::Mcp);
     let _ = engine.config.features.enable(Feature::Subagents);
     engine.config.subagents_enabled = true;
-    engine.deepseek_client = None;
+    engine.codewhale_client = None;
     let planned = plan(&config, &identity, false, "planned child route").await;
     let route = planned.route.validate().expect("planned route validates");
     let planned_model = route.model.clone();
@@ -2177,7 +2177,7 @@ async fn preview_tool_snapshot_has_no_mcp_or_event_side_effects() {
                 model: engine.session.model.clone(),
                 capabilities: engine.active_route_capabilities,
                 limits: engine.active_route_limits,
-                client: engine.deepseek_client.clone(),
+                client: engine.codewhale_client.clone(),
                 api_config: Box::new(engine.api_config.clone()),
                 locale_tag: engine.config.locale_tag.clone(),
                 role_models: engine.subagent_role_models(),

@@ -6931,7 +6931,7 @@ struct EnvRuntimeOverrides {
     yolo: Option<bool>,
     verbosity: Option<String>,
     http_headers: Option<BTreeMap<String, String>>,
-    deepseek_base_url: Option<String>,
+    active_route_base_url: Option<String>,
     deepseek_anthropic_base_url: Option<String>,
     nvidia_base_url: Option<String>,
     openai_base_url: Option<String>,
@@ -7112,7 +7112,7 @@ impl EnvRuntimeOverrides {
                     }
                 })
                 .filter(|headers| !headers.is_empty()),
-            deepseek_base_url: std::env::var("CODEWHALE_BASE_URL")
+            active_route_base_url: std::env::var("CODEWHALE_BASE_URL")
                 .or_else(|_| std::env::var("DEEPSEEK_BASE_URL"))
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
@@ -7417,7 +7417,7 @@ impl EnvRuntimeOverrides {
         // Defaults belong in the resolver's final fallback so config-file
         // values (`providers.<name>.base_url`) still win when env is unset.
         match provider {
-            ProviderKind::Deepseek => self.deepseek_base_url.clone(),
+            ProviderKind::Deepseek => self.active_route_base_url.clone(),
             ProviderKind::DeepseekAnthropic => self.deepseek_anthropic_base_url.clone(),
             ProviderKind::NvidiaNim => self.nvidia_base_url.clone(),
             ProviderKind::Openai => self.openai_base_url.clone(),
