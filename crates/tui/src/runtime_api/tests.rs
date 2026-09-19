@@ -17486,9 +17486,28 @@ async fn threads_running_lists_active_turns_and_clears_on_settle() -> Result<()>
     assert_eq!(active[0]["status"], "in_progress");
     let turn_id = active[0]["turn_id"].as_str().context("missing turn id")?;
 
-    let mut turn = manager.test_store().load_turn(turn_id)?;
-    turn.status = crate::runtime_threads::RuntimeTurnStatus::Completed;
-    manager.test_store().save_turn(&turn)?;
+    // Stop the live runner before the store-side settle. Mid-turn monitor
+    // projection used to load an in-flight snapshot and save_turn it back over
+    // a concurrent Completed write; save_turn now serializes every turn write
+    // (reentrant turn_mutation), late item attaches skip terminal turns, and
+    // interrupting drops the engine so no further projection races the settle.
+    // Prefer the runner's own terminalization when it lands quickly; otherwise
+    // pin Completed the same way the InProgress pin above is authoritative.
+    let _ = manager.interrupt_turn(thread_id, turn_id).await;
+    let settle_deadline = std::time::Instant::now() + Duration::from_millis(500);
+    loop {
+        let turn = manager.test_store().load_turn(turn_id)?;
+        if !turn.status.is_active_work() {
+            break;
+        }
+        if std::time::Instant::now() >= settle_deadline {
+            let mut turn = turn;
+            turn.status = crate::runtime_threads::RuntimeTurnStatus::Completed;
+            manager.test_store().save_turn(&turn)?;
+            break;
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
 
     let settled: serde_json::Value = client
         .get(format!("{base}/v1/threads/running"))

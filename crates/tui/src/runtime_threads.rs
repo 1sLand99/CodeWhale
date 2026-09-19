@@ -666,6 +666,13 @@ pub enum RuntimeTurnStatus {
     Canceled,
 }
 
+impl RuntimeTurnStatus {
+    /// Queued or in-progress — the statuses `GET /v1/threads/running` counts.
+    pub const fn is_active_work(self) -> bool {
+        matches!(self, Self::Queued | Self::InProgress)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnItemKind {
@@ -1734,7 +1741,11 @@ pub struct RuntimeThreadStore {
     thread_mutation: Arc<parking_lot::Mutex<()>>,
     /// Serializes load-modify-save operations on turn records. Like the
     /// thread guard, it is synchronous and never crosses an `.await`.
-    turn_mutation: Arc<parking_lot::Mutex<()>>,
+    /// Reentrant so [`Self::save_turn`] can take the guard while an outer
+    /// RMW transaction already holds it; every turn write goes through that
+    /// path so a store-side settle cannot be stomped by a concurrent monitor
+    /// save that loaded a stale in-flight copy.
+    turn_mutation: Arc<parking_lot::ReentrantMutex<()>>,
     /// Serializes envelope claim/state transitions. The durable envelope is
     /// the queue; this guard prevents concurrent replay/wake requests from
     /// starting more than one turn for the same message.
@@ -1794,7 +1805,7 @@ impl RuntimeThreadStore {
             state_path,
             event_lock_path,
             thread_mutation: Arc::new(parking_lot::Mutex::new(())),
-            turn_mutation: Arc::new(parking_lot::Mutex::new(())),
+            turn_mutation: Arc::new(parking_lot::ReentrantMutex::new(())),
             goal_mutation: Arc::new(parking_lot::Mutex::new(())),
             mail_mutation: Arc::new(parking_lot::Mutex::new(())),
             #[cfg(test)]
@@ -2211,6 +2222,10 @@ impl RuntimeThreadStore {
     }
 
     pub fn save_turn(&self, turn: &TurnRecord) -> Result<()> {
+        // Hold the turn mutation guard for every write — including callers that
+        // already hold it (reentrant) — so unlocked test/API settles cannot be
+        // overwritten by a monitor RMW that loaded an older in-flight snapshot.
+        let _turn_mutation = self.turn_mutation.lock();
         turn.validate_output_token_limit()?;
         validated_record_id(&turn.thread_id, "thread id")?;
         let path = self.turn_path(&turn.id)?;
@@ -4314,7 +4329,7 @@ struct RecoveredTurnReceipt {
 /// - the Runtime event-file transaction lock — serializes writes across processes.
 /// - `RuntimeThreadStore::thread_mutation` — synchronizes short, synchronous
 ///   thread-record load-modify-save transactions and never crosses `.await`.
-/// - `RuntimeThreadStore::turn_mutation` — does the same for turn records.
+/// - `RuntimeThreadStore::turn_mutation` — reentrant guard for turn records; `save_turn` always acquires it.
 /// - `RuntimeThreadStore::goal_mutation` — serializes goal controls and progress;
 ///   acquired after `active` and before `thread_mutation` at turn admission.
 /// - `RuntimeThreadManager::active` — protects the set of loaded engine handles.
@@ -7256,10 +7271,7 @@ impl RuntimeThreadManager {
         let mut active_by_thread: std::collections::BTreeMap<String, Vec<ActiveTurn>> =
             std::collections::BTreeMap::new();
         for turn in self.store.list_all_turns()? {
-            if matches!(
-                turn.status,
-                RuntimeTurnStatus::Queued | RuntimeTurnStatus::InProgress
-            ) {
+            if turn.status.is_active_work() {
                 active_by_thread
                     .entry(turn.thread_id.clone())
                     .or_default()
@@ -11227,6 +11239,8 @@ impl RuntimeThreadManager {
                     {
                         let _turn_mutation = self.store.turn_mutation.lock();
                         let mut turn = self.store.load_turn(&turn_id)?;
+                        // Load-under-lock sees any concurrent terminal settle;
+                        // field updates below preserve that status.
                         turn.started_at = Some(created_at);
                         // A lifecycle start carries no billing envelope, so
                         // there is nothing to persist yet. The dispatch event
@@ -11258,6 +11272,8 @@ impl RuntimeThreadManager {
                     {
                         let _turn_mutation = self.store.turn_mutation.lock();
                         let mut turn = self.store.load_turn(&turn_id)?;
+                        // Preserve whatever status the store already has (including
+                        // a concurrent terminal settle); only refresh route fields.
                         if let Some(envelope) = route.cost_envelope() {
                             turn.persist_effective_route(&envelope);
                         }
@@ -12593,7 +12609,8 @@ impl RuntimeThreadManager {
     fn attach_item_to_turn(&self, turn_id: &str, item_id: &str) -> Result<()> {
         let _turn_mutation = self.store.turn_mutation.lock();
         let mut turn = self.store.load_turn(turn_id)?;
-        if !turn.item_ids.iter().any(|id| id == item_id) {
+        // A terminal settle must not be rewritten by a late stream item attach.
+        if turn.status.is_active_work() && !turn.item_ids.iter().any(|id| id == item_id) {
             turn.item_ids.push(item_id.to_string());
             self.store.save_turn(&turn)?;
         }
