@@ -267,6 +267,10 @@ pub(crate) const AGGREGATOR_BILLING_SURFACE: &str = "aggregator-payg";
 pub(crate) const MODELSTUDIO_TOKEN_PLAN_BILLING_SURFACE: &str = "modelstudio-token-plan";
 pub(crate) const MODELSTUDIO_CODING_PLAN_BILLING_SURFACE: &str = "modelstudio-coding-plan";
 pub(crate) const VOLCENGINE_CODING_PLAN_BILLING_SURFACE: &str = "volcengine-coding-plan";
+/// CSDN 星图's Coding Plan subscription product (the `glm_for_coding` route).
+pub(crate) const CSDN_CODING_PLAN_BILLING_SURFACE: &str = "csdn-coding-plan";
+/// CSDN 星图's ordinary metered marketplace access on the same endpoint.
+pub(crate) const CSDN_PAYG_BILLING_SURFACE: &str = "csdn-payg";
 /// A reachable endpoint CodeWhale could not match to any known billing surface.
 /// Distinct from "not classified yet": this is a positive statement that the
 /// surface is unknown, and it fails closed everywhere it is consumed.
@@ -308,6 +312,7 @@ pub fn endpoint_metering_for_billing_surface(billing_surface: Option<&str>) -> E
         (MOONSHOT_PAYG_BILLING_SURFACE, EndpointMetering::Money),
         (MINIMAX_PAYG_BILLING_SURFACE, EndpointMetering::Money),
         (XIAOMI_PAYG_BILLING_SURFACE, EndpointMetering::Money),
+        (CSDN_PAYG_BILLING_SURFACE, EndpointMetering::Money),
         (FIRST_PARTY_PAYG_BILLING_SURFACE, EndpointMetering::Money),
         (AGGREGATOR_BILLING_SURFACE, EndpointMetering::Money),
         (
@@ -340,6 +345,10 @@ pub fn endpoint_metering_for_billing_surface(billing_surface: Option<&str>) -> E
         ),
         (
             XIAOMI_TOKEN_PLAN_BILLING_SURFACE,
+            EndpointMetering::ExactSubscription,
+        ),
+        (
+            CSDN_CODING_PLAN_BILLING_SURFACE,
             EndpointMetering::ExactSubscription,
         ),
         (
@@ -430,6 +439,7 @@ pub(crate) fn billing_surface_for_route(
         ApiProvider::Zai => zai_surface(&shape),
         ApiProvider::Moonshot => moonshot_surface(&shape),
         ApiProvider::Minimax | ApiProvider::MinimaxAnthropic => minimax_surface(&shape),
+        ApiProvider::Csdn => csdn_surface(&shape),
         ApiProvider::XiaomiMimo => xiaomi_surface(&shape),
         ApiProvider::ModelstudioTokenPlan
         | ApiProvider::ModelstudioTokenPlanAnthropic
@@ -538,6 +548,15 @@ fn minimax_surface(shape: &EndpointShape) -> Option<&'static str> {
         shape.host.as_str(),
         "api.minimax.io" | "api.minimaxi.com" | "api.minimax.chat"
     ) && matches!(shape.path.as_str(), "" | "/v1" | "/anthropic");
+    None
+}
+
+fn csdn_surface(shape: &EndpointShape) -> Option<&'static str> {
+    // Coding Plan keys and general marketplace keys share the one
+    // ai.csdn.net/api/model/v1 endpoint, so the URL proves neither product;
+    // only the captured credential product can produce a concrete surface.
+    let _is_supported_endpoint = shape.host == "ai.csdn.net"
+        && matches!(shape.path.as_str(), "/api/model" | "/api/model/v1");
     None
 }
 

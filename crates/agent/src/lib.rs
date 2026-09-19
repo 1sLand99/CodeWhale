@@ -1006,6 +1006,18 @@ impl Default for ModelRegistry {
                 supports_tools: true,
                 supports_reasoning: true,
             },
+            // CSDN 星图 (Starmap) — the Coding Plan's dedicated model id.
+            // Other CSDN marketplace models resolve through pass-through.
+            ModelInfo {
+                id: "glm_for_coding".to_string(),
+                provider: ProviderKind::Csdn,
+                aliases: vec![
+                    "glm-for-coding".to_string(),
+                    "csdn-glm-for-coding".to_string(),
+                ],
+                supports_tools: true,
+                supports_reasoning: true,
+            },
             // Together AI provider models
             ModelInfo {
                 id: "deepseek-ai/DeepSeek-V4-Pro".to_string(),

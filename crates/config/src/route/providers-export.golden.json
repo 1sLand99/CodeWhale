@@ -123,6 +123,24 @@
       "transport": "open-ai-responses"
     },
     {
+      "id": "csdn",
+      "family": "csdn",
+      "label": "CSDN",
+      "endpoint": "https://ai.csdn.net/api/model/v1",
+      "wire": "chat-completions",
+      "defaultModel": "glm_for_coding",
+      "envVars": [
+        "CSDN_API_KEY"
+      ],
+      "auth": [
+        {
+          "kind": "api-key",
+          "label": "API key"
+        }
+      ],
+      "transport": "chat-completions"
+    },
+    {
       "id": "custom",
       "family": "custom",
       "label": "Custom (OpenAI-compatible)",

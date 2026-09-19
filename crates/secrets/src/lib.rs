@@ -1197,6 +1197,7 @@ impl Secrets {
 /// | `telecomjs` / `tokenhub` | `TELECOMJS_API_KEY` |
 /// | `edenai` / `eden-ai` | `EDENAI_API_KEY` |
 /// | `zenmux` / `zen-mux` | `ZENMUX_API_KEY` |
+/// | `csdn` / `csdn-ai` / `starmap` | `CSDN_API_KEY` |
 /// | `concentrate` / `concentrate-ai` | `CONCENTRATE_API_KEY` |
 /// | `codewhale` / `codewhale-api` | `CODEWHALE_API_KEY` |
 ///
@@ -1255,6 +1256,9 @@ pub fn env_for(name: &str) -> Option<String> {
         }
         "edenai" | "eden-ai" | "eden_ai" => &["EDENAI_API_KEY"],
         "zenmux" | "zen-mux" | "zen_mux" => &["ZENMUX_API_KEY"],
+        "csdn" | "csdn-ai" | "csdn_ai" | "csdn-coding-plan" | "csdn_coding_plan" | "starmap" => {
+            &["CSDN_API_KEY"]
+        }
         "concentrate" | "concentrate-ai" | "concentrate_ai" | "concentrateai" => {
             &["CONCENTRATE_API_KEY"]
         }
@@ -1366,6 +1370,7 @@ mod tests {
             "TELECOMJS_API_KEY",
             "EDENAI_API_KEY",
             "ZENMUX_API_KEY",
+            "CSDN_API_KEY",
             "CONCENTRATE_API_KEY",
             "MODELSTUDIO_API_KEY",
             "DASHSCOPE_API_KEY",
@@ -1982,6 +1987,26 @@ mod tests {
 
         for alias in ["zenmux", "zen-mux", "zen_mux"] {
             assert_eq!(env_for(alias).as_deref(), Some("zen-key"), "{alias}");
+        }
+
+        clear_known_envs();
+    }
+
+    #[test]
+    fn csdn_env_aliases_resolve() {
+        let _guard = env_lock();
+        clear_known_envs();
+        unsafe { std::env::set_var("CSDN_API_KEY", "csdn-key") };
+
+        for alias in [
+            "csdn",
+            "csdn-ai",
+            "csdn_ai",
+            "csdn-coding-plan",
+            "csdn_coding_plan",
+            "starmap",
+        ] {
+            assert_eq!(env_for(alias).as_deref(), Some("csdn-key"), "{alias}");
         }
 
         clear_known_envs();
