@@ -115,6 +115,7 @@ pub(super) struct TerminalKillResponse {
 }
 
 /// `base64` keeps bytes exact; `text` is the lossy convenience form.
+#[cfg(unix)]
 fn chunk_encoding(format: &str) -> Result<&'static str, ApiError> {
     match format {
         "base64" => Ok("base64"),
@@ -123,6 +124,7 @@ fn chunk_encoding(format: &str) -> Result<&'static str, ApiError> {
     }
 }
 
+#[cfg(unix)]
 fn encode_bytes(bytes: &[u8], encoding: &str) -> String {
     if encoding == "base64" {
         base64::engine::general_purpose::STANDARD.encode(bytes)
@@ -131,6 +133,7 @@ fn encode_bytes(bytes: &[u8], encoding: &str) -> String {
     }
 }
 
+#[cfg(unix)]
 fn decode_bytes(data: &str, encoding: &str) -> Result<Vec<u8>, ApiError> {
     let bytes = match encoding {
         "base64" => base64::engine::general_purpose::STANDARD
@@ -147,6 +150,7 @@ fn decode_bytes(data: &str, encoding: &str) -> Result<Vec<u8>, ApiError> {
     Ok(bytes)
 }
 
+#[cfg(unix)]
 fn bounded_max_bytes(requested: Option<usize>) -> Result<usize, ApiError> {
     let max_bytes = requested.unwrap_or(TERMINAL_CHUNK_DEFAULT);
     if !(1..=terminal_session::READ_LIMIT).contains(&max_bytes) {
@@ -158,6 +162,7 @@ fn bounded_max_bytes(requested: Option<usize>) -> Result<usize, ApiError> {
     Ok(max_bytes)
 }
 
+#[cfg(unix)]
 fn bounded_dimension(value: u16, field: &str) -> Result<u16, ApiError> {
     if !(1..=TERMINAL_DIMENSION_MAX).contains(&value) {
         return Err(ApiError::bad_request(format!(

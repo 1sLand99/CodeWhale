@@ -13748,8 +13748,11 @@ async fn runtime_info_advertises_terminal_capabilities() -> Result<()> {
         .error_for_status()?
         .json()
         .await?;
-    // A GPUI client gates its terminal pane on these; on Unix they are the
-    // four routes in runtime_api::terminal.
+    // A GPUI client gates its terminal pane on these. They are true where the
+    // routes serve bytes and false where the owner is Unix-only — the flag
+    // must not claim a capability the build cannot serve, so assert the
+    // platform's truth rather than `true`.
+    let expected = cfg!(unix);
     for capability in [
         "terminal_stream",
         "terminal_input",
@@ -13757,8 +13760,8 @@ async fn runtime_info_advertises_terminal_capabilities() -> Result<()> {
         "terminal_kill",
     ] {
         assert_eq!(
-            info["capabilities"][capability], true,
-            "runtime/info must advertise {capability}"
+            info["capabilities"][capability], expected,
+            "runtime/info must advertise {capability}={expected}"
         );
     }
 
@@ -13905,6 +13908,7 @@ async fn terminal_routes_serve_a_live_engine_session_over_http() -> Result<()> {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn terminal_output_for_an_unknown_session_is_not_found_and_creates_nothing() -> Result<()> {
     let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
         return Ok(());
