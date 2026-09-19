@@ -212,65 +212,50 @@ pub(crate) fn text_display_width(text: &str) -> usize {
     text.graphemes(true).map(grapheme_display_width).sum()
 }
 
-/// Tab-stop width of one grapheme at absolute column `col`: a tab advances to
-/// the next 8-column stop, matching the terminal and the markdown renderer.
-/// Every other grapheme keeps the shared [`grapheme_display_width`] contract.
-fn tab_stop_width(grapheme: &str, col: usize) -> usize {
-    if grapheme == "\t" {
-        8usize.saturating_sub(col % 8)
+/// Visible width of one grapheme: ratatui strips control characters before
+/// painting, so they occupy no cells. Every other grapheme keeps the shared
+/// [`grapheme_display_width`] contract.
+fn visible_grapheme_width(grapheme: &str) -> usize {
+    if grapheme.chars().any(|c| c.is_control()) {
+        0
     } else {
         grapheme_display_width(grapheme)
     }
 }
 
-/// Display width in terminal columns, with tabs advancing to 8-column stops.
+/// Display width in painted terminal columns: control characters are
+/// invisible (ratatui strips them), so they add nothing.
 ///
 /// Mouse selection coordinates are terminal cells, so the copy path must
 /// measure in this space: the fixed-4 [`text_display_width`] would shift
-/// every column after a tab away from what the user dragged over. `base_col`
-/// is the absolute column of the first grapheme, for text already stripped of
-/// its (tab-free) rail and copy prefixes. The two agree on tab-free text.
-pub(crate) fn text_display_width_tab_stops_from(text: &str, base_col: usize) -> usize {
-    let mut col = base_col;
-    for grapheme in text.graphemes(true) {
-        col = col.saturating_add(tab_stop_width(grapheme, col));
-    }
-    col.saturating_sub(base_col)
+/// every column after a tab away from what the user dragged over. The two
+/// agree on text without control characters.
+pub(crate) fn text_visible_width(text: &str) -> usize {
+    text.graphemes(true).map(visible_grapheme_width).sum()
 }
 
-/// [`text_display_width_tab_stops_from`] for text starting at column zero.
-pub(crate) fn text_display_width_tab_stops(text: &str) -> usize {
-    text_display_width_tab_stops_from(text, 0)
-}
-
-/// Slice `[start, end)` in terminal columns with tab stops, in the column
-/// space the mouse reports.
+/// Slice `[start, end)` in painted terminal columns, the space the mouse
+/// reports.
 ///
-/// `start`/`end` are relative to `text`; `base_col` is the absolute column
-/// of its first grapheme. A grapheme overlapping the window is kept whole,
-/// tabs included, so copied indentation stays tabs.
-pub(crate) fn slice_text_tab_stops(
-    text: &str,
-    start: usize,
-    end: usize,
-    base_col: usize,
-) -> String {
+/// A grapheme overlapping the window is kept whole under the same strict
+/// rule for every width: zero-width control spans join the output only when
+/// the window strictly covers their position, so interior tabs survive while
+/// un-aimable edge touches stay out.
+pub(crate) fn slice_visible_columns(text: &str, start: usize, end: usize) -> String {
     if end <= start {
         return String::new();
     }
-    let abs_start = base_col.saturating_add(start);
-    let abs_end = base_col.saturating_add(end);
 
     let mut out = String::new();
-    let mut col = base_col;
+    let mut col = 0usize;
     for grapheme in text.graphemes(true) {
         let grapheme_start = col;
-        let grapheme_end = col.saturating_add(tab_stop_width(grapheme, col));
-        if grapheme_end > abs_start && grapheme_start < abs_end {
+        let grapheme_end = col.saturating_add(visible_grapheme_width(grapheme));
+        if grapheme_end > start && grapheme_start < end {
             out.push_str(grapheme);
         }
         col = grapheme_end;
-        if col >= abs_end {
+        if col >= end {
             break;
         }
     }
@@ -362,39 +347,40 @@ mod tests {
     #[test]
     fn slice_text_respects_column_bounds() {
         let text = "hello world";
-        assert_eq!(slice_text_tab_stops(text, 0, 5, 0), "hello");
-        assert_eq!(slice_text_tab_stops(text, 6, 11, 0), "world");
-        assert_eq!(slice_text_tab_stops(text, 0, 0, 0), "");
-        assert_eq!(slice_text_tab_stops(text, 0, 100, 0), text);
+        assert_eq!(slice_visible_columns(text, 0, 5), "hello");
+        assert_eq!(slice_visible_columns(text, 6, 11), "world");
+        assert_eq!(slice_visible_columns(text, 0, 0), "");
+        assert_eq!(slice_visible_columns(text, 0, 100), text);
     }
 
     #[test]
     fn slice_text_handles_multibyte_characters() {
         let text = "a─b"; // U+2500 is 1 display column on supported terminals
-        assert_eq!(slice_text_tab_stops(text, 1, 2, 0), "─");
-        assert_eq!(slice_text_tab_stops(text, 0, 3, 0), text);
+        assert_eq!(slice_visible_columns(text, 1, 2), "─");
+        assert_eq!(slice_visible_columns(text, 0, 3), text);
     }
 
     #[test]
     fn slice_text_truncates_at_end() {
         let text = "ab";
-        assert_eq!(slice_text_tab_stops(text, 1, 5, 0), "b");
+        assert_eq!(slice_visible_columns(text, 1, 5), "b");
     }
 
     #[test]
-    fn tab_stop_width_advances_to_next_stop() {
-        assert_eq!(text_display_width_tab_stops("\t"), 8);
-        assert_eq!(text_display_width_tab_stops("\ta"), 9);
-        assert_eq!(text_display_width_tab_stops("ab\t"), 8);
-        assert_eq!(text_display_width_tab_stops_from("\t", 4), 4);
-        assert_eq!(text_display_width_tab_stops_from("xy", 6), 2);
+    fn visible_width_ignores_stripped_controls() {
+        assert_eq!(text_visible_width("\t"), 0);
+        assert_eq!(text_visible_width("\ta"), 1);
+        assert_eq!(text_visible_width("ab\t"), 2);
+        assert_eq!(text_visible_width("a\tb"), 2);
     }
 
     #[test]
-    fn tab_stop_slice_preserves_tabs_and_base() {
-        assert_eq!(slice_text_tab_stops("\tindented", 8, 14, 0), "indent");
-        assert_eq!(slice_text_tab_stops("\t\txy", 4, 12, 4), "\t");
-        assert_eq!(slice_text_tab_stops("ab", 0, 2, 0), "ab");
+    fn visible_slice_keeps_interior_controls_only() {
+        // Interior tab strictly inside the window survives.
+        assert_eq!(slice_visible_columns("ab\tcdef", 0, 4), "ab\tcd");
+        // Zero-width span at the window edge stays out, like any grapheme.
+        assert_eq!(slice_visible_columns("\txy", 0, 2), "xy");
+        assert_eq!(slice_visible_columns("ab", 0, 2), "ab");
     }
 
     // --- Unicode / CJK / terminal-width QA (issue #3488) -------------------
@@ -485,9 +471,9 @@ mod tests {
     fn slice_text_slices_cjk_by_display_column() {
         // Columns:  中=[0,2) 文=[2,4) a=[4,5) b=[5,6)
         let text = "中文ab";
-        assert_eq!(slice_text_tab_stops(text, 0, 2, 0), "中");
-        assert_eq!(slice_text_tab_stops(text, 2, 4, 0), "文");
-        assert_eq!(slice_text_tab_stops(text, 4, 6, 0), "ab");
+        assert_eq!(slice_visible_columns(text, 0, 2), "中");
+        assert_eq!(slice_visible_columns(text, 2, 4), "文");
+        assert_eq!(slice_visible_columns(text, 4, 6), "ab");
     }
 
     // --- New #3488 fixtures: CJK/wide-glyph truncation on selector-style rows.
@@ -603,7 +589,7 @@ mod tests {
         // The keycap occupies columns [5, 7). Any overlapping selection keeps
         // the complete grapheme; no isolated FE0F/U+20E3 mark may escape.
         for (start, end) in [(0, 7), (5, 6), (6, 7)] {
-            let sliced = slice_text_tab_stops(row, start, end, 0);
+            let sliced = slice_visible_columns(row, start, end);
             assert!(
                 sliced.contains("1\u{fe0f}\u{20e3}"),
                 "range=({start}, {end}) split keycap: {sliced:?}"

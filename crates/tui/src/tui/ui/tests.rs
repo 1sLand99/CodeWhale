@@ -4255,12 +4255,12 @@ fn mouse_selection_fragment_drag_copies_exact_text() {
 
 #[test]
 fn tab_line_partial_selection_copies_exact_fragment_not_whole_cells() {
-    // Mouse columns are terminal cells, where a tab advances to the next
-    // 8-column stop. The 2-wide rail puts content at absolute column 2, so
-    // the tab below sits at absolute 10 and spans 6 cells (10..16) while a
-    // fixed-4 tab would span 4. A selection ending inside that divergence
-    // zone is a fragment: the Markdown path must decline and the text
-    // fallback must slice in stop space, keeping the tab itself.
+    // Mouse columns are painted cells, where control characters are
+    // invisible. The tab below takes no column, so visible content ends 4
+    // cells before a fixed-4 tab would end it. A selection stopping short
+    // of the visible end is a fragment: the Markdown path must decline and
+    // the text fallback must slice in visible space, keeping the interior
+    // tab itself.
     let mut app = create_test_app();
     app.history = vec![HistoryCell::Assistant {
         content: "abcdefgh\tcdefghij".to_string(),
@@ -4289,7 +4289,7 @@ fn tab_line_partial_selection_copies_exact_fragment_not_whole_cells() {
     });
     app.viewport.transcript_selection.head = Some(TranscriptSelectionPoint {
         line_index,
-        column: head + 20,
+        column: head + 14,
     });
 
     assert_eq!(
@@ -4301,13 +4301,14 @@ fn tab_line_partial_selection_copies_exact_fragment_not_whole_cells() {
     assert_eq!(
         app.clipboard.last_written_text(),
         Some("abcdefgh\tcdefgh"),
-        "fragment keeps the tab and stops inside the stop span"
+        "fragment keeps the interior tab and stops before the last chars"
     );
 
-    // Covering the line end to end still projects Markdown source.
+    // Covering all visible cells still projects Markdown source, even
+    // though the window ends before a fixed-4 tail would.
     app.viewport.transcript_selection.head = Some(TranscriptSelectionPoint {
         line_index,
-        column: head + 24,
+        column: head + 17,
     });
     let (text, cells) = selection_to_markdown(&app).expect("full tab line keeps markdown");
     assert_eq!(cells, 1);
@@ -4316,10 +4317,10 @@ fn tab_line_partial_selection_copies_exact_fragment_not_whole_cells() {
 
 #[test]
 fn tab_indented_code_fragment_copies_shifted_exact_text() {
-    // Double-indented code: with the 2-wide rail plus the 2-wide code
-    // prefix, the first tab spans absolute 4..8 and the second spans 8..16
-    // under tab stops (8..12 under a fixed-4 tab). A window covering
-    // exactly the second tab's rendered span must copy just that tab.
+    // Leading tabs paint no cells, so the visible line is just the code
+    // chars. A window over the second visible char must copy exactly it;
+    // the zero-width tab spans at and below the window start stay out
+    // under the same strict rule every grapheme follows.
     let mut app = create_test_app();
     app.history = vec![HistoryCell::Assistant {
         content: "```\n\t\txy\n```".to_string(),
@@ -4347,11 +4348,11 @@ fn tab_indented_code_fragment_copies_shifted_exact_text() {
     assert_eq!(head, 4, "code line carries rail plus code prefix");
     app.viewport.transcript_selection.anchor = Some(TranscriptSelectionPoint {
         line_index,
-        column: head + 4,
+        column: head + 1,
     });
     app.viewport.transcript_selection.head = Some(TranscriptSelectionPoint {
         line_index,
-        column: head + 12,
+        column: head + 2,
     });
 
     assert_eq!(
@@ -4362,8 +4363,8 @@ fn tab_indented_code_fragment_copies_shifted_exact_text() {
     copy_active_selection(&mut app);
     assert_eq!(
         app.clipboard.last_written_text(),
-        Some("\t"),
-        "window covers the second tab stop exactly, excluding neighbors"
+        Some("y"),
+        "fragment copies exactly the covered visible cell"
     );
 }
 
