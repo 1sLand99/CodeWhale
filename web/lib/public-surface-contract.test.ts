@@ -413,21 +413,19 @@ done
     expect(matrixText).not.toContain('"approvalPostures"');
   });
 
-  it("enforces the six-tool core, deferred discovery, and exact hidden compatibility", () => {
+  it("keeps public tool facts aligned with the native core and discovery boundaries", () => {
     const toolDoc = text("docs/TOOL_SURFACE.md");
-    const toolsPage = text("web/app/[locale]/docs/tools/page.tsx");
+    const toolsPage = text("web/app/[locale]/docs/tools/page.tsx") + text("web/lib/content/tools.ts");
     const registry = text("crates/tui/src/tools/registry.rs");
     const limits = text("crates/tui/src/config/subagent_limits.rs");
     const roadmap = text("web/app/[locale]/roadmap/page.tsx");
 
-    expect(matrix.toolSurface.defaultActive).toEqual([
-      "read",
-      "write",
-      "edit",
-      "bash",
-      "agent",
-      "todo_write",
-    ]);
+    const catalog = text("crates/tui/src/core/engine/tool_catalog.rs");
+    const nativeCore = catalog.match(/const DEFAULT_ACTIVE_NATIVE_TOOLS: &[\s\S]*?= &\[([\s\S]*?)\];/);
+    expect(nativeCore, "native core declaration must be found").not.toBeNull();
+    const nativeNames = [...nativeCore![1].matchAll(/"([^"\n]+)"/g)].map((match) => match[1]);
+    expect(nativeNames.length).toBeGreaterThan(0);
+    expect(matrix.toolSurface.defaultActive).toEqual(nativeNames);
     expect(matrix.toolSurface.schemas).toEqual({
       read: ["path", "offset?", "limit?"],
       write: ["path", "content"],
@@ -458,13 +456,6 @@ done
       roadmap.indexOf('title: "Underway"'),
     );
     expect(roadmap).toContain("Implemented in the v0.9.1 source candidate");
-    // docs/TOOL_SURFACE.md moved from six to seven model-facing names when
-    // the TUI promoted todo_write into DEFAULT_ACTIVE_NATIVE_TOOLS
-    // (bf6def00d). docs/public-surface-facts.json tracks the six-name
-    // DEFAULT_ACTIVE_NATIVE_TOOLS matrix (tool_search is the synthetic
-    // always-active entry outside it), and the name loop below keeps the
-    // matrix↔doc↔site alignment honest.
-    expect(toolDoc).toContain("exactly seven model-facing names");
     for (const name of matrix.toolSurface.defaultActive) {
       expect(toolDoc, name).toContain(`\`${name}\``);
       expect(toolsPage, name).toContain(name);

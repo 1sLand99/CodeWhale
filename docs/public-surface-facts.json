@@ -105,7 +105,11 @@
       "edit",
       "bash",
       "agent",
-      "todo_write"
+      "workflow",
+      "todo_write",
+      "create_goal",
+      "get_goal",
+      "update_goal"
     ],
     "schemas": {
       "read": [
