@@ -1389,6 +1389,7 @@
   "SessionsTitleLength": "El títol ha de tenir entre 1 i 100 caràcters",
   "SessionsOpenFailed": "No s'han pogut obrir les sessions: {error}",
   "SessionsLoadFailed": "No s'ha pogut carregar la sessió: {error}",
+  "SessionsResumed": "Sessió represa: {title}",
   "SessionsRenameFailed": "El canvi de nom ha fallat: {error}",
   "SessionsRenamed": "S'ha canviat el nom a \"{title}\"",
   "SessionsNoResults": "No s'ha trobat cap sessió.",

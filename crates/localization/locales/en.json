@@ -1412,6 +1412,7 @@
   "SessionsTitleLength": "Title must be 1–100 characters",
   "SessionsOpenFailed": "Could not open sessions: {error}",
   "SessionsLoadFailed": "Could not load the session: {error}",
+  "SessionsResumed": "Resumed: {title}",
   "SessionsRenameFailed": "Could not rename: {error}",
   "SessionsRenamed": "Renamed to \"{title}\"",
   "SessionsNoResults": "No sessions found.",

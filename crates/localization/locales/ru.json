@@ -1389,6 +1389,7 @@
   "SessionsTitleLength": "Заголовок должен быть от 1 до 100 символов",
   "SessionsOpenFailed": "Не удалось открыть сессии: {error}",
   "SessionsLoadFailed": "Не удалось загрузить сессию: {error}",
+  "SessionsResumed": "Сеанс возобновлён: {title}",
   "SessionsRenameFailed": "Ошибка переименования: {error}",
   "SessionsRenamed": "Переименовано в \"{title}\"",
   "SessionsNoResults": "Сессии не найдены.",

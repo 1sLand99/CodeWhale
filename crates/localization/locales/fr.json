@@ -1389,6 +1389,7 @@
   "SessionsTitleLength": "Le titre doit faire 1 à 100 caractères",
   "SessionsOpenFailed": "Impossible d'ouvrir les sessions : {error}",
   "SessionsLoadFailed": "Impossible de charger la session : {error}",
+  "SessionsResumed": "Session reprise : {title}",
   "SessionsRenameFailed": "Échec du renommage : {error}",
   "SessionsRenamed": "Renommée en \"{title}\"",
   "SessionsNoResults": "Aucune session trouvée.",

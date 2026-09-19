@@ -1389,6 +1389,7 @@
   "SessionsTitleLength": "Titel muss 1–100 Zeichen haben",
   "SessionsOpenFailed": "Sitzungen konnten nicht geöffnet werden: {error}",
   "SessionsLoadFailed": "Sitzung konnte nicht geladen werden: {error}",
+  "SessionsResumed": "Fortgesetzt: {title}",
   "SessionsRenameFailed": "Umbenennen fehlgeschlagen: {error}",
   "SessionsRenamed": "Umbenannt in \"{title}\"",
   "SessionsNoResults": "Keine Sitzungen gefunden.",

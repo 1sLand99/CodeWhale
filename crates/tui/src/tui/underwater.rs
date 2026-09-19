@@ -1104,8 +1104,8 @@ fn empty_state_caption(
 /// real one.
 pub struct LaunchEmptyState {
     pub lines: Vec<Line<'static>>,
-    /// Text lane relative to the paint area; the whale and outer whitespace
-    /// are not controls. Selection and pointer targets share this lane.
+    /// Text lane relative to the paint area. Outer whitespace is not a
+    /// control; selection and pointer targets share this lane.
     text_column: Rect,
     /// Clickable rows as `(id, row index within `lines`)`. The caller turns
     /// these into rects against the painted area, so hitboxes and glyphs
@@ -1113,8 +1113,8 @@ pub struct LaunchEmptyState {
     pub rows: Vec<(crate::tui::app::LaunchRowId, usize)>,
 }
 
-/// Left indent for the whole block. Small: this is a top-left anchor, not a
-/// centred hero.
+/// Minimum left indent. Wider terminals balance the bounded reading lane
+/// inside the transcript rather than leaving it stranded against one edge.
 const LAUNCH_BLOCK_INDENT: usize = 2;
 /// The card's reading measure: a row is a title with its detail set against
 /// it, and without a ceiling the detail right-aligns against the terminal's
@@ -1457,6 +1457,7 @@ fn fade_lines(lines: &mut [Line<'static>], dissolve: f32, water: Color) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct LaunchFit {
     brand: bool,
+    context: bool,
     help: bool,
     notice: bool,
     heading: bool,
@@ -1478,6 +1479,7 @@ struct LaunchFit {
 impl LaunchFit {
     const fn rows(self) -> usize {
         (self.brand as usize)
+            + (self.context as usize)
             + (self.help as usize)
             + (self.notice as usize)
             + self.blanks * self.gap
@@ -1501,6 +1503,7 @@ impl LaunchFit {
 fn launch_fit(height: usize, recent: usize, has_more: bool, notice: bool, mcp: usize) -> LaunchFit {
     let mut fit = LaunchFit {
         brand: true,
+        context: true,
         help: true,
         notice,
         heading: true,
@@ -1524,16 +1527,17 @@ fn launch_fit(height: usize, recent: usize, has_more: bool, notice: bool, mcp: u
                 }
             }
             5 => fit.help = false,
-            6 => fit.heading = false,
-            7 => fit.brand = false,
-            8 => {
+            6 => fit.context = false,
+            7 => fit.heading = false,
+            8 => fit.brand = false,
+            9 => {
                 while fit.shown > 0 && fit.rows() > height {
                     fit.shown -= 1;
                     fit.see_all = true;
                 }
             }
-            9 => fit.mcp = 0,
-            10 => fit.see_all = false,
+            10 => fit.mcp = 0,
+            11 => fit.see_all = false,
             _ => break,
         }
         step += 1;
@@ -1559,7 +1563,7 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
     // One reading lane: identity never steals width from session titles.
     // Reserve a two-cell action gutter where the terminal can afford it.
     let block_indent = if width >= LAUNCH_INDENT_MIN_WIDTH {
-        LAUNCH_BLOCK_INDENT
+        LAUNCH_BLOCK_INDENT.max(width.saturating_sub(LAUNCH_CARD_MEASURE + 2) / 2)
     } else {
         0
     };
@@ -1610,27 +1614,34 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
         )];
         if text_width >= text_display_width(brand) + 1 + text_display_width(&version) {
             spans.push(Span::styled(
-                format!(" {version}"),
+                format!(
+                    "{}{version}",
+                    " ".repeat(
+                        text_width - text_display_width(brand) - text_display_width(&version)
+                    )
+                ),
                 Style::default().fg(theme.text_muted),
             ));
         }
         text.push(Some(Line::from(spans)));
     }
-    // What to press, on the one screen where it has not been learned yet.
-    if fit.help {
-        text.push(Some(Line::from(Span::styled(
-            semantic_truncate(
-                &tr(locale, MessageId::LaunchHelpLine).replace(
-                    "{dock}",
-                    crate::tui::shell_key_routing::binding(
-                        crate::tui::shell_key_routing::ShellBindingId::ViewCycle,
-                    )
-                    .footer_chord,
-                ),
-                text_width,
-            ),
-            Style::default().fg(theme.text_hint),
-        ))));
+    if fit.context {
+        let workspace = shorten_workspace(&crate::utils::display_path(&app.workspace), 2);
+        let identity = crate::tui::workspace_context::identity_from_context(
+            &app.workspace,
+            app.workspace_context.as_deref(),
+        );
+        let mut spans = vec![Span::styled(
+            semantic_truncate(&workspace, text_width),
+            Style::default().fg(theme.text_soft),
+        )];
+        if let Some(branch) = identity.branch {
+            let detail = format!(" · {branch}");
+            if text_display_width(&workspace) + text_display_width(&detail) <= text_width {
+                spans.push(Span::styled(detail, Style::default().fg(theme.text_muted)));
+            }
+        }
+        text.push(Some(Line::from(spans)));
     }
     // The migration notice, while there is still a question to answer. It
     // retires for good once `/import-claude` has been run.
@@ -1648,7 +1659,10 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
 
     for row in &card_rows {
         let style = if row.prominent {
-            Style::default().fg(theme.accent_primary).bold()
+            Style::default()
+                .fg(theme.accent_primary)
+                .bg(theme.panel_bg)
+                .bold()
         } else {
             Style::default().fg(theme.text_body)
         };
@@ -1697,6 +1711,12 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
                 Style::default().fg(theme.text_muted),
             ));
         }
+        if row.prominent {
+            spans.push(Span::styled(
+                " ".repeat(lane.saturating_sub(label_width)),
+                style,
+            ));
+        }
         rows.push((row.id.clone(), text.len()));
         text.push(Some(Line::from(spans)));
         if matches!(row.id, crate::tui::app::LaunchRowId::NewSession) && fit.heading {
@@ -1715,10 +1735,24 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
                     text.push(None);
                 }
             }
-            text.push(Some(Line::from(Span::styled(
-                semantic_truncate(&tr(locale, heading), text_width),
-                Style::default().fg(theme.text_muted),
-            ))));
+            let label = semantic_truncate(&tr(locale, heading), text_width);
+            let remaining = text_width.saturating_sub(text_display_width(&label) + 2);
+            let mut spans = vec![Span::styled(
+                label,
+                Style::default().fg(theme.text_soft).bold(),
+            )];
+            if remaining >= 4 {
+                let rule = if crate::tui::color_compat::ascii_safe_enabled() {
+                    "-"
+                } else {
+                    "─"
+                };
+                spans.push(Span::styled(
+                    format!("  {}", rule.repeat(remaining)),
+                    Style::default().fg(theme.border),
+                ));
+            }
+            text.push(Some(Line::from(spans)));
         }
     }
 
@@ -1742,8 +1776,28 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
         }
     }
 
+    // Keep the invitation and recent work ahead of command instructions.
+    if fit.help {
+        if text.len() + 1 < height {
+            text.push(None);
+        }
+        text.push(Some(Line::from(Span::styled(
+            semantic_truncate(
+                &tr(locale, MessageId::LaunchHelpLine).replace(
+                    "{dock}",
+                    crate::tui::shell_key_routing::binding(
+                        crate::tui::shell_key_routing::ShellBindingId::ViewCycle,
+                    )
+                    .footer_chord,
+                ),
+                text_width,
+            ),
+            Style::default().fg(theme.text_hint),
+        ))));
+    }
+
     // Paint the state mouse/keyboard navigation already records. Restrict the
-    // band to the text lane so selecting a session never highlights the whale.
+    // band to the text lane so selecting a session never colors the margins.
     for (index, (_, row)) in rows.iter().enumerate() {
         let style = if app.launch.menu_selected == Some(index) {
             Some(crate::tui::menu_style::selected_row_style())
@@ -1765,7 +1819,12 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
 
     // Stable action gutter: every executable row advertises itself before
     // hover. The band includes the gutter and only the bounded reading lane.
-    let block_rows = text.len().min(height);
+    // A little top breathing room only comes from unused space. Compact
+    // terminals never sacrifice a control for this composition.
+    if height >= 16 && text.len() + 1 < height {
+        lines.push(Line::from(""));
+    }
+    let block_rows = text.len().min(height.saturating_sub(lines.len()));
     let mut row_offsets = Vec::with_capacity(block_rows);
     for (row, line) in text.iter().take(block_rows).enumerate() {
         let action = rows.iter().position(|(_, y)| *y == row);
@@ -1776,7 +1835,13 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
         } else if hovered {
             crate::tui::menu_style::hovered_row_style()
         } else {
-            Style::default().fg(theme.accent_primary)
+            let style = Style::default().fg(theme.accent_primary);
+            if action.is_some_and(|i| matches!(rows[i].0, crate::tui::app::LaunchRowId::NewSession))
+            {
+                style.bg(theme.panel_bg)
+            } else {
+                style
+            }
         };
         let mut spans = vec![Span::raw(" ".repeat(block_indent))];
         if action_gutter > 0 {
@@ -2162,7 +2227,7 @@ mod launch_card_tests {
             .find(|line| line.contains("Ship the launch card"))
             .expect("recent row painted");
         assert!(
-            text_display_width(row) <= LAUNCH_CARD_MEASURE + 32,
+            text_display_width(row.trim_start()) <= LAUNCH_CARD_MEASURE + 2,
             "row runs to the terminal edge: {row:?}",
         );
         assert!(row.contains("msgs"), "row lost its detail: {row:?}");

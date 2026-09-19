@@ -1412,6 +1412,7 @@
   "SessionsTitleLength": "제목은 1–100자여야 합니다",
   "SessionsOpenFailed": "세션을 열 수 없음: {error}",
   "SessionsLoadFailed": "세션을 불러올 수 없음: {error}",
+  "SessionsResumed": "세션 재개: {title}",
   "SessionsRenameFailed": "이름 변경 실패: {error}",
   "SessionsRenamed": "\"{title}\"으로 변경됨",
   "SessionsNoResults": "세션을 찾을 수 없습니다.",

@@ -1412,6 +1412,7 @@
   "SessionsTitleLength": "标题长度须为 1–100 个字符",
   "SessionsOpenFailed": "无法打开会话：{error}",
   "SessionsLoadFailed": "无法加载会话：{error}",
+  "SessionsResumed": "已恢复会话：{title}",
   "SessionsRenameFailed": "重命名失败：{error}",
   "SessionsRenamed": "已重命名为“{title}”",
   "SessionsNoResults": "未找到会话。",

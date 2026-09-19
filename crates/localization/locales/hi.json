@@ -1389,6 +1389,7 @@
   "SessionsTitleLength": "शीर्षक 1–100 अक्षरों का होना चाहिए",
   "SessionsOpenFailed": "सत्र नहीं खुल सके: {error}",
   "SessionsLoadFailed": "सत्र लोड नहीं हो सका: {error}",
+  "SessionsResumed": "सत्र फिर शुरू किया: {title}",
   "SessionsRenameFailed": "नाम बदलना विफल: {error}",
   "SessionsRenamed": "\"{title}\" में नाम बदला",
   "SessionsNoResults": "कोई सत्र नहीं मिला।",

@@ -17,6 +17,15 @@ fn start(rows: u16, cols: u16, with_mcp: bool) -> (SealedWorkspace, Harness) {
 }
 
 fn start_titled(rows: u16, cols: u16, with_mcp: bool, title: &str) -> (SealedWorkspace, Harness) {
+    start_with_titles(rows, cols, with_mcp, &[title])
+}
+
+fn start_with_titles(
+    rows: u16,
+    cols: u16,
+    with_mcp: bool,
+    titles: &[&str],
+) -> (SealedWorkspace, Harness) {
     let workspace = make_sealed_workspace().unwrap();
     std::fs::write(workspace.home().join(".codewhale/.onboarded"), "").unwrap();
     let trust = workspace.workspace().join(".deepseek");
@@ -24,27 +33,33 @@ fn start_titled(rows: u16, cols: u16, with_mcp: bool, title: &str) -> (SealedWor
     std::fs::write(trust.join("trusted"), "").unwrap();
     let sessions = workspace.home().join(".codewhale/sessions");
     std::fs::create_dir_all(&sessions).unwrap();
-    let session = serde_json::json!({
-        "schema_version": 1,
-        "metadata": {
-            "id": "11111111-2222-4333-8444-555555555555",
-            "title": title,
-            "created_at": "2026-09-19T00:00:00Z",
-            "updated_at": "2026-09-19T00:00:00Z",
-            "message_count": 1,
-            "total_tokens": 0,
-            "model": "deepseek-flash",
-            "model_provider": "deepseek",
-            "workspace": workspace.workspace()
-        },
-        "messages": [{"role": "user", "content": [{"type": "text", "text": SAVED_TEXT}]}],
-        "system_prompt": null
-    });
-    std::fs::write(
-        sessions.join("11111111-2222-4333-8444-555555555555.json"),
-        serde_json::to_vec(&session).unwrap(),
-    )
-    .unwrap();
+    for (index, title) in titles.iter().enumerate() {
+        let id = format!(
+            "11111111-2222-4333-8444-{:012}",
+            555555555555u64 + index as u64
+        );
+        let session = serde_json::json!({
+            "schema_version": 1,
+            "metadata": {
+                "id": id,
+                "title": title,
+                "created_at": "2026-09-19T00:00:00Z",
+                "updated_at": format!("2026-09-19T00:00:{:02}Z", 59usize.saturating_sub(index)),
+                "message_count": 1,
+                "total_tokens": 0,
+                "model": "deepseek-flash",
+                "model_provider": "deepseek",
+                "workspace": workspace.workspace()
+            },
+            "messages": [{"role": "user", "content": [{"type": "text", "text": SAVED_TEXT}]}],
+            "system_prompt": null
+        });
+        std::fs::write(
+            sessions.join(format!("{id}.json")),
+            serde_json::to_vec(&session).unwrap(),
+        )
+        .unwrap();
+    }
     if with_mcp {
         // A local failing server gives the summary a real row without any network.
         let mcp = serde_json::json!({"mcpServers": {"launch-proof": {
@@ -117,6 +132,10 @@ fn launch_recent_click_then_enter_resumes_without_another_mouse_event() {
         tui.send(keys::key::enter()).unwrap();
         // No pointer motion follows Enter: the accepted action must run now.
         wait(&mut tui, SAVED_TEXT);
+        assert!(
+            !tui.frame().contains("Session loaded from"),
+            "resume should not add a technical path receipt to the conversation"
+        );
         capture(&mut tui, "conversation");
         tui.shutdown();
     }
@@ -204,8 +223,38 @@ fn workbench_settings_visual_evidence() {
             tui.send(keys::key::enter()).unwrap();
             wait(&mut tui, title);
             capture(&mut tui, name);
+            if name == "providers" {
+                tui.send(keys::key::alt('v')).unwrap();
+                wait(&mut tui, "DeepSeek · Open details");
+                capture(&mut tui, "provider-details");
+                tui.send(keys::key::esc()).unwrap();
+                wait(&mut tui, "Provider");
+            }
             tui.shutdown();
         }
+    }
+}
+
+#[test]
+#[ignore = "opt-in populated launch evidence; fixture sessions, no provider calls"]
+fn workbench_populated_home_visual_evidence() {
+    assert!(std::env::var_os("QA_LAUNCH_CAPTURE_DIR").is_some());
+    for (rows, cols) in SIZES {
+        let (_workspace, mut tui) = start_with_titles(
+            rows,
+            cols,
+            true,
+            &[
+                "Polish the release notes",
+                "Investigate a provider timeout",
+                "Review the plugin setup flow",
+            ],
+        );
+        capture(&mut tui, "home-populated");
+        tui.send(keys::key::down()).unwrap();
+        tui.send(keys::key::down()).unwrap();
+        capture(&mut tui, "home-populated-selected");
+        tui.shutdown();
     }
 }
 

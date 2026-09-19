@@ -1412,6 +1412,7 @@
   "SessionsTitleLength": "タイトルは 1〜100 文字にしてください",
   "SessionsOpenFailed": "セッションを開けませんでした: {error}",
   "SessionsLoadFailed": "セッションを読み込めませんでした: {error}",
+  "SessionsResumed": "再開しました: {title}",
   "SessionsRenameFailed": "名前の変更に失敗しました: {error}",
   "SessionsRenamed": "「{title}」に変更しました",
   "SessionsNoResults": "セッションが見つかりません。",

@@ -1389,6 +1389,7 @@
   "SessionsTitleLength": "Назва має містити 1–100 символів",
   "SessionsOpenFailed": "Не вдалося відкрити сесії: {error}",
   "SessionsLoadFailed": "Не вдалося завантажити сесію: {error}",
+  "SessionsResumed": "Сеанс відновлено: {title}",
   "SessionsRenameFailed": "Перейменування не вдалося: {error}",
   "SessionsRenamed": "Перейменовано на \"{title}\"",
   "SessionsNoResults": "Сесій не знайдено.",

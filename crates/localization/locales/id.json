@@ -1389,6 +1389,7 @@
   "SessionsTitleLength": "Judul harus 1–100 karakter",
   "SessionsOpenFailed": "Tidak dapat membuka sesi: {error}",
   "SessionsLoadFailed": "Tidak dapat memuat sesi: {error}",
+  "SessionsResumed": "Sesi dilanjutkan: {title}",
   "SessionsRenameFailed": "Ganti nama gagal: {error}",
   "SessionsRenamed": "Diganti nama menjadi \"{title}\"",
   "SessionsNoResults": "Tidak ada sesi ditemukan.",

@@ -1407,16 +1407,16 @@ pub(crate) async fn apply_command_result(
                         config: app.compaction_config(),
                     })
                     .await;
-                let success_message = format!(
-                    "Session loaded from {} (ID: {}, {} messages)",
-                    path.display(),
-                    crate::session_manager::truncate_id(&session.metadata.id),
-                    session.metadata.message_count
+                let title = crate::session_manager::sanitize_session_title(&session.metadata.title);
+                app.push_status_toast_record(
+                    StatusToast::new(
+                        app.tr(MessageId::SessionsResumed)
+                            .replace("{title}", &title),
+                        StatusToastLevel::Success,
+                        Some(4_000),
+                    )
+                    .for_event(format!("session-resumed:{}", session.metadata.id)),
                 );
-                app.add_message(HistoryCell::System {
-                    content: success_message.clone(),
-                });
-                app.status_message = Some(success_message);
                 // A loaded session is the working screen. The launch card's
                 // recent rows reach here through `/resume`-shaped dispatch;
                 // leaving the launch stage visible over the restored

@@ -1396,6 +1396,7 @@
   "SessionsHistoryPaneTitle": " 歷史 (Shift+PgUp/PgDn) ",
   "SessionsImage": "[圖片]",
   "SessionsLoadFailed": "無法載入工作階段：{error}",
+  "SessionsResumed": "已恢復工作階段：{title}",
   "SessionsMessageCountCompact": "{count} 條訊息",
   "SessionsNewSessionTitle": "新工作階段",
   "SessionsNewTitlePrompt": "新標題: ",
