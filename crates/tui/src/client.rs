@@ -4735,6 +4735,9 @@ pub(super) fn apply_reasoning_effort(
             // provider must not inject a model-specific reasoning dialect.
             ApiProvider::Edenai => {}
             ApiProvider::Zenmux => {}
+            // CSDN 星图 is OpenAI-compatible but documents no provider-owned
+            // reasoning dialect; do not invent one.
+            ApiProvider::Csdn => {}
             // The Codewhale API is a passthrough to the account's own
             // connected provider; it documents no Codewhale-owned
             // reasoning-effort translation, so nothing is invented here.
@@ -4835,6 +4838,9 @@ pub(super) fn apply_reasoning_effort(
             ApiProvider::Telecomjs => {}
             ApiProvider::Edenai => {}
             ApiProvider::Zenmux => {}
+            // CSDN 星图 is OpenAI-compatible but documents no provider-owned
+            // reasoning dialect; do not invent one.
+            ApiProvider::Csdn => {}
             // The Codewhale API is a passthrough to the account's own
             // connected provider; it documents no Codewhale-owned
             // reasoning-effort translation, so nothing is invented here.
@@ -4960,6 +4966,9 @@ pub(super) fn apply_reasoning_effort(
             ApiProvider::Telecomjs => {}
             ApiProvider::Edenai => {}
             ApiProvider::Zenmux => {}
+            // CSDN 星图 is OpenAI-compatible but documents no provider-owned
+            // reasoning dialect; do not invent one.
+            ApiProvider::Csdn => {}
             // The Codewhale API is a passthrough to the account's own
             // connected provider; it documents no Codewhale-owned
             // reasoning-effort translation, so nothing is invented here.

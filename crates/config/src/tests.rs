@@ -5230,6 +5230,78 @@ model = "z-ai/glm-5.3"
     assert_eq!(resolved.api_key_source, Some(RuntimeApiKeySource::Env));
 }
 
+/// CSDN 星图 (Starmap) is an OpenAI-compatible hosted platform whose default
+/// route is the Coding Plan model `glm_for_coding`: aliases collapse onto one
+/// catalog identity, the metadata names the official base URL and a distinct
+/// `CSDN_API_KEY` slot, the wire policy is fixed on Chat Completions, and
+/// env/config overrides resolve exactly like every other provider table.
+#[test]
+fn csdn_resolves_named_chat_provider_and_environment_overrides() {
+    let _lock = env_lock();
+    let _env = EnvGuard::without_deepseek_runtime_overrides();
+
+    for alias in [
+        "csdn",
+        "csdn-ai",
+        "csdn_ai",
+        "csdn-coding-plan",
+        "csdn_coding_plan",
+        "starmap",
+    ] {
+        assert_eq!(ProviderKind::parse(alias), Some(ProviderKind::Csdn));
+        let parsed: ConfigToml =
+            toml::from_str(&format!("provider = \"{alias}\"")).expect("CSDN alias");
+        assert_eq!(parsed.provider, ProviderKind::Csdn);
+    }
+
+    let metadata = provider::resolve_provider("starmap").expect("CSDN metadata");
+    assert_eq!(metadata.id(), "csdn");
+    assert_eq!(metadata.display_name(), "CSDN");
+    assert_eq!(metadata.provider_config_key(), "csdn");
+    assert_eq!(metadata.default_base_url(), DEFAULT_CSDN_BASE_URL);
+    assert_eq!(metadata.default_model(), DEFAULT_CSDN_MODEL);
+    assert_eq!(metadata.env_vars(), &["CSDN_API_KEY"]);
+    assert_eq!(
+        metadata.wire_policy(),
+        provider::WirePolicy::Fixed(provider::WireFormat::ChatCompletions)
+    );
+
+    let config: ConfigToml = toml::from_str(
+        r#"
+provider = "csdn"
+
+[providers.csdn]
+api_key = "csdn-config-key"
+model = "glm_for_coding"
+"#,
+    )
+    .expect("CSDN provider table");
+    let resolved = config.resolve_runtime_options(&CliRuntimeOverrides::default());
+    assert_eq!(resolved.provider, ProviderKind::Csdn);
+    assert_eq!(resolved.base_url, DEFAULT_CSDN_BASE_URL);
+    assert_eq!(resolved.model, "glm_for_coding");
+    assert_eq!(resolved.api_key.as_deref(), Some("csdn-config-key"));
+    assert_eq!(
+        resolved.api_key_source,
+        Some(RuntimeApiKeySource::ConfigFile)
+    );
+
+    unsafe {
+        std::env::set_var("CSDN_API_KEY", "csdn-env-key");
+        std::env::set_var("CSDN_BASE_URL", "https://ai.csdn.net/api/model/v1");
+        std::env::set_var("CSDN_MODEL", "deepseek-v3.2");
+    }
+    let env_config = ConfigToml {
+        provider: ProviderKind::Csdn,
+        ..ConfigToml::default()
+    };
+    let resolved = env_config.resolve_runtime_options(&CliRuntimeOverrides::default());
+    assert_eq!(resolved.base_url, "https://ai.csdn.net/api/model/v1");
+    assert_eq!(resolved.model, "deepseek-v3.2");
+    assert_eq!(resolved.api_key.as_deref(), Some("csdn-env-key"));
+    assert_eq!(resolved.api_key_source, Some(RuntimeApiKeySource::Env));
+}
+
 /// Concentrate is an opt-in, BYOK, Responses-wire gateway: aliases collapse
 /// onto one catalog identity, the metadata names the official base URL and a
 /// distinct `CONCENTRATE_API_KEY` slot, the wire policy is fixed on the

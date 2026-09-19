@@ -115,6 +115,7 @@ const PROVIDER_LABEL_MAP = {
   ModelstudioCodingPlan: { id: "modelstudio-coding-plan", label: "Model Studio Coding Plan", env: "MODELSTUDIO_API_KEY" },
   ModelstudioCodingPlanAnthropic: { id: "modelstudio-coding-plan-anthropic", label: "Model Studio Coding Plan (Anthropic-compatible)", env: "MODELSTUDIO_API_KEY" },
   Zenmux: { id: "zenmux", label: "ZenMux", env: "ZENMUX_API_KEY" },
+  Csdn: { id: "csdn", label: "CSDN 星图 (Starmap)", env: "CSDN_API_KEY" },
 };
 
 // DeepseekCN: not wired through shared ProviderKind (#1104).

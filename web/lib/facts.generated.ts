@@ -37,7 +37,7 @@ export interface RepoFacts {
 }
 
 export const FACTS: RepoFacts = {
-  "generatedAt": "2026-09-18T18:49:13.339Z",
+  "generatedAt": "2026-09-19T00:08:11.198Z",
   "sourceRevision": null,
   "sourceCommittedAt": null,
   "version": "0.9.14",
@@ -288,6 +288,11 @@ export const FACTS: RepoFacts = {
       "id": "zenmux",
       "label": "ZenMux",
       "env": "ZENMUX_API_KEY"
+    },
+    {
+      "id": "csdn",
+      "label": "CSDN 星图 (Starmap)",
+      "env": "CSDN_API_KEY"
     },
     {
       "id": "concentrate",
