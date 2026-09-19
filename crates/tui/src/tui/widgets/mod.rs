@@ -25,8 +25,6 @@ use crate::tui::menu_style;
 use crate::tui::scrolling::TranscriptLineMeta;
 use crate::tui::ui_text::{grapheme_display_width, text_display_width};
 use crate::tui::underwater::ShellPhase;
-use codewhale_config::AppMode;
-use codewhale_execpolicy::ApprovalMode;
 use codewhale_localization::{Locale, MessageId, tr};
 use codewhale_palette as palette;
 use ratatui::{
@@ -1220,11 +1218,11 @@ pub(crate) fn active_composer_submit_rect(app: &App, area: Rect) -> Option<Rect>
     Some(crate::tui::composer_chrome::tideline_composer_geometry(area).submit)
 }
 
-/// Restore the rounded corners after the semantic top/bottom passes.
+/// Restore rounded corners after the title-bearing top/bottom passes.
 ///
 /// Ratatui renders a `TOP`-only (or `BOTTOM`-only) block through the corner
 /// cells as horizontal line glyphs. The live composer needs those passes for
-/// its localized titles and independent permission/mode color ramps, so put
+/// its localized titles and shared focus outline, so put
 /// the four rounded joins back afterward rather than replacing its mature
 /// input widget with the unfinished translation scaffold.
 fn render_composer_panel_corners(
@@ -1419,11 +1417,17 @@ impl<'a> ComposerWidget<'a> {
         composer_inner_area(area, self.has_panel(area))
     }
 
-    fn mode_color(&self) -> Color {
-        match self.app.mode {
-            AppMode::Agent => self.app.ui_theme.mode_agent,
-            AppMode::Plan => self.app.ui_theme.mode_plan,
-            AppMode::Operate => self.app.ui_theme.mode_operate,
+    fn focus_color(&self) -> Color {
+        use crate::tui::shell_key_routing::Focus;
+        let editing = match self.app.focus() {
+            Focus::Composer => true,
+            Focus::Launch => self.app.launch.menu_selected.is_none(),
+            _ => false,
+        };
+        if editing {
+            self.app.ui_theme.accent_primary
+        } else {
+            self.app.ui_theme.border
         }
     }
 
@@ -1518,28 +1522,19 @@ impl Renderable for ComposerWidget<'_> {
                 None
             };
 
-            // Warm permission ramp: Ask is amber, Auto-Review is Signal Gold,
-            // and Full Access is coral. The bottom edge independently carries
-            // the cool Plan -> Act -> Operate mode ramp.
-            let permission_color = match self.app.approval_mode {
-                ApprovalMode::Suggest | ApprovalMode::Never => self.app.ui_theme.permission_ask,
-                ApprovalMode::Auto => self.app.ui_theme.permission_auto_review,
-                ApprovalMode::Bypass => self.app.ui_theme.permission_full_access,
-            };
-            // Paint the enclosure first so the live composer gets actual
-            // rounded side rails. The semantic top/bottom blocks below keep
-            // their existing permission/mode color ramps and titles while the
-            // neutral rails stay legible on every supported theme.
+            // Focus has one outline. Permission and mode remain explicit in
+            // their footer; repeating both around the input competes with it.
+            let focus_color = self.focus_color();
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(self.app.ui_theme.border))
+                .border_style(Style::default().fg(focus_color))
                 .style(background)
                 .render(area, buf);
             let mut top_border = Block::default()
                 .borders(Borders::TOP)
                 .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(permission_color))
+                .border_style(Style::default().fg(focus_color))
                 .style(background);
             if self.app.is_history_search_active() {
                 top_border = top_border.title(Line::from(Span::styled(
@@ -1569,19 +1564,13 @@ impl Renderable for ComposerWidget<'_> {
             let mut bottom_border = Block::default()
                 .borders(Borders::BOTTOM)
                 .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(self.mode_color()))
+                .border_style(Style::default().fg(focus_color))
                 .style(background);
             if let Some(hint_line) = hint_line {
                 bottom_border = bottom_border.title_bottom(hint_line);
             }
             bottom_border.render(area, buf);
-            render_composer_panel_corners(
-                area,
-                buf,
-                background,
-                permission_color,
-                self.mode_color(),
-            );
+            render_composer_panel_corners(area, buf, background, focus_color, focus_color);
         } else if area.height >= 2 {
             let mut block = Block::default()
                 .borders(Borders::TOP)
@@ -4641,18 +4630,17 @@ fn line_spans_with_selection<'a>(
 #[cfg(test)]
 mod tests {
     use super::{
-        ACTIVE_REVISION_DOMAIN, ApprovalMode, ApprovalWidget, COMPOSER_PANEL_HEIGHT,
-        COMPOSER_PLACEHOLDER, ChatWidget, ComposerWidget, Renderable, SlashMenuEntry,
-        active_composer_submit_rect, active_entry_revision, apply_detail_target_highlight,
-        apply_selection_to_line, apply_send_flash, approval_palette, approval_truncation_hint,
-        build_empty_state_lines, composer_content_geometry, composer_empty_hint_text,
-        composer_height, composer_inner_area, composer_max_height, composer_submit_hint,
-        composer_top_padding, cursor_row_col, empty_composer_visual_rows,
-        enclosed_composer_panel_fits, fish_flee_offset, fish_heading, fish_mark,
-        history_entry_revision, layout_input, layout_input_with_scroll, placeholder_visual_lines,
-        push_command_entry, receipt_is_settling, revision_in_domain, should_render_empty_state,
-        slash_completion_hints, tool_run_summary_revision, wrap_input_lines,
-        wrap_input_lines_for_mouse, wrap_text,
+        ACTIVE_REVISION_DOMAIN, ApprovalWidget, COMPOSER_PANEL_HEIGHT, COMPOSER_PLACEHOLDER,
+        ChatWidget, ComposerWidget, Renderable, SlashMenuEntry, active_composer_submit_rect,
+        active_entry_revision, apply_detail_target_highlight, apply_selection_to_line,
+        apply_send_flash, approval_palette, approval_truncation_hint, build_empty_state_lines,
+        composer_content_geometry, composer_empty_hint_text, composer_height, composer_inner_area,
+        composer_max_height, composer_submit_hint, composer_top_padding, cursor_row_col,
+        empty_composer_visual_rows, enclosed_composer_panel_fits, fish_flee_offset, fish_heading,
+        fish_mark, history_entry_revision, layout_input, layout_input_with_scroll,
+        placeholder_visual_lines, push_command_entry, receipt_is_settling, revision_in_domain,
+        should_render_empty_state, slash_completion_hints, tool_run_summary_revision,
+        wrap_input_lines, wrap_input_lines_for_mouse, wrap_text,
     };
     use crate::config::{ApiProvider, Config};
     use crate::tui::active_cell::ActiveCell;
@@ -4664,7 +4652,6 @@ mod tests {
         ExecCell, ExecSource, GenericToolCell, HistoryCell, ToolCell, ToolRun, ToolStatus,
     };
     use crate::tui::scrolling::{TranscriptLineMeta, TranscriptScroll};
-    use codewhale_config::AppMode;
     use codewhale_localization::Locale;
     use codewhale_palette as palette;
     use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -6836,52 +6823,27 @@ mod tests {
     }
 
     #[test]
-    fn composer_border_edges_encode_warm_permission_and_cool_mode_ramps() {
-        let slash_menu_entries = Vec::<SlashMenuEntry>::new();
-        let mention_menu_entries = Vec::<String>::new();
+    fn composer_outline_tracks_focus_without_repeating_permission_or_mode() {
+        let slash = Vec::<SlashMenuEntry>::new();
+        let mentions = Vec::<String>::new();
         let area = Rect::new(0, 0, 40, 5);
-
         for theme_id in palette::SELECTABLE_THEMES {
-            let theme = theme_id.ui_theme();
-            for (approval_mode, expected) in [
-                (ApprovalMode::Suggest, theme.permission_ask),
-                (ApprovalMode::Never, theme.permission_ask),
-                (ApprovalMode::Auto, theme.permission_auto_review),
-                (ApprovalMode::Bypass, theme.permission_full_access),
-            ] {
-                let mut app = create_test_app();
-                app.ui_theme = theme;
-                app.approval_mode = approval_mode;
-                let widget =
-                    ComposerWidget::new(&app, 5, &slash_menu_entries, &mention_menu_entries);
+            let mut app = create_test_app();
+            app.ui_theme = theme_id.ui_theme();
+            app.launch.visible = true;
+            for selected in [None, Some(0)] {
+                app.launch.menu_selected = selected;
+                let widget = ComposerWidget::new(&app, 5, &slash, &mentions);
                 let mut buf = Buffer::empty(area);
                 widget.render(area, &mut buf);
-                assert_eq!(
-                    buf[(1, area.top())].fg,
-                    expected,
-                    "{} {approval_mode:?}",
-                    theme_id.name()
-                );
-            }
-
-            for (mode, expected) in [
-                (AppMode::Plan, theme.mode_plan),
-                (AppMode::Agent, theme.mode_agent),
-                (AppMode::Operate, theme.mode_operate),
-            ] {
-                let mut app = create_test_app();
-                app.ui_theme = theme;
-                app.mode = mode;
-                let widget =
-                    ComposerWidget::new(&app, 5, &slash_menu_entries, &mention_menu_entries);
-                let mut buf = Buffer::empty(area);
-                widget.render(area, &mut buf);
-                assert_eq!(
-                    buf[(1, area.bottom().saturating_sub(1))].fg,
-                    expected,
-                    "{} {mode:?}",
-                    theme_id.name()
-                );
+                let expected = if selected.is_none() {
+                    app.ui_theme.accent_primary
+                } else {
+                    app.ui_theme.border
+                };
+                for cell in [(1, 0), (1, 4), (0, 1), (39, 1)] {
+                    assert_eq!(buf[cell].fg, expected, "{} {selected:?}", theme_id.name());
+                }
             }
         }
     }

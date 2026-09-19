@@ -831,7 +831,7 @@ fn posture_items(footer: &TidelineFooter<'_>, shed: u8) -> Vec<PostureItem> {
                 footer.mode_key.filter(|_| shed < SHED_MODE_KEY),
             ),
             ink,
-            bold: true,
+            bold: false,
             joined: false,
             count_index: None,
         });

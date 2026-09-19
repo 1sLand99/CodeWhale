@@ -166,7 +166,7 @@ pub(crate) fn info_segments(app: &App, width: u16) -> Vec<InfoSegment> {
                     .map(|field| field.text.as_str())
                     .collect::<Vec<_>>()
                     .join(ROUTE_FIELD_JOIN),
-                ChromeInk::Identity,
+                ChromeInk::MetadataValue,
             ));
         }
     }

@@ -6,7 +6,6 @@
 //! one place prevents the default UI from drifting back into a header +
 //! sidebar + dashboard + footer composition with four owners for one fact.
 
-use crate::tui::mark::MarkSize;
 use std::borrow::Cow;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -1117,8 +1116,6 @@ pub struct LaunchEmptyState {
 /// Left indent for the whole block. Small: this is a top-left anchor, not a
 /// centred hero.
 const LAUNCH_BLOCK_INDENT: usize = 2;
-/// Column gap between the mark and the text beside it.
-const LAUNCH_MARK_GAP: usize = 3;
 /// The card's reading measure: a row is a title with its detail set against
 /// it, and without a ceiling the detail right-aligns against the terminal's
 /// far edge. Titles persist at 50 characters, the detail reads ~20.
@@ -1127,8 +1124,8 @@ const LAUNCH_CARD_MEASURE: usize = 72;
 const LAUNCH_ROW_GAP: usize = 3;
 /// Below this the row spends its whole lane on the title and sheds the detail.
 const LAUNCH_ROW_MIN_TITLE: usize = 24;
-/// The recent list and its overflow row sit under the `Recent` heading.
-const LAUNCH_LIST_INDENT: usize = 2;
+/// Labels align with their heading; the action cue has its own gutter.
+const LAUNCH_LIST_INDENT: usize = 0;
 /// Blank rows the card spends on rhythm when the pane is tall enough.
 const LAUNCH_SEPARATORS: usize = 3;
 /// Blank rows per separator when the pane can afford them.
@@ -1494,8 +1491,8 @@ impl LaunchFit {
 }
 
 /// Shed the card down to `height`, in a fixed order: rhythm, the migration
-/// notice, the MCP block's detail, the tail of the recent list — which turns
-/// the overflow row on, so nothing shed becomes unreachable — then chrome.
+/// notice, the MCP block's detail, identity/help chrome, then the tail of
+/// the recent list. The overflow row keeps any hidden sessions reachable.
 ///
 /// The MCP block gives up its rows before the recent list does (recent work
 /// is what the screen is *for*) but keeps its summary line until almost
@@ -1526,15 +1523,15 @@ fn launch_fit(height: usize, recent: usize, has_more: bool, notice: bool, mcp: u
                     fit.mcp -= 1;
                 }
             }
-            5 => {
+            5 => fit.help = false,
+            6 => fit.heading = false,
+            7 => fit.brand = false,
+            8 => {
                 while fit.shown > 0 && fit.rows() > height {
                     fit.shown -= 1;
                     fit.see_all = true;
                 }
             }
-            6 => fit.help = false,
-            7 => fit.heading = false,
-            8 => fit.brand = false,
             9 => fit.mcp = 0,
             10 => fit.see_all = false,
             _ => break,
@@ -1559,38 +1556,22 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut rows: Vec<(crate::tui::app::LaunchRowId, usize)> = Vec::new();
 
-    // The mark rides beside the text rather than above it, so the block reads
-    // as one top-left unit. It sheds a rung at a time, then out entirely,
-    // before any row of text is given up. ASCII-safe terminals get no mark.
-    let mark_rung = if crate::tui::color_compat::ascii_safe_enabled() {
-        None
-    } else if width >= 64 && area.height >= 10 {
-        Some(MarkSize::Large)
-    } else if width >= 44 && area.height >= 7 {
-        Some(MarkSize::Small)
-    } else if width >= 32 && area.height >= 5 {
-        Some(MarkSize::Tiny)
-    } else {
-        None
-    };
-    let (mark_rows, mark_width): (Vec<&'static str>, usize) = match mark_rung {
-        None => (Vec::new(), 0),
-        Some(rung) => (rung.rows().to_vec(), usize::from(rung.cells().0)),
-    };
+    // One reading lane: identity never steals width from session titles.
+    // Reserve a two-cell action gutter where the terminal can afford it.
     let block_indent = if width >= LAUNCH_INDENT_MIN_WIDTH {
         LAUNCH_BLOCK_INDENT
     } else {
         0
     };
-    let text_indent = block_indent
-        + if mark_width == 0 {
-            0
-        } else {
-            mark_width + LAUNCH_MARK_GAP
-        };
-    // The lane is what is left beside the mark; the measure is what the card
-    // uses of it, so a row's detail stays beside its title.
-    let text_width = width.saturating_sub(text_indent).min(LAUNCH_CARD_MEASURE);
+    let action_gutter = if width >= LAUNCH_INDENT_MIN_WIDTH {
+        2
+    } else {
+        0
+    };
+    let text_indent = block_indent + action_gutter;
+    let text_width = width
+        .saturating_sub(text_indent + block_indent)
+        .min(LAUNCH_CARD_MEASURE);
     if text_width == 0 {
         return LaunchEmptyState {
             lines: Vec::new(),
@@ -1667,9 +1648,9 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
 
     for row in &card_rows {
         let style = if row.prominent {
-            Style::default().fg(theme.accent_action).bold()
+            Style::default().fg(theme.accent_primary).bold()
         } else {
-            Style::default().fg(theme.text_soft)
+            Style::default().fg(theme.text_body)
         };
         // The recent list and its overflow hang under the heading.
         let indent = match row.id {
@@ -1713,7 +1694,7 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
             spans.push(Span::raw(" ".repeat(pad)));
             spans.push(Span::styled(
                 detail.to_string(),
-                Style::default().fg(theme.text_dim),
+                Style::default().fg(theme.text_muted),
             ));
         }
         rows.push((row.id.clone(), text.len()));
@@ -1782,33 +1763,35 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
         }
     }
 
-    // The whale still surfaces. It rises by ink rather than by position: at 0
-    // it is exactly the water behind it and eases to full over
-    // `MARK_SURFACE_MS`. Reduced motion gets the endpoint.
-    let rise = if app.motion_policy().allows_decorative() && !app.low_motion {
-        crate::tui::mark::surface_progress(app.ambient_clock_ms, MARK_SURFACE_MS)
-    } else {
-        1.0
-    };
-    let ink_color = crate::tui::mark::lerp_color(theme.surface_bg, theme.accent_primary, rise);
-
-    // Compose: the mark column on the left, the text column beside it. The
-    // block is as tall as whichever column is taller, and never taller than
-    // the pane it is drawn into.
-    let block_rows = mark_rows.len().max(text.len()).min(height);
-    let mut row_offsets: Vec<usize> = Vec::with_capacity(block_rows);
-    for row in 0..block_rows {
+    // Stable action gutter: every executable row advertises itself before
+    // hover. The band includes the gutter and only the bounded reading lane.
+    let block_rows = text.len().min(height);
+    let mut row_offsets = Vec::with_capacity(block_rows);
+    for (row, line) in text.iter().take(block_rows).enumerate() {
+        let action = rows.iter().position(|(_, y)| *y == row);
+        let selected = action.is_some_and(|i| app.launch.menu_selected == Some(i));
+        let hovered = action.is_some_and(|i| app.launch.hovered_row == Some(i));
+        let style = if selected {
+            crate::tui::menu_style::selected_row_style()
+        } else if hovered {
+            crate::tui::menu_style::hovered_row_style()
+        } else {
+            Style::default().fg(theme.accent_primary)
+        };
         let mut spans = vec![Span::raw(" ".repeat(block_indent))];
-        if mark_width > 0 {
-            let ink = mark_rows.get(row).copied().unwrap_or("");
-            let pad = mark_width.saturating_sub(ink.width());
-            spans.push(Span::styled(
-                ink.to_string(),
-                Style::default().fg(ink_color),
-            ));
-            spans.push(Span::raw(" ".repeat(pad + LAUNCH_MARK_GAP)));
+        if action_gutter > 0 {
+            let marker = if action.is_some() {
+                if crate::tui::color_compat::ascii_safe_enabled() {
+                    "> "
+                } else {
+                    "› "
+                }
+            } else {
+                "  "
+            };
+            spans.push(Span::styled(marker, style));
         }
-        if let Some(Some(line)) = text.get(row) {
+        if let Some(line) = line {
             spans.extend(line.spans.iter().cloned());
         }
         row_offsets.push(lines.len());
@@ -1825,7 +1808,12 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
     LaunchEmptyState {
         lines,
         rows,
-        text_column: Rect::new(text_indent as u16, 0, text_width as u16, area.height),
+        text_column: Rect::new(
+            block_indent as u16,
+            0,
+            (text_width + action_gutter) as u16,
+            area.height,
+        ),
     }
 }
 
@@ -1943,7 +1931,11 @@ mod launch_card_tests {
             .iter()
             .find(|(id, _)| matches!(id, LaunchRowId::Recent(_)))
             .expect("a recent row painted");
-        flatten(&state.lines[*row]).trim().to_string()
+        flatten(&state.lines[*row])
+            .trim()
+            .trim_start_matches("› ")
+            .trim_start_matches("> ")
+            .to_string()
     }
 
     fn is_grapheme_prefix(candidate: &str, full: &str) -> bool {
@@ -1968,7 +1960,7 @@ mod launch_card_tests {
 
         // Highlight the last row, then shrink the pane under it.
         app.launch.menu_selected = Some(tall.len() - 1);
-        refresh_launch_row_hitboxes(&mut app, Rect::new(0, 0, 120, 9));
+        refresh_launch_row_hitboxes(&mut app, Rect::new(0, 0, 120, 4));
         let short = launch_rows_for_app(&app);
         assert_eq!(
             short.iter().map(|row| row.id.clone()).collect::<Vec<_>>(),
@@ -2020,7 +2012,7 @@ mod launch_card_tests {
         // overflow row, a short one sheds and therefore must offer it.
         refresh_launch_row_hitboxes(&mut app, Rect::new(0, 0, 120, 30));
         assert!(!row_ids(&app).contains(&LaunchRowId::SeeAll));
-        refresh_launch_row_hitboxes(&mut app, Rect::new(0, 0, 120, 7));
+        refresh_launch_row_hitboxes(&mut app, Rect::new(0, 0, 120, 4));
         let ids = row_ids(&app);
         assert!(ids.contains(&LaunchRowId::SeeAll), "{ids:?}");
         assert!(
@@ -2507,30 +2499,11 @@ mod empty_state_caption_tests {
 }
 
 // ---------------------------------------------------------------------------
-// Tideline startup stage — the launch header (shell design §2.0 item 2,
-// founder direction 2026-09-02: "Claude Code's structure, not a centred hero
-// with quick actions"). Top-left of the stage:
-//
-//   <mark>  Codewhale v0.9.12
-//   <mark>  openrouter · deepseek-v4        (or `not connected`, gate ink)
-//   <mark>  owner/repo · branch             (or the workspace path)
-//
-//   ⚠ no model connected · run /provider    (only while it is true)
-//   ● 2 MCP servers connected · 1 needs sign-in · run /mcp   (only if true)
-//
-// then room, then the docked pre-session composer. Nothing else: no heading,
-// no quick actions, no option strip, no wave rules. The stage is a pure,
-// deterministic widget fed injected facts (`tideline_startup_from_app`
-// projects `App`), proven against golden buffers `startup_{w}x{h}`.
+// Launch motion scheduling: only a real dissolve or active water field
+// requests frames. The static workbench index does not animate its identity.
 // ---------------------------------------------------------------------------
 
-/// How long the hero mark takes to surface, then it holds still forever.
-const MARK_SURFACE_MS: u128 = 640;
-
-/// Whether the launch screen wants animation frames right now: the mark is
-/// still surfacing, the card is dissolving, or the underwater field is
-/// alive and not yet settled. Nothing here paints; the event loop reads it
-/// to schedule redraws, and each redraw advances the ambient clock.
+/// Whether the launch screen has a visible transition or ambient scene.
 #[must_use]
 pub fn launch_motion_active(app: &App, obscured: bool, ambient_settled: bool) -> bool {
     if !app.launch.visible
@@ -2542,9 +2515,8 @@ pub fn launch_motion_active(app: &App, obscured: bool, ambient_settled: bool) ->
         return false;
     }
     let now = app.ambient_clock_ms;
-    let surfacing = crate::tui::mark::surface_progress(now, MARK_SURFACE_MS) < 1.0;
     let dissolve = app.launch.card_dissolve_progress(now, true);
     let dissolving = dissolve > 0.0 && dissolve < 1.0;
     let water_alive = app.theme_id == codewhale_palette::ThemeId::Underwater && !ambient_settled;
-    surfacing || dissolving || water_alive
+    dissolving || water_alive
 }
