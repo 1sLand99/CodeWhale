@@ -34,14 +34,14 @@ describe("GPUI public-surface contract", () => {
   it("grounds the paper sheet in the GPUI light theme's warm paper and inks", () => {
     // Above the waterline the field is the GPUI light background — warm
     // paper — and the ink is its plum-charcoal foreground. The literals are
-    // the theme constants in codehwhale-gpui/src/workspace/mod.rs plus the
-    // derived tones in codehwhale-gpui/mockups/style.css.
+    // the Shoreline theme constants in crates/palette/src/tokens.rs, reached
+    // through the generated tokens in app/tokens.css.
     expect(cssHexIn(ROOT, "paper")).toBe("#f5f0e9");
-    expect(cssHexIn(ROOT, "paper-deep")).toBe("#eae3de");
+    expect(cssHexIn(ROOT, "paper-deep")).toBe("#ece5e0");
     expect(cssHexIn(ROOT, "paper-edge")).toBe("#d7ced5");
-    expect(cssHexIn(ROOT, "paper-card")).toBe("#fbf5ee");
+    expect(cssHexIn(ROOT, "paper-card")).toBe("#fffcf7");
     expect(cssHexIn(ROOT, "ink")).toBe("#302832");
-    expect(cssHexIn(ROOT, "ink-soft")).toBe("#564e58");
+    expect(cssHexIn(ROOT, "ink-soft")).toBe("#4a414c");
     expect(cssHexIn(ROOT, "ink-mute")).toBe("#6b606e");
     // Action on paper is the GPUI light primary; hover sinks to its hover.
     expect(cssHexIn(ROOT, "indigo")).toBe("#245bc7");
@@ -49,10 +49,10 @@ describe("GPUI public-surface contract", () => {
     expect(cssHexIn(ROOT, "mark-ink")).toBe("#302832");
     // The deep field is always the stage's darkest, and code plates keep the
     // stage deep on either side of the waterline.
-    expect(cssHexIn(ROOT, "ocean-deep")).toBe("#171618");
+    expect(cssHexIn(ROOT, "ocean-deep")).toBe("#1a181c");
     expect(cssHexIn(ROOT, "action-on-dark")).toBe("#90b9ff");
     expect(cssHexIn(ROOT, "ocean-current")).toBe("#90b9ff");
-    expect(cssHexIn(ROOT, "code-bg")).toBe("#171618");
+    expect(cssHexIn(ROOT, "code-bg")).toBe("#1a181c");
   });
 
   it("re-inks every dark subtree with the GPUI charcoal tokens through one rule", () => {
@@ -65,7 +65,7 @@ describe("GPUI public-surface contract", () => {
     expect(cssHexIn(BELOW_WATERLINE, "paper-edge")).toBe("#49424d");
     expect(cssHexIn(BELOW_WATERLINE, "ink")).toBe("#f2ece5");
     expect(cssHexIn(BELOW_WATERLINE, "ink-soft")).toBe("#b0a7b2");
-    expect(cssHexIn(BELOW_WATERLINE, "ink-mute")).toBe("#8d858f");
+    expect(cssHexIn(BELOW_WATERLINE, "ink-mute")).toBe("#7e7583");
     expect(cssHexIn(BELOW_WATERLINE, "indigo")).toBe("#90b9ff");
     expect(cssHexIn(BELOW_WATERLINE, "jade")).toBe("#9ec7b2");
     expect(cssHexIn(BELOW_WATERLINE, "signal-gold")).toBe("#d6c78f");

@@ -15,44 +15,44 @@
  *
  * The token NAMES keep their historical shape (`--paper`, `--ink`,
  * `--indigo`) so every component rule stays diffable; the VALUES resolve
- * through the `--gpui-*` block below, which mirrors the product client's
- * theme — codehwhale-gpui/src/workspace/mod.rs (ThemeColors) plus the
- * derived tones in codehwhale-gpui/mockups/style.css. They are stated here
- * rather than in ./tokens.css because that file is generated from
- * crates/palette/src/tokens.rs — the TUI palette — and the site now tracks
- * the GPUI app instead. `--whale-*`/`--light-*` remain available to anything
- * that genuinely wants the terminal palette.
+ * through the `--gpui-*` block below, which now references the generated
+ * Shoreline tokens in ./tokens.css (crates/palette/src/tokens.rs is the
+ * single source — the same constants the GPUI client and the TUI open on).
+ * Only values with no Shoreline slot stay literal: the hover tones, the
+ * accent washes, and the AA-adapted state hues. `--whale-*`/`--light-*`
+ * remain available to anything that genuinely wants the terminal palette.
  */
 :root {
-  /* --- The GPUI source palette (mirrors codehwhale-gpui, kept by hand) --- */
-  --gpui-paper: #f5f0e9;            /* light background — warm paper */
-  --gpui-paper-raised: #fbf5ee;     /* light card/popover (mockups) */
-  --gpui-paper-muted: #eae3de;      /* light muted surface */
-  --gpui-ink: #302832;              /* light foreground */
-  --gpui-ink-soft: #564e58;         /* derived midpoint of ink → muted */
-  --gpui-ink-mute: #6b606e;         /* light muted_foreground */
-  --gpui-edge: #d7ced5;             /* light border */
-  --gpui-primary: #245bc7;          /* light primary */
-  --gpui-primary-hover: #174aa9;    /* light button_primary_hover */
-  --gpui-accent: #dde6f5;           /* light accent */
-  --gpui-selection: #c8d9f9;        /* light selection */
+  /* --- The GPUI source palette (generated Shoreline slots) --- */
+  --gpui-paper: var(--shoreline-light-surface);      /* light background — warm paper */
+  --gpui-paper-raised: var(--shoreline-light-elevated); /* light card/popover */
+  --gpui-paper-muted: var(--shoreline-light-panel);  /* light muted surface */
+  --gpui-ink: var(--shoreline-light-text-body);      /* light foreground */
+  --gpui-ink-soft: var(--shoreline-light-text-soft);
+  --gpui-ink-mute: var(--shoreline-light-text-muted); /* light muted_foreground */
+  --gpui-edge: var(--shoreline-light-border);        /* light border */
+  --gpui-primary: var(--shoreline-light-action);     /* light primary */
+  --gpui-primary-hover: #174aa9;    /* light button_primary_hover — no Shoreline slot */
+  --gpui-accent: #dde6f5;           /* light accent — no Shoreline slot */
+  --gpui-selection: var(--shoreline-light-selection); /* light selection */
 
-  --gpui-stage: #211f23;            /* dark background — warm charcoal */
-  --gpui-stage-deep: #171618;       /* deepest dark (mockups) */
-  --gpui-stage-muted: #2b282e;      /* dark muted surface */
-  --gpui-stage-raised: #413b45;     /* raised dark plate (mockups) */
-  --gpui-stage-ink: #f2ece5;        /* dark foreground */
-  --gpui-stage-ink-soft: #b0a7b2;   /* dark muted_foreground */
-  --gpui-stage-ink-dim: #8d858f;    /* derived, dimmer than muted */
-  --gpui-stage-edge: #49424d;       /* dark border */
-  --gpui-primary-dark: #90b9ff;     /* dark primary */
-  --gpui-primary-hover-dark: #b0ccff; /* dark button_primary_hover */
-  --gpui-on-primary: #15243e;       /* dark primary_foreground */
-  --gpui-accent-dark: #353a4a;      /* dark accent */
-  --gpui-selection-dark: #354967;   /* dark selection */
+  --gpui-stage: var(--shoreline-surface);           /* dark background — warm charcoal */
+  --gpui-stage-deep: var(--shoreline-chrome);       /* deepest dark */
+  --gpui-stage-muted: var(--shoreline-panel);       /* dark muted surface */
+  --gpui-stage-raised: var(--shoreline-elevated);   /* raised dark plate */
+  --gpui-stage-ink: var(--shoreline-text-body);     /* dark foreground */
+  --gpui-stage-ink-soft: var(--shoreline-text-muted); /* dark muted_foreground */
+  --gpui-stage-ink-dim: var(--shoreline-text-dim);
+  --gpui-stage-edge: var(--shoreline-border);       /* dark border */
+  --gpui-primary-dark: var(--shoreline-action);     /* dark primary */
+  --gpui-primary-hover-dark: #b0ccff; /* dark button_primary_hover — no Shoreline slot */
+  --gpui-on-primary: #15243e;       /* dark primary_foreground — no Shoreline slot */
+  --gpui-accent-dark: #353a4a;      /* dark accent — no Shoreline slot */
+  --gpui-selection-dark: var(--shoreline-selection); /* dark selection */
 
   /* Warm-muted state hues from the GPUI mockups, darkened or lifted per
-     side of the waterline so text uses of them still clear AA. */
+     side of the waterline so text uses of them still clear AA. No Shoreline
+     slots: these are site-specific adaptations. */
   --gpui-tan: #b1a17a;              /* human mark */
   --gpui-moss: #739686;             /* outcome */
   --gpui-rust: #aa6f6c;             /* attention */
@@ -60,17 +60,17 @@
   /* RGB channel triples backing the Tailwind surface/ink tokens (see
      tailwind.config.ts). `.ocean-column` and the opt-in docs dark sheet
      override them for their dark subtree. */
-  --c-paper: 245 240 233;
-  --c-paper-deep: 234 227 222;
-  --c-paper-edge: 215 206 213;
-  --c-ink: 48 40 50;
-  --c-ink-soft: 86 78 88;
-  --c-ink-mute: 107 96 110;
-  --c-indigo: 36 91 199;
-  --c-indigo-deep: 23 74 169;
-  --c-stage-soft: 176 167 178;
-  --c-stage-deep: 23 22 24;
-  --c-primary-dark: 144 185 255;
+  --c-paper: var(--shoreline-light-surface-rgb);
+  --c-paper-deep: var(--shoreline-light-panel-rgb);
+  --c-paper-edge: var(--shoreline-light-border-rgb);
+  --c-ink: var(--shoreline-light-text-body-rgb);
+  --c-ink-soft: var(--shoreline-light-text-soft-rgb);
+  --c-ink-mute: var(--shoreline-light-text-muted-rgb);
+  --c-indigo: var(--shoreline-light-action-rgb);
+  --c-indigo-deep: 23 74 169;       /* light primary hover — no Shoreline slot */
+  --c-stage-soft: var(--shoreline-text-muted-rgb);
+  --c-stage-deep: var(--shoreline-chrome-rgb);
+  --c-primary-dark: var(--shoreline-action-rgb);
 
   /* The sheet. */
   --paper: var(--gpui-paper);
@@ -151,14 +151,14 @@
 .ocean-column,
 .site-footer,
 html[data-theme="dark"] .docs-portal {
-  --c-paper: 33 31 35;
-  --c-paper-deep: 43 40 46;
-  --c-paper-edge: 73 66 77;
-  --c-ink: 242 236 229;
-  --c-ink-soft: 176 167 178;
-  --c-ink-mute: 141 133 143;
-  --c-indigo: 144 185 255;
-  --c-indigo-deep: 176 204 255; /* lifted primary — hover on dark */
+  --c-paper: var(--shoreline-surface-rgb);
+  --c-paper-deep: var(--shoreline-panel-rgb);
+  --c-paper-edge: var(--shoreline-border-rgb);
+  --c-ink: var(--shoreline-text-body-rgb);
+  --c-ink-soft: var(--shoreline-text-muted-rgb);
+  --c-ink-mute: var(--shoreline-text-dim-rgb);
+  --c-indigo: var(--shoreline-action-rgb);
+  --c-indigo-deep: 176 204 255; /* lifted primary — hover on dark, no Shoreline slot */
   --paper: var(--gpui-stage);
   --paper-deep: var(--gpui-stage-muted);
   --paper-edge: var(--gpui-stage-edge);
