@@ -134,7 +134,7 @@ pub(crate) fn render_underwater_surface(
     title: impl Into<String>,
 ) -> Rect {
     let margin_x = u16::from(area.width >= 44);
-    let margin_y = u16::from(area.height >= 14);
+    let margin_y = u16::from(area.height >= 24);
     let surface = Rect {
         x: area.x.saturating_add(margin_x),
         y: area.y.saturating_add(margin_y),
@@ -160,7 +160,7 @@ pub(crate) fn render_underwater_surface(
         .borders(Borders::TOP | Borders::BOTTOM)
         .border_style(Style::default().fg(palette::BORDER_COLOR))
         .style(Style::default().bg(palette::WHALE_BG))
-        .padding(Padding::new(1, 1, 1, 1));
+        .padding(Padding::new(1, 1, u16::from(area.height >= 24), 0));
     let inner = block.inner(surface);
     block.render(surface, buf);
     inner
