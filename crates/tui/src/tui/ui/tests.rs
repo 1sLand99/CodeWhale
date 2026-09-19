@@ -25089,6 +25089,131 @@ fn composer_arrow_down_at_last_line_preserves_multiline_draft() {
     assert!(app.history_index.is_none());
 }
 
+// A long single-line prompt spans several visual rows; Up/Down must step
+// between them instead of recalling history (which reads as deletion). Inner
+// composer width 22 -> text width 20 after the prompt gutter, so a 45-char
+// unbroken line wraps to visual rows [0..20), [20..40), [40..45).
+#[test]
+fn composer_arrow_up_in_wrapped_line_moves_cursor_not_history() {
+    let mut app = create_test_app();
+    app.composer_arrows_scroll = false;
+    app.input = "a".repeat(45);
+    app.cursor_position = 45;
+    app.input_history.push("previous prompt".to_string());
+    app.viewport.last_composer_content = Some(Rect::new(0, 0, 22, 5));
+
+    assert!(handle_composer_history_arrow(
+        &mut app,
+        KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+        false,
+        false,
+    ));
+
+    assert_eq!(app.input, "a".repeat(45));
+    assert!(app.history_index.is_none());
+    assert_eq!(app.cursor_position, 25);
+}
+
+#[test]
+fn composer_arrow_down_in_wrapped_line_moves_cursor_not_history() {
+    let mut app = create_test_app();
+    app.composer_arrows_scroll = false;
+    app.input = "a".repeat(45);
+    app.cursor_position = 25;
+    app.input_history.push("previous prompt".to_string());
+    app.viewport.last_composer_content = Some(Rect::new(0, 0, 22, 5));
+
+    assert!(handle_composer_history_arrow(
+        &mut app,
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        false,
+        false,
+    ));
+
+    assert_eq!(app.input, "a".repeat(45));
+    assert!(app.history_index.is_none());
+    assert_eq!(app.cursor_position, 45);
+}
+
+#[test]
+fn composer_arrow_up_on_first_visual_row_still_recalls_history() {
+    let mut app = create_test_app();
+    app.composer_arrows_scroll = false;
+    app.input = "a".repeat(45);
+    app.cursor_position = 5;
+    app.input_history.push("previous prompt".to_string());
+    app.viewport.last_composer_content = Some(Rect::new(0, 0, 22, 5));
+
+    assert!(handle_composer_history_arrow(
+        &mut app,
+        KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+        false,
+        false,
+    ));
+
+    assert_eq!(app.input, "previous prompt");
+}
+
+#[test]
+fn composer_arrow_down_on_last_visual_row_preserves_wrapped_draft() {
+    let mut app = create_test_app();
+    app.composer_arrows_scroll = false;
+    app.input = "a".repeat(45);
+    app.cursor_position = 45;
+    app.input_history.push("previous prompt".to_string());
+    app.viewport.last_composer_content = Some(Rect::new(0, 0, 22, 5));
+
+    assert!(handle_composer_history_arrow(
+        &mut app,
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        false,
+        false,
+    ));
+
+    assert_eq!(app.input, "a".repeat(45));
+    assert_eq!(app.cursor_position, 45);
+    assert!(app.history_index.is_none());
+}
+
+#[test]
+fn composer_arrow_up_wrapped_line_without_geometry_recalls_history() {
+    let mut app = create_test_app();
+    app.composer_arrows_scroll = false;
+    app.input = "a".repeat(45);
+    app.cursor_position = 45;
+    app.input_history.push("previous prompt".to_string());
+    assert!(app.viewport.last_composer_content.is_none());
+
+    assert!(handle_composer_history_arrow(
+        &mut app,
+        KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+        false,
+        false,
+    ));
+
+    assert_eq!(app.input, "previous prompt");
+}
+
+#[test]
+fn composer_arrows_scroll_wrapped_line_navigates_not_scrolls() {
+    let mut app = create_test_app();
+    app.composer_arrows_scroll = true;
+    app.input = "a".repeat(45);
+    app.cursor_position = 45;
+    app.viewport.last_composer_content = Some(Rect::new(0, 0, 22, 5));
+
+    assert!(handle_composer_history_arrow(
+        &mut app,
+        KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+        false,
+        false,
+    ));
+
+    assert_eq!(app.input, "a".repeat(45));
+    assert_eq!(app.cursor_position, 25);
+    assert_eq!(app.viewport.pending_scroll_delta, 0);
+}
+
 // #1443: when mouse capture is off (e.g. Windows CMD), arrow-scroll
 // must default to true so mouse-wheel events (sent as arrow keys by
 // the terminal) scroll the transcript rather than cycling history.
