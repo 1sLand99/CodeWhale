@@ -941,6 +941,7 @@ endpoint when the endpoint supports model listing.
 | `google` | `gemini-3.1-pro-preview`, `gemini-3-pro-preview`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-2.5-pro`, `gemini-2.5-flash` | yes | yes except `gemini-3.5-flash-lite` |
 | `mistral` | `mistral-code-latest`, `mistral-medium-latest`, `mistral-small-latest`, `mistral-large-latest` | yes | yes for Medium and Small (`reasoning_effort` `none` or `high` on exact first-party routes); deprecated native Magistral remains an always-on explicit compatibility ID; no for Code and Large |
 | `modelstudio-token-plan`, `modelstudio-coding-plan` | `qwen3.8-max`, `qwen3.8-max-preview`, `qwen3.7-plus`, `qwen3.7-max`, `qwen3.6-flash`, `deepseek-v4-pro`, `deepseek-v4-flash-0731`, `glm-5.2` | yes | yes |
+| `csdn` | `glm_for_coding`; other marketplace model IDs pass through | yes | yes |
 
 AtlasCloud keeps the same default model as the config layer and adds
 provider-scoped aliases for the Pro and Flash rows. Other AtlasCloud model IDs
