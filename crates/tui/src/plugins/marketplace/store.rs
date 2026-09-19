@@ -223,6 +223,18 @@ impl MarketplaceStore {
 /// `MarketplaceSource::identity`). Falls back to the stored string when the
 /// path is not readable as a file — a GitHub URL, or a document that has
 /// since moved away.
+///
+/// The `std::fs` site below carries a budget entry in
+/// `scripts/check-blocking-calls-budget.json`: the ratchet counts a
+/// synchronous helper's site regardless of its callers, and this helper
+/// cannot move to the blocking pool without restructuring the store's
+/// synchronous `load`/`add`/`remove` API (#6149).
+///
+/// Known limitation, recorded because the ratchet cannot see it: the scanner
+/// is lexical and per-file, so it does not notice that
+/// `runtime_api::plugins` calls [`MarketplaceStore::load`]/`add`/`remove`
+/// inline from async route handlers. The budget entry is therefore debt
+/// acknowledged, not debt paid.
 fn canonical_source_path(path: &str) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path))
 }
