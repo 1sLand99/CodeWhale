@@ -433,6 +433,12 @@ fn render_info_row(
         app.viewport.last_infoline_hitboxes.clear();
         return InfoLineInteractionHitboxes::default();
     }
+    // The two bottom rows share the composer's one-cell inset. Paint the
+    // full band before insetting so hover/click geometry uses the same area.
+    Block::default()
+        .style(Style::default().bg(app.ui_theme.header_bg))
+        .render(area, f.buffer_mut());
+    let area = area.inner(ratatui::layout::Margin::new(u16::from(area.width >= 8), 0));
     let mut segments = info_segments(app, area.width);
     if identity_only {
         segments.retain(|segment| {

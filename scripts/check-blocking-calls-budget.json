@@ -482,7 +482,7 @@
     "std_fs": 1
   },
   "crates/tui/tests/cucumber/launch_card_pty.rs": {
-    "std_fs": 8
+    "std_fs": 9
   },
   "crates/tui/tests/cucumber/plugin_e2e_acceptance.rs": {
     "std_fs": 15,

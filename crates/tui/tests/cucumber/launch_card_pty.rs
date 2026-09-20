@@ -223,7 +223,7 @@ fn launch_resume_buttons_support_mouse_cancel_and_keyboard_choice() {
 
 /// Optional review evidence from the real PTY, keeping cell colors rather
 /// than relying on symbol-only goldens. The viewer supplies terminal fonts.
-fn capture(tui: &mut Harness, name: &str) {
+pub(super) fn capture(tui: &mut Harness, name: &str) {
     let Some(directory) = std::env::var_os("QA_LAUNCH_CAPTURE_DIR") else {
         return;
     };
@@ -373,4 +373,33 @@ fn workbench_whale_reveal_visual_evidence() {
     }
     eprintln!("Captured launch reveal over {:?}", start.elapsed());
     tui.shutdown();
+}
+
+/// Exercise the visible catalog controls and provider search through the
+/// input decoder. This only browses fixture state; it never applies a route.
+#[test]
+fn settings_catalog_controls_and_provider_search_work_with_mouse_and_keyboard() {
+    for (rows, cols) in SIZES {
+        let (_workspace, mut tui) = start(rows, cols, false);
+        tui.paste("/provider").unwrap();
+        tui.send(keys::key::enter()).unwrap();
+        wait(&mut tui, "Provider");
+        click_text(&mut tui, "browse all");
+        wait(&mut tui, "configured");
+        tui.send("/Anthropic").unwrap();
+        wait(&mut tui, "search: Anthropic");
+        capture(&mut tui, "providers-search");
+        tui.send(keys::key::esc()).unwrap();
+        wait(&mut tui, "Provider");
+        capture(&mut tui, "providers-catalog");
+        tui.send(keys::key::esc()).unwrap();
+        tui.paste("/model").unwrap();
+        tui.send(keys::key::enter()).unwrap();
+        wait(&mut tui, "route ·");
+        click_text(&mut tui, "browse catalog");
+        wait(&mut tui, "catalog");
+        capture(&mut tui, "models-catalog");
+        tui.send(keys::key::esc()).unwrap();
+        tui.shutdown();
+    }
 }

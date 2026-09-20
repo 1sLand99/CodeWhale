@@ -8,10 +8,10 @@
 //! moved to the launch header and the git bottom view, and the DeepSeek
 //! harness session metrics came back on screen in their place.
 //!
-//! The row, left to right, joined by ` · `:
+//! The row, left to right, separated by three spaces:
 //!
 //! ```text
-//! deepseek-v4 · ctx 22% · $0.14 · ttft 400ms · 38 tok/s · ↓ 1.2K      Ctrl+/ help
+//! deepseek-v4   ctx 22%   $0.14   ttft 400ms   38 tok/s   ↓ 1.2K      Ctrl+/ help
 //! ```
 //!
 //! The model is the one route fact the user checks before a turn, and it
@@ -62,7 +62,7 @@ use crate::tui::glyphs;
 use codewhale_palette::{ChromeInk, UiTheme};
 
 /// Separator between items — the row's one piece of punctuation.
-const ITEM_JOIN: &str = " · ";
+const ITEM_JOIN: &str = "   ";
 /// Minimum gap between the last left item and the pinned help hint.
 const HELP_GAP: usize = 2;
 

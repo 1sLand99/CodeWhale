@@ -157,8 +157,8 @@ fn composed_frame_paints_each_fact_in_exactly_one_row() {
         // The context reading paints exactly once, at every fullness
         // (#5950 — it used to go silent below 50%).
         let mut facts = vec![
-            ("mode chip", format!("· {mode} (")),
-            ("permission chip", format!("▶▶ {permission} (")),
+            ("mode chip", format!("   {mode} (")),
+            ("permission chip", format!(" {permission} (")),
             ("model", model),
             ("cost", super::session_cost_label(&app)),
             ("agent count", "2 agents".to_string()),
@@ -187,7 +187,7 @@ fn composed_frame_paints_each_fact_in_exactly_one_row() {
         // roster — never the other way round.
         let posture = rows
             .iter()
-            .position(|row| row.contains("▶▶"))
+            .position(|row| row.contains("(Shift+Tab)"))
             .expect("posture bar");
         let metrics = rows
             .iter()
@@ -278,7 +278,7 @@ fn idle_frame_keeps_two_chrome_rows_and_last_turn_metrics() {
     app.subagent_cache.clear();
     let rows = draw(&mut app, 100, 32);
     let composer = app.viewport.last_composer_area.unwrap().bottom() as usize;
-    assert!(rows[composer].starts_with("▶▶"), "{}", rows[composer]);
+    assert!(rows[composer].contains("(Shift+Tab)"), "{}", rows[composer]);
     // The idle fixture sits at 0% context and says so: the reading is on
     // the row at every fullness (#5950), not only once it is a problem.
     assert!(
@@ -367,7 +367,7 @@ fn row_presets_reclaim_rows_and_quiet_them_in_the_composed_frame() {
     // halves only both fit beside the pinned unenforced-scope permission
     // chip from that width up, and this test asserts the full row's clocks.
     let (width, height) = (160u16, 32u16);
-    let posture_row = |rows: &[String]| rows.iter().position(|row| row.contains("▶▶"));
+    let posture_row = |rows: &[String]| rows.iter().position(|row| row.contains("(Shift+Tab)"));
     let metrics_row = |rows: &[String]| rows.iter().position(|row| row.contains("ctx "));
 
     let mut app = working_app();

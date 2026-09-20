@@ -254,6 +254,8 @@ pub struct ModelPickerView {
     sort: Option<ModelSort>,
     column_hitboxes: RefCell<Vec<(Rect, ModelSortColumn)>>,
     pane_hitboxes: RefCell<Vec<(Rect, Pane)>>,
+    catalog_action_hitbox: RefCell<Option<Rect>>,
+    catalog_action_hovered: bool,
     purpose: ModelPickerPurpose,
 }
 
@@ -554,6 +556,8 @@ impl ModelPickerView {
             sort: None,
             column_hitboxes: RefCell::new(Vec::new()),
             pane_hitboxes: RefCell::new(Vec::new()),
+            catalog_action_hitbox: RefCell::new(None),
+            catalog_action_hovered: false,
             purpose: ModelPickerPurpose::Session,
         };
         view.restore_memory(app.model_picker_memory.as_ref());
@@ -3802,6 +3806,19 @@ impl ModalView for ModelPickerView {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) -> ViewAction {
+        let over_catalog = self
+            .catalog_action_hitbox
+            .borrow()
+            .is_some_and(|rect| rect.contains((mouse.column, mouse.row).into()));
+        if mouse.kind == MouseEventKind::Moved {
+            self.catalog_action_hovered = over_catalog;
+        }
+        if over_catalog && mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            self.toggle_view();
+            self.catalog_action_hovered = false;
+            self.last_mouse_selected = None;
+            return ViewAction::None;
+        }
         match mouse.kind {
             MouseEventKind::Moved => {
                 self.hovered_row =
@@ -3901,19 +3918,46 @@ impl ModelPickerView {
         self.row_hitboxes.borrow_mut().clear();
         self.column_hitboxes.borrow_mut().clear();
         self.pane_hitboxes.borrow_mut().clear();
-        let inner = render_underwater_surface(
-            area,
-            buf,
-            tr(self.locale, MessageId::RouteSurfaceTitle)
-                .replace("{view}", self.view.title_label()),
-        );
-
-        // Say what the action does in model language. Provider changes are an
-        // implementation detail of applying a cross-provider model row.
+        *self.catalog_action_hitbox.borrow_mut() = None;
         let view_action: std::borrow::Cow<'static, str> = match self.view {
             ModelListView::Configured => tr(self.locale, MessageId::RouteBrowseCatalog),
             other => other.next().title_label().into(),
         };
+        let title = tr(self.locale, MessageId::RouteSurfaceTitle)
+            .replace("{view}", self.view.title_label());
+        // The catalog is a visible action on the existing title rail, with
+        // no extra row taken from short terminals. Keep the shortcut too.
+        let action_label = crate::tui::ui_text::semantic_truncate(
+            &view_action,
+            usize::from(area.width.saturating_sub(20)),
+        );
+        let action_width = unicode_width::UnicodeWidthStr::width(action_label.as_str()) as u16;
+        let show_action = area.width >= 28 && area.height > 0;
+        let title = if show_action {
+            crate::tui::ui_text::semantic_truncate(
+                &title,
+                usize::from(area.width.saturating_sub(action_width + 8)),
+            )
+        } else {
+            title
+        };
+        let inner = render_underwater_surface(area, buf, title);
+        if show_action {
+            let action = Rect::new(
+                inner.right().saturating_sub(action_width),
+                area.y + u16::from(area.height >= 24),
+                action_width,
+                1,
+            );
+            *self.catalog_action_hitbox.borrow_mut() = Some(action);
+            Paragraph::new(action_label)
+                .style(if self.catalog_action_hovered {
+                    menu_style::hovered_row_style()
+                } else {
+                    Style::default().fg(palette::WHALE_ACTION).underlined()
+                })
+                .render(action, buf);
+        }
         let mut footer_hints = vec![
             ActionHint::new("↑↓", tr(self.locale, MessageId::PickerActionMove)),
             ActionHint::new("Tab", tr(self.locale, MessageId::PickerActionSwitch)),
@@ -4448,6 +4492,8 @@ mod tests {
             sort: None,
             column_hitboxes: RefCell::new(Vec::new()),
             pane_hitboxes: RefCell::new(Vec::new()),
+            catalog_action_hitbox: RefCell::new(None),
+            catalog_action_hovered: false,
             purpose: ModelPickerPurpose::Session,
         }
     }
@@ -4455,6 +4501,40 @@ mod tests {
     /// Opened for a Fleet row, Enter hands the editor the absolute route
     /// instead of switching the session; the startup-default chord is the
     /// same pick.
+    #[test]
+    fn catalog_header_click_matches_keyboard_at_compact_and_wide_sizes() {
+        for (width, height) in [(40, 12), (80, 24), (140, 40)] {
+            let mut mouse_picker = test_picker();
+            let mut key_picker = test_picker();
+            let area = Rect::new(0, 0, width, height);
+            mouse_picker.render(area, &mut Buffer::empty(area));
+            let hit = mouse_picker
+                .catalog_action_hitbox
+                .borrow()
+                .expect("catalog action");
+            assert!(area.contains((hit.x, hit.y).into()));
+            assert!(hit.right() <= area.right());
+            assert!(matches!(
+                mouse_picker.handle_mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: hit.x,
+                    row: hit.y,
+                    modifiers: KeyModifiers::NONE,
+                }),
+                ViewAction::None
+            ));
+            key_picker.handle_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT));
+            assert_eq!(mouse_picker.view, key_picker.view);
+            assert_eq!(
+                mouse_picker.selected_model_idx,
+                key_picker.selected_model_idx
+            );
+            let empty = Rect::new(0, 0, 0, 0);
+            mouse_picker.render(empty, &mut Buffer::empty(empty));
+            assert!(mouse_picker.catalog_action_hitbox.borrow().is_none());
+        }
+    }
+
     #[test]
     fn fleet_purpose_enter_hands_the_absolute_route_to_the_editor() {
         let mut picker = test_picker();

@@ -174,7 +174,7 @@ fn infoline_is_model_context_and_metrics_only() {
     }
     let work = render_row(&UI_THEME, 160, &work_segments());
     assert!(
-        work.starts_with("deepseek-v4 · ctx 61% · $0.42 · ttft 400ms · 38 tok/s · ↓ 1.2K  "),
+        work.starts_with("deepseek-v4   ctx 61%   $0.42   ttft 400ms   38 tok/s   ↓ 1.2K  "),
         "{work:?}"
     );
     assert!(work.trim_end().ends_with("/help"), "{work:?}");
@@ -246,7 +246,7 @@ fn infoline_compact_keeps_performance_readings_without_extra_rows() {
     let (wide, ids) = compact_row(160);
     assert_eq!(
         wide.trim_end(),
-        "deepseek-v4 · ctx 61% · $0.42 · ttft 400ms · 38 tok/s",
+        "deepseek-v4   ctx 61%   $0.42   ttft 400ms   38 tok/s",
         "compact keeps performance, route, context and price: {wide:?}"
     );
     assert_eq!(
