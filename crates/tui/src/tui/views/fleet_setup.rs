@@ -2181,7 +2181,13 @@ impl ModalView for FleetSetupView {
 
         // Header (title + subtitle + "Saves to" chip) above the step body.
         // In the Compact tier the subtitle is dropped so the chip survives.
-        let header_rows = if content.height < 12 { 2 } else { 3 };
+        let header_rows = if content.height < 4 {
+            1
+        } else if content.height < 12 {
+            2
+        } else {
+            3
+        };
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(header_rows), Constraint::Min(1)])
@@ -2765,10 +2771,10 @@ fn render_choice_step(
             .split(area);
         (cols[0], cols[1])
     } else {
-        let list_height = (choices.len() as u16).min(area.height.saturating_sub(1).max(1));
+        let list_height = (choices.len() as u16).min(area.height);
         let rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(list_height), Constraint::Min(1)])
+            .constraints([Constraint::Length(list_height), Constraint::Min(0)])
             .split(area);
         (rows[0], rows[1])
     };
@@ -2861,10 +2867,10 @@ fn register_choice_hitboxes(
             ])
             .split(area)[0]
     } else {
-        let list_height = (choice_count as u16).min(area.height.saturating_sub(1).max(1));
+        let list_height = (choice_count as u16).min(area.height);
         Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(list_height), Constraint::Min(1)])
+            .constraints([Constraint::Length(list_height), Constraint::Min(0)])
             .split(area)[0]
     };
     let visible = choice_count.min(usize::from(list_area.height));

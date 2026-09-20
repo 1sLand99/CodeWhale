@@ -402,6 +402,8 @@ fn settings_catalog_controls_and_provider_search_work_with_mouse_and_keyboard() 
         wait(&mut tui, "Provider");
         capture(&mut tui, "providers-catalog");
         tui.send(keys::key::esc()).unwrap();
+        // Let the standalone Escape decode before starting a bracketed paste.
+        tui.wait_for_idle(Duration::from_millis(200), WAIT).unwrap();
         tui.paste("/model").unwrap();
         tui.send(keys::key::enter()).unwrap();
         wait(&mut tui, "route ·");
@@ -440,6 +442,7 @@ fn fleet_roles_open_the_shared_model_picker_and_escape_returns_to_the_same_role(
         wait(&mut tui, "Model · manager");
         // Following Coordinator is a selectable local choice even without credentials.
         tui.send(keys::key::enter()).unwrap();
+        wait(&mut tui, "Personal");
         capture(&mut tui, "fleet-role-destination");
         tui.shutdown();
     }
