@@ -329,133 +329,158 @@ impl Harness {
         let transcript = self.pty.transcript();
         let pid = self.pty.pid();
         let exit = self.pty.wait_until(Instant::now());
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let destination = self
-            .diagnostic_root
-            .join(format!("{}-{nonce}", pid.unwrap_or_default()));
-        let mut report = format!(
-            "program={:?} host={}/{} pid={pid:?} observed_exit={exit:?} wait_budget={budget:?} parent_CI={} {}\nPTY bytes={}\n",
-            self.program,
-            std::env::consts::OS,
-            std::env::consts::ARCH,
-            std::env::var_os("CI").is_some(),
-            self.terminal_environment,
-            transcript.len(),
-        );
-        // Hash the running Linux executable when available; the launch path
-        // may have been replaced by a concurrent build. Other hosts retain the
-        // launch-path digest, explicitly labelled as such.
-        let executable = pid
-            .map(|pid| PathBuf::from(format!("/proc/{pid}/exe")))
-            .filter(|path| path.exists())
-            .unwrap_or_else(|| self.program.clone());
-        let digest = (|| -> std::io::Result<String> {
-            use sha2::{Digest, Sha256};
-            let mut file = std::fs::File::open(&executable)?;
-            let mut hasher = Sha256::new();
-            use std::io::Read;
-            let mut buffer = [0_u8; 64 * 1024];
-            loop {
-                let count = file.read(&mut buffer)?;
-                if count == 0 {
-                    break;
-                }
-                hasher.update(&buffer[..count]);
-            }
-            Ok(hasher
-                .finalize()
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect())
-        })();
-        report.push_str(&format!("executable={executable:?} sha256={digest:?}\n"));
-        // /proc is local, read-only and cheap. No debugger dependency or
-        // process environment is needed to locate a blocked Linux thread.
-        if let Some(pid) = pid {
-            let process = PathBuf::from(format!("/proc/{pid}"));
-            for name in ["status", "wchan"] {
-                if let Ok(text) = std::fs::read_to_string(process.join(name)) {
-                    report.push_str(&format!("process {name}:\n{text}\n"));
-                }
-            }
-            if let Ok(entries) = std::fs::read_dir(process.join("task")) {
-                for entry in entries.flatten().take(128) {
-                    let thread = entry.path();
-                    for name in ["comm", "wchan", "stack"] {
-                        let text = std::fs::read_to_string(thread.join(name))
-                            .unwrap_or_else(|error| format!("unavailable: {error}"));
-                        report
-                            .push_str(&format!("thread {:?} {name}: {text}\n", entry.file_name()));
+        let program = self.program.clone();
+        let diagnostic_root = self.diagnostic_root.clone();
+        let sealed_home = self.sealed_home.clone();
+        let terminal_environment = self.terminal_environment.clone();
+        let frame_dump = self.frame.debug_dump();
+        let modes_dump = self.terminal_modes().debug_dump();
+        // Failure evidence can hash a large binary and read redirected logs.
+        // Keep that I/O on a dedicated worker, then join before fixture teardown
+        // can remove the sealed HOME. Readiness itself has already timed out.
+        let worker = std::thread::Builder::new()
+            .name("qa-pty-diagnostics".into())
+            .spawn(move || {
+                let nonce = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos();
+                let destination = diagnostic_root
+                    .join(format!("{}-{nonce}", pid.unwrap_or_default()));
+                let mut report = format!(
+                    "program={:?} host={}/{} pid={pid:?} observed_exit={exit:?} wait_budget={budget:?} parent_CI={} {}\nPTY bytes={}\n",
+                    program,
+                    std::env::consts::OS,
+                    std::env::consts::ARCH,
+                    std::env::var_os("CI").is_some(),
+                    terminal_environment,
+                    transcript.len(),
+                );
+                report.push_str(&format!("diagnostic_worker={:?}\n", std::thread::current().name()));
+                // Hash the running Linux executable when available; the launch path
+                // may have been replaced by a concurrent build. Other hosts retain the
+                // launch-path digest, explicitly labelled as such.
+                let executable = pid
+                    .map(|pid| PathBuf::from(format!("/proc/{pid}/exe")))
+                    .filter(|path| path.exists())
+                    .unwrap_or_else(|| program.clone());
+                let digest = (|| -> std::io::Result<String> {
+                    use sha2::{Digest, Sha256};
+                    let mut file = std::fs::File::open(&executable)?;
+                    let mut hasher = Sha256::new();
+                    use std::io::Read;
+                    let mut buffer = [0_u8; 64 * 1024];
+                    loop {
+                        let count = file.read(&mut buffer)?;
+                        if count == 0 {
+                            break;
+                        }
+                        hasher.update(&buffer[..count]);
                     }
-                }
-            }
-        }
-        let saved = (|| -> std::io::Result<()> {
-            let mut directories = std::fs::DirBuilder::new();
-            directories.recursive(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::DirBuilderExt;
-                directories.mode(0o700);
-            }
-            directories.create(&destination)?;
-            let write_private = |path: &Path, contents: &[u8]| -> std::io::Result<()> {
-                use std::io::Write;
-                let mut options = std::fs::OpenOptions::new();
-                options.write(true).create_new(true);
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::OpenOptionsExt;
-                    options.mode(0o600);
-                }
-                options.open(path)?.write_all(contents)
-            };
-            write_private(&destination.join("pty.raw"), &transcript)?;
-            write_private(
-                &destination.join("frame.txt"),
-                self.frame.debug_dump().as_bytes(),
-            )?;
-            // Copy only runtime logs under the explicitly sealed fixture;
-            // never walk a developer's HOME or copy configuration/credentials.
-            if let Some(home) = &self.sealed_home {
-                for relative in [".codewhale/logs", ".deepseek/logs"] {
-                    let directory = home.join(relative);
-                    if let Ok(entries) = std::fs::read_dir(&directory) {
-                        for entry in entries.flatten() {
-                            let name = entry.file_name();
-                            let name_text = name.to_string_lossy();
-                            if !name_text.starts_with("tui-")
-                                || !name_text.ends_with(".log")
-                                || !entry.file_type()?.is_file()
-                            {
-                                continue;
+                    Ok(hasher
+                        .finalize()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect())
+                })();
+                report.push_str(&format!("executable={executable:?} sha256={digest:?}\n"));
+                // /proc is local, read-only and cheap. No debugger dependency or
+                // process environment is needed to locate a blocked Linux thread.
+                if let Some(pid) = pid {
+                    let process = PathBuf::from(format!("/proc/{pid}"));
+                    for name in ["status", "wchan"] {
+                        if let Ok(text) = std::fs::read_to_string(process.join(name)) {
+                            report.push_str(&format!("process {name}:\n{text}\n"));
+                        }
+                    }
+                    if let Ok(entries) = std::fs::read_dir(process.join("task")) {
+                        for entry in entries.flatten().take(128) {
+                            let thread = entry.path();
+                            for name in ["comm", "wchan", "stack"] {
+                                let text = std::fs::read_to_string(thread.join(name))
+                                    .unwrap_or_else(|error| format!("unavailable: {error}"));
+                                report
+                                    .push_str(&format!("thread {:?} {name}: {text}\n", entry.file_name()));
                             }
-                            let target = destination.join(relative).join(&name);
-                            directories.create(target.parent().unwrap())?;
-                            write_private(&target, &std::fs::read(entry.path())?)?;
-                            report.push_str(&format!("runtime stderr: {}\n", target.display()));
                         }
                     }
                 }
-            }
-            write_private(&destination.join("process.txt"), report.as_bytes())?;
-            Ok(())
-        })();
-        match saved {
-            Ok(()) => report.push_str(&format!("failure artifacts: {}\n", destination.display())),
-            Err(error) => report.push_str(&format!("failure artifact capture failed: {error}\n")),
+                let saved = (|| -> std::io::Result<()> {
+                    let mut directories = std::fs::DirBuilder::new();
+                    directories.recursive(true);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::DirBuilderExt;
+                        directories.mode(0o700);
+                    }
+                    directories.create(&destination)?;
+                    let write_private = |path: &Path, contents: &[u8]| -> std::io::Result<()> {
+                        use std::io::Write;
+                        let mut options = std::fs::OpenOptions::new();
+                        options.write(true).create_new(true);
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::OpenOptionsExt;
+                            options.mode(0o600);
+                        }
+                        options.open(path)?.write_all(contents)
+                    };
+                    write_private(&destination.join("pty.raw"), &transcript)?;
+                    write_private(
+                        &destination.join("frame.txt"),
+                        frame_dump.as_bytes(),
+                    )?;
+                    // Copy only runtime logs under the explicitly sealed fixture;
+                    // never walk a developer's HOME or copy configuration/credentials.
+                    if let Some(home) = &sealed_home {
+                        for relative in [".codewhale/logs", ".deepseek/logs"] {
+                            let directory = home.join(relative);
+                            if let Ok(entries) = std::fs::read_dir(&directory) {
+                                for entry in entries.flatten() {
+                                    let name = entry.file_name();
+                                    let name_text = name.to_string_lossy();
+                                    if !name_text.starts_with("tui-")
+                                        || !name_text.ends_with(".log")
+                                        || !entry.file_type()?.is_file()
+                                    {
+                                        continue;
+                                    }
+                                    let target = destination.join(relative).join(&name);
+                                    directories.create(target.parent().unwrap())?;
+                                    write_private(&target, &std::fs::read(entry.path())?)?;
+                                    report.push_str(&format!("runtime stderr: {}\n", target.display()));
+                                }
+                            }
+                        }
+                    }
+                    write_private(&destination.join("process.txt"), report.as_bytes())?;
+                    Ok(())
+                })();
+                match saved {
+                    Ok(()) => report.push_str(&format!("failure artifacts: {}\n", destination.display())),
+                    Err(error) => report.push_str(&format!("failure artifact capture failed: {error}\n")),
+                }
+                let tail = &transcript[transcript.len().saturating_sub(4096)..];
+                format!(
+                    "{}{}\nPTY tail: {:?}\n{}",
+                    frame_dump,
+                    modes_dump,
+                    String::from_utf8_lossy(tail),
+                    report
+                )
+            });
+        match worker {
+            Ok(worker) => worker.join().unwrap_or_else(|_| {
+                format!(
+                    "{}\nfailure diagnostic worker panicked",
+                    self.frame.debug_dump()
+                )
+            }),
+            Err(error) => format!(
+                "{}\nfailure diagnostic worker could not start: {error}",
+                self.frame.debug_dump()
+            ),
         }
-        let tail = &transcript[transcript.len().saturating_sub(4096)..];
-        format!(
-            "{}{}\nPTY tail: {:?}\n{}",
-            self.frame.debug_dump(),
-            self.terminal_modes().debug_dump(),
-            String::from_utf8_lossy(tail),
-            report
-        )
     }
 
     /// Resolve a binary by Cargo bin-name (uses `CARGO_BIN_EXE_<name>`).
@@ -690,6 +715,7 @@ mod tests {
         }
         let process = std::fs::read_to_string(evidence.join("process.txt")).unwrap();
         assert!(process.contains("pid=Some("));
+        assert!(process.contains("diagnostic_worker=Some(\"qa-pty-diagnostics\")"));
         assert!(process.contains("wait_budget="));
         assert!(process.contains("sha256=Ok("));
         assert!(process.contains("TERM=\"xterm-256color\""));
