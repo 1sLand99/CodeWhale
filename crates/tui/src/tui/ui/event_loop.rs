@@ -387,7 +387,7 @@ pub(super) fn handle_transcript_space(app: &mut App) -> bool {
             return false;
         }
         let options = app.transcript_render_options();
-        let folded = (!options.verbose ^ options.thinking_default_expanded)
+        let folded = !(options.verbose || options.thinking_default_expanded)
             ^ (target.action == ReasoningAction::Collapse);
         app.folded_thinking.remove(&idx);
         if folded {

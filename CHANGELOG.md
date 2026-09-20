@@ -142,6 +142,14 @@ tag, packages, checksums and release assets exist.
 
 ### Changed
 
+- The launcher keeps the Codewhale mark while balancing its layout above the
+  composer. A single cursor identifies the selected action; MCP faults retain
+  their warning color even in compact terminals. Recent-session counts now
+  read correctly for a single message.
+- Model and provider settings use quieter selection surfaces, one focused
+  cursor, clearer missing-key warnings, compact output limits, and less
+  repetitive credential detail. Plugin actions use plain labels.
+
 - The terminal opens on **Shoreline**, the same palette the GPUI client already
   uses: warm charcoal field `#211F23`, a raised plate for panels and the
   composer, one blue for action and selection `#90B9FF`, and the whale's ivory
@@ -218,6 +226,11 @@ tag, packages, checksums and release assets exist.
   source and the published notarized 0.4.0 Mac app.
 
 ### Fixed
+
+- Stopping a turn revokes its pending approvals. A late approval cannot resume
+  the cancelled action or save an automatic approval for later turns.
+- Expanding and collapsing selected reasoning now matches its rendered state
+  when verbose mode and the default-expansion preference are both enabled.
 
 - Branch navigation preserves sibling histories, stable entry IDs and timestamps
   through autosave, resume and forks, and synchronizes the selected branch into

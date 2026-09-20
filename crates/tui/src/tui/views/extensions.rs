@@ -2082,7 +2082,7 @@ impl ModalView for ExtensionsView {
                     parts.push(("  ".into(), None));
                     if let Some(action) = item.action.as_ref() {
                         parts.push((
-                            format!("[{}] ", action.label()),
+                            format!("{} · ", action.label()),
                             Some(match action {
                                 ExtensionAction::Command { .. } => {
                                     codewhale_palette::ChromeInk::Identity
@@ -2092,7 +2092,7 @@ impl ModalView for ExtensionsView {
                         ));
                     }
                     parts.push((item.label.clone(), None));
-                    parts.push((format!(" [{}]", item.state), Some(item.tone.ink())));
+                    parts.push((format!(" · {}", item.state), Some(item.tone.ink())));
                 }
                 VisibleEntry::Problem(problem) => parts.push((
                     format!("! {problem}"),

@@ -77,6 +77,8 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Changed",
         "items": [
+          "The launcher keeps the Codewhale mark while balancing its layout above the composer. A single cursor identifies the selected action; MCP faults retain their warning color even in compact terminals. Recent-session counts now read correctly for a single message.",
+          "Model and provider settings use quieter selection surfaces, one focused cursor, clearer missing-key warnings, compact output limits, and less repetitive credential detail. Plugin actions use plain labels.",
           "The terminal opens on Shoreline, the same palette the GPUI client already uses: warm charcoal field #211F23, a raised plate for panels and the composer, one blue for action and selection #90B9FF, and the whale's ivory #F2ECE5 for body text, with 4.5:1 floors on every muted step. The old saturated navy gradient is not gone — underwater is a named theme now rather than the ground the product opens on. Existing installs keep whatever theme they have saved; /theme switches…",
           "Menu navigation is starting to mean the same thing everywhere. menu_style already single-sourced how a selected row *looks*; what a key *does* was still reinvented per surface — h/l in the provider picker against Left/Right in the model picker one screen later, Home/End in one of seven pickers, and no paging at all in Fleet's detail view. list_nav, which already owned the wrap arithmetic, now owns the vocabulary too: one vertical axis, one horizontal axis, and two entry…",
           "Reviewed plugin bundles are no longer re-hashed four times per MCP dispatch. verify_plugin_authority walks and hashes both the reviewed source and the runtime snapshot, and four separate authority checks ran per tools/call — eight tree walks. Three of them sat one statement after a validate_before_use on the same source, so is_ready re-verified what had just been verified; readiness and authority are now separate, and only the callers with no preceding check still pay for…",
@@ -87,11 +89,13 @@ export const CHANGELOG: ChangelogRelease[] = [
           "Computer Use is the only computer-use product in Extensions and /mcp recommendations. Cua is no longer suggested as a parallel desktop-control MCP; enable the first-party computer-use plugin instead. The bundled plugin is 0.4.0: Return/Enter from type, filtered and paginated get_app_state, focus/get_value, and strategy:\"app\" window-scoped clicks. Shared-desktop pointer gestures stay gated.",
           "The bundled first-party catalog pins marketplace revision ca6be22, so installing Computer Use from the Extensions listing fetches the same 0.4.0 source and the published notarized 0.4.0 Mac app."
         ],
-        "itemCount": 9
+        "itemCount": 11
       },
       {
         "heading": "Fixed",
         "items": [
+          "Stopping a turn revokes its pending approvals. A late approval cannot resume the cancelled action or save an automatic approval for later turns.",
+          "Expanding and collapsing selected reasoning now matches its rendered state when verbose mode and the default-expansion preference are both enabled.",
           "Branch navigation preserves sibling histories, stable entry IDs and timestamps through autosave, resume and forks, and synchronizes the selected branch into the live engine. Thanks to @7jrxt42BxFZo4iAnN4CX for the report (#6367).",
           "Compaction now writes local diagnostic records for completed passes and automatic refusals. codewhale metrics reports them with summarizer token usage; text-mode exec retains its session after attempting compaction. Historical artifacts are not backfilled. Thanks to @7jrxt42BxFZo4iAnN4CX for identifying the missing producer (#6368).",
           "The opening workbench retains the canonical Codewhale mark in a responsive header while keeping recent-session titles full-width and actions clickable.",
@@ -101,11 +105,9 @@ export const CHANGELOG: ChangelogRelease[] = [
           "A write-scope contention refusal now names a remedy that works. The agent tool's description claimed release was \"the remediation a write-scope contention refusal names\"; the refusal did not name it, and pointing back at it would have been worse, because release only clears claims whose owner is no longer running while a contention refusal names a live one. The refusal itself now says to wait for that owner to settle or cancel it (#6272).",
           "The session picker no longer refuses a saved session whose Runtime store exists but holds nothing. A force-quit leaves the store on disk, ownerless and empty, and the switch path refused it because recovery only covered a *missing* store. A switch now also adopts a store that is provably empty (every work directory, plus the event sequence that remembers pruned appends) *and* provably unheld (the process-owner lock, which a live manager holds from open to close), with no…",
           "Double-tap Enter now sends every queued follow-up into the running turn, oldest first. The second Enter used to steer only the most recent message and leave older ones queued; a failed steer restores the failed message plus everything unattempted in original order, so nothing is lost or reordered.",
-          "Only the most recently sent prompt carries the elevated-surface background now; every older prompt renders on the bare ground. The fill used to sit behind every user row (striping), then behind none; newest-only keeps the eye on the turn in play. Sending a new prompt moves the highlight and un-highlights its predecessor.",
-          "Diff rows tint whole: added/deleted line numbers now share the row's green / red background instead of sitting bare next to a painted body. Context rows stay on the bare ground.",
-          "MCP connections are supervised now: a background task notices a dead server within one sweep, reconnects on the existing backoff ladder, and reports each transition, so Extensions rows flip with liveness instead of parking on stale-ready or a silent [reconnect]. Five consecutive failures park the server with a notice naming /mcp retry; an explicit retry or a fresh connection resumes watching. Tool calls also retry once across a dead pipe/socket (not just stale sessions), and…"
+          "Only the most recently sent prompt carries the elevated-surface background now; every older prompt renders on the bare ground. The fill used to sit behind every user row (striping), then behind none; newest-only keeps the eye on the turn in play. Sending a new prompt moves the highlight and un-highlights its predecessor."
         ],
-        "itemCount": 24
+        "itemCount": 26
       }
     ]
   },

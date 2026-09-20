@@ -6239,6 +6239,71 @@ fn selected_reasoning_hint_and_space_share_one_owner() {
 }
 
 #[test]
+fn selected_reasoning_actions_roundtrip_for_every_expansion_baseline() {
+    use crate::tui::history::ReasoningAction;
+
+    for verbose in [false, true] {
+        for default_expanded in [false, true] {
+            for folded in [false, true] {
+                let mut app = create_test_app();
+                app.verbose_transcript = verbose;
+                app.thinking_default_expanded = default_expanded;
+                app.thinking_preview_lines = 4;
+                app.history = vec![oversized_reasoning("baseline", false)];
+                if folded {
+                    app.folded_thinking.insert(0);
+                }
+                app.resync_history_revisions();
+                // The adaptive preview fills spare viewport rows. Keep the
+                // 40-line body larger than the pane so both actions exist.
+                let _ = render_underwater_test_app(&mut app, 100, 32);
+                select_original_cell(&mut app, 0);
+
+                let initially_expanded = (verbose || default_expanded) != folded;
+                for (step, expanded) in
+                    [initially_expanded, !initially_expanded, initially_expanded]
+                        .into_iter()
+                        .enumerate()
+                {
+                    let surface = render_underwater_test_app(&mut app, 100, 32);
+                    // Inspect rendered lines, including the scrolled-off part,
+                    // so viewport position cannot masquerade as a fold.
+                    let rendered_full_body = app
+                        .viewport
+                        .transcript_cache
+                        .lines()
+                        .iter()
+                        .any(|line| line.to_string().contains("baseline line 40"));
+                    assert_eq!(
+                        rendered_full_body, expanded,
+                        "verbose={verbose}, default_expanded={default_expanded}, \
+                         folded={folded}, step={step}: {surface}"
+                    );
+                    let target = app
+                        .viewport
+                        .transcript_cache
+                        .reasoning_action_target()
+                        .expect("selected reasoning has a rendered action");
+                    assert_eq!(target.owner.cell_index, 0);
+                    assert_eq!(
+                        target.action,
+                        if expanded {
+                            ReasoningAction::Collapse
+                        } else {
+                            ReasoningAction::Expand
+                        }
+                    );
+                    if step < 2 {
+                        assert!(handle_transcript_space(&mut app));
+                    }
+                }
+                assert_eq!(app.folded_thinking.contains(&0), folded);
+            }
+        }
+    }
+}
+
+#[test]
 fn mouse_selection_redraws_and_retargets_reasoning_with_unchanged_revisions() {
     let mut app = create_test_app();
     app.history = vec![

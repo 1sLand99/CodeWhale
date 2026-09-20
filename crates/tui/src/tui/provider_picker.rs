@@ -935,10 +935,13 @@ impl ProviderDashboardRow {
     /// repeats. One owner so the renderer and the tests cannot disagree about
     /// what a provider's state reads as.
     fn detail_state_line(&self) -> String {
+        let auth = match self.auth_status {
+            ProviderAuthStatus::Missing | ProviderAuthStatus::Configured => String::new(),
+            status => format!(" | {}", status.label()),
+        };
         format!(
-            "{} | {} | {}{}",
+            "{}{auth} | {}{}",
             self.readiness.label(),
-            self.auth_status.label(),
             self.catalog_label(),
             self.maturity
                 .tag()
@@ -1161,7 +1164,7 @@ fn catalog_freshness_title_suffix() -> &'static str {
 
 fn catalog_freshness_title_suffix_for(freshness: ModelsDevFreshness) -> &'static str {
     match freshness {
-        ModelsDevFreshness::Stale => " · stale",
+        ModelsDevFreshness::Stale => " · cached catalog",
         // A failed optional refresh keeps prior or bundled rows available.
         // Say what the picker is using instead of implying the catalog broke.
         ModelsDevFreshness::Failed => " · refresh failed; catalog available",
@@ -2678,7 +2681,7 @@ impl ProviderPickerView {
         // Onboarding asks one question. The ordinary provider manager keeps
         // its technical detail pane, but first-run gives the available rows
         // the whole body so 40x12 still has room to choose and proceed.
-        let layout = if self.onboarding_mode {
+        let mut layout = if self.onboarding_mode {
             ListDetailLayout {
                 list: content,
                 detail: Rect::new(content.x, content.y, 0, 0),
@@ -2687,6 +2690,12 @@ impl ProviderPickerView {
         } else {
             ListDetailLayout::split(content, 34)
         };
+        if layout.stacked && filtered.len() < usize::from(layout.list.height) {
+            layout.list.height = filtered.len() as u16;
+            let detail_y = layout.list.bottom().saturating_add(1).min(content.bottom());
+            layout.detail.y = detail_y;
+            layout.detail.height = content.bottom().saturating_sub(detail_y);
+        }
         let selected_pos = filtered
             .iter()
             .position(|(idx, _)| *idx == self.selected_idx)
@@ -2731,9 +2740,11 @@ impl ProviderPickerView {
                     | CredentialState::Legacy
             );
             let hint_style = if is_selected {
-                // The credential label carries its meaning in text; focus
-                // ink must remain readable against the selection background.
-                menu_style::selected_row_style_with_fg(palette::SELECTION_TEXT)
+                menu_style::selected_row_style_with_fg(if has_usable_auth {
+                    palette::SELECTION_TEXT
+                } else {
+                    palette::STATUS_WARNING
+                })
             } else if has_usable_auth {
                 Style::default().fg(palette::TEXT_MUTED)
             } else {
@@ -2887,15 +2898,11 @@ impl ProviderPickerView {
                 // row is short now, so the fact lives here, with the rest of
                 // the provider's detail.
                 row.detail_state_line(),
-                Style::default().fg(palette::TEXT_MUTED),
-            )),
-            // Which place the credential actually came from. A row can read
-            // "key:configured" for four different reasons; naming the one that
-            // won is what lets a user reconcile the picker with a request that
-            // succeeded (or didn't).
-            Line::from(Span::styled(
-                format!("Credential: {}", row.credential_source),
-                Style::default().fg(palette::TEXT_MUTED),
+                Style::default().fg(if row.credential_state == CredentialState::MissingKey {
+                    palette::STATUS_WARNING
+                } else {
+                    palette::TEXT_MUTED
+                }),
             )),
             Line::from(Span::styled(
                 // Whether this model is the provider's default, one the
@@ -2910,6 +2917,17 @@ impl ProviderPickerView {
                 Style::default().fg(palette::TEXT_MUTED),
             )),
         ];
+        // Keep a resolved credential's origin visible. An absent credential
+        // is already named by readiness; its search details remain in the pager.
+        if full || row.credential_source != "not found" {
+            lines.insert(
+                1,
+                Line::from(Span::styled(
+                    format!("Credential: {}", row.credential_source),
+                    Style::default().fg(palette::TEXT_MUTED),
+                )),
+            );
+        }
         // Protocol/capability details explain a route, but must not crowd out
         // its model choices and prices. Credential warnings and consent stay
         // ahead of the model inventory; technical diagnostics follow it.
@@ -6855,7 +6873,8 @@ mod tests {
         assert_eq!(row.readiness, ResolvedProviderReadiness::MissingKey);
         assert_eq!(row.readiness.label(), "missing key");
         let hint = row.detail_state_line();
-        assert!(hint.contains("key:not-set"));
+        assert!(hint.contains("missing key"));
+        assert!(!hint.contains("key:not-set"));
         assert!(!hint.contains("needs-auth"));
         assert!(!hint.contains("auth:missing"));
         assert!(
@@ -7023,7 +7042,8 @@ mod tests {
 
         let rendered = render_text(&picker, 124, 24);
 
-        assert!(rendered.contains("key:configured"));
+        assert!(rendered.contains("key saved"));
+        assert!(!rendered.contains("key:configured"));
         assert!(!rendered.contains("auth:configured"));
         assert!(rendered.contains("Route: custom-model"));
         let ViewAction::Emit(ViewEvent::OpenTextPager { content, .. }) =

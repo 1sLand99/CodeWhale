@@ -150,8 +150,10 @@ fn launch_recent_entries(app: &App) -> (Vec<LaunchRecentEntry>, bool) {
                 &session.updated_at,
                 app.ui_locale,
             );
-            let count = tr(app.ui_locale, MessageId::SessionsMessageCountCompact)
-                .replace("{count}", &session.message_count.to_string());
+            let count = crate::tui::session_picker::format_message_count(
+                session.message_count,
+                app.ui_locale,
+            );
             LaunchRecentEntry {
                 id: session.id.clone(),
                 title,
@@ -273,7 +275,13 @@ pub fn open_launch_resume_confirm(app: &mut App, session_id: &str) {
         .map(|entry| {
             let when =
                 crate::tui::session_picker::format_relative_time(&entry.updated_at, app.ui_locale);
-            format!("{when} · {} msgs", entry.message_count)
+            format!(
+                "{when} · {}",
+                crate::tui::session_picker::format_message_count(
+                    entry.message_count,
+                    app.ui_locale
+                )
+            )
         })
         .unwrap_or_default();
     app.view_stack.push(
@@ -1335,7 +1343,13 @@ fn mcp_launch_lines(app: &App, text_width: usize) -> McpLaunchBlock {
     }
     lines.push(Line::from(Span::styled(
         semantic_truncate(&summary, text_width),
-        Style::default().fg(theme.text_muted),
+        Style::default().fg(if !failed.is_empty() {
+            theme.error_fg
+        } else if !needs_login.is_empty() {
+            theme.warning
+        } else {
+            theme.text_muted
+        }),
     )));
 
     // One problems row answers *which* and *what to type*: `✕` groups the
@@ -1699,10 +1713,7 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
 
     for row in &card_rows {
         let style = if row.prominent {
-            Style::default()
-                .fg(theme.accent_primary)
-                .bg(theme.panel_bg)
-                .bold()
+            Style::default().fg(theme.accent_primary).bold()
         } else {
             Style::default().fg(theme.text_body)
         };
@@ -1837,7 +1848,7 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
     // band to the text lane so selecting a session never colors the margins.
     for (index, (_, row)) in rows.iter().enumerate() {
         let style = if app.launch.menu_selected == Some(index) {
-            Some(crate::tui::menu_style::selected_row_style())
+            Some(crate::tui::menu_style::selected_row_bg_style().bold())
         } else if app.launch.hovered_row == Some(index) {
             Some(crate::tui::menu_style::hovered_row_style())
         } else {
@@ -1854,12 +1865,15 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
         }
     }
 
-    // Stable action gutter: every executable row advertises itself before
-    // hover. The band includes the gutter and only the bounded reading lane.
+    // Stable focus gutter: the cursor identifies the current Enter target.
+    // The band includes the gutter and only the bounded reading lane.
     // A little top breathing room only comes from unused space. Compact
     // terminals never sacrifice a control for this composition.
-    if height >= 16 && text.len() + 1 < height {
-        lines.push(Line::from(""));
+    if height >= 16 {
+        // Use spare height to balance the launcher above the composer. Leave
+        // the bottom half as breathing room; controls never lose a row.
+        let top = height.saturating_sub(text.len()) / 2;
+        lines.resize_with(top, || Line::from(""));
     }
     let block_rows = text.len().min(height.saturating_sub(lines.len()));
     let mut row_offsets = Vec::with_capacity(block_rows);
@@ -1872,17 +1886,11 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
         } else if hovered {
             crate::tui::menu_style::hovered_row_style()
         } else {
-            let style = Style::default().fg(theme.accent_primary);
-            if action.is_some_and(|i| matches!(rows[i].0, crate::tui::app::LaunchRowId::NewSession))
-            {
-                style.bg(theme.panel_bg)
-            } else {
-                style
-            }
+            Style::default().fg(theme.text_muted)
         };
         let mut spans = vec![Span::raw(" ".repeat(block_indent))];
         if action_gutter > 0 {
-            let marker = if action.is_some() {
+            let marker = if selected || hovered {
                 if crate::tui::color_compat::ascii_safe_enabled() {
                     "> "
                 } else {
@@ -2455,11 +2463,38 @@ mod launch_card_tests {
                 let selected = launch_empty_state(&app, area);
                 assert_eq!(
                     selected.lines[y].spans.last().unwrap().style,
-                    crate::tui::menu_style::selected_row_style()
+                    crate::tui::menu_style::selected_row_bg_style().bold()
                 );
                 // Neither the whale nor the leading whitespace changes color.
                 assert_eq!(selected.lines[y].spans[0].style.bg, None);
             }
+        }
+    }
+
+    #[test]
+    fn mcp_warning_ink_survives_selection_and_compact_layout() {
+        let mut app = with_mcp(app_with_recent(&["Recent proof"], 1));
+        for (width, height) in [(40, 12), (80, 24), (140, 40)] {
+            let area = Rect::new(0, 0, width, height);
+            let layout = launch_empty_state(&app, area);
+            let index = layout
+                .rows
+                .iter()
+                .position(|(id, _)| *id == LaunchRowId::McpManager)
+                .unwrap();
+            app.launch.menu_selected = Some(index);
+            let selected = launch_empty_state(&app, area);
+            let (_, y) = selected.rows[index];
+            let summary = selected.lines[y]
+                .spans
+                .iter()
+                .find(|span| span.content.starts_with("MCP"))
+                .unwrap();
+            assert_eq!(summary.style.fg, Some(app.ui_theme.error_fg));
+            assert_eq!(
+                summary.style.bg,
+                crate::tui::menu_style::selected_row_bg_style().bg
+            );
         }
     }
 

@@ -831,13 +831,13 @@ impl ModelPickerView {
             let identity = row_provider_identity(row).unwrap_or("custom");
             return ViewAction::Emit(ViewEvent::StatusMessage {
                 message: format!(
-                    "🔒 {identity}/{} is locked — {reason}. Open /provider and select {identity} to repair or authenticate this route.",
+                    "! {identity}/{} is locked — {reason}. Open /provider and select {identity} to repair or authenticate this route.",
                     row.id
                 ),
             });
         }
         let message = format!(
-            "🔒 {} is locked — {reason}. Open /provider to authenticate, then refresh.",
+            "! {} is locked — {reason}. Open /provider to authenticate, then refresh.",
             row.id
         );
         // The ordinary setup wizard switches the session after auth. A
@@ -1364,17 +1364,14 @@ impl ModelPickerView {
             .render(area, buf);
         let title_area = Rect { height: 1, ..area };
         Paragraph::new(Line::from(vec![
-            Span::styled(
-                if state.focused { "▸ " } else { "  " },
-                Style::default().fg(palette::WHALE_ACTION),
-            ),
+            Span::raw("  "),
             Span::styled(
                 title,
                 Style::default()
                     .fg(if state.focused {
-                        palette::WHALE_ACTION
-                    } else {
                         palette::TEXT_PRIMARY
+                    } else {
+                        palette::TEXT_MUTED
                     })
                     .bold(),
             ),
@@ -1408,24 +1405,19 @@ impl ModelPickerView {
                 break;
             }
             let is_selected = idx == state.selected;
-            // Non-selectable rows are dimmed with a lock glyph so they never
-            // look choosable. Selection still highlights, but stays muted.
+            // Only the focused pane owns the keyboard cursor. Unavailable
+            // routes retain a width-safe attention mark and warning ink.
             let locked = row.locked;
-            // Marker precedence: a locked route first (it is the reason Enter
-            // will not work), then the keyboard cursor, then the route this
-            // session is already on. `CURRENT` is the charter's "current human
-            // choice" mark, so "which one am I on?" is answered by shape rather
-            // than by a second accent colour.
-            let marker = if locked {
-                "🔒"
-            } else if is_selected {
+            let focused = is_selected && state.focused;
+            let marker = if focused {
                 crate::tui::glyphs::SELECTION
+            } else if locked {
+                crate::tui::glyphs::ATTENTION
             } else if row.active {
                 crate::tui::glyphs::CURRENT
             } else {
                 " "
             };
-            let focused = is_selected && state.focused;
             let hovered = self.hovered_row == Some((state.pane, idx)) && !focused;
             let label_style = if focused && !locked {
                 menu_style::selected_row_style()
@@ -1438,7 +1430,9 @@ impl ModelPickerView {
                     palette::TEXT_PRIMARY
                 })
             } else if is_selected {
-                Style::default().fg(palette::WHALE_ACTION).bold()
+                Style::default()
+                    .fg(palette::TEXT_MUTED)
+                    .bg(palette::SURFACE_ELEVATED)
             } else if locked {
                 Style::default()
                     .fg(palette::TEXT_MUTED)
@@ -1446,7 +1440,9 @@ impl ModelPickerView {
             } else {
                 Style::default().fg(palette::TEXT_PRIMARY)
             };
-            let hint_style = if focused && !locked {
+            let hint_style = if locked {
+                label_style.fg(palette::TEXT_MUTED)
+            } else if focused {
                 menu_style::selected_row_bg_style().fg(palette::SELECTION_TEXT)
             } else if hovered {
                 menu_style::hovered_row_style().fg(palette::TEXT_MUTED)
@@ -1802,9 +1798,8 @@ fn fit_identifier(text: &str, width: usize) -> String {
 
 /// Lay a row out into aligned, individually-truncated columns.
 ///
-/// Colour vocabulary is deliberately two-valued: `label_style` for the row's
-/// primary content and `hint_style` for every secondary column. Selection is
-/// the only thing that changes a row's colour.
+/// Primary and secondary ink follow the pane's focus; unavailable routes
+/// retain a semantic warning mark independently of selection.
 fn picker_row_spans<'a>(
     row: &'a PaneRow,
     marker: &'static str,
@@ -1819,7 +1814,14 @@ fn picker_row_spans<'a>(
     let marker_pad = MARKER_CELL_WIDTH.saturating_sub(UnicodeWidthStr::width(marker));
     let mut spans = vec![
         Span::styled(" ", label_style),
-        Span::styled(marker, label_style),
+        Span::styled(
+            marker,
+            if row.locked {
+                label_style.fg(palette::STATUS_WARNING)
+            } else {
+                label_style
+            },
+        ),
         Span::styled(" ".repeat(marker_pad + 1), label_style),
     ];
     let mut used = ROW_PREFIX_WIDTH;
@@ -2616,7 +2618,7 @@ fn catalog_freshness_title_suffix() -> &'static str {
 
 fn catalog_freshness_title_suffix_for(freshness: ModelsDevFreshness) -> &'static str {
     match freshness {
-        ModelsDevFreshness::Stale => " · stale",
+        ModelsDevFreshness::Stale => " · cached catalog",
         ModelsDevFreshness::Failed => " · refresh failed; catalog available",
         ModelsDevFreshness::Bundled | ModelsDevFreshness::Live => "",
     }
@@ -2796,7 +2798,7 @@ fn model_row_meta_chips(row: &ModelPickerRow) -> Vec<String> {
                 .unwrap_or_else(|| "context unknown".into()),
             row.metadata
                 .max_output
-                .map(|value| format!("{value} out"))
+                .map(|value| format!("{} out", format_picker_context_window(u64::from(value))))
                 .unwrap_or_else(|| "output unknown".into()),
             match &row.metadata.pricing {
                 PickerPricing::Known(price) => format!("estimate {price}"),
@@ -2855,7 +2857,10 @@ fn model_row_meta_chips(row: &ModelPickerRow) -> Vec<String> {
         } else {
             ""
         };
-        chips.push(format!("{max_output} out{suffix}"));
+        chips.push(format!(
+            "{} out{suffix}",
+            format_picker_context_window(u64::from(max_output))
+        ));
     }
     // Modality and tool facts are shown only when the catalog genuinely knows
     // them — an unknown is never rendered as a claim.
@@ -3978,6 +3983,14 @@ impl ModelPickerView {
                     .unwrap_or(self.initial_provider)
                     .display_name(),
                 Style::default().fg(palette::TEXT_PRIMARY),
+            ),
+            Span::styled(
+                self.visible_model_rows()
+                    .get(self.selected_model_idx)
+                    .and_then(|row| row.blocked_reason.as_deref())
+                    .map(|reason| format!(" · ! {reason}"))
+                    .unwrap_or_default(),
+                Style::default().fg(palette::STATUS_WARNING),
             ),
             Span::styled(
                 catalog_freshness_title_suffix(),
