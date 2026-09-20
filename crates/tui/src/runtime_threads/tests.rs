@@ -16784,3 +16784,201 @@ async fn notices_raise_from_engine_events_and_clear_on_settle_or_ack() -> Result
         .await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn shell_opt_in_is_idle_only_and_preserves_ask() -> Result<()> {
+    let _env = crate::test_support::lock_test_env();
+    let _shell_env = [
+        crate::test_support::EnvVarGuard::remove("CODEWHALE_ALLOW_SHELL"),
+        crate::test_support::EnvVarGuard::remove("DEEPSEEK_ALLOW_SHELL"),
+    ];
+    let dir = tempfile::tempdir()?;
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+    let workspace = dir.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let config_path = dir.path().join("config.toml");
+    fs::write(&config_path, "allow_shell = false\n")?;
+    let manager = test_manager(dir.path().join("runtime"))?;
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            workspace: Some(workspace),
+            allow_shell: Some(false),
+            permission_posture: Some("ask".into()),
+            ..Default::default()
+        })
+        .await?;
+    let mut harness = install_mock_engine(&manager, &thread.id).await;
+    manager
+        .active
+        .lock()
+        .await
+        .engines
+        .get_mut(&thread.id)
+        .unwrap()
+        .active_turn = Some(ActiveTurnState {
+        goal_id: None,
+        turn_id: "turn_shell_guard".into(),
+        interrupt_requested: false,
+        compaction_id: None,
+    });
+    let error = manager
+        .update_thread_with_shell_policy(
+            &thread.id,
+            UpdateThreadRequest {
+                allow_shell: Some(true),
+                title: Some("must not persist".into()),
+                ..Default::default()
+            },
+            Some(&config_path),
+            None,
+        )
+        .await
+        .expect_err("active turn must reject opt-in");
+    assert!(error.to_string().contains("already has an active turn"));
+    let unchanged = manager.store.load_thread(&thread.id)?;
+    assert!(!unchanged.allow_shell);
+    assert_eq!(unchanged.title, thread.title);
+    assert_eq!(unchanged.updated_at, thread.updated_at);
+    assert!(harness.rx_op.try_recv().is_err());
+    manager
+        .active
+        .lock()
+        .await
+        .engines
+        .get_mut(&thread.id)
+        .unwrap()
+        .active_turn = None;
+    let enabled = manager
+        .update_thread_with_shell_policy(
+            &thread.id,
+            UpdateThreadRequest {
+                allow_shell: Some(true),
+                ..Default::default()
+            },
+            Some(&config_path),
+            None,
+        )
+        .await?;
+    assert!(enabled.allow_shell);
+    assert_eq!(enabled.permission_posture.as_deref(), Some("ask"));
+    assert!(!enabled.auto_approve && !enabled.trust_mode);
+    assert!(matches!(
+        harness.rx_op.recv().await,
+        Some(Op::ChangeMode {
+            allow_shell: true,
+            auto_approve: false,
+            approval_mode: ApprovalMode::Suggest,
+            ..
+        })
+    ));
+    manager
+        .active
+        .lock()
+        .await
+        .engines
+        .get_mut(&thread.id)
+        .unwrap()
+        .active_turn = Some(ActiveTurnState {
+        goal_id: None,
+        turn_id: "turn_revoke".into(),
+        interrupt_requested: false,
+        compaction_id: None,
+    });
+    let disabled = manager
+        .update_thread_with_shell_policy(
+            &thread.id,
+            UpdateThreadRequest {
+                allow_shell: Some(false),
+                ..Default::default()
+            },
+            Some(&config_path),
+            None,
+        )
+        .await?;
+    assert!(
+        !disabled.allow_shell,
+        "tightening remains available during a turn"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn shell_policy_uses_explicit_profile_and_actual_thread_workspace() -> Result<()> {
+    let _env = crate::test_support::lock_test_env();
+    let _shell_env = [
+        crate::test_support::EnvVarGuard::remove("CODEWHALE_ALLOW_SHELL"),
+        crate::test_support::EnvVarGuard::remove("DEEPSEEK_ALLOW_SHELL"),
+    ];
+    let dir = tempfile::tempdir()?;
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+    let workspace = dir.path().join("thread-workspace");
+    fs::create_dir(&workspace)?;
+    let config_path = dir.path().join("explicit.toml");
+    fs::write(
+        &config_path,
+        "allow_shell = true\n[profiles.restricted]\nallow_shell = false\n",
+    )?;
+    let manager = test_manager(dir.path().join("runtime"))?;
+    manager.config.write().allow_shell = Some(false);
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            workspace: Some(workspace.clone()),
+            allow_shell: Some(false),
+            ..Default::default()
+        })
+        .await?;
+    let error = manager
+        .update_thread_with_shell_policy(
+            &thread.id,
+            UpdateThreadRequest {
+                allow_shell: Some(true),
+                ..Default::default()
+            },
+            Some(&config_path),
+            Some("restricted"),
+        )
+        .await
+        .expect_err("profile denial must win");
+    assert!(error.to_string().contains("active config profile"));
+    assert!(!manager.store.load_thread(&thread.id)?.allow_shell);
+    // This same policy check is used by direct job launch, so historical
+    // opt-ins cannot bypass a subsequently controlled denial.
+    assert!(
+        manager
+            .validate_shell_access_policy(&workspace, Some(&config_path), Some("restricted"))
+            .await
+            .is_err()
+    );
+    manager.config.write().allow_shell = Some(true);
+    let project = workspace.join(codewhale_config::CODEWHALE_APP_DIR);
+    fs::create_dir(&project)?;
+    fs::write(project.join("config.toml"), "allow_shell = false\n")?;
+    let error = manager
+        .validate_shell_access_policy(&workspace, Some(&config_path), None)
+        .await
+        .expect_err("thread folder beats host merged true");
+    assert!(error.to_string().contains("project configuration"));
+    let managed = dir.path().join("managed.toml");
+    fs::write(&managed, "allow_shell = false\n")?;
+    manager.config.write().managed_config_path = Some(managed.to_string_lossy().into_owned());
+    manager.config.write().allow_shell = Some(false);
+    assert!(
+        manager
+            .validate_shell_access_policy(dir.path(), Some(&config_path), None)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("managed configuration")
+    );
+    // Ambiguous/unreadable managed authority fails closed even if a stale
+    // effective snapshot says true.
+    fs::write(&managed, "[broken")?;
+    manager.config.write().allow_shell = Some(true);
+    assert!(
+        manager
+            .validate_shell_access_policy(dir.path(), Some(&config_path), None)
+            .await
+            .is_err()
+    );
+    Ok(())
+}

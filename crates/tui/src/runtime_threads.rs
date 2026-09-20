@@ -7572,7 +7572,23 @@ impl RuntimeThreadManager {
             .with_context(|| format!("Thread not found: {id}"))
     }
 
-    pub async fn update_thread(&self, id: &str, req: UpdateThreadRequest) -> Result<ThreadRecord> {
+    // Unit fixtures without a runtime source use the ordinary default source.
+    // Production callers must pass the source actually loaded by their host.
+    #[cfg(test)]
+    async fn update_thread(&self, id: &str, req: UpdateThreadRequest) -> Result<ThreadRecord> {
+        self.update_thread_with_shell_policy(id, req, None, None)
+            .await
+    }
+
+    pub(crate) async fn update_thread_with_shell_policy(
+        &self,
+        id: &str,
+        req: UpdateThreadRequest,
+        config_path: Option<&Path>,
+        config_profile: Option<&str>,
+    ) -> Result<ThreadRecord> {
+        // Keep policy publication ordered with this authorization decision.
+        let _config_admission = self.config_admission.read().await;
         if req.archived.is_none()
             && req.allow_shell.is_none()
             && req.trust_mode.is_none()
@@ -7608,6 +7624,21 @@ impl RuntimeThreadManager {
             bail!("workspace must not be empty");
         }
 
+        // Source resolution reads config files. Do it off the Tokio worker,
+        // then recheck the conversation identity before committing the grant.
+        let shell_policy_workspace = if req.allow_shell == Some(true) || req.workspace.is_some() {
+            let current = self.get_thread(id).await?;
+            if req.allow_shell.unwrap_or(current.allow_shell) {
+                let workspace = req.workspace.clone().unwrap_or(current.workspace);
+                self.validate_shell_access_policy(&workspace, config_path, config_profile)
+                    .await?;
+                Some(workspace)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let configured_sandbox_mode = self.read_config().sandbox_mode.clone();
         let (thread, changes, evicted_engine, posture_engine) = {
             // Take the active guard first so a workspace mutation can check
@@ -7619,6 +7650,29 @@ impl RuntimeThreadManager {
                 .store
                 .load_thread(id)
                 .with_context(|| format!("Thread not found: {id}"))?;
+            // Shell opt-in broadens only an idle conversation. Check while
+            // holding the same active + record locks used by turn admission.
+            if req.allow_shell == Some(true)
+                && !thread.allow_shell
+                && active
+                    .engines
+                    .get(id)
+                    .and_then(|state| state.active_turn.as_ref())
+                    .is_some()
+            {
+                bail!(
+                    "thread '{id}' already has an active turn; finish it before enabling shell commands"
+                );
+            }
+            if req.allow_shell.unwrap_or(thread.allow_shell)
+                && (req.allow_shell.is_some() || req.workspace.is_some())
+                && shell_policy_workspace.as_deref()
+                    != Some(req.workspace.as_deref().unwrap_or(&thread.workspace))
+            {
+                bail!(
+                    "thread permissions changed during update; refresh the conversation before trying again"
+                );
+            }
             let mut changes = serde_json::Map::new();
             let policy_patch = if req.mode.is_some()
                 || req.permission_posture.is_some()
@@ -10818,6 +10872,49 @@ impl RuntimeThreadManager {
             .iter()
             .map(|(thread_id, manager)| (thread_id.clone(), manager.clone()))
             .collect()
+    }
+
+    /// A thread opt-in cannot override an externally controlled denial.
+    /// Root config is the user's default, so an explicit conversation opt-in
+    /// may override it. ProjectConfig is returned only for an explicit local
+    /// false, even when the host's merged Config was loaded in another folder.
+    /// Other external values come from loaded Config: this does not reload
+    /// changed files or revoke already-running shell jobs.
+    pub(crate) async fn validate_shell_access_policy(
+        &self,
+        workspace: &Path,
+        config_path: Option<&Path>,
+        config_profile: Option<&str>,
+    ) -> Result<()> {
+        use crate::config::ShellAccessControl;
+        let config = self.read_config().clone();
+        let workspace = workspace.to_path_buf();
+        let config_path = config_path.map(Path::to_path_buf);
+        let config_profile = config_profile.map(str::to_owned);
+        #[cfg(test)]
+        let env_ticket = crate::test_support::env_scope_ticket();
+        tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            let _membership = crate::test_support::join_env_scope(env_ticket);
+            let control = config.allow_shell_control(
+                config_path.as_deref(),
+                config_profile.as_deref(),
+                &workspace,
+            );
+            let denied = match control {
+                ShellAccessControl::Unset | ShellAccessControl::RootConfig => false,
+                ShellAccessControl::ProjectConfig | ShellAccessControl::Ambiguous => true,
+                ShellAccessControl::Profile
+                | ShellAccessControl::Environment
+                | ShellAccessControl::ManagedConfig => !config.allow_shell(),
+            };
+            if denied {
+                bail!("shell commands are restricted by {}", control.label());
+            }
+            Ok(())
+        })
+        .await
+        .context("shell policy inspection worker failed")?
     }
 
     /// The sandbox policy an API-created job inherits — the same posture

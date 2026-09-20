@@ -218,6 +218,15 @@ pub(super) async fn create_thread_job(
             "this thread does not allow shell commands",
         ));
     }
+    state
+        .runtime_threads
+        .validate_shell_access_policy(
+            &thread.workspace,
+            state.config_path.as_deref(),
+            state.config_profile.as_deref(),
+        )
+        .await
+        .map_err(|error| ApiError::forbidden(error.to_string()))?;
     if let Some(cwd) = request.cwd.as_deref() {
         let resolved = std::path::Path::new(cwd);
         let resolved = if resolved.is_absolute() {

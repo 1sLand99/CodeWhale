@@ -566,6 +566,7 @@ fn default_runtime_capabilities() -> RuntimeCapabilities {
     RuntimeCapabilities {
         account_session: true,
         threads: true,
+        thread_shell_consent: true,
         turns: true,
         turn_operation_idempotency: true,
         turn_operation_lookup: true,
@@ -5125,7 +5126,12 @@ async fn update_thread(
 ) -> Result<Json<ThreadRecord>, ApiError> {
     let thread = state
         .runtime_threads
-        .update_thread(&id, req)
+        .update_thread_with_shell_policy(
+            &id,
+            req,
+            state.config_path.as_deref(),
+            state.config_profile.as_deref(),
+        )
         .await
         .map_err(map_thread_err)?;
     Ok(Json(thread))
@@ -9360,7 +9366,10 @@ fn map_thread_err(err: anyhow::Error) -> ApiError {
         || lower.starts_with("thread not found:")
     {
         ApiError::not_found(message)
+    } else if message.starts_with("shell commands are restricted by ") {
+        ApiError::forbidden(message)
     } else if message.contains("already has an active turn")
+        || message.contains("thread permissions changed during update")
         || message.contains("No active turn")
         || message.contains("is not active")
         // A steer the engine dropped: the turn moved on before the model saw
