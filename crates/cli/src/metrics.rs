@@ -1106,7 +1106,9 @@ fn compaction_receipt_identity(v: &Value, runtime: bool) -> Option<String> {
         )
     } else {
         (
-            v.pointer("/details/session_id")?,
+            v.pointer("/details/thread_id")
+                .filter(|id| id.is_string())
+                .or_else(|| v.pointer("/details/session_id"))?,
             v.pointer("/details/compaction_id")?,
         )
     };
@@ -1481,7 +1483,7 @@ mod tests {
     fn compaction_audit_counts_usage_refusals_and_deduplicates_runtime_receipt() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let completed = serde_json::json!({"ts": "2026-09-19T12:00:00Z", "event": "compaction.completed", "details": {
-            "session_id": "thread-a", "compaction_id": "pass-a", "trigger": "manual", "path": "summary",
+            "session_id": "engine-session-a", "thread_id": "thread-a", "compaction_id": "pass-a", "trigger": "manual", "path": "summary",
             "reduction_ratio": 0.75, "summarizer_usage": {"input_tokens": 120, "output_tokens": 15}
         }});
         let refused = serde_json::json!({"ts": "2026-09-19T12:01:00Z", "event": "compaction.refused", "details": {"reason": "retained_floor"}});

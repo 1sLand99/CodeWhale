@@ -82,6 +82,7 @@ impl Engine {
         mut details: serde_json::Value,
     ) {
         details["session_id"] = serde_json::json!(self.session.id);
+        details["thread_id"] = serde_json::json!(self.config.runtime_services.active_thread_id);
         details["model"] = serde_json::json!(self.config.model);
         if let Err(error) = tokio::task::spawn_blocking(move || {
             crate::audit::log_sensitive_event(event, details);
