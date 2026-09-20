@@ -41,6 +41,38 @@ use tokio::time::timeout;
 use super::diagnostics::{Diagnostic, Severity};
 use crate::utils::spawn_supervised;
 
+/// A publication retains the server's document version instead of pretending
+/// that a matching URI alone proves which text was checked.
+#[derive(Debug)]
+pub struct DiagnosticPublication {
+    pub items: Vec<Diagnostic>,
+    pub document_version: Option<i64>,
+    pub diagnostic_version: Option<i64>,
+}
+
+impl DiagnosticPublication {
+    #[must_use]
+    pub fn freshness(&self) -> &'static str {
+        if self.document_version.is_some() && self.document_version == self.diagnostic_version {
+            "verified"
+        } else {
+            "unverified"
+        }
+    }
+}
+
+// Diagnostic-only transports have no document-version proof. Existing callers
+// may still use their results, but must not claim freshness from an empty list.
+impl From<Vec<Diagnostic>> for DiagnosticPublication {
+    fn from(items: Vec<Diagnostic>) -> Self {
+        Self {
+            items,
+            document_version: None,
+            diagnostic_version: None,
+        }
+    }
+}
+
 /// Trait the LSP manager talks to. A real LSP server speaks this via stdio;
 /// tests use an in-process fake.
 #[async_trait]
@@ -54,7 +86,7 @@ pub trait LspTransport: Send + Sync {
         path: &Path,
         text: &str,
         wait: Duration,
-    ) -> Result<Vec<Diagnostic>>;
+    ) -> Result<DiagnosticPublication>;
 
     /// Send a JSON-RPC request and wait up to `wait` for the reply.
     ///
@@ -88,7 +120,8 @@ pub struct StdioLspTransport {
     tx_outbound: mpsc::Sender<Vec<u8>>,
     /// Inbound diagnostics queue. We push every `publishDiagnostics`
     /// notification into here and the public API drains the relevant entries.
-    diagnostics_rx: AsyncMutex<mpsc::Receiver<(PathBuf, Vec<Diagnostic>)>>,
+    diagnostics_gate: AsyncMutex<()>,
+    diagnostics_rx: AsyncMutex<mpsc::Receiver<(PathBuf, Option<i64>, Vec<Diagnostic>)>>,
     /// Map of in-flight request id -> reply slot for model-facing intelligence
     /// requests (definition, references, symbols).
     pending: Arc<AsyncMutex<HashMap<i64, oneshot::Sender<Value>>>>,
@@ -132,7 +165,7 @@ impl StdioLspTransport {
 
         let (tx_outbound, rx_outbound) = mpsc::channel::<Vec<u8>>(64);
         let (tx_inbound, rx_inbound) = mpsc::channel::<Value>(64);
-        let (tx_diag, rx_diag) = mpsc::channel::<(PathBuf, Vec<Diagnostic>)>(64);
+        let (tx_diag, rx_diag) = mpsc::channel::<(PathBuf, Option<i64>, Vec<Diagnostic>)>(64);
 
         // Writer task: drain outbound channel, frame with Content-Length, write to stdin.
         spawn_supervised(
@@ -167,7 +200,7 @@ impl StdioLspTransport {
                 "rootUri": uri_from_path(&workspace),
                 "capabilities": {
                     "textDocument": {
-                        "publishDiagnostics": { "relatedInformation": false }
+                        "publishDiagnostics": { "relatedInformation": false, "versionSupport": true }
                     }
                 },
                 "workspaceFolders": [{
@@ -193,6 +226,7 @@ impl StdioLspTransport {
         Ok(Self {
             child: AsyncMutex::new(Some(child)),
             tx_outbound,
+            diagnostics_gate: AsyncMutex::new(()),
             diagnostics_rx: AsyncMutex::new(rx_diag),
             pending,
             next_id: AsyncMutex::new(2),
@@ -203,14 +237,12 @@ impl StdioLspTransport {
 }
 
 impl StdioLspTransport {
-    async fn open_or_change(&self, path: &Path, text: &str) -> Result<String> {
+    async fn open_or_change(&self, path: &Path, text: &str) -> Result<(String, i64)> {
         let path_buf = path.to_path_buf();
         let uri = uri_from_path(&path_buf);
         let mut opened = self.opened.lock().await;
         let is_new = !opened.contains_key(&path_buf);
         let new_version = opened.get(&path_buf).copied().unwrap_or(0) + 1;
-        opened.insert(path_buf, new_version);
-        drop(opened);
 
         let payload = if is_new {
             json!({
@@ -239,7 +271,8 @@ impl StdioLspTransport {
             })
         };
         send_message(&self.tx_outbound, &payload).await?;
-        Ok(uri)
+        opened.insert(path_buf, new_version);
+        Ok((uri, new_version))
     }
 }
 
@@ -250,48 +283,54 @@ impl LspTransport for StdioLspTransport {
         path: &Path,
         text: &str,
         wait: Duration,
-    ) -> Result<Vec<Diagnostic>> {
-        let path_buf = path.to_path_buf();
-        self.open_or_change(path, text).await?;
-
-        // Drain matching `publishDiagnostics` notifications until `wait`
-        // elapses. Servers typically publish within a few hundred ms; for
-        // initial cold-start (rust-analyzer) it can be many seconds — but
-        // the manager guards us with a separate timeout.
+    ) -> Result<DiagnosticPublication> {
+        // One receiver cannot serve concurrent polling safely: serialize the
+        // open/version/send/wait transaction, including semantic ensure_open.
         let deadline = tokio::time::Instant::now() + wait;
-        let mut latest: Option<Vec<Diagnostic>> = None;
-
+        let _gate = timeout(wait, self.diagnostics_gate.lock())
+            .await
+            .map_err(|_| anyhow!("LSP diagnostics timed out waiting for another document"))?;
+        let path_buf = path.to_path_buf();
+        let (_, version) = timeout(
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+            self.open_or_change(path, text),
+        )
+        .await
+        .map_err(|_| anyhow!("LSP diagnostics timed out sending document"))??;
         loop {
-            let now = tokio::time::Instant::now();
-            if now >= deadline {
-                break;
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(anyhow!(
+                    "LSP diagnostics timed out before a current publication"
+                ));
             }
-            let remaining = deadline - now;
             let mut rx = self.diagnostics_rx.lock().await;
-            let next = match timeout(remaining, rx.recv()).await {
+            let (file, published_version, items) = match timeout(remaining, rx.recv()).await {
                 Ok(Some(item)) => item,
                 Ok(None) => {
                     return Err(anyhow!(
                         "LSP diagnostics channel closed before publishDiagnostics"
                     ));
                 }
-                Err(_) => break, // timed out
+                Err(_) => {
+                    return Err(anyhow!(
+                        "LSP diagnostics timed out before a current publication"
+                    ));
+                }
             };
-            drop(rx);
-            let (file, items) = next;
-            if file == path_buf {
-                latest = Some(items);
-                // We have a payload — return immediately. If the server
-                // re-publishes after rapid edits, the next call will sync.
-                break;
+            if file != path_buf || published_version.is_some_and(|published| published != version) {
+                continue;
             }
-            // Otherwise: notification was for a different file we previously
-            // opened. Discard and continue waiting.
+            return Ok(DiagnosticPublication {
+                items,
+                document_version: Some(version),
+                diagnostic_version: published_version,
+            });
         }
-        Ok(latest.unwrap_or_default())
     }
 
     async fn ensure_open(&self, path: &Path, text: &str) -> Result<()> {
+        let _gate = self.diagnostics_gate.lock().await;
         self.open_or_change(path, text).await?;
         Ok(())
     }
@@ -427,15 +466,15 @@ fn parse_header(buf: &[u8]) -> Option<(usize, usize)> {
 /// notifications/responses, and routes accordingly.
 async fn dispatcher_task(
     mut rx: mpsc::Receiver<Value>,
-    tx_diag: mpsc::Sender<(PathBuf, Vec<Diagnostic>)>,
+    tx_diag: mpsc::Sender<(PathBuf, Option<i64>, Vec<Diagnostic>)>,
     pending: Arc<AsyncMutex<HashMap<i64, oneshot::Sender<Value>>>>,
 ) {
     while let Some(value) = rx.recv().await {
         // Notifications have a `method` and no `id`.
         let method = value.get("method").and_then(|v| v.as_str());
         if method == Some("textDocument/publishDiagnostics") {
-            if let Some((path, diags)) = parse_publish_diagnostics(&value) {
-                let _ = tx_diag.send((path, diags)).await;
+            if let Some(publication) = parse_publish_diagnostics(&value) {
+                let _ = tx_diag.send(publication).await;
             }
             continue;
         }
@@ -450,10 +489,14 @@ async fn dispatcher_task(
 }
 
 /// Decode a `textDocument/publishDiagnostics` notification.
-fn parse_publish_diagnostics(value: &Value) -> Option<(PathBuf, Vec<Diagnostic>)> {
+fn parse_publish_diagnostics(value: &Value) -> Option<(PathBuf, Option<i64>, Vec<Diagnostic>)> {
     let params = value.get("params")?;
     let uri = params.get("uri")?.as_str()?;
     let path = path_from_uri(uri)?;
+    let version = match params.get("version") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(value.as_i64()?),
+    };
     let raw = params.get("diagnostics")?.as_array()?;
     let mut out = Vec::with_capacity(raw.len());
     for d in raw {
@@ -475,7 +518,7 @@ fn parse_publish_diagnostics(value: &Value) -> Option<(PathBuf, Vec<Diagnostic>)
             message,
         });
     }
-    Some((path, out))
+    Some((path, version, out))
 }
 
 /// Convert a filesystem path to a `file://` URI. Best-effort — we do not
@@ -535,8 +578,9 @@ mod tests {
                 ]
             }
         });
-        let (path, diags) = parse_publish_diagnostics(&payload).expect("parses");
+        let (path, version, diags) = parse_publish_diagnostics(&payload).expect("parses");
         assert_eq!(path, PathBuf::from("/tmp/foo.rs"));
+        assert_eq!(version, None);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].line, 12);
         assert_eq!(diags[0].column, 8);
@@ -559,6 +603,7 @@ mod tests {
         let transport = StdioLspTransport {
             child: AsyncMutex::new(None),
             tx_outbound,
+            diagnostics_gate: AsyncMutex::new(()),
             diagnostics_rx: AsyncMutex::new(rx_diag),
             pending: Arc::new(AsyncMutex::new(HashMap::new())),
             next_id: AsyncMutex::new(1),
@@ -579,5 +624,166 @@ mod tests {
             error.to_string().contains("diagnostics channel closed"),
             "unexpected error: {error}"
         );
+    }
+
+    fn diagnostic_fixture() -> (
+        StdioLspTransport,
+        mpsc::Receiver<Vec<u8>>,
+        mpsc::Sender<(PathBuf, Option<i64>, Vec<Diagnostic>)>,
+    ) {
+        let (tx_outbound, rx_outbound) = mpsc::channel(8);
+        let (tx_diag, rx_diag) = mpsc::channel(8);
+        (
+            StdioLspTransport {
+                child: AsyncMutex::new(None),
+                tx_outbound,
+                diagnostics_gate: AsyncMutex::new(()),
+                diagnostics_rx: AsyncMutex::new(rx_diag),
+                pending: Arc::new(AsyncMutex::new(HashMap::new())),
+                next_id: AsyncMutex::new(1),
+                language_id: "rust".into(),
+                opened: AsyncMutex::new(HashMap::new()),
+            },
+            rx_outbound,
+            tx_diag,
+        )
+    }
+
+    async fn next_document(rx: &mut mpsc::Receiver<Vec<u8>>) -> Value {
+        let frame = rx.recv().await.unwrap();
+        let (start, _) = parse_header(&frame).unwrap();
+        serde_json::from_slice::<Value>(&frame[start..]).unwrap()
+    }
+
+    fn diagnostic(line: u32) -> Diagnostic {
+        Diagnostic {
+            line,
+            column: 1,
+            severity: Severity::Error,
+            message: "fixture".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn diagnostic_freshness_rejects_old_version_and_accepts_current_empty_publication() {
+        let (transport, mut outbound, diag) = diagnostic_fixture();
+        let server = tokio::spawn(async move {
+            let first = next_document(&mut outbound).await;
+            assert_eq!(first["method"], "textDocument/didOpen");
+            assert_eq!(first["params"]["textDocument"]["version"], 1);
+            let path =
+                path_from_uri(first["params"]["textDocument"]["uri"].as_str().unwrap()).unwrap();
+            diag.send((path.clone(), Some(1), vec![diagnostic(1)]))
+                .await
+                .unwrap();
+            let second = next_document(&mut outbound).await;
+            assert_eq!(second["method"], "textDocument/didChange");
+            assert_eq!(second["params"]["textDocument"]["version"], 2);
+            assert_eq!(second["params"]["contentChanges"][0]["text"], "new 🐋 text");
+            diag.send((path.clone(), Some(1), vec![diagnostic(99)]))
+                .await
+                .unwrap();
+            diag.send((path, Some(2), vec![])).await.unwrap();
+        });
+        let path = Path::new("/tmp/freshness.rs");
+        let first = transport
+            .diagnostics_for(path, "old text", Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(first.freshness(), "verified");
+        assert_eq!(first.items[0].line, 1);
+        let second = transport
+            .diagnostics_for(path, "new 🐋 text", Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(second.freshness(), "verified");
+        assert_eq!(second.document_version, Some(2));
+        assert_eq!(second.diagnostic_version, Some(2));
+        assert!(
+            second.items.is_empty(),
+            "old error must not apply to the new text"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn diagnostic_freshness_serializes_concurrent_file_requests() {
+        let (transport, mut outbound, diag) = diagnostic_fixture();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let request = next_document(&mut outbound).await;
+                assert!(
+                    matches!(outbound.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+                    "second file must not advance before this publication"
+                );
+                let path =
+                    path_from_uri(request["params"]["textDocument"]["uri"].as_str().unwrap())
+                        .unwrap();
+                let line = if path.ends_with("one.rs") { 1 } else { 2 };
+                diag.send((
+                    PathBuf::from("/tmp/unrelated.rs"),
+                    Some(1),
+                    vec![diagnostic(99)],
+                ))
+                .await
+                .unwrap();
+                diag.send((path, Some(1), vec![diagnostic(line)]))
+                    .await
+                    .unwrap();
+            }
+        });
+        let (one, two) = tokio::join!(
+            transport.diagnostics_for(Path::new("/tmp/one.rs"), "one", Duration::from_secs(1)),
+            transport.diagnostics_for(Path::new("/tmp/two.rs"), "two", Duration::from_secs(1)),
+        );
+        assert_eq!(one.unwrap().items[0].line, 1);
+        assert_eq!(two.unwrap().items[0].line, 2);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn diagnostic_freshness_unversioned_is_unverified_and_silence_is_error() {
+        let (transport, mut outbound, diag) = diagnostic_fixture();
+        let server = tokio::spawn(async move {
+            let request = next_document(&mut outbound).await;
+            let path =
+                path_from_uri(request["params"]["textDocument"]["uri"].as_str().unwrap()).unwrap();
+            diag.send((path, None, vec![])).await.unwrap();
+            // Keep the channels alive while the second request times out.
+            let _ = next_document(&mut outbound).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        });
+        let response = transport
+            .diagnostics_for(
+                Path::new("/tmp/unversioned.rs"),
+                "text",
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.freshness(), "unverified");
+        assert_eq!(response.diagnostic_version, None);
+        assert!(
+            transport
+                .diagnostics_for(
+                    Path::new("/tmp/silent.rs"),
+                    "text",
+                    Duration::from_millis(10)
+                )
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("timed out")
+        );
+        server.abort();
+    }
+
+    #[test]
+    fn diagnostic_freshness_parser_retains_version_and_rejects_malformed_version() {
+        let mut payload =
+            json!({"params":{"uri":"file:///tmp/version.rs","version":4,"diagnostics":[]}});
+        assert_eq!(parse_publish_diagnostics(&payload).unwrap().1, Some(4));
+        payload["params"]["version"] = json!("4");
+        assert!(parse_publish_diagnostics(&payload).is_none());
     }
 }

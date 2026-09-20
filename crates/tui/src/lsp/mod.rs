@@ -107,7 +107,7 @@ impl Default for LspConfig {
 impl LspConfig {
     /// Resolve `(command, args)` for `lang`. User-supplied overrides take
     /// precedence over the built-in registry.
-    fn resolve_command(&self, lang: Language) -> Option<(String, Vec<String>)> {
+    pub(crate) fn resolve_command(&self, lang: Language) -> Option<(String, Vec<String>)> {
         if let Some(parts) = self.servers.get(lang.as_key())
             && let Some((first, rest)) = parts.split_first()
         {
@@ -150,6 +150,7 @@ pub(crate) struct LintReadResult {
     pub(crate) file: PathBuf,
     pub(crate) status: LintReadStatus,
     pub(crate) items: Vec<Diagnostic>,
+    pub(crate) freshness: DiagnosticFreshness,
     /// Number of diagnostics after severity selection but before the
     /// configured per-file cap was applied. Unknown when the request did not
     /// complete successfully.
@@ -164,8 +165,18 @@ pub(crate) enum LintReadStatus {
     Timeout { wait_ms: u64 },
 }
 
+#[derive(Debug, Default, serde::Serialize)]
+pub(crate) struct DiagnosticFreshness {
+    pub(crate) source_revision: Option<String>,
+    pub(crate) document_version: Option<i64>,
+    pub(crate) diagnostic_version: Option<i64>,
+    /// Only an exact publication version match proves the text was checked.
+    pub(crate) freshness: Option<&'static str>,
+}
+
 struct DiagnosticPollSuccess {
     block: DiagnosticBlock,
+    freshness: DiagnosticFreshness,
     total_diagnostic_count: usize,
     truncated: bool,
 }
@@ -198,6 +209,46 @@ impl LspManager {
         &self.config
     }
 
+    async fn read_workspace_text(&self, file: &Path) -> std::io::Result<String> {
+        let root = self.workspace.clone();
+        let requested = file.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            use std::io::Read;
+            // The caller may already have resolved the configured workspace
+            // alias (macOS /var -> /private/var, or a workspace-root symlink).
+            // Resolve only that authorized root, never the requested file:
+            // internal links must still be rejected by the confined opener.
+            let canonical_root = root.canonicalize()?;
+            let relative = requested
+                .strip_prefix(&root)
+                .or_else(|_| requested.strip_prefix(&canonical_root))
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "LSP file is outside the workspace",
+                    )
+                })?;
+            // Match the existing workspace file serving ceiling. Decode only
+            // bounded UTF-8 bytes from the same no-follow workspace opener.
+            const MAX_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
+            let file = crate::fleet::files::WorkspaceFile::open(&canonical_root, relative, false)?;
+            let mut bytes = Vec::new();
+            file.open_file()?
+                .take(MAX_DOCUMENT_BYTES + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > MAX_DOCUMENT_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "LSP file exceeds the document limit",
+                ));
+            }
+            String::from_utf8(bytes)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        })
+        .await
+        .map_err(std::io::Error::other)?
+    }
+
     /// Inject a fake transport for a language. Used by tests so we never
     /// fork a real LSP server in CI.
     #[cfg(test)]
@@ -228,7 +279,7 @@ impl LspManager {
             return None;
         }
 
-        let text = match tokio::fs::read_to_string(file).await {
+        let text = match self.read_workspace_text(file).await {
             Ok(text) => text,
             Err(err) => {
                 tracing::debug!(?err, file = %file.display(), "lsp: read file failed");
@@ -271,16 +322,19 @@ impl LspManager {
         transport: Arc<dyn LspTransport>,
     ) -> DiagnosticPollOutcome {
         let wait = Duration::from_millis(self.config.poll_after_edit_ms);
-        // The stdio transport treats its own deadline as an empty diagnostics
-        // result. Give it a slightly longer inner deadline so this outer bound
-        // owns the timeout state while still accepting an explicit empty
-        // publishDiagnostics payload as success.
+        // The outer bound owns timeout reporting, including time waiting for
+        // another operation on the same transport. An explicit empty
+        // publishDiagnostics payload is a successful publication.
         let inner_wait = wait.saturating_add(Duration::from_millis(100));
         let raw = match timeout(wait, transport.diagnostics_for(file, text, inner_wait)).await {
             Ok(Ok(items)) => items,
             Ok(Err(err)) => {
                 tracing::debug!(?err, file = %file.display(), "lsp: diagnostics call failed");
-                return DiagnosticPollOutcome::Error(err.to_string());
+                return if err.to_string().contains("timed out") {
+                    DiagnosticPollOutcome::Timeout
+                } else {
+                    DiagnosticPollOutcome::Error(err.to_string())
+                };
             }
             Err(_) => {
                 tracing::debug!(file = %file.display(), "lsp: diagnostics timed out");
@@ -288,9 +342,16 @@ impl LspManager {
             }
         };
 
+        let freshness = DiagnosticFreshness {
+            source_revision: Some(crate::hashing::sha256_hex(text.as_bytes())),
+            document_version: raw.document_version,
+            diagnostic_version: raw.diagnostic_version,
+            freshness: Some(raw.freshness()),
+        };
         // Filter, sort, and truncate.
         let include_warnings = self.config.include_warnings;
         let mut items: Vec<Diagnostic> = raw
+            .items
             .into_iter()
             .filter(|d| match d.severity {
                 Severity::Error => true,
@@ -313,6 +374,7 @@ impl LspManager {
         block.truncate(self.config.max_diagnostics_per_file);
         DiagnosticPollOutcome::Success(DiagnosticPollSuccess {
             block,
+            freshness,
             total_diagnostic_count,
             truncated,
         })
@@ -325,7 +387,7 @@ impl LspManager {
         custom: &CustomLspDef,
     ) -> Option<DiagnosticBlock> {
         let ext = file.extension()?.to_str()?.to_ascii_lowercase();
-        let text = match tokio::fs::read_to_string(file).await {
+        let text = match self.read_workspace_text(file).await {
             Ok(t) => t,
             Err(err) => {
                 tracing::debug!(?err, file = %file.display(), "lsp: read file failed");
@@ -452,34 +514,40 @@ impl LspManager {
         let wait = Duration::from_millis(self.config.poll_after_edit_ms);
         match operation {
             "diagnostics" => {
-                let block = self
-                    .diagnostics_for(file, 0)
-                    .await
-                    .map(|b| {
-                        serde_json::json!({
-                            "file": b.file.display().to_string(),
-                            "items": b.items.iter().map(|d| serde_json::json!({
-                                "line": d.line,
-                                "column": d.column,
-                                "severity": format!("{:?}", d.severity).to_ascii_lowercase(),
-                                "message": d.message,
-                            })).collect::<Vec<_>>(),
-                        })
-                    })
-                    .unwrap_or_else(|| {
-                        serde_json::json!({
-                            "file": relative_to_workspace(&self.workspace, file).display().to_string(),
-                            "items": [],
-                        })
-                    });
-                Ok(block)
+                let result = self
+                    .diagnostics_for_paths(&[file.to_path_buf()])
+                    .await?
+                    .into_iter()
+                    .next()
+                    .ok_or("LSP diagnostics returned no outcome")?;
+                match result.status {
+                    LintReadStatus::Error(error) => Err(error),
+                    LintReadStatus::Timeout { wait_ms } => {
+                        Err(format!("LSP diagnostics timed out after {wait_ms} ms"))
+                    }
+                    LintReadStatus::Success => Ok(serde_json::json!({
+                        "file": result.file.display().to_string(),
+                        "items": result.items.iter().map(|d| serde_json::json!({
+                            "line": d.line, "column": d.column,
+                            "severity": format!("{:?}", d.severity).to_ascii_lowercase(),
+                            "message": d.message,
+                        })).collect::<Vec<_>>(),
+                        "source_revision": result.freshness.source_revision,
+                        "document_version": result.freshness.document_version,
+                        "diagnostic_version": result.freshness.diagnostic_version,
+                        "freshness": result.freshness.freshness,
+                        "total_diagnostic_count": result.total_diagnostic_count,
+                        "truncated": result.truncated,
+                    })),
+                }
             }
             "symbols" | "definition" | "references" => {
                 let transport = self
                     .transport_for_path(file)
                     .await
                     .ok_or_else(|| format!("no LSP server for {}", file.display()))?;
-                let text = tokio::fs::read_to_string(file)
+                let text = self
+                    .read_workspace_text(file)
                     .await
                     .map_err(|err| format!("read {}: {err}", file.display()))?;
                 transport
@@ -574,13 +642,14 @@ impl LspManager {
         let mut results = Vec::with_capacity(files.len());
         for file in files {
             let relative_file = relative_to_workspace(&self.workspace, file);
-            let text = match tokio::fs::read_to_string(file).await {
+            let text = match self.read_workspace_text(file).await {
                 Ok(text) => text,
                 Err(err) => {
                     results.push(LintReadResult {
                         file: relative_file,
                         status: LintReadStatus::Error(format!("failed to read file: {err}")),
                         items: Vec::new(),
+                        freshness: DiagnosticFreshness::default(),
                         total_diagnostic_count: None,
                         truncated: false,
                     });
@@ -594,6 +663,7 @@ impl LspManager {
                         "no LSP server is available for this file".to_string(),
                     ),
                     items: Vec::new(),
+                    freshness: DiagnosticFreshness::default(),
                     total_diagnostic_count: None,
                     truncated: false,
                 });
@@ -605,6 +675,7 @@ impl LspManager {
                     file: outcome.block.file,
                     status: LintReadStatus::Success,
                     items: outcome.block.items,
+                    freshness: outcome.freshness,
                     total_diagnostic_count: Some(outcome.total_diagnostic_count),
                     truncated: outcome.truncated,
                 },
@@ -614,6 +685,7 @@ impl LspManager {
                         "LSP diagnostics request failed: {error}"
                     )),
                     items: Vec::new(),
+                    freshness: DiagnosticFreshness::default(),
                     total_diagnostic_count: None,
                     truncated: false,
                 },
@@ -623,6 +695,7 @@ impl LspManager {
                         wait_ms: self.config.poll_after_edit_ms,
                     },
                     items: Vec::new(),
+                    freshness: DiagnosticFreshness::default(),
                     total_diagnostic_count: None,
                     truncated: false,
                 },
@@ -760,9 +833,9 @@ pub(crate) mod tests {
             _path: &Path,
             _text: &str,
             _wait: Duration,
-        ) -> anyhow::Result<Vec<Diagnostic>> {
+        ) -> anyhow::Result<crate::lsp::client::DiagnosticPublication> {
             self.calls.fetch_add(1, Ordering::Relaxed);
-            Ok(self.items.clone())
+            Ok(self.items.clone().into())
         }
 
         async fn shutdown(&self) {}
@@ -1090,5 +1163,132 @@ pub(crate) mod tests {
 
         // No custom config for .lua and Lua is not built-in → should be None.
         assert!(mgr.diagnostics_for(&path, 1).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn diagnostic_freshness_intelligence_distinguishes_no_server_and_unverified_empty() {
+        let root = tempfile::tempdir().unwrap();
+        let unknown = root.path().join("notes.unsupported_extension");
+        std::fs::write(&unknown, "text").unwrap();
+        let manager = LspManager::new(LspConfig::default(), root.path().to_owned());
+        let error = manager
+            .intelligence("diagnostics", &unknown, None, None, None)
+            .await
+            .unwrap_err();
+        assert!(error.contains("no LSP server"));
+        let file = root.path().join("main.rs");
+        let text = "fn main() { /* 🐋 */ }";
+        std::fs::write(&file, text).unwrap();
+        manager
+            .install_test_transport(Language::Rust, Arc::new(FakeTransport::new(vec![])))
+            .await;
+        let result = manager
+            .intelligence("diagnostics", &file, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(result["items"], serde_json::json!([]));
+        assert_eq!(
+            result["source_revision"],
+            crate::hashing::sha256_hex(text.as_bytes())
+        );
+        assert_eq!(result["freshness"], "unverified");
+        assert!(result["diagnostic_version"].is_null());
+        assert_eq!(result["total_diagnostic_count"], 0);
+    }
+
+    #[tokio::test]
+    async fn diagnostic_freshness_missing_binary_is_not_clean() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("main.rs");
+        std::fs::write(&file, "fn main() {}").unwrap();
+        let mut config = LspConfig::default();
+        config.servers.insert(
+            "rust".into(),
+            vec![
+                root.path()
+                    .join("nonexistent-language-server")
+                    .display()
+                    .to_string(),
+            ],
+        );
+        let manager = LspManager::new(config, root.path().to_owned());
+        assert!(
+            manager
+                .intelligence("diagnostics", &file, None, None, None)
+                .await
+                .unwrap_err()
+                .contains("no LSP server")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn diagnostic_freshness_confined_read_rejects_replaced_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret.rs");
+        std::fs::write(&secret, "outside text").unwrap();
+        let file = root.path().join("main.rs");
+        std::os::unix::fs::symlink(&secret, &file).unwrap();
+        let manager = LspManager::new(LspConfig::default(), root.path().to_owned());
+        let fake = Arc::new(FakeTransport::new(vec![]));
+        manager
+            .install_test_transport(Language::Rust, fake.clone())
+            .await;
+        assert!(
+            manager
+                .intelligence("diagnostics", &file, None, None, None)
+                .await
+                .unwrap_err()
+                .contains("read file")
+        );
+        assert_eq!(
+            fake.call_count(),
+            0,
+            "outside bytes must not reach the language server"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn diagnostic_freshness_accepts_verified_workspace_root_alias_only() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let alias = root.path().join("workspace-alias");
+        std::os::unix::fs::symlink(&workspace, &alias).unwrap();
+        let original = workspace.join("main.rs");
+        std::fs::write(&original, "fn main() {} 🐋").unwrap();
+        let manager = LspManager::new(LspConfig::default(), alias.clone());
+        assert_eq!(
+            manager
+                .read_workspace_text(&original.canonicalize().unwrap())
+                .await
+                .unwrap(),
+            "fn main() {} 🐋"
+        );
+        assert_eq!(
+            manager
+                .read_workspace_text(&alias.join("main.rs"))
+                .await
+                .unwrap(),
+            "fn main() {} 🐋"
+        );
+        let outside = root.path().join("outside.rs");
+        std::fs::write(&outside, "not in workspace").unwrap();
+        assert!(manager.read_workspace_text(&outside).await.is_err());
+        std::os::unix::fs::symlink(&outside, workspace.join("escape.rs")).unwrap();
+        assert!(
+            manager
+                .read_workspace_text(&alias.join("escape.rs"))
+                .await
+                .is_err()
+        );
+        assert!(
+            manager
+                .read_workspace_text(&workspace.canonicalize().unwrap().join("escape.rs"))
+                .await
+                .is_err()
+        );
     }
 }

@@ -16736,7 +16736,8 @@ async fn lsp_routes_serve_workspace_files_through_a_transport() -> Result<()> {
         .error_for_status()?
         .json()
         .await?;
-    assert_eq!(none["items"].as_array().unwrap().len(), 0);
+    assert_eq!(none["ok"], false);
+    assert_eq!(none["reason"], "no_server");
 
     // Position routes validate `line` before touching LSP.
     let status = client
