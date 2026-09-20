@@ -404,8 +404,9 @@ mod tests {
     #[test]
     fn session_metrics_strip_is_on_by_default() {
         assert!(
-            crate::config::StatusItem::default_footer()
-                .contains(&crate::config::StatusItem::SessionMetrics)
+            crate::config::StatusItem::default_footer().contains(&crate::config::StatusItem::Ttft)
+                && crate::config::StatusItem::default_footer()
+                    .contains(&crate::config::StatusItem::OutputRate)
         );
         assert_eq!(
             crate::config::StatusItem::from_key("session_metrics"),
@@ -1366,8 +1367,9 @@ mod neutrality_tests {
     #[test]
     fn session_metrics_strip_is_on_by_default() {
         assert!(
-            crate::config::StatusItem::default_footer()
-                .contains(&crate::config::StatusItem::SessionMetrics)
+            crate::config::StatusItem::default_footer().contains(&crate::config::StatusItem::Ttft)
+                && crate::config::StatusItem::default_footer()
+                    .contains(&crate::config::StatusItem::OutputRate)
         );
         assert_eq!(
             crate::config::StatusItem::from_key("session_metrics"),

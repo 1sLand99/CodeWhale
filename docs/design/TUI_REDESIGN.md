@@ -243,3 +243,21 @@ record exact build and installation receipts separately.
   implement a visual treatment.
 - **Don't** describe reconstructed cells as host screenshots or static captures
   as motion proof, and don't imply every settings subview gained mouse parity.
+
+
+## Working-screen performance readings (2026-09-20)
+
+TTFT and output rate reuse the existing session accumulator. The compact footer
+keeps selected performance readings when they fit, shedding secondary counts
+and help first. `/statusline` offers separate Time to first token and Output
+rate controls with immediate preview, Enter to save and Esc to restore. Old
+`session_metrics` settings continue to enable both and become separate choices
+when edited. Full, compact and hidden row settings remain in `/config`.
+
+The motion focal point remains the shared activity marker: request progress,
+verification and completion use one cadence and the existing bounded completion
+settle. Numbers stay still between measured receipts, preserving legibility on
+video. There is no synthetic live speed counter, new timer or extra footer row.
+Reduced and still motion retain the same readings and explicit phase words.
+TTFT is a session average; throughput includes first-token wait and stream
+pauses, but excludes tool/idle gaps. Missing measurements stay absent.

@@ -218,6 +218,7 @@ fn workbench_settings_visual_evidence() {
         ("/fleet", "Coordinator", "fleet"),
         ("/plugin", "Extensions", "plugins"),
         ("/config", "Config", "settings"),
+        ("/statusline", "Status", "statusline"),
     ] {
         for (rows, cols) in SIZES {
             let (_workspace, mut tui) = start(rows, cols, true);

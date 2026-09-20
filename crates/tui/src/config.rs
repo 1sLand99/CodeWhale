@@ -2145,9 +2145,13 @@ pub enum StatusItem {
     Tokens,
     /// Prepaid remaining credit, refreshed once per turn completion.
     Balance,
-    /// The metrics line's latency pair: `ttft NNNms` and `NN tok/s`, from
-    /// the same engine timings and provider usage `/status` prints in full.
+    /// Legacy configuration alias enabling both TTFT and output rate.
+    /// The picker expands it into independently editable readings.
     SessionMetrics,
+    /// Mean measured time from request dispatch to the first token.
+    Ttft,
+    /// Provider output tokens divided by measured request time.
+    OutputRate,
     /// Leaf directory of the session workspace, left-truncated when long.
     /// Opt-in (#6112); off the default footer.
     Workspace,
@@ -2171,7 +2175,8 @@ impl StatusItem {
             StatusItem::Cost,
             StatusItem::Cache,
             StatusItem::Tokens,
-            StatusItem::SessionMetrics,
+            StatusItem::Ttft,
+            StatusItem::OutputRate,
         ]
     }
 
@@ -2187,6 +2192,8 @@ impl StatusItem {
             StatusItem::Tokens => "tokens",
             StatusItem::Balance => "balance",
             StatusItem::SessionMetrics => "session_metrics",
+            StatusItem::Ttft => "ttft",
+            StatusItem::OutputRate => "output_rate",
             StatusItem::Workspace => "workspace",
             StatusItem::GitBranch => "git_branch",
         }
@@ -2210,6 +2217,8 @@ impl StatusItem {
             | "rate_limit" => None,
             "balance" => Some(Self::Balance),
             "session_metrics" => Some(Self::SessionMetrics),
+            "ttft" => Some(Self::Ttft),
+            "output_rate" => Some(Self::OutputRate),
             "workspace" => Some(Self::Workspace),
             // Revived in #6112 as an opt-in metrics-line chip; it parses
             // again, so a config written between its #5950 retirement and
@@ -2231,6 +2240,8 @@ impl StatusItem {
             StatusItem::Tokens => "Output tokens",
             StatusItem::Balance => "Account balance",
             StatusItem::SessionMetrics => "Session metrics",
+            StatusItem::Ttft => "Time to first token",
+            StatusItem::OutputRate => "Output rate",
             StatusItem::Workspace => "Workspace",
             StatusItem::GitBranch => "Git branch",
         }
@@ -2249,12 +2260,15 @@ impl StatusItem {
             StatusItem::Tokens => "output tokens of the live or last turn",
             StatusItem::Balance => "remaining prepaid credit from the active provider",
             StatusItem::SessionMetrics => "time to first token and output rate",
+            StatusItem::Ttft => "average wait for the first token",
+            StatusItem::OutputRate => "average tok/s, including first-token wait",
             StatusItem::Workspace => "directory this session writes to",
             StatusItem::GitBranch => "branch the next commit lands on",
         }
     }
 
-    /// Every variant in display order — used by the picker to enumerate rows.
+    /// Editable items in display order. Legacy combined metrics parse but
+    /// expand to the two individual controls instead of appearing twice.
     #[must_use]
     pub fn all() -> &'static [StatusItem] {
         &[
@@ -2265,7 +2279,8 @@ impl StatusItem {
             StatusItem::Balance,
             StatusItem::Cache,
             StatusItem::Tokens,
-            StatusItem::SessionMetrics,
+            StatusItem::Ttft,
+            StatusItem::OutputRate,
             StatusItem::Workspace,
             StatusItem::GitBranch,
         ]

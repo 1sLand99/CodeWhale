@@ -12351,6 +12351,21 @@ fn status_items_scenario() {
         assert_eq!(StatusItem::Workspace.key(), "workspace");
         assert_eq!(StatusItem::GitBranch.key(), "git_branch");
     }
+    {
+        let tui: TuiConfig =
+            toml::from_str(r#"status_items = ["ttft", "output_rate", "session_metrics"]"#)
+                .expect("new and legacy metrics keys should parse");
+        assert_eq!(
+            tui.status_items,
+            Some(vec![
+                StatusItem::Ttft,
+                StatusItem::OutputRate,
+                StatusItem::SessionMetrics
+            ])
+        );
+        assert_eq!(StatusItem::Ttft.key(), "ttft");
+        assert_eq!(StatusItem::OutputRate.key(), "output_rate");
+    }
     // from status_items_deser_allows_missing_field
     {
         let toml_str = r#"

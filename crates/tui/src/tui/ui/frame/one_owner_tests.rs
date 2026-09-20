@@ -162,18 +162,15 @@ fn composed_frame_paints_each_fact_in_exactly_one_row() {
             ("model", model),
             ("cost", super::session_cost_label(&app)),
             ("agent count", "2 agents".to_string()),
-            (
-                "help hint",
-                crate::tui::shell_key_routing::info_help_hint(app.ui_locale),
-            ),
             ("ttft", "ttft 400ms".to_string()),
         ];
         facts.push(("context reading", format!("ctx {pct}%")));
+        facts.push(("output rate", "40 avg tok/s".to_string()));
         if width >= 120 {
-            facts.push(("output rate", "40 avg tok/s".to_string()));
-        } else {
-            // The billing tier takes priority over rate at narrow widths.
-            assert_eq!(count_rows_containing(&rows, "40 avg tok/s"), 0);
+            facts.push((
+                "help hint",
+                crate::tui::shell_key_routing::info_help_hint(app.ui_locale),
+            ));
         }
         for (name, needle) in facts {
             if needle.is_empty() {
@@ -418,7 +415,7 @@ fn row_presets_reclaim_rows_and_quiet_them_in_the_composed_frame() {
     assert_eq!(count_rows_containing(&rows, "deepseek-v4-pro"), 0);
 
     // Compact both: the rows are back, quieter — the posture and the
-    // route/reading/price, none of the live facts or telemetry.
+    // route/reading/price and measured performance, without secondary counts.
     app.posture_bar = ChromeRowPreset::Compact;
     app.metrics_line = ChromeRowPreset::Compact;
     let rows = draw(&mut app, width, height);
@@ -446,9 +443,10 @@ fn row_presets_reclaim_rows_and_quiet_them_in_the_composed_frame() {
         "{:?}",
         rows[metrics]
     );
+    assert!(rows[metrics].contains("ttft 400ms"), "{}", rows[metrics]);
+    assert!(rows[metrics].contains("40 avg tok/s"), "{}", rows[metrics]);
     for gone in [
-        "tok/s",
-        "ttft",
+        "↓ 1.2K",
         crate::tui::shell_key_routing::info_help_hint(app.ui_locale).as_str(),
     ] {
         assert!(
@@ -647,7 +645,14 @@ fn statusline_full_frame_presets_preserve_transcript_composer_and_hitboxes() {
                 assert_eq!(count_rows_containing(&rows, "ctx 0%"), 1, "{evidence}");
             }
             if metrics == ChromeRowPreset::Compact {
-                for shed in ["tok/s", "ttft", "Ctrl+/ help"] {
+                if width >= 60 {
+                    assert!(rows[usize::from(height - 1)].contains("ttft"), "{evidence}");
+                    assert!(
+                        rows[usize::from(height - 1)].contains("avg tok/s"),
+                        "{evidence}"
+                    );
+                }
+                for shed in ["↓ 1.2K", "Ctrl+/ help"] {
                     assert!(!rows[usize::from(height - 1)].contains(shed), "{evidence}");
                 }
             }
