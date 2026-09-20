@@ -3771,6 +3771,16 @@ impl Engine {
                             }));
                         }
 
+                        let result = match result {
+                            Ok(rich) => Ok(super::tool_media::project(
+                                rich,
+                                &session_id,
+                                &plan.id,
+                                &plan.name,
+                            )
+                            .await),
+                            Err(error) => Err(error),
+                        };
                         let content_blocks = result
                             .as_ref()
                             .map(|result| result.content_blocks.clone())
@@ -3915,10 +3925,10 @@ impl Engine {
                                 tool_exec_lock.clone(),
                                 tool_context_for_call(batch_tool_context.clone(), &tool_id),
                             ) => match result {
-                                Ok(rich) => (
-                                    ToolExecutionOutcome::from_legacy(Ok(rich.result)),
-                                    rich.content_blocks,
-                                ),
+                                Ok(rich) => {
+                                    let rich = super::tool_media::project(rich, &self.session.id, &tool_id, &tool_name).await;
+                                    (ToolExecutionOutcome::from_legacy(Ok(rich.result)), rich.content_blocks)
+                                },
                                 Err(err) => (
                                     ToolExecutionOutcome::from_legacy(Err(err)),
                                     Vec::new(),
@@ -4303,6 +4313,16 @@ impl Engine {
                         }));
                     }
 
+                    let result = match result {
+                        Ok(rich) => Ok(super::tool_media::project(
+                            rich,
+                            &self.session.id,
+                            &tool_id,
+                            &tool_name,
+                        )
+                        .await),
+                        Err(error) => Err(error),
+                    };
                     let content_blocks = result
                         .as_ref()
                         .map(|result| result.content_blocks.clone())
