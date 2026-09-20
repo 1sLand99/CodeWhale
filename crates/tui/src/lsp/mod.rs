@@ -121,15 +121,17 @@ impl LspConfig {
     }
 }
 
+type TransportSlot = Arc<AsyncMutex<Option<Arc<dyn LspTransport>>>>;
+
 /// The LspManager holds a lazily populated map of `Language -> Transport`.
 /// One transport is reused across files of the same language for the
 /// session's lifetime.
 pub struct LspManager {
     config: LspConfig,
     workspace: PathBuf,
-    /// Per-language transports. Wrapped in `Arc` so we can release the outer
-    /// lock before driving I/O on a single transport.
-    transports: AsyncMutex<HashMap<Language, Arc<dyn LspTransport>>>,
+    /// One startup slot per language. Cold callers share a handshake without
+    /// holding the map lock or blocking unrelated language servers.
+    transports: AsyncMutex<HashMap<Language, TransportSlot>>,
     /// Per-language "we already warned the user that the binary is missing"
     /// guard so we do not spam the audit log on every edit.
     missing_warned: AsyncMutex<HashSet<Language>>,
@@ -137,7 +139,7 @@ pub struct LspManager {
     /// real LSP processes. Keyed by language.
     test_transports: AsyncMutex<HashMap<Language, Arc<dyn LspTransport>>>,
     /// Per-extension transports for user-defined custom language servers.
-    custom_transports: AsyncMutex<HashMap<String, Arc<dyn LspTransport>>>,
+    custom_transports: AsyncMutex<HashMap<String, TransportSlot>>,
     /// Per-extension "we already warned" guard for custom servers.
     custom_missing_warned: AsyncMutex<HashSet<String>>,
 }
@@ -407,25 +409,18 @@ impl LspManager {
         ext: &str,
         def: &CustomLspDef,
     ) -> Option<Arc<dyn LspTransport>> {
-        if let Some(t) = self.custom_transports.lock().await.get(ext) {
-            return Some(t.clone());
-        }
-        match StdioLspTransport::spawn(
-            &def.command,
-            &def.args,
-            &def.language_id,
-            self.workspace.clone(),
-        )
-        .await
+        let slot = self
+            .custom_transports
+            .lock()
+            .await
+            .entry(ext.to_owned())
+            .or_default()
+            .clone();
+        match self
+            .cached_transport(&slot, &def.command, &def.args, &def.language_id)
+            .await
         {
-            Ok(t) => {
-                let arc: Arc<dyn LspTransport> = Arc::new(t);
-                self.custom_transports
-                    .lock()
-                    .await
-                    .insert(ext.to_string(), arc.clone());
-                Some(arc)
-            }
+            Ok(transport) => Some(transport),
             Err(err) => {
                 let key = ext.to_string();
                 let mut warned = self.custom_missing_warned.lock().await;
@@ -449,24 +444,47 @@ impl LspManager {
             return Some(t.clone());
         }
 
-        if let Some(t) = self.transports.lock().await.get(&lang) {
-            return Some(t.clone());
-        }
-
         let (cmd, args) = self.config.resolve_command(lang)?;
-        match StdioLspTransport::spawn(&cmd, &args, lang.language_id(), self.workspace.clone())
+        let slot = self
+            .transports
+            .lock()
+            .await
+            .entry(lang)
+            .or_default()
+            .clone();
+        match self
+            .cached_transport(&slot, &cmd, &args, lang.language_id())
             .await
         {
-            Ok(transport) => {
-                let arc: Arc<dyn LspTransport> = Arc::new(transport);
-                self.transports.lock().await.insert(lang, arc.clone());
-                Some(arc)
-            }
+            Ok(transport) => Some(transport),
             Err(err) => {
                 self.warn_missing_once(lang, &cmd, &err).await;
                 None
             }
         }
+    }
+
+    async fn cached_transport(
+        &self,
+        slot: &TransportSlot,
+        command: &str,
+        args: &[String],
+        language_id: &str,
+    ) -> anyhow::Result<Arc<dyn LspTransport>> {
+        let mut cached = slot.lock().await;
+        if let Some(transport) = cached.as_ref().filter(|transport| transport.is_alive()) {
+            return Ok(transport.clone());
+        }
+        // Only a later caller retries a dead process; never replay a failed
+        // operation or spawn a background restart loop.
+        if let Some(dead) = cached.take() {
+            dead.shutdown().await;
+        }
+        let transport: Arc<dyn LspTransport> = Arc::new(
+            StdioLspTransport::spawn(command, args, language_id, self.workspace.clone()).await?,
+        );
+        *cached = Some(transport.clone());
+        Ok(transport)
     }
 
     async fn warn_missing_once(&self, lang: Language, cmd: &str, err: &anyhow::Error) {
@@ -706,22 +724,21 @@ impl LspManager {
 
     /// Best-effort shutdown of every spawned transport. Called when the
     /// session ends.
-    #[expect(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub async fn shutdown_all(&self) {
-        let transports: Vec<Arc<dyn LspTransport>> =
+        let transports: Vec<TransportSlot> =
             self.transports.lock().await.values().cloned().collect();
-        let custom: Vec<Arc<dyn LspTransport>> = self
+        let custom: Vec<TransportSlot> = self
             .custom_transports
             .lock()
             .await
             .values()
             .cloned()
             .collect();
-        for transport in transports {
-            transport.shutdown().await;
-        }
-        for transport in custom {
-            transport.shutdown().await;
+        for slot in transports.into_iter().chain(custom) {
+            if let Some(transport) = slot.lock().await.take() {
+                transport.shutdown().await;
+            }
         }
     }
 }
@@ -839,6 +856,117 @@ pub(crate) mod tests {
         }
 
         async fn shutdown(&self) {}
+    }
+
+    #[cfg(unix)]
+    async fn cache_fixture(custom: bool) {
+        let root = tempfile::tempdir().unwrap();
+        let pids = root.path().join("pids");
+        let args = vec![
+            "-u".into(),
+            "-c".into(),
+            client::tests::STDIO_FIXTURE.into(),
+            "cache".into(),
+            pids.to_string_lossy().into_owned(),
+        ];
+        let mut config = LspConfig::default();
+        if custom {
+            config.custom.insert(
+                "cachetest".into(),
+                CustomLspDef {
+                    command: "python3".into(),
+                    args,
+                    language_id: "cachetest".into(),
+                },
+            );
+        } else {
+            let mut command = vec!["python3".into()];
+            command.extend(args);
+            config.servers.insert("python".into(), command);
+        }
+        let manager = LspManager::new(config, root.path().to_owned());
+        let path = root
+            .path()
+            .join(if custom { "file.cachetest" } else { "file.py" });
+        let (first, second, third) = tokio::join!(
+            manager.transport_for_path(&path),
+            manager.transport_for_path(&path),
+            manager.transport_for_path(&path)
+        );
+        let first = first.unwrap();
+        assert!(Arc::ptr_eq(&first, &second.unwrap()));
+        assert!(Arc::ptr_eq(&first, &third.unwrap()));
+        assert_eq!(std::fs::read_to_string(&pids).unwrap().lines().count(), 1);
+        assert!(
+            first
+                .request(
+                    "fixture/exit",
+                    serde_json::json!({}),
+                    Duration::from_secs(2)
+                )
+                .await
+                .is_err()
+        );
+        timeout(Duration::from_secs(2), async {
+            while first.is_alive() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let recovered = manager.transport_for_path(&path).await.unwrap();
+        assert!(!Arc::ptr_eq(&first, &recovered));
+        assert!(
+            recovered
+                .request(
+                    "fixture/ready",
+                    serde_json::json!({}),
+                    Duration::from_secs(2)
+                )
+                .await
+                .is_ok()
+        );
+        assert_eq!(std::fs::read_to_string(&pids).unwrap().lines().count(), 2);
+        manager.shutdown_all().await;
+        assert!(manager.transport_for_path(&path).await.is_some());
+        assert_eq!(std::fs::read_to_string(&pids).unwrap().lines().count(), 3);
+        manager.shutdown_all().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn built_in_transport_cache_shares_cold_start_and_recovers_after_exit() {
+        cache_fixture(false).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn custom_transport_cache_shares_cold_start_and_recovers_after_exit() {
+        cache_fixture(true).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_transport_initialization_does_not_poison_the_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let script = root.path().join("server.py");
+        let mut config = LspConfig::default();
+        config.servers.insert(
+            "python".into(),
+            vec![
+                "python3".into(),
+                "-u".into(),
+                script.to_string_lossy().into_owned(),
+                "cache".into(),
+                root.path().join("pids").to_string_lossy().into_owned(),
+            ],
+        );
+        let manager = LspManager::new(config, root.path().to_owned());
+        let path = root.path().join("file.py");
+        assert!(manager.transport_for_path(&path).await.is_none());
+        std::fs::write(&script, client::tests::STDIO_FIXTURE).unwrap();
+        assert!(manager.transport_for_path(&path).await.is_some());
+        manager.shutdown_all().await;
     }
 
     #[tokio::test]
@@ -1142,10 +1270,10 @@ pub(crate) mod tests {
             severity: Severity::Error,
             message: "ruby type error".to_string(),
         }]));
-        mgr.custom_transports
-            .lock()
-            .await
-            .insert("rb".to_string(), fake.clone());
+        mgr.custom_transports.lock().await.insert(
+            "rb".to_string(),
+            Arc::new(AsyncMutex::new(Some(fake.clone()))),
+        );
 
         let block = mgr.diagnostics_for(&path, 1).await.expect("has block");
         let rendered = block.render();

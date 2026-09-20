@@ -107,6 +107,12 @@ pub trait LspTransport: Send + Sync {
         Ok(())
     }
 
+    /// A closed transport is never valid cache evidence. Diagnostic-only
+    /// in-process implementations remain usable until their owner removes them.
+    fn is_alive(&self) -> bool {
+        true
+    }
+
     /// Best-effort shutdown. Called via `LspManager::shutdown_all`.
     async fn shutdown(&self);
 }
@@ -323,6 +329,12 @@ impl StdioLspTransport {
 
 #[async_trait]
 impl LspTransport for StdioLspTransport {
+    fn is_alive(&self) -> bool {
+        // stderr may close independently. The writer, reader and dispatcher
+        // are the protocol lifetime; none may have exited or been aborted.
+        !self.tx_outbound.is_closed() && self.tasks.iter().skip(1).all(|task| !task.is_finished())
+    }
+
     async fn diagnostics_for(
         &self,
         path: &Path,
@@ -624,7 +636,7 @@ fn path_from_uri(uri: &str) -> Option<PathBuf> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     #[test]
@@ -873,12 +885,12 @@ mod tests {
         assert!(parse_publish_diagnostics(&payload).is_none());
     }
     #[cfg(unix)]
-    const STDIO_FIXTURE: &str = r#"
+    pub(crate) const STDIO_FIXTURE: &str = r#"
 import json, os, select, sys, time
 mode, pid_path = sys.argv[1:]
 input_stream = os.fdopen(0, 'rb', buffering=0)
-with open(pid_path, 'w') as f:
-    f.write(str(os.getpid()))
+with open(pid_path, 'a' if mode == 'cache' else 'w') as f:
+    f.write(str(os.getpid()) + ('\n' if mode == 'cache' else ''))
 def read():
     headers = {}
     while True:
@@ -920,6 +932,8 @@ send({'jsonrpc':'2.0','id':request['id'],'result':{'capabilities':{}}})
 assert read()['method'] == 'initialized'
 while True:
     request = read()
+    if request.get('method') == 'fixture/exit':
+        raise SystemExit(0)
     if request.get('method') == 'fixture/overflow':
         for _ in range(80):
             send({'jsonrpc':'2.0','method':'textDocument/publishDiagnostics','params':{'uri':'file:///tmp/overflow.rs','version':1,'diagnostics':[]}})
