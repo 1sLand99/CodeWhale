@@ -588,6 +588,7 @@ pub struct LaunchRecentSession {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchRowId {
     NewSession,
+    ReturnToSession,
     Recent(String),
     SeeAll,
     /// Open the MCP manager from the status summary, including healthy servers.
@@ -610,6 +611,8 @@ pub(crate) const LAUNCH_RECENT_INLINE_LIMIT: usize = 5;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchState {
     pub visible: bool,
+    /// Home temporarily covers the current conversation; it does not own a session.
+    pub return_to_session: bool,
     pub status: Option<String>,
     /// Canonical workspace this launch state is scoped to. Recent work is
     /// the workspace's own sessions (archived and empty auto-created ones
@@ -727,6 +730,7 @@ impl LaunchState {
         let claude_code_detected = has_claude_code && !import_already_reviewed;
         Self {
             visible,
+            return_to_session: false,
             status: None,
             workspace: workspace.to_path_buf(),
             recent,
@@ -740,6 +744,15 @@ impl LaunchState {
             mark_reveal_started_at: None,
             claude_code_detected,
         }
+    }
+
+    /// Leave home without resetting the conversation, draft, or reveal clock.
+    pub fn dismiss(&mut self) {
+        self.visible = false;
+        self.return_to_session = false;
+        self.row_hitboxes.clear();
+        self.menu_selected = None;
+        self.hovered_row = None;
     }
 
     /// Re-read the recent-work list from disk (same filter as
@@ -1808,7 +1821,7 @@ pub struct App {
     pub launch: LaunchState,
     /// Mouse-selected launch action, consumed by the async UI loop.
     pub pending_launch_action: Option<crate::tui::underwater::LaunchAction>,
-    /// Mouse click on the live composer's `[↑]` send target. The async UI loop
+    /// Mouse click on the live composer's `[↵]` send target. The async UI loop
     /// consumes it through the same submit dispatcher as Enter.
     pub pending_composer_submit: Option<ComposerSubmitChord>,
     /// Mouse-selected hotbar slot, consumed by the async UI loop.

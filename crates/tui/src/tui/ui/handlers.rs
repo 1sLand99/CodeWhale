@@ -1539,7 +1539,7 @@ pub(crate) async fn handle_view_events(
                             content: loaded_message.clone(),
                         });
                         app.status_message = Some(loaded_message);
-                        app.launch.visible = false;
+                        app.launch.dismiss();
                         app.launch.status = None;
                     }
                     Err(err) => {

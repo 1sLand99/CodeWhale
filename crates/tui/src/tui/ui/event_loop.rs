@@ -1234,6 +1234,18 @@ async fn dispatch_launch_composer_submit(
     config: &mut Config,
     chord: ComposerSubmitChord,
 ) -> Result<bool> {
+    if app.launch.return_to_session {
+        app.launch.dismiss();
+        return dispatch_session_composer_submit(
+            terminal,
+            app,
+            engine_handle,
+            task_manager,
+            config,
+            chord,
+        )
+        .await;
+    }
     let action = app.decide_composer_submit(chord);
     if app.startup_input_unproven || !app.composer_enter_would_submit() {
         // A paste burst, empty composer or startup integrity hold owns this
@@ -1274,7 +1286,7 @@ async fn dispatch_launch_composer_submit(
 
 /// Submit the live-session composer through the same branches Enter uses.
 ///
-/// Mouse `[↑]` sets `pending_composer_submit`; this consumes that chord without
+/// Mouse `[↵]` sets `pending_composer_submit`; this consumes that chord without
 /// duplicating draft consumption or opening transcript-only Enter shortcuts.
 /// Its own gates (`SendQueuedNow`, the paste-burst probe) run here; everything
 /// from slash-menu selection onward is the shared `submit_decided_composer_input`
@@ -1288,6 +1300,9 @@ async fn dispatch_session_composer_submit(
     config: &mut Config,
     chord: ComposerSubmitChord,
 ) -> Result<bool> {
+    if app.launch.return_to_session {
+        app.launch.dismiss();
+    }
     let action = app.decide_composer_submit(chord);
     if matches!(action, ComposerSubmitAction::SendQueuedNow) {
         let _ = send_next_queued_message_now(app, config, engine_handle).await?;
@@ -1302,7 +1317,7 @@ async fn dispatch_session_composer_submit(
 /// Shared tail of a decided composer submit: slash-menu selection, draft
 /// consumption, and the memory/`!`/`/`/message branches.
 ///
-/// Keyboard Enter and the mouse `[↑]` dispatcher both end here. Each caller
+/// Keyboard Enter and the mouse `[↵]` dispatcher both end here. Each caller
 /// keeps its own gates — transcript-only shortcuts and forced-submit chords
 /// stay keyboard-only, `SendQueuedNow` and the paste-burst probe stay in the
 /// dispatcher — so this tail is the one place either surface can change.
@@ -4659,6 +4674,9 @@ pub(crate) async fn run_event_loop(
                 }
             }
             if let Event::Paste(text) = &evt {
+                if app.launch.return_to_session && app.view_stack.is_empty() {
+                    app.launch.dismiss();
+                }
                 handle_bracketed_paste(app, text);
                 continue;
             }
@@ -4824,6 +4842,9 @@ pub(crate) async fn run_event_loop(
                 if let Some(action) = app.pending_launch_action.take() {
                     match action {
                         crate::tui::underwater::LaunchAction::None => {}
+                        crate::tui::underwater::LaunchAction::ReturnToSession => {
+                            app.launch.dismiss()
+                        }
                         crate::tui::underwater::LaunchAction::NewSession => {
                             let result = begin_launch_session(app, None);
                             if apply_command_result(
@@ -5514,6 +5535,9 @@ pub(crate) async fn run_event_loop(
                     });
                     match action {
                         crate::tui::underwater::LaunchAction::None => {}
+                        crate::tui::underwater::LaunchAction::ReturnToSession => {
+                            app.launch.dismiss()
+                        }
                         crate::tui::underwater::LaunchAction::NewSession => {
                             let result = begin_launch_session(app, None);
                             if apply_command_result(
@@ -6447,7 +6471,7 @@ pub(crate) async fn run_event_loop(
                     );
                     // Slash-menu selection, draft consumption, and the
                     // memory/`!`/`/`/message branches are the shared tail the
-                    // mouse `[↑]` dispatcher also runs, so keyboard and pointer
+                    // mouse `[↵]` dispatcher also runs, so keyboard and pointer
                     // submit behavior cannot drift apart.
                     if submit_decided_composer_input(
                         terminal,

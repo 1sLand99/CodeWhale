@@ -447,3 +447,37 @@ fn fleet_roles_open_the_shared_model_picker_and_escape_returns_to_the_same_role(
         tui.shutdown();
     }
 }
+
+#[test]
+fn home_returns_to_the_same_conversation_by_escape_click_and_typing() {
+    for (rows, cols) in SIZES {
+        let (_workspace, mut tui) = start(rows, cols, false);
+        click_text(&mut tui, TITLE);
+        wait(&mut tui, "Resume");
+        tui.wait_for_idle(Duration::from_millis(200), WAIT).unwrap();
+        tui.send(keys::key::enter()).unwrap();
+        wait(&mut tui, SAVED_TEXT);
+        for return_path in ["escape", "click", "type"] {
+            tui.paste("/home").unwrap();
+            tui.send(keys::key::enter()).unwrap();
+            wait(&mut tui, "Back to conversation");
+            capture(&mut tui, "home-return");
+            match return_path {
+                "escape" => tui.send(keys::key::esc()).unwrap(),
+                "click" => click_text(&mut tui, "Back to conversation"),
+                _ => tui.send("draft stays here").unwrap(),
+            }
+            wait(&mut tui, SAVED_TEXT);
+            tui.wait_for_idle(Duration::from_millis(200), WAIT).unwrap();
+            if return_path == "type" {
+                wait(&mut tui, "draft stays here");
+                capture(&mut tui, "home-return-draft");
+                tui.send(keys::key::ctrl('u')).unwrap();
+            }
+        }
+        tui.paste("/overview").unwrap();
+        tui.send(keys::key::enter()).unwrap();
+        wait(&mut tui, "Quick Actions");
+        tui.shutdown();
+    }
+}

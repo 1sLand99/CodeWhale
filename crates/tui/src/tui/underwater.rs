@@ -46,6 +46,7 @@ pub enum LaunchAction {
     /// The prominent new-session entry: begin a fresh session in the
     /// current workspace.
     NewSession,
+    ReturnToSession,
     /// Resume one recent-work row by session id.
     ResumeSession(String),
     /// The see-all overflow: open the full session picker.
@@ -169,6 +170,19 @@ fn launch_recent_entries(app: &App) -> (Vec<LaunchRecentEntry>, bool) {
     (recent, has_more)
 }
 
+/// Both painting and input use the same primary action on revisited home.
+fn home_card_rows(app: &App, recent: &[LaunchRecentEntry], has_more: bool) -> Vec<LaunchCardRow> {
+    let mut rows = launch_card_rows(app.ui_locale, recent, has_more);
+    if app.launch.return_to_session {
+        rows[0].id = crate::tui::app::LaunchRowId::ReturnToSession;
+        rows[0].label = format!(
+            "{}  Esc",
+            tr(app.ui_locale, MessageId::HomeBackToConversation)
+        );
+    }
+    rows
+}
+
 /// The card's rows for live `App` state, for keyboard navigation and Enter.
 ///
 /// The painted rows are the authority. Paint sheds the tail of the recent
@@ -179,12 +193,10 @@ fn launch_recent_entries(app: &App) -> (Vec<LaunchRecentEntry>, bool) {
 /// list: one ordering for paint, mouse, and keyboard, with no second state.
 #[must_use]
 pub fn launch_rows_for_app(app: &App) -> Vec<LaunchCardRow> {
-    let (recent, has_more) = launch_recent_entries(app);
-    if app.launch.row_hitboxes.is_empty() {
-        // Nothing painted yet (first frame): nothing is selected either.
-        return launch_card_rows(app.ui_locale, &recent, has_more);
-    }
-    let mut superset = launch_card_rows(app.ui_locale, &recent, true);
+    let (recent, _) = launch_recent_entries(app);
+    // An empty pane has no navigable rows, including before its first paint.
+    // A preserved multiline draft can legitimately leave no room for home.
+    let mut superset = home_card_rows(app, &recent, true);
     // MCP rows join the same ordering only when the boot block painted them.
     for id in [
         crate::tui::app::LaunchRowId::McpManager,
@@ -245,6 +257,7 @@ pub fn refresh_launch_row_hitboxes(app: &mut App, area: Rect) {
 pub fn launch_row_click_action(id: &crate::tui::app::LaunchRowId) -> LaunchAction {
     match id {
         crate::tui::app::LaunchRowId::NewSession => LaunchAction::NewSession,
+        crate::tui::app::LaunchRowId::ReturnToSession => LaunchAction::ReturnToSession,
         crate::tui::app::LaunchRowId::Recent(session_id) => {
             LaunchAction::ResumeSession(session_id.clone())
         }
@@ -338,8 +351,8 @@ pub enum LaunchComposerKey {
     ComposerAuthority,
     /// Move the launch card's row selection (Up/Down while the card is up).
     MenuNavigate(i32),
-    /// Run the card's highlighted row (Enter while the card is up, the
-    /// composer is empty, and the user has arrowed onto a row).
+    /// Run the card's highlighted row. Revisited home retains its draft;
+    /// on startup, only an empty composer yields Enter to the card.
     MenuRun,
 }
 
@@ -350,12 +363,27 @@ pub enum LaunchComposerKey {
 /// system. Only F1 help stays launch-owned via
 /// [`LaunchComposerKey::MenuChord`].
 pub fn handle_launch_composer_key(app: &mut App, key: KeyEvent) -> LaunchComposerKey {
+    if app.launch.return_to_session && key.code == KeyCode::Esc {
+        app.launch.dismiss();
+        return LaunchComposerKey::Consumed;
+    }
     let multiline = app.composer_multiline_mode;
     let card_up = app.launch.dissolve_started_ms.is_none();
     match key.code {
         KeyCode::Enter
             if crate::tui::composer_ui::composer_submit_chord(key, multiline).is_some() =>
         {
+            // Explicit home navigation takes precedence over a preserved draft.
+            // Only painted rows may own Enter, just as with mouse activation.
+            if app.launch.return_to_session
+                && card_up
+                && app
+                    .launch
+                    .menu_selected
+                    .is_some_and(|index| index < app.launch.row_hitboxes.len())
+            {
+                return LaunchComposerKey::MenuRun;
+            }
             // #573 parity with the session composer's Enter arm: when a
             // completion popup is matching (e.g. `/mo` → `/model`), Enter
             // applies the highlighted entry instead of sending the literal
@@ -411,7 +439,11 @@ pub fn handle_launch_composer_key(app: &mut App, key: KeyEvent) -> LaunchCompose
                     .modifiers
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
             {
-                app.launch.dissolve_card(app.ambient_clock_ms);
+                if app.launch.return_to_session {
+                    app.launch.dismiss();
+                } else {
+                    app.launch.dissolve_card(app.ambient_clock_ms);
+                }
             }
             LaunchComposerKey::ComposerAuthority
         }
@@ -1639,7 +1671,7 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
         text_width.saturating_sub(mark.map_or(0, |size| usize::from(size.cells().0) + 2));
     let spacious = fit.blanks == LAUNCH_SEPARATORS;
     let visible: Vec<LaunchRecentEntry> = entries.into_iter().take(fit.shown).collect();
-    let card_rows = launch_card_rows(locale, &visible, fit.see_all);
+    let card_rows = home_card_rows(app, &visible, fit.see_all);
 
     // The text column, in order. `None` is a blank row.
     let mut text: Vec<Option<Line<'static>>> = Vec::new();
@@ -1693,7 +1725,7 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
                             .map_or(crate::tui::mark::REVEAL_MS, |started| {
                                 started.elapsed().as_millis()
                             }),
-                        app.motion_policy().allows_decorative(),
+                        app.motion_policy().allows_decorative() && !app.launch.return_to_session,
                     ),
                     Style::default().fg(theme.accent_primary),
                 ),
@@ -1775,7 +1807,7 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
         }
         rows.push((row.id.clone(), text.len()));
         text.push(Some(Line::from(spans)));
-        if matches!(row.id, crate::tui::app::LaunchRowId::NewSession) && fit.heading {
+        if row.prominent && fit.heading {
             // With no resumable work the heading says so — but only when the
             // workspace genuinely has none. Sessions the card's filter drops
             // (empty auto-created shells) still exist in `/resume`, so their
@@ -2162,7 +2194,7 @@ mod launch_card_tests {
     #[test]
     fn no_keyboard_row_names_a_session_the_pane_is_not_showing() {
         let mut app = app_with_recent(&["one", "two", "three", "four", "five"], 5);
-        for height in 1u16..=14 {
+        for height in 0u16..=14 {
             refresh_launch_row_hitboxes(&mut app, Rect::new(0, 0, 120, height));
             let painted: Vec<LaunchRowId> = row_ids(&app);
             for row in launch_rows_for_app(&app) {
@@ -2585,6 +2617,21 @@ mod launch_card_tests {
     }
 
     #[test]
+    fn mcp_remedy_preserves_a_draft_and_opens_the_manager() {
+        let mut app = with_mcp(app_with_recent(&["one"], 9));
+        app.launch.return_to_session = true;
+        app.input = "unsent draft".into();
+        app.cursor_position = 4;
+        crate::tui::ui::type_launch_mcp_remedy(&mut app);
+        assert_eq!(app.input, "unsent draft");
+        assert_eq!(app.cursor_position, 4);
+        assert_eq!(
+            app.view_stack.top_kind(),
+            Some(crate::tui::views::ModalKind::Extensions),
+        );
+    }
+
+    #[test]
     fn mcp_remedy_action_is_a_noop_when_nothing_is_wrong() {
         let mut app = app_with_recent(&["one"], 9);
         crate::tui::ui::type_launch_mcp_remedy(&mut app);
@@ -2727,7 +2774,8 @@ pub fn launch_motion_active(app: &App, obscured: bool, ambient_settled: bool) ->
     let dissolve = app.launch.card_dissolve_progress(now, true);
     let dissolving = dissolve > 0.0 && dissolve < 1.0;
     let water_alive = app.theme_id == codewhale_palette::ThemeId::Underwater && !ambient_settled;
-    let revealing = !crate::tui::color_compat::ascii_safe_enabled()
+    let revealing = !app.launch.return_to_session
+        && !crate::tui::color_compat::ascii_safe_enabled()
         && app
             .launch
             .mark_reveal_started_at

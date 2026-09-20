@@ -1203,7 +1203,7 @@ pub(crate) fn composer_enclosure_enabled(app: &App) -> bool {
     app.composer_border
 }
 
-/// Shared `[↑]` submit rect for the live composer, or `None` when the
+/// Shared `[↵]` submit rect for the live composer, or `None` when the
 /// enclosure cannot host the three-cell affordance.
 ///
 /// The gate is the same `enclosed_composer_panel_fits` predicate the painter
@@ -1256,7 +1256,7 @@ fn enclosed_composer_panel_fits(show_panel: bool, area_width: u16, area_height: 
 
 /// Border-aware input plane for the active composer.
 ///
-/// The shared shell's `[↑]` control occupies three cells on the inner row.
+/// The shared shell's `[↵]` control occupies three cells on the inner row.
 /// Keep the text plane to its left, with one blank cell in between, so input
 /// wrapping, cursor placement, and pointer mapping cannot claim painted send
 /// cells. The outer block still owns the trailing breathing cell before its
@@ -1935,7 +1935,7 @@ impl Renderable for ComposerWidget<'_> {
                 .set_style(Style::default().fg(self.app.ui_theme.accent_primary));
         }
 
-        // Restore the shared `[↑]` after caller-owned input so a long draft
+        // Restore the shared `[↵]` after caller-owned input so a long draft
         // cannot erase the one cell target the mouse handler also uses.
         if has_panel {
             crate::tui::composer_chrome::render_tideline_composer_submit(
@@ -3529,6 +3529,9 @@ fn apply_selection_to_line(
 /// [`crate::tui::ui::render`] and thread the result, so the reservation and
 /// the render can never disagree inside a single frame.
 pub(crate) fn should_render_empty_state(app: &App) -> bool {
+    if app.launch.visible && app.launch.return_to_session {
+        return true;
+    }
     let active_is_empty = app
         .active_cell
         .as_ref()
@@ -3682,7 +3685,7 @@ fn composer_height(
     let has_panel = enclosed_composer_panel_fits(show_panel, area_width, available_height);
     // Measure through the same border- and submit-aware plane that rendering,
     // cursor placement, the frame viewport, and mouse mapping use. A draft
-    // that wraps here therefore cannot consume the painted `[↑]` cells later.
+    // that wraps here therefore cannot consume the painted `[↵]` cells later.
     let measurement_area = Rect::new(0, 0, area_width, if has_panel { 3 } else { 1 });
     let content_width =
         composer_content_geometry(composer_inner_area(measurement_area, has_panel), false)
@@ -6434,7 +6437,7 @@ mod tests {
     #[test]
     fn composer_height_wraps_to_the_rounded_panel_content_width() {
         // At the minimum viable panel width, the side rails, prompt gutter,
-        // shared `[↑]` control, and its breathing cell leave three text
+        // shared `[↵]` control, and its breathing cell leave three text
         // columns. Measuring against the old width would render extra lines
         // without allocating their rows.
         let height = composer_height(
@@ -6684,7 +6687,7 @@ mod tests {
         );
         let inner = widget.inner_area(area);
         let quiet_row = cursor_y.saturating_add(1);
-        // The quiet row hosts exactly one thing: the shared `[↑]` affordance
+        // The quiet row hosts exactly one thing: the shared `[↵]` affordance
         // on its recorded hitbox cells. Every other cell stays blank.
         let submit = active_composer_submit_rect(&app, area).expect("enclosed composer submit");
         assert!(
@@ -6694,12 +6697,15 @@ mod tests {
                         submit.y == quiet_row && x >= submit.x && x < submit.x + submit.width;
                     on_submit || buf[(x, quiet_row)].symbol() == " "
                 }),
-            "comfortable composer should keep a quiet content row before the footer, hosting only the shared [↑]: {rendered}"
+            "comfortable composer should keep a quiet content row before the footer, hosting only the shared [↵]: {rendered}"
         );
         let painted: String = (submit.x..submit.x + submit.width)
             .map(|x| buf[(x, submit.y)].symbol().to_string())
             .collect();
-        assert_eq!(painted, "[↑]", "the quiet row hosts the shared send cells");
+        assert_eq!(
+            painted, "[·]",
+            "the empty composer has an inactive send cue"
+        );
     }
 
     #[test]
@@ -6939,7 +6945,7 @@ mod tests {
         for (width, height) in [(40_u16, 12), (60, 16), (80, 24), (100, 32), (120, 32)] {
             let rendered = render_composer(&app, width, height);
             assert!(
-                rendered.contains("[↑]"),
+                rendered.contains("[↵]"),
                 "missing send affordance at {width}x{height}:\n{rendered}"
             );
             assert!(
@@ -6963,7 +6969,16 @@ mod tests {
             let mut buf = Buffer::empty(area);
             widget.render(area, &mut buf);
             let submit = active_composer_submit_rect(&app, area).unwrap();
-            let role = if app.composer_enter_would_submit() {
+            let ready = app.composer_enter_would_submit();
+            let painted: String = (submit.x..submit.right())
+                .map(|x| buf[(x, submit.y)].symbol())
+                .collect();
+            assert_eq!(painted, if ready { "[↵]" } else { "[·]" });
+            assert_eq!(
+                buf[(submit.x, submit.y)].modifier.contains(Modifier::BOLD),
+                ready
+            );
+            let role = if ready {
                 codewhale_palette::ChromeInk::Info
             } else {
                 codewhale_palette::ChromeInk::MetadataDim
@@ -6993,7 +7008,7 @@ mod tests {
         let painted: String = (submit.x..submit.x + submit.width)
             .map(|x| buf[(x, submit.y)].symbol().to_string())
             .collect();
-        assert_eq!(painted, "[↑]", "geometry must cover the painted send cells");
+        assert_eq!(painted, "[↵]", "geometry must cover the painted send cells");
     }
 
     #[test]
@@ -7040,7 +7055,7 @@ mod tests {
         let painted: String = (submit.x..submit.right())
             .map(|x| buf[(x, submit.y)].symbol().to_string())
             .collect();
-        assert_eq!(painted, "[↑]", "submit stays intact beside the draft");
+        assert_eq!(painted, "[↵]", "submit stays intact beside the draft");
     }
 
     #[test]
@@ -7075,7 +7090,7 @@ mod tests {
         app.cursor_position = app.input.chars().count();
         let rendered = render_composer(&app, 80, 4);
         assert!(
-            !rendered.contains("[↑]"),
+            !rendered.contains("[↵]"),
             "compact composer must shed the send chrome:\n{rendered}"
         );
     }

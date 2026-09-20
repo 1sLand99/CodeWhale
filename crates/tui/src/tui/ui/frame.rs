@@ -551,7 +551,7 @@ fn register_clickable_chrome_for_hover(app: &App) {
         );
     }
 
-    // The composer's `[↑]` submit control. It registers only when a click
+    // The composer's `[↵]` submit control. It registers only when a click
     // there would actually send: an affordance that lights up and then does
     // nothing is the same defect as one that acts without lighting up.
     if let Some(composer) = app.viewport.last_composer_area
@@ -1731,7 +1731,7 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
             };
         app.sidebar_hover_tooltip = None;
 
-        if app.agent_focus.is_some() {
+        if app.agent_focus.is_some() && !app.launch.return_to_session {
             // A focused worker's full transcript owns the conversation area;
             // the ocean column and every other shell surface stay as they are.
             //
@@ -1753,7 +1753,10 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
             let buf = f.buffer_mut();
             crate::tui::agent_focus::render_focus(app, chat_area, buf);
         } else {
-            if app.launch.visible && app.onboarding == crate::tui::app::OnboardingState::None {
+            if app.launch.visible
+                && !app.launch.return_to_session
+                && app.onboarding == crate::tui::app::OnboardingState::None
+            {
                 app.launch
                     .mark_reveal_started_at
                     .get_or_insert_with(std::time::Instant::now);
@@ -2256,7 +2259,7 @@ mod tests {
         );
     }
 
-    /// The composer's `[↑]` answered clicks and showed nothing under the
+    /// The composer's `[↵]` answered clicks and showed nothing under the
     /// pointer — the last of the clickable-but-dark controls. It lights up
     /// only when a click there would actually send.
     #[test]
