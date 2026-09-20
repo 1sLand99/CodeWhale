@@ -66,6 +66,8 @@
   "ExtensionsInventorySkills": "技能：{count}",
   "ExtensionsMarketplaceDetail": "发布者：{publisher} · 级别：{tier} · 可安装：{installable}",
   "ExtensionsMarketplaceUnavailable": "插件市场存储不可用",
+  "ExtensionsMcpEmpty": "尚未配置 MCP 服务器",
+  "ExtensionsMcpBrowse": "浏览推荐服务器",
   "ExtensionsMcpDetail": "工具：{tools} · 资源：{resources} · 提示词：{prompts}",
   "ExtensionsMcpNotInspected": "此快照中尚未检查 · 按 Enter 重新加载并连接已配置的服务器",
   "ExtensionsMcpRefresh": "已配置 {count} 个 MCP 服务器；打开 /mcp 刷新此快照",

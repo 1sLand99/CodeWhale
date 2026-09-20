@@ -66,6 +66,8 @@
   "ExtensionsInventorySkills": "スキル: {count}",
   "ExtensionsMarketplaceDetail": "発行元: {publisher} · 区分: {tier} · インストール可: {installable}",
   "ExtensionsMarketplaceUnavailable": "プラグインマーケットプレイスの保存領域を利用できません",
+  "ExtensionsMcpEmpty": "MCPサーバーが設定されていません",
+  "ExtensionsMcpBrowse": "おすすめのサーバーを見る",
   "ExtensionsMcpDetail": "ツール: {tools} · リソース: {resources} · プロンプト: {prompts}",
   "ExtensionsMcpNotInspected": "このスナップショットでは未確認 · Enter で再読み込みし、設定済みサーバーへ接続",
   "ExtensionsMcpRefresh": "MCP サーバーが {count} 件設定されています。/mcp を開いてスナップショットを更新してください",

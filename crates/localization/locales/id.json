@@ -66,6 +66,8 @@
   "ExtensionsInventorySkills": "Keahlian: {count}",
   "ExtensionsMarketplaceDetail": "penerbit: {publisher} · tingkat: {tier} · dapat dipasang: {installable}",
   "ExtensionsMarketplaceUnavailable": "Penyimpanan marketplace plugin tidak tersedia",
+  "ExtensionsMcpEmpty": "Belum ada server MCP yang dikonfigurasi",
+  "ExtensionsMcpBrowse": "Lihat saran server",
   "ExtensionsMcpDetail": "alat: {tools} · sumber daya: {resources} · prompt: {prompts}",
   "ExtensionsMcpNotInspected": "Belum diperiksa dalam snapshot ini · Enter memuat ulang dan menghubungkan server terkonfigurasi",
   "ExtensionsMcpRefresh": "{count} server MCP dikonfigurasi; buka /mcp untuk menyegarkan cuplikan ini",

@@ -66,6 +66,8 @@
   "ExtensionsInventorySkills": "स्किल: {count}",
   "ExtensionsMarketplaceDetail": "प्रकाशक: {publisher} · स्तर: {tier} · इंस्टॉल योग्य: {installable}",
   "ExtensionsMarketplaceUnavailable": "प्लगइन मार्केटप्लेस स्टोरेज उपलब्ध नहीं है",
+  "ExtensionsMcpEmpty": "कोई MCP सर्वर कॉन्फ़िगर नहीं है",
+  "ExtensionsMcpBrowse": "सुझाए गए सर्वर देखें",
   "ExtensionsMcpDetail": "टूल: {tools} · संसाधन: {resources} · प्रॉम्प्ट: {prompts}",
   "ExtensionsMcpNotInspected": "इस स्नैपशॉट में जाँच नहीं हुई · Enter कॉन्फ़िगर किए सर्वर पुनः लोड करके कनेक्ट करता है",
   "ExtensionsMcpRefresh": "{count} MCP सर्वर कॉन्फ़िगर हैं; यह स्नैपशॉट ताज़ा करने के लिए /mcp खोलें",

@@ -66,6 +66,8 @@
   "ExtensionsInventorySkills": "Skills: {count}",
   "ExtensionsMarketplaceDetail": "Herausgeber: {publisher} · Stufe: {tier} · installierbar: {installable}",
   "ExtensionsMarketplaceUnavailable": "Der Plugin-Marktplatzspeicher ist nicht verfügbar",
+  "ExtensionsMcpEmpty": "Keine MCP-Server eingerichtet",
+  "ExtensionsMcpBrowse": "Servervorschläge ansehen",
   "ExtensionsMcpDetail": "Werkzeuge: {tools} · Ressourcen: {resources} · Prompts: {prompts}",
   "ExtensionsMcpNotInspected": "In diesem Snapshot nicht geprüft · Eingabetaste lädt neu und verbindet konfigurierte Server",
   "ExtensionsMcpRefresh": "{count} MCP-Server sind konfiguriert; /mcp öffnen, um diesen Stand zu aktualisieren",

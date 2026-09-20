@@ -66,6 +66,8 @@
   "ExtensionsInventorySkills": "技能：{count}",
   "ExtensionsMarketplaceDetail": "發行者：{publisher} · 級別：{tier} · 可安裝：{installable}",
   "ExtensionsMarketplaceUnavailable": "外掛市集儲存空間無法使用",
+  "ExtensionsMcpEmpty": "尚未設定 MCP 伺服器",
+  "ExtensionsMcpBrowse": "瀏覽推薦伺服器",
   "ExtensionsMcpDetail": "工具：{tools} · 資源：{resources} · 提示詞：{prompts}",
   "ExtensionsMcpNotInspected": "此快照中尚未檢查 · 按 Enter 重新載入並連線已設定的伺服器",
   "ExtensionsMcpRefresh": "已設定 {count} 個 MCP 伺服器；開啟 /mcp 重新整理此快照",

@@ -66,6 +66,8 @@
   "ExtensionsInventorySkills": "Compétences : {count}",
   "ExtensionsMarketplaceDetail": "éditeur : {publisher} · niveau : {tier} · installable : {installable}",
   "ExtensionsMarketplaceUnavailable": "Le stockage du marché des plugins n'est pas disponible",
+  "ExtensionsMcpEmpty": "Aucun serveur MCP configuré",
+  "ExtensionsMcpBrowse": "Voir les serveurs suggérés",
   "ExtensionsMcpDetail": "outils : {tools} · ressources : {resources} · prompts : {prompts}",
   "ExtensionsMcpNotInspected": "Non inspecté dans cet instantané · Entrée recharge et connecte les serveurs configurés",
   "ExtensionsMcpRefresh": "{count} serveurs MCP sont configurés ; ouvrez /mcp pour actualiser cet instantané",

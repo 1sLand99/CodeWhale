@@ -66,6 +66,8 @@
   "ExtensionsInventorySkills": "Habilitats: {count}",
   "ExtensionsMarketplaceDetail": "editor: {publisher} · nivell: {tier} · instal·lable: {installable}",
   "ExtensionsMarketplaceUnavailable": "L'emmagatzematge del mercat de connectors no està disponible",
+  "ExtensionsMcpEmpty": "No hi ha servidors MCP configurats",
+  "ExtensionsMcpBrowse": "Explora els servidors suggerits",
   "ExtensionsMcpDetail": "eines: {tools} · recursos: {resources} · indicacions: {prompts}",
   "ExtensionsMcpNotInspected": "No inspeccionat en aquesta instantània · prem Retorn per tornar a carregar i connectar els servidors configurats",
   "ExtensionsMcpRefresh": "Hi ha {count} servidors MCP configurats; obre /mcp per actualitzar aquesta instantània",

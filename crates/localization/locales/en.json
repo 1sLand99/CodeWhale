@@ -66,6 +66,8 @@
   "ExtensionsInventorySkills": "Skills: {count}",
   "ExtensionsMarketplaceDetail": "publisher: {publisher} · tier: {tier} · installable: {installable}",
   "ExtensionsMarketplaceUnavailable": "Marketplace storage unavailable",
+  "ExtensionsMcpEmpty": "No MCP servers configured",
+  "ExtensionsMcpBrowse": "Browse server suggestions",
   "ExtensionsMcpDetail": "tools: {tools} · resources: {resources} · prompts: {prompts}",
   "ExtensionsMcpNotInspected": "Not inspected yet · reload to connect your servers",
   "ExtensionsMcpRefresh": "{count} MCP servers set up; open /mcp to refresh",

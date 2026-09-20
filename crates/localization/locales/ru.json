@@ -66,6 +66,8 @@
   "ExtensionsInventorySkills": "Навыки: {count}",
   "ExtensionsMarketplaceDetail": "издатель: {publisher} · уровень: {tier} · можно установить: {installable}",
   "ExtensionsMarketplaceUnavailable": "Хранилище магазина плагинов недоступно",
+  "ExtensionsMcpEmpty": "Серверы MCP не настроены",
+  "ExtensionsMcpBrowse": "Посмотреть рекомендуемые серверы",
   "ExtensionsMcpDetail": "инструменты: {tools} · ресурсы: {resources} · промпты: {prompts}",
   "ExtensionsMcpNotInspected": "Не проверено в этом снимке · Enter перезагрузит и подключит настроенные серверы",
   "ExtensionsMcpRefresh": "Настроено серверов MCP: {count}; откройте /mcp, чтобы обновить снимок",
