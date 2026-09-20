@@ -29,6 +29,9 @@
 
 /// Shared secure-storage contract for the Codewhale account session.
 pub mod account;
+mod file_lock;
+#[cfg(test)]
+mod file_transactions_tests;
 /// Pure secret-redaction primitives shared by config diagnostics and the
 /// portable command sanitizer (FEAT-025 D4).
 pub mod redact;
@@ -412,10 +415,12 @@ struct ReadOnlyFileKeyringStore {
     legacy: Option<FileKeyringStore>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
 struct FileSecretsBlob {
     #[serde(default)]
     entries: HashMap<String, String>,
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl FileKeyringStore {
@@ -480,20 +485,28 @@ impl FileKeyringStore {
         }
 
         let primary_store = Self::new(primary.to_path_buf());
-        let mut primary_blob = primary_store.load_unlocked()?;
-        let mut changed = false;
-        for (key, value) in legacy_blob.entries {
-            if let std::collections::hash_map::Entry::Vacant(entry) =
-                primary_blob.entries.entry(key)
-            {
-                entry.insert(value);
-                changed = true;
+        primary_store.mutate(|primary_blob| {
+            for (key, value) in legacy_blob.entries {
+                primary_blob.entries.entry(key).or_insert(value);
             }
-        }
-        if changed {
-            primary_store.store_unlocked(&primary_blob)?;
-        }
-        Ok(())
+            Ok(())
+        })
+    }
+
+    fn mutate<T>(
+        &self,
+        operation: impl FnOnce(&mut FileSecretsBlob) -> Result<T, SecretsError>,
+    ) -> Result<T, SecretsError> {
+        file_lock::with_write_lock(&self.path, |path| {
+            let store = Self::new(path);
+            let mut blob = store.load_unlocked()?;
+            let original = serde_json::to_vec(&blob)?;
+            let result = operation(&mut blob)?;
+            if serde_json::to_vec(&blob)? != original {
+                store.store_unlocked(&blob)?;
+            }
+            Ok(result)
+        })
     }
 
     /// Path used for storage.
@@ -503,25 +516,16 @@ impl FileKeyringStore {
     }
 
     fn load_unlocked(&self) -> Result<FileSecretsBlob, SecretsError> {
-        if !self.path.exists() {
-            return Ok(FileSecretsBlob::default());
-        }
-        // Reject files with unsafe permissions on unix. On Windows the
-        // ACL model is too different to enforce here; the caller is
-        // responsible for placing the file in a per-user directory.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let meta = fs::metadata(&self.path)?;
-            let mode = meta.permissions().mode() & 0o777;
-            if mode & 0o077 != 0 {
-                return Err(SecretsError::InsecurePermissions {
-                    path: self.path.clone(),
-                    mode,
-                });
+        use std::io::Read as _;
+        let mut file = match file_lock::open_private(&self.path, false) {
+            Ok(file) => file,
+            Err(SecretsError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(FileSecretsBlob::default());
             }
-        }
-        let raw = fs::read_to_string(&self.path)?;
+            Err(error) => return Err(error),
+        };
+        let mut raw = String::new();
+        file.read_to_string(&mut raw)?;
         if raw.trim().is_empty() {
             return Ok(FileSecretsBlob::default());
         }
@@ -664,22 +668,19 @@ impl KeyringStore for FileKeyringStore {
     }
 
     fn set(&self, key: &str, value: &str) -> Result<(), SecretsError> {
-        // load_unlocked already returns Ok(default) for a missing file, so the
-        // first-write-creates-the-file path is preserved. Any other Err
-        // (insecure permissions, corrupt JSON, transient I/O) MUST surface to
-        // the caller — propagating it via `unwrap_or_default()` silently
-        // wipes every previously stored secret on the next `store_unlocked`.
-        let mut blob = self.load_unlocked()?;
-        blob.entries.insert(key.to_string(), value.to_string());
-        self.store_unlocked(&blob)
+        self.mutate(|blob| {
+            account::invalidate_device_companion(&mut blob.entries, key, Some(value));
+            blob.entries.insert(key.to_string(), value.to_string());
+            Ok(())
+        })
     }
 
     fn delete(&self, key: &str) -> Result<(), SecretsError> {
-        // Same invariant as `set`: never fall back to an empty blob on read
-        // error, or `delete <one-key>` becomes `delete <every-key>`.
-        let mut blob = self.load_unlocked()?;
-        blob.entries.remove(key);
-        self.store_unlocked(&blob)
+        self.mutate(|blob| {
+            account::invalidate_device_companion(&mut blob.entries, key, None);
+            blob.entries.remove(key);
+            Ok(())
+        })
     }
 
     fn backend_name(&self) -> &'static str {

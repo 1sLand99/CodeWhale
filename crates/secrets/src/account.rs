@@ -580,3 +580,35 @@ mod tests {
         );
     }
 }
+
+/// Keep device custody tied to the account session, inside the file store's
+/// existing transaction. Refreshing access tokens within that owner preserves it.
+pub(crate) fn invalidate_device_companion(
+    entries: &mut std::collections::HashMap<String, String>,
+    slot: &str,
+    replacement: Option<&str>,
+) {
+    let Some(suffix) = slot.strip_prefix("codewhale-cloud-auth-v1-") else {
+        return;
+    };
+    if suffix.len() != 64 || !suffix.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return;
+    }
+    fn identity(raw: &str) -> Option<(String, String, String)> {
+        let stored: StoredAccountAuth = serde_json::from_str(raw).ok()?;
+        if stored.schema_version != ACCOUNT_SESSION_SCHEMA_VERSION {
+            return None;
+        }
+        let account = stored.bundle.user?.id;
+        let session = stored.bundle.session?.id;
+        if stored.api_base.is_empty() || account.is_empty() || session.is_empty() {
+            return None;
+        }
+        Some((stored.api_base, account, session))
+    }
+    let old = entries.get(slot).and_then(|raw| identity(raw));
+    let next = replacement.and_then(identity);
+    if old.is_none() || old != next {
+        entries.remove(&format!("codewhale-cloud-device-v1-{suffix}"));
+    }
+}
