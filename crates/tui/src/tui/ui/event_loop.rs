@@ -636,6 +636,24 @@ pub async fn run_tui(
     require_interactive_terminal(io::stdin().is_terminal(), io::stdout().is_terminal())?;
     require_foreground_terminal_owner()?;
 
+    // The dispatcher resets SIGPIPE to SIG_DFL so `codewhale doctor | head`
+    // exits quietly (#4030). A full-screen session is the opposite case: it
+    // writes to pipes whose far end it does not own — stdio MCP servers, shell
+    // tools, hooks, LSP — and a peer that exits first must surface as an
+    // `EPIPE` error on that one write, not kill the whole TUI with the terminal
+    // left in raw mode and nothing in the runtime log. Reproduced with a stdio
+    // MCP server that exits before `initialize` is written: the process died
+    // of SIGPIPE before its first frame, and the PTY harness reported it as a
+    // plain exit 1. Children are unaffected: the standard library resets
+    // SIGPIPE to SIG_DFL before exec, so `| head` inside a shell tool still
+    // terminates the way a shell expects. Non-TUI subcommands keep SIG_DFL.
+    // SAFETY: a plain disposition change, no handler; it runs before this
+    // session spawns anything that writes to a pipe.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+
     // #6169: install the suspend/resume handshake here — after the
     // foreground-ownership check (the termios snapshot needs the still-cooked
     // tty) and before raw mode, so every mode enabled below has a handler that
