@@ -146,6 +146,8 @@ pub trait LspTransport: Send + Sync {
     async fn shutdown(&self);
 }
 
+type DiagnosticMessage = (PathBuf, Option<i64>, Vec<Diagnostic>);
+
 /// Stdio-backed transport. Spawns the LSP server as a child process and
 /// pipes JSON-RPC over stdin/stdout. Stderr is drained without retaining or
 /// exposing arbitrary server output.
@@ -159,7 +161,7 @@ pub struct StdioLspTransport {
     /// Inbound diagnostics queue. We push every `publishDiagnostics`
     /// notification into here and the public API drains the relevant entries.
     diagnostics_gate: AsyncMutex<()>,
-    diagnostics_rx: AsyncMutex<mpsc::Receiver<(PathBuf, Option<i64>, Vec<Diagnostic>)>>,
+    diagnostics_rx: AsyncMutex<mpsc::Receiver<DiagnosticMessage>>,
     /// Map of in-flight request id -> reply slot for model-facing intelligence
     /// requests (definition, references, symbols).
     pending: Arc<AsyncMutex<HashMap<i64, oneshot::Sender<Value>>>>,
@@ -224,7 +226,7 @@ impl StdioLspTransport {
 
         let (tx_outbound, rx_outbound) = mpsc::channel::<Vec<u8>>(64);
         let (tx_inbound, rx_inbound) = mpsc::channel::<Value>(64);
-        let (tx_diag, rx_diag) = mpsc::channel::<(PathBuf, Option<i64>, Vec<Diagnostic>)>(64);
+        let (tx_diag, rx_diag) = mpsc::channel::<DiagnosticMessage>(64);
 
         // Writer task: drain outbound channel, frame with Content-Length, write to stdin.
         let writer_task = spawn_supervised(
@@ -619,7 +621,7 @@ fn parse_header(buf: &[u8]) -> Result<Option<(usize, usize)>> {
 /// notifications/responses, and routes accordingly.
 async fn dispatcher_task(
     mut rx: mpsc::Receiver<Value>,
-    tx_diag: mpsc::Sender<(PathBuf, Option<i64>, Vec<Diagnostic>)>,
+    tx_diag: mpsc::Sender<DiagnosticMessage>,
     pending: Arc<AsyncMutex<HashMap<i64, oneshot::Sender<Value>>>>,
 ) {
     while let Some(value) = rx.recv().await {
@@ -650,7 +652,7 @@ async fn dispatcher_task(
 }
 
 /// Decode a `textDocument/publishDiagnostics` notification.
-fn parse_publish_diagnostics(value: &Value) -> Option<(PathBuf, Option<i64>, Vec<Diagnostic>)> {
+fn parse_publish_diagnostics(value: &Value) -> Option<DiagnosticMessage> {
     let params = value.get("params")?;
     let uri = params.get("uri")?.as_str()?;
     let path = path_from_uri(uri)?;
@@ -803,7 +805,7 @@ pub(super) mod tests {
     fn diagnostic_fixture() -> (
         StdioLspTransport,
         mpsc::Receiver<Vec<u8>>,
-        mpsc::Sender<(PathBuf, Option<i64>, Vec<Diagnostic>)>,
+        mpsc::Sender<DiagnosticMessage>,
     ) {
         let (tx_outbound, rx_outbound) = mpsc::channel(8);
         let (tx_diag, rx_diag) = mpsc::channel(8);
