@@ -282,6 +282,7 @@ warm themes. Uwu now participates in the same remapping as other named presets.
 Themes are being checked against five color families: surface, neutral text,
 action, live/outcome, and attention/danger. Shades preserve contrast and severity;
 labels and symbols retain meaning without color. Underwater keeps its ambient
-identity within the same chrome discipline. This is not a claim of monochrome
-NO_COLOR behavior: the existing setting still limits output to ANSI16, a separate
-known compatibility gap.
+identity within the same chrome discipline. Nonempty NO_COLOR selects monochrome
+output: terminal-owned foreground, background, and underline colors, preserving
+text modifiers and selection symbols. ANSI16 remains a distinct colored fallback
+for terminals with a limited palette.

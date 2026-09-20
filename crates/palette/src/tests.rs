@@ -637,7 +637,7 @@ fn color_depth_detect_is_safe_without_env() {
 }
 
 /// no-color.org contract (spec TIDELINE §5d gap): `NO_COLOR` present and
-/// non-empty forces the mono/ascii-safe path even on a truecolor terminal;
+/// non-empty suppresses colors even on a truecolor terminal;
 /// an empty value does not count.
 #[test]
 fn no_color_forces_the_mono_depth_even_on_truecolor() {
@@ -650,7 +650,21 @@ fn no_color_forces_the_mono_depth_even_on_truecolor() {
         }
     }
     let depth = ColorDepth::detect_with(read(&[("NO_COLOR", "1"), ("COLORTERM", "truecolor")]));
-    assert_eq!(depth, ColorDepth::Ansi16, "NO_COLOR wins over COLORTERM");
+    assert_eq!(
+        depth,
+        ColorDepth::Monochrome,
+        "NO_COLOR wins over COLORTERM"
+    );
+    for color in [
+        Color::Reset,
+        Color::Red,
+        Color::Indexed(9),
+        Color::Rgb(103, 184, 214),
+    ] {
+        assert_eq!(adapt_color(color, depth), Color::Reset);
+        assert_eq!(adapt_bg(color, depth), Color::Reset);
+    }
+    assert!(reasoning_surface_tint(depth).is_none());
     let depth = ColorDepth::detect_with(read(&[("NO_COLOR", ""), ("COLORTERM", "truecolor")]));
     assert_eq!(
         depth,

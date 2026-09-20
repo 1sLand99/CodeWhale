@@ -36,7 +36,7 @@ fn start_with_theme(
     titles: &[&str],
     theme: Option<&str>,
 ) -> (SealedWorkspace, Harness) {
-    start_with_options(rows, cols, with_mcp, titles, theme, false)
+    start_with_options(rows, cols, with_mcp, titles, theme, false, false)
 }
 
 fn start_with_options(
@@ -46,6 +46,7 @@ fn start_with_options(
     titles: &[&str],
     theme: Option<&str>,
     animated: bool,
+    no_color: bool,
 ) -> (SealedWorkspace, Harness) {
     let workspace = make_sealed_workspace().unwrap();
     let trust = workspace.workspace().join(".deepseek");
@@ -111,6 +112,7 @@ fn start_with_options(
         .env("CODEWHALE_NO_UPDATE_CHECK", "1")
         .env("NO_ANIMATIONS", if animated { "0" } else { "1" })
         .env("COLORTERM", "truecolor")
+        .env("NO_COLOR", if no_color { "1" } else { "" })
         .args([
             "--workspace",
             workspace.workspace().to_str().unwrap(),
@@ -365,7 +367,7 @@ fn workbench_whale_reveal_visual_evidence() {
     let directory = std::path::PathBuf::from(std::env::var_os("QA_LAUNCH_CAPTURE_DIR").unwrap());
     std::fs::create_dir_all(&directory).unwrap();
     let (_workspace, mut tui) =
-        start_with_options(32, 100, false, &[TITLE], Some("shoreline"), true);
+        start_with_options(32, 100, false, &[TITLE], Some("shoreline"), true, false);
     let start = std::time::Instant::now();
     for index in 0..16 {
         let frame = tui.frame();
@@ -448,6 +450,57 @@ fn fleet_roles_open_the_shared_model_picker_and_escape_returns_to_the_same_role(
         tui.send(keys::key::enter()).unwrap();
         wait(&mut tui, "Personal");
         capture(&mut tui, "fleet-role-destination");
+        tui.shutdown();
+    }
+}
+
+#[test]
+fn no_color_keeps_home_navigation_and_submit_cues_without_color() {
+    let sgr = regex::Regex::new(r"\x1b\[([0-9;:]*)m").unwrap();
+    for (rows, cols) in SIZES {
+        let (_workspace, mut tui) =
+            start_with_options(rows, cols, false, &[TITLE], Some("shoreline"), false, true);
+        wait(&mut tui, "[·]");
+        tui.send(keys::key::down()).unwrap();
+        tui.send(keys::key::down()).unwrap();
+        capture(&mut tui, "no-color-selected");
+        tui.send(keys::key::enter()).unwrap();
+        wait(&mut tui, "Resume");
+        tui.wait_for_idle(Duration::from_millis(200), WAIT).unwrap();
+        tui.send(keys::key::enter()).unwrap();
+        wait(&mut tui, SAVED_TEXT);
+        tui.send("monochrome draft").unwrap();
+        wait(&mut tui, "[↵]");
+        tui.wait_for_idle(Duration::from_millis(200), WAIT).unwrap();
+        capture(&mut tui, "no-color-draft");
+
+        for row in 0..rows {
+            for col in 0..cols {
+                assert_eq!(
+                    tui.frame().colors_at(row, col),
+                    Some((
+                        qa_harness::frame::Color::Default,
+                        qa_harness::frame::Color::Default
+                    )),
+                    "{cols}x{rows} cell ({row}, {col}) added a color"
+                );
+            }
+        }
+        // Inspect the whole emitted stream, not just its last rendered frame.
+        let transcript = tui.transcript();
+        let output = String::from_utf8_lossy(&transcript);
+        for codes in sgr.captures_iter(&output) {
+            for code in codes[1]
+                .split([';', ':'])
+                .filter_map(|code| code.parse::<u16>().ok())
+            {
+                assert!(
+                    !matches!(code, 30..=38 | 40..=48 | 58 | 90..=97 | 100..=107),
+                    "{cols}x{rows} emitted color SGR {:?}",
+                    &codes[0]
+                );
+            }
+        }
         tui.shutdown();
     }
 }
