@@ -13141,6 +13141,155 @@ async fn auto_review_force_prompt_is_denied_without_opening_a_modal() -> Result<
 }
 
 #[tokio::test]
+async fn approval_interrupt_revokes_waiter_and_rejects_late_actions() -> Result<()> {
+    // Also cover an allow already queued when Stop wins, before the monitor
+    // resumes: it must not dispatch or persist remember=true.
+    for queued_allow in [false, true] {
+        let manager = test_manager(test_runtime_dir())?;
+        let thread = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        let mut harness = install_mock_engine(&manager, &thread.id).await;
+        let turn = manager
+            .start_turn(
+                &thread.id,
+                StartTurnRequest {
+                    prompt: "cancel the pending write".to_string(),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        assert!(matches!(
+            harness.rx_op.recv().await,
+            Some(Op::SendMessage(_))
+        ));
+        let event = |id: &str| EngineEvent::ApprovalRequired {
+            approval_key: id.to_string(),
+            approval_grouping_key: id.to_string(),
+            id: id.to_string(),
+            tool_name: "computer_set_value".to_string(),
+            description: "pending write".to_string(),
+            input: json!({}),
+            intent_summary: None,
+            approval_force_prompt: false,
+        };
+        harness.tx_event.send(event("pending_write")).await?;
+        let approval = await_approval_identity(&manager, &thread.id, "pending_write").await?;
+        let (other_approval, mut other_rx) =
+            manager.register_pending_approval_for_thread_for_test("other-thread", "other-call");
+
+        if queued_allow {
+            assert!(manager.deliver_external_approval(
+                &approval,
+                ExternalApprovalDecision::Allow { remember: true },
+            ));
+        }
+        manager.interrupt_turn(&thread.id, &turn.id).await?;
+        assert!(!manager.deliver_external_approval(
+            &approval,
+            ExternalApprovalDecision::Allow { remember: true },
+        ));
+        assert!(
+            manager
+                .get_thread_detail(&thread.id)
+                .await?
+                .pending_approvals
+                .is_empty()
+        );
+        assert_eq!(
+            manager.pending_approvals_count(),
+            1,
+            "other task remains gated"
+        );
+        assert!(matches!(
+            other_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        let decision = tokio::time::timeout(Duration::from_secs(2), harness.recv_approval_event())
+            .await
+            .context("Stop must wake the approval monitor")?;
+        assert_eq!(
+            decision,
+            Some(MockApprovalEvent::Denied {
+                id: "pending_write".to_string()
+            })
+        );
+        assert!(!manager.store.load_thread(&thread.id)?.auto_approve);
+        assert!(
+            manager.events_since(&thread.id, None)?.iter().any(|event| {
+                event.event == "approval.decided"
+                    && event.payload["approval_id"] == approval
+                    && event.payload["decision"] == "deny"
+                    && event.payload["cancelled"] == true
+            }),
+            "cancelled approval must clear the client's pending UI"
+        );
+
+        harness.tx_event.send(event("queued_after_stop")).await?;
+        let decision = tokio::time::timeout(Duration::from_secs(2), harness.recv_approval_event())
+            .await
+            .context("late approval event must fail closed")?;
+        assert_eq!(
+            decision,
+            Some(MockApprovalEvent::Denied {
+                id: "queued_after_stop".to_string()
+            })
+        );
+        assert!(
+            manager
+                .get_thread_detail(&thread.id)
+                .await?
+                .pending_approvals
+                .is_empty()
+        );
+        assert!(
+            !manager.events_since(&thread.id, None)?.iter().any(|event| {
+                event.event == "approval.required"
+                    && event.payload["tool_call_id"] == "queued_after_stop"
+            })
+        );
+        harness
+            .tx_event
+            .send(EngineEvent::TurnComplete {
+                usage: Usage::default(),
+                parent_route_usage: Usage::default(),
+                routed_usage_dropped_records: 0,
+                status: TurnOutcomeStatus::Interrupted,
+                error: None,
+                tool_catalog: None,
+                base_url: None,
+            })
+            .await?;
+        assert_eq!(
+            wait_for_terminal_turn(&manager, &turn.id).await?.status,
+            RuntimeTurnStatus::Interrupted
+        );
+        assert!(manager.deliver_external_approval(
+            &other_approval,
+            ExternalApprovalDecision::Deny { remember: false },
+        ));
+        assert!(matches!(
+            other_rx.await?,
+            ExternalApprovalDecision::Deny { .. }
+        ));
+        manager
+            .start_turn(
+                &thread.id,
+                StartTurnRequest {
+                    prompt: "new turn after stop".to_string(),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        assert!(matches!(
+            harness.rx_op.recv().await,
+            Some(Op::SendMessage(_))
+        ));
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn approval_timeout_denies_clears_ui_and_next_turn_can_start() -> Result<()> {
     let _timeout_guard = test_approval_timeout_ms(25);
     let manager = test_manager(test_runtime_dir())?;

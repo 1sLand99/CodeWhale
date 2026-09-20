@@ -5769,7 +5769,7 @@ impl RuntimeThreadManager {
         })
     }
 
-    async fn remember_thread_auto_approve(&self, thread_id: &str) {
+    fn remember_thread_auto_approve(&self, thread_id: &str, engine: &EngineHandle) {
         let thread = {
             let _thread_mutation = self.store.thread_mutation.lock();
             let Ok(mut thread) = self.store.load_thread(thread_id) else {
@@ -5791,29 +5791,20 @@ impl RuntimeThreadManager {
             thread
         };
 
-        let engine = {
-            let active = self.active.lock().await;
-            active
-                .engines
-                .get(thread_id)
-                .map(|state| state.engine.clone())
-        };
-        if let Some(engine) = engine {
-            let configured_sandbox_mode = self.read_config().sandbox_mode.clone();
-            let policy = RuntimePolicyProjection::from_persisted(
-                &thread.mode,
-                thread.permission_posture.as_deref(),
-                thread.auto_approve,
-            );
-            let _ = engine.try_send(Op::ChangeMode {
-                mode: policy.mode,
-                allow_shell: thread.allow_shell,
-                trust_mode: thread.trust_mode,
-                auto_approve: policy.auto_approve(),
-                approval_mode: policy.permission,
-                configured_sandbox_mode,
-            });
-        }
+        let configured_sandbox_mode = self.read_config().sandbox_mode.clone();
+        let policy = RuntimePolicyProjection::from_persisted(
+            &thread.mode,
+            thread.permission_posture.as_deref(),
+            thread.auto_approve,
+        );
+        let _ = engine.try_send(Op::ChangeMode {
+            mode: policy.mode,
+            allow_shell: thread.allow_shell,
+            trust_mode: thread.trust_mode,
+            auto_approve: policy.auto_approve(),
+            approval_mode: policy.permission,
+            configured_sandbox_mode,
+        });
     }
 
     #[must_use]
@@ -9996,6 +9987,13 @@ impl RuntimeThreadManager {
                 bail!("Turn {turn_id} is not active on thread {thread_id}");
             }
             active_turn.interrupt_requested = true;
+            // Wake the monitor's approval wait so it can consume the Engine's
+            // terminal receipt. Revoke only this turn's minted capabilities.
+            // Registration takes the same active lock, so a late event cannot
+            // install a new waiter after this sweep.
+            self.pending_approvals.lock().retain(|_, entry| {
+                entry.thread_id != thread_id || entry.request.turn_id != turn_id
+            });
             if let Some(compaction_id) = active_turn.compaction_id.as_deref() {
                 active_thread.engine.cancel_compaction(compaction_id)?;
             } else {
@@ -12037,8 +12035,23 @@ impl RuntimeThreadManager {
                     // subscribes from an older cursor that will replay it.
                     let projection_lock = self.projection_lock(&thread_id);
                     let projection = projection_lock.lock().await;
-                    let (approval_id, rx) =
-                        self.register_pending_approval(&thread_id, pending_request);
+                    let registration = {
+                        let active = self.active.lock().await;
+                        let accepting = active
+                            .engines
+                            .get(&thread_id)
+                            .and_then(|state| state.active_turn.as_ref())
+                            .is_some_and(|turn| {
+                                turn.turn_id == turn_id && !turn.interrupt_requested
+                            });
+                        accepting
+                            .then(|| self.register_pending_approval(&thread_id, pending_request))
+                    };
+                    let Some((approval_id, rx)) = registration else {
+                        drop(projection);
+                        let _ = engine.deny_tool_call(&id).await;
+                        continue;
+                    };
                     if let Err(err) = self
                         .emit_event(
                             &thread_id,
@@ -12067,11 +12080,51 @@ impl RuntimeThreadManager {
                         Some(wait) => tokio::time::timeout(wait, rx).await,
                         None => Ok(rx.await),
                     };
+                    // A decision may already have consumed the sender when
+                    // Stop wins. Never remember or dispatch that late allow.
+                    let cancelled = {
+                        let active = self.active.lock().await;
+                        let accepting = active
+                            .engines
+                            .get(&thread_id)
+                            .and_then(|state| state.active_turn.as_ref())
+                            .is_some_and(|turn| {
+                                turn.turn_id == turn_id && !turn.interrupt_requested
+                            });
+                        if accepting
+                            && matches!(
+                                decision,
+                                Ok(Ok(ExternalApprovalDecision::Allow { remember: true }))
+                            )
+                        {
+                            // Keep Stop excluded until its competing permission
+                            // change has committed to the same active turn.
+                            self.remember_thread_auto_approve(&thread_id, &engine);
+                        }
+                        !accepting
+                    };
+                    if cancelled {
+                        self.cancel_pending_approval(&approval_id);
+                        self.emit_event(
+                            &thread_id,
+                            Some(&turn_id),
+                            None,
+                            "approval.decided",
+                            json!({
+                                "approval_id": approval_id,
+                                "tool_call_id": id,
+                                "decision": "deny",
+                                "remember": false,
+                                "cancelled": true,
+                            }),
+                        )
+                        .await
+                        .ok();
+                        let _ = engine.deny_tool_call(id).await;
+                        continue;
+                    }
                     match decision {
                         Ok(Ok(ExternalApprovalDecision::Allow { remember })) => {
-                            if remember {
-                                self.remember_thread_auto_approve(&thread_id).await;
-                            }
                             self.emit_event(
                                 &thread_id,
                                 Some(&turn_id),
@@ -12652,7 +12705,7 @@ impl RuntimeThreadManager {
         let active = self.active.lock().await;
         let state = active.engines.get(thread_id)?;
         let turn = state.active_turn.as_ref()?;
-        if turn.turn_id != turn_id {
+        if turn.turn_id != turn_id || turn.interrupt_requested {
             return None;
         }
         Some(engine.runtime_permission_authority())
