@@ -18272,3 +18272,225 @@ async fn mcp_management_revision_precondition_prevents_stale_mutation() -> Resul
     handle.abort();
     Ok(())
 }
+
+#[cfg(all(unix, not(target_env = "ohos")))]
+#[tokio::test]
+async fn jobs_api_pty_resize_raw_input_and_nonblocking_poll() -> Result<()> {
+    use base64::Engine as _;
+    let tmp = tempfile::tempdir()?;
+    let workspace = tmp.path().join("workspace");
+    fs::create_dir_all(&workspace)?;
+    let (addr, _, handle) = spawn_test_server_with_root_token_mobile_workspace(
+        tmp.path().join("runtime"),
+        tmp.path().join("sessions"),
+        Some("pty-token".into()),
+        false,
+        workspace.clone(),
+    )
+    .await?
+    .context("PTY test requires loopback listener")?;
+    let client = crate::tls::reqwest_client();
+    let base = format!("http://{addr}");
+    let thread: Value = client
+        .post(format!("{base}/v1/threads"))
+        .bearer_auth("pty-token")
+        .json(&json!({"workspace":workspace,"allow_shell":true}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let thread_id = thread["id"].as_str().unwrap();
+    let jobs = format!("{base}/v1/threads/{thread_id}/jobs");
+    let created: Value = client.post(&jobs).bearer_auth("pty-token")
+        .json(&json!({"command":"stty -echo; printf ready; while IFS= read -r line; do stty size; done", "tty":true}))
+        .send().await?.error_for_status()?.json().await?;
+    assert_eq!(created["job"]["tty"], true);
+    assert_eq!(
+        created["job"]["terminal_size"],
+        json!({"rows":24,"cols":80})
+    );
+    let job_id = created["job"]["job_id"].as_str().unwrap();
+    let job = format!("{jobs}/{job_id}");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let output: Value = client
+            .get(format!("{job}/output?format=text"))
+            .bearer_auth("pty-token")
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        if output["data"].as_str().unwrap().contains("ready") {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline);
+        sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        client
+            .post(format!("{job}/resize"))
+            .json(&json!({"rows":30,"cols":90}))
+            .send()
+            .await?
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    for size in [json!({"rows":0,"cols":90}), json!({"rows":30,"cols":1001})] {
+        assert_eq!(
+            client
+                .post(format!("{job}/resize"))
+                .bearer_auth("pty-token")
+                .json(&size)
+                .send()
+                .await?
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let resized: Value = client
+        .post(format!("{job}/resize"))
+        .bearer_auth("pty-token")
+        .json(&json!({"rows":42,"cols":123}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(
+        resized["job"]["terminal_size"],
+        json!({"rows":42,"cols":123})
+    );
+    client
+        .post(format!("{job}/stdin"))
+        .bearer_auth("pty-token")
+        .json(&json!({"data":"size\n"}))
+        .send()
+        .await?
+        .error_for_status()?;
+    loop {
+        let output: Value = client
+            .get(format!("{job}/output?format=text"))
+            .bearer_auth("pty-token")
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        if output["data"].as_str().unwrap().contains("42 123") {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline);
+        sleep(Duration::from_millis(20)).await;
+    }
+    let other: Value = client
+        .post(format!("{base}/v1/threads"))
+        .bearer_auth("pty-token")
+        .json(&json!({"workspace":workspace,"allow_shell":true}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(
+        client
+            .post(format!(
+                "{base}/v1/threads/{}/jobs/{job_id}/resize",
+                other["id"].as_str().unwrap()
+            ))
+            .bearer_auth("pty-token")
+            .json(&json!({"rows":30,"cols":90}))
+            .send()
+            .await?
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    client
+        .post(format!("{job}/kill"))
+        .bearer_auth("pty-token")
+        .send()
+        .await?
+        .error_for_status()?;
+    assert_eq!(
+        client
+            .post(format!("{job}/resize"))
+            .bearer_auth("pty-token")
+            .json(&json!({"rows":30,"cols":90}))
+            .send()
+            .await?
+            .status(),
+        StatusCode::CONFLICT
+    );
+
+    let cat: Value = client
+        .post(&jobs)
+        .bearer_auth("pty-token")
+        .json(&json!({"command":"cat"}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(cat["job"]["tty"], false);
+    assert!(cat["job"]["terminal_size"].is_null());
+    let cat_job = format!("{jobs}/{}", cat["job"]["job_id"].as_str().unwrap());
+    assert_eq!(
+        client
+            .post(format!("{cat_job}/resize"))
+            .bearer_auth("pty-token")
+            .json(&json!({"rows":30,"cols":90}))
+            .send()
+            .await?
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    // A 5-second output long-poll must not hold the owner lock against stdin.
+    let poll_client = client.clone();
+    let poll_url = format!("{cat_job}/output?wait_ms=5000");
+    let polling = tokio::spawn(async move {
+        poll_client
+            .get(poll_url)
+            .bearer_auth("pty-token")
+            .send()
+            .await
+    });
+    sleep(Duration::from_millis(100)).await;
+    let bytes = b"\0\xff\x1b[A\x03\n";
+    tokio::time::timeout(Duration::from_secs(2), client.post(format!("{cat_job}/stdin"))
+        .bearer_auth("pty-token").json(&json!({"data":base64::engine::general_purpose::STANDARD.encode(bytes), "encoding":"base64", "close":true})).send()).await??.error_for_status()?;
+    let _ = polling.await??.error_for_status()?;
+    let output: Value = client
+        .get(format!("{cat_job}/output?wait_ms=1000"))
+        .bearer_auth("pty-token")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD.decode(output["data"].as_str().unwrap())?,
+        bytes
+    );
+    let replay: Value = client
+        .get(format!("{cat_job}/output"))
+        .bearer_auth("pty-token")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(replay["data"], output["data"]);
+    let end = output["next_cursor"].as_u64().unwrap();
+    let tail: Value = client
+        .get(format!("{cat_job}/output?cursor={end}"))
+        .bearer_auth("pty-token")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(tail["data"], "");
+    handle.abort();
+    Ok(())
+}

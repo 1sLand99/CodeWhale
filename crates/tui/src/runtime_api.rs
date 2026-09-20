@@ -1255,6 +1255,10 @@ pub fn build_router(state: RuntimeApiState) -> Router {
             "/v1/threads/{id}/jobs/{job_id}/kill",
             post(jobs::kill_thread_job),
         )
+        .route(
+            "/v1/threads/{id}/jobs/{job_id}/resize",
+            post(jobs::resize_thread_job),
+        )
         .route("/v1/threads/{id}/context", get(context::get_thread_context))
         .route("/v1/threads/{id}/plan", get(plans::get_thread_plan))
         .route("/v1/threads/{id}/todo", get(plans::get_thread_todo))
