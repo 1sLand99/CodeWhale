@@ -32,7 +32,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::{mpsc, oneshot};
@@ -40,6 +40,10 @@ use tokio::time::timeout;
 
 use super::diagnostics::{Diagnostic, Severity};
 use crate::utils::spawn_supervised;
+
+const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_LSP_HEADER_BYTES: usize = 8 * 1024;
+const MAX_LSP_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 /// A publication retains the server's document version instead of pretending
 /// that a matching URI alone proves which text was checked.
@@ -104,18 +108,17 @@ pub trait LspTransport: Send + Sync {
     }
 
     /// Best-effort shutdown. Called via `LspManager::shutdown_all`.
-    #[expect(dead_code)]
     async fn shutdown(&self);
 }
 
 /// Stdio-backed transport. Spawns the LSP server as a child process and
-/// pipes JSON-RPC over stdin/stdout. Stderr is captured into a buffer so
-/// callers can include it in error messages without polluting our own stderr.
+/// pipes JSON-RPC over stdin/stdout. Stderr is drained without retaining or
+/// exposing arbitrary server output.
 pub struct StdioLspTransport {
     /// JoinHandle for the running server. Held so the child stays alive for
     /// the transport's lifetime; consumed during `shutdown`.
-    #[expect(dead_code)]
-    child: AsyncMutex<Option<Child>>,
+    child: Arc<AsyncMutex<Option<Child>>>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
     /// Outgoing message sender to the writer task.
     tx_outbound: mpsc::Sender<Vec<u8>>,
     /// Inbound diagnostics queue. We push every `publishDiagnostics`
@@ -143,6 +146,16 @@ impl StdioLspTransport {
         language_id: &str,
         workspace: PathBuf,
     ) -> Result<Self> {
+        Self::spawn_with_timeout(command, args, language_id, workspace, INITIALIZE_TIMEOUT).await
+    }
+
+    async fn spawn_with_timeout(
+        command: &str,
+        args: &[String],
+        language_id: &str,
+        workspace: PathBuf,
+        initialize_wait: Duration,
+    ) -> Result<Self> {
         let mut cmd = Command::new(command);
         cmd.args(args);
         cmd.stdin(Stdio::piped());
@@ -163,18 +176,29 @@ impl StdioLspTransport {
             .take()
             .context("LSP child has no stdout handle")?;
 
+        let mut stderr = child
+            .stderr
+            .take()
+            .context("LSP child has no stderr handle")?;
+        let stderr_task =
+            spawn_supervised("lsp-stderr", std::panic::Location::caller(), async move {
+                // Drain bytes, not lines: even a single unbounded log line must
+                // neither block the child nor accumulate in host memory.
+                let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
+            });
+
         let (tx_outbound, rx_outbound) = mpsc::channel::<Vec<u8>>(64);
         let (tx_inbound, rx_inbound) = mpsc::channel::<Value>(64);
         let (tx_diag, rx_diag) = mpsc::channel::<(PathBuf, Option<i64>, Vec<Diagnostic>)>(64);
 
         // Writer task: drain outbound channel, frame with Content-Length, write to stdin.
-        spawn_supervised(
+        let writer_task = spawn_supervised(
             "lsp-writer",
             std::panic::Location::caller(),
             writer_task(stdin, rx_outbound),
         );
         // Reader task: parse Content-Length frames from stdout, push to inbound queue.
-        spawn_supervised(
+        let reader_task = spawn_supervised(
             "lsp-reader",
             std::panic::Location::caller(),
             reader_task(stdout, tx_inbound),
@@ -184,55 +208,76 @@ impl StdioLspTransport {
         // diagnostics polling itself does not reuse it.
         let pending: Arc<AsyncMutex<HashMap<i64, oneshot::Sender<Value>>>> =
             Arc::new(AsyncMutex::new(HashMap::new()));
-        spawn_supervised(
+        let child = Arc::new(AsyncMutex::new(Some(child)));
+        let dispatcher_child = child.clone();
+        let dispatcher_pending = pending.clone();
+        let dispatcher_task = spawn_supervised(
             "lsp-dispatcher",
             std::panic::Location::caller(),
-            dispatcher_task(rx_inbound, tx_diag, pending.clone()),
+            async move {
+                dispatcher_task(rx_inbound, tx_diag, dispatcher_pending).await;
+                // EOF, malformed frames, or an overflowing diagnostics queue
+                // terminate the producer too, so its pipes cannot stay stuck.
+                if let Some(mut child) = dispatcher_child.lock().await.take() {
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                }
+            },
         );
 
-        // Send `initialize` and wait for `initialized`. We synthesize id=1.
-        let init_payload = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "processId": std::process::id(),
-                "rootUri": uri_from_path(&workspace),
-                "capabilities": {
-                    "textDocument": {
-                        "publishDiagnostics": { "relatedInformation": false, "versionSupport": true }
-                    }
-                },
-                "workspaceFolders": [{
-                    "uri": uri_from_path(&workspace),
-                    "name": "workspace"
-                }]
-            }
-        });
-        send_message(&tx_outbound, &init_payload).await?;
-
-        // We do not actually wait for the initialize response here in MVP —
-        // most servers buffer notifications until they are ready, and waiting
-        // for `initialize` reply doubles the latency of the first edit. Send
-        // `initialized` immediately and let publishDiagnostics arrive on its
-        // own clock.
-        let initialized = json!({
-            "jsonrpc": "2.0",
-            "method": "initialized",
-            "params": {}
-        });
-        send_message(&tx_outbound, &initialized).await?;
-
-        Ok(Self {
-            child: AsyncMutex::new(Some(child)),
+        let transport = Self {
+            child,
+            tasks: vec![stderr_task, writer_task, reader_task, dispatcher_task],
             tx_outbound,
             diagnostics_gate: AsyncMutex::new(()),
             diagnostics_rx: AsyncMutex::new(rx_diag),
             pending,
-            next_id: AsyncMutex::new(2),
+            next_id: AsyncMutex::new(1),
             language_id: language_id.to_string(),
             opened: AsyncMutex::new(HashMap::new()),
-        })
+        };
+        let result = transport.request("initialize", json!({
+            "processId": std::process::id(),
+            "rootUri": uri_from_path(&workspace),
+            "capabilities": {
+                "textDocument": {
+                    "publishDiagnostics": { "relatedInformation": false, "versionSupport": true }
+                }
+            },
+            "workspaceFolders": [{"uri": uri_from_path(&workspace), "name": "workspace"}]
+        }), initialize_wait).await.context("LSP initialization failed")?;
+        if !result.get("capabilities").is_some_and(Value::is_object) {
+            return Err(anyhow!(
+                "LSP initialize response is missing server capabilities"
+            ));
+        }
+        timeout(
+            initialize_wait,
+            send_message(
+                &transport.tx_outbound,
+                &json!({
+                    "jsonrpc": "2.0", "method": "initialized", "params": {}
+                }),
+            ),
+        )
+        .await
+        .map_err(|_| anyhow!("LSP initialized notification timed out"))??;
+        Ok(transport)
+    }
+}
+
+impl Drop for StdioLspTransport {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+        if let Ok(mut child) = self.child.try_lock()
+            && let Some(child) = child.as_mut()
+        {
+            let _ = child.start_kill();
+        }
+        // If shutdown/dispatcher currently owns the child, abort releases
+        // its local Child and kill_on_drop remains the final fallback.
     }
 }
 
@@ -353,28 +398,29 @@ impl LspTransport for StdioLspTransport {
             "method": method,
             "params": params,
         });
-        if let Err(err) = send_message(&self.tx_outbound, &payload).await {
-            let mut pending = self.pending.lock().await;
-            pending.remove(&id);
-            return Err(err);
-        }
-        match timeout(wait, rx).await {
+        // The deadline includes queue backpressure, not just the reply.
+        let response = timeout(wait, async {
+            send_message(&self.tx_outbound, &payload).await?;
+            rx.await.map_err(|_| anyhow!("LSP request channel closed"))
+        })
+        .await;
+        self.pending.lock().await.remove(&id);
+        match response {
             Ok(Ok(reply)) => {
                 if let Some(error) = reply.get("error") {
                     let message = error
                         .get("message")
-                        .and_then(|v| v.as_str())
+                        .and_then(Value::as_str)
                         .unwrap_or("LSP request failed");
                     return Err(anyhow!("{message}"));
                 }
-                Ok(reply.get("result").cloned().unwrap_or(Value::Null))
+                reply
+                    .get("result")
+                    .cloned()
+                    .ok_or_else(|| anyhow!("LSP response has no result"))
             }
-            Ok(Err(_)) => Err(anyhow!("LSP request channel closed")),
-            Err(_) => {
-                let mut pending = self.pending.lock().await;
-                pending.remove(&id);
-                Err(anyhow!("LSP request timed out for {method}"))
-            }
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(anyhow!("LSP request timed out for {method}")),
         }
     }
 
@@ -384,6 +430,10 @@ impl LspTransport for StdioLspTransport {
             let _ = c.start_kill();
             let _ = c.wait().await;
         }
+        for task in &self.tasks {
+            task.abort();
+        }
+        self.pending.lock().await.clear();
     }
 }
 
@@ -417,7 +467,7 @@ async fn writer_task(mut stdin: tokio::process::ChildStdin, mut rx: mpsc::Receiv
 /// the LSP server's stdout. Pushes each parsed JSON value to `tx`. Exits
 /// when stdout closes or a frame is malformed (we choose to fail closed
 /// rather than risk hanging).
-async fn reader_task(mut stdout: tokio::process::ChildStdout, tx: mpsc::Sender<Value>) {
+async fn reader_task(mut stdout: impl AsyncRead + Unpin, tx: mpsc::Sender<Value>) {
     let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
     let mut tmp = [0u8; 4096];
     loop {
@@ -427,39 +477,63 @@ async fn reader_task(mut stdout: tokio::process::ChildStdout, tx: mpsc::Sender<V
             Err(_) => return,
         };
         buf.extend_from_slice(&tmp[..n]);
-        // Try to parse as many frames as we can from the accumulated buffer.
-        while let Some((header_end, content_length)) = parse_header(&buf) {
-            if buf.len() < header_end + content_length {
-                break; // need more bytes
+        loop {
+            let (header_end, content_length) = match parse_header(&buf) {
+                Ok(Some(frame)) => frame,
+                Ok(None) => break,
+                Err(_) => return,
+            };
+            // Both operands are bounded by parse_header.
+            let frame_end = header_end + content_length;
+            if buf.len() < frame_end {
+                break;
             }
-            let body = &buf[header_end..header_end + content_length];
-            let parsed = serde_json::from_slice::<Value>(body).ok();
-            // Drop the consumed bytes regardless of parse result so a bad frame
-            // does not stall the loop.
-            buf.drain(..header_end + content_length);
-            if let Some(value) = parsed
-                && tx.send(value).await.is_err()
-            {
+            let value = match serde_json::from_slice::<Value>(&buf[header_end..frame_end]) {
+                Ok(value) => value,
+                Err(_) => return,
+            };
+            buf.drain(..frame_end);
+            if tx.send(value).await.is_err() {
                 return;
             }
         }
     }
 }
 
-/// Parse a JSON-RPC header block. Returns `Some((header_end, content_length))`
-/// where `header_end` is the byte offset of the first body byte. The header
-/// terminator is `\r\n\r\n`. We require a `Content-Length` header.
-fn parse_header(buf: &[u8]) -> Option<(usize, usize)> {
-    let term = b"\r\n\r\n";
-    let pos = buf.windows(term.len()).position(|window| window == term)?;
-    let header = std::str::from_utf8(&buf[..pos]).ok()?;
-    let mut content_length: Option<usize> = None;
+/// Distinguish incomplete headers from malformed or oversized frames so a
+/// broken server cannot cause an indefinitely growing input buffer.
+fn parse_header(buf: &[u8]) -> Result<Option<(usize, usize)>> {
+    let Some(pos) = buf.windows(4).position(|window| window == b"\r\n\r\n") else {
+        if buf.len() > MAX_LSP_HEADER_BYTES {
+            return Err(anyhow!("LSP header exceeds size limit"));
+        }
+        return Ok(None);
+    };
+    if pos + 4 > MAX_LSP_HEADER_BYTES {
+        return Err(anyhow!("LSP header exceeds size limit"));
+    }
+    let header = std::str::from_utf8(&buf[..pos]).context("invalid LSP header encoding")?;
+    let mut content_length = None;
     for line in header.split("\r\n") {
-        if let Some(rest) = line.strip_prefix("Content-Length:") {
-            content_length = rest.trim().parse::<usize>().ok();
+        let (name, value) = line.split_once(':').context("malformed LSP header")?;
+        if name.eq_ignore_ascii_case("Content-Length") {
+            if content_length.is_some() {
+                return Err(anyhow!("duplicate LSP Content-Length"));
+            }
+            let length = value
+                .trim()
+                .parse::<usize>()
+                .context("invalid LSP Content-Length")?;
+            if length == 0 || length > MAX_LSP_FRAME_BYTES {
+                return Err(anyhow!("LSP frame exceeds size limit or is empty"));
+            }
+            content_length = Some(length);
         }
     }
-    content_length.map(|cl| (pos + term.len(), cl))
+    Ok(Some((
+        pos + 4,
+        content_length.context("missing LSP Content-Length")?,
+    )))
 }
 
 /// Background task that consumes inbound JSON values, classifies them as
@@ -474,7 +548,12 @@ async fn dispatcher_task(
         let method = value.get("method").and_then(|v| v.as_str());
         if method == Some("textDocument/publishDiagnostics") {
             if let Some(publication) = parse_publish_diagnostics(&value) {
-                let _ = tx_diag.send(publication).await;
+                // Do not let an unconsumed diagnostics burst prevent reply
+                // delivery or EOF cleanup. Overflow closes this transport's
+                // dispatcher, giving callers an explicit channel error.
+                if tx_diag.try_send(publication).is_err() {
+                    break;
+                }
             }
             continue;
         }
@@ -486,6 +565,9 @@ async fn dispatcher_task(
             }
         }
     }
+    // Reader EOF/malformed frames and queue overflow wake every pending
+    // request immediately instead of leaving reply slots until their timeout.
+    pending.lock().await.clear();
 }
 
 /// Decode a `textDocument/publishDiagnostics` notification.
@@ -548,7 +630,9 @@ mod tests {
     #[test]
     fn parses_lsp_header() {
         let frame = b"Content-Length: 5\r\n\r\nhello";
-        let (end, len) = parse_header(frame).expect("header parses");
+        let (end, len) = parse_header(frame)
+            .expect("valid header")
+            .expect("header parses");
         assert_eq!(end, 21);
         assert_eq!(len, 5);
     }
@@ -556,7 +640,7 @@ mod tests {
     #[test]
     fn parse_header_returns_none_when_truncated() {
         let frame = b"Content-Length: 5\r\nMissingTerm";
-        assert!(parse_header(frame).is_none());
+        assert!(parse_header(frame).unwrap().is_none());
     }
 
     #[test]
@@ -601,7 +685,8 @@ mod tests {
         let (tx_diag, rx_diag) = mpsc::channel(1);
         drop(tx_diag);
         let transport = StdioLspTransport {
-            child: AsyncMutex::new(None),
+            child: Arc::new(AsyncMutex::new(None)),
+            tasks: Vec::new(),
             tx_outbound,
             diagnostics_gate: AsyncMutex::new(()),
             diagnostics_rx: AsyncMutex::new(rx_diag),
@@ -635,7 +720,8 @@ mod tests {
         let (tx_diag, rx_diag) = mpsc::channel(8);
         (
             StdioLspTransport {
-                child: AsyncMutex::new(None),
+                child: Arc::new(AsyncMutex::new(None)),
+                tasks: Vec::new(),
                 tx_outbound,
                 diagnostics_gate: AsyncMutex::new(()),
                 diagnostics_rx: AsyncMutex::new(rx_diag),
@@ -651,7 +737,7 @@ mod tests {
 
     async fn next_document(rx: &mut mpsc::Receiver<Vec<u8>>) -> Value {
         let frame = rx.recv().await.unwrap();
-        let (start, _) = parse_header(&frame).unwrap();
+        let (start, _) = parse_header(&frame).unwrap().unwrap();
         serde_json::from_slice::<Value>(&frame[start..]).unwrap()
     }
 
@@ -785,5 +871,232 @@ mod tests {
         assert_eq!(parse_publish_diagnostics(&payload).unwrap().1, Some(4));
         payload["params"]["version"] = json!("4");
         assert!(parse_publish_diagnostics(&payload).is_none());
+    }
+    #[cfg(unix)]
+    const STDIO_FIXTURE: &str = r#"
+import json, os, select, sys, time
+mode, pid_path = sys.argv[1:]
+input_stream = os.fdopen(0, 'rb', buffering=0)
+with open(pid_path, 'w') as f:
+    f.write(str(os.getpid()))
+def read():
+    headers = {}
+    while True:
+        line = input_stream.readline()
+        if not line:
+            raise SystemExit(0)
+        if line == b'\r\n':
+            break
+        key, value = line.decode().split(':', 1)
+        headers[key.lower()] = value.strip()
+    body = b''
+    length = int(headers['content-length'])
+    while len(body) < length:
+        chunk = input_stream.read(length - len(body))
+        if not chunk:
+            raise SystemExit(0)
+        body += chunk
+    return json.loads(body)
+def send(value):
+    body = json.dumps(value).encode()
+    sys.stdout.buffer.write(('Content-Length: %d\r\n\r\n' % len(body)).encode() + body)
+    sys.stdout.buffer.flush()
+request = read()
+assert request['method'] == 'initialize'
+if mode == 'eof':
+    raise SystemExit(0)
+if mode == 'silence':
+    time.sleep(60)
+if mode == 'error':
+    send({'jsonrpc':'2.0','id':request['id'],'error':{'code':-32002,'message':'fixture rejected initialization'}})
+    time.sleep(60)
+if mode == 'delayed' and select.select([input_stream], [], [], 0.1)[0]:
+    send({'jsonrpc':'2.0','id':request['id'],'error':{'code':-32002,'message':'notification arrived before initialize reply'}})
+    raise SystemExit(1)
+if mode == 'stderr':
+    for _ in range(64):
+        os.write(2, b'x' * 32768)
+send({'jsonrpc':'2.0','id':request['id'],'result':{'capabilities':{}}})
+assert read()['method'] == 'initialized'
+while True:
+    request = read()
+    if request.get('method') == 'fixture/overflow':
+        for _ in range(80):
+            send({'jsonrpc':'2.0','method':'textDocument/publishDiagnostics','params':{'uri':'file:///tmp/overflow.rs','version':1,'diagnostics':[]}})
+        time.sleep(60)
+    elif 'id' in request:
+        send({'jsonrpc':'2.0','id':request['id'],'result':{'ready':True}})
+"#;
+
+    #[cfg(unix)]
+    async fn spawn_stdio_fixture(
+        mode: &str,
+        root: &Path,
+        wait: Duration,
+    ) -> Result<StdioLspTransport> {
+        StdioLspTransport::spawn_with_timeout(
+            "python3",
+            &[
+                "-u".into(),
+                "-c".into(),
+                STDIO_FIXTURE.into(),
+                mode.into(),
+                root.join("pid").to_string_lossy().into_owned(),
+            ],
+            "rust",
+            root.to_path_buf(),
+            wait,
+        )
+        .await
+    }
+
+    #[cfg(unix)]
+    async fn assert_fixture_exited(root: &Path) {
+        let pid = std::fs::read_to_string(root.join("pid"))
+            .expect("fixture started")
+            .parse::<i32>()
+            .unwrap();
+        for _ in 0..100 {
+            // Signal zero probes only this fixture PID; it never sends a signal.
+            if unsafe { libc::kill(pid, 0) } == -1 {
+                assert_eq!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(libc::ESRCH)
+                );
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("fixture child remained alive after transport termination");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdio_startup_waits_for_initialize_and_drains_stderr_pressure() {
+        for mode in ["delayed", "stderr"] {
+            let root = tempfile::tempdir().unwrap();
+            let transport = spawn_stdio_fixture(mode, root.path(), Duration::from_secs(3))
+                .await
+                .unwrap();
+            let result = transport
+                .request("fixture/ready", json!({}), Duration::from_secs(1))
+                .await
+                .unwrap();
+            assert_eq!(result["ready"], true, "{mode}");
+            transport.shutdown().await;
+            assert_fixture_exited(root.path()).await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdio_startup_error_eof_and_silence_fail_and_terminate_child() {
+        for (mode, expected) in [
+            ("error", "fixture rejected initialization"),
+            ("eof", "channel closed"),
+            ("silence", "timed out"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let error = match timeout(
+                Duration::from_secs(3),
+                spawn_stdio_fixture(mode, root.path(), Duration::from_millis(500)),
+            )
+            .await
+            .unwrap()
+            {
+                Ok(_) => panic!("{mode} unexpectedly initialized"),
+                Err(error) => error,
+            };
+            assert!(format!("{error:#}").contains(expected), "{mode}: {error:#}");
+            assert_fixture_exited(root.path()).await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdio_diagnostic_overflow_fails_pending_request_and_terminates_child() {
+        let root = tempfile::tempdir().unwrap();
+        let transport = spawn_stdio_fixture("ready", root.path(), Duration::from_secs(3))
+            .await
+            .unwrap();
+        let error = transport
+            .request("fixture/overflow", json!({}), Duration::from_secs(2))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("channel closed"), "{error:#}");
+        assert!(transport.pending.lock().await.is_empty());
+        assert_fixture_exited(root.path()).await;
+    }
+
+    #[tokio::test]
+    async fn stdio_request_deadline_includes_full_outbound_queue() {
+        let (transport, _outbound, _diag) = diagnostic_fixture();
+        for _ in 0..8 {
+            transport.tx_outbound.try_send(vec![]).unwrap();
+        }
+        let error = timeout(
+            Duration::from_millis(250),
+            transport.request("fixture/blocked", json!({}), Duration::from_millis(20)),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+        assert!(transport.pending.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stdio_reader_bounds_and_malformed_frames_close_pending_replies() {
+        let frames = [
+            vec![b'x'; MAX_LSP_HEADER_BYTES + 1],
+            format!("Content-Length: {}\r\n\r\n", MAX_LSP_FRAME_BYTES + 1).into_bytes(),
+            b"Content-Length: 999999999999999999999999999999999\r\n\r\n".to_vec(),
+            b"Content-Length: 1\r\nContent-Length: 1\r\n\r\nx".to_vec(),
+            b"Missing-Length: 1\r\n\r\nx".to_vec(),
+            b"Content-Length: 1\r\n\r\n{".to_vec(),
+        ];
+        for frame in frames {
+            let (mut producer, reader) = tokio::io::duplex(MAX_LSP_HEADER_BYTES * 2);
+            let (tx, rx) = mpsc::channel(8);
+            let (diag, _diagnostics) = mpsc::channel(8);
+            let pending = Arc::new(AsyncMutex::new(HashMap::new()));
+            let (reply, receiver) = oneshot::channel();
+            pending.lock().await.insert(1, reply);
+            let read_task = tokio::spawn(reader_task(reader, tx));
+            let dispatch = tokio::spawn(dispatcher_task(rx, diag, pending.clone()));
+            producer.write_all(&frame).await.unwrap();
+            assert!(
+                timeout(Duration::from_secs(1), receiver)
+                    .await
+                    .unwrap()
+                    .is_err()
+            );
+            read_task.await.unwrap();
+            dispatch.await.unwrap();
+            assert!(pending.lock().await.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn stdio_reader_preserves_fragmented_and_coalesced_valid_frames() {
+        let (mut producer, reader) = tokio::io::duplex(128);
+        let (tx, mut rx) = mpsc::channel(8);
+        let task = tokio::spawn(reader_task(reader, tx));
+        producer.write_all(b"content-length: 2\r\n").await.unwrap();
+        producer
+            .write_all(b"\r\n{}Content-Length: 2\r\n\r\n[]")
+            .await
+            .unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(1), rx.recv()).await.unwrap(),
+            Some(json!({}))
+        );
+        assert_eq!(
+            timeout(Duration::from_secs(1), rx.recv()).await.unwrap(),
+            Some(json!([]))
+        );
+        drop(producer);
+        task.await.unwrap();
+        assert!(rx.recv().await.is_none());
     }
 }
