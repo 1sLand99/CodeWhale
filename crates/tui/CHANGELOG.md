@@ -149,6 +149,17 @@ tag, packages, checksums and release assets exist.
 
 ### Changed
 
+- Extensions keeps the exact-content plugin review on the panel: confirming
+  a bundle's digest re-reads the inventory, so the row you just reviewed
+  reports its new trust state and offers Enable instead of leaving you in
+  the transcript with a stale "not reviewed" row.
+- Underwater motion ticks at the cadence the frame limiter actually draws
+  (the atmosphere interval while only the water moves, the authored 80 ms
+  ocean cadence inside the interactive cap while a turn streams), and the
+  event loop wakes exactly for the next tick instead of on the next idle
+  poll. Idle water no longer requests frames it cannot draw or quantizes its
+  cadence to the poll interval; reduced motion, Ghostty, tmux and the
+  six-second idle settle are unchanged.
 - The launcher keeps the Codewhale mark while balancing its layout above the
   composer. A single cursor identifies the selected action; MCP faults retain
   their warning color even in compact terminals. Recent-session counts now
@@ -234,6 +245,12 @@ tag, packages, checksums and release assets exist.
 
 ### Fixed
 
+- Configuration parsing keeps the parsed base config boxed, so loading a
+  profile no longer carries the full `Config` by value through the
+  deserializer and overflows a default 2 MiB test-thread stack; the
+  runtime-store binding test that also overflowed is split into phases and
+  pinned to that budget so CI's larger stack cannot mask a regression
+  ([#6362](https://github.com/Hmbown/Codewhale/issues/6362)).
 - Stopping a turn revokes its pending approvals. A late approval cannot resume
   the cancelled action or save an automatic approval for later turns.
 - Expanding and collapsing selected reasoning now matches its rendered state

@@ -77,6 +77,8 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Changed",
         "items": [
+          "Extensions keeps the exact-content plugin review on the panel: confirming a bundle's digest re-reads the inventory, so the row you just reviewed reports its new trust state and offers Enable instead of leaving you in the transcript with a stale \"not reviewed\" row.",
+          "Underwater motion ticks at the cadence the frame limiter actually draws (the atmosphere interval while only the water moves, the authored 80 ms ocean cadence inside the interactive cap while a turn streams), and the event loop wakes exactly for the next tick instead of on the next idle poll. Idle water no longer requests frames it cannot draw or quantizes its cadence to the poll interval; reduced motion, Ghostty, tmux and the six-second idle settle are unchanged.",
           "The launcher keeps the Codewhale mark while balancing its layout above the composer. A single cursor identifies the selected action; MCP faults retain their warning color even in compact terminals. Recent-session counts now read correctly for a single message.",
           "Model and provider settings use quieter selection surfaces, one focused cursor, clearer missing-key warnings, compact output limits, and less repetitive credential detail. Plugin actions use plain labels.",
           "The terminal opens on Shoreline, the same palette the GPUI client already uses: warm charcoal field #211F23, a raised plate for panels and the composer, one blue for action and selection #90B9FF, and the whale's ivory #F2ECE5 for body text, with 4.5:1 floors on every muted step. The old saturated navy gradient is not gone — underwater is a named theme now rather than the ground the product opens on. Existing installs keep whatever theme they have saved; /theme switches…",
@@ -86,14 +88,14 @@ export const CHANGELOG: ChangelogRelease[] = [
           "MCP protocol negotiation: every surface advertised the original 2024-11-05 revision and the stdio client required an exact match, so newer servers could not connect. The server and both clients now advertise 2025-06-18 and negotiate over the supported set (2025-06-18, 2025-03-26, 2024-11-05) — the server echoes the client's revision when it is supported and answers with the latest otherwise, the stdio client accepts any supported revision, and streamable HTTP sends the…",
           "Configured MCP servers now connect lazily instead of all at session boot. The pool owns a connecting set marked at spawn and cleared on resolution or abort, so \"connecting\" is no longer inferred as enabled-minus-connected. The boot pass scopes to the eager set — required servers plus those covered by tools.always_load / allowed_tools — and a turn naming an unstarted server spawns its connects alongside, under the existing five-second deadline. A configured-but-unstarted…",
           "The launch card's MCP problems row runs its own remedy. It already printed /mcp login <name> or /mcp; it now joins the shared paint/click/keyboard ordering, so Up/Down lands on it and Enter or a click types the printed command into the composer for you to send. Typing beats copying: no clipboard dependency over SSH, and you see the command before a second Enter runs it (#6085).",
-          "Computer Use is the only computer-use product in Extensions and /mcp recommendations. Cua is no longer suggested as a parallel desktop-control MCP; enable the first-party computer-use plugin instead. The bundled plugin is 0.4.0: Return/Enter from type, filtered and paginated get_app_state, focus/get_value, and strategy:\"app\" window-scoped clicks. Shared-desktop pointer gestures stay gated.",
-          "The bundled first-party catalog pins marketplace revision ca6be22, so installing Computer Use from the Extensions listing fetches the same 0.4.0 source and the published notarized 0.4.0 Mac app."
+          "Computer Use is the only computer-use product in Extensions and /mcp recommendations. Cua is no longer suggested as a parallel desktop-control MCP; enable the first-party computer-use plugin instead. The bundled plugin is 0.4.0: Return/Enter from type, filtered and paginated get_app_state, focus/get_value, and strategy:\"app\" window-scoped clicks. Shared-desktop pointer gestures stay gated."
         ],
-        "itemCount": 11
+        "itemCount": 13
       },
       {
         "heading": "Fixed",
         "items": [
+          "Configuration parsing keeps the parsed base config boxed, so loading a profile no longer carries the full Config by value through the deserializer and overflows a default 2 MiB test-thread stack; the runtime-store binding test that also overflowed is split into phases and pinned to that budget so CI's larger stack cannot mask a regression (#6362).",
           "Stopping a turn revokes its pending approvals. A late approval cannot resume the cancelled action or save an automatic approval for later turns.",
           "Expanding and collapsing selected reasoning now matches its rendered state when verbose mode and the default-expansion preference are both enabled.",
           "Branch navigation preserves sibling histories, stable entry IDs and timestamps through autosave, resume and forks, and synchronizes the selected branch into the live engine. Thanks to @7jrxt42BxFZo4iAnN4CX for the report (#6367).",
@@ -104,10 +106,9 @@ export const CHANGELOG: ChangelogRelease[] = [
           "Clicking a path:line in tool output no longer spawns $EDITOR detached while the TUI still owns the terminal, and no longer spawns one editor per matching line. The launch goes through the single terminal-handoff path, and a click is one request to open one file (#6235).",
           "A write-scope contention refusal now names a remedy that works. The agent tool's description claimed release was \"the remediation a write-scope contention refusal names\"; the refusal did not name it, and pointing back at it would have been worse, because release only clears claims whose owner is no longer running while a contention refusal names a live one. The refusal itself now says to wait for that owner to settle or cancel it (#6272).",
           "The session picker no longer refuses a saved session whose Runtime store exists but holds nothing. A force-quit leaves the store on disk, ownerless and empty, and the switch path refused it because recovery only covered a *missing* store. A switch now also adopts a store that is provably empty (every work directory, plus the event sequence that remembers pruned appends) *and* provably unheld (the process-owner lock, which a live manager holds from open to close), with no…",
-          "Double-tap Enter now sends every queued follow-up into the running turn, oldest first. The second Enter used to steer only the most recent message and leave older ones queued; a failed steer restores the failed message plus everything unattempted in original order, so nothing is lost or reordered.",
-          "Only the most recently sent prompt carries the elevated-surface background now; every older prompt renders on the bare ground. The fill used to sit behind every user row (striping), then behind none; newest-only keeps the eye on the turn in play. Sending a new prompt moves the highlight and un-highlights its predecessor."
+          "Double-tap Enter now sends every queued follow-up into the running turn, oldest first. The second Enter used to steer only the most recent message and leave older ones queued; a failed steer restores the failed message plus everything unattempted in original order, so nothing is lost or reordered."
         ],
-        "itemCount": 26
+        "itemCount": 27
       }
     ]
   },
