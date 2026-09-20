@@ -314,21 +314,17 @@ fn assert_startup_contract(frame: &Frame, rows: u16, cols: u16, size: &str) {
             frame.debug_dump()
         );
     }
-    // The card sheds rows on narrow stages; the new-session entry holds
-    // last. The sealed harness home has no saved sessions, so wide stages
-    // also paint the empty-workspace note.
-    let needles: &[&str] = if cols < 56 {
-        &["New session"]
-    } else {
-        &["New session", "No recent sessions"]
-    };
-    for needle in needles {
-        assert!(
-            text.contains(needle),
-            "{size}: startup misses {needle:?}\n{}",
-            frame.debug_dump()
-        );
-    }
+    // Empty workspaces keep the invitation without an empty history section.
+    assert!(
+        text.contains("New session"),
+        "{size}: startup misses invitation\n{}",
+        frame.debug_dump()
+    );
+    assert!(
+        !text.contains("No recent sessions"),
+        "{size}: empty history adds noise\n{}",
+        frame.debug_dump()
+    );
     for retired_mark_row in ["▄▄▄▄██▌", "▜████▀▘"] {
         assert!(
             !text.contains(retired_mark_row),

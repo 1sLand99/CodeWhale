@@ -225,8 +225,8 @@ pub const MATRIX_BORDER_RGB: (u8, u8, u8) = (0, 204, 0); // #00CC00
 // Shoreline — the product-client palette, shared with the GPUI desktop.
 //
 // Warm charcoal ground and warm paper sheet, one restrained blue, and the
-// whale's ivory ink on both sides. This is the default shell from 0.9.14:
-// the navy "Underwater" water column remains a selectable theme. The
+// whale's ivory ink on both sides. This is the charcoal alternative to the
+// terminal's navy "Underwater" default in 0.10.0. The
 // 0.10.0 action pair uses glacial blue on charcoal and deep ocean blue on
 // paper. Shared tokens keep the terminal, desktop, and web in one system.
 //

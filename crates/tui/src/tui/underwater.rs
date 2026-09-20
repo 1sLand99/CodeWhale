@@ -151,14 +151,10 @@ fn launch_recent_entries(app: &App) -> (Vec<LaunchRecentEntry>, bool) {
                 &session.updated_at,
                 app.ui_locale,
             );
-            let count = crate::tui::session_picker::format_message_count(
-                session.message_count,
-                app.ui_locale,
-            );
             LaunchRecentEntry {
                 id: session.id.clone(),
                 title,
-                detail: format!("{age} · {count}"),
+                detail: age,
             }
         })
         .collect::<Vec<_>>();
@@ -1155,12 +1151,12 @@ pub struct LaunchEmptyState {
 const LAUNCH_BLOCK_INDENT: usize = 2;
 /// The card's reading measure: a row is a title with its detail set against
 /// it, and without a ceiling the detail right-aligns against the terminal's
-/// far edge. Titles persist at 50 characters, the detail reads ~20.
+/// far edge. The title is primary; the relative age is secondary.
 const LAUNCH_CARD_MEASURE: usize = 72;
 /// Gap between a row's title and its right-aligned detail.
 const LAUNCH_ROW_GAP: usize = 3;
 /// Below this the row spends its whole lane on the title and sheds the detail.
-const LAUNCH_ROW_MIN_TITLE: usize = 24;
+const LAUNCH_ROW_MIN_TITLE: usize = 28;
 /// Labels align with their heading; the action cue has its own gutter.
 /// Blank rows the card spends on rhythm when the pane is tall enough.
 const LAUNCH_SEPARATORS: usize = 3;
@@ -1548,7 +1544,7 @@ fn launch_fit(height: usize, recent: usize, has_more: bool, notice: bool, mcp: u
         context: true,
         help: true,
         notice,
-        heading: true,
+        heading: recent > 0 || has_more,
         blanks: LAUNCH_SEPARATORS,
         shown: recent,
         see_all: has_more,
@@ -1627,10 +1623,6 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
     }
 
     let (entries, has_more) = launch_recent_entries(app);
-    // Whether this workspace has recent work at all, before any is shed for
-    // height: the heading must not say "no recent sessions" about a list that
-    // only ran out of rows.
-    let had_recent = !entries.is_empty();
     // Built before the fit ladder runs: how many rows the block wants is a
     // fact about this workspace's servers, not about the pane.
     let mcp_block = mcp_launch_lines(app, text_width);
@@ -1757,17 +1749,15 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
         } else {
             Style::default().fg(theme.text_body)
         };
-        // Every action shares the same left edge.
-        let indent = 0;
         if matches!(row.id, crate::tui::app::LaunchRowId::SeeAll) && spacious {
             for _ in 0..fit.gap {
                 text.push(None);
             }
         }
-        let lane = text_width.saturating_sub(indent);
+        let lane = text_width;
         let detail_width = text_display_width(&row.detail);
-        // Age and message count are context, not the row: when the lane
-        // cannot hold a readable title beside them they are dropped whole
+        // Age is context: when the lane cannot hold a readable title
+        // beside it, drop the age whole
         // rather than ellipsing the title to a stub. This is also the
         // fallback for a locale that spends more cells on the same fact.
         let detail = if row.detail.is_empty()
@@ -1785,9 +1775,6 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
         let label = semantic_truncate(&row.label, label_budget);
         let label_width = text_display_width(&label);
         let mut spans = Vec::with_capacity(4);
-        if indent > 0 {
-            spans.push(Span::raw(" ".repeat(indent)));
-        }
         spans.push(Span::styled(label, style));
         if !detail.is_empty() {
             let pad = lane
@@ -1808,22 +1795,15 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
         rows.push((row.id.clone(), text.len()));
         text.push(Some(Line::from(spans)));
         if row.prominent && fit.heading {
-            // With no resumable work the heading says so — but only when the
-            // workspace genuinely has none. Sessions the card's filter drops
-            // (empty auto-created shells) still exist in `/resume`, so their
-            // presence earns the honest "Recent" + a see-all row, not a
-            // "no recent sessions" the picker would immediately disprove.
-            let heading = if had_recent || app.launch.has_scoped_sessions {
-                MessageId::LaunchRecentHeading
-            } else {
-                MessageId::LaunchNoRecentSessions
-            };
+            // An empty workspace needs only the invitation and composer.
+            // Real history, including filtered sessions reachable via See all,
+            // still gets a heading; zero counts are not content.
             if spacious {
                 for _ in 0..fit.gap {
                     text.push(None);
                 }
             }
-            let label = semantic_truncate(&tr(locale, heading), text_width);
+            let label = semantic_truncate(&tr(locale, MessageId::LaunchRecentHeading), text_width);
             let remaining = text_width.saturating_sub(text_display_width(&label) + 2);
             let mut spans = vec![Span::styled(
                 label,
@@ -1970,8 +1950,9 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
 #[cfg(test)]
 mod launch_card_tests {
     use super::{
-        LAUNCH_CARD_MEASURE, LaunchAction, launch_empty_state, launch_fit, launch_row_click_action,
-        launch_rows_for_app, refresh_launch_row_hitboxes, run_launch_card_row, text_display_width,
+        LAUNCH_CARD_MEASURE, LaunchAction, launch_empty_state, launch_fit, launch_recent_entries,
+        launch_row_click_action, launch_rows_for_app, refresh_launch_row_hitboxes,
+        run_launch_card_row, text_display_width,
     };
     use crate::tui::app::{App, LaunchRecentSession, LaunchRowId};
     use ratatui::layout::Rect;
@@ -2365,6 +2346,18 @@ mod launch_card_tests {
         }
     }
 
+    #[test]
+    fn empty_workspace_omits_recent_section_but_hidden_history_stays_reachable() {
+        let app = app_with_recent(&[], 0);
+        let text = painted(&app, 100, 24).join("\n");
+        assert!(text.contains("New session"));
+        assert!(!text.contains("Recent"));
+        assert!(!text.contains("No recent sessions"));
+        assert!(!launch_fit(24, 0, false, false, 0).heading);
+        assert!(launch_fit(24, 0, true, false, 0).heading);
+        assert!(launch_fit(24, 0, true, false, 0).see_all);
+    }
+
     // --- the row reads as one object -----------------------------------
 
     #[test]
@@ -2379,14 +2372,26 @@ mod launch_card_tests {
             text_display_width(row.trim_start()) <= LAUNCH_CARD_MEASURE + 2,
             "row runs to the terminal edge: {row:?}",
         );
-        assert!(row.contains("msgs"), "row lost its detail: {row:?}");
+        let (entries, _) = launch_recent_entries(&app);
+        assert!(
+            row.contains(&entries[0].detail),
+            "row lost its age: {row:?}"
+        );
+        assert!(
+            !row.contains("msgs"),
+            "message counts belong in session details: {row:?}"
+        );
     }
 
     #[test]
     fn a_narrow_pane_spends_its_lane_on_the_title() {
         let app = app_with_recent(&["Ship the launch card"], 1);
         let row = recent_row_title(&app, 40, 24);
-        assert!(!row.contains("msgs"), "detail should have shed: {row:?}");
+        let (entries, _) = launch_recent_entries(&app);
+        assert!(
+            !row.contains(&entries[0].detail),
+            "age should have shed: {row:?}"
+        );
         assert!(row.starts_with("Ship the launch"), "{row:?}");
     }
 

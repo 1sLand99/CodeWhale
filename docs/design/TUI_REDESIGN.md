@@ -1,6 +1,12 @@
-# TUI redesign — Shoreline / Workbench index
+# TUI redesign — ocean depth / Workbench index
 
 ## Overview
+
+Fresh 0.10.0 terminal installs use **Underwater**, the restrained navy ombré.
+Shoreline remains the warm charcoal alternative; saved theme choices are
+preserved. `/theme` previews either treatment, Enter saves, and Escape restores
+the previous choice. The same layout, whale mark and information hierarchy
+serve both themes; the ocean is a continuous background, not extra chrome.
 
 Shoreline is the terminal's warm charcoal, ivory and blue visual system,
 introduced on 2026-09-15 to bring the TUI closer to the GPUI product client.
@@ -12,12 +18,12 @@ the previous appearance when it improved the experience.
 The home screen uses a compact codewhale identity, version metadata aligned
 opposite it, and one bounded reading lane centered in wide terminals. Actual
 workspace and branch context make the screen specific to the current work.
-A filled New session action and ruled Recent heading organize the available
-choices. A compact canonical braille whale accompanies the identity when
+A prominent New session action and a Recent heading for real history organize
+the available choices. A compact canonical braille whale accompanies the identity when
 space permits, yielding before session titles and actionable rows in short
 terminals. The canonical brand asset is unchanged. The full-width
 composer, shared session runtime, permission authority and website design
-remain their existing systems. `underwater` remains a selectable theme.
+remain their existing systems. The terminal default does not change app defaults.
 
 This document describes implemented terminal behavior, not the website's
 Tidal Folio system. Source owns values and actions; this file records how
@@ -25,7 +31,11 @@ they form a coherent interface.
 
 ## Colors
 
-The source of truth is `crates/palette/src/tokens.rs` and the
+Underwater's continuous water column is authored by `OceanRamp::for_theme` in
+`crates/tui/src/tui/ocean.rs`: dark navy at the top, deeper near the composer.
+Its existing motion policy preserves reduced/still modes and semantic surfaces.
+
+For the charcoal alternative, the source of truth is `crates/palette/src/tokens.rs` and the
 `SHORELINE_UI_THEME` / `SHORELINE_LIGHT_UI_THEME` mappings in
 `crates/palette/src/themes.rs`. The dark palette is unchanged by the
 Workbench index pass:
@@ -39,14 +49,14 @@ Workbench index pass:
 | Border | `#49424D` | Quiet boundaries and inactive composer |
 | Body | `#F2ECE5` | Primary ivory text |
 | Soft / muted / hint / dim | `#D9D2DC` / `#B0A7B2` / `#9A919F` / `#7E7583` | Secondary information by role |
-| Action / selection background | `#90B9FF` / `#354967` | Affordances and focused rows |
+| Action / selection background | `#67B8D6` / `#2C4654` | Affordances and focused rows |
 | Live | `#7FD6C6` | Live activity |
 | Human | `#F6C453` | Human input and decisions |
 | Warning / danger / success | `#F0A868` / `#FF8FA8` / `#A3D977` | Semantic state |
 | Mode ramp | `#7EB4E8` / `#B9DCEC` / `#AD88FF` / `#FF70A0` | Existing mode distinctions |
 
 Shoreline Light uses warm paper (`#F5F0E9` field) and blue action
-(`#245BC7`); its full mapping remains in the same source. Neither this pass
+(`#006684`); its full mapping remains in the same source. Neither this pass
 nor the Shoreline token family re-inks `web/app/tokens.css`.
 
 **Focus uses selection ink on selection blue.** Bright action blue is an
@@ -68,7 +78,8 @@ The terminal host owns the font, size and rasterization. There is no separate
 application display face. Hierarchy comes from bold identity and selection,
 regular body text, secondary metadata, and spacing between groups.
 
-Session titles take priority over age and message count. Width calculations
+Home shows session titles and age; message counts stay in session details.
+An empty workspace omits the Recent section. Titles take priority over age. Width calculations
 and truncation use terminal display cells, including wide characters; omit
 metadata before reducing a useful title to a stub. Longer labels receive an
 explicit truncation marker rather than silently running under a border.

@@ -399,6 +399,45 @@ fn workbench_whale_reveal_visual_evidence() {
     tui.shutdown();
 }
 
+/// Record temporal evidence from the real terminal, including its idle settle.
+#[test]
+#[ignore = "opt-in Underwater motion capture; isolated fixture, no provider calls"]
+fn underwater_motion_visual_evidence() {
+    use std::io::Write;
+    let directory = std::path::PathBuf::from(std::env::var_os("QA_LAUNCH_CAPTURE_DIR").unwrap());
+    std::fs::create_dir_all(&directory).unwrap();
+    for (rows, cols) in [(24, 80), (36, 120)] {
+        let (_workspace, mut tui) =
+            start_with_options(rows, cols, false, &[TITLE], Some("underwater"), true, false);
+        let file =
+            std::fs::File::create(directory.join(format!("ocean-{cols}x{rows}.jsonl.gz"))).unwrap();
+        let mut output = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+        let start = std::time::Instant::now();
+        for index in 0..360u64 {
+            let frame = tui.frame();
+            assert!(
+                frame.contains("New session"),
+                "motion cannot displace the launch action"
+            );
+            serde_json::to_writer(
+                &mut output,
+                &serde_json::json!({
+                    "elapsed_ms": start.elapsed().as_millis(),
+                    "frame": frame.capture_cells()
+                }),
+            )
+            .unwrap();
+            output.write_all(b"\n").unwrap();
+            let target = Duration::from_millis((index + 1) * 33);
+            if let Some(remaining) = target.checked_sub(start.elapsed()) {
+                std::thread::sleep(remaining);
+            }
+        }
+        output.finish().unwrap();
+        tui.shutdown();
+    }
+}
+
 /// Exercise the visible catalog controls and provider search through the
 /// input decoder. This only browses fixture state; it never applies a route.
 #[test]
