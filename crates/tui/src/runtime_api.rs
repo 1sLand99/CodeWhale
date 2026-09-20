@@ -1431,6 +1431,10 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         )
         .route("/v1/providers", get(list_providers))
         .route("/v1/providers/{id}/models", get(list_provider_models))
+        .route(
+            "/v1/providers/{id}/models/refresh",
+            post(refresh_provider_models),
+        )
         .route("/v1/providers/{id}/switch", post(switch_provider))
         .route(
             "/v1/providers/{id}/key",
@@ -7376,44 +7380,54 @@ pub(crate) fn runtime_chat_relay_catalog(
 async fn list_providers(
     State(state): State<RuntimeApiState>,
 ) -> Result<Json<ProvidersResponse>, ApiError> {
-    let config = state.config.read().clone();
-    let active_provider = config.api_provider();
-    let active_identity = config
-        .active_provider_identity(active_provider)
-        .map_err(ApiError::bad_request)?;
-    let current = active_provider.as_str().to_string();
-    let mut providers = Vec::new();
-    for api_provider in ApiProvider::sorted_for_display() {
-        let default_model = provider_default_model_for_api(&config, active_provider, api_provider);
-        let identity = config.provider_identity_for(api_provider);
-        let base_url = config.base_url_for_route_identity(api_provider, &identity);
-        let has_model_catalog = !crate::provider_lake::configured_catalog_models_for_route(
-            &config,
-            api_provider,
-            &identity,
-            &base_url,
-        )
-        .is_empty();
-        let writeability = secrets::credential_writeability(&config, api_provider);
-        providers.push(ProviderEntry {
-            id: api_provider.as_str().to_string(),
-            model_provider_id: (api_provider == active_provider)
-                .then(|| active_identity.persisted_id().map(str::to_string))
-                .flatten(),
-            display_name: api_provider.display_name().to_string(),
-            default_model,
-            has_model_catalog,
-            credential_state: crate::provider_readiness::credential_state_for_provider(
+    #[cfg(test)]
+    let env_ticket = crate::test_support::env_scope_ticket();
+    tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let _membership = crate::test_support::join_env_scope(env_ticket);
+        let config = state.config.read().clone();
+        secrets::invalidate_stale_account_catalog(&config);
+        let active_provider = config.api_provider();
+        let active_identity = config
+            .active_provider_identity(active_provider)
+            .map_err(ApiError::bad_request)?;
+        let current = active_provider.as_str().to_string();
+        let mut providers = Vec::new();
+        for api_provider in ApiProvider::sorted_for_display() {
+            let default_model =
+                provider_default_model_for_api(&config, active_provider, api_provider);
+            let identity = config.provider_identity_for(api_provider);
+            let base_url = config.base_url_for_route_identity(api_provider, &identity);
+            let has_model_catalog = !crate::provider_lake::configured_catalog_models_for_route(
                 &config,
                 api_provider,
+                &identity,
+                &base_url,
             )
-            .into(),
-            credential_source: writeability.source,
-            credential_writable: writeability.writable,
-            credential_writable_reason: writeability.reason,
-        });
-    }
-    Ok(Json(ProvidersResponse { current, providers }))
+            .is_empty();
+            let writeability = secrets::credential_writeability(&config, api_provider);
+            providers.push(ProviderEntry {
+                id: api_provider.as_str().to_string(),
+                model_provider_id: (api_provider == active_provider)
+                    .then(|| active_identity.persisted_id().map(str::to_string))
+                    .flatten(),
+                display_name: api_provider.display_name().to_string(),
+                default_model,
+                has_model_catalog,
+                credential_state: crate::provider_readiness::credential_state_for_provider(
+                    &config,
+                    api_provider,
+                )
+                .into(),
+                credential_source: writeability.source,
+                credential_writable: writeability.writable,
+                credential_writable_reason: writeability.reason,
+            });
+        }
+        Ok(Json(ProvidersResponse { current, providers }))
+    })
+    .await
+    .map_err(|_| ApiError::internal("Provider listing failed"))?
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -7432,12 +7446,11 @@ struct ListProviderModelsParams {
     limit: Option<usize>,
 }
 
-async fn list_provider_models(
-    State(state): State<RuntimeApiState>,
-    Path(id): Path<String>,
-    Query(params): Query<ListProviderModelsParams>,
-) -> Result<Json<ProviderModelsResponse>, ApiError> {
-    let mut config = state.config.read().clone();
+fn provider_models_identity(
+    config: &Config,
+    id: &str,
+    exact_id: Option<&str>,
+) -> Result<(ApiProvider, Option<crate::config::ProviderIdentity>), ApiError> {
     let api_provider = ApiProvider::parse(&id)
         .ok_or_else(|| ApiError::bad_request(format!("Unknown provider id '{id}'")))?;
     // Reject requests for the legacy deepseek-cn alias that has no
@@ -7447,7 +7460,7 @@ async fn list_provider_models(
             "provider 'deepseek-cn' is a legacy alias; use 'deepseek' instead",
         ));
     }
-    let route_fingerprint = if let Some(exact_id) = params.model_provider_id.as_deref() {
+    let identity = if let Some(exact_id) = exact_id {
         if exact_id.is_empty()
             || exact_id != exact_id.trim()
             || exact_id.chars().any(char::is_control)
@@ -7464,26 +7477,84 @@ async fn list_provider_models(
                 "model_provider_id does not match this provider route",
             ));
         }
-        config.scope_to_provider_identity(&identity);
-        // Do not expose the endpoint in an opaque cursor. Its hash binds even
-        // identical catalogs under distinct named routes or a changed base URL.
-        let route = serde_json::to_vec(&(
-            api_provider.as_str(),
-            exact_id,
-            config.base_url_for_route_identity(api_provider, &identity.key),
-        ))
-        .map_err(|error| {
-            ApiError::internal(format!("Could not fingerprint provider route: {error}"))
-        })?;
-        Some(crate::hashing::sha256_hex(route))
+        Some(identity)
     } else {
         None
     };
-    let models = provider_models_for_api(&config, config.api_provider(), api_provider)
-        .into_iter()
-        .map(|id| provider_model_entry_for_api(&config, api_provider, id))
-        .collect();
-    paginate_provider_models(api_provider.as_str(), models, &params, route_fingerprint).map(Json)
+    Ok((api_provider, identity))
+}
+
+async fn list_provider_models(
+    State(state): State<RuntimeApiState>,
+    Path(id): Path<String>,
+    Query(params): Query<ListProviderModelsParams>,
+) -> Result<Json<ProviderModelsResponse>, ApiError> {
+    #[cfg(test)]
+    let env_ticket = crate::test_support::env_scope_ticket();
+    tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let _membership = crate::test_support::join_env_scope(env_ticket);
+        let mut config = state.config.read().clone();
+        secrets::invalidate_stale_account_catalog(&config);
+        let (api_provider, identity) =
+            provider_models_identity(&config, &id, params.model_provider_id.as_deref())?;
+        let route_fingerprint = if let Some(identity) = identity {
+            config.scope_to_provider_identity(&identity);
+            let route = serde_json::to_vec(&(
+                api_provider.as_str(),
+                params.model_provider_id.as_deref(),
+                config.base_url_for_route_identity(api_provider, &identity.key),
+            ))
+            .map_err(|error| {
+                ApiError::internal(format!("Could not fingerprint provider route: {error}"))
+            })?;
+            Some(crate::hashing::sha256_hex(route))
+        } else {
+            None
+        };
+        let models = provider_models_for_api(&config, config.api_provider(), api_provider)
+            .into_iter()
+            .map(|id| provider_model_entry_for_api(&config, api_provider, id))
+            .collect();
+        paginate_provider_models(api_provider.as_str(), models, &params, route_fingerprint)
+            .map(Json)
+    })
+    .await
+    .map_err(|_| ApiError::internal("Provider model listing failed"))?
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RefreshProviderModelsParams {
+    model_provider_id: Option<String>,
+}
+
+async fn refresh_provider_models(
+    State(state): State<RuntimeApiState>,
+    Path(id): Path<String>,
+    Query(params): Query<RefreshProviderModelsParams>,
+) -> Result<Json<crate::provider_lake::CatalogUpdateReceipt>, ApiError> {
+    let runtime = tokio::runtime::Handle::current();
+    #[cfg(test)]
+    let env_ticket = crate::test_support::env_scope_ticket();
+    tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let _membership = crate::test_support::join_env_scope(env_ticket);
+        let config = state.config.read().clone();
+        let (provider, exact) =
+            provider_models_identity(&config, &id, params.model_provider_id.as_deref())?;
+        let identity = match exact {
+            Some(identity) => identity,
+            None => config
+                .active_provider_identity(provider)
+                .map_err(ApiError::bad_request)?,
+        };
+        Ok(Json(runtime.block_on(
+            crate::provider_lake::update_provider_catalog(&config, &identity),
+        )))
+    })
+    .await
+    .map_err(|_| ApiError::internal("Provider model refresh failed"))?
 }
 
 /// Request body for `POST /v1/providers/{id}/switch`.

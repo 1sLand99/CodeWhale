@@ -1837,6 +1837,13 @@ async fn runtime_token_guard_protects_v1_routes() -> Result<()> {
         .send()
         .await?;
     assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+    let refresh = client
+        .post(format!(
+            "http://{addr}/v1/providers/codewhale/models/refresh"
+        ))
+        .send()
+        .await?;
+    assert_eq!(refresh.status(), StatusCode::UNAUTHORIZED);
 
     let bearer = client
         .get(format!("http://{addr}/v1/threads/summary"))
@@ -17598,6 +17605,97 @@ async fn thread_notices_serve_list_and_ack() -> Result<()> {
         .await?;
     assert_eq!(unknown.status(), reqwest::StatusCode::NOT_FOUND);
 
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_models_refresh_uses_exact_configured_route_without_switching() -> Result<()> {
+    let _env = crate::test_support::lock_test_env();
+    let root = tempfile::tempdir()?;
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path());
+    let _cli = crate::test_support::EnvVarGuard::remove(codewhale_config::CLI_API_KEY_ENV);
+    crate::provider_catalog_live::reset_cache_for_test();
+    let upstream = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/v1/models"))
+        .and(wiremock::matchers::header(
+            "Authorization",
+            "Bearer refresh-fixture-key",
+        ))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(json!({"data":[{"id":"discovered-fixture-model"}]})),
+        )
+        .expect(1)
+        .mount(&upstream)
+        .await;
+    let config_path = root.path().join("config.toml");
+    fs::write(
+        &config_path,
+        format!(
+            r#"provider = "first"
+[providers.first]
+kind = "openai-compatible"
+base_url = "http://127.0.0.1:9/v1"
+model = "saved-model"
+[providers.second]
+kind = "openai-compatible"
+base_url = "{}/v1"
+api_key = "refresh-fixture-key"
+"#,
+            upstream.uri()
+        ),
+    )?;
+    let (addr, _, handle) = spawn_test_server_with_config_path(config_path)
+        .await?
+        .expect("loopback server required");
+    let client = crate::tls::reqwest_client_builder()
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    for suffix in [
+        "custom/models/refresh?model_provider_id=",
+        "custom/models/refresh?model_provider_id=missing",
+        "openai/models/refresh?model_provider_id=second",
+        "deepseek-cn/models/refresh",
+        "custom/models/refresh?base_url=https://untrusted.invalid",
+    ] {
+        assert_eq!(
+            client
+                .post(format!("http://{addr}/v1/providers/{suffix}"))
+                .send()
+                .await?
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let response = client
+        .post(format!(
+            "http://{addr}/v1/providers/custom/models/refresh?model_provider_id=second"
+        ))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let receipt: Value = response.json().await?;
+    assert_eq!(receipt["outcome"], "updated");
+    assert_eq!(receipt["model_count"], 1);
+    assert!(!receipt.to_string().contains("refresh-fixture-key"));
+    let catalog: Value = client
+        .get(format!(
+            "http://{addr}/v1/providers/custom/models?model_provider_id=second"
+        ))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert!(
+        catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["id"] == "discovered-fixture-model")
+    );
+    assert_eq!(get_config(&client, &addr).await["provider"], "first");
     handle.abort();
     Ok(())
 }
