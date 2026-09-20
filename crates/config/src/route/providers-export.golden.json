@@ -1072,6 +1072,21 @@
           "label": "API key"
         }
       ],
+      "models": [
+        {
+          "id": "step-3.5-flash"
+        },
+        {
+          "id": "step-3.5-flash-2603"
+        },
+        {
+          "id": "step-3.7-flash",
+          "default": true
+        },
+        {
+          "id": "step-5-preview"
+        }
+      ],
       "transport": "chat-completions"
     },
     {
