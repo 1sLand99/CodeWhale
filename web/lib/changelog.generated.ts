@@ -37,6 +37,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Contributors",
         "items": [
+          "@AdityaVG13 — fixed composer wrapping, tab/caret placement, pasted and editor-returned draft history, painted-column transcript copying, explicit terminal foregrounds, and headless user-input tool availability (#6363, #6365).",
           "@aboimpinto — moved the TUI session-export slice onto shared command contracts (FEAT-025): a session-export contract facet with one shared sanitizer, /export routed through the facet, pinned with baseline-captured goldens and gates (#6096).",
           "@BX166 — contributed the AICraft provider template and its documentation (#6171). It was closed unmerged, but it is what surfaced the decision to stop special-casing named OpenAI-compatible hosts (#6289).",
           "@7jrxt42BxFZo4iAnN4CX — reported the session-retention defects behind archive-past-the-cap and empty-session cap occupancy (#6136, #6137), the resume-failure design behind durable transcript errors (#6138), and the gaps behind the opt-in approval timeout (#6101), codewhale exec --hooks (#6099), Markdown drag-copy (#6156), and the browsable, current-aware session picker (#6014); the goal token-budget hard stop (#6013) and the fleet no-progress guard shared with child workers…",
@@ -46,7 +47,7 @@ export const CHANGELOG: ChangelogRelease[] = [
           "@sequico — reported the ACP session/new ids that session/load could not resolve, fixed by minting resolvable session ids (#6174).",
           "@bevis-wong — reported the mid-run engine freeze behind the bounded turn-end foreground-child join, and the resume path that re-ran identical tool-call repair on every load instead of persisting it (#6184, #6185)."
         ],
-        "itemCount": 8
+        "itemCount": 9
       },
       {
         "heading": "Security",
@@ -91,6 +92,9 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Fixed",
         "items": [
+          "Branch navigation preserves sibling histories, stable entry IDs and timestamps through autosave, resume and forks, and synchronizes the selected branch into the live engine. Thanks to @7jrxt42BxFZo4iAnN4CX for the report (#6367).",
+          "Compaction now writes local diagnostic records for completed passes and automatic refusals. codewhale metrics reports them with summarizer token usage; text-mode exec retains its session after attempting compaction. Historical artifacts are not backfilled. Thanks to @7jrxt42BxFZo4iAnN4CX for identifying the missing producer (#6368).",
+          "The opening workbench retains the canonical Codewhale mark in a responsive header while keeping recent-session titles full-width and actions clickable.",
           "serve --acp no longer ignores the approval posture. The ACP adapter hardcoded ApprovalMode::Suggest, so --yolo (and any configured approval_policy) never reached admission: every mutating tool parked behind a permission request no unattended client answers, and sessions executed zero tools. Posture now derives from server config — --yolo pre-approves prompts and flows into the sandbox policy — while hard blocks (safety floor, repo law, reviewer consult) and the Plan…",
           "Plain agent spawns could not resolve. built_in_members() seeded both general and worker, and the role parse boundary migrates worker to general, so both canonicalized to the same role — and role:general, the selector the roster advertises for the default posture, matched two members and raised Ambiguous every time, permanently. The duplicate built-in is gone. The legacy name still resolves: general, member:general, role:general and default all land on the worker posture…",
           "Clicking a path:line in tool output no longer spawns $EDITOR detached while the TUI still owns the terminal, and no longer spawns one editor per matching line. The launch goes through the single terminal-handoff path, and a click is one request to open one file (#6235).",
@@ -99,12 +103,9 @@ export const CHANGELOG: ChangelogRelease[] = [
           "Double-tap Enter now sends every queued follow-up into the running turn, oldest first. The second Enter used to steer only the most recent message and leave older ones queued; a failed steer restores the failed message plus everything unattempted in original order, so nothing is lost or reordered.",
           "Only the most recently sent prompt carries the elevated-surface background now; every older prompt renders on the bare ground. The fill used to sit behind every user row (striping), then behind none; newest-only keeps the eye on the turn in play. Sending a new prompt moves the highlight and un-highlights its predecessor.",
           "Diff rows tint whole: added/deleted line numbers now share the row's green / red background instead of sitting bare next to a painted body. Context rows stay on the bare ground.",
-          "MCP connections are supervised now: a background task notices a dead server within one sweep, reconnects on the existing backoff ladder, and reports each transition, so Extensions rows flip with liveness instead of parking on stale-ready or a silent [reconnect]. Five consecutive failures park the server with a notice naming /mcp retry; an explicit retry or a fresh connection resumes watching. Tool calls also retry once across a dead pipe/socket (not just stale sessions), and…",
-          "A steer the engine never delivered is no longer reported as sent. The runtime API persisted the steer item as already-Completed and emitted turn.steered + item.completed the moment the text entered the engine's mailbox — before the engine decided anything. The engine discards a steer whose turn has moved on, and an interrupted or failed turn drops whatever it had queued, so a GUI could show \"Guidance sent\", clear the composer, and lose the user's words. The engine now…",
-          "<recommended_plugins> suggestions stop nagging: a plugin id is now injected at most once per engine lifetime, and a plugin whose name a loaded skill already covers is never suggested — the local skill owns the domain, so the nudge was noise. Dismissals still apply, and the fragment stays append-only on the user turn (#6274).",
-          "A canceled automation run now settles with a transcript receipt that names the cancellation (by request, cancel timeout, or shutdown) instead of vanishing from the live band silently. The receipt wears attention ink and never lights the failure demand; the run record keeps the cancellation reason as its error detail. (#6162)"
+          "MCP connections are supervised now: a background task notices a dead server within one sweep, reconnects on the existing backoff ladder, and reports each transition, so Extensions rows flip with liveness instead of parking on stale-ready or a silent [reconnect]. Five consecutive failures park the server with a notice naming /mcp retry; an explicit retry or a fresh connection resumes watching. Tool calls also retry once across a dead pipe/socket (not just stale sessions), and…"
         ],
-        "itemCount": 21
+        "itemCount": 24
       }
     ]
   },

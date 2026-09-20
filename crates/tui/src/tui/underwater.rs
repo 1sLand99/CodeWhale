@@ -1591,13 +1591,41 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
     // Built before the fit ladder runs: how many rows the block wants is a
     // fact about this workspace's servers, not about the pane.
     let mcp_block = mcp_launch_lines(app, text_width);
-    let fit = launch_fit(
-        height,
+    // Brand occupies the header only; recent titles retain the whole reading lane.
+    // Scale the canonical raster derivative before sacrificing any controls.
+    use crate::tui::mark::MarkSize;
+    let mut mark = if crate::tui::color_compat::ascii_safe_enabled() {
+        None
+    } else if height >= 14 && text_width >= 40 {
+        Some(MarkSize::Large)
+    } else if height >= 8 && text_width >= 26 {
+        Some(MarkSize::Small)
+    } else if height >= 4 && text_width >= 19 {
+        Some(MarkSize::Tiny)
+    } else {
+        None
+    };
+    let mark_extra = mark.map_or(0, |size| usize::from(size.cells().1).saturating_sub(2));
+    let mut fit = launch_fit(
+        height.saturating_sub(mark_extra),
         entries.len(),
         has_more,
         app.launch.claude_code_detected,
         mcp_block.lines.len(),
     );
+    if mark.is_some() && !(fit.brand && fit.context) {
+        // At the absolute height floor the wordmark yields to the actions too.
+        mark = None;
+        fit = launch_fit(
+            height,
+            entries.len(),
+            has_more,
+            app.launch.claude_code_detected,
+            mcp_block.lines.len(),
+        );
+    }
+    let header_width =
+        text_width.saturating_sub(mark.map_or(0, |size| usize::from(size.cells().0) + 2));
     let spacious = fit.blanks == LAUNCH_SEPARATORS;
     let visible: Vec<LaunchRecentEntry> = entries.into_iter().take(fit.shown).collect();
     let card_rows = launch_card_rows(locale, &visible, fit.see_all);
@@ -1608,15 +1636,15 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
         let brand = "codewhale";
         let version = format!("v{}", env!("CODEWHALE_BUILD_VERSION"));
         let mut spans = vec![Span::styled(
-            semantic_truncate(brand, text_width),
+            semantic_truncate(brand, header_width),
             Style::default().fg(theme.accent_primary).bold(),
         )];
-        if text_width >= text_display_width(brand) + 1 + text_display_width(&version) {
+        if header_width >= text_display_width(brand) + 1 + text_display_width(&version) {
             spans.push(Span::styled(
                 format!(
                     "{}{version}",
                     " ".repeat(
-                        text_width - text_display_width(brand) - text_display_width(&version)
+                        header_width - text_display_width(brand) - text_display_width(&version)
                     )
                 ),
                 Style::default().fg(theme.text_muted),
@@ -1631,16 +1659,29 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
             app.workspace_context.as_deref(),
         );
         let mut spans = vec![Span::styled(
-            semantic_truncate(&workspace, text_width),
+            semantic_truncate(&workspace, header_width),
             Style::default().fg(theme.text_soft),
         )];
         if let Some(branch) = identity.branch {
             let detail = format!(" · {branch}");
-            if text_display_width(&workspace) + text_display_width(&detail) <= text_width {
+            if text_display_width(&workspace) + text_display_width(&detail) <= header_width {
                 spans.push(Span::styled(detail, Style::default().fg(theme.text_muted)));
             }
         }
         text.push(Some(Line::from(spans)));
+    }
+    if let Some(mark) = mark {
+        text.resize_with(usize::from(mark.cells().1), || None);
+        for (row, dots) in mark.rows().iter().enumerate() {
+            let mut spans = vec![
+                Span::styled(*dots, Style::default().fg(theme.accent_primary)),
+                Span::raw("  "),
+            ];
+            if let Some(line) = text[row].take() {
+                spans.extend(line.spans);
+            }
+            text[row] = Some(Line::from(spans));
+        }
     }
     // The migration notice, while there is still a question to answer. It
     // retires for good once `/import-claude` has been run.
@@ -2094,7 +2135,7 @@ mod launch_card_tests {
             with_mcp(app_with_recent(&["one", "two", "three", "four", "five"], 9)),
         ] {
             for width in [0u16, 1, 2, 3, 8, 12, 20, 31, 32, 40, 44, 64, 80, 120, 200] {
-                for height in 0u16..=10 {
+                for height in 0u16..=30 {
                     let state = launch_empty_state(&app, Rect::new(0, 0, width, height));
                     assert!(
                         state.lines.len() <= usize::from(height),
