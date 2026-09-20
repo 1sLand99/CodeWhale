@@ -94,7 +94,9 @@ async fn resolve_workspace_file(state: &RuntimeApiState, raw: &str) -> Result<Pa
 /// `intelligence` reports ordinary states (disabled, no server) as error
 /// strings; split them back into the honest machine-readable reasons.
 fn lsp_failure(error: String) -> Value {
-    let reason = if error.contains("no LSP server") {
+    let reason = if error == "stale_document" {
+        "stale_document"
+    } else if error.contains("no LSP server") {
         "no_server"
     } else if error.contains("disabled") {
         "lsp_disabled"
@@ -113,6 +115,7 @@ async fn run_intelligence(
     line: Option<u32>,
     character: Option<u32>,
     query: Option<String>,
+    expected_revision: Option<String>,
 ) -> Result<Json<Value>, ApiError> {
     let manager = lsp_manager(state)?;
     if !manager.config().enabled {
@@ -121,7 +124,14 @@ async fn run_intelligence(
         ));
     }
     let result = manager
-        .intelligence(operation, &file, line, character, query.as_deref())
+        .intelligence_at_revision(
+            operation,
+            &file,
+            line,
+            character,
+            query.as_deref(),
+            expected_revision.as_deref(),
+        )
         .await;
     match result {
         Ok(mut value) => {
@@ -145,6 +155,7 @@ pub(super) struct LspFileQuery {
 #[serde(deny_unknown_fields)]
 pub(super) struct LspPositionQuery {
     path: String,
+    expected_revision: Option<String>,
     /// 1-based line; required by definition/references.
     line: Option<u32>,
     /// 1-based column; defaults to 1.
@@ -155,6 +166,7 @@ pub(super) struct LspPositionQuery {
 #[serde(deny_unknown_fields)]
 pub(super) struct LspSymbolsQuery {
     path: String,
+    expected_revision: Option<String>,
     query: Option<String>,
 }
 
@@ -187,6 +199,8 @@ pub(super) async fn lsp_status(
     Ok(Json(json!({
         "enabled": config.enabled,
         "diagnostics_contract_version": 1,
+        "semantic_contract_version": 1,
+        "position_encoding": "utf-16",
         "capability_source": "configuration",
         "server_probe": "on_request",
         "workspace": state.workspace.display().to_string(),
@@ -204,7 +218,8 @@ pub(super) async fn lsp_diagnostics(
     Query(query): Query<LspFileQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let file = resolve_workspace_file(&state, &query.path).await?;
-    let Json(result) = run_intelligence(&state, "diagnostics", file, None, None, None).await?;
+    let Json(result) =
+        run_intelligence(&state, "diagnostics", file, None, None, None, None).await?;
     if result.get("ok").and_then(Value::as_bool) == Some(true)
         && query.expected_revision.as_deref().is_some_and(|expected| {
             result.get("source_revision").and_then(Value::as_str) != Some(expected)
@@ -230,6 +245,7 @@ pub(super) async fn lsp_definition(
         Some(line),
         query.character,
         None,
+        query.expected_revision,
     )
     .await
 }
@@ -249,6 +265,7 @@ pub(super) async fn lsp_references(
         Some(line),
         query.character,
         None,
+        query.expected_revision,
     )
     .await
 }
@@ -258,12 +275,39 @@ pub(super) async fn lsp_symbols(
     Query(query): Query<LspSymbolsQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let file = resolve_workspace_file(&state, &query.path).await?;
-    run_intelligence(&state, "symbols", file, None, None, query.query).await
+    run_intelligence(
+        &state,
+        "symbols",
+        file,
+        None,
+        None,
+        query.query,
+        query.expected_revision,
+    )
+    .await
 }
 
 #[cfg(test)]
 mod diagnostic_freshness_tests {
     use super::*;
+
+    #[test]
+    fn semantic_queries_accept_expected_revision_without_changing_position_units() {
+        let position: LspPositionQuery = serde_json::from_value(
+            json!({"path":"a.rs","line":2,"character":4,"expected_revision":"abc"}),
+        )
+        .unwrap();
+        assert_eq!(position.expected_revision.as_deref(), Some("abc"));
+        assert_eq!(position.line, Some(2));
+        assert_eq!(position.character, Some(4));
+        let symbols: LspSymbolsQuery =
+            serde_json::from_value(json!({"path":"a.rs","expected_revision":"abc"})).unwrap();
+        assert_eq!(symbols.expected_revision.as_deref(), Some("abc"));
+        assert_eq!(
+            lsp_failure("stale_document".into())["reason"],
+            "stale_document"
+        );
+    }
 
     #[test]
     fn failures_keep_unavailable_disabled_and_timeout_distinct() {

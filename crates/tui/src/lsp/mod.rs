@@ -526,6 +526,21 @@ impl LspManager {
         character: Option<u32>,
         query: Option<&str>,
     ) -> Result<serde_json::Value, String> {
+        self.intelligence_at_revision(operation, file, line, character, query, None)
+            .await
+    }
+
+    /// Optional source revision for native navigation; raw tool results remain
+    /// available. A target revision proves bytes read here, not server analysis.
+    pub async fn intelligence_at_revision(
+        &self,
+        operation: &str,
+        file: &Path,
+        line: Option<u32>,
+        character: Option<u32>,
+        query: Option<&str>,
+        expected_revision: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
         if !self.config.enabled {
             return Err("LSP is disabled ([lsp] enabled = false)".to_string());
         }
@@ -560,89 +575,219 @@ impl LspManager {
                 }
             }
             "symbols" | "definition" | "references" => {
-                let transport = self
-                    .transport_for_path(file)
-                    .await
-                    .ok_or_else(|| format!("no LSP server for {}", file.display()))?;
                 let text = self
                     .read_workspace_text(file)
                     .await
                     .map_err(|err| format!("read {}: {err}", file.display()))?;
-                transport
-                    .ensure_open(file, &text)
+                let source_revision = crate::hashing::sha256_hex(text.as_bytes());
+                if expected_revision.is_some_and(|expected| expected != source_revision) {
+                    return Err("stale_document".into());
+                }
+                let root = tokio::fs::canonicalize(&self.workspace)
+                    .await
+                    .map_err(|_| "workspace unavailable")?;
+                let source_path = file
+                    .strip_prefix(&self.workspace)
+                    .or_else(|_| file.strip_prefix(&root))
+                    .ok()
+                    .and_then(semantic_relative_path)
+                    .ok_or("source path is not workspace-relative UTF-8")?;
+                let uri = client::uri_from_path(file);
+                let (method, params) = if operation == "symbols" {
+                    if let Some(q) = query.filter(|s| !s.trim().is_empty()) {
+                        if q.len() > 1024 {
+                            return Err("symbol query is too long".into());
+                        }
+                        ("workspace/symbol", serde_json::json!({"query":q}))
+                    } else {
+                        (
+                            "textDocument/documentSymbol",
+                            serde_json::json!({"textDocument":{"uri":uri}}),
+                        )
+                    }
+                } else {
+                    let position = SemanticPosition {
+                        line: line
+                            .and_then(|value| value.checked_sub(1))
+                            .ok_or("line must be 1-based")?,
+                        character: character
+                            .unwrap_or(1)
+                            .checked_sub(1)
+                            .ok_or("character must be 1-based")?,
+                    };
+                    if !position.valid_in(&text) {
+                        return Err(
+                            "position is outside the document or splits a UTF-16 character".into(),
+                        );
+                    }
+                    let method = if operation == "definition" {
+                        "textDocument/definition"
+                    } else {
+                        "textDocument/references"
+                    };
+                    let mut params =
+                        serde_json::json!({"textDocument":{"uri":uri}, "position":position});
+                    if operation == "references" {
+                        params["context"] = serde_json::json!({"includeDeclaration":true});
+                    }
+                    (method, params)
+                };
+                let transport = self
+                    .transport_for_path(file)
+                    .await
+                    .ok_or_else(|| format!("no LSP server for {}", file.display()))?;
+                let reply = transport
+                    .request_for_document(file, &text, method, params, wait)
                     .await
                     .map_err(|err| err.to_string())?;
-                let uri = client::uri_from_path(file);
-                let result = match operation {
-                    "symbols" => {
-                        if let Some(q) = query.filter(|s| !s.trim().is_empty()) {
-                            transport
-                                .request(
-                                    "workspace/symbol",
-                                    serde_json::json!({ "query": q }),
-                                    wait,
-                                )
-                                .await
-                        } else {
-                            transport
-                                .request(
-                                    "textDocument/documentSymbol",
-                                    serde_json::json!({
-                                        "textDocument": { "uri": uri }
-                                    }),
-                                    wait,
-                                )
-                                .await
-                        }
-                    }
-                    "definition" => {
-                        let line = line.ok_or("definition requires line (1-based)")?;
-                        let character = character.unwrap_or(1);
-                        transport
-                            .request(
-                                "textDocument/definition",
-                                serde_json::json!({
-                                    "textDocument": { "uri": uri },
-                                    "position": {
-                                        "line": line.saturating_sub(1),
-                                        "character": character.saturating_sub(1),
-                                    }
-                                }),
-                                wait,
-                            )
-                            .await
-                    }
-                    "references" => {
-                        let line = line.ok_or("references requires line (1-based)")?;
-                        let character = character.unwrap_or(1);
-                        transport
-                            .request(
-                                "textDocument/references",
-                                serde_json::json!({
-                                    "textDocument": { "uri": uri },
-                                    "position": {
-                                        "line": line.saturating_sub(1),
-                                        "character": character.saturating_sub(1),
-                                    },
-                                    "context": { "includeDeclaration": true }
-                                }),
-                                wait,
-                            )
-                            .await
-                    }
-                    _ => unreachable!(),
+                let (locations, truncated, omitted) =
+                    self.semantic_locations(&reply.result, file, &text).await;
+                // Re-read after the request and normalization; a changed or
+                // replaced source cannot publish a successful navigation result.
+                let current = self
+                    .read_workspace_text(file)
+                    .await
+                    .map_err(|_| "stale_document")?;
+                if crate::hashing::sha256_hex(current.as_bytes()) != source_revision {
+                    return Err("stale_document".into());
                 }
-                .map_err(|err| err.to_string())?;
                 Ok(serde_json::json!({
                     "operation": operation,
-                    "file": relative_to_workspace(&self.workspace, file).display().to_string(),
-                    "result": truncate_intelligence_result(result),
+                    "file": source_path,
+                    "semantic_contract_version": 1,
+                    "position_encoding": "utf-16",
+                    "source_revision": source_revision,
+                    "document_version": reply.document_version,
+                    "freshness": if reply.document_version.is_some() { "verified" } else { "unverified" },
+                    "locations": locations, "truncated": truncated, "omitted": omitted,
+                    "result": truncate_intelligence_result(reply.result),
                 }))
             }
             other => Err(format!(
                 "unknown LSP operation '{other}'; use diagnostics, symbols, definition, or references"
             )),
         }
+    }
+
+    async fn semantic_locations(
+        &self,
+        raw: &serde_json::Value,
+        source: &Path,
+        source_text: &str,
+    ) -> (Vec<SemanticLocation>, bool, usize) {
+        const MAX_LOCATIONS: usize = 40;
+        const MAX_NODES: usize = 256;
+        const MAX_TARGET_BYTES: usize = 16 * 1024 * 1024;
+        let root = match tokio::fs::canonicalize(&self.workspace).await {
+            Ok(root) => root,
+            Err(_) => return (vec![], false, 1),
+        };
+        let mut pending = vec![(raw, 0usize)];
+        let mut locations = Vec::new();
+        let mut visited = 0;
+        let mut target_bytes: usize = 0;
+        let mut truncated = false;
+        let mut omitted = 0;
+        while let Some((value, depth)) = pending.pop() {
+            visited += 1;
+            if visited > MAX_NODES || locations.len() >= MAX_LOCATIONS {
+                truncated = true;
+                break;
+            }
+            if value.is_null() {
+                continue;
+            }
+            if let Some(items) = value.as_array() {
+                let remaining = MAX_NODES.saturating_sub(visited + pending.len());
+                truncated |= items.len() > remaining;
+                pending.extend(items.iter().take(remaining).rev().map(|item| (item, depth)));
+                continue;
+            }
+            if let Some(children) = value.get("children").and_then(serde_json::Value::as_array) {
+                if depth >= 16 {
+                    truncated |= !children.is_empty();
+                } else {
+                    let remaining = MAX_NODES.saturating_sub(visited + pending.len());
+                    truncated |= children.len() > remaining;
+                    pending.extend(
+                        children
+                            .iter()
+                            .take(remaining)
+                            .rev()
+                            .map(|item| (item, depth + 1)),
+                    );
+                }
+            }
+            let location = value.get("location").unwrap_or(value);
+            let uri = location.get("uri").or_else(|| value.get("targetUri"));
+            let target = match uri {
+                Some(uri) => uri.as_str().and_then(client::path_from_uri),
+                None if value
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some()
+                    && value.get("selectionRange").is_some() =>
+                {
+                    Some(source.to_path_buf())
+                }
+                _ => None,
+            };
+            let range = value
+                .get("targetSelectionRange")
+                .or_else(|| value.get("selectionRange"))
+                .or_else(|| location.get("range"))
+                .and_then(|range| serde_json::from_value::<SemanticRange>(range.clone()).ok());
+            let (Some(target), Some(range)) = (target, range) else {
+                omitted += 1;
+                continue;
+            };
+            let relative = match target.strip_prefix(&self.workspace).or_else(|_| target.strip_prefix(&root)) {
+                Ok(relative) if !relative.as_os_str().is_empty()
+                    && relative.components().all(|component| matches!(component, std::path::Component::Normal(part) if part != ".git")) => relative,
+                _ => { omitted += 1; continue; }
+            };
+            let Some(path) = semantic_relative_path(relative) else {
+                omitted += 1;
+                continue;
+            };
+            let text = if target == source {
+                source_text.to_owned()
+            } else {
+                match self.read_workspace_text(&target).await {
+                    Ok(text) => text,
+                    Err(_) => {
+                        omitted += 1;
+                        continue;
+                    }
+                }
+            };
+            target_bytes = target_bytes.saturating_add(text.len());
+            if target_bytes > MAX_TARGET_BYTES {
+                truncated = true;
+                break;
+            }
+            if range.start > range.end || !range.start.valid_in(&text) || !range.end.valid_in(&text)
+            {
+                omitted += 1;
+                continue;
+            }
+            locations.push(SemanticLocation {
+                path,
+                range,
+                target_revision: crate::hashing::sha256_hex(text.as_bytes()),
+                target_freshness: "unverified",
+                name: value
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|name| name.chars().filter(|c| !c.is_control()).take(256).collect()),
+                kind: value
+                    .get("kind")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|kind| u32::try_from(kind).ok())
+                    .filter(|kind| (1..=26).contains(kind)),
+            });
+        }
+        (locations, truncated, omitted)
     }
 
     /// Read diagnostics for several existing files through the shared LSP
@@ -753,37 +898,92 @@ impl LspConfig {
     }
 }
 
+fn semantic_relative_path(path: &Path) -> Option<String> {
+    let parts = path
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(part) if part != ".git" => {
+                part.to_str().filter(|part| !part.contains('\\'))
+            }
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let path = parts.join("/");
+    (!path.is_empty() && path.len() <= 4096).then_some(path)
+}
+
+/// LSP positions are zero-based UTF-16 code units, never UTF-8 byte offsets.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize,
+)]
+struct SemanticPosition {
+    line: u32,
+    character: u32,
+}
+impl SemanticPosition {
+    fn valid_in(self, text: &str) -> bool {
+        let Some(line) = text.split('\n').nth(self.line as usize) else {
+            return false;
+        };
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let mut column = 0;
+        for ch in line.chars() {
+            if column == self.character {
+                return true;
+            }
+            column += ch.len_utf16() as u32;
+            if column > self.character {
+                return false;
+            }
+        }
+        column == self.character
+    }
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct SemanticRange {
+    start: SemanticPosition,
+    end: SemanticPosition,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct SemanticLocation {
+    path: String,
+    range: SemanticRange,
+    target_revision: String,
+    target_freshness: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kind: Option<u32>,
+}
+
 /// Cap intelligence payloads so a chatty language server cannot flood the
 /// model context. Arrays keep the first `MAX` entries and set `truncated`.
 fn truncate_intelligence_result(value: serde_json::Value) -> serde_json::Value {
     const MAX_ITEMS: usize = 40;
     const MAX_CHARS: usize = 12_000;
-    match value {
-        serde_json::Value::Array(mut items) => {
+    let bounded = match value {
+        serde_json::Value::Array(mut items) if items.len() > MAX_ITEMS => {
             let total = items.len();
-            if total > MAX_ITEMS {
-                items.truncate(MAX_ITEMS);
-                serde_json::json!({
-                    "items": items,
-                    "truncated": true,
-                    "total": total,
-                })
-            } else {
-                serde_json::Value::Array(items)
-            }
+            items.truncate(MAX_ITEMS);
+            serde_json::json!({"items":items, "truncated":true, "total":total})
         }
-        other => {
-            let rendered = other.to_string();
-            if rendered.len() > MAX_CHARS {
-                serde_json::json!({
-                    "truncated": true,
-                    "preview": &rendered[..MAX_CHARS],
-                    "total_chars": rendered.len(),
-                })
-            } else {
-                other
-            }
+        other => other,
+    };
+    let rendered = bounded.to_string();
+    if rendered.len() > MAX_CHARS {
+        let mut boundary = MAX_CHARS;
+        while !rendered.is_char_boundary(boundary) {
+            boundary -= 1;
         }
+        serde_json::json!({
+            "truncated": true,
+            "preview": &rendered[..boundary],
+            "total_chars": rendered.len(),
+        })
+    } else {
+        bounded
     }
 }
 
@@ -967,6 +1167,176 @@ pub(crate) mod tests {
         std::fs::write(&script, client::tests::STDIO_FIXTURE).unwrap();
         assert!(manager.transport_for_path(&path).await.is_some());
         manager.shutdown_all().await;
+    }
+
+    struct SemanticFixture {
+        result: serde_json::Value,
+        mutate: Option<PathBuf>,
+    }
+    #[async_trait::async_trait]
+    impl LspTransport for SemanticFixture {
+        async fn diagnostics_for(
+            &self,
+            _: &Path,
+            _: &str,
+            _: Duration,
+        ) -> anyhow::Result<client::DiagnosticPublication> {
+            Ok(vec![].into())
+        }
+        async fn request(
+            &self,
+            _: &str,
+            _: serde_json::Value,
+            _: Duration,
+        ) -> anyhow::Result<serde_json::Value> {
+            if let Some(path) = &self.mutate {
+                tokio::fs::write(path, "changed").await?;
+            }
+            Ok(self.result.clone())
+        }
+        async fn shutdown(&self) {}
+    }
+
+    #[tokio::test]
+    async fn semantic_source_revision_rejects_stale_before_and_after_request() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("main.rs");
+        tokio::fs::write(&file, "fn main() {}\n").await.unwrap();
+        let manager = LspManager::new(LspConfig::default(), root.path().to_owned());
+        assert_eq!(
+            manager
+                .intelligence_at_revision(
+                    "definition",
+                    &file,
+                    Some(1),
+                    Some(1),
+                    None,
+                    Some("wrong")
+                )
+                .await
+                .unwrap_err(),
+            "stale_document"
+        );
+        manager
+            .install_test_transport(
+                Language::Rust,
+                Arc::new(SemanticFixture {
+                    result: serde_json::json!([]),
+                    mutate: Some(file.clone()),
+                }),
+            )
+            .await;
+        let revision = crate::hashing::sha256_hex(b"fn main() {}\n");
+        assert_eq!(
+            manager
+                .intelligence_at_revision(
+                    "definition",
+                    &file,
+                    Some(1),
+                    Some(1),
+                    None,
+                    Some(&revision)
+                )
+                .await
+                .unwrap_err(),
+            "stale_document"
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_locations_preserve_raw_and_distinguish_target_readback_from_analysis() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("main.rs");
+        let target = root.path().join("a b.rs");
+        tokio::fs::write(&file, "fn main() {}\n").await.unwrap();
+        tokio::fs::write(&target, "🐋foo\n").await.unwrap();
+        let raw = serde_json::json!([{"targetUri":client::uri_from_path(&target),"targetSelectionRange":{"start":{"line":0,"character":2},"end":{"line":0,"character":5}}}]);
+        let manager = LspManager::new(LspConfig::default(), root.path().to_owned());
+        manager
+            .install_test_transport(
+                Language::Rust,
+                Arc::new(SemanticFixture {
+                    result: raw.clone(),
+                    mutate: None,
+                }),
+            )
+            .await;
+        let result = manager
+            .intelligence("definition", &file, Some(1), Some(1), None)
+            .await
+            .unwrap();
+        assert_eq!(result["result"], raw);
+        assert_eq!(result["semantic_contract_version"], 1);
+        assert_eq!(result["position_encoding"], "utf-16");
+        assert_eq!(result["freshness"], "unverified");
+        assert_eq!(result["locations"][0]["path"], "a b.rs");
+        assert_eq!(
+            result["locations"][0]["target_revision"],
+            crate::hashing::sha256_hex("🐋foo\n".as_bytes())
+        );
+        assert_eq!(result["locations"][0]["target_freshness"], "unverified");
+        assert_eq!(result["omitted"], 0);
+    }
+
+    #[tokio::test]
+    async fn semantic_locations_reject_unsafe_uri_range_and_symlink_and_bound_symbols() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("main.rs");
+        tokio::fs::write(&file, "🐋foo\n").await.unwrap();
+        let manager = LspManager::new(LspConfig::default(), root.path().to_owned());
+        let good = serde_json::json!({"name":"foo","kind":12,"selectionRange":{"start":{"line":0,"character":2},"end":{"line":0,"character":5}}});
+        let mut split = good.clone();
+        split["selectionRange"]["start"]["character"] = serde_json::json!(1);
+        let mut huge = good.clone();
+        huge["selectionRange"]["end"]["character"] = serde_json::json!(u64::MAX);
+        let mut unsafe_uri = good.clone();
+        unsafe_uri["uri"] = serde_json::json!("file://remote/etc/passwd");
+        let mut outside = good.clone();
+        outside["uri"] = serde_json::json!("file:///etc/passwd");
+        let mut reverse = good.clone();
+        reverse["selectionRange"]["end"]["character"] = serde_json::json!(0);
+        let mut cases = vec![good.clone(), split, huge, unsafe_uri, outside, reverse];
+        #[cfg(unix)]
+        {
+            let link = root.path().join("link.rs");
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+            let mut linked = good.clone();
+            linked["uri"] = serde_json::json!(client::uri_from_path(&link));
+            cases.push(linked);
+        }
+        let expected_omitted = cases.len() - 1;
+        let (locations, truncated, omitted) = manager
+            .semantic_locations(&serde_json::json!(cases), &file, "🐋foo\n")
+            .await;
+        assert_eq!(locations.len(), 1);
+        assert!(!truncated);
+        assert_eq!(omitted, expected_omitted);
+        let (locations, truncated, _) = manager
+            .semantic_locations(&serde_json::json!(vec![good; 100]), &file, "🐋foo\n")
+            .await;
+        assert_eq!(locations.len(), 40);
+        assert!(truncated);
+        assert!(
+            !SemanticPosition {
+                line: 0,
+                character: 1
+            }
+            .valid_in("🐋")
+        );
+        assert!(
+            SemanticPosition {
+                line: 0,
+                character: 2
+            }
+            .valid_in("🐋")
+        );
+    }
+
+    #[test]
+    fn semantic_raw_result_bound_is_unicode_safe_for_arrays_too() {
+        let result = truncate_intelligence_result(serde_json::json!(["🐋".repeat(20_000)]));
+        assert_eq!(result["truncated"], true);
+        assert!(result["preview"].as_str().unwrap().len() <= 12_000);
     }
 
     #[tokio::test]

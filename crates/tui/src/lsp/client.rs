@@ -77,6 +77,14 @@ impl From<Vec<Diagnostic>> for DiagnosticPublication {
     }
 }
 
+/// Source synchronization proof for a semantic reply. Legacy transports keep
+/// the raw result but cannot assert which document version served it.
+#[derive(Debug)]
+pub struct SemanticReply {
+    pub result: Value,
+    pub document_version: Option<i64>,
+}
+
 /// Trait the LSP manager talks to. A real LSP server speaks this via stdio;
 /// tests use an in-process fake.
 #[async_trait]
@@ -99,6 +107,27 @@ pub trait LspTransport: Send + Sync {
     /// references without spawning a second server lifecycle.
     async fn request(&self, _method: &str, _params: Value, _wait: Duration) -> Result<Value> {
         Err(anyhow!("LSP request not supported by this transport"))
+    }
+
+    /// Synchronize and query one document atomically when the transport can
+    /// prove that ordering. Diagnostic-only/legacy transports stay unverified.
+    async fn request_for_document(
+        &self,
+        path: &Path,
+        text: &str,
+        method: &str,
+        params: Value,
+        wait: Duration,
+    ) -> Result<SemanticReply> {
+        timeout(wait, async {
+            self.ensure_open(path, text).await?;
+            Ok(SemanticReply {
+                result: self.request(method, params, wait).await?,
+                document_version: None,
+            })
+        })
+        .await
+        .map_err(|_| anyhow!("LSP semantic request timed out"))?
     }
 
     /// Ensure `path` is open with `text` (didOpen/didChange) so position-based
@@ -246,6 +275,7 @@ impl StdioLspTransport {
             "processId": std::process::id(),
             "rootUri": uri_from_path(&workspace),
             "capabilities": {
+                "general": { "positionEncodings": ["utf-16"] },
                 "textDocument": {
                     "publishDiagnostics": { "relatedInformation": false, "versionSupport": true }
                 }
@@ -256,6 +286,12 @@ impl StdioLspTransport {
             return Err(anyhow!(
                 "LSP initialize response is missing server capabilities"
             ));
+        }
+        if result
+            .pointer("/capabilities/positionEncoding")
+            .is_some_and(|encoding| encoding.as_str() != Some("utf-16"))
+        {
+            return Err(anyhow!("LSP server must use UTF-16 positions"));
         }
         timeout(
             initialize_wait,
@@ -384,6 +420,37 @@ impl LspTransport for StdioLspTransport {
                 diagnostic_version: published_version,
             });
         }
+    }
+
+    async fn request_for_document(
+        &self,
+        path: &Path,
+        text: &str,
+        method: &str,
+        params: Value,
+        wait: Duration,
+    ) -> Result<SemanticReply> {
+        let deadline = tokio::time::Instant::now() + wait;
+        let _gate = timeout(wait, self.diagnostics_gate.lock())
+            .await
+            .map_err(|_| anyhow!("LSP semantic request timed out waiting for another document"))?;
+        let (_, version) = timeout(
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+            self.open_or_change(path, text),
+        )
+        .await
+        .map_err(|_| anyhow!("LSP semantic request timed out sending document"))??;
+        let result = self
+            .request(
+                method,
+                params,
+                deadline.saturating_duration_since(tokio::time::Instant::now()),
+            )
+            .await?;
+        Ok(SemanticReply {
+            result,
+            document_version: Some(version),
+        })
     }
 
     async fn ensure_open(&self, path: &Path, text: &str) -> Result<()> {
@@ -615,29 +682,39 @@ fn parse_publish_diagnostics(value: &Value) -> Option<(PathBuf, Option<i64>, Vec
     Some((path, version, out))
 }
 
-/// Convert a filesystem path to a `file://` URI. Best-effort — we do not
-/// support Windows drive letters perfectly, but the LSP servers in our
-/// registry accept percent-encoded paths well enough for the post-edit
-/// diagnostics use case.
+/// Encode an absolute filesystem path without following its links.
 pub(crate) fn uri_from_path(path: &Path) -> String {
-    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let s = canonical.to_string_lossy();
-    if s.starts_with('/') {
-        format!("file://{s}")
-    } else {
-        format!("file:///{}", s.trim_start_matches('/'))
-    }
+    reqwest::Url::from_file_path(path)
+        .map(|url| url.to_string())
+        .unwrap_or_default()
 }
 
-/// Inverse of [`uri_from_path`]. Returns `None` when the URI is not a `file://`.
-fn path_from_uri(uri: &str) -> Option<PathBuf> {
-    let stripped = uri.strip_prefix("file://")?;
-    Some(PathBuf::from(stripped))
+/// File URLs only: no network authority, query or fragment. Decoding happens
+/// before the workspace no-follow opener validates the target path.
+pub(super) fn path_from_uri(uri: &str) -> Option<PathBuf> {
+    let url = reqwest::Url::parse(uri).ok()?;
+    if url.scheme() != "file"
+        || url.host_str().is_some_and(|host| !host.is_empty())
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    url.to_file_path().ok()
 }
 
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+
+    fn fixture_path(name: &str) -> PathBuf {
+        std::env::temp_dir()
+            .join("codewhale-lsp-fixture")
+            .join(name)
+    }
 
     #[test]
     fn parses_lsp_header() {
@@ -661,7 +738,7 @@ pub(super) mod tests {
             "jsonrpc": "2.0",
             "method": "textDocument/publishDiagnostics",
             "params": {
-                "uri": "file:///tmp/foo.rs",
+                "uri": uri_from_path(&fixture_path("foo.rs")),
                 "diagnostics": [
                     {
                         "range": {
@@ -675,7 +752,7 @@ pub(super) mod tests {
             }
         });
         let (path, version, diags) = parse_publish_diagnostics(&payload).expect("parses");
-        assert_eq!(path, PathBuf::from("/tmp/foo.rs"));
+        assert_eq!(path, fixture_path("foo.rs"));
         assert_eq!(version, None);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].line, 12);
@@ -686,8 +763,8 @@ pub(super) mod tests {
 
     #[test]
     fn round_trips_uri_path() {
-        let path = PathBuf::from("/tmp/example/foo.rs");
-        let uri = format!("file://{}", path.display());
+        let path = fixture_path("example/foo.rs");
+        let uri = uri_from_path(&path);
         assert_eq!(path_from_uri(&uri), Some(path));
     }
 
@@ -710,7 +787,7 @@ pub(super) mod tests {
 
         let error = transport
             .diagnostics_for(
-                Path::new("/tmp/closed-channel.rs"),
+                &fixture_path("closed-channel.rs"),
                 "fn main() {}\n",
                 Duration::from_millis(10),
             )
@@ -783,7 +860,7 @@ pub(super) mod tests {
                 .unwrap();
             diag.send((path, Some(2), vec![])).await.unwrap();
         });
-        let path = Path::new("/tmp/freshness.rs");
+        let path = &fixture_path("freshness.rs");
         let first = transport
             .diagnostics_for(path, "old text", Duration::from_secs(1))
             .await
@@ -818,21 +895,19 @@ pub(super) mod tests {
                     path_from_uri(request["params"]["textDocument"]["uri"].as_str().unwrap())
                         .unwrap();
                 let line = if path.ends_with("one.rs") { 1 } else { 2 };
-                diag.send((
-                    PathBuf::from("/tmp/unrelated.rs"),
-                    Some(1),
-                    vec![diagnostic(99)],
-                ))
-                .await
-                .unwrap();
+                diag.send((fixture_path("unrelated.rs"), Some(1), vec![diagnostic(99)]))
+                    .await
+                    .unwrap();
                 diag.send((path, Some(1), vec![diagnostic(line)]))
                     .await
                     .unwrap();
             }
         });
+        let one_path = fixture_path("one.rs");
+        let two_path = fixture_path("two.rs");
         let (one, two) = tokio::join!(
-            transport.diagnostics_for(Path::new("/tmp/one.rs"), "one", Duration::from_secs(1)),
-            transport.diagnostics_for(Path::new("/tmp/two.rs"), "two", Duration::from_secs(1)),
+            transport.diagnostics_for(&one_path, "one", Duration::from_secs(1)),
+            transport.diagnostics_for(&two_path, "two", Duration::from_secs(1)),
         );
         assert_eq!(one.unwrap().items[0].line, 1);
         assert_eq!(two.unwrap().items[0].line, 2);
@@ -853,7 +928,7 @@ pub(super) mod tests {
         });
         let response = transport
             .diagnostics_for(
-                Path::new("/tmp/unversioned.rs"),
+                &fixture_path("unversioned.rs"),
                 "text",
                 Duration::from_secs(1),
             )
@@ -864,7 +939,7 @@ pub(super) mod tests {
         assert!(
             transport
                 .diagnostics_for(
-                    Path::new("/tmp/silent.rs"),
+                    &fixture_path("silent.rs"),
                     "text",
                     Duration::from_millis(10)
                 )
@@ -878,8 +953,7 @@ pub(super) mod tests {
 
     #[test]
     fn diagnostic_freshness_parser_retains_version_and_rejects_malformed_version() {
-        let mut payload =
-            json!({"params":{"uri":"file:///tmp/version.rs","version":4,"diagnostics":[]}});
+        let mut payload = json!({"params":{"uri":uri_from_path(&fixture_path("version.rs")),"version":4,"diagnostics":[]}});
         assert_eq!(parse_publish_diagnostics(&payload).unwrap().1, Some(4));
         payload["params"]["version"] = json!("4");
         assert!(parse_publish_diagnostics(&payload).is_none());
@@ -1040,6 +1114,118 @@ while True:
         assert!(error.to_string().contains("channel closed"), "{error:#}");
         assert!(transport.pending.lock().await.is_empty());
         assert_fixture_exited(root.path()).await;
+    }
+
+    #[tokio::test]
+    async fn semantic_request_holds_document_gate_until_reply_before_diagnostics() {
+        timeout(Duration::from_secs(2), async {
+            let (transport, mut outbound, diag) = diagnostic_fixture();
+            let transport = Arc::new(transport);
+            let semantic = {
+                let transport = transport.clone();
+                tokio::spawn(async move {
+                    transport
+                        .request_for_document(
+                            &fixture_path("semantic.rs"),
+                            "before",
+                            "textDocument/definition",
+                            json!({}),
+                            Duration::from_secs(1),
+                        )
+                        .await
+                })
+            };
+            let open = next_document(&mut outbound).await;
+            assert_eq!(open["method"], "textDocument/didOpen");
+            let request = next_document(&mut outbound).await;
+            assert_eq!(request["method"], "textDocument/definition");
+            let diagnostics = {
+                let transport = transport.clone();
+                tokio::spawn(async move {
+                    transport
+                        .diagnostics_for(
+                            &fixture_path("semantic.rs"),
+                            "after",
+                            Duration::from_secs(1),
+                        )
+                        .await
+                })
+            };
+            assert!(
+                timeout(Duration::from_millis(20), outbound.recv())
+                    .await
+                    .is_err()
+            );
+            transport
+                .pending
+                .lock()
+                .await
+                .remove(&request["id"].as_i64().unwrap())
+                .unwrap()
+                .send(json!({"result":[]}))
+                .unwrap();
+            assert_eq!(semantic.await.unwrap().unwrap().document_version, Some(1));
+            let change = next_document(&mut outbound).await;
+            assert_eq!(change["params"]["textDocument"]["version"], 2);
+            diag.send((fixture_path("semantic.rs"), Some(2), vec![]))
+                .await
+                .unwrap();
+            assert_eq!(
+                diagnostics.await.unwrap().unwrap().document_version,
+                Some(2)
+            );
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn semantic_deadline_includes_gate_wait_and_cleans_pending_request() {
+        let (transport, _outbound, _diag) = diagnostic_fixture();
+        let gate = transport.diagnostics_gate.lock().await;
+        let result = timeout(
+            Duration::from_millis(250),
+            transport.request_for_document(
+                &fixture_path("a.rs"),
+                "a",
+                "textDocument/definition",
+                json!({}),
+                Duration::from_millis(20),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(result.unwrap_err().to_string().contains("timed out"));
+        drop(gate);
+        assert!(transport.pending.lock().await.is_empty());
+        let result = transport
+            .request_for_document(
+                &fixture_path("a.rs"),
+                "a",
+                "textDocument/definition",
+                json!({}),
+                Duration::from_millis(20),
+            )
+            .await;
+        assert!(result.unwrap_err().to_string().contains("timed out"));
+        assert!(transport.pending.lock().await.is_empty());
+    }
+
+    #[test]
+    fn semantic_file_uris_decode_spaces_and_reject_authority_and_query() {
+        let path = &fixture_path("a b#🐋.rs");
+        assert_eq!(
+            path_from_uri(&uri_from_path(path)).as_deref(),
+            Some(path.as_path())
+        );
+        for uri in [
+            "https://example.test/a.rs",
+            "file://remote/tmp/a.rs",
+            "file:///tmp/a.rs?q=1",
+            "file:///tmp/a.rs#fragment",
+        ] {
+            assert!(path_from_uri(uri).is_none(), "{uri}");
+        }
     }
 
     #[tokio::test]
