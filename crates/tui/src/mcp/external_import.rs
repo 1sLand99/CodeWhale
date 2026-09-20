@@ -190,25 +190,40 @@ fn hex_sha256(bytes: &[u8]) -> String {
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Load consent store from disk (missing file → empty).
-pub fn load_consent_store(path: &Path) -> ImportConsentStore {
-    let Ok(raw) = fs::read_to_string(path) else {
-        return ImportConsentStore::default();
-    };
-    serde_json::from_str(&raw).unwrap_or_default()
-}
-
-/// Persist consent store atomically-ish (write then rename best-effort).
-pub fn save_consent_store(path: &Path, store: &ImportConsentStore) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let raw = serde_json::to_string_pretty(store)
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, raw)?;
-    fs::rename(tmp, path)?;
-    Ok(())
+/// Record decisions against the latest consent document under the shared
+/// process lock. Malformed history is never silently replaced with empty state.
+pub fn persist_decisions(
+    path: &Path,
+    candidates: &[ImportCandidate],
+    decisions: &HashMap<String, ImportDecision>,
+    now_unix: u64,
+) -> anyhow::Result<()> {
+    super::validate_mcp_config_path(path)?;
+    codewhale_config::with_config_write_lock(path, |path| {
+        let original = super::read_mcp_config_file(path)?;
+        let mut raw: Value = match original.as_deref() {
+            Some(raw) => serde_json::from_str(raw)
+                .map_err(|_| anyhow::anyhow!("Invalid MCP consent history; contents omitted"))?,
+            None => serde_json::json!({}),
+        };
+        anyhow::ensure!(raw.is_object(), "MCP consent history must be an object");
+        let mut store: ImportConsentStore = if original.is_none() {
+            ImportConsentStore::default()
+        } else {
+            serde_json::from_value(raw.clone())
+                .map_err(|_| anyhow::anyhow!("Invalid MCP consent history; contents omitted"))?
+        };
+        let before = serde_json::to_value(&store)?;
+        record_decisions(&mut store, candidates, decisions, now_unix);
+        let after = serde_json::to_value(&store)?;
+        super::apply_json_delta(&mut raw, &before, &after);
+        let rendered = serde_json::to_vec_pretty(&raw)?;
+        if rendered.len() as u64 > super::MAX_MCP_CONFIG_BYTES {
+            anyhow::bail!("MCP consent history exceeds size limit");
+        }
+        crate::utils::write_atomic(path, &rendered)?;
+        Ok(())
+    })
 }
 
 /// Filter candidates that still need a user decision for this content hash.
@@ -383,6 +398,34 @@ mod tests {
         let path = dir.join(".claude.json");
         fs::write(&path, body).unwrap();
         path
+    }
+
+    #[test]
+    fn consent_transaction_preserves_other_sources_and_unknown_fields() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("consent.json");
+        fs::write(&path, r#"{"entries":{},"extension":{"owner":"external"}}"#).unwrap();
+        for name in ["first", "second"] {
+            let source = dir.path().join(format!("{name}.json"));
+            fs::write(
+                &source,
+                format!(r#"{{"mcpServers":{{"{name}":{{"command":"echo"}}}}}}"#),
+            )
+            .unwrap();
+            let candidates = discover_from_json_file(&source, ExternalMcpSourceKind::ClaudeJson);
+            let decisions = HashMap::from([(name.to_string(), ImportDecision::Approve)]);
+            persist_decisions(&path, &candidates, &decisions, 1).unwrap();
+        }
+        let raw: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(raw["extension"]["owner"], "external");
+        assert_eq!(raw["entries"].as_object().unwrap().len(), 2);
+        fs::write(&path, "malformed-sensitive-history").unwrap();
+        let error = persist_decisions(&path, &[], &HashMap::new(), 2).unwrap_err();
+        assert!(!error.to_string().contains("malformed-sensitive-history"));
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "malformed-sensitive-history"
+        );
     }
 
     #[test]

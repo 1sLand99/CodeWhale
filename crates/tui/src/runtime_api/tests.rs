@@ -12925,6 +12925,7 @@ async fn mcp_server_management_crud() -> Result<()> {
     // 1. Create a new server.
     let created: serde_json::Value = client
         .post(&base)
+        .header(header::IF_MATCH, mcp_test_revision(&client, &base).await?)
         .json(&serde_json::json!({
             "name": "test-stdio",
             "command": "echo",
@@ -12960,6 +12961,7 @@ async fn mcp_server_management_crud() -> Result<()> {
     // 3. Duplicate create returns 409 Conflict.
     let conflict = client
         .post(&base)
+        .header(header::IF_MATCH, mcp_test_revision(&client, &base).await?)
         .json(&serde_json::json!({
             "name": "test-stdio",
             "command": "echo",
@@ -12971,6 +12973,7 @@ async fn mcp_server_management_crud() -> Result<()> {
     // 4. PATCH (update) the server.
     let updated: serde_json::Value = client
         .patch(format!("{base}/test-stdio"))
+        .header(header::IF_MATCH, mcp_test_revision(&client, &base).await?)
         .json(&serde_json::json!({
             "args": ["updated"],
             "required": true,
@@ -12990,6 +12993,7 @@ async fn mcp_server_management_crud() -> Result<()> {
 
     let cleared: serde_json::Value = client
         .patch(format!("{base}/test-stdio"))
+        .header(header::IF_MATCH, mcp_test_revision(&client, &base).await?)
         .json(&json!({
             "url": "https://example.com/replacement",
             "command": null,
@@ -13021,6 +13025,7 @@ async fn mcp_server_management_crud() -> Result<()> {
     // Clearing the final endpoint is invalid and must not alter persisted state.
     let invalid = client
         .patch(format!("{base}/test-stdio"))
+        .header(header::IF_MATCH, mcp_test_revision(&client, &base).await?)
         .json(&json!({ "url": null }))
         .send()
         .await?;
@@ -13037,6 +13042,7 @@ async fn mcp_server_management_crud() -> Result<()> {
     // 5. Disable the server.
     let disabled: serde_json::Value = client
         .post(format!("{base}/test-stdio/disable"))
+        .header(header::IF_MATCH, mcp_test_revision(&client, &base).await?)
         .send()
         .await?
         .error_for_status()?
@@ -13058,6 +13064,7 @@ async fn mcp_server_management_crud() -> Result<()> {
     // 6. Re-enable the server.
     let enabled: serde_json::Value = client
         .post(format!("{base}/test-stdio/enable"))
+        .header(header::IF_MATCH, mcp_test_revision(&client, &base).await?)
         .send()
         .await?
         .error_for_status()?
@@ -13070,12 +13077,14 @@ async fn mcp_server_management_crud() -> Result<()> {
     // so this management test never attempts the example remote endpoint.
     client
         .patch(format!("{base}/test-stdio"))
+        .header(header::IF_MATCH, mcp_test_revision(&client, &base).await?)
         .json(&json!({"command":root.join("missing-mcp-executable"),"url":null}))
         .send()
         .await?
         .error_for_status()?;
     let reconnected: serde_json::Value = client
         .post(format!("{base}/test-stdio/reconnect"))
+        .header(header::IF_MATCH, mcp_test_revision(&client, &base).await?)
         .send()
         .await?
         .error_for_status()?
@@ -13089,6 +13098,7 @@ async fn mcp_server_management_crud() -> Result<()> {
     // 8. Delete the server.
     let deleted: serde_json::Value = client
         .delete(format!("{base}/test-stdio"))
+        .header(header::IF_MATCH, mcp_test_revision(&client, &base).await?)
         .send()
         .await?
         .error_for_status()?
@@ -13156,6 +13166,7 @@ async fn mcp_server_management_redacts_credentials() -> Result<()> {
     // Create a server with sensitive fields.
     let created: serde_json::Value = client
         .post(&base)
+        .header(header::IF_MATCH, mcp_test_revision(&client, &base).await?)
         .json(&serde_json::json!({
             "name": "secret-server",
             "url": "https://example.com/mcp",
@@ -17959,6 +17970,7 @@ async fn mcp_management_project_ownership_blocks_global_shadow_mutations() -> Re
         assert_eq!(
             client
                 .patch(format!("{base}/{name}"))
+                .header(header::IF_MATCH, mcp_test_revision(&client, &base).await?)
                 .json(&json!({"enabled":false}))
                 .send()
                 .await?
@@ -17968,6 +17980,7 @@ async fn mcp_management_project_ownership_blocks_global_shadow_mutations() -> Re
         assert_eq!(
             client
                 .delete(format!("{base}/{name}"))
+                .header(header::IF_MATCH, mcp_test_revision(&client, &base).await?)
                 .send()
                 .await?
                 .status(),
@@ -17977,6 +17990,7 @@ async fn mcp_management_project_ownership_blocks_global_shadow_mutations() -> Re
             assert_eq!(
                 client
                     .post(format!("{base}/{name}/{action}"))
+                    .header(header::IF_MATCH, mcp_test_revision(&client, &base).await?)
                     .send()
                     .await?
                     .status(),
@@ -17986,6 +18000,7 @@ async fn mcp_management_project_ownership_blocks_global_shadow_mutations() -> Re
         assert_eq!(
             client
                 .post(&base)
+                .header(header::IF_MATCH, mcp_test_revision(&client, &base).await?)
                 .json(&json!({"name":name,"command":"override"}))
                 .send()
                 .await?
@@ -18115,6 +18130,7 @@ async fn mcp_server_management_blocks_credential_retargeting() -> Result<()> {
         }
         client
             .patch(format!("{base}/{name}"))
+            .header(header::IF_MATCH, mcp_test_revision(&client, &base).await?)
             .json(&json!({"connect_timeout":17}))
             .send()
             .await?
@@ -18128,6 +18144,7 @@ async fn mcp_server_management_blocks_credential_retargeting() -> Result<()> {
         ] {
             let response = client
                 .patch(format!("{base}/{name}"))
+                .header(header::IF_MATCH, mcp_test_revision(&client, &base).await?)
                 .json(&patch)
                 .send()
                 .await?;
@@ -18141,6 +18158,7 @@ async fn mcp_server_management_blocks_credential_retargeting() -> Result<()> {
     }
     let plain: Value = client
         .patch(format!("{base}/plain"))
+        .header(header::IF_MATCH, mcp_test_revision(&client, &base).await?)
         .json(&json!({"command":"replacement-command"}))
         .send()
         .await?
@@ -18150,6 +18168,7 @@ async fn mcp_server_management_blocks_credential_retargeting() -> Result<()> {
     assert_eq!(plain["credential_configured"], false);
     let cleared: Value = client
         .patch(format!("{base}/env"))
+        .header(header::IF_MATCH, mcp_test_revision(&client, &base).await?)
         .json(&json!({"env":{},"command":"replacement-command"}))
         .send()
         .await?
@@ -18158,6 +18177,98 @@ async fn mcp_server_management_blocks_credential_retargeting() -> Result<()> {
         .await?;
     assert_eq!(cleared["credential_configured"], false);
     assert_eq!(cleared["command"], "replacement-command");
+    handle.abort();
+    Ok(())
+}
+
+async fn mcp_test_revision(client: &reqwest::Client, base: &str) -> Result<String> {
+    let listing: Value = client
+        .get(base)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    Ok(format!(
+        "\"{}\"",
+        listing["revision"]
+            .as_str()
+            .context("MCP revision missing")?
+    ))
+}
+
+#[tokio::test]
+async fn mcp_management_revision_precondition_prevents_stale_mutation() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let (addr, _, handle) =
+        spawn_test_server_with_root(root.path().to_owned(), root.path().join("sessions"))
+            .await?
+            .context("loopback required")?;
+    let client = crate::tls::reqwest_client();
+    let base = format!("http://{addr}/v1/apps/mcp/servers");
+    let absent = mcp_test_revision(&client, &base).await?;
+    assert_eq!(absent, "\"mcp-v1-absent\"");
+    assert_eq!(
+        client
+            .post(&base)
+            .json(&json!({"name":"one","command":"one"}))
+            .send()
+            .await?
+            .status(),
+        StatusCode::PRECONDITION_REQUIRED
+    );
+    let created: Value = client
+        .post(&base)
+        .header(header::IF_MATCH, &absent)
+        .json(&json!({"name":"one","command":"one"}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert!(created["revision"].as_str().unwrap().starts_with("mcp-v1-"));
+    let path = root.path().join("mcp.json");
+    let before = fs::read(&path)?;
+    for request in [
+        client
+            .post(&base)
+            .json(&json!({"name":"two","command":"two"})),
+        client
+            .patch(format!("{base}/one"))
+            .json(&json!({"command":"changed"})),
+        client.delete(format!("{base}/one")),
+        client.post(format!("{base}/one/enable")),
+        client.post(format!("{base}/one/disable")),
+    ] {
+        assert_eq!(
+            request
+                .header(header::IF_MATCH, &absent)
+                .send()
+                .await?
+                .status(),
+            StatusCode::PRECONDITION_FAILED
+        );
+        assert_eq!(fs::read(&path)?, before);
+    }
+    assert_eq!(
+        client
+            .delete(format!("{base}/one"))
+            .header(header::IF_MATCH, "*")
+            .send()
+            .await?
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let current = mcp_test_revision(&client, &base).await?;
+    let disabled: Value = client
+        .post(format!("{base}/one/disable"))
+        .header(header::IF_MATCH, &current)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_ne!(disabled["revision"], created["revision"]);
     handle.abort();
     Ok(())
 }

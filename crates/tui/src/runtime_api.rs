@@ -618,6 +618,7 @@ struct McpServerEntry {
 
 #[derive(Debug, Serialize)]
 struct McpServersResponse {
+    revision: String,
     servers: Vec<McpServerEntry>,
 }
 
@@ -724,6 +725,7 @@ where
 /// the API never echoes credentials back to callers.
 #[derive(Debug, Serialize)]
 struct McpServerDetail {
+    revision: String,
     name: String,
     credential_configured: bool,
     origin: &'static str,
@@ -755,12 +757,18 @@ struct McpServerDetail {
 }
 
 impl McpServerDetail {
-    fn from_config(name: &str, cfg: &crate::mcp::McpServerConfig, connected: bool) -> Self {
+    fn from_config(
+        name: &str,
+        cfg: &crate::mcp::McpServerConfig,
+        connected: bool,
+        revision: String,
+    ) -> Self {
         let mut env_keys: Vec<String> = cfg.env.keys().cloned().collect();
         env_keys.sort();
         let mut env_header_keys: Vec<String> = cfg.env_headers.keys().cloned().collect();
         env_header_keys.sort();
         Self {
+            revision,
             name: name.to_string(),
             credential_configured: mcp_credential_configured(cfg),
             origin: "global",
@@ -789,6 +797,8 @@ impl McpServerDetail {
 
 #[derive(Debug, Serialize)]
 struct McpServerActionReceipt {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revision: Option<String>,
     name: String,
     action: &'static str,
     ok: bool,
@@ -4017,6 +4027,109 @@ fn mcp_management_config(
     Ok((config, origins))
 }
 
+#[derive(Debug)]
+struct McpManagementFailure(ApiError);
+impl std::fmt::Display for McpManagementFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0.message)
+    }
+}
+impl std::error::Error for McpManagementFailure {}
+
+fn mcp_mutation_error(error: anyhow::Error) -> ApiError {
+    if error.is::<crate::mcp::McpRevisionConflict>() {
+        ApiError {
+            status: StatusCode::PRECONDITION_FAILED,
+            message: error.to_string(),
+        }
+    } else if let Some(error) = error.downcast_ref::<McpManagementFailure>() {
+        error.0.clone()
+    } else {
+        ApiError::internal(error.to_string())
+    }
+}
+
+fn mcp_expected_revision(headers: &axum::http::HeaderMap) -> Result<String, ApiError> {
+    let value = headers
+        .get(header::IF_MATCH)
+        .ok_or_else(|| ApiError {
+            status: StatusCode::PRECONDITION_REQUIRED,
+            message: "Read the MCP configuration and send its revision in If-Match before saving"
+                .into(),
+        })?
+        .to_str()
+        .map_err(|_| ApiError::bad_request("Invalid MCP revision"))?
+        .trim();
+    let value = if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
+        &value[1..value.len() - 1]
+    } else {
+        value
+    };
+    if value != "mcp-v1-absent"
+        && !value.strip_prefix("mcp-v1-").is_some_and(|hash| {
+            hash.len() == 64
+                && hash
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+    {
+        return Err(ApiError::bad_request("Invalid MCP revision"));
+    }
+    Ok(value.to_owned())
+}
+
+async fn mutate_mcp_management<T: Send + 'static>(
+    state: RuntimeApiState,
+    headers: axum::http::HeaderMap,
+    mutate: impl FnOnce(&RuntimeApiState, &mut crate::mcp::McpConfig) -> Result<T, ApiError>
+    + Send
+    + 'static,
+) -> Result<(T, String), ApiError> {
+    let expected = mcp_expected_revision(&headers)?;
+    #[cfg(test)]
+    let env_ticket = crate::test_support::env_scope_ticket();
+    tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let _membership = crate::test_support::join_env_scope(env_ticket);
+        let path = state.config.read().mcp_config_path();
+        crate::mcp::mutate_config(&path, Some(&expected), |config| {
+            mutate(&state, config).map_err(|error| anyhow::Error::new(McpManagementFailure(error)))
+        })
+        .map_err(mcp_mutation_error)
+    })
+    .await
+    .map_err(|_| ApiError::internal("MCP configuration write failed"))?
+}
+
+async fn mcp_management_snapshot(
+    state: RuntimeApiState,
+) -> Result<
+    (
+        (
+            crate::mcp::McpConfig,
+            std::collections::HashMap<String, &'static str>,
+        ),
+        String,
+    ),
+    ApiError,
+> {
+    #[cfg(test)]
+    let env_ticket = crate::test_support::env_scope_ticket();
+    tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let _membership = crate::test_support::join_env_scope(env_ticket);
+        let path = state.config.read().mcp_config_path();
+        codewhale_config::with_config_write_lock(&path, |path| {
+            let config = mcp_management_config(&state)
+                .map_err(|error| anyhow::Error::new(McpManagementFailure(error)))?;
+            Ok((config, crate::mcp::read_config_revision(path)?))
+        })
+        .map_err(mcp_mutation_error)
+    })
+    .await
+    .map_err(|_| ApiError::internal("MCP configuration read failed"))?
+}
+
 fn require_writable_mcp_server(state: &RuntimeApiState, name: &str) -> Result<(), ApiError> {
     let (_, origins) = mcp_management_config(state)?;
     match origins.get(name) {
@@ -4068,7 +4181,7 @@ fn mcp_connection_outcome(
 async fn list_mcp_servers(
     State(state): State<RuntimeApiState>,
 ) -> Result<Json<McpServersResponse>, ApiError> {
-    let (config, origins) = mcp_management_config(&state)?;
+    let ((config, origins), revision) = mcp_management_snapshot(state.clone()).await?;
     let handle = mcp_pool_handle(&state, false).await?;
     let pool = match handle.as_ref() {
         Some(handle) => Some(handle.lock().await),
@@ -4096,7 +4209,7 @@ async fn list_mcp_servers(
         });
     }
     servers.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(Json(McpServersResponse { servers }))
+    Ok(Json(McpServersResponse { servers, revision }))
 }
 
 async fn list_mcp_tools(
@@ -4204,7 +4317,7 @@ async fn get_mcp_server(
     State(state): State<RuntimeApiState>,
     Path(name): Path<String>,
 ) -> Result<Json<McpServerDetail>, ApiError> {
-    let (config, origins) = mcp_management_config(&state)?;
+    let ((config, origins), revision) = mcp_management_snapshot(state.clone()).await?;
     let server_cfg = config
         .servers
         .get(&name)
@@ -4217,7 +4330,7 @@ async fn get_mcp_server(
     let connected = pool
         .as_ref()
         .is_some_and(|pool| pool.connected_servers().contains(&name.as_str()));
-    let mut detail = McpServerDetail::from_config(&name, server_cfg, connected);
+    let mut detail = McpServerDetail::from_config(&name, server_cfg, connected, revision);
     detail.origin = origins.get(&name).copied().unwrap_or("unknown");
     detail.writable = detail.origin == "global";
     detail.auth_required = pool
@@ -4232,6 +4345,7 @@ async fn get_mcp_server(
 /// required top-level `"name"` string that will be the server key.
 async fn create_mcp_server(
     State(state): State<RuntimeApiState>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> Result<(StatusCode, Json<McpServerDetail>), ApiError> {
     let name = body
@@ -4260,32 +4374,26 @@ async fn create_mcp_server(
             .map_err(|e| ApiError::bad_request(e.to_string()))?;
     }
 
-    let mcp_config_path = state.config.read().mcp_config_path();
-
-    if mcp_management_config(&state)?.0.servers.contains_key(&name) {
-        return Err(ApiError {
-            status: StatusCode::CONFLICT,
-            message: format!("MCP server '{name}' already exists in the effective configuration"),
-        });
-    }
-
-    // Build the config entry from the request.
     let new_cfg = mcp_server_config_from_write_request(req, None);
-
-    // Persist to the global MCP config.
-    {
-        let mut cfg = crate::mcp::load_config(&mcp_config_path)
-            .map_err(|e| ApiError::internal(format!("Failed to load MCP config: {e}")))?;
-        if cfg.servers.contains_key(&name) {
-            return Err(ApiError {
-                status: StatusCode::CONFLICT,
-                message: format!("MCP server '{name}' already exists"),
-            });
-        }
-        cfg.servers.insert(name.clone(), new_cfg.clone());
-        crate::mcp::save_config(&mcp_config_path, &cfg)
-            .map_err(|e| ApiError::internal(format!("Failed to save MCP config: {e}")))?;
-    }
+    let target_name = name.clone();
+    let (new_cfg, revision) =
+        mutate_mcp_management(state.clone(), headers, move |state, config| {
+            if mcp_management_config(state)?
+                .0
+                .servers
+                .contains_key(&target_name)
+            {
+                return Err(ApiError {
+                    status: StatusCode::CONFLICT,
+                    message: format!(
+                        "MCP server '{target_name}' already exists in the effective configuration"
+                    ),
+                });
+            }
+            config.servers.insert(target_name, new_cfg.clone());
+            Ok(new_cfg)
+        })
+        .await?;
 
     // Invalidate the in-memory pool so the next tool call reloads from disk.
     {
@@ -4295,7 +4403,9 @@ async fn create_mcp_server(
 
     Ok((
         StatusCode::CREATED,
-        Json(McpServerDetail::from_config(&name, &new_cfg, false)),
+        Json(McpServerDetail::from_config(
+            &name, &new_cfg, false, revision,
+        )),
     ))
 }
 
@@ -4303,6 +4413,7 @@ async fn create_mcp_server(
 async fn update_mcp_server(
     State(state): State<RuntimeApiState>,
     Path(name): Path<String>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<McpServerWriteRequest>,
 ) -> Result<Json<McpServerDetail>, ApiError> {
     if let Some(Some(transport)) = &req.transport {
@@ -4310,12 +4421,10 @@ async fn update_mcp_server(
             .map_err(|e| ApiError::bad_request(e.to_string()))?;
     }
 
-    require_writable_mcp_server(&state, &name)?;
-    let mcp_config_path = state.config.read().mcp_config_path();
-
-    let updated_cfg = {
-        let mut cfg = crate::mcp::load_config(&mcp_config_path)
-            .map_err(|e| ApiError::internal(format!("Failed to load MCP config: {e}")))?;
+    let target_name = name.clone();
+    let (updated_cfg, revision) = mutate_mcp_management(state.clone(), headers, move |state, cfg| {
+        let name = target_name;
+        require_writable_mcp_server(state, &name)?;
         let existing = cfg
             .servers
             .get_mut(&name)
@@ -4345,11 +4454,8 @@ async fn update_mcp_server(
                 "Either 'command' or 'url' must remain configured for an MCP server",
             ));
         }
-        let updated = existing.clone();
-        crate::mcp::save_config(&mcp_config_path, &cfg)
-            .map_err(|e| ApiError::internal(format!("Failed to save MCP config: {e}")))?;
-        updated
-    };
+        Ok(existing.clone())
+    }).await?;
 
     // Invalidate the in-memory pool.
     {
@@ -4361,6 +4467,7 @@ async fn update_mcp_server(
         &name,
         &updated_cfg,
         false,
+        revision,
     )))
 }
 
@@ -4368,18 +4475,17 @@ async fn update_mcp_server(
 async fn delete_mcp_server(
     State(state): State<RuntimeApiState>,
     Path(name): Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<McpServerActionReceipt>, ApiError> {
-    require_writable_mcp_server(&state, &name)?;
-    let mcp_config_path = state.config.read().mcp_config_path();
-
-    crate::mcp::remove_server_config(&mcp_config_path, &name).map_err(|e| {
-        let msg = e.to_string();
-        if msg.contains("not found") {
-            ApiError::not_found(msg)
-        } else {
-            ApiError::internal(msg)
-        }
-    })?;
+    let target_name = name.clone();
+    let (_, revision) = mutate_mcp_management(state.clone(), headers, move |state, cfg| {
+        require_writable_mcp_server(state, &target_name)?;
+        cfg.servers
+            .remove(&target_name)
+            .ok_or_else(|| ApiError::not_found("MCP server not found"))?;
+        Ok(())
+    })
+    .await?;
 
     // Invalidate the in-memory pool.
     {
@@ -4388,6 +4494,7 @@ async fn delete_mcp_server(
     }
 
     Ok(Json(McpServerActionReceipt {
+        revision: Some(revision),
         name,
         action: "deleted",
         ok: true,
@@ -4399,18 +4506,20 @@ async fn delete_mcp_server(
 async fn enable_mcp_server(
     State(state): State<RuntimeApiState>,
     Path(name): Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<McpServerActionReceipt>, ApiError> {
-    require_writable_mcp_server(&state, &name)?;
-    let mcp_config_path = state.config.read().mcp_config_path();
-
-    crate::mcp::set_server_enabled(&mcp_config_path, &name, true).map_err(|e| {
-        let msg = e.to_string();
-        if msg.contains("not found") {
-            ApiError::not_found(msg)
-        } else {
-            ApiError::internal(msg)
-        }
-    })?;
+    let target_name = name.clone();
+    let (_, revision) = mutate_mcp_management(state.clone(), headers, move |state, cfg| {
+        require_writable_mcp_server(state, &target_name)?;
+        let server = cfg
+            .servers
+            .get_mut(&target_name)
+            .ok_or_else(|| ApiError::not_found("MCP server not found"))?;
+        server.enabled = true;
+        server.disabled = false;
+        Ok(())
+    })
+    .await?;
 
     // Invalidate the in-memory pool so the enabled server participates next time.
     {
@@ -4419,6 +4528,7 @@ async fn enable_mcp_server(
     }
 
     Ok(Json(McpServerActionReceipt {
+        revision: Some(revision),
         name,
         action: "enabled",
         ok: true,
@@ -4430,18 +4540,20 @@ async fn enable_mcp_server(
 async fn disable_mcp_server(
     State(state): State<RuntimeApiState>,
     Path(name): Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<McpServerActionReceipt>, ApiError> {
-    require_writable_mcp_server(&state, &name)?;
-    let mcp_config_path = state.config.read().mcp_config_path();
-
-    crate::mcp::set_server_enabled(&mcp_config_path, &name, false).map_err(|e| {
-        let msg = e.to_string();
-        if msg.contains("not found") {
-            ApiError::not_found(msg)
-        } else {
-            ApiError::internal(msg)
-        }
-    })?;
+    let target_name = name.clone();
+    let (_, revision) = mutate_mcp_management(state.clone(), headers, move |state, cfg| {
+        require_writable_mcp_server(state, &target_name)?;
+        let server = cfg
+            .servers
+            .get_mut(&target_name)
+            .ok_or_else(|| ApiError::not_found("MCP server not found"))?;
+        server.enabled = false;
+        server.disabled = true;
+        Ok(())
+    })
+    .await?;
 
     // Invalidate the in-memory pool so the disabled server is excluded next time.
     {
@@ -4450,6 +4562,7 @@ async fn disable_mcp_server(
     }
 
     Ok(Json(McpServerActionReceipt {
+        revision: Some(revision),
         name,
         action: "disabled",
         ok: true,
@@ -4484,6 +4597,7 @@ async fn reconnect_mcp_server(
     };
     let connection = mcp_connection_outcome(&pool, &name, error.as_ref());
     Ok(Json(McpServerActionReceipt {
+        revision: None,
         name,
         action: if error.is_none() {
             "reconnected"
@@ -9204,6 +9318,7 @@ fn cors_layer(extra_origins: &[String]) -> CorsLayer {
             header::AUTHORIZATION,
             header::CONTENT_TYPE,
             header::ACCEPT,
+            header::IF_MATCH,
             HeaderName::from_static("x-codewhale-runtime-token"),
             HeaderName::from_static("x-deepseek-runtime-token"),
         ])

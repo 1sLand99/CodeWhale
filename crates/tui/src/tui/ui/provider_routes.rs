@@ -949,8 +949,8 @@ pub(crate) fn mcp_import_apply(
     approve: bool,
 ) -> anyhow::Result<String> {
     use crate::mcp::external_import::{
-        ImportDecision, apply_approved, discover_external_sources, load_consent_store,
-        merge_approved_into_config, record_decisions, save_consent_store,
+        ImportDecision, apply_approved, discover_external_sources, merge_approved_into_config,
+        persist_decisions,
     };
     use std::collections::HashMap;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -988,13 +988,16 @@ pub(crate) fn mcp_import_apply(
         },
     );
 
-    let mut store = load_consent_store(&mcp_import_consent_path());
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    record_decisions(&mut store, std::slice::from_ref(candidate), &decisions, now);
-    save_consent_store(&mcp_import_consent_path(), &store)?;
+    persist_decisions(
+        &mcp_import_consent_path(),
+        std::slice::from_ref(candidate),
+        &decisions,
+        now,
+    )?;
 
     if !approve {
         return Ok(format!(
@@ -1006,8 +1009,9 @@ pub(crate) fn mcp_import_apply(
     }
 
     let approved = apply_approved(std::slice::from_ref(candidate), &decisions);
-    let mut cfg = crate::mcp::load_config(mcp_path)?;
-    let inserted = merge_approved_into_config(&mut cfg, &approved);
+    let (inserted, _) = crate::mcp::mutate_config(mcp_path, None, |cfg| {
+        Ok(merge_approved_into_config(cfg, &approved))
+    })?;
     if inserted.is_empty() {
         return Ok(format!(
             "MCP '{}' was already present in {} or could not be merged. Provenance: {} @ {}",
@@ -1017,7 +1021,6 @@ pub(crate) fn mcp_import_apply(
             candidate.source_path.display()
         ));
     }
-    crate::mcp::save_config(mcp_path, &cfg)?;
     Ok(format!(
         "Imported managed MCP connector '{}' into {} (provenance: {} @ {}, hash {}). Run /mcp reload to connect after review.",
         candidate.name,
