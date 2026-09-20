@@ -1125,7 +1125,6 @@ const LAUNCH_ROW_GAP: usize = 3;
 /// Below this the row spends its whole lane on the title and sheds the detail.
 const LAUNCH_ROW_MIN_TITLE: usize = 24;
 /// Labels align with their heading; the action cue has its own gutter.
-const LAUNCH_LIST_INDENT: usize = 0;
 /// Blank rows the card spends on rhythm when the pane is tall enough.
 const LAUNCH_SEPARATORS: usize = 3;
 /// Blank rows per separator when the pane can afford them.
@@ -1301,7 +1300,7 @@ fn mcp_launch_lines(app: &App, text_width: usize) -> McpLaunchBlock {
         .len()
         .max(boot.connecting_without_names());
 
-    let indent = LAUNCH_LIST_INDENT.min(text_width.saturating_sub(1));
+    let indent = 0;
     let lane = text_width.saturating_sub(indent);
     let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -1666,11 +1665,8 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
         } else {
             Style::default().fg(theme.text_body)
         };
-        // The recent list and its overflow hang under the heading.
-        let indent = match row.id {
-            crate::tui::app::LaunchRowId::NewSession => 0,
-            _ => LAUNCH_LIST_INDENT.min(text_width.saturating_sub(1)),
-        };
+        // Every action shares the same left edge.
+        let indent = 0;
         if matches!(row.id, crate::tui::app::LaunchRowId::SeeAll) && spacious {
             for _ in 0..fit.gap {
                 text.push(None);

@@ -763,7 +763,7 @@ impl ModalView for PagerView {
                     Color::DarkGray
                 };
                 let fg = if is_current {
-                    Color::Reset
+                    Color::Black
                 } else {
                     Color::Yellow
                 };
@@ -1594,23 +1594,22 @@ mod tests {
         let mut buf = Buffer::empty(area);
         p.render(area, &mut buf);
 
-        // Text starts at popup_area.x + block_border_left + padding_left
-        // = 1 + 1 + 1 = 3. The fixture text is "line-NNN" (8 chars) so we
-        // sample 3..11. The current-match row is the top of the visible
-        // window because `jump_to_match` set scroll = match_line.
-        let popup_top_y = 1 /* outer popup */ + 1 /* block top border */ + 1 /* padding top */;
-        let mut found_highlight = false;
-        for x in 3..11 {
-            let bg = buf[(x, popup_top_y)].style().bg;
-            if matches!(bg, Some(Color::Yellow) | Some(Color::DarkGray)) {
-                found_highlight = true;
-                break;
-            }
+        // Find the actual painted match: shared compact layout may move it.
+        let row = (0..area.height)
+            .find(|&y| {
+                (0..area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains("line-005")
+            })
+            .expect("matched text must be visible");
+        let highlighted = (0..area.width)
+            .filter(|&x| buf[(x, row)].style().bg == Some(Color::Yellow))
+            .collect::<Vec<_>>();
+        assert_eq!(highlighted.len(), "line-005".len());
+        for x in highlighted {
+            assert_eq!(buf[(x, row)].style().fg, Some(Color::Black));
         }
-        assert!(
-            found_highlight,
-            "expected a Yellow/DarkGray highlight cell on the matched-line text columns"
-        );
     }
 
     #[test]
