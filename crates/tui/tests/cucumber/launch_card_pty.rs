@@ -12,6 +12,19 @@ const SIZES: [(u16, u16); 5] = [(12, 40), (16, 60), (24, 80), (32, 100), (40, 14
 const TITLE: &str = "Recent proof";
 const SAVED_TEXT: &str = "Restored conversation proof";
 
+#[test]
+#[ignore = "opt-in website media; empty isolated session, no provider calls"]
+fn website_current_terminal_capture() {
+    assert!(std::env::var_os("QA_LAUNCH_CAPTURE_DIR").is_some());
+    let (_workspace, mut tui) =
+        start_with_options(24, 100, false, &[], Some("shoreline"), true, false);
+    // Capture only actual application output: no fabricated history, usage,
+    // connected tools, model response or completed work.
+    tui.wait_for_idle(Duration::from_secs(4), WAIT).unwrap();
+    capture(&mut tui, "website-home");
+    tui.shutdown();
+}
+
 fn start(rows: u16, cols: u16, with_mcp: bool) -> (SealedWorkspace, Harness) {
     start_titled(rows, cols, with_mcp, TITLE)
 }
