@@ -1301,17 +1301,16 @@ fn read_session_artifact_window(
     let relative = PathBuf::from(id).join(&summary.path);
     let file = super::workspace::open_confined_file(sessions_dir, &relative, false)?;
     let read = super::workspace::read_confined_bytes(&file)?;
-    if let Some(evidence) = evidence {
-        if read.size != evidence.size_bytes
+    if let Some(evidence) = evidence
+        && (read.size != evidence.size_bytes
             || read.revision != evidence.digest
             || crate::image_attach::sniff_media_type(&read.bytes)
                 != Some(evidence.content_type.as_str())
-            || crate::image_attach::decode_and_guard_image(&read.bytes).is_err()
-        {
-            return Err(ApiError::bad_request(
-                "image evidence integrity check failed",
-            ));
-        }
+            || crate::image_attach::decode_and_guard_image(&read.bytes).is_err())
+    {
+        return Err(ApiError::bad_request(
+            "image evidence integrity check failed",
+        ));
     }
     let (window, truncated) = super::workspace::read_window(&read.bytes, offset, limit);
     let (encoding, content) = super::workspace::encode_window(window);

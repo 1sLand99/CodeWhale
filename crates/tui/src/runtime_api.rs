@@ -7770,7 +7770,7 @@ fn provider_models_identity(
     id: &str,
     exact_id: Option<&str>,
 ) -> Result<(ApiProvider, Option<crate::config::ProviderIdentity>), ApiError> {
-    let api_provider = ApiProvider::parse(&id)
+    let api_provider = ApiProvider::parse(id)
         .ok_or_else(|| ApiError::bad_request(format!("Unknown provider id '{id}'")))?;
     // Reject requests for the legacy deepseek-cn alias that has no
     // ProviderKind metadata — the GUI should use `deepseek` instead.
