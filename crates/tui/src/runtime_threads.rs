@@ -11633,7 +11633,7 @@ impl RuntimeThreadManager {
                         status: TurnItemLifecycleStatus::InProgress,
                         summary: summarize_text(&message, SUMMARY_LIMIT),
                         detail: Some(message.clone()),
-                        metadata: None,
+                        metadata: Some(json!({ "compaction_id": id })),
                         artifact_refs: Vec::new(),
                         started_at: Some(Utc::now()),
                         ended_at: None,
@@ -12338,12 +12338,27 @@ impl RuntimeThreadManager {
                     .await?;
                 }
                 EngineEvent::ToolRequestSnapshot { snapshot } => {
-                    if let (Some(terminal), Some(engine_turn_id)) =
-                        (snapshot.terminal.as_ref(), engine_turn_id.as_deref())
-                        && !snapshot.turn_id.truncated
-                        && snapshot.turn_id.value == engine_turn_id
+                    if !snapshot.turn_id.truncated
+                        && engine_turn_id.as_deref() == Some(snapshot.turn_id.value.as_str())
                     {
-                        turn_model_request_diagnostics = Some(terminal.into());
+                        if let Some(terminal) = snapshot.terminal.as_ref() {
+                            turn_model_request_diagnostics = Some(terminal.into());
+                        }
+                        // Keep the existing bounded request projection in the
+                        // originating task's durable event stream. It describes
+                        // prepared tools, never proves provider delivery, and
+                        // does not add conversation input or transcript noise.
+                        let snapshot = codewhale_config::persistence::redact_json_secrets(
+                            &serde_json::to_value(snapshot)?,
+                        );
+                        self.emit_event(
+                            &thread_id,
+                            Some(&turn_id),
+                            None,
+                            "model.tools.snapshot",
+                            json!({ "snapshot": snapshot, "projection_redacted": true }),
+                        )
+                        .await?;
                     }
                 }
                 EngineEvent::TurnComplete {

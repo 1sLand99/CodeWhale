@@ -7740,7 +7740,7 @@ async fn monitor_separates_lifecycle_start_from_billing_dispatch_and_child_usage
 }
 
 #[tokio::test]
-async fn monitor_persists_only_terminal_request_diagnostics_per_turn() -> Result<()> {
+async fn monitor_persists_request_snapshots_and_matching_terminal_diagnostics() -> Result<()> {
     let manager = test_manager(test_runtime_dir())?;
     let thread = manager
         .create_thread(CreateThreadRequest::default())
@@ -7770,11 +7770,14 @@ async fn monitor_persists_only_terminal_request_diagnostics_per_turn() -> Result
             route: None,
         })
         .await?;
+    let mut tool = catalog_tool("mcp_computer_get_app_state");
+    tool.description = "Inspect app; api_key=sk-fixture-private-value".to_string();
     let pre_request = crate::tool_inspection::ToolInspectionSnapshot::from_prepared_request(
         engine_turn_id,
         0,
-        None,
+        Some(&[tool]),
     );
+    let request_digest = pre_request.active_tool_catalog_sha256.clone();
     harness
         .tx_event
         .send(EngineEvent::ToolRequestSnapshot {
@@ -7860,6 +7863,41 @@ async fn monitor_persists_only_terminal_request_diagnostics_per_turn() -> Result
         .filter(|item| item.kind == TurnItemKind::Status)
         .count();
     assert_eq!(status_items, 4);
+    let snapshots = manager
+        .events_since(&thread.id, None)?
+        .into_iter()
+        .filter(|event| event.event == "model.tools.snapshot")
+        .collect::<Vec<_>>();
+    assert_eq!(snapshots.len(), 2, "foreign-turn snapshots must be ignored");
+    for event in &snapshots {
+        assert_eq!(event.turn_id.as_deref(), Some(first.id.as_str()));
+        assert_eq!(event.payload["projection_redacted"], true);
+        assert_eq!(
+            event.payload["snapshot"]["delivery_status"],
+            "unknown (capture does not prove provider delivery)"
+        );
+        assert!(
+            !event
+                .payload
+                .to_string()
+                .contains("sk-fixture-private-value")
+        );
+    }
+    let prepared = &snapshots[0].payload["snapshot"];
+    assert_eq!(
+        prepared["tools"][0]["name"]["value"],
+        "mcp_computer_get_app_state"
+    );
+    assert_eq!(
+        prepared["active_tool_catalog_sha256"].as_str(),
+        request_digest.as_deref()
+    );
+    assert!(prepared["terminal"].is_null());
+    assert_eq!(
+        snapshots[1].payload["snapshot"]["terminal"]["model_requests_started"],
+        2
+    );
+
     let completion = manager
         .events_since(&thread.id, None)?
         .into_iter()
@@ -7936,6 +7974,21 @@ async fn monitor_persists_only_terminal_request_diagnostics_per_turn() -> Result
         "a pre-request snapshot must not look like a delivered model call or inherit the prior turn"
     );
     assert_eq!(second.schema_version, OUTPUT_LIMIT_RUNTIME_SCHEMA_VERSION);
+    let second_snapshots = manager
+        .events_since(&thread.id, None)?
+        .into_iter()
+        .filter(|event| {
+            event.event == "model.tools.snapshot"
+                && event.turn_id.as_deref() == Some(second.id.as_str())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(second_snapshots.len(), 1);
+    assert_eq!(
+        second_snapshots[0].payload["snapshot"]["tools_field_present"],
+        false
+    );
+    assert!(second_snapshots[0].payload["snapshot"]["terminal"].is_null());
+
     assert!(
         serde_json::to_value(&second)?
             .get("modelRequestDiagnostics")
