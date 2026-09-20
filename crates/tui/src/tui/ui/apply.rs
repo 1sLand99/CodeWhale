@@ -3657,7 +3657,7 @@ pub(crate) fn apply_loaded_session_with_goal(
     app.refresh_notification_settings(config);
     app.restore_api_messages(
         crate::runtime_handoff::project_messages_for_restore(&session.messages),
-        &session.journal_message_stamps(),
+        session,
     );
     app.clear_history();
     app.tool_cells.clear();

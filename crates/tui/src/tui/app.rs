@@ -1497,6 +1497,9 @@ pub struct App {
     /// length-mismatched site degrades to save-time stamps, never to a
     /// dropped message.
     pub api_message_stamps: Vec<DateTime<Utc>>,
+    /// Full saved history, including inactive branches. API messages remain
+    /// the active projection; snapshots reconcile it without rebuilding IDs.
+    pub session_journal: crate::session_tree::SessionJournal,
     /// User-visible assistant text that crossed typed completion boundaries.
     /// Receipts are aligned to transcript cells because provider context can
     /// be compacted or purged without changing what remains visible.
@@ -4850,9 +4853,18 @@ impl App {
     /// per-entry `created_at` as the stamps so a next save does not rewrite
     /// history to resume time. Entries without a matching stamp fall back to
     /// now.
-    pub fn restore_api_messages(&mut self, messages: Vec<Message>, stamps: &[DateTime<Utc>]) {
-        self.api_message_stamps.clear();
-        self.api_message_stamps.extend_from_slice(stamps);
+    pub fn restore_api_messages(
+        &mut self,
+        messages: Vec<Message>,
+        session: &crate::session_manager::SavedSession,
+    ) {
+        self.session_journal = session.journal.clone().unwrap_or_else(|| {
+            crate::session_tree::SessionJournal::from_messages(
+                session.messages.clone(),
+                session.metadata.spawn_depth,
+            )
+        });
+        self.api_message_stamps = session.journal_message_stamps();
         self.api_message_stamps
             .resize_with(messages.len(), Utc::now);
         self.api_messages = Arc::new(messages);
@@ -4894,6 +4906,7 @@ impl App {
     }
 
     pub fn clear_api_messages(&mut self) {
+        self.session_journal = crate::session_tree::SessionJournal::new();
         self.api_messages_mut().clear();
         self.api_message_stamps.clear();
     }

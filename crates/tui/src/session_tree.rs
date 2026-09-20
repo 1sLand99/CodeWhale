@@ -329,6 +329,16 @@ impl SessionJournal {
     /// The existing active branch remains as evidence. We reuse its longest
     /// unchanged prefix, then append the repaired suffix as a sibling branch.
     pub fn rebranch_active_messages(&mut self, messages: &[Message]) {
+        self.rebranch_active_messages_stamped(messages, &[]);
+    }
+
+    /// Preserve existing entry identity and timestamps; only append the changed
+    /// suffix, keeping the previous branch reachable.
+    pub fn rebranch_active_messages_stamped(
+        &mut self,
+        messages: &[Message],
+        stamps: &[DateTime<Utc>],
+    ) {
         let active_path = self.root_to_leaf();
         let shared_prefix = active_path
             .iter()
@@ -338,8 +348,13 @@ impl SessionJournal {
         self.leaf_id = shared_prefix
             .checked_sub(1)
             .map(|index| active_path[index].id.clone());
-        for message in &messages[shared_prefix..] {
-            self.append_message(message.clone());
+        for (index, message) in messages.iter().enumerate().skip(shared_prefix) {
+            self.append_stamped(
+                SessionEntryKind::Message {
+                    message: message.clone(),
+                },
+                stamps.get(index).copied().unwrap_or_else(Utc::now),
+            );
         }
     }
 }

@@ -978,6 +978,7 @@ pub struct SessionSyncPayload {
 pub struct SessionBranchOutcome {
     pub leaf_display: String,
     pub journal_entries_before: usize,
+    pub sync: SessionSyncPayload,
 }
 
 /// `/fork` success projection for an active-conversation fork. The handler

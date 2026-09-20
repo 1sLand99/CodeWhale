@@ -1077,29 +1077,20 @@ pub(crate) fn build_session_snapshot(
             format!("automatic session snapshot skipped while Work state is busy: {err}")
         })?,
     };
-    let mut session = if let Some(existing_id) = app.current_session_id.as_ref() {
-        crate::session_manager::create_saved_session_journal_only(
-            existing_id.clone(),
-            &app.api_messages,
-            &app.api_message_stamps,
-            &model,
-            &app.workspace,
-            u64::from(app.session.total_tokens),
-            app.system_prompt.as_ref(),
-            Some(app.mode.as_setting()),
-        )
-    } else {
-        crate::session_manager::create_saved_session_journal_only(
-            uuid::Uuid::new_v4().to_string(),
-            &app.api_messages,
-            &app.api_message_stamps,
-            &model,
-            &app.workspace,
-            u64::from(app.session.total_tokens),
-            app.system_prompt.as_ref(),
-            Some(app.mode.as_setting()),
-        )
-    };
+    app.session_journal
+        .rebranch_active_messages_stamped(&app.api_messages, &app.api_message_stamps);
+    let mut session = crate::session_manager::create_saved_session_journal_only(
+        app.current_session_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        &app.api_messages,
+        app.session_journal.clone(),
+        &model,
+        &app.workspace,
+        u64::from(app.session.total_tokens),
+        app.system_prompt.as_ref(),
+        Some(app.mode.as_setting()),
+    );
     let computed_title = session.metadata.title.clone();
     if let Some(cached) = app
         .current_session_metadata
