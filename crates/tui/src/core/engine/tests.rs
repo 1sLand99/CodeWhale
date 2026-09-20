@@ -15503,7 +15503,9 @@ async fn compaction_keeps_todos_out_of_the_prefix() {
 
 #[tokio::test]
 async fn compaction_completed_reports_complete_post_input_tokens() {
+    let _env = crate::test_support::lock_test_env();
     let tmp = tempdir().expect("tempdir");
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", tmp.path());
     let config = EngineConfig {
         workspace: tmp.path().to_path_buf(),
         ..Default::default()
@@ -15533,6 +15535,17 @@ async fn compaction_completed_reports_complete_post_input_tokens() {
             "Compaction complete".to_string(),
             Some(4),
             Some(1),
+            super::compaction::CompactionPass {
+                trigger: "manual",
+                path: crate::compaction::CompactionPath::Summary,
+                tokens_before: 9000,
+                threshold_tokens: 8000,
+                usage: Usage {
+                    input_tokens: 120,
+                    output_tokens: 15,
+                    ..Default::default()
+                },
+            },
         )
         .await;
 
@@ -15550,6 +15563,37 @@ async fn compaction_completed_reports_complete_post_input_tokens() {
         panic!("expected CompactionCompleted, got {event:?}");
     };
     assert_eq!(post_input_tokens, Some(expected as u64));
+    let log = std::fs::read_to_string(tmp.path().join("audit.log")).unwrap();
+    let records = log
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|row| row["event"] == "compaction.completed")
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 1);
+    let details = &records[0]["details"];
+    assert_eq!(details["messages_before"], 4);
+    assert_eq!(details["messages_after"], 1);
+    assert_eq!(details["reduction_ratio"], 0.75);
+    assert_eq!(details["estimated_tokens_before"], 9000);
+    assert_eq!(details["estimated_tokens_after"], expected);
+    assert_eq!(details["threshold_tokens"], 8000);
+    assert_eq!(details["summarizer_usage"]["input_tokens"], 120);
+    assert_eq!(details["trigger"], "manual");
+    assert_eq!(details["path"], "summary");
+    assert!(!log.contains("post-compaction message"));
+    engine
+        .record_compaction_event(
+            "compaction.refused",
+            serde_json::json!({
+                "trigger": "auto", "reason": "retained_floor", "threshold_tokens": 8000,
+            }),
+        )
+        .await;
+    assert!(
+        std::fs::read_to_string(tmp.path().join("audit.log"))
+            .unwrap()
+            .contains("compaction.refused")
+    );
 }
 
 /// `fork_context` is captured once at turn start, so a `work_update` followed

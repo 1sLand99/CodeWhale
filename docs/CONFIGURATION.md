@@ -964,6 +964,16 @@ save the original messages without making an extra model call. Pressure metadata
 shows estimated input tokens and the configured trigger; it is an estimate, not
 an exact promise about a provider's remaining context.
 
+Compaction history is available through `codewhale metrics` (or `--json`) and
+`audit.log` in the Codewhale home. Completed passes record their trigger,
+summary/pruning path, message and estimated-token counts, effective threshold,
+and summarizer token usage. Automatic refusals are recorded once per turn with
+their reason. These are local diagnostics, not provider invoice totals; earlier
+artifacts are not retroactively counted. A text-mode `exec` that attempts
+compaction saves its owning session at turn completion so its recovery artifacts
+remain discoverable. A killed process may leave artifacts without that final
+session snapshot; the audit writer reports I/O failures instead of inventing data.
+
 See [Settings File](#settings-file-persistent-ui-preferences) for the
 compaction settings and [Token Quantities and
 Drivers](#token-quantities-and-drivers) for what each displayed token number

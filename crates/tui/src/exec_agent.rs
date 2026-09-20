@@ -775,7 +775,8 @@ pub(crate) async fn run_exec_agent(
     let mut last_error_category = None;
     let mut reported_sandbox_contract = false;
 
-    let should_persist_session = resuming_session || output_format == ExecOutputFormat::StreamJson;
+    let mut should_persist_session =
+        resuming_session || output_format == ExecOutputFormat::StreamJson;
     let mut latest_session_id = loaded_session_id;
     let mut latest_messages: Arc<Vec<Message>> = Arc::new(Vec::new());
     let mut latest_system_prompt: Option<SystemPrompt> = None;
@@ -1339,6 +1340,11 @@ pub(crate) async fn run_exec_agent(
                     tokio::time::timeout(Duration::from_secs(2), engine_handle.send(Op::Shutdown))
                         .await;
                 break;
+            }
+            Event::CompactionStarted { .. } => {
+                // The Engine writes recovery artifacts under its session ID.
+                // Keep the owning session discoverable even in text output.
+                should_persist_session = true;
             }
             Event::SessionUpdated {
                 session_id,

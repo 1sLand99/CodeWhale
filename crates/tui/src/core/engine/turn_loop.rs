@@ -979,6 +979,18 @@ impl Engine {
                         // status line and the trace.
                         if !turn.compaction_refusal_notified {
                             turn.compaction_refusal_notified = true;
+                            let estimated_tokens_before = self.estimated_input_tokens();
+                            self.record_compaction_event("compaction.refused", serde_json::json!({
+                                "trigger": "auto",
+                                "reason": match &reason {
+                                    crate::compaction::CompactionRefusal::TooFewMessages { .. } => "too_few_messages",
+                                    crate::compaction::CompactionRefusal::RetainedFloor { .. } => "retained_floor",
+                                },
+                                "messages_before": self.session.messages.len(),
+                                "estimated_tokens_before": estimated_tokens_before,
+                                "billed_input_tokens": billed_input_tokens,
+                                "threshold_tokens": prepared.config.token_threshold,
+                            })).await;
                             let message = match reason {
                                 crate::compaction::CompactionRefusal::TooFewMessages { count } => {
                                     format!(
@@ -1086,6 +1098,7 @@ impl Engine {
                             let auto_messages_after = result.messages.len();
                             let retries_used = result.retries_used;
                             let coverage_clause = result.coverage.receipt_clause();
+                            let path = result.coverage.path;
                             self.session.replace_messages(result.messages);
                             turn.clear_parent_input_tokens();
                             if let Some(pm) = self.session.prefix_stability.as_mut() {
@@ -1116,6 +1129,13 @@ impl Engine {
                                 status.clone(),
                                 Some(auto_messages_before),
                                 Some(auto_messages_after),
+                                super::compaction::CompactionPass {
+                                    trigger: "auto",
+                                    path,
+                                    tokens_before: auto_tokens_before,
+                                    threshold_tokens: prepared.config.token_threshold,
+                                    usage: compaction_usage.clone(),
+                                },
                             )
                             .await;
                         } else {
