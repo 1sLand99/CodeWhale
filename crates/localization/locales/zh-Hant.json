@@ -339,7 +339,7 @@
   "CmdOverviewDescription": "顯示主頁面板，含統計與快捷操作",
   "HomeBackToConversation": "返回對話",
   "HomeNavigationBusy": "請先完成或停止目前工作，再開啟首頁。",
-  "CmdHooksDescription": "列出已設定的生命週期鉤子（唯讀）",
+  "CmdHooksDescription": "在擴充功能中管理生命週期掛鉤",
   "CmdHotbarDescription": "開啟 Hotbar 設定",
   "CmdInitDescription": "為項目生成 AGENTS.md",
   "CmdJobsDescription": "檢視並管理後台 shell 作業",

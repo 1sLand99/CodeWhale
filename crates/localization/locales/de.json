@@ -442,7 +442,7 @@
   "CmdOverviewDescription": "Home-Dashboard mit Statistiken und Schnellaktionen anzeigen",
   "HomeBackToConversation": "Zurück zur Unterhaltung",
   "HomeNavigationBusy": "Beende oder stoppe die aktuelle Arbeit, bevor du die Startseite öffnest.",
-  "CmdHooksDescription": "Konfigurierte Lifecycle-Hooks auflisten (schreibgeschützt)",
+  "CmdHooksDescription": "Lebenszyklus-Hooks in Erweiterungen verwalten",
   "CmdAgentDescription": "Persistente Sub-Agent-Sitzung öffnen",
   "CmdGoalDescription": "Über mehrere Turns hinweg an einem Ziel weiterarbeiten",
   "CmdInitDescription": "AGENTS.md für das Projekt erzeugen",

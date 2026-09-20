@@ -442,7 +442,7 @@
   "CmdOverviewDescription": "Показати домашню панель зі статистикою та швидкими діями",
   "HomeBackToConversation": "Повернутися до розмови",
   "HomeNavigationBusy": "Завершіть або зупиніть поточну роботу, перш ніж відкрити головну.",
-  "CmdHooksDescription": "Показати налаштовані хуки життєвого циклу (лише читання)",
+  "CmdHooksDescription": "Керування хуками життєвого циклу в розширеннях",
   "CmdAgentDescription": "Відкрити постійний сеанс субагента",
   "CmdGoalDescription": "Продовжувати одну ціль упродовж кількох ходів",
   "CmdInitDescription": "Згенерувати AGENTS.md для проєкту",

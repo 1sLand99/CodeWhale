@@ -445,7 +445,7 @@
   "CmdOverviewDescription": "Hiển thị bảng điều khiển trang chủ với số liệu thống kê và hành động nhanh",
   "HomeBackToConversation": "Quay lại cuộc trò chuyện",
   "HomeNavigationBusy": "Hoàn tất hoặc dừng công việc hiện tại trước khi mở trang chủ.",
-  "CmdHooksDescription": "Liệt kê các lifecycle hook đã cấu hình (chỉ đọc)",
+  "CmdHooksDescription": "Quản lý hook vòng đời trong Tiện ích mở rộng",
   "CmdAgentDescription": "Mở một phiên sub-agent nền",
   "CmdGoalDescription": "Tiếp tục một mục tiêu xuyên suốt nhiều lượt",
   "CmdInitDescription": "Tạo tệp AGENTS.md cho dự án",

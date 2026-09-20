@@ -6529,6 +6529,32 @@ fn raw_paste_beginning_with_space_preserves_payload_over_reasoning_action() {
 }
 
 #[test]
+fn paste_safety_expiry_repaints_the_submit_cue_without_another_key() {
+    let mut app = create_test_app();
+    app.use_paste_burst_detection = true;
+    app.insert_str("/mcp");
+    let now = Instant::now();
+    app.paste_burst.extend_window(now);
+    assert!(!app.composer_enter_would_submit());
+    let waiting = render_underwater_test_app(&mut app, 80, 24);
+    assert!(waiting.contains("[·]"), "{waiting}");
+    app.needs_redraw = false;
+    assert!(flush_paste_burst_before_composer(
+        &mut app,
+        now + Duration::from_millis(121)
+    ));
+    assert!(app.needs_redraw);
+    assert!(app.composer_enter_would_submit());
+    let ready = render_underwater_test_app(&mut app, 80, 24);
+    assert!(ready.contains("[↵]"), "{ready}");
+    assert_eq!(app.input, "/mcp");
+    assert_eq!(
+        app.paste_burst_next_flush_delay_if_enabled(now + Duration::from_millis(121)),
+        None
+    );
+}
+
+#[test]
 fn paste_burst_does_not_leak_into_composer_while_a_modal_owns_keys() {
     // `/model` opens a picker with its own query. A held paste-burst from
     // typing the slash command must not flush into the composer under it.

@@ -445,7 +445,7 @@
   "CmdOverviewDescription": "显示主页面板，含统计与快捷操作",
   "HomeBackToConversation": "返回对话",
   "HomeNavigationBusy": "请先完成或停止当前工作，再打开主页。",
-  "CmdHooksDescription": "列出已配置的生命周期钩子（只读）",
+  "CmdHooksDescription": "在扩展中管理生命周期钩子",
   "CmdAgentDescription": "打开持久子代理会话",
   "CmdGoalDescription": "跨多轮持续推进同一个目标",
   "CmdInitDescription": "为项目生成 AGENTS.md",

@@ -442,7 +442,7 @@
   "CmdOverviewDescription": "Mostra el tauler inicial amb estadístiques i accions ràpides",
   "HomeBackToConversation": "Torna a la conversa",
   "HomeNavigationBusy": "Acaba o atura la feina actual abans d’obrir l’inici.",
-  "CmdHooksDescription": "Llista els hooks de cicle de vida configurats (només lectura)",
+  "CmdHooksDescription": "Gestiona els hooks del cicle de vida a Extensions",
   "CmdAgentDescription": "Obre una sessió persistent de subagent",
   "CmdGoalDescription": "Continuar un sol objectiu al llarg de diversos torns",
   "CmdInitDescription": "Genera l'AGENTS.md per al projecte",

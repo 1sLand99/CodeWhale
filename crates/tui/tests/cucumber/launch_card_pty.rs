@@ -172,6 +172,51 @@ fn click_text(tui: &mut Harness, text: &str) {
 }
 
 #[test]
+fn local_slash_navigation_does_not_create_rewindable_user_turns() {
+    let (_workspace, mut tui) = start_with_titles(24, 80, false, &[]);
+    // The first command leaves home; the others use the active-session path.
+    for (command, title) in [
+        ("/settings", "Config"),
+        ("/skills", "Extensions"),
+        ("/mcp", "Extensions"),
+    ] {
+        tui.type_line(command).unwrap();
+        wait(&mut tui, title);
+        tui.send(keys::key::esc()).unwrap();
+        tui.wait_for_idle(Duration::from_millis(200), WAIT).unwrap();
+        assert!(
+            !tui.frame()
+                .text()
+                .lines()
+                .take(18)
+                .any(|line| line.contains(command)),
+            "navigation leaked into transcript above the composer: {}",
+            tui.diagnostics()
+        );
+    }
+    tui.send(keys::key::esc()).unwrap();
+    tui.send(keys::key::esc()).unwrap();
+    tui.wait_for_idle(Duration::from_millis(200), WAIT).unwrap();
+    assert!(
+        !tui.frame().contains("Backtrack preview"),
+        "view navigation became a rewindable turn: {}",
+        tui.diagnostics()
+    );
+    tui.shutdown();
+}
+
+#[test]
+fn raw_slash_input_reenables_its_submit_cue_without_another_key() {
+    let (_workspace, mut tui) = start_with_titles(24, 80, false, &[]);
+    tui.send("/mcp").unwrap();
+    wait(&mut tui, "enter:run");
+    wait(&mut tui, "[↵]");
+    tui.send(keys::key::enter()).unwrap();
+    wait(&mut tui, "Extensions");
+    tui.shutdown();
+}
+
+#[test]
 fn launch_recent_click_then_enter_resumes_without_another_mouse_event() {
     for (rows, cols) in SIZES {
         let (_workspace, mut tui) = start(rows, cols, false);

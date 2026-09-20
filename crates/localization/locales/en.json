@@ -445,7 +445,7 @@
   "CmdOverviewDescription": "Show the home dashboard",
   "HomeBackToConversation": "Back to conversation",
   "HomeNavigationBusy": "Finish or stop the current work before opening home.",
-  "CmdHooksDescription": "List configured lifecycle hooks (read-only)",
+  "CmdHooksDescription": "Manage lifecycle hooks in Extensions",
   "CmdAgentDescription": "Open a persistent sub-agent session",
   "CmdGoalDescription": "Work toward one objective across turns",
   "CmdInitDescription": "Generate AGENTS.md for this project",

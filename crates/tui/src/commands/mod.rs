@@ -601,6 +601,8 @@ mod tests {
     #[test]
     fn command_registry_contains_config_and_links_but_not_set_or_deepseek() {
         assert!(command_infos().iter().any(|cmd| cmd.name == "config"));
+        assert!(get_command_info("experiments").is_none());
+        assert!(get_command_info("experimental").is_none());
         let rail = command_infos()
             .into_iter()
             .find(|cmd| cmd.name == "workbar")

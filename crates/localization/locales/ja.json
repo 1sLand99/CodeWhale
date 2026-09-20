@@ -445,7 +445,7 @@
   "CmdOverviewDescription": "統計とクイックアクション付きのホームダッシュボードを表示",
   "HomeBackToConversation": "会話に戻る",
   "HomeNavigationBusy": "ホームを開く前に、現在の作業を完了または停止してください。",
-  "CmdHooksDescription": "設定済みのライフサイクルフックを一覧表示（読み取り専用）",
+  "CmdHooksDescription": "拡張機能でライフサイクルフックを管理",
   "CmdAgentDescription": "永続サブエージェントセッションを開く",
   "CmdGoalDescription": "複数ターンにわたって一つの目標を追い続ける",
   "CmdInitDescription": "プロジェクト用に AGENTS.md を生成",

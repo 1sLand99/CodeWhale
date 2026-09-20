@@ -445,7 +445,7 @@
   "CmdOverviewDescription": "Exibir o painel inicial com estatísticas e ações rápidas",
   "HomeBackToConversation": "Voltar à conversa",
   "HomeNavigationBusy": "Conclua ou pare o trabalho atual antes de abrir o início.",
-  "CmdHooksDescription": "Listar hooks de ciclo de vida configurados (somente leitura)",
+  "CmdHooksDescription": "Gerenciar hooks de ciclo de vida em Extensões",
   "CmdAgentDescription": "Abrir uma sessão persistente de sub-agente",
   "CmdGoalDescription": "Continuar um único objetivo ao longo de vários turnos",
   "CmdInitDescription": "Gerar AGENTS.md para o projeto",

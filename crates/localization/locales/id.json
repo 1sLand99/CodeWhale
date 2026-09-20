@@ -442,7 +442,7 @@
   "CmdOverviewDescription": "Tampilkan dasbor beranda dengan statistik dan aksi cepat",
   "HomeBackToConversation": "Kembali ke percakapan",
   "HomeNavigationBusy": "Selesaikan atau hentikan pekerjaan saat ini sebelum membuka beranda.",
-  "CmdHooksDescription": "Tampilkan hook siklus hidup terkonfigurasi (hanya baca)",
+  "CmdHooksDescription": "Kelola hook siklus hidup di Ekstensi",
   "CmdAgentDescription": "Buka sesi sub-agen persisten",
   "CmdGoalDescription": "Terus mengerjakan satu tujuan lintas giliran",
   "CmdInitDescription": "Buat AGENTS.md untuk proyek",

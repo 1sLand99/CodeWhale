@@ -442,7 +442,7 @@
   "CmdOverviewDescription": "आँकड़ों और त्वरित क्रियाओं सहित होम डैशबोर्ड दिखाएँ",
   "HomeBackToConversation": "बातचीत पर वापस जाएँ",
   "HomeNavigationBusy": "होम खोलने से पहले मौजूदा काम पूरा करें या रोकें।",
-  "CmdHooksDescription": "कॉन्फ़िगर किए गए लाइफ़साइकिल हुक सूचीबद्ध करें (केवल-पठन)",
+  "CmdHooksDescription": "Extensions में जीवनचक्र हुक प्रबंधित करें",
   "CmdAgentDescription": "स्थायी सब-एजेंट सत्र खोलें",
   "CmdGoalDescription": "कई टर्न तक एक ही लक्ष्य पर काम जारी रखें",
   "CmdInitDescription": "प्रोजेक्ट के लिए AGENTS.md बनाएँ",

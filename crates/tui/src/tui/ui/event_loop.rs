@@ -445,6 +445,10 @@ pub(super) fn flush_paste_burst_before_composer(app: &mut App, now: Instant) -> 
             app.insert_char(ch);
             true
         }
+        crate::tui::paste_burst::FlushResult::SuppressionExpired => {
+            app.needs_redraw = true;
+            true
+        }
         crate::tui::paste_burst::FlushResult::None => false,
     }
 }
@@ -1269,10 +1273,7 @@ async fn dispatch_launch_composer_submit(
         return Ok(false);
     }
     if looks_like_slash_command_input(&input) {
-        // Every submit echoes (see submit_decided_composer_input).
-        app.add_message(HistoryCell::User {
-            content: input.clone(),
-        });
+        // Commands own their output; only model-bound prompts become user turns.
         if execute_command_input(terminal, app, engine_handle, task_manager, config, &input).await?
         {
             return Ok(true);
@@ -1363,12 +1364,8 @@ async fn submit_decided_composer_input(
         return Ok(false);
     }
     if looks_like_slash_command_input(&input) {
-        // Every submit echoes: a command that clears the composer must leave
-        // what the user typed in the thread, not just its receipt — bare
-        // error lines with no user row read as a void.
-        app.add_message(HistoryCell::User {
-            content: input.clone(),
-        });
+        // Opening a view is not a conversation turn. SendMessage actions
+        // record their real prompt through dispatch_composer_message instead.
         if execute_command_input(terminal, app, engine_handle, task_manager, config, &input).await?
         {
             return Ok(true);
