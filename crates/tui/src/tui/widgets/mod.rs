@@ -1942,7 +1942,7 @@ impl Renderable for ComposerWidget<'_> {
                 area,
                 buf,
                 &self.app.ui_theme,
-                true,
+                self.app.composer_enter_would_submit(),
                 crate::tui::color_compat::ascii_safe_enabled(),
             );
         }
@@ -6945,6 +6945,34 @@ mod tests {
             assert!(
                 !rendered.contains("▚△▞"),
                 "retired crown must stay gone at {width}x{height}:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn composer_submit_ink_matches_real_submit_readiness() {
+        let mut app = create_test_app();
+        app.composer_border = true;
+        let slash = Vec::<SlashMenuEntry>::new();
+        let mentions = Vec::<String>::new();
+        let area = Rect::new(0, 0, 80, 8);
+        for draft in ["", "   ", "ship it"] {
+            app.input = draft.to_string();
+            app.cursor_position = app.input.chars().count();
+            let widget = ComposerWidget::new(&app, 8, &slash, &mentions);
+            let mut buf = Buffer::empty(area);
+            widget.render(area, &mut buf);
+            let submit = active_composer_submit_rect(&app, area).unwrap();
+            let role = if app.composer_enter_would_submit() {
+                codewhale_palette::ChromeInk::Info
+            } else {
+                codewhale_palette::ChromeInk::MetadataDim
+            };
+            assert_eq!(
+                buf[(submit.x, submit.y)].fg,
+                codewhale_palette::chrome_style(&app.ui_theme, role)
+                    .fg
+                    .unwrap()
             );
         }
     }

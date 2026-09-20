@@ -1419,10 +1419,8 @@ impl ModelPickerView {
                 " "
             };
             let hovered = self.hovered_row == Some((state.pane, idx)) && !focused;
-            let label_style = if focused && !locked {
+            let label_style = if focused {
                 menu_style::selected_row_style()
-            } else if focused && locked {
-                menu_style::disabled_selected_row_style()
             } else if hovered {
                 menu_style::hovered_row_style().fg(if locked {
                     palette::TEXT_MUTED
@@ -1440,10 +1438,10 @@ impl ModelPickerView {
             } else {
                 Style::default().fg(palette::TEXT_PRIMARY)
             };
-            let hint_style = if locked {
-                label_style.fg(palette::TEXT_MUTED)
-            } else if focused {
+            let hint_style = if focused {
                 menu_style::selected_row_bg_style().fg(palette::SELECTION_TEXT)
+            } else if locked {
+                label_style.fg(palette::TEXT_MUTED)
             } else if hovered {
                 menu_style::hovered_row_style().fg(palette::TEXT_MUTED)
             } else {
@@ -4371,6 +4369,25 @@ mod tests {
             blocked_reason: None,
             enabled,
         }
+    }
+
+    #[test]
+    fn locked_model_keeps_keyboard_focus_visible_without_becoming_selectable() {
+        let mut picker = test_picker();
+        picker.model_rows[0].selectable = false;
+        picker.model_rows[0].blocked_reason = Some("missing key".to_string());
+        let area = Rect::new(0, 0, 100, 32);
+        let mut buf = Buffer::empty(area);
+        picker.render(area, &mut buf);
+        let hit = picker
+            .row_hitboxes
+            .borrow()
+            .iter()
+            .find(|(_, pane, idx)| *pane == Pane::Model && *idx == 0)
+            .unwrap()
+            .0;
+        assert_eq!(buf[(hit.right() - 1, hit.y)].bg, palette::SELECTION_BG);
+        assert!(!picker.model_rows[0].selectable);
     }
 
     #[test]

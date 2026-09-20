@@ -218,6 +218,7 @@ pub const fn theme_remap_active(theme: ThemeId) -> bool {
             | ThemeId::Claude
             | ThemeId::Matrix
             | ThemeId::SolarizedLight
+            | ThemeId::Uwu
     )
 }
 
@@ -408,7 +409,18 @@ fn adapt_fg_for_grayscale_palette(color: Color) -> Color {
 }
 
 fn adapt_bg_for_grayscale_palette(color: Color) -> Color {
-    if color == Color::Reset {
+    // Direct UiTheme paints have already resolved these slots. Bucketing
+    // their luminance again collapses selection into panel and raised
+    // surfaces into the field, so preserve the authored grayscale ladder.
+    if color == Color::Reset
+        || color == GRAYSCALE_SURFACE
+        || color == GRAYSCALE_PANEL
+        || color == GRAYSCALE_ELEVATED
+        || color == GRAYSCALE_REASONING
+        || color == GRAYSCALE_SELECTION_BG
+        || color == GRAYSCALE_SUCCESS
+        || color == GRAYSCALE_ERROR
+    {
         return color;
     }
     if color == WHALE_BG || color == BACKGROUND_DARK || color == LIGHT_SURFACE {
@@ -420,12 +432,9 @@ fn adapt_bg_for_grayscale_palette(color: Color) -> Color {
         || color == LIGHT_PANEL
     {
         GRAYSCALE_PANEL
-    } else if color == SURFACE_ELEVATED
-        || color == SURFACE_TOOL_ACTIVE
-        || color == LIGHT_ELEVATED
-        || color == SELECTION_BG
-        || color == LIGHT_SELECTION_BG
-    {
+    } else if color == SELECTION_BG || color == LIGHT_SELECTION_BG {
+        GRAYSCALE_SELECTION_BG
+    } else if color == SURFACE_ELEVATED || color == SURFACE_TOOL_ACTIVE || color == LIGHT_ELEVATED {
         GRAYSCALE_ELEVATED
     } else if color == SURFACE_REASONING
         || color == SURFACE_REASONING_TINT

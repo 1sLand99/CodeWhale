@@ -13,9 +13,9 @@ The home screen uses a compact codewhale identity, version metadata aligned
 opposite it, and one bounded reading lane centered in wide terminals. Actual
 workspace and branch context make the screen specific to the current work.
 A filled New session action and ruled Recent heading organize the available
-choices. Removing the large launch mark gives session titles usable width and
-keeps the same hierarchy in short terminals. The canonical brand asset is
-unchanged; the launch screen no longer spends a column on it. The full-width
+choices. A compact canonical braille whale accompanies the identity when
+space permits, yielding before session titles and actionable rows in short
+terminals. The canonical brand asset is unchanged. The full-width
 composer, shared session runtime, permission authority and website design
 remain their existing systems. `underwater` remains a selectable theme.
 
@@ -261,3 +261,27 @@ video. There is no synthetic live speed counter, new timer or extra footer row.
 Reduced and still motion retain the same readings and explicit phase words.
 TTFT is a session average; throughput includes first-token wait and stream
 pauses, but excludes tool/idle gaps. Missing measurements stay absent.
+
+
+## Identity, theme and motion refinement (2026-09-20)
+
+Claude Fable 5.1 reviewed real terminal-cell captures and current motion source.
+The founder explicitly chose a brief whale reveal: the canonical braille mark
+resolves through nested dot masks over 360 ms, once from its first launch paint.
+Text and controls are complete immediately. Typing, paste or resize settles the
+mark; reduced/still motion shows the complete asset immediately. This reuses the
+existing frame scheduler and requests no reveal frames after the endpoint.
+
+Completion keeps the word Done stable while its existing glyph settles. Generic
+working status uses a direct verb. The send control uses action ink only when the
+same predicate used by its click handler permits submission; otherwise it is dim.
+Locked model rows retain readable keyboard focus and their availability warning.
+New session uses body ink on its filled plate to meet text contrast in light and
+warm themes. Uwu now participates in the same remapping as other named presets.
+
+Themes are being checked against five color families: surface, neutral text,
+action, live/outcome, and attention/danger. Shades preserve contrast and severity;
+labels and symbols retain meaning without color. Underwater keeps its ambient
+identity within the same chrome discipline. This is not a claim of monochrome
+NO_COLOR behavior: the existing setting still limits output to ANSI16, a separate
+known compatibility gap.

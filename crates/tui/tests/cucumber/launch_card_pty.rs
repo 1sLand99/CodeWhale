@@ -26,7 +26,35 @@ fn start_with_titles(
     with_mcp: bool,
     titles: &[&str],
 ) -> (SealedWorkspace, Harness) {
+    start_with_theme(rows, cols, with_mcp, titles, None)
+}
+
+fn start_with_theme(
+    rows: u16,
+    cols: u16,
+    with_mcp: bool,
+    titles: &[&str],
+    theme: Option<&str>,
+) -> (SealedWorkspace, Harness) {
+    start_with_options(rows, cols, with_mcp, titles, theme, false)
+}
+
+fn start_with_options(
+    rows: u16,
+    cols: u16,
+    with_mcp: bool,
+    titles: &[&str],
+    theme: Option<&str>,
+    animated: bool,
+) -> (SealedWorkspace, Harness) {
     let workspace = make_sealed_workspace().unwrap();
+    if let Some(theme) = theme {
+        std::fs::write(
+            workspace.home().join(".codewhale/settings.toml"),
+            format!("theme = {theme:?}\n"),
+        )
+        .unwrap();
+    }
     std::fs::write(workspace.home().join(".codewhale/.onboarded"), "").unwrap();
     let trust = workspace.workspace().join(".deepseek");
     std::fs::create_dir_all(&trust).unwrap();
@@ -78,7 +106,7 @@ fn start_with_titles(
         .seal_home(workspace.home())
         .env("CODEWHALE_DISABLE_MODELS_DEV_FETCH", "1")
         .env("CODEWHALE_NO_UPDATE_CHECK", "1")
-        .env("NO_ANIMATIONS", "1")
+        .env("NO_ANIMATIONS", if animated { "0" } else { "1" })
         .env("COLORTERM", "truecolor")
         .args([
             "--workspace",
@@ -95,6 +123,9 @@ fn start_with_titles(
     wait(&mut tui, "You're ready.");
     tui.send(keys::key::enter()).unwrap();
     wait(&mut tui, "New session");
+    if animated {
+        return (workspace, tui);
+    }
     tui.wait_for_idle(Duration::from_millis(300), WAIT).unwrap();
     tui.send(keys::key::ctrl('u')).unwrap();
     tui.wait_for_idle(Duration::from_millis(200), WAIT).unwrap();
@@ -301,4 +332,45 @@ fn launch_long_resume_title_preserves_warning_and_truthful_enter_hint() {
         assert!(!tui.frame().contains(SAVED_TEXT));
         tui.shutdown();
     }
+}
+
+#[test]
+#[ignore = "opt-in all-theme evidence; fixture sessions, no provider calls"]
+fn workbench_every_theme_visual_evidence() {
+    assert!(std::env::var_os("QA_LAUNCH_CAPTURE_DIR").is_some());
+    for theme in codewhale_palette::SELECTABLE_THEMES {
+        let (_workspace, mut tui) = start_with_theme(24, 80, true, &[TITLE], Some(theme.name()));
+        capture(&mut tui, &format!("theme-{}-home", theme.name()));
+        tui.paste("/statusline").unwrap();
+        tui.wait_for_idle(Duration::from_millis(300), WAIT).unwrap();
+        tui.send(keys::key::enter()).unwrap();
+        wait(&mut tui, "Status");
+        capture(&mut tui, &format!("theme-{}-statusline", theme.name()));
+        tui.shutdown();
+    }
+}
+
+#[test]
+#[ignore = "opt-in real launch animation capture; fixture state, no provider calls"]
+fn workbench_whale_reveal_visual_evidence() {
+    let directory = std::path::PathBuf::from(std::env::var_os("QA_LAUNCH_CAPTURE_DIR").unwrap());
+    std::fs::create_dir_all(&directory).unwrap();
+    let (_workspace, mut tui) =
+        start_with_options(32, 100, false, &[TITLE], Some("shoreline"), true);
+    let start = std::time::Instant::now();
+    for index in 0..16 {
+        let frame = tui.frame();
+        assert!(
+            frame.text().contains("New session"),
+            "controls must remain usable during reveal"
+        );
+        std::fs::write(
+            directory.join(format!("reveal-{index:02}-100x32.json")),
+            serde_json::to_vec_pretty(&frame.capture_cells()).unwrap(),
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    eprintln!("Captured launch reveal over {:?}", start.elapsed());
+    tui.shutdown();
 }

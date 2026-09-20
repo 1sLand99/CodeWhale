@@ -1747,6 +1747,11 @@ pub(crate) fn render(f: &mut Frame, app: &mut App, _config: &Config) -> Option<(
             let buf = f.buffer_mut();
             crate::tui::agent_focus::render_focus(app, chat_area, buf);
         } else {
+            if app.launch.visible && app.onboarding == crate::tui::app::OnboardingState::None {
+                app.launch
+                    .mark_reveal_started_at
+                    .get_or_insert_with(std::time::Instant::now);
+            }
             let chat_widget = ChatWidget::new(app, chat_area).with_ocean_viewport(size);
             shell_ocean = chat_widget.ocean_column();
             let buf = f.buffer_mut();

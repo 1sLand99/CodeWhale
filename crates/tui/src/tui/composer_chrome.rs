@@ -231,14 +231,14 @@ pub fn tideline_composer_geometry(area: Rect) -> TidelineComposerGeometry {
 
 /// Paint or restore the visible `[↑]` affordance above caller-owned content.
 ///
-/// The standalone shell paints it immediately. The multiline work composer
-/// calls this again after it has painted a long input or queued crumb, so that
+/// The multiline work composer paints this after its input or queued crumb, so that
 /// content can never overwrite the one cell target the user is meant to click.
+/// Ink follows the submission predicate used by the pointer target.
 pub fn render_tideline_composer_submit(
     area: Rect,
     buf: &mut Buffer,
     theme: &UiTheme,
-    focused: bool,
+    can_submit: bool,
     ascii_safe: bool,
 ) {
     if area.width < 6 || area.height < 3 {
@@ -246,8 +246,8 @@ pub fn render_tideline_composer_submit(
     }
     let geometry = tideline_composer_geometry(area);
     let send = symbol("[↑]", ascii_safe);
-    let send_ink = if focused {
-        ChromeInk::Active
+    let send_ink = if can_submit {
+        ChromeInk::Info
     } else {
         ChromeInk::MetadataDim
     };

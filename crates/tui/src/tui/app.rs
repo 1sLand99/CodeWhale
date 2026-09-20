@@ -650,6 +650,9 @@ pub struct LaunchState {
     /// it has. The first keystroke or a launched command dissolves the card
     /// (founder decision, 2026-09-02).
     pub dissolve_started_ms: Option<u128>,
+    /// One bounded reveal of the canonical mark, anchored at first paint.
+    /// Kept when the launcher is revisited so it never replays on navigation.
+    pub mark_reveal_started_at: Option<Instant>,
     /// Claude Code config was detected on this host (probed once at
     /// construction); drives the launch card's migration notice line.
     pub claude_code_detected: bool,
@@ -734,6 +737,7 @@ impl LaunchState {
             hovered_row: None,
             menu_selected: None,
             dissolve_started_ms: None,
+            mark_reveal_started_at: None,
             claude_code_detected,
         }
     }

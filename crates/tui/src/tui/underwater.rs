@@ -789,7 +789,7 @@ pub(crate) fn title_activity_verb(app: &App) -> &'static str {
             LiveActivityKind::UsingTool => "using tool…",
             LiveActivityKind::UsingSubagents => "fleet underway…",
             LiveActivityKind::Verifying => "verifying…",
-            LiveActivityKind::Working => "in the current…",
+            LiveActivityKind::Working => "working…",
         },
     }
 }
@@ -856,10 +856,7 @@ pub(crate) fn phase_marker_with_activity(
         ShellPhase::Done => match completion_elapsed_ms(app) {
             Some(elapsed) if elapsed < COMPLETION_RELEASE_MS => {
                 let index = ((elapsed / 140) as usize + 4).min(WORKING_BUBBLE_FRAMES.len() - 1);
-                (
-                    WORKING_BUBBLE_FRAMES[index],
-                    tr(locale, MessageId::PhaseFinishing),
-                )
+                (WORKING_BUBBLE_FRAMES[index], phase.label(locale))
             }
             _ => (crate::tui::glyphs::DONE, phase.label(locale)),
         },
@@ -1688,7 +1685,18 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
         text.resize_with(usize::from(mark.cells().1), || None);
         for (row, dots) in mark.rows().iter().enumerate() {
             let mut spans = vec![
-                Span::styled(*dots, Style::default().fg(theme.accent_primary)),
+                Span::styled(
+                    crate::tui::mark::reveal_row(
+                        dots,
+                        app.launch
+                            .mark_reveal_started_at
+                            .map_or(crate::tui::mark::REVEAL_MS, |started| {
+                                started.elapsed().as_millis()
+                            }),
+                        app.motion_policy().allows_decorative(),
+                    ),
+                    Style::default().fg(theme.accent_primary),
+                ),
                 Span::raw("  "),
             ];
             if let Some(line) = text[row].take() {
@@ -1713,7 +1721,7 @@ pub fn launch_empty_state(app: &App, area: Rect) -> LaunchEmptyState {
 
     for row in &card_rows {
         let style = if row.prominent {
-            Style::default().fg(theme.accent_primary).bold()
+            Style::default().fg(theme.text_body).bold()
         } else {
             Style::default().fg(theme.text_body)
         };
@@ -1957,6 +1965,70 @@ mod launch_card_tests {
             .collect();
         app.launch.total_workspace_sessions = total;
         app
+    }
+
+    #[test]
+    fn launch_primary_action_has_readable_ink_in_every_theme() {
+        for theme in codewhale_palette::SELECTABLE_THEMES {
+            let mut app = app_with_recent(&["Recent proof"], 1);
+            app.ui_theme = theme.ui_theme();
+            app.theme_id = *theme;
+            let card = launch_empty_state(&app, Rect::new(0, 0, 100, 24));
+            let span = card
+                .lines
+                .iter()
+                .flat_map(|line| &line.spans)
+                .find(|span| span.content.contains("New session"))
+                .unwrap();
+            assert_eq!(
+                span.style.fg,
+                Some(app.ui_theme.text_body),
+                "{}",
+                theme.name()
+            );
+            if let Some(ratio) =
+                codewhale_palette::contrast_ratio(span.style.fg.unwrap(), app.ui_theme.panel_bg)
+            {
+                assert!(
+                    ratio >= 4.5,
+                    "{} New session contrast {ratio}",
+                    theme.name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn completion_settle_keeps_done_label_stable() {
+        let mut app = app_with_recent(&[], 0);
+        app.low_motion = false;
+        app.fancy_animations = true;
+        let activity = super::LiveActivity::from_app(&app);
+        for elapsed in [0, 280, 700] {
+            app.ocean_completion_started_at =
+                Some(std::time::Instant::now() - std::time::Duration::from_millis(elapsed));
+            let (_, label) =
+                super::phase_marker_with_activity(&app, super::ShellPhase::Done, activity);
+            assert_eq!(label, super::ShellPhase::Done.label(app.ui_locale));
+        }
+    }
+
+    #[test]
+    fn launch_reveal_stops_scheduling_after_its_endpoint() {
+        let mut app = app_with_recent(&[], 0);
+        app.onboarding = crate::tui::app::OnboardingState::None;
+        app.theme_id = codewhale_palette::ThemeId::Shoreline;
+        app.low_motion = false;
+        app.fancy_animations = true;
+        app.launch.mark_reveal_started_at = Some(std::time::Instant::now());
+        assert!(super::launch_motion_active(&app, false, true));
+        assert!(!super::launch_motion_active(&app, true, true));
+        app.low_motion = true;
+        assert!(!super::launch_motion_active(&app, false, true));
+        app.low_motion = false;
+        app.launch.mark_reveal_started_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(361));
+        assert!(!super::launch_motion_active(&app, false, true));
     }
 
     /// The founder's own shape: many servers, a couple genuinely broken, a
@@ -2636,8 +2708,8 @@ mod empty_state_caption_tests {
 }
 
 // ---------------------------------------------------------------------------
-// Launch motion scheduling: only a real dissolve or active water field
-// requests frames. The static workbench index does not animate its identity.
+// Launch motion scheduling: the bounded mark reveal, a real dissolve, or
+// an active water field requests frames through the existing scheduler.
 // ---------------------------------------------------------------------------
 
 /// Whether the launch screen has a visible transition or ambient scene.
@@ -2655,5 +2727,10 @@ pub fn launch_motion_active(app: &App, obscured: bool, ambient_settled: bool) ->
     let dissolve = app.launch.card_dissolve_progress(now, true);
     let dissolving = dissolve > 0.0 && dissolve < 1.0;
     let water_alive = app.theme_id == codewhale_palette::ThemeId::Underwater && !ambient_settled;
-    dissolving || water_alive
+    let revealing = !crate::tui::color_compat::ascii_safe_enabled()
+        && app
+            .launch
+            .mark_reveal_started_at
+            .is_some_and(|started| started.elapsed().as_millis() < crate::tui::mark::REVEAL_MS);
+    revealing || dissolving || water_alive
 }

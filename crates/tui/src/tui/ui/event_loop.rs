@@ -4629,6 +4629,13 @@ pub(crate) async fn run_event_loop(
         if let Some(observed_terminal_event) = maybe_terminal_event {
             let event_observed_at = observed_terminal_event.observed_at;
             let evt = observed_terminal_event.event;
+            if app.launch.mark_reveal_started_at.is_some()
+                && matches!(&evt, Event::Key(_) | Event::Paste(_) | Event::Resize(_, _))
+            {
+                app.launch.mark_reveal_started_at = Some(
+                    Instant::now() - Duration::from_millis(crate::tui::mark::REVEAL_MS as u64),
+                );
+            }
             app.needs_redraw = true;
             terminal_unfocused = next_unfocused(terminal_unfocused, &evt);
 
