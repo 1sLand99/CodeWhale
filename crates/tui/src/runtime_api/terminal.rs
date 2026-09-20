@@ -43,13 +43,20 @@ use crate::tools::terminal_session;
 use super::{ApiError, RuntimeApiState};
 
 /// Default per-response ceiling; the owner clamps to its own `READ_LIMIT`.
+#[cfg(all(unix, not(target_env = "ohos")))]
 const TERMINAL_CHUNK_DEFAULT: usize = 64 * 1024;
 /// Session names come from the agent's tools; this only bounds the echo.
+#[cfg(all(unix, not(target_env = "ohos")))]
 const TERMINAL_NAME_MAX_BYTES: usize = 128;
 /// One input frame. Interactive typing is bytes, not uploads.
+#[cfg(all(unix, not(target_env = "ohos")))]
 const TERMINAL_INPUT_MAX_BYTES: usize = 64 * 1024;
+#[cfg(all(unix, not(target_env = "ohos")))]
 const TERMINAL_DIMENSION_MAX: u16 = 1000;
 
+// The request shape is the contract on every platform; only the Unix
+// handlers read it, so the 501 builds expect the fields to stay unread.
+#[cfg_attr(any(not(unix), target_env = "ohos"), expect(dead_code))]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct TerminalOutputQuery {
@@ -83,6 +90,7 @@ pub(super) struct TerminalOutputResponse {
     exit_code: Option<i64>,
 }
 
+#[cfg_attr(any(not(unix), target_env = "ohos"), expect(dead_code))]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct TerminalInputRequest {
@@ -98,6 +106,7 @@ pub(super) struct TerminalWriteResponse {
     written: usize,
 }
 
+#[cfg_attr(any(not(unix), target_env = "ohos"), expect(dead_code))]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct TerminalResizeRequest {
