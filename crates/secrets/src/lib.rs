@@ -120,6 +120,36 @@ pub trait KeyringStore: Send + Sync {
     /// rather than returning an error.
     fn delete(&self, key: &str) -> Result<(), SecretsError>;
 
+    /// Run a non-reentrant entry mutation while holding the backend's authority
+    /// lock. Errors must leave the stored entry unchanged.
+    fn with_entry_transaction(
+        &self,
+        _key: &str,
+        _operation: &mut dyn FnMut(&mut Option<String>) -> Result<(), SecretsError>,
+    ) -> Result<(), SecretsError> {
+        Err(SecretsError::Keyring(
+            "This secret backend does not support atomic updates".into(),
+        ))
+    }
+
+    /// Replace an entry only while its exact bytes still match a snapshot.
+    fn compare_exchange(
+        &self,
+        key: &str,
+        expected: Option<&str>,
+        replacement: Option<&str>,
+    ) -> Result<bool, SecretsError> {
+        let mut changed = false;
+        self.with_entry_transaction(key, &mut |current| {
+            if current.as_deref() == expected {
+                *current = replacement.map(str::to_owned);
+                changed = true;
+            }
+            Ok(())
+        })?;
+        Ok(changed)
+    }
+
     /// Short, human-readable label for this backend.
     ///
     /// Used by diagnostic output (e.g. `doctor` command) to indicate which
@@ -214,8 +244,8 @@ impl DefaultKeyringStore {
     }
 }
 
-impl KeyringStore for DefaultKeyringStore {
-    fn get(&self, key: &str) -> Result<Option<String>, SecretsError> {
+impl DefaultKeyringStore {
+    fn get_unlocked(&self, key: &str) -> Result<Option<String>, SecretsError> {
         #[cfg(any(
             target_os = "macos",
             target_os = "windows",
@@ -249,7 +279,7 @@ impl KeyringStore for DefaultKeyringStore {
         }
     }
 
-    fn set(&self, key: &str, value: &str) -> Result<(), SecretsError> {
+    fn set_unlocked(&self, key: &str, value: &str) -> Result<(), SecretsError> {
         #[cfg(any(
             target_os = "macos",
             target_os = "windows",
@@ -281,7 +311,7 @@ impl KeyringStore for DefaultKeyringStore {
         }
     }
 
-    fn delete(&self, key: &str) -> Result<(), SecretsError> {
+    fn delete_unlocked(&self, key: &str) -> Result<(), SecretsError> {
         #[cfg(any(
             target_os = "macos",
             target_os = "windows",
@@ -312,6 +342,62 @@ impl KeyringStore for DefaultKeyringStore {
             let _ = key;
             Err(SecretsError::Keyring(unsupported_keyring_message()))
         }
+    }
+}
+
+impl DefaultKeyringStore {
+    fn with_key_lock<T>(
+        &self,
+        key: &str,
+        operation: impl FnOnce() -> Result<T, SecretsError>,
+    ) -> Result<T, SecretsError> {
+        use sha2::{Digest, Sha256};
+        // OS keyring authority is per user, not per CODEWHALE_HOME/profile.
+        let home = codewhale_paths::user_home()
+            .filter(|p| p.is_absolute())
+            .ok_or_else(home_resolution_error)?;
+        let mut digest = Sha256::new();
+        digest.update(self.service.as_bytes());
+        digest.update([0]);
+        digest.update(key.as_bytes());
+        let path = home.join(".codewhale").join("keyring-locks").join(
+            digest
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+        );
+        file_lock::with_write_lock(&path, |_| operation())
+    }
+}
+
+impl KeyringStore for DefaultKeyringStore {
+    fn get(&self, key: &str) -> Result<Option<String>, SecretsError> {
+        self.get_unlocked(key)
+    }
+    fn set(&self, key: &str, value: &str) -> Result<(), SecretsError> {
+        self.with_key_lock(key, || self.set_unlocked(key, value))
+    }
+    fn delete(&self, key: &str) -> Result<(), SecretsError> {
+        self.with_key_lock(key, || self.delete_unlocked(key))
+    }
+    fn with_entry_transaction(
+        &self,
+        key: &str,
+        operation: &mut dyn FnMut(&mut Option<String>) -> Result<(), SecretsError>,
+    ) -> Result<(), SecretsError> {
+        self.with_key_lock(key, || {
+            let before = self.get_unlocked(key)?;
+            let mut current = before.clone();
+            operation(&mut current)?;
+            if current != before {
+                match current {
+                    Some(value) => self.set_unlocked(key, &value)?,
+                    None => self.delete_unlocked(key)?,
+                }
+            }
+            Ok(())
+        })
     }
 
     fn backend_name(&self) -> &'static str {
@@ -373,6 +459,28 @@ impl KeyringStore for InMemoryKeyringStore {
             SecretsError::Keyring(format!("InMemoryKeyringStore mutex poisoned: {e}"))
         })?;
         guard.remove(key);
+        Ok(())
+    }
+
+    fn with_entry_transaction(
+        &self,
+        key: &str,
+        operation: &mut dyn FnMut(&mut Option<String>) -> Result<(), SecretsError>,
+    ) -> Result<(), SecretsError> {
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| SecretsError::Keyring("Secret store lock poisoned".into()))?;
+        let mut current = entries.get(key).cloned();
+        operation(&mut current)?;
+        match current {
+            Some(value) => {
+                entries.insert(key.into(), value);
+            }
+            None => {
+                entries.remove(key);
+            }
+        }
         Ok(())
     }
 
@@ -679,6 +787,30 @@ impl KeyringStore for FileKeyringStore {
         self.mutate(|blob| {
             account::invalidate_device_companion(&mut blob.entries, key, None);
             blob.entries.remove(key);
+            Ok(())
+        })
+    }
+
+    fn with_entry_transaction(
+        &self,
+        key: &str,
+        operation: &mut dyn FnMut(&mut Option<String>) -> Result<(), SecretsError>,
+    ) -> Result<(), SecretsError> {
+        self.mutate(|blob| {
+            let before = blob.entries.get(key).cloned();
+            let mut current = before.clone();
+            operation(&mut current)?;
+            if current != before {
+                account::invalidate_device_companion(&mut blob.entries, key, current.as_deref());
+                match current {
+                    Some(value) => {
+                        blob.entries.insert(key.into(), value);
+                    }
+                    None => {
+                        blob.entries.remove(key);
+                    }
+                }
+            }
             Ok(())
         })
     }
@@ -1124,6 +1256,34 @@ impl Secrets {
     /// Convenience: read a secret directly (no env fallback).
     pub fn get(&self, name: &str) -> Result<Option<String>, SecretsError> {
         self.store.get(name)
+    }
+
+    /// Run one non-reentrant callback under the backend's entry authority.
+    pub fn with_entry_transaction<T>(
+        &self,
+        name: &str,
+        operation: impl FnOnce(&mut Option<String>) -> Result<T, SecretsError>,
+    ) -> Result<T, SecretsError> {
+        let mut operation = Some(operation);
+        let mut result = None;
+        self.store.with_entry_transaction(name, &mut |value| {
+            let call = operation.take().ok_or_else(|| {
+                SecretsError::Keyring("Secret transaction invoked more than once".into())
+            })?;
+            result = Some(call(value)?);
+            Ok(())
+        })?;
+        result.ok_or_else(|| SecretsError::Keyring("Secret transaction was not invoked".into()))
+    }
+
+    /// Atomically update one secret only while its exact stored bytes match.
+    pub fn compare_exchange(
+        &self,
+        name: &str,
+        expected: Option<&str>,
+        replacement: Option<&str>,
+    ) -> Result<bool, SecretsError> {
+        self.store.compare_exchange(name, expected, replacement)
     }
 
     /// Resolve a secret by key name with an optional source constraint.
