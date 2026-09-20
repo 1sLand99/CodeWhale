@@ -1420,6 +1420,15 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .route("/v1/usage", get(get_usage))
         .route("/v1/snapshots", get(list_snapshots))
         .route("/v1/snapshots/{id}/restore", post(restore_snapshot))
+        .route(
+            "/v1/account/model-access",
+            get(secrets::get_account_model_access)
+                .put(secrets::set_account_model_access)
+                .delete(secrets::clear_account_model_access)
+                .layer(DefaultBodyLimit::max(
+                    secrets::PROVIDER_KEY_BODY_LIMIT_BYTES,
+                )),
+        )
         .route("/v1/providers", get(list_providers))
         .route("/v1/providers/{id}/models", get(list_provider_models))
         .route("/v1/providers/{id}/switch", post(switch_provider))
@@ -7597,8 +7606,9 @@ async fn switch_provider(
     // swap in the new config. A failure here means an active thread's
     // route is invalid under the new provider — surface it so the GUI can
     // tell the user to fix their config.
-    let reloaded = Config::load(state.config_path.clone(), state.config_profile.as_deref())
+    let mut reloaded = Config::load(state.config_path.clone(), state.config_profile.as_deref())
         .map_err(|e| ApiError::internal(format!("Failed to reload config: {e}")))?;
+    reloaded.account_model_access = state.config.read().account_model_access.clone();
     state
         .runtime_threads
         .reload_config(reloaded.clone())
@@ -8579,8 +8589,9 @@ fn normalize_runtime_config_model(
 async fn reload_config(
     State(state): State<RuntimeApiState>,
 ) -> Result<Json<ReloadConfigResponse>, ApiError> {
-    let reloaded = Config::load(state.config_path.clone(), state.config_profile.as_deref())
+    let mut reloaded = Config::load(state.config_path.clone(), state.config_profile.as_deref())
         .map_err(|e| ApiError::internal(format!("Failed to reload config: {e}")))?;
+    reloaded.account_model_access = state.config.read().account_model_access.clone();
     state
         .runtime_threads
         .reload_config(reloaded.clone())

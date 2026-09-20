@@ -2783,9 +2783,25 @@ impl TranscriptConfig {
     }
 }
 
+/// Process-only account auth transform. Shared by Config clones so logout and
+/// expiry affect future request resolution without rewriting provider config.
+/// Running turns retain their materialized client; immediate revocation of
+/// that credential remains the account service's responsibility.
+#[derive(Debug, Clone)]
+pub(crate) struct AccountModelAccess {
+    pub(crate) session_id: String,
+    pub(crate) credential: crate::credentials::Credential,
+    pub(crate) expires_at: i64,
+    pub(crate) profile: Option<String>,
+}
+
 /// Resolved CLI configuration, including defaults and environment overrides.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Config {
+    /// Never deserialized from disk or exposed as provider configuration.
+    #[serde(skip)]
+    pub(crate) account_model_access:
+        std::sync::Arc<parking_lot::RwLock<Option<AccountModelAccess>>>,
     /// Persisted exact-route declarations, separate from provider credentials.
     #[serde(
         default,
@@ -6976,6 +6992,37 @@ impl Config {
                 && base_url_uses_local_host(&self.active_route_base_url()))
     }
 
+    pub(crate) fn account_model_api_key(&self, provider: ApiProvider) -> Option<String> {
+        // Exact endpoint binding, including path. A custom Codewhale route
+        // must never inherit the account's credential, even on the same host.
+        if provider != ApiProvider::Codewhale
+            || self.base_url_for_route(provider).trim_end_matches('/') != DEFAULT_CODEWHALE_BASE_URL
+            || auth_mode_disables_api_key(self.auth_mode_for_provider(provider).as_deref())
+            || self
+                .provider_config_for(provider)
+                .is_some_and(|entry| entry.auth.is_some() || entry.api_key_env.is_some())
+        {
+            return None;
+        }
+        let access = self.account_model_access.read().clone()?;
+        if access.expires_at <= chrono::Utc::now().timestamp() {
+            return None;
+        }
+        // Check the shared session again at use, so a late install cannot
+        // resurrect a session removed by another local process.
+        let secrets = codewhale_secrets::account::secure_account_session_secrets().ok()?;
+        let account = codewhale_secrets::account::AccountSessionStore::new(
+            secrets,
+            access.profile.as_deref(),
+            codewhale_secrets::account::DEFAULT_ACCOUNT_API_BASE,
+        )
+        .runtime_info_at(chrono::Utc::now())
+        .ok()?;
+        (account.state == codewhale_secrets::account::AccountSessionState::Authenticated
+            && account.session_id.as_deref() == Some(access.session_id.as_str()))
+        .then(|| access.credential.expose_secret().to_string())
+    }
+
     /// Read the API key.
     ///
     /// Precedence: **route-specific explicitly consented OAuth token → source-marked explicit CLI key →
@@ -7218,6 +7265,12 @@ impl Config {
             {
                 return Ok(value);
             }
+        }
+
+        // Account auth is a reversible fallback, never an overwrite of an
+        // environment, config-file, or durable provider credential.
+        if let Some(key) = self.account_model_api_key(provider) {
+            return Ok(key);
         }
 
         // The Codewhale API always authenticates. It is not a self-hosted
@@ -11268,6 +11321,7 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
                 recorded => recorded,
             }
         },
+        account_model_access: base.account_model_access,
         runtime_chat_isolated: override_cfg.runtime_chat_isolated || base.runtime_chat_isolated,
         runtime_thread_inference_unrelated: override_cfg.runtime_thread_inference_unrelated
             || base.runtime_thread_inference_unrelated,
