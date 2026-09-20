@@ -27,6 +27,7 @@
 //! Release is `Drop` and never cached: a leaked inhibitor would keep a laptop
 //! awake forever, which is worse than the problem this solves.
 
+#[cfg(unix)]
 use std::process::{Child, Command, Stdio};
 
 /// An idle-sleep assertion held for as long as this value lives.

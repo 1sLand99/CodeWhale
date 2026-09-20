@@ -31,6 +31,7 @@
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
+#[cfg(all(unix, not(target_env = "ohos")))]
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
@@ -300,7 +301,7 @@ mod platform {
         )
     }
 
-    pub(super) async fn terminal_output(
+    pub(crate) async fn terminal_output(
         State(_): State<RuntimeApiState>,
         Path(_): Path<String>,
         Query(_): Query<TerminalOutputQuery>,
@@ -308,7 +309,7 @@ mod platform {
         Err(unsupported())
     }
 
-    pub(super) async fn terminal_input(
+    pub(crate) async fn terminal_input(
         State(_): State<RuntimeApiState>,
         Path(_): Path<String>,
         Json(_): Json<TerminalInputRequest>,
@@ -316,7 +317,7 @@ mod platform {
         Err(unsupported())
     }
 
-    pub(super) async fn terminal_resize(
+    pub(crate) async fn terminal_resize(
         State(_): State<RuntimeApiState>,
         Path(_): Path<String>,
         Json(_): Json<TerminalResizeRequest>,
@@ -324,7 +325,7 @@ mod platform {
         Err(unsupported())
     }
 
-    pub(super) async fn terminal_kill(
+    pub(crate) async fn terminal_kill(
         State(_): State<RuntimeApiState>,
         Path(_): Path<String>,
     ) -> Result<Json<TerminalKillResponse>, ApiError> {
