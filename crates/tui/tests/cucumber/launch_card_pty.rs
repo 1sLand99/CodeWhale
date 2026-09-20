@@ -454,6 +454,11 @@ fn underwater_motion_visual_evidence() {
     for (rows, cols) in [(24, 80), (36, 120)] {
         let (_workspace, mut tui) =
             start_with_options(rows, cols, false, &[TITLE], Some("underwater"), true, false);
+        // Home intentionally gives its brief whale reveal the stage. Sea life
+        // lives in the conversation field, so enter a fresh offline session.
+        tui.send(keys::key::ctrl('u')).unwrap();
+        click_text(&mut tui, "New session");
+        wait(&mut tui, "What do you want to accomplish?");
         let file =
             std::fs::File::create(directory.join(format!("ocean-{cols}x{rows}.jsonl.gz"))).unwrap();
         let mut output = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
@@ -461,8 +466,9 @@ fn underwater_motion_visual_evidence() {
         for index in 0..360u64 {
             let frame = tui.frame();
             assert!(
-                frame.contains("New session"),
-                "motion cannot displace the launch action"
+                frame.contains("Type a message")
+                    && frame.contains("What do you want to accomplish?"),
+                "motion cannot displace the conversation or composer"
             );
             serde_json::to_writer(
                 &mut output,
