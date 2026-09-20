@@ -434,8 +434,12 @@ fn fleet_roles_open_the_shared_model_picker_and_escape_returns_to_the_same_role(
         wait(&mut tui, "Model · manager");
         capture(&mut tui, "fleet-role-model");
         tui.send("search-proof").unwrap();
+        wait(&mut tui, "search-proof");
+        tui.wait_for_idle(Duration::from_millis(200), WAIT).unwrap();
         tui.send(keys::key::esc()).unwrap();
-        wait(&mut tui, "Model · manager");
+        tui.wait_for(|frame| !frame.contains("search-proof"), WAIT)
+            .unwrap();
+        tui.wait_for_idle(Duration::from_millis(200), WAIT).unwrap();
         tui.send(keys::key::esc()).unwrap();
         wait(&mut tui, "saved teams");
         tui.send(keys::key::enter()).unwrap();
@@ -467,16 +471,32 @@ fn home_returns_to_the_same_conversation_by_escape_click_and_typing() {
                 "click" => click_text(&mut tui, "Back to conversation"),
                 _ => tui.send("draft stays here").unwrap(),
             }
-            wait(&mut tui, SAVED_TEXT);
+            tui.wait_for(|frame| !frame.contains("Back to conversation"), WAIT)
+                .unwrap();
             tui.wait_for_idle(Duration::from_millis(200), WAIT).unwrap();
             if return_path == "type" {
                 wait(&mut tui, "draft stays here");
                 capture(&mut tui, "home-return-draft");
                 tui.send(keys::key::ctrl('u')).unwrap();
             }
+            // Slash commands add transcript rows. At 40x12 the original
+            // message is now above the viewport, so inspect scrollback.
+            tui.send(keys::key::page_up()).unwrap();
+            wait(&mut tui, SAVED_TEXT);
+            tui.send(keys::key::alt('G')).unwrap();
+            tui.wait_for_idle(Duration::from_millis(200), WAIT).unwrap();
         }
         tui.paste("/overview").unwrap();
         tui.send(keys::key::enter()).unwrap();
+        tui.wait_for_idle(Duration::from_millis(300), WAIT).unwrap();
+        // The dashboard is longer than a short transcript viewport.
+        for _ in 0..20 {
+            if tui.frame().contains("Quick Actions") {
+                break;
+            }
+            tui.send(keys::key::page_up()).unwrap();
+            tui.wait_for_idle(Duration::from_millis(200), WAIT).unwrap();
+        }
         wait(&mut tui, "Quick Actions");
         tui.shutdown();
     }
