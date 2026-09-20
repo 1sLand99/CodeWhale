@@ -91,6 +91,7 @@ struct RouteRow {
 pub struct FleetDetailView {
     fleet: FleetFile,
     editor_id: uuid::Uuid,
+    pub(crate) return_to_roster: bool,
     saved_source: Option<String>,
     locale: Locale,
     scope: FleetScope,
@@ -164,13 +165,12 @@ impl FleetDetailView {
             &session_provider,
             &session_model,
         );
-        if let Some(member_id) = member_id.map(str::trim).filter(|id| !id.is_empty())
-            && let Some(index) = view
+        if let Some(member_id) = member_id.map(str::trim).filter(|id| !id.is_empty()) {
+            let index = view
                 .fleet
                 .members
                 .iter()
-                .position(|member| member.id.eq_ignore_ascii_case(member_id))
-        {
+                .position(|member| member.id.eq_ignore_ascii_case(member_id))?;
             view.selected = index + 1;
         }
         Some(view)
@@ -193,6 +193,7 @@ impl FleetDetailView {
         let mut view = Self {
             fleet,
             editor_id: uuid::Uuid::new_v4(),
+            return_to_roster: false,
             saved_source,
             locale,
             scope,
@@ -400,6 +401,26 @@ impl FleetDetailView {
             Some(idx) => FleetRouteTarget::Member(idx),
             None => FleetRouteTarget::Operator,
         }
+    }
+
+    pub(crate) fn direct_assignment(&mut self) -> (uuid::Uuid, FleetRouteTarget) {
+        self.return_to_roster = true;
+        (self.editor_id, self.selected_route_target())
+    }
+
+    pub(crate) fn assignment_context(&self) -> (String, String) {
+        let role = self
+            .selected_member()
+            .map(|member| member.id.clone())
+            .unwrap_or_else(|| "Coordinator".into());
+        (
+            role,
+            format!("{} · {}", self.fleet.name, self.scope.label()),
+        )
+    }
+
+    pub(crate) fn is_direct_assignment(&self, editor_id: uuid::Uuid) -> bool {
+        self.return_to_roster && self.editor_id == editor_id
     }
 
     pub(crate) fn route_selection(

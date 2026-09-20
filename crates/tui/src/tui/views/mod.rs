@@ -793,6 +793,23 @@ pub enum ViewEvent {
     /// Enter on a Fleet editor row: open the standard `/model` picker for
     /// that row (the editor stays underneath) instead of the editor's own
     /// inline route list.
+    FleetProfileRoutePickRequested {
+        editor_id: uuid::Uuid,
+    },
+    FleetProfileRoutePicked {
+        editor_id: uuid::Uuid,
+        provider: crate::config::ApiProvider,
+        provider_id: Option<String>,
+        model: String,
+        reasoning: Option<crate::reasoning_preference::ReasoningEffort>,
+    },
+    FleetProfileRouteCommitRequested {
+        editor_id: uuid::Uuid,
+    },
+    FleetAssignmentPickerDismissed {
+        editor_id: uuid::Uuid,
+    },
+    FleetRosterOpenCoordinatorRequested,
     FleetDetailRoutePickRequested {
         target: crate::tui::views::fleet_detail::FleetRouteTarget,
         editor_id: uuid::Uuid,

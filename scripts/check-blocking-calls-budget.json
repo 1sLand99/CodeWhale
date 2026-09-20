@@ -452,6 +452,9 @@
   "crates/tui/src/tui/views/fleet_list.rs": {
     "std_fs": 3
   },
+  "crates/tui/src/tui/views/fleet_setup.rs": {
+    "std_fs": 1
+  },
   "crates/tui/src/tui/window_control.rs": {
     "thread_sleep": 1
   },
@@ -482,7 +485,7 @@
     "std_fs": 1
   },
   "crates/tui/tests/cucumber/launch_card_pty.rs": {
-    "std_fs": 9
+    "std_fs": 8
   },
   "crates/tui/tests/cucumber/plugin_e2e_acceptance.rs": {
     "std_fs": 15,

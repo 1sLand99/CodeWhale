@@ -48,19 +48,21 @@ fn start_with_options(
     animated: bool,
 ) -> (SealedWorkspace, Harness) {
     let workspace = make_sealed_workspace().unwrap();
-    if let Some(theme) = theme {
-        std::fs::write(
-            workspace.home().join(".codewhale/settings.toml"),
-            format!("theme = {theme:?}\n"),
-        )
-        .unwrap();
-    }
-    std::fs::write(workspace.home().join(".codewhale/.onboarded"), "").unwrap();
     let trust = workspace.workspace().join(".deepseek");
-    std::fs::create_dir_all(&trust).unwrap();
-    std::fs::write(trust.join("trusted"), "").unwrap();
     let sessions = workspace.home().join(".codewhale/sessions");
-    std::fs::create_dir_all(&sessions).unwrap();
+    for directory in [&trust, &sessions] {
+        std::fs::create_dir_all(directory).unwrap();
+    }
+    let mut fixtures = vec![
+        (workspace.home().join(".codewhale/.onboarded"), Vec::new()),
+        (trust.join("trusted"), Vec::new()),
+    ];
+    if let Some(theme) = theme {
+        fixtures.push((
+            workspace.home().join(".codewhale/settings.toml"),
+            format!("theme = {theme:?}\n").into_bytes(),
+        ));
+    }
     for (index, title) in titles.iter().enumerate() {
         let id = format!(
             "11111111-2222-4333-8444-{:012}",
@@ -82,22 +84,23 @@ fn start_with_options(
             "messages": [{"role": "user", "content": [{"type": "text", "text": SAVED_TEXT}]}],
             "system_prompt": null
         });
-        std::fs::write(
+        fixtures.push((
             sessions.join(format!("{id}.json")),
             serde_json::to_vec(&session).unwrap(),
-        )
-        .unwrap();
+        ));
     }
     if with_mcp {
         // A local failing server gives the summary a real row without any network.
         let mcp = serde_json::json!({"mcpServers": {"launch-proof": {
             "command": "/usr/bin/false", "required": true
         }}});
-        std::fs::write(
+        fixtures.push((
             workspace.home().join(".codewhale/mcp.json"),
             serde_json::to_vec(&mcp).unwrap(),
-        )
-        .unwrap();
+        ));
+    }
+    for (path, contents) in fixtures {
+        std::fs::write(path, contents).unwrap();
     }
 
     let mut tui = Harness::builder(Harness::cargo_bin("codewhale-tui"))
@@ -134,7 +137,13 @@ fn start_with_options(
 
 fn wait(tui: &mut Harness, text: &str) {
     if let Err(error) = tui.wait_for(|frame| frame.contains(text), WAIT) {
-        panic!("waiting for {text:?}: {error}\n{}", tui.diagnostics());
+        let transcript = tui.transcript();
+        let tail = &transcript[transcript.len().saturating_sub(4096)..];
+        panic!(
+            "waiting for {text:?}: {error}\n{}\nPTY tail: {:?}",
+            tui.diagnostics(),
+            String::from_utf8_lossy(tail)
+        );
     }
 }
 
@@ -400,6 +409,38 @@ fn settings_catalog_controls_and_provider_search_work_with_mouse_and_keyboard() 
         wait(&mut tui, "catalog");
         capture(&mut tui, "models-catalog");
         tui.send(keys::key::esc()).unwrap();
+        tui.shutdown();
+    }
+}
+
+#[test]
+fn fleet_roles_open_the_shared_model_picker_and_escape_returns_to_the_same_role() {
+    for (rows, cols) in SIZES {
+        let (_workspace, mut tui) = start(rows, cols, false);
+        tui.paste("/fleet").unwrap();
+        tui.send(keys::key::enter()).unwrap();
+        wait(&mut tui, "Coordinator");
+        capture(&mut tui, "fleet-assignments");
+        tui.send(keys::key::enter()).unwrap();
+        wait(&mut tui, "Model · Coordinator");
+        wait(&mut tui, "Current session");
+        capture(&mut tui, "fleet-coordinator-model");
+        tui.send(keys::key::esc()).unwrap();
+        wait(&mut tui, "saved teams");
+        tui.send(keys::key::down()).unwrap();
+        tui.send(keys::key::enter()).unwrap();
+        wait(&mut tui, "Model · manager");
+        capture(&mut tui, "fleet-role-model");
+        tui.send("search-proof").unwrap();
+        tui.send(keys::key::esc()).unwrap();
+        wait(&mut tui, "Model · manager");
+        tui.send(keys::key::esc()).unwrap();
+        wait(&mut tui, "saved teams");
+        tui.send(keys::key::enter()).unwrap();
+        wait(&mut tui, "Model · manager");
+        // Following Coordinator is a selectable local choice even without credentials.
+        tui.send(keys::key::enter()).unwrap();
+        capture(&mut tui, "fleet-role-destination");
         tui.shutdown();
     }
 }
