@@ -869,7 +869,7 @@ impl LspManager {
 
     /// Best-effort shutdown of every spawned transport. Called when the
     /// session ends.
-    #[cfg_attr(not(test), expect(dead_code))]
+    #[cfg_attr(any(not(test), not(unix)), expect(dead_code))]
     pub async fn shutdown_all(&self) {
         let transports: Vec<TransportSlot> =
             self.transports.lock().await.values().cloned().collect();
@@ -1295,15 +1295,17 @@ pub(crate) mod tests {
         outside["uri"] = serde_json::json!("file:///etc/passwd");
         let mut reverse = good.clone();
         reverse["selectionRange"]["end"]["character"] = serde_json::json!(0);
-        let mut cases = vec![good.clone(), split, huge, unsafe_uri, outside, reverse];
+        let cases = vec![good.clone(), split, huge, unsafe_uri, outside, reverse];
         #[cfg(unix)]
-        {
+        let cases = {
+            let mut cases = cases;
             let link = root.path().join("link.rs");
             std::os::unix::fs::symlink(&file, &link).unwrap();
             let mut linked = good.clone();
             linked["uri"] = serde_json::json!(client::uri_from_path(&link));
             cases.push(linked);
-        }
+            cases
+        };
         let expected_omitted = cases.len() - 1;
         let (locations, truncated, omitted) = manager
             .semantic_locations(&serde_json::json!(cases), &file, "🐋foo\n")

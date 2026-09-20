@@ -11914,7 +11914,7 @@ async fn cors_layer_advertises_exact_supported_headers_and_never_an_extra() -> R
         .header("Access-Control-Request-Method", "POST")
         .header(
             "Access-Control-Request-Headers",
-            "authorization, content-type, accept, x-codewhale-runtime-token, x-deepseek-runtime-token",
+            "authorization, content-type, accept, if-match, x-codewhale-runtime-token, x-deepseek-runtime-token",
         )
         .send()
         .await?;
@@ -11941,6 +11941,7 @@ async fn cors_layer_advertises_exact_supported_headers_and_never_an_extra() -> R
         "accept",
         "authorization",
         "content-type",
+        "if-match",
         "x-codewhale-runtime-token",
         "x-deepseek-runtime-token",
     ]
