@@ -8492,25 +8492,19 @@ base_url = "https://api.xiaomimimo.com/v1"
         assert_eq!(actual, expected);
     }
 
-    /// Every row the screen shows must land in a store. `settings.toml` rows
-    /// round-trip through `Settings`; the rest are actions, receipts, or
-    /// `config.toml` keys, and that list is spelled out so a new row cannot
-    /// quietly become one that discards the user's edit.
+    /// Every persisted row must land in a store. Typed action rows only open
+    /// another surface; `settings.toml` rows round-trip through `Settings`.
+    /// The remaining receipts and `config.toml` keys are spelled out so a new
+    /// editable row cannot quietly discard the user's edit.
     #[test]
     fn every_settings_row_reaches_a_store() {
         let _guard = crate::test_support::lock_test_env();
-        // Not `settings.toml`: opens another surface, reports a fact, or is
-        // persisted to config.toml by `set_config_value`.
+        // Non-action rows outside `settings.toml`: report a fact or persist
+        // to config.toml through `set_config_value`.
         const NOT_SETTINGS_TOML: &[&str] = &[
-            "provider",
-            "model",
             "fleet.exec.max_spawn_depth",
             "goal_command",
             "workflow",
-            "mcp_open",
-            "mcp_reconnect",
-            "mcp_diagnose",
-            "plugins_open",
             "mcp_config_path",
             "approval_mode",
             "permission_posture",
@@ -8536,6 +8530,11 @@ base_url = "https://api.xiaomimimo.com/v1"
         ];
 
         for def in codewhale_config::schema_rows() {
+            if def.ui.is_some_and(|ui| {
+                ui.row == codewhale_config::settings_schema::SettingRowKind::Action
+            }) {
+                continue;
+            }
             if let Some(setting) =
                 codewhale_config::notifications::NotificationSetting::parse(def.key)
             {

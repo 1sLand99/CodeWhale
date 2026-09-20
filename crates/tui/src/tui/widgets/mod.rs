@@ -7427,8 +7427,31 @@ mod tests {
         assert_eq!(actual_padding, expected_padding);
     }
 
+    /// The four complete native tail poses at the pinned t=0 sample, facing
+    /// right. Inspect only the school's floor band: a jelly or completion
+    /// whale elsewhere must not satisfy a fish-presence assertion.
+    fn native_school_count_at_start(rendered: &str) -> usize {
+        const FISH: [&str; 4] = ["⢀⠦⣒⠤", "⠐⡤⣒⠤", "⢐⠤⣒⠤", "⠠⡢⣒⠤"];
+        let mut count = 0;
+        for row in rendered.lines().rev().take(4) {
+            for silhouette in row.split_whitespace().filter(|run| {
+                run.chars()
+                    .all(|ch| ('\u{2801}'..='\u{28ff}').contains(&ch))
+            }) {
+                assert!(
+                    FISH.contains(&silhouette),
+                    "school must contain complete, consistently facing native fish, got {silhouette:?}:\n{rendered}"
+                );
+                count += 1;
+            }
+        }
+        count
+    }
+
     #[test]
     fn underwater_launch_is_visibly_deep_and_preserves_text_cells() {
+        let _env_lock = crate::test_support::lock_test_env();
+        let _native = crate::test_support::EnvVarGuard::remove("CODEWHALE_ASCII_SAFE");
         let mut app = create_test_app();
         // App::new reads persisted presentation settings. Other tests swap the
         // isolated settings home in parallel, so this visual contract must pin
@@ -7452,21 +7475,13 @@ mod tests {
 
         assert_ne!(buf[(0, 0)].bg, buf[(0, 19)].bg);
         let rendered = buffer_text(&buf, area);
-        // One loose wedge school: an eyed lead plus plain members, all
-        // facing the same way (facing equals travel by construction).
-        let rightward = rendered.matches("><>").count() + rendered.matches("><o>").count();
-        let leftward = rendered.matches("<><").count() + rendered.matches("<o><").count();
-        assert!(
-            rightward == 0 || leftward == 0,
-            "one school shares one direction:\n{rendered}"
-        );
-        let fish_count = rightward + leftward;
+        // Native fish share the same contour; leadership no longer adds an
+        // ASCII eye. Keep the population and common-facing contract instead.
+        let fish_count = native_school_count_at_start(&rendered);
         assert!(
             (4..=7).contains(&fish_count),
             "wide idle water should show one cohesive wedge school (got {fish_count}):\n{rendered}"
         );
-        let leads = rendered.matches("><o>").count() + rendered.matches("<o><").count();
-        assert_eq!(leads, 1, "exactly one eyed lead fish:\n{rendered}");
 
         let context_x = ((100usize - UnicodeWidthStr::width(context.as_str())) / 2) as u16;
         let context_cell = (0..area.height)
@@ -7501,7 +7516,11 @@ mod tests {
         assert_eq!(buf[(0, 19)].bg, base, "flat keeps the plain theme surface");
         let rendered = buffer_text(&buf, area);
         assert!(
-            !rendered.contains("><>") && !rendered.contains("<><"),
+            !rendered.contains("><>")
+                && !rendered.contains("<><")
+                && !rendered
+                    .chars()
+                    .any(|ch| ('\u{2801}'..='\u{28ff}').contains(&ch)),
             "terminal-owned themes must keep a normal shell without decorative fish:\n{rendered}"
         );
     }
@@ -7533,7 +7552,11 @@ mod tests {
         );
         let rendered = buffer_text(&buf, area);
         assert!(
-            !rendered.contains("><>") && !rendered.contains("<><"),
+            !rendered.contains("><>")
+                && !rendered.contains("<><")
+                && !rendered
+                    .chars()
+                    .any(|ch| ('\u{2801}'..='\u{28ff}').contains(&ch)),
             "a theme with no painted field earns no ambient life:\n{rendered}"
         );
     }
@@ -7576,7 +7599,11 @@ mod tests {
         );
         let rendered = buffer_text(&buf, area);
         assert!(
-            !rendered.contains("><>") && !rendered.contains("<><"),
+            !rendered.contains("><>")
+                && !rendered.contains("<><")
+                && !rendered
+                    .chars()
+                    .any(|ch| ('\u{2801}'..='\u{28ff}').contains(&ch)),
             "Terminal must remain a quiet host-owned shell without the selected Deepsea scene:\n{rendered}"
         );
     }
@@ -7825,7 +7852,7 @@ mod tests {
         }
         app.viewport.transcript_scroll = TranscriptScroll::at_line(0);
         let area = Rect::new(0, 0, 100, 20);
-        let widget = ChatWidget::new(&mut app, area);
+        let widget = ChatWidget::new_with_ocean_elapsed(&mut app, area, 0);
         assert!(widget.ambient_life);
         assert!(widget.ocean_animated);
         let mut buf = Buffer::empty(area);
@@ -7838,12 +7865,14 @@ mod tests {
 
     #[test]
     fn browsing_history_keeps_fish_in_available_water() {
+        let _env_lock = crate::test_support::lock_test_env();
+        let _native = crate::test_support::EnvVarGuard::remove("CODEWHALE_ASCII_SAFE");
         // Short transcript rows own their text plus a quiet gutter, not the
         // entire width. Browsing still holds the school in the clear water.
         let rows = history_field_rows(4);
         let rendered = rows.join("\n");
         assert!(
-            rendered.contains("><>") || rendered.contains("<><"),
+            native_school_count_at_start(&rendered) > 0,
             "open water below the transcript should hold fish:\n{rendered}"
         );
         for index in 0..4 {
@@ -7856,6 +7885,8 @@ mod tests {
 
     #[test]
     fn active_tail_keeps_fish_after_message_submit() {
+        let _env_lock = crate::test_support::lock_test_env();
+        let _native = crate::test_support::EnvVarGuard::remove("CODEWHALE_ASCII_SAFE");
         let mut app = create_test_app();
         app.low_motion = false;
         app.fancy_animations = true;
@@ -7880,7 +7911,7 @@ mod tests {
         widget.render(area, &mut buf);
         let rendered = buffer_text(&buf, area);
         assert!(
-            rendered.contains("><") || rendered.contains("<o"),
+            native_school_count_at_start(&rendered) > 0,
             "submitting a message must not empty the ocean:\n{rendered}"
         );
         assert!(rendered.contains("release check 17"), "{rendered}");
@@ -7888,6 +7919,8 @@ mod tests {
 
     #[test]
     fn completed_turn_keeps_bounded_ocean_settle() {
+        let _env_lock = crate::test_support::lock_test_env();
+        let _native = crate::test_support::EnvVarGuard::remove("CODEWHALE_ASCII_SAFE");
         let mut app = create_test_app();
         app.low_motion = false;
         app.fancy_animations = true;
@@ -7904,7 +7937,7 @@ mod tests {
         widget.render(area, &mut buf);
         let rendered = buffer_text(&buf, area);
         assert!(
-            rendered.contains("><") || rendered.contains("<o"),
+            native_school_count_at_start(&rendered) > 0,
             "the completion settle must not snap the ocean empty:\n{rendered}"
         );
         assert!(rendered.contains("release receipt"), "{rendered}");
@@ -7930,7 +7963,11 @@ mod tests {
         widget.render(area, &mut buf);
         let rendered = buffer_text(&buf, area);
         assert!(
-            !rendered.contains("><>") && !rendered.contains("<><"),
+            !rendered.contains("><>")
+                && !rendered.contains("<><")
+                && !rendered
+                    .chars()
+                    .any(|ch| ('\u{2801}'..='\u{28ff}').contains(&ch)),
             "a full transcript is not an aquarium:\n{rendered}"
         );
     }
