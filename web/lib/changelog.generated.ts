@@ -29,10 +29,10 @@ export const CHANGELOG: ChangelogRelease[] = [
     "sections": []
   },
   {
-    "version": "0.9.14",
+    "version": "0.10.0",
     "date": null,
     "unreleased": false,
-    "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.9.13...v0.9.14",
+    "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.9.13...HEAD",
     "sections": [
       {
         "heading": "Contributors",

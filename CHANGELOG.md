@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.14] - Unreleased candidate
+## [0.10.0] - Unreleased candidate
 
-The v0.9.14 source candidate. Nothing below is published until the matching
+The v0.10.0 source candidate brings a redesigned terminal workbench, clearer
+settings, and more reliable session and runtime behavior. It supersedes the
+unpublished v0.9.14 candidate. Nothing below is published until the matching
 tag, packages, checksums and release assets exist.
 
 ### Contributors
@@ -8974,7 +8976,7 @@ overflow report and `/theme` picker edge-wrapping patch in #1814.
 Older releases (v0.8.39 and earlier) are archived in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).
 
 [Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.13...HEAD
-[0.9.14]: https://github.com/Hmbown/CodeWhale/compare/v0.9.13...v0.9.14
+[0.10.0]: https://github.com/Hmbown/CodeWhale/compare/v0.9.13...HEAD
 [0.9.13]: https://github.com/Hmbown/CodeWhale/compare/v0.9.12...v0.9.13
 [0.9.12]: https://github.com/Hmbown/CodeWhale/compare/v0.9.11...v0.9.12
 [0.9.11]: https://github.com/Hmbown/CodeWhale/compare/v0.9.10...v0.9.11

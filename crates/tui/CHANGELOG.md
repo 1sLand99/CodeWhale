@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.14] - Unreleased candidate
+## [0.10.0] - Unreleased candidate
 
-The v0.9.14 source candidate. Nothing below is published until the matching
+The v0.10.0 source candidate brings a redesigned terminal workbench, clearer
+settings, and more reliable session and runtime behavior. It supersedes the
+unpublished v0.9.14 candidate. Nothing below is published until the matching
 tag, packages, checksums and release assets exist.
 
 ### Contributors
