@@ -12975,6 +12975,8 @@ async fn mcp_server_management_crud() -> Result<()> {
             "args": ["updated"],
             "required": true,
             "url": null,
+            "bearer_token_env_var": null,
+            "oauth_resource": null,
         }))
         .send()
         .await?
@@ -13064,7 +13066,14 @@ async fn mcp_server_management_crud() -> Result<()> {
     assert_eq!(enabled["action"], "enabled");
     assert_eq!(enabled["ok"], true);
 
-    // 7. Reconnect (schedules a reconnect — no live pool present so always succeeds).
+    // 7. Reconnect reports the real failure; use a missing local executable
+    // so this management test never attempts the example remote endpoint.
+    client
+        .patch(format!("{base}/test-stdio"))
+        .json(&json!({"command":root.join("missing-mcp-executable"),"url":null}))
+        .send()
+        .await?
+        .error_for_status()?;
     let reconnected: serde_json::Value = client
         .post(format!("{base}/test-stdio/reconnect"))
         .send()
@@ -13072,8 +13081,10 @@ async fn mcp_server_management_crud() -> Result<()> {
         .error_for_status()?
         .json()
         .await?;
-    assert_eq!(reconnected["action"], "reconnect_scheduled");
-    assert_eq!(reconnected["ok"], true);
+    assert_eq!(reconnected["action"], "reconnect_failed");
+    assert_eq!(reconnected["ok"], false);
+    assert_eq!(reconnected["connection"]["connected"], false);
+    assert!(reconnected["connection"]["error"].as_str().is_some());
 
     // 8. Delete the server.
     let deleted: serde_json::Value = client
@@ -17697,6 +17708,456 @@ api_key = "refresh-fixture-key"
             .any(|m| m["id"] == "discovered-fixture-model")
     );
     assert_eq!(get_config(&client, &addr).await["provider"], "first");
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_management_selected_connection_and_retry_preserve_siblings() -> Result<()> {
+    use axum::response::IntoResponse as _;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    async fn fixture(
+        State(count): State<Arc<AtomicUsize>>,
+        Json(request): Json<Value>,
+    ) -> axum::response::Response {
+        let Some(id) = request.get("id") else {
+            return StatusCode::NO_CONTENT.into_response();
+        };
+        let result = match request["method"].as_str().unwrap_or_default() {
+            "initialize" => {
+                count.fetch_add(1, Ordering::SeqCst);
+                json!({"protocolVersion":request["params"]["protocolVersion"],"capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}})
+            }
+            "tools/list" => {
+                json!({"tools":[{"name":"fixture_tool","inputSchema":{"type":"object"}}]})
+            }
+            _ => json!({}),
+        };
+        Json(json!({"jsonrpc":"2.0","id":id,"result":result})).into_response()
+    }
+    let one = Arc::new(AtomicUsize::new(0));
+    let two = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let fixture_addr = listener.local_addr()?;
+    let app = axum::Router::new()
+        .route("/one", axum::routing::post(fixture).with_state(one.clone()))
+        .route("/two", axum::routing::post(fixture).with_state(two.clone()));
+    let fixture_task = tokio::spawn(async move { axum::serve(listener, app).await });
+    let root = tempfile::tempdir()?;
+    fs::write(
+        root.path().join("mcp.json"),
+        json!({"servers":{
+            "one":{"url":format!("http://{fixture_addr}/one"),"transport":"streamable_http"},
+            "two":{"url":format!("http://{fixture_addr}/two"),"transport":"streamable_http"},
+            "broken":{"command":root.path().join("missing-executable"),"connect_timeout":1}
+        }})
+        .to_string(),
+    )?;
+    let (addr, _, handle) =
+        spawn_test_server_with_root(root.path().to_owned(), root.path().join("sessions"))
+            .await?
+            .context("MCP management test requires loopback")?;
+    let client = crate::tls::reqwest_client();
+    let base = format!("http://{addr}/v1/apps/mcp");
+    let failed: Value = client
+        .get(format!("{base}/tools?server=broken&connect=true"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(failed["connections"][0]["server"], "broken");
+    assert_eq!(failed["connections"][0]["connected"], false);
+    assert!(failed["connections"][0]["error"].is_string());
+    assert_eq!(one.load(Ordering::SeqCst), 0);
+    assert_eq!(two.load(Ordering::SeqCst), 0);
+    let selected: Value = client
+        .get(format!("{base}/tools?server=one&connect=true"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(selected["connections"][0]["connected"], true, "{selected}");
+    assert_eq!(one.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        two.load(Ordering::SeqCst),
+        0,
+        "testing one server must not connect its sibling"
+    );
+    let second: Value = client
+        .get(format!("{base}/tools?server=two&connect=true"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(second["connections"][0]["connected"], true, "{second}");
+    let retry: Value = client
+        .post(format!("{base}/servers/one/reconnect"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(retry["ok"], true, "{retry}");
+    assert_eq!(one.load(Ordering::SeqCst), 2);
+    assert_eq!(two.load(Ordering::SeqCst), 1);
+    let listing: Value = client
+        .get(format!("{base}/servers"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    for name in ["one", "two"] {
+        let row = listing["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == name)
+            .unwrap();
+        assert_eq!(row["connected"], true, "{listing}");
+        assert_eq!(row["origin"], "global");
+        assert_eq!(row["writable"], true);
+    }
+    let mut changed: Value =
+        serde_json::from_str(&fs::read_to_string(root.path().join("mcp.json"))?)?;
+    changed["servers"]["one"]["enabled"] = json!(false);
+    fs::write(root.path().join("mcp.json"), changed.to_string())?;
+    let disabled: Value = client
+        .post(format!("{base}/servers/one/reconnect"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(disabled["ok"], false);
+    assert!(
+        disabled["connection"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("disabled")
+    );
+    assert_eq!(
+        one.load(Ordering::SeqCst),
+        2,
+        "disabled retry must not launch the old cached config"
+    );
+    changed["servers"]["one"]["enabled"] = json!(true);
+    changed["servers"]["one"]["url"] = json!(format!("http://{fixture_addr}/two"));
+    fs::write(root.path().join("mcp.json"), changed.to_string())?;
+    let stale: Value = client
+        .post(format!("{base}/servers/one/reconnect"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(stale["ok"], false);
+    assert!(
+        stale["connection"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("configuration changed")
+    );
+    assert_eq!(one.load(Ordering::SeqCst), 2);
+    assert_eq!(two.load(Ordering::SeqCst), 1);
+    let stale_connect: Value = client
+        .get(format!("{base}/tools?server=one&connect=true"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert!(
+        stale_connect["connections"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("configuration changed")
+    );
+    assert_eq!(stale_connect["tools"], json!([]));
+    fs::write(root.path().join("mcp.json"), "{malformed")?;
+    let malformed = client
+        .get(format!("{base}/tools?server=one&connect=true"))
+        .send()
+        .await?;
+    assert_eq!(malformed.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        one.load(Ordering::SeqCst),
+        2,
+        "malformed sources must not connect cached endpoints"
+    );
+    assert_eq!(two.load(Ordering::SeqCst), 1);
+    handle.abort();
+    fixture_task.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_management_project_ownership_blocks_global_shadow_mutations() -> Result<()> {
+    let _env = crate::test_support::lock_test_env();
+    let root = tempfile::tempdir()?;
+    let workspace = root.path().join("workspace");
+    fs::create_dir_all(workspace.join(".codewhale"))?;
+    let trust_path = root.path().join("trust.toml");
+    let trusted = workspace.canonicalize()?;
+    let mut projects = toml::map::Map::new();
+    projects.insert(
+        trusted.display().to_string(),
+        toml::Value::try_from(json!({"trust_level":"trusted"}))?,
+    );
+    fs::write(
+        &trust_path,
+        toml::to_string(&toml::Value::Table(toml::map::Map::from_iter([(
+            "projects".to_owned(),
+            toml::Value::Table(projects),
+        )])))?,
+    )?;
+    let _path = crate::test_support::EnvVarGuard::set("CODEWHALE_CONFIG_PATH", &trust_path);
+    let _legacy = crate::test_support::EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH");
+    let global = json!({"servers":{"shared":{"command":"global-command"},"global":{"command":"global-command"}}}).to_string();
+    let project = json!({"servers":{"shared":{"command":root.path().join("missing-project-executable")},"project":{"command":root.path().join("missing-project-executable")}}}).to_string();
+    fs::write(root.path().join("mcp.json"), &global)?;
+    fs::write(workspace.join(".codewhale/mcp.json"), &project)?;
+    let (addr, _, handle) = spawn_test_server_with_root_token_mobile_workspace(
+        root.path().to_owned(),
+        root.path().join("sessions"),
+        None,
+        false,
+        workspace.clone(),
+    )
+    .await?
+    .context("MCP ownership test requires loopback")?;
+    let client = crate::tls::reqwest_client();
+    let base = format!("http://{addr}/v1/apps/mcp/servers");
+    let listing: Value = client
+        .get(&base)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    for name in ["shared", "project"] {
+        let row = listing["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == name)
+            .unwrap();
+        assert_eq!(row["origin"], "project", "{listing}");
+        assert_eq!(row["writable"], false);
+        let detail: Value = client
+            .get(format!("{base}/{name}"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(detail["origin"], "project");
+        assert_eq!(detail["writable"], false);
+        assert_eq!(
+            client
+                .patch(format!("{base}/{name}"))
+                .json(&json!({"enabled":false}))
+                .send()
+                .await?
+                .status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            client
+                .delete(format!("{base}/{name}"))
+                .send()
+                .await?
+                .status(),
+            StatusCode::CONFLICT
+        );
+        for action in ["enable", "disable"] {
+            assert_eq!(
+                client
+                    .post(format!("{base}/{name}/{action}"))
+                    .send()
+                    .await?
+                    .status(),
+                StatusCode::CONFLICT
+            );
+        }
+        assert_eq!(
+            client
+                .post(&base)
+                .json(&json!({"name":name,"command":"override"}))
+                .send()
+                .await?
+                .status(),
+            StatusCode::CONFLICT
+        );
+    }
+    assert_eq!(fs::read_to_string(root.path().join("mcp.json"))?, global);
+    assert_eq!(
+        fs::read_to_string(workspace.join(".codewhale/mcp.json"))?,
+        project
+    );
+    // Initialize the pool under project authority, without a real executable.
+    let trusted_connect: Value = client
+        .get(format!(
+            "http://{addr}/v1/apps/mcp/tools?server=project&connect=true"
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert!(trusted_connect["connections"][0]["error"].is_string());
+    // Removing workspace trust removes project ownership rather than
+    // labelling an ignored repository file as writable effective state.
+    fs::write(&trust_path, "")?;
+    let detail: Value = client
+        .get(format!("{base}/shared"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(detail["origin"], "global");
+    assert_eq!(detail["writable"], true);
+    let revoked_connect: Value = client
+        .get(format!(
+            "http://{addr}/v1/apps/mcp/tools?server=project&connect=true"
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert!(
+        revoked_connect["connections"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("configuration changed")
+    );
+    assert_eq!(revoked_connect["tools"], json!([]));
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_server_management_blocks_credential_retargeting() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let mut servers = serde_json::Map::new();
+    for (name, field, value) in [
+        ("env", "env", json!({"API_KEY":"fixture-private-value"})),
+        (
+            "headers",
+            "headers",
+            json!({"Authorization":"fixture-private-value"}),
+        ),
+        (
+            "env_headers",
+            "env_headers",
+            json!({"Authorization":"FIXTURE_TOKEN"}),
+        ),
+        ("bearer", "bearer_token_env_var", json!("FIXTURE_TOKEN")),
+        (
+            "oauth",
+            "oauth",
+            json!({"client_id":"fixture-private-value"}),
+        ),
+        ("scopes", "scopes", json!(["tools"])),
+        (
+            "resource",
+            "oauth_resource",
+            json!("https://original.invalid/resource"),
+        ),
+    ] {
+        let mut server = json!({"command":"original-command","args":["original"],"url":"https://original.invalid/mcp","transport":"sse"});
+        server[field] = value;
+        servers.insert(name.to_owned(), server);
+    }
+    servers.insert("plain".to_owned(), json!({"command":"original-command"}));
+    let path = root.path().join("mcp.json");
+    fs::write(&path, json!({"servers":servers}).to_string())?;
+    let (addr, _, handle) =
+        spawn_test_server_with_root(root.path().to_owned(), root.path().join("sessions"))
+            .await?
+            .context("MCP credential guard test requires loopback")?;
+    let client = crate::tls::reqwest_client();
+    let base = format!("http://{addr}/v1/apps/mcp/servers");
+    for name in [
+        "env",
+        "headers",
+        "env_headers",
+        "bearer",
+        "oauth",
+        "scopes",
+        "resource",
+    ] {
+        let detail: Value = client
+            .get(format!("{base}/{name}"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(detail["credential_configured"], true, "{name}");
+        assert!(!detail.to_string().contains("fixture-private-value"));
+        for private_field in [
+            "env",
+            "headers",
+            "env_headers",
+            "bearer_token_env_var",
+            "oauth",
+        ] {
+            assert!(
+                detail.get(private_field).is_none(),
+                "{name}: {private_field}"
+            );
+        }
+        client
+            .patch(format!("{base}/{name}"))
+            .json(&json!({"connect_timeout":17}))
+            .send()
+            .await?
+            .error_for_status()?;
+        let before = fs::read(&path)?;
+        for patch in [
+            json!({"command":"replacement-command"}),
+            json!({"args":["replacement"]}),
+            json!({"url":"https://other.invalid/mcp"}),
+            json!({"transport":null}),
+        ] {
+            let response = client
+                .patch(format!("{base}/{name}"))
+                .json(&patch)
+                .send()
+                .await?;
+            assert_eq!(response.status(), StatusCode::CONFLICT, "{name}: {patch}");
+            assert_eq!(
+                fs::read(&path)?,
+                before,
+                "rejected retarget must not change config"
+            );
+        }
+    }
+    let plain: Value = client
+        .patch(format!("{base}/plain"))
+        .json(&json!({"command":"replacement-command"}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(plain["credential_configured"], false);
+    let cleared: Value = client
+        .patch(format!("{base}/env"))
+        .json(&json!({"env":{},"command":"replacement-command"}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(cleared["credential_configured"], false);
+    assert_eq!(cleared["command"], "replacement-command");
     handle.abort();
     Ok(())
 }

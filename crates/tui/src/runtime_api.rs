@@ -604,6 +604,9 @@ fn runtime_api_sub_agent_manager(workspace: &FsPath, workers: usize) -> SharedSu
 #[derive(Debug, Serialize)]
 struct McpServerEntry {
     name: String,
+    origin: &'static str,
+    writable: bool,
+    auth_required: bool,
     enabled: bool,
     required: bool,
     command: Option<String>,
@@ -637,6 +640,16 @@ struct McpToolEntry {
 #[derive(Debug, Serialize)]
 struct McpToolsResponse {
     tools: Vec<McpToolEntry>,
+    connections: Vec<McpConnectionOutcome>,
+}
+
+#[derive(Debug, Serialize)]
+struct McpConnectionOutcome {
+    server: String,
+    connected: bool,
+    auth_required: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 /// Request body for `POST /v1/apps/mcp/servers` (create) and
@@ -712,6 +725,10 @@ where
 #[derive(Debug, Serialize)]
 struct McpServerDetail {
     name: String,
+    credential_configured: bool,
+    origin: &'static str,
+    writable: bool,
+    auth_required: bool,
     enabled: bool,
     required: bool,
     command: Option<String>,
@@ -745,6 +762,10 @@ impl McpServerDetail {
         env_header_keys.sort();
         Self {
             name: name.to_string(),
+            credential_configured: mcp_credential_configured(cfg),
+            origin: "global",
+            writable: true,
+            auth_required: false,
             enabled: cfg.is_enabled(),
             required: cfg.required,
             command: cfg.command.clone(),
@@ -771,6 +792,8 @@ struct McpServerActionReceipt {
     name: String,
     action: &'static str,
     ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    connection: Option<McpConnectionOutcome>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3938,35 +3961,141 @@ fn normalize_runtime_account_api_base(value: &str) -> Option<String> {
     Some(url.as_str().trim_end_matches('/').to_string())
 }
 
-async fn list_mcp_servers(
-    State(state): State<RuntimeApiState>,
-) -> Result<Json<McpServersResponse>, ApiError> {
-    let mcp_config_path = state.config.read().mcp_config_path();
-    let plugin_registry = state
+/// Ownership is derived using the same trust/precedence as the existing MCP
+/// loader. A global editor must never silently change a shadowed project entry
+/// or manufacture an override for a reviewed plugin component.
+fn mcp_management_config(
+    state: &RuntimeApiState,
+) -> Result<
+    (
+        crate::mcp::McpConfig,
+        std::collections::HashMap<String, &'static str>,
+    ),
+    ApiError,
+> {
+    let global_path = state.config.read().mcp_config_path();
+    let plugins = state
         .plugin_discovery
         .registry_for_workspace(&state.workspace);
     let config = crate::mcp::load_config_with_workspace_and_plugins(
-        &mcp_config_path,
+        &global_path,
         &state.workspace,
-        plugin_registry.as_ref(),
+        plugins.as_ref(),
     )
     .map_err(|e| ApiError::internal(format!("Failed to load MCP config: {e}")))?;
+    let global = crate::mcp::load_config(&global_path)
+        .map_err(|e| ApiError::internal(format!("Failed to load MCP config: {e}")))?;
+    let project_path = crate::mcp::workspace_mcp_config_path(&state.workspace);
+    let same_source = project_path == global_path
+        || project_path
+            .canonicalize()
+            .ok()
+            .zip(global_path.canonicalize().ok())
+            .is_some_and(|(project, global)| project == global);
+    let project = if !same_source && crate::config::is_workspace_trusted(&state.workspace) {
+        crate::mcp::load_config(&project_path)
+            .map_err(|e| ApiError::internal(format!("Failed to load project MCP config: {e}")))?
+    } else {
+        crate::mcp::McpConfig::default()
+    };
+    let origins = config
+        .servers
+        .iter()
+        .map(|(name, server)| {
+            let origin = if server.reviewed_plugin.is_some() {
+                "plugin"
+            } else if project.servers.contains_key(name) {
+                "project"
+            } else if global.servers.contains_key(name) {
+                "global"
+            } else {
+                "unknown"
+            };
+            (name.clone(), origin)
+        })
+        .collect();
+    Ok((config, origins))
+}
 
+fn require_writable_mcp_server(state: &RuntimeApiState, name: &str) -> Result<(), ApiError> {
+    let (_, origins) = mcp_management_config(state)?;
+    match origins.get(name) {
+        Some(&"global") => Ok(()),
+        Some(origin) => Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: format!(
+                "MCP server '{name}' is owned by {origin} configuration; manage it at its source"
+            ),
+        }),
+        None => Err(ApiError::not_found(format!(
+            "MCP server '{name}' not found"
+        ))),
+    }
+}
+
+async fn mcp_pool_handle(
+    state: &RuntimeApiState,
+    create: bool,
+) -> Result<Option<Arc<Mutex<McpPool>>>, ApiError> {
+    let mut slot = state.mcp_pool.lock().await;
+    if slot.is_none() && create {
+        let path = state.config.read().mcp_config_path();
+        let plugins = state
+            .plugin_discovery
+            .registry_for_workspace(&state.workspace);
+        let pool =
+            McpPool::from_config_path_with_workspace_and_plugins(&path, &state.workspace, plugins)
+                .map_err(|e| ApiError::internal(format!("Failed to load MCP config: {e}")))?;
+        *slot = Some(Arc::new(Mutex::new(pool)));
+    }
+    Ok(slot.clone())
+}
+
+fn mcp_connection_outcome(
+    pool: &McpPool,
+    server: &str,
+    error: Option<&anyhow::Error>,
+) -> McpConnectionOutcome {
+    McpConnectionOutcome {
+        server: server.to_owned(),
+        connected: pool.connected_servers().contains(&server),
+        auth_required: pool.server_needs_auth(server),
+        error: error
+            .map(|error| truncate_text(&crate::mcp::format_mcp_error_for_display(error), 2048)),
+    }
+}
+
+async fn list_mcp_servers(
+    State(state): State<RuntimeApiState>,
+) -> Result<Json<McpServersResponse>, ApiError> {
+    let (config, origins) = mcp_management_config(&state)?;
+    let handle = mcp_pool_handle(&state, false).await?;
+    let pool = match handle.as_ref() {
+        Some(handle) => Some(handle.lock().await),
+        None => None,
+    };
     let mut servers = Vec::new();
     for (name, server_cfg) in config.servers {
+        let origin = origins.get(&name).copied().unwrap_or("unknown");
         servers.push(McpServerEntry {
             name: name.clone(),
+            origin,
+            writable: origin == "global",
+            auth_required: pool
+                .as_ref()
+                .is_some_and(|pool| pool.server_needs_auth(&name)),
             enabled: server_cfg.is_enabled(),
             required: server_cfg.required,
             command: server_cfg.command.clone(),
             url: server_cfg.url.clone(),
-            connected: false,
+            connected: pool
+                .as_ref()
+                .is_some_and(|pool| pool.connected_servers().contains(&name.as_str())),
             enabled_tools: server_cfg.enabled_tools.clone(),
             disabled_tools: server_cfg.disabled_tools.clone(),
         });
     }
     servers.sort_by(|a, b| a.name.cmp(&b.name));
-
     Ok(Json(McpServersResponse { servers }))
 }
 
@@ -3974,40 +4103,75 @@ async fn list_mcp_tools(
     State(state): State<RuntimeApiState>,
     Query(query): Query<McpToolsQuery>,
 ) -> Result<Json<McpToolsResponse>, ApiError> {
-    // Double-checked init: hold the state-level slot mutex only long enough
-    // to grab (or lazily create) the pool handle. connect_all can stall on a
-    // slow MCP server and must not run under the slot lock.
-    let pool_handle = {
-        let mut pool_slot = state.mcp_pool.lock().await;
-        match pool_slot.as_ref() {
-            Some(pool) => Some(Arc::clone(pool)),
-            None if query.connect => {
-                let mcp_config_path = state.config.read().mcp_config_path();
-                let plugin_registry = state
-                    .plugin_discovery
-                    .registry_for_workspace(&state.workspace);
-                let new_pool = McpPool::from_config_path_with_workspace_and_plugins(
-                    &mcp_config_path,
-                    &state.workspace,
-                    plugin_registry,
-                )
-                .map_err(|e| ApiError::internal(format!("Failed to load MCP config: {e}")))?;
-                let handle = Arc::new(Mutex::new(new_pool));
-                pool_slot.replace(Arc::clone(&handle));
-                Some(handle)
-            }
-            None => None,
-        }
+    // An explicit connection request must not inherit the tool dispatcher's
+    // best-effort reload behavior: unreadable/revoked sources fail closed.
+    let fresh_config = if query.connect {
+        Some(mcp_management_config(&state)?.0)
+    } else {
+        None
     };
-
-    let Some(pool_handle) = pool_handle else {
-        return Ok(Json(McpToolsResponse { tools: Vec::new() }));
+    let Some(pool_handle) = mcp_pool_handle(&state, query.connect).await? else {
+        return Ok(Json(McpToolsResponse {
+            tools: Vec::new(),
+            connections: Vec::new(),
+        }));
     };
-
     let mut pool = pool_handle.lock().await;
-    if query.connect {
-        let _errors = pool.connect_all().await;
+    if fresh_config
+        .as_ref()
+        .is_some_and(|config| !pool.config_matches(config))
+    {
+        let error =
+            anyhow::anyhow!("MCP configuration changed; reload it before connecting this server");
+        let names = query
+            .server
+            .clone()
+            .map(|name| vec![name])
+            .unwrap_or_else(|| pool.server_names());
+        return Ok(Json(McpToolsResponse {
+            tools: Vec::new(),
+            connections: names
+                .iter()
+                .map(|name| mcp_connection_outcome(&pool, name, Some(&error)))
+                .collect(),
+        }));
     }
+    let errors = if query.connect {
+        if let Some(server) = query.server.as_deref() {
+            match pool.get_or_connect(server).await {
+                Ok(_) => Vec::new(),
+                Err(error) => vec![(server.to_owned(), error)],
+            }
+        } else {
+            pool.connect_all().await
+        }
+    } else {
+        Vec::new()
+    };
+    let mut names = query
+        .server
+        .clone()
+        .map(|name| vec![name])
+        .unwrap_or_else(|| pool.server_names());
+    for (server, _) in &errors {
+        if !names.contains(server) {
+            names.push(server.clone());
+        }
+    }
+    names.sort();
+    let connections = names
+        .iter()
+        .map(|name| {
+            mcp_connection_outcome(
+                &pool,
+                name,
+                errors
+                    .iter()
+                    .find(|(server, _)| server == name)
+                    .map(|(_, error)| error),
+            )
+        })
+        .collect();
 
     let mut tools = Vec::new();
     for (prefixed_name, tool) in pool.all_tools() {
@@ -4032,7 +4196,7 @@ async fn list_mcp_tools(
 
     tools.sort_by(|a, b| a.server.cmp(&b.server).then_with(|| a.name.cmp(&b.name)));
 
-    Ok(Json(McpToolsResponse { tools }))
+    Ok(Json(McpToolsResponse { tools, connections }))
 }
 
 /// `GET /v1/apps/mcp/servers/{name}` — fetch a single server's redacted config.
@@ -4040,34 +4204,26 @@ async fn get_mcp_server(
     State(state): State<RuntimeApiState>,
     Path(name): Path<String>,
 ) -> Result<Json<McpServerDetail>, ApiError> {
-    let mcp_config_path = state.config.read().mcp_config_path();
-    let plugin_registry = state
-        .plugin_discovery
-        .registry_for_workspace(&state.workspace);
-    let config = crate::mcp::load_config_with_workspace_and_plugins(
-        &mcp_config_path,
-        &state.workspace,
-        plugin_registry.as_ref(),
-    )
-    .map_err(|e| ApiError::internal(format!("Failed to load MCP config: {e}")))?;
-
+    let (config, origins) = mcp_management_config(&state)?;
     let server_cfg = config
         .servers
         .get(&name)
         .ok_or_else(|| ApiError::not_found(format!("MCP server '{name}' not found")))?;
-
-    let connected = {
-        let pool_slot = state.mcp_pool.lock().await;
-        pool_slot.as_ref().is_some_and(|pool_handle| {
-            pool_handle
-                .try_lock()
-                .is_ok_and(|p| p.connected_servers().contains(&name.as_str()))
-        })
+    let handle = mcp_pool_handle(&state, false).await?;
+    let pool = match handle.as_ref() {
+        Some(handle) => Some(handle.lock().await),
+        None => None,
     };
-
-    Ok(Json(McpServerDetail::from_config(
-        &name, server_cfg, connected,
-    )))
+    let connected = pool
+        .as_ref()
+        .is_some_and(|pool| pool.connected_servers().contains(&name.as_str()));
+    let mut detail = McpServerDetail::from_config(&name, server_cfg, connected);
+    detail.origin = origins.get(&name).copied().unwrap_or("unknown");
+    detail.writable = detail.origin == "global";
+    detail.auth_required = pool
+        .as_ref()
+        .is_some_and(|pool| pool.server_needs_auth(&name));
+    Ok(Json(detail))
 }
 
 /// `POST /v1/apps/mcp/servers` — add a new server to the persistent config.
@@ -4105,6 +4261,13 @@ async fn create_mcp_server(
     }
 
     let mcp_config_path = state.config.read().mcp_config_path();
+
+    if mcp_management_config(&state)?.0.servers.contains_key(&name) {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: format!("MCP server '{name}' already exists in the effective configuration"),
+        });
+    }
 
     // Build the config entry from the request.
     let new_cfg = mcp_server_config_from_write_request(req, None);
@@ -4147,6 +4310,7 @@ async fn update_mcp_server(
             .map_err(|e| ApiError::bad_request(e.to_string()))?;
     }
 
+    require_writable_mcp_server(&state, &name)?;
     let mcp_config_path = state.config.read().mcp_config_path();
 
     let updated_cfg = {
@@ -4156,7 +4320,26 @@ async fn update_mcp_server(
             .servers
             .get_mut(&name)
             .ok_or_else(|| ApiError::not_found(format!("MCP server '{name}' not found")))?;
+        let previous_target = (
+            existing.command.clone(),
+            existing.args.clone(),
+            existing.url.clone(),
+            existing.transport.clone(),
+        );
         apply_write_request_to_config(req, existing);
+        let target_changed = previous_target
+            != (
+                existing.command.clone(),
+                existing.args.clone(),
+                existing.url.clone(),
+                existing.transport.clone(),
+            );
+        if target_changed && mcp_credential_configured(existing) {
+            return Err(ApiError {
+                status: StatusCode::CONFLICT,
+                message: "Clear this connector's credential configuration before changing its command, arguments, URL, or transport; retained credentials cannot be forwarded to a different target".to_owned(),
+            });
+        }
         if existing.command.is_none() && existing.url.is_none() {
             return Err(ApiError::bad_request(
                 "Either 'command' or 'url' must remain configured for an MCP server",
@@ -4186,6 +4369,7 @@ async fn delete_mcp_server(
     State(state): State<RuntimeApiState>,
     Path(name): Path<String>,
 ) -> Result<Json<McpServerActionReceipt>, ApiError> {
+    require_writable_mcp_server(&state, &name)?;
     let mcp_config_path = state.config.read().mcp_config_path();
 
     crate::mcp::remove_server_config(&mcp_config_path, &name).map_err(|e| {
@@ -4207,6 +4391,7 @@ async fn delete_mcp_server(
         name,
         action: "deleted",
         ok: true,
+        connection: None,
     }))
 }
 
@@ -4215,6 +4400,7 @@ async fn enable_mcp_server(
     State(state): State<RuntimeApiState>,
     Path(name): Path<String>,
 ) -> Result<Json<McpServerActionReceipt>, ApiError> {
+    require_writable_mcp_server(&state, &name)?;
     let mcp_config_path = state.config.read().mcp_config_path();
 
     crate::mcp::set_server_enabled(&mcp_config_path, &name, true).map_err(|e| {
@@ -4236,6 +4422,7 @@ async fn enable_mcp_server(
         name,
         action: "enabled",
         ok: true,
+        connection: None,
     }))
 }
 
@@ -4244,6 +4431,7 @@ async fn disable_mcp_server(
     State(state): State<RuntimeApiState>,
     Path(name): Path<String>,
 ) -> Result<Json<McpServerActionReceipt>, ApiError> {
+    require_writable_mcp_server(&state, &name)?;
     let mcp_config_path = state.config.read().mcp_config_path();
 
     crate::mcp::set_server_enabled(&mcp_config_path, &name, false).map_err(|e| {
@@ -4265,44 +4453,45 @@ async fn disable_mcp_server(
         name,
         action: "disabled",
         ok: true,
+        connection: None,
     }))
 }
 
-/// `POST /v1/apps/mcp/servers/{name}/reconnect` — drop the cached pool entry
-/// for this server so it re-initializes on the next call that needs tools.
+/// `POST /v1/apps/mcp/servers/{name}/reconnect` — retry only this server and
+/// return the actual result without replacing healthy sibling connections.
 async fn reconnect_mcp_server(
     State(state): State<RuntimeApiState>,
     Path(name): Path<String>,
 ) -> Result<Json<McpServerActionReceipt>, ApiError> {
-    // Verify the server exists in the config.
-    let mcp_config_path = state.config.read().mcp_config_path();
-    let plugin_registry = state
-        .plugin_discovery
-        .registry_for_workspace(&state.workspace);
-    let config = crate::mcp::load_config_with_workspace_and_plugins(
-        &mcp_config_path,
-        &state.workspace,
-        plugin_registry.as_ref(),
-    )
-    .map_err(|e| ApiError::internal(format!("Failed to load MCP config: {e}")))?;
-
+    let (config, _) = mcp_management_config(&state)?;
     if !config.servers.contains_key(&name) {
         return Err(ApiError::not_found(format!(
             "MCP server '{name}' not found"
         )));
     }
-
-    // Drop the whole pool so the next connect_all call recreates all
-    // connections from the current on-disk config.
-    {
-        let mut pool_slot = state.mcp_pool.lock().await;
-        *pool_slot = None;
-    }
-
+    let handle = mcp_pool_handle(&state, true)
+        .await?
+        .ok_or_else(|| ApiError::internal("MCP pool unavailable"))?;
+    let mut pool = handle.lock().await;
+    let error = if !config.servers[&name].is_enabled() {
+        Some(anyhow::anyhow!("MCP server '{name}' is disabled"))
+    } else if !pool.config_matches(&config) {
+        Some(anyhow::anyhow!(
+            "MCP configuration changed; reload it before retrying this server"
+        ))
+    } else {
+        pool.retry_connection(&name).await.err()
+    };
+    let connection = mcp_connection_outcome(&pool, &name, error.as_ref());
     Ok(Json(McpServerActionReceipt {
         name,
-        action: "reconnect_scheduled",
-        ok: true,
+        action: if error.is_none() {
+            "reconnected"
+        } else {
+            "reconnect_failed"
+        },
+        ok: error.is_none() && connection.connected,
+        connection: Some(connection),
     }))
 }
 
@@ -4337,6 +4526,18 @@ fn mcp_server_config_from_write_request(
         runtime_added: false,
         allow_private_network: false,
     }
+}
+
+/// Nonsecret indicator and retargeting guard. Treat environment and OAuth
+/// configuration as authority even when it only references a credential.
+fn mcp_credential_configured(cfg: &crate::mcp::McpServerConfig) -> bool {
+    !cfg.env.is_empty()
+        || !cfg.headers.is_empty()
+        || !cfg.env_headers.is_empty()
+        || cfg.bearer_token_env_var.is_some()
+        || cfg.oauth.is_some()
+        || !cfg.scopes.is_empty()
+        || cfg.oauth_resource.is_some()
 }
 
 /// Apply a partial update from a PATCH request onto an existing config entry.

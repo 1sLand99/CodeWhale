@@ -5084,6 +5084,12 @@ impl McpPool {
         names
     }
 
+    /// Compare against the freshly authorized merged configuration without
+    /// reloading or disconnecting any sibling transport.
+    pub(crate) fn config_matches(&self, config: &McpConfig) -> bool {
+        hash_mcp_config(config) == self.config_hash
+    }
+
     /// Whether every configured MCP source still has the mtime this pool last
     /// read, i.e. whether `connect_all` would find anything new.
     ///
