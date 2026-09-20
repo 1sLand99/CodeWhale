@@ -28,7 +28,11 @@
 //! awake forever, which is worse than the problem this solves.
 
 #[cfg(unix)]
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
+// Only the macOS and Linux inhibitors spawn anything; every other Unix
+// (Android, the BSDs, illumos) is a no-op and would see these as dead.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use std::process::{Command, Stdio};
 
 /// An idle-sleep assertion held for as long as this value lives.
 pub struct SleepGuard {
@@ -105,7 +109,7 @@ fn start_inhibitor() -> Option<Child> {
     None
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn spawn(program: &str, args: &[&str]) -> Option<Child> {
     Command::new(program)
         .args(args)
