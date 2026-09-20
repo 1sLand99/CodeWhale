@@ -101,6 +101,7 @@ mod diagnostics;
 mod git;
 mod jobs;
 mod lsp;
+mod mcp_import;
 mod memory_lens;
 mod mobile;
 mod plans;
@@ -1359,6 +1360,10 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .route(
             "/v1/skills/{name}",
             post(set_skill_enabled).delete(uninstall_skill_api),
+        )
+        .route(
+            "/v1/apps/mcp/imports",
+            get(mcp_import::preview).post(mcp_import::apply),
         )
         .route(
             "/v1/apps/mcp/servers",

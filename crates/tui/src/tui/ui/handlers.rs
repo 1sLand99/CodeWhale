@@ -672,6 +672,7 @@ pub(crate) async fn handle_mcp_ui_action(
     let snapshot_live_pool = matches!(&action, crate::tui::app::McpUiAction::Show);
     let discover = mcp_ui_action_refreshes_discovery(&action);
 
+    let approve_import = matches!(&action, crate::tui::app::McpUiAction::ImportApprove { .. });
     let action_result = match action {
         crate::tui::app::McpUiAction::Diagnose { name } => {
             let receipt = mcp_server_diagnosis(app, &name);
@@ -765,27 +766,47 @@ pub(crate) async fn handle_mcp_ui_action(
             })
         }
         crate::tui::app::McpUiAction::ImportList => {
-            let text = mcp_external_import_status_text(&app.workspace);
-            message = Some(text);
-            Ok(())
-        }
-        crate::tui::app::McpUiAction::ImportApprove { name } => {
-            match mcp_import_apply(&app.workspace, &path, &name, true) {
-                Ok(msg) => {
-                    changed = msg.contains("Imported");
-                    message = Some(msg);
+            let path = path.clone();
+            let workspace = app.workspace.clone();
+            let plugins = app.plugin_registry.clone();
+            #[cfg(test)]
+            let ticket = crate::test_support::env_scope_ticket();
+            match tokio::task::spawn_blocking(move || {
+                #[cfg(test)]
+                let _membership = crate::test_support::join_env_scope(ticket);
+                mcp_external_import_status_text(&workspace, &path, plugins.as_ref())
+            })
+            .await
+            {
+                Ok(text) => {
+                    message = Some(text);
                     Ok(())
                 }
-                Err(err) => Err(err),
+                Err(_) => Err(anyhow::anyhow!("MCP import preview failed")),
             }
         }
-        crate::tui::app::McpUiAction::ImportDecline { name } => {
-            match mcp_import_apply(&app.workspace, &path, &name, false) {
-                Ok(msg) => {
+        crate::tui::app::McpUiAction::ImportApprove { name }
+        | crate::tui::app::McpUiAction::ImportDecline { name } => {
+            let approve = approve_import;
+            let path = path.clone();
+            let workspace = app.workspace.clone();
+            let plugins = app.plugin_registry.clone();
+            #[cfg(test)]
+            let ticket = crate::test_support::env_scope_ticket();
+            match tokio::task::spawn_blocking(move || {
+                #[cfg(test)]
+                let _membership = crate::test_support::join_env_scope(ticket);
+                mcp_import_apply(&workspace, &path, plugins.as_ref(), &name, approve)
+            })
+            .await
+            {
+                Ok(Ok(msg)) => {
+                    changed = approve;
                     message = Some(msg);
                     Ok(())
                 }
-                Err(err) => Err(err),
+                Ok(Err(err)) => Err(err),
+                Err(_) => Err(anyhow::anyhow!("MCP import failed")),
             }
         }
         crate::tui::app::McpUiAction::Validate | crate::tui::app::McpUiAction::Reload => Ok(()),
