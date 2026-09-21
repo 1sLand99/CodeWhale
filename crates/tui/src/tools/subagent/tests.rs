@@ -3716,6 +3716,51 @@ fn direct_consultant_aliases_apply_role_reasoning_default_after_inheritance() {
     );
 }
 
+/// A `Faster`/`Auto` child on a pair the router has no cheap sibling for used
+/// to run on the parent model at the parent's price with nothing said. The
+/// fallback stays — the router must not invent a model — but it now carries a
+/// note, so the operator can see why the child was not cheaper.
+#[test]
+fn a_fast_lane_the_router_cannot_serve_carries_a_note() {
+    let mut unknown = stub_runtime_for_provider("moonshot");
+    unknown.model = "kimi-k3".to_string();
+    let route = worker_profile_subagent_assignment_route(
+        &unknown,
+        &ModelRoute::Faster,
+        SubAgentThinking::Auto,
+        &FleetRole::Worker,
+    );
+    assert_eq!(route.model, "kimi-k3", "the child still runs on the parent");
+    let note = route
+        .route_note
+        .expect("an unserved fast lane must be visible, not silent");
+    assert!(
+        note.contains("kimi-k3") && note.contains("parent price"),
+        "{note}"
+    );
+
+    // A pair the route table does know keeps its sibling and stays quiet.
+    let mut served = stub_runtime_for_provider("moonshot");
+    served.model = "kimi-k2.7-code".to_string();
+    let route = worker_profile_subagent_assignment_route(
+        &served,
+        &ModelRoute::Faster,
+        SubAgentThinking::Auto,
+        &FleetRole::Worker,
+    );
+    assert_eq!(route.model, "kimi-k2.6");
+    assert_eq!(route.route_note, None);
+
+    // Inherit never asked for a fast lane, so there is nothing to report.
+    let route = worker_profile_subagent_assignment_route(
+        &unknown,
+        &ModelRoute::Inherit,
+        SubAgentThinking::Auto,
+        &FleetRole::Worker,
+    );
+    assert_eq!(route.route_note, None);
+}
+
 /// The role name has to survive the wire, or receipts and resumed sessions
 /// silently reclassify a consultant as the default worker.
 #[test]
@@ -16528,6 +16573,14 @@ async fn faster_route_on_provider_without_known_sibling_stays_on_parent_model() 
             !route.model.contains("deepseek"),
             "no DeepSeek id may be fabricated: {route:?}"
         );
+        // Staying on the parent is right; staying there quietly is not, so the
+        // same unknown family that must not fabricate an id must also say why
+        // the faster lane resolved to the parent.
+        let note = route
+            .route_note
+            .as_deref()
+            .expect("an unserved fast lane must be visible, not silent");
+        assert!(note.contains("qwen3:32b"), "{note}");
     }
 }
 

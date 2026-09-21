@@ -213,6 +213,25 @@ pub(crate) fn provider_router_candidates(
     }
 }
 
+/// The loud half of `RouterCandidates::cheap == None`.
+///
+/// `None` is a legitimate answer for a pair this router knows to be
+/// single-tier, and a misconfiguration for a pair it has never heard of; both
+/// land the child on the parent model at the parent's price. A caller that was
+/// asked for a fast lane attaches this where the route is shown, so
+/// `Faster`/`Auto` never resolves to full price without saying so.
+#[must_use]
+pub(crate) fn missing_fast_sibling_note(provider: ApiProvider, model: &str) -> String {
+    // The model id is bounded so an absurd route cannot crowd the receipt it
+    // travels on (`ChildRouteReceipt::fallback_note`, 1 KiB gate).
+    let model: String = model.trim().chars().take(64).collect();
+    format!(
+        "no cheap sibling for {}/{}; the child runs on the parent model at parent price — pin a child model to choose",
+        provider.as_str(),
+        model
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AutoRouteSource {
     FlashRouter,

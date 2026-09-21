@@ -710,8 +710,10 @@ pub struct ChildRouteReceipt {
     pub provider_id: String,
     pub model_id: String,
     pub route_source: String,
-    /// Present only when the dispatch fell back past an unusable pinned
-    /// provider: names the pin and the reason (#5529 mode 2).
+    /// Present when the dispatch could not run the route it was asked for:
+    /// it names either the unusable pinned provider and the reason
+    /// (#5529 mode 2) or the requested fast lane the router had no cheap
+    /// sibling for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_note: Option<String>,
     pub requested_reasoning: String,
@@ -15528,6 +15530,12 @@ async fn bind_spawn_model_route(
         request.thinking,
     )
     .await;
+    // A fast lane the router could not serve is a fallback too: the note rides
+    // the receipt field the pinned-provider fallback already uses (#5529 mode
+    // 2) without relabelling where the model came from.
+    if fallback_note.is_none() {
+        fallback_note = route.route_note.clone();
+    }
     let model = ensure_subagent_model_for_provider(runtime, &route.model_route, route.model)?;
     if let Some(rebound) = runtime
         .client
@@ -16146,6 +16154,11 @@ pub(crate) struct SubAgentResolvedRoute {
     pub(crate) model: String,
     pub(crate) reasoning_effort: Option<String>,
     pub(crate) tuning: RequestTuning,
+    /// Set when the requested route could not be served as asked and the
+    /// dispatch fell back to the parent model — today, a `Faster`/`Auto` lane
+    /// the router has no cheap sibling for. The spawn receipt carries it to
+    /// the operator, so the fallback is visible instead of silent.
+    pub(crate) route_note: Option<String>,
 }
 
 impl SubAgentResolvedRoute {
@@ -16160,6 +16173,7 @@ impl SubAgentResolvedRoute {
             model,
             reasoning_effort,
             tuning,
+            route_note: None,
         }
     }
 }
@@ -16271,14 +16285,23 @@ fn worker_profile_subagent_assignment_route(
 ) -> SubAgentResolvedRoute {
     let candidates = subagent_router_candidates(runtime);
     let mut requested_fast_lane = false;
+    let mut route_note = None;
     let model = match model_route {
         ModelRoute::Fixed(model) => model.clone(),
         ModelRoute::Faster | ModelRoute::Auto => {
             requested_fast_lane = true;
-            candidates
-                .cheap
-                .clone()
-                .unwrap_or_else(|| runtime.model.clone())
+            match candidates.cheap.clone() {
+                Some(cheap) => cheap,
+                None => {
+                    // Staying on the parent is correct; staying there quietly
+                    // is what cost money, so the route says why.
+                    route_note = Some(crate::model_routing::missing_fast_sibling_note(
+                        runtime.client.api_provider(),
+                        &runtime.model,
+                    ));
+                    runtime.model.clone()
+                }
+            }
         }
         ModelRoute::Inherit => runtime.model.clone(),
     };
@@ -16293,7 +16316,9 @@ fn worker_profile_subagent_assignment_route(
         role_reasoning_default.as_deref(),
     );
 
-    SubAgentResolvedRoute::new(model_route.clone(), model, reasoning_effort)
+    let mut resolved = SubAgentResolvedRoute::new(model_route.clone(), model, reasoning_effort);
+    resolved.route_note = route_note;
+    resolved
 }
 
 fn subagent_reasoning_effort_for_request(
