@@ -273,6 +273,11 @@ impl Engine {
         // built-in default; an explicit 0 waits indefinitely.
         let wait = self.config.user_input_timeout.unwrap_or(USER_INPUT_TIMEOUT);
         let started = std::time::Instant::now();
+        // One absolute deadline for the whole wait. `select!` drops the losing
+        // branches whenever the heartbeat wins, so a relative `timeout(wait,
+        // ..)` rebuilt per iteration restarted from zero at every tick and,
+        // with the tick shorter than the timeout, never fired at all.
+        let deadline = (!wait.is_zero()).then(|| tokio::time::Instant::now() + wait);
         let mut heartbeat = tokio::time::interval(WAIT_HEARTBEAT);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         heartbeat.tick().await;
@@ -297,10 +302,11 @@ impl Engine {
                     ));
                 }
                 result = async {
-                    if wait.is_zero() {
-                        Ok(self.rx_user_input.recv().await)
-                    } else {
-                        tokio::time::timeout(wait, self.rx_user_input.recv()).await
+                    match deadline {
+                        None => Ok(self.rx_user_input.recv().await),
+                        Some(deadline) => {
+                            tokio::time::timeout_at(deadline, self.rx_user_input.recv()).await
+                        }
                     }
                 } => {
                     match result {
@@ -558,6 +564,35 @@ mod tests {
         );
 
         task.abort();
+    }
+
+    /// The user-input deadline has to survive the #6184 heartbeat. Under test
+    /// the heartbeat ticks every 50 ms, so a 200 ms timeout that is rebuilt on
+    /// every tick never fires and the turn parks forever; the outer guard here
+    /// is what turns that hang into a failure.
+    #[tokio::test]
+    async fn user_input_deadline_is_not_reset_by_the_wait_heartbeat() {
+        let (mut engine, _handle) = Engine::new(
+            EngineConfig {
+                user_input_timeout: Some(Duration::from_millis(200)),
+                terminal_chrome_enabled: false,
+                ..EngineConfig::default()
+            },
+            &Config::default(),
+        );
+        let request = UserInputRequest {
+            questions: Vec::new(),
+        };
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(3),
+            engine.await_user_input("user-input-deadline", request),
+        )
+        .await
+        .expect("a bounded user-input wait must end at its own deadline");
+        assert!(
+            matches!(outcome, Err(ToolError::Timeout { .. })),
+            "expected the configured timeout, got {outcome:?}"
+        );
     }
 
     async fn assert_required_fixture(source: ClaimSource, action: HostAction) {
