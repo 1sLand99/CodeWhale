@@ -1179,6 +1179,11 @@ fn build_preview_lines(session: &SavedSession, locale: Locale) -> Vec<String> {
                 .to_string(),
         ),
     );
+    // Known limitation: this count, like the list row's, is the persisted
+    // total and so still includes the runtime traffic the body below hides.
+    // `session_peek` excludes it, but the row is rendered from the session
+    // index without loading messages, so filtering only the preview would
+    // contradict the row the person just selected on the same screen.
     out.push(
         tr(locale, MessageId::SessionsPreviewMessagesModel)
             .replace("{count}", &session.metadata.message_count.to_string())
@@ -1190,6 +1195,17 @@ fn build_preview_lines(session: &SavedSession, locale: Locale) -> Vec<String> {
     out.push("".to_string());
 
     for message in &session.messages {
+        // Runtime control traffic is persisted with `role = "user"` because
+        // strict chat templates reject any other role mid-conversation. Both
+        // of the surfaces that already render a session drop it on this same
+        // predicate -- the live transcript in `history_cells_from_message`
+        // and the read-only pane in `session_peek::build_peek`. Printing it
+        // here attributed the runtime's own bookkeeping to the person: an
+        // Operate session previewed as `USER:` followed by the whole
+        // `<codewhale:runtime_event kind="operate_contract">` envelope.
+        if crate::runtime_handoff::is_internal_runtime_handoff(message) {
+            continue;
+        }
         let text = message_text_for_history(message, locale);
         if text.trim().is_empty() {
             continue;
@@ -1684,6 +1700,35 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("session-with-a-long-identifier")),
             "the row truncates the id; the preview is where the full handle lives (#6014)"
+        );
+    }
+
+    /// The preview is a read-only view of a saved session, and runtime
+    /// control traffic rides `role = "user"` on disk. Rendering it verbatim
+    /// opened every Operate-mode preview with `USER:` and the whole internal
+    /// `operate_contract` envelope, attributing the runtime's own bookkeeping
+    /// to the person.
+    #[test]
+    fn preview_hides_internal_runtime_traffic() {
+        let saved = saved_session_with_messages(vec![
+            crate::runtime_handoff::operate_contract_runtime_message(),
+            text_message("user", "ship the release"),
+            text_message("assistant", "on it"),
+        ]);
+
+        let preview = build_preview_lines(&saved, Locale::En).join("\n");
+
+        assert!(
+            !preview.contains("codewhale:runtime_event"),
+            "internal runtime traffic must not be shown to a person: {preview}"
+        );
+        assert!(
+            !preview.contains("Input provenance:"),
+            "the runtime provenance envelope must not leak either: {preview}"
+        );
+        assert!(
+            preview.contains("ship the release") && preview.contains("on it"),
+            "the person's own conversation still belongs in the preview: {preview}"
         );
     }
 
