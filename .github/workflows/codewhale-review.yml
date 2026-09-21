@@ -261,7 +261,7 @@ jobs:
           CLASS='LLM error: HTTP (401|402|403|408|429|5[0-9][0-9])|Provider plan quota exhausted|Authentication failed|Authorization failed|Rate limit exceeded|Server error \([0-9]{3}\)|Network error|Request timed out'
           NONRUN="Review pass [0-9]+/[0-9]+ request failed: ([A-Za-z ]+ request failed: )?($CLASS)"
           if echo "$OUTPUT" | grep -qE "$NONRUN"; then
-            REASON=$(echo "$OUTPUT" | grep -oE "$NONRUN[^\"]{0,80}" | head -1)
+            REASON=$(echo "$OUTPUT" | grep -oE "${NONRUN}[^\"]{0,80}" | head -1)
             echo "::warning::Codewhale review could not run (${REASON}). The PR is not blocked — provider funding/config is founder-gated."
             echo "Codewhale review: not run (provider unavailable; this is not a clean-review result)." >> "$GITHUB_STEP_SUMMARY"
             # Silence is not success: leave one visible, idempotent note on the
