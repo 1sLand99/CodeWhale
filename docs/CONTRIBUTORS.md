@@ -28,7 +28,7 @@ notes, and relevant issue/PR comments.
 ## Contributors by time
 
 <details open>
-<summary><strong>v0.9.14 — edit safety, session recovery, and runtime surfaces</strong></summary>
+<summary><strong>v0.10.0 — redesigned workbench, session recovery, and runtime surfaces</strong></summary>
 
 **Merged or adapted contributions**
 
