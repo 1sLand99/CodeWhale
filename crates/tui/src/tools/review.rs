@@ -1475,11 +1475,15 @@ impl ToolSpec for ReviewTool {
             let response = match client.create_message(request).await {
                 Ok(response) => response,
                 Err(error) => {
+                    // Alternate format walks the chain: the outermost context is
+                    // the bare "<wire> API request failed", and the `LlmError`
+                    // beneath it names the class (quota, auth, rate limit, 5xx,
+                    // network) that the reader and the CI non-run classifier need.
                     return Ok(review_error_with_usage(
                         &route,
                         &usage,
                         format!(
-                            "Review pass {}/{} request failed: {error}; no partial review was accepted.",
+                            "Review pass {}/{} request failed: {error:#}; no partial review was accepted.",
                             index + 1,
                             plan.as_ref().map_or(1, |plan| plan.passes.len())
                         ),
