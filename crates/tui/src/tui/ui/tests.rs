@@ -12269,6 +12269,68 @@ async fn live_steer_crosses_message_submit_transform_exactly_once() {
     );
 }
 
+/// `turn_loop` commits a steer as `pending.commit().trim()`. The UI used to
+/// hand `EngineHandle::steer` the untrimmed text and keep that same copy for
+/// matching, so any steer carrying a composer newline differed from its own
+/// record by whitespace alone, never matched, was never promoted, and left
+/// the "sending into this turn" card showing a message the transcript had
+/// already delivered — the duplicate that would not clear.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn a_steer_settles_even_though_the_engine_stored_it_trimmed() {
+    let _environment = crate::test_support::lock_test_env();
+    let mut app = create_test_app();
+    let session = super::event_loop::ensure_runtime_session_id(&mut app);
+    app.api_messages = std::sync::Arc::new(vec![text_message("user", "original request")]);
+    app.is_loading = true;
+    let mut engine = crate::core::engine::mock_engine_handle();
+
+    attempt_steer_with_queue_fallback(
+        &mut app,
+        &Config::default(),
+        &engine.handle,
+        QueuedMessage::new("check the job status\n".to_string(), None),
+        DispatchRecovery::Immediate,
+    )
+    .await;
+    // The UI now sends exactly what the engine will store, so the held copy
+    // and the record cannot differ by whitespace alone.
+    assert_eq!(
+        engine.rx_steer.recv().await.as_deref(),
+        Some("check the job status"),
+        "the composer newline must not reach the engine"
+    );
+
+    app.is_loading = false;
+    let model = app.model.clone();
+    let workspace = app.workspace.clone();
+    // The engine's record carries the trimmed form, which is what
+    // `turn_loop` stores for a committed steer.
+    assert!(super::event_loop::apply_engine_session_projection(
+        &mut app,
+        &Config::default(),
+        EngineEvent::SessionUpdated {
+            session_id: session,
+            messages: std::sync::Arc::new(vec![
+                text_message("user", "original request"),
+                text_message("user", "check the job status"),
+            ]),
+            system_prompt: None,
+            model,
+            workspace,
+        }
+    ));
+
+    assert!(
+        app.inflight_steers.is_empty(),
+        "a trimmed record must still settle the steer it came from"
+    );
+    assert!(
+        build_pending_input_preview(&app).pending_steers.is_empty(),
+        "the pending card must clear once the turn has delivered the message"
+    );
+}
+
 /// #6190: steering did not place the steer as the newest transcript entry —
 /// it was painted at send time, so it sat above assistant work the engine's
 /// record places before it, and the live transcript disagreed with the
