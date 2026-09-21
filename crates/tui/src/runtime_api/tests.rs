@@ -13897,10 +13897,10 @@ async fn runtime_info_advertises_terminal_capabilities() -> Result<()> {
         .json()
         .await?;
     // A GPUI client gates its terminal pane on these. They are true where the
-    // routes serve bytes and false where the owner is Unix-only — the flag
-    // must not claim a capability the build cannot serve, so assert the
-    // platform's truth rather than `true`.
-    let expected = cfg!(unix);
+    // routes serve bytes and false where they answer 501 (Windows, OpenHarmony)
+    // — the flag must not claim a capability the build cannot serve, so assert
+    // the routes' own gate rather than `true`.
+    let expected = cfg!(all(unix, not(target_env = "ohos")));
     for capability in [
         "terminal_stream",
         "terminal_input",

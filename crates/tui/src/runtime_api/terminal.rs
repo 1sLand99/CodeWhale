@@ -198,13 +198,30 @@ fn open_session(
         .ok_or_else(|| ApiError::not_found(format!("no live terminal session named '{name}'")))
 }
 
+/// Run one operation against the locked session on the blocking pool.
+///
+/// The session mutex and the PTY behind it are synchronous: the agent's own
+/// tool holds the lock across a whole command, and a write to a child that
+/// stopped reading blocks until the kernel buffer drains. Neither may park a
+/// runtime worker (#6149), so a route never touches the session inline.
 #[cfg(all(unix, not(target_env = "ohos")))]
-fn lock_session(
-    session: &terminal_session::SharedSession,
-) -> Result<std::sync::MutexGuard<'_, terminal_session::TerminalSession>, ApiError> {
-    session
-        .lock()
-        .map_err(|_| ApiError::internal("terminal session lock poisoned"))
+async fn with_session<T>(
+    session: terminal_session::SharedSession,
+    operation: impl FnOnce(&mut terminal_session::TerminalSession) -> Result<T, ApiError>
+    + Send
+    + 'static,
+) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let mut guard = session
+            .lock()
+            .map_err(|_| ApiError::internal("terminal session lock poisoned"))?;
+        operation(&mut guard)
+    })
+    .await
+    .map_err(|error| ApiError::internal(error.to_string()))?
 }
 
 /// `GET /v1/terminal/{name}/output` — the resumable byte stream.
@@ -221,10 +238,13 @@ pub(super) async fn terminal_output(
     let encoding = chunk_encoding(query.format.as_deref().unwrap_or("base64"))?;
     let max_bytes = bounded_max_bytes(query.max_bytes)?;
     let cursor = query.cursor.unwrap_or(0);
-    let mut guard = lock_session(&session)?;
-    let chunk = terminal_session::read_session_since(&guard, cursor, max_bytes)
-        .map_err(ApiError::internal)?;
-    let exit = terminal_session::session_exit_status(&mut guard).map_err(ApiError::internal)?;
+    let (chunk, exit) = with_session(session, move |session| {
+        let chunk = terminal_session::read_session_since(session, cursor, max_bytes)
+            .map_err(ApiError::internal)?;
+        let exit = terminal_session::session_exit_status(session).map_err(ApiError::internal)?;
+        Ok((chunk, exit))
+    })
+    .await?;
     let running = exit.is_none();
     Ok(Json(TerminalOutputResponse {
         name,
@@ -257,12 +277,12 @@ pub(super) async fn terminal_input(
         &request.data,
         request.encoding.as_deref().unwrap_or("base64"),
     )?;
-    let guard = lock_session(&session)?;
-    terminal_session::write_bytes(&guard, &bytes).map_err(ApiError::internal)?;
-    Ok(Json(TerminalWriteResponse {
-        name,
-        written: bytes.len(),
-    }))
+    let written = bytes.len();
+    with_session(session, move |session| {
+        terminal_session::write_bytes(session, &bytes).map_err(ApiError::internal)
+    })
+    .await?;
+    Ok(Json(TerminalWriteResponse { name, written }))
 }
 
 /// `POST /v1/terminal/{name}/resize` — the window the child should draw for.
@@ -275,8 +295,10 @@ pub(super) async fn terminal_resize(
     let session = open_session(&state, &name)?;
     let rows = bounded_dimension(request.rows, "rows")?;
     let cols = bounded_dimension(request.cols, "cols")?;
-    let guard = lock_session(&session)?;
-    terminal_session::resize_session(&guard, rows, cols).map_err(ApiError::internal)?;
+    with_session(session, move |session| {
+        terminal_session::resize_session(session, rows, cols).map_err(ApiError::internal)
+    })
+    .await?;
     Ok(Json(TerminalResizeResponse { name, rows, cols }))
 }
 
@@ -291,8 +313,10 @@ pub(super) async fn terminal_kill(
     Path(name): Path<String>,
 ) -> Result<Json<TerminalKillResponse>, ApiError> {
     let session = open_session(&state, &name)?;
-    let mut guard = lock_session(&session)?;
-    terminal_session::kill_session(&mut guard).map_err(ApiError::internal)?;
+    with_session(session, |session| {
+        terminal_session::kill_session(session).map_err(ApiError::internal)
+    })
+    .await?;
     Ok(Json(TerminalKillResponse { name, killed: true }))
 }
 

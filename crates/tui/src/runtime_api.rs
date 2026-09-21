@@ -593,13 +593,14 @@ fn default_runtime_capabilities() -> RuntimeCapabilities {
         // SSE journal frames carry their durable `seq` as the event id, and the
         // thread event stream resumes from `Last-Event-ID`.
         event_stream_resume: true,
-        // The terminal family is Unix-only in this build: the owner is
-        // `#[cfg(unix)]` end to end and the Windows routes answer 501. A
-        // client must be able to feature-detect that before it offers a pane.
-        terminal_stream: cfg!(unix),
-        terminal_input: cfg!(unix),
-        terminal_resize: cfg!(unix),
-        terminal_kill: cfg!(unix),
+        // The terminal family follows the routes' own gate: the owner is
+        // `#[cfg(unix)]` end to end, and the Windows and OpenHarmony builds
+        // answer 501. A client must be able to feature-detect that before it
+        // offers a pane, so the flag must never outrun the handler.
+        terminal_stream: cfg!(all(unix, not(target_env = "ohos"))),
+        terminal_input: cfg!(all(unix, not(target_env = "ohos"))),
+        terminal_resize: cfg!(all(unix, not(target_env = "ohos"))),
+        terminal_kill: cfg!(all(unix, not(target_env = "ohos"))),
     }
 }
 
