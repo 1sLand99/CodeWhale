@@ -1686,6 +1686,18 @@ impl TaskManager {
         {
             bail!("A pinned task provider requires an explicit model");
         }
+        // The worker runs this same projection when it opens the task's
+        // thread. Running it here as well refuses an unknown mode or posture
+        // at the boundary the request crossed, instead of after the task has
+        // sat in the durable queue and a worker has claimed it.
+        crate::runtime_policy::RuntimePolicyProjection::from_request(
+            req.mode
+                .as_deref()
+                .filter(|mode| !mode.trim().is_empty())
+                .unwrap_or(&self.cfg.default_mode),
+            req.permission_posture.as_deref(),
+            req.auto_approve,
+        )?;
         validate_preallocated_task_id(&task_id)?;
 
         let task = TaskRecord {
@@ -4494,6 +4506,31 @@ mod tests {
         // `from_prompt` asks for auto-approval; the pinned posture outranks it,
         // so the thread must not silently run wider than what was requested.
         assert_eq!(request.auto_approve, Some(true));
+        Ok(())
+    }
+
+    /// The worker's thread projection refuses these postures, so admission
+    /// refuses them too: the request came through the Runtime API, and that
+    /// is where the refusal belongs, not in a worker after the task was
+    /// durably queued.
+    #[tokio::test]
+    async fn add_task_refuses_a_posture_the_thread_would_reject() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("deepseek-task-test-{}", Uuid::new_v4()));
+        let manager =
+            TaskManager::start_with_executor(test_config(root.clone()), Arc::new(MockExecutor))
+                .await?;
+
+        for posture in ["sideways", "never"] {
+            let error = manager
+                .add_task(NewTaskRequest {
+                    permission_posture: Some(posture.to_string()),
+                    ..NewTaskRequest::from_prompt("refuse me")
+                })
+                .await
+                .expect_err("a posture the thread cannot honour is refused at admission");
+            assert!(error.to_string().contains("permission posture"), "{error}");
+        }
+        assert!(manager.list_tasks(None).await?.is_empty());
         Ok(())
     }
 
