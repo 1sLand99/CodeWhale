@@ -1347,10 +1347,14 @@ impl Engine {
     /// switch would measure the next request with the previous route's
     /// tokenizer and prefix — a 256k route's 150k bill would send a 128k
     /// route straight into emergency compaction before anything was sent.
-    /// Drop the bill when the route identity, model, or limits change and let
-    /// the first request on the new route re-bill. A re-install of the same
-    /// route (every turn installs its host-resolved route) keeps the
-    /// carry-over the compaction gate relies on (#5577).
+    /// Drop the bill when the route identity, endpoint, model, or limits
+    /// change and let the first request on the new route re-bill. A
+    /// re-install of the same route (every turn installs its host-resolved
+    /// route) keeps the carry-over the compaction gate relies on (#5577).
+    /// The endpoint is part of the identity because a named custom provider
+    /// keeps its name, model string, and (usually absent) limits across a
+    /// config reload that points it at a different server, and a different
+    /// server is a different tokenizer.
     ///
     /// Known limitation: a same-route change of the system prefix is not a
     /// route change here; its size shows up as growth once the next request
@@ -1359,11 +1363,13 @@ impl Engine {
         &mut self,
         identity: &str,
         provider_id: Option<&str>,
+        endpoint: &str,
         model: &str,
         limits: Option<codewhale_config::route::RouteLimits>,
     ) {
         let same_route = self.api_provider_identity == identity
             && self.api_provider_id.as_deref() == provider_id
+            && self.api_config.active_route_base_url() == endpoint
             && self.session.model == model
             && self.active_route_limits == limits;
         if !same_route {
@@ -1384,7 +1390,14 @@ impl Engine {
         let api_config = *route.config;
         let client = route.client;
 
-        self.forget_input_bill_if_route_changes(&identity, provider_id.as_deref(), &model, limits);
+        let endpoint = route.candidate.endpoint().base_url.clone();
+        self.forget_input_bill_if_route_changes(
+            &identity,
+            provider_id.as_deref(),
+            &endpoint,
+            &model,
+            limits,
+        );
         self.api_provider = provider;
         self.api_provider_identity = identity;
         self.api_provider_id = provider_id;
@@ -1427,7 +1440,14 @@ impl Engine {
             .map(Ok)
             .unwrap_or_else(|| CodewhaleClient::from_candidate(&api_config, &route.candidate));
 
-        self.forget_input_bill_if_route_changes(&identity, provider_id.as_deref(), &model, limits);
+        let endpoint = route.candidate.endpoint().base_url.clone();
+        self.forget_input_bill_if_route_changes(
+            &identity,
+            provider_id.as_deref(),
+            &endpoint,
+            &model,
+            limits,
+        );
         self.api_provider = provider;
         self.api_provider_identity = identity;
         self.api_provider_id = provider_id;
@@ -2982,9 +3002,13 @@ impl Engine {
                     } => {
                         let identity = self.api_provider_identity.clone();
                         let provider_id = self.api_provider_id.clone();
+                        // SetModel carries no route: the endpoint stays the
+                        // one the current client is built on.
+                        let endpoint = self.api_config.active_route_base_url().to_string();
                         self.forget_input_bill_if_route_changes(
                             &identity,
                             provider_id.as_deref(),
+                            &endpoint,
                             &model,
                             route_limits,
                         );

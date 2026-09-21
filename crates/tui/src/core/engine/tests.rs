@@ -513,6 +513,64 @@ fn registry_instruction_does_not_gate_ordinary_local_work() {
 /// request with the previous route's tokenizer and prefix. Re-installing the
 /// same route keeps the carry-over #5577 relies on; a different route drops
 /// it.
+/// A named custom provider keeps its name, model string, and (absent) limits
+/// across a config reload that points it at a different server. A different
+/// server is a different tokenizer, so the bill from the old one must not
+/// measure the first request to the new one (post-merge finding on #6380).
+#[test]
+fn custom_route_endpoint_change_forgets_the_previous_bill() {
+    let mut custom = HashMap::new();
+    custom.insert(
+        "lm-studio".to_string(),
+        crate::config::ProviderConfig {
+            kind: Some("openai-compatible".to_string()),
+            base_url: Some("http://127.0.0.1:18181/v1".to_string()),
+            model: Some("local-model".to_string()),
+            api_key: Some("local-test-key".to_string()),
+            ..crate::config::ProviderConfig::default()
+        },
+    );
+    let config = Config {
+        provider: Some("lm-studio".to_string()),
+        providers: Some(crate::config::ProvidersConfig {
+            custom,
+            ..crate::config::ProvidersConfig::default()
+        }),
+        ..Config::default()
+    };
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &config);
+    let install = |engine: &mut Engine, config: &Config| {
+        let route = resolve_runtime_route(config, ApiProvider::Custom, Some("local-model"))
+            .expect("resolve lm-studio")
+            .validate()
+            .expect("preflight lm-studio");
+        engine.install_validated_runtime_route(route);
+    };
+    install(&mut engine, &config);
+    engine.session.latest_parent_input_tokens = Some(150_000);
+
+    install(&mut engine, &config);
+    assert_eq!(
+        engine.session.latest_parent_input_tokens,
+        Some(150_000),
+        "the same endpoint keeps the last bill"
+    );
+
+    let mut reloaded = config;
+    reloaded
+        .providers
+        .as_mut()
+        .and_then(|providers| providers.custom.get_mut("lm-studio"))
+        .expect("named custom provider")
+        .base_url = Some("http://127.0.0.1:18182/v1".to_string());
+    install(&mut engine, &reloaded);
+    assert_eq!(engine.api_provider_identity, "lm-studio");
+    assert_eq!(
+        engine.session.latest_parent_input_tokens, None,
+        "a new endpoint under the same name drops the old server's bill"
+    );
+}
+
 #[test]
 fn route_switch_forgets_the_previous_routes_input_bill() {
     let mut custom = HashMap::new();
