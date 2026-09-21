@@ -170,10 +170,14 @@ impl OutputBuffer {
     /// is idempotent. Does not advance `read_cursor` — the consuming
     /// tool-result path is untouched. This is the cursor arithmetic only;
     /// response-size policy belongs to the caller.
+    ///
+    /// A cursor past the head clamps to `total`: nothing is there yet, and
+    /// echoing the future cursor back as `next_cursor` would make every byte
+    /// produced before the stream reached it invisible to that client.
     fn read_since(&self, cursor: u64, max_bytes: usize) -> OutputChunk {
         let dropped = self.oldest();
         let gap = cursor < dropped;
-        let start = cursor.max(dropped);
+        let start = cursor.max(dropped).min(self.total);
         let skip = usize::try_from(start - dropped).unwrap_or(usize::MAX);
         let take = max_bytes.min(self.bytes.len().saturating_sub(skip));
         let bytes = self.bytes.iter().skip(skip).take(take).copied().collect();
@@ -1391,6 +1395,15 @@ mod tests {
         assert!(!current.gap);
         assert!(current.bytes.is_empty());
         assert_eq!(current.next_cursor, BUFFER_LIMIT as u64 + 32);
+
+        // A cursor past the head clamps to it instead of being echoed back:
+        // a client that continues from `next_cursor` must not skip the bytes
+        // the stream produces before it reaches the bogus position.
+        let beyond = wrapped.read_since(BUFFER_LIMIT as u64 + 4096, 8);
+        assert!(!beyond.gap);
+        assert!(beyond.bytes.is_empty());
+        assert_eq!(beyond.offset, BUFFER_LIMIT as u64 + 32);
+        assert_eq!(beyond.next_cursor, BUFFER_LIMIT as u64 + 32);
     }
 
     /// The session-level entry point an Engine byte stream will call: absolute
@@ -1417,12 +1430,13 @@ mod tests {
         assert_eq!(again.bytes, printed.bytes, "a replay read must not consume");
 
         // A cursor ahead of the stream is not a gap: nothing was lost, there
-        // is simply nothing there yet.
+        // is simply nothing there yet — and the answer clamps to the head so
+        // continuing from it cannot skip what arrives next.
         let ahead =
             read_session_since(&session.lock().unwrap(), printed.next_cursor + 4096, 16).unwrap();
         assert!(!ahead.gap);
         assert!(ahead.bytes.is_empty());
-        assert_eq!(ahead.next_cursor, printed.next_cursor + 4096);
+        assert_eq!(ahead.next_cursor, ahead.total);
 
         // More than one response's worth of output proves the clamp.
         let large = fresh("test-read-since-clamp");

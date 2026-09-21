@@ -1229,17 +1229,18 @@ terminal the Engine does not know about. Input is attributable by route:
   <base64|text>` — the resumable byte stream. `{name, offset, next_cursor,
   total, dropped, encoding, data, running, exit_code}`: pass `next_cursor`
   back to continue; reads never consume, so several clients may hold
-  independent cursors; `dropped` reports bytes the 512 KiB ring discarded
-- `POST /v1/terminal/{name}/input` — `{ "data", "encoding"? }`, UTF-8 text by
-  default or `base64` for exact bytes → `{ "name", "written" }`
+  independent cursors; `dropped` reports bytes the 512 KiB ring discarded,
+  and a cursor past `total` is answered from `total` rather than echoed back
+- `POST /v1/terminal/{name}/input` — `{ "data", "encoding"? }`, `base64` by
+  default (exact bytes) or `text` for UTF-8 → `{ "name", "written" }`
 - `POST /v1/terminal/{name}/resize` — `{ "rows", "cols" }` → the kernel
   window the child draws for
 - `POST /v1/terminal/{name}/kill` — end the shell; observe the exit through
   `output` (`running` / `exit_code`) rather than the acknowledgement
 
 `GET /v1/runtime/info` advertises `terminal_stream`, `terminal_input`,
-`terminal_resize` and `terminal_kill`. All four are `false` on Windows builds
-today: the owner is Unix-only, the Windows routes answer `501`, and a client
+`terminal_resize` and `terminal_kill`. All four are `false` on Windows and OpenHarmony builds
+today: the owner is Unix-only, those routes answer `501`, and a client
 should gate its terminal controls on these flags rather than discovering it
 from a failed request. Known limitations, stated because a reader would
 otherwise assume them: there is no `wait_ms` long poll (poll the cursor),
