@@ -27,6 +27,23 @@
 //! [`PluginActivationPolicy`](super::activation::PluginActivationPolicy), which
 //! describes which capability *kinds* this build will ever activate. The managed
 //! policy describes which plugin *identities* this machine may enable.
+//!
+//! # Known limitations
+//!
+//! The "no window in which a forbidden plugin is active" guarantee above is
+//! scoped to *in-process activation*: every live capability surface (MCP
+//! servers, Skills, agents, hooks, commands) reaches the plugin through
+//! [`LoadedPlugin::active`](super::types::LoadedPlugin::active), which reads
+//! the `enabled` bit that `apply_state` has already gated. This policy is
+//! **not** consulted by
+//! [`verify_plugin_state_authority`](super::registry::verify_plugin_state_authority),
+//! the execution-boundary revocation probe, which re-reads the persisted
+//! `state.json` `enabled` bit directly and never sees the in-memory registry.
+//! A [`PluginAuthority`](super::types::PluginAuthority) minted before the
+//! policy arrived and then *persisted* — today only the offline-queue
+//! `skill_provenance` receipt, which survives a restart — therefore
+//! revalidates against `state.json` alone. Closing that path means enforcing
+//! the policy at the authority boundary too, which this slice does not do.
 
 use std::collections::BTreeSet;
 use std::fs;
