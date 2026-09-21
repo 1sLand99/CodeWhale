@@ -72,10 +72,12 @@ use crate::runtime_threads::{
     CompactThreadRequest, CreateThreadRequest, ExternalApprovalDecision,
     MAX_RUNTIME_EVENT_REPLAY_TAIL, RuntimeThreadManager, RuntimeThreadManagerConfig,
     SharedRuntimeThreadManager, StartTurnRequest, SteerTurnRequest, ThreadDetail, ThreadListFilter,
-    ThreadRecord, TurnItemKind, TurnRecord, UpdateThreadRequest, UsageGroupBy, UsageTotals,
+    ThreadRecord, TurnRecord, UpdateThreadRequest, UsageGroupBy, UsageTotals,
 };
+// `TurnItemKind` is read only by the summary tests now that the route builds
+// its rows from `ThreadListFacts` instead of walking item records here.
 #[cfg(test)]
-pub(super) use crate::runtime_threads::{RuntimeTurnStatus, TurnItemLifecycleStatus};
+pub(super) use crate::runtime_threads::{RuntimeTurnStatus, TurnItemKind, TurnItemLifecycleStatus};
 use crate::session_manager::default_sessions_dir;
 #[cfg(test)]
 pub(super) use crate::session_manager::{SavedSession, SessionMetadata};
@@ -129,8 +131,9 @@ use self::sessions::{messages_from_thread_detail, session_to_detail};
 #[cfg(test)]
 use self::workspace::collect_workspace_status;
 use self::workspace::{
-    collect_workspace_git_metadata, workspace_file_read, workspace_file_search,
-    workspace_file_write, workspace_files_list, workspace_instructions, workspace_status,
+    WorkspaceGitMetadata, collect_workspace_git_metadata, workspace_file_read,
+    workspace_file_search, workspace_file_write, workspace_files_list, workspace_instructions,
+    workspace_status,
 };
 
 const RUNTIME_TOKEN_ENV: &str = "CODEWHALE_RUNTIME_TOKEN";
@@ -1886,6 +1889,22 @@ async fn ack_thread_notice(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// First-appearance dedupe that preserves the order paths were seen in.
+///
+/// The thread summary resolves git metadata per distinct workspace rather than
+/// per row. One resolution runs up to five blocking `git` processes, and rows
+/// overwhelmingly share a single workspace, so resolving per row multiplied a
+/// listing's process count by its row count.
+fn distinct_paths(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    let mut distinct: Vec<PathBuf> = Vec::new();
+    for path in paths {
+        if !distinct.contains(&path) {
+            distinct.push(path);
+        }
+    }
+    distinct
+}
+
 async fn list_threads_summary(
     State(state): State<RuntimeApiState>,
     Query(query): Query<ThreadSummaryQuery>,
@@ -1899,10 +1918,8 @@ async fn list_threads_summary(
     // to find — was invisible. Unsearched listings keep the cheap bounded read;
     // a search scans in newest-first order and stops at `limit` matches.
     //
-    // Match on the thread record *before* `get_thread_detail`. Detail is a
-    // whole-store turns+items walk, so loading it for every thread made a
-    // non-matching dashboard keystroke O(threads × (all_turns + all_items))
-    // JSON reads. Preview is filled only for matches; it is not a search key.
+    // Match on the thread record *before* harvesting row facts. Preview is
+    // filled only for rows that are returned; it is not a search key.
     let scan_limit = if search.is_some() { None } else { Some(limit) };
     let threads = state
         .runtime_threads
@@ -1910,9 +1927,9 @@ async fn list_threads_summary(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    let mut summaries = Vec::new();
+    let mut rows = Vec::new();
     for thread in threads {
-        if summaries.len() >= limit {
+        if rows.len() >= limit {
             break;
         }
         if let Some(search) = &search
@@ -1922,18 +1939,60 @@ async fn list_threads_summary(
         {
             continue;
         }
-        let detail = state
-            .runtime_threads
-            .get_thread_detail(&thread.id)
-            .await
-            .map_err(map_thread_err)?;
-        let latest_turn = detail.turns.last();
-        let latest_status =
-            latest_turn.map(|turn| format!("{:?}", turn.status).to_ascii_lowercase());
-        let pending_attention_count = detail
-            .pending_approvals
-            .len()
-            .saturating_add(detail.pending_user_inputs.len());
+        rows.push(thread);
+    }
+
+    // Harvest every returned row's facts in ONE pass over the store. Reading a
+    // whole thread detail per row made this route `rows x (all_turns +
+    // all_items)` JSON reads and parses — seconds-per-thread, so the rail timed
+    // out and went blank on a store of a few dozen threads. Preview and turn
+    // status now come from that same scan; attention comes from live state.
+    let row_ids: Vec<String> = rows.iter().map(|thread| thread.id.clone()).collect();
+
+    // Settle queued recovery receipts before reading the rows, exactly as the
+    // per-row detail read did. The flush cancels a recovered turn's pending
+    // requests, and this page's attention count reads that state, so it has to
+    // precede the scan.
+    state
+        .runtime_threads
+        .flush_recovery_receipts(&row_ids)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let facts = state
+        .runtime_threads
+        .thread_list_facts(&row_ids)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    // Resolve git metadata once per workspace, not once per row. Each
+    // resolution spawns up to five blocking `git` processes — `rev-parse
+    // --is-inside-work-tree` twice, `--abbrev-ref HEAD`, `--short HEAD` and
+    // `status --porcelain` — and rows overwhelmingly share one workspace, so a
+    // per-row resolve turned a 72-thread listing into roughly 360 process
+    // spawns, every one of them blocking whichever runtime thread ran it.
+    // One blocking task now covers every distinct workspace on the page.
+    let workspaces = distinct_paths(rows.iter().map(|thread| thread.workspace.clone()));
+    let git_by_workspace: Vec<(PathBuf, WorkspaceGitMetadata)> =
+        tokio::task::spawn_blocking(move || {
+            workspaces
+                .into_iter()
+                .map(|workspace| {
+                    let metadata = collect_workspace_git_metadata(&workspace);
+                    (workspace, metadata)
+                })
+                .collect()
+        })
+        .await
+        .map_err(|e| ApiError::internal(format!("Workspace git metadata task failed: {e}")))?;
+
+    let mut summaries = Vec::with_capacity(rows.len());
+    for thread in rows {
+        let facts = facts.get(&thread.id);
+        let latest_status = facts.and_then(|facts| facts.latest_turn_status.clone());
+        let pending_attention_count = facts.map_or(0, |facts| facts.pending_attention_count);
+        let latest_input_summary =
+            facts.and_then(|facts| facts.latest_turn_input_summary.as_deref());
 
         let title = thread
             .title
@@ -1942,44 +2001,35 @@ async fn list_threads_summary(
             .filter(|t| !t.is_empty())
             .map(|t| truncate_text(t, 72))
             .unwrap_or_else(|| {
-                latest_turn
-                    .map(|turn| {
-                        if turn.input_summary.trim().is_empty() {
+                latest_input_summary
+                    .map(|summary| {
+                        if summary.trim().is_empty() {
                             "New Thread".to_string()
                         } else {
-                            truncate_text(&turn.input_summary, 72)
+                            truncate_text(summary, 72)
                         }
                     })
                     .unwrap_or_else(|| "New Thread".to_string())
             });
 
-        let preview = detail
-            .items
-            .iter()
-            .rev()
-            .find_map(|item| match item.kind {
-                TurnItemKind::AgentMessage | TurnItemKind::UserMessage => {
-                    let text = item.detail.clone().unwrap_or_else(|| item.summary.clone());
-                    if text.trim().is_empty() {
-                        None
-                    } else {
-                        Some(truncate_text(&text, 140))
-                    }
-                }
-                _ => None,
-            })
+        let preview = facts
+            .and_then(|facts| facts.preview.as_deref())
+            .map(|text| truncate_text(text, 140))
             .unwrap_or_else(|| title.clone());
 
-        let workspace_git = collect_workspace_git_metadata(&thread.workspace);
+        let workspace_git = git_by_workspace
+            .iter()
+            .find(|(workspace, _)| workspace == &thread.workspace)
+            .map(|(_, metadata)| metadata);
         summaries.push(ThreadSummary {
             id: thread.id,
             title,
             preview,
             model: thread.model,
             mode: thread.mode,
-            branch: workspace_git.branch,
-            head: workspace_git.head,
-            dirty: workspace_git.dirty,
+            branch: workspace_git.and_then(|git| git.branch.clone()),
+            head: workspace_git.and_then(|git| git.head.clone()),
+            dirty: workspace_git.is_some_and(|git| git.dirty),
             workspace: thread.workspace,
             archived: thread.archived,
             updated_at: thread.updated_at,
