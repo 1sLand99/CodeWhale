@@ -1341,6 +1341,36 @@ impl Engine {
         format!("{message}\n\n{hint}")
     }
 
+    /// A provider's input bill describes one route's tokenization of one
+    /// prompt. The auto-compaction gate and the preflight guard lift the
+    /// honest estimate to the last bill, so a bill carried across a route
+    /// switch would measure the next request with the previous route's
+    /// tokenizer and prefix — a 256k route's 150k bill would send a 128k
+    /// route straight into emergency compaction before anything was sent.
+    /// Drop the bill when the route identity, model, or limits change and let
+    /// the first request on the new route re-bill. A re-install of the same
+    /// route (every turn installs its host-resolved route) keeps the
+    /// carry-over the compaction gate relies on (#5577).
+    ///
+    /// Known limitation: a same-route change of the system prefix is not a
+    /// route change here; its size shows up as growth once the next request
+    /// bills.
+    fn forget_input_bill_if_route_changes(
+        &mut self,
+        identity: &str,
+        provider_id: Option<&str>,
+        model: &str,
+        limits: Option<codewhale_config::route::RouteLimits>,
+    ) {
+        let same_route = self.api_provider_identity == identity
+            && self.api_provider_id.as_deref() == provider_id
+            && self.session.model == model
+            && self.active_route_limits == limits;
+        if !same_route {
+            self.session.latest_parent_input_tokens = None;
+        }
+    }
+
     /// Install a route that the host already resolved and client-preflighted.
     /// No identity guessing or config re-resolution is allowed at this
     /// boundary: the descriptor is the single authority for the turn.
@@ -1354,6 +1384,7 @@ impl Engine {
         let api_config = *route.config;
         let client = route.client;
 
+        self.forget_input_bill_if_route_changes(&identity, provider_id.as_deref(), &model, limits);
         self.api_provider = provider;
         self.api_provider_identity = identity;
         self.api_provider_id = provider_id;
@@ -1396,6 +1427,7 @@ impl Engine {
             .map(Ok)
             .unwrap_or_else(|| CodewhaleClient::from_candidate(&api_config, &route.candidate));
 
+        self.forget_input_bill_if_route_changes(&identity, provider_id.as_deref(), &model, limits);
         self.api_provider = provider;
         self.api_provider_identity = identity;
         self.api_provider_id = provider_id;
@@ -2948,6 +2980,14 @@ impl Engine {
                         mode: _,
                         route_limits,
                     } => {
+                        let identity = self.api_provider_identity.clone();
+                        let provider_id = self.api_provider_id.clone();
+                        self.forget_input_bill_if_route_changes(
+                            &identity,
+                            provider_id.as_deref(),
+                            &model,
+                            route_limits,
+                        );
                         self.session.auto_model = model.trim().eq_ignore_ascii_case("auto");
                         self.session.model = model;
                         self.config.model.clone_from(&self.session.model);
