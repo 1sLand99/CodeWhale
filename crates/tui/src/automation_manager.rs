@@ -2043,6 +2043,20 @@ fn new_run_record(
     }
 }
 
+/// The posture an automation's `auto_approve` bit stands for, in the wire
+/// spelling a task request carries.
+///
+/// A scheduled run fires with no session to inherit from, so the only authority
+/// it has is its own record — and stating it explicitly keeps the scheduled
+/// task from re-deriving a posture out of a legacy bit on every later change to
+/// what that bit means.
+fn automation_posture(auto_approve: bool) -> String {
+    crate::runtime_policy::approval_wire(crate::core::authority::posture_from_auto_approve(
+        auto_approve,
+    ))
+    .to_string()
+}
+
 fn automation_task_request(automation: &AutomationRecord) -> NewTaskRequest {
     NewTaskRequest {
         prompt: automation.prompt.clone(),
@@ -2055,6 +2069,7 @@ fn automation_task_request(automation: &AutomationRecord) -> NewTaskRequest {
         allow_shell: Some(automation.task_allow_shell()),
         trust_mode: Some(automation.task_trust_mode()),
         auto_approve: Some(automation.task_auto_approve()),
+        permission_posture: Some(automation_posture(automation.task_auto_approve())),
         owner_session_id: None,
     }
 }
@@ -2430,6 +2445,7 @@ where
                         allow_shell: Some(false),
                         trust_mode: Some(false),
                         auto_approve: Some(false),
+                        permission_posture: Some(automation_posture(false)),
                         owner_session_id: current.owner_session_id.clone(),
                     },
                     task_data_dir: task_data_dir.canonicalize()?,
@@ -4250,6 +4266,54 @@ mod tests {
         assert!(!record.task_trust_mode());
         assert!(!record.task_auto_approve());
         assert_eq!(record.delivery_mode(), AutomationDeliveryMode::Task);
+    }
+
+    #[test]
+    fn automation_requests_pin_the_posture_its_bit_stands_for() {
+        let now = Utc::now().to_rfc3339();
+        let legacy: AutomationRecord = serde_json::from_value(serde_json::json!({
+            "schema_version": CURRENT_AUTOMATION_SCHEMA_VERSION,
+            "id": Uuid::new_v4().to_string(),
+            "name": "Nightly",
+            "prompt": "Run the nightly sweep",
+            "rrule": "FREQ=DAILY",
+            "cwds": [],
+            "status": "active",
+            "created_at": now,
+            "updated_at": now
+        }))
+        .expect("legacy automation record");
+
+        // No session exists when a scheduler fires, so the request states the
+        // posture the record's own authority means instead of leaving the
+        // runtime to re-derive it from the bit.
+        assert!(legacy.auto_approve.is_none());
+        assert_eq!(
+            automation_task_request(&legacy)
+                .permission_posture
+                .as_deref(),
+            Some("ask")
+        );
+
+        let elevated: AutomationRecord = serde_json::from_value(serde_json::json!({
+            "schema_version": CURRENT_AUTOMATION_SCHEMA_VERSION,
+            "id": Uuid::new_v4().to_string(),
+            "name": "Nightly, unattended",
+            "prompt": "Run the nightly sweep",
+            "rrule": "FREQ=DAILY",
+            "cwds": [],
+            "auto_approve": true,
+            "status": "active",
+            "created_at": now,
+            "updated_at": now
+        }))
+        .expect("elevated automation record");
+        assert_eq!(
+            automation_task_request(&elevated)
+                .permission_posture
+                .as_deref(),
+            Some("full_access")
+        );
     }
 
     #[tokio::test]

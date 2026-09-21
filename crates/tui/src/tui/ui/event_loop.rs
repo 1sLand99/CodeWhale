@@ -636,6 +636,24 @@ pub async fn run_tui(
     require_interactive_terminal(io::stdin().is_terminal(), io::stdout().is_terminal())?;
     require_foreground_terminal_owner()?;
 
+    // The dispatcher resets SIGPIPE to SIG_DFL so `codewhale doctor | head`
+    // exits quietly (#4030). A full-screen session is the opposite case: it
+    // writes to pipes whose far end it does not own — stdio MCP servers, shell
+    // tools, hooks, LSP — and a peer that exits first must surface as an
+    // `EPIPE` error on that one write, not kill the whole TUI with the terminal
+    // left in raw mode and nothing in the runtime log. Reproduced with a stdio
+    // MCP server that exits before `initialize` is written: the process died
+    // of SIGPIPE before its first frame, and the PTY harness reported it as a
+    // plain exit 1. Children are unaffected: the standard library resets
+    // SIGPIPE to SIG_DFL before exec, so `| head` inside a shell tool still
+    // terminates the way a shell expects. Non-TUI subcommands keep SIG_DFL.
+    // SAFETY: a plain disposition change, no handler; it runs before this
+    // session spawns anything that writes to a pipe.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+
     // #6169: install the suspend/resume handshake here — after the
     // foreground-ownership check (the termios snapshot needs the still-cooked
     // tty) and before raw mode, so every mode enabled below has a handler that
@@ -4361,18 +4379,27 @@ pub(crate) async fn run_event_loop(
             active_cell_has_live_motion,
             translation_placeholder_has_live_motion,
         );
-        let animation_interval_ms = animation_interval_ms(
+        // Content-driven cadence: atmosphere rate when only ocean life moves;
+        // full interactive rate while streaming, selecting, typing, or hovering.
+        // Read once here so the animation tick and the frame limiter below
+        // agree on the same tier for this frame.
+        let cadence_tier = crate::tui::display_refresh::cadence_tier_from_signals(
+            app.is_loading || has_running_agents,
+            app.viewport.transcript_selection.is_active(),
+            !app.input.is_empty(),
+            crate::tui::hover_layer::current_hover().is_some(),
+        );
+        let underwater_motion =
+            underwater_ambient_motion || underwater_completion_motion || launch_motion;
+        let animation_active = status_motion || underwater_motion;
+        let animation_interval = Duration::from_millis(animation_interval_ms(
             app,
             status_motion,
-            underwater_ambient_motion || underwater_completion_motion || launch_motion,
-        );
+            underwater_motion,
+            cadence_tier,
+        ));
         let motion_policy = app.motion_policy();
-        if (status_motion
-            || underwater_ambient_motion
-            || underwater_completion_motion
-            || launch_motion)
-            && last_status_frame.elapsed() >= Duration::from_millis(animation_interval_ms)
-        {
+        if animation_active && last_status_frame.elapsed() >= animation_interval {
             let translation_animated = streaming_thinking::animate_pending_translation(
                 app,
                 pending_thinking_translations > 0,
@@ -4401,6 +4428,20 @@ pub(crate) async fn run_event_loop(
                 app.needs_redraw = true;
             }
             last_status_frame = Instant::now();
+        }
+        if animation_active {
+            // Aim the poll at the next tick. Without a deadline the tick only
+            // ran when the idle/active poll happened to return, which
+            // quantized an 80 ms cadence to 96 ms and a 120 ms one to 144 ms.
+            frame_requester.request_at(
+                Instant::now(),
+                last_status_frame + animation_interval,
+                motion_policy,
+            );
+        } else {
+            // Consume a deadline armed before motion stopped so an orphaned
+            // request cannot hold the poll timeout at zero.
+            let _ = frame_requester.take_due(Instant::now(), motion_policy);
         }
 
         if event_broker.is_paused() {
@@ -4517,21 +4558,15 @@ pub(crate) async fn run_event_loop(
         frame_rate_limiter.set_low_motion(motion_policy.uses_constrained_frame_rate());
         stream_display_clock.set_allow_catch_up(motion_policy.allows_catch_up_bursts());
 
-        // Content-driven cadence: atmosphere rate when only ocean life moves;
-        // full interactive rate while streaming, selecting, typing, or hovering.
+        // The draw limiter follows the same content-driven tier the
+        // animation tick above read for this frame.
         {
             use crate::tui::display_refresh::{
-                cadence_tier_from_signals, content_driven_draw_interval, probe_display_refresh,
+                content_driven_draw_interval, probe_display_refresh,
             };
-            let tier = cadence_tier_from_signals(
-                app.is_loading || has_running_agents,
-                app.viewport.transcript_selection.is_active(),
-                !app.input.is_empty(),
-                crate::tui::hover_layer::current_hover().is_some(),
-            );
             let probe = probe_display_refresh();
             frame_rate_limiter.set_adaptive_interval(Some(content_driven_draw_interval(
-                tier,
+                cadence_tier,
                 probe.hz,
                 motion_policy.uses_constrained_frame_rate(),
             )));

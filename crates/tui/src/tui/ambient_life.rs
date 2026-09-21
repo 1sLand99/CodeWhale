@@ -1133,6 +1133,29 @@ fn fish_body(facing_right: bool, lead: bool) -> &'static str {
     }
 }
 
+/// Count fish silhouettes in rendered text by facing: `(rightward, leftward)`.
+///
+/// Recognizes the ASCII bodies and every native braille pose, so a render
+/// test can assert the school without knowing which family painted it. The
+/// native poses carry no eye (ad20493), so only the ASCII lead is
+/// distinguishable from its followers.
+#[cfg(test)]
+pub(crate) fn fish_silhouette_counts(text: &str) -> (usize, usize) {
+    let native = |right: bool| {
+        let poses: std::collections::BTreeSet<&'static str> = (0..4)
+            .flat_map(|pose| (0..2).flat_map(move |dx| (0..2).map(move |dy| (pose, dx, dy))))
+            .map(|(pose, dx, dy)| native_poses::fish(right, pose, dx, dy))
+            .collect();
+        poses
+            .into_iter()
+            .map(|pose| text.matches(pose).count())
+            .sum::<usize>()
+    };
+    let ascii_right = text.matches("><>").count() + text.matches(LEAD_FISH_RIGHT).count();
+    let ascii_left = text.matches("<><").count() + text.matches(LEAD_FISH_LEFT).count();
+    (ascii_right + native(true), ascii_left + native(false))
+}
+
 /// Subtle caustic shimmer applied to empty water cells when the field would
 /// otherwise read as a static ramp. Cheap: one phase lookup per cell, only
 /// when `animated` and density allows.

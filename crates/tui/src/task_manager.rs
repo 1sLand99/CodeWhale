@@ -287,6 +287,13 @@ pub struct TaskRecord {
     pub trust_mode: bool,
     #[serde(default = "default_auto_approve")]
     pub auto_approve: bool,
+    /// Permission posture the task's own thread starts on (`ask`,
+    /// `auto_review`, `full_access`). Absent on records written before the
+    /// field existed and on the in-process callers that still express authority
+    /// through `auto_approve` alone; the thread request then derives the
+    /// posture from that bit exactly as it always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_posture: Option<String>,
     pub status: TaskStatus,
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
@@ -425,6 +432,9 @@ pub struct NewTaskRequest {
     pub allow_shell: Option<bool>,
     pub trust_mode: Option<bool>,
     pub auto_approve: Option<bool>,
+    /// Posture for the thread this task runs on. Takes precedence over
+    /// `auto_approve`, which the runtime only reads when no posture is given.
+    pub permission_posture: Option<String>,
     pub owner_session_id: Option<String>,
 }
 
@@ -442,6 +452,7 @@ impl NewTaskRequest {
             allow_shell: Some(task.allow_shell),
             trust_mode: Some(task.trust_mode),
             auto_approve: Some(task.auto_approve),
+            permission_posture: task.permission_posture.clone(),
             owner_session_id: task.owner_session_id.clone(),
         }
     }
@@ -460,6 +471,7 @@ impl NewTaskRequest {
             allow_shell: None,
             trust_mode: None,
             auto_approve: Some(true),
+            permission_posture: None,
             owner_session_id: None,
         }
     }
@@ -649,6 +661,7 @@ pub struct ExecutionTask {
     allow_shell: bool,
     trust_mode: bool,
     auto_approve: bool,
+    permission_posture: Option<String>,
 }
 
 impl From<&TaskRecord> for ExecutionTask {
@@ -664,6 +677,7 @@ impl From<&TaskRecord> for ExecutionTask {
             allow_shell: task.allow_shell,
             trust_mode: task.trust_mode,
             auto_approve: task.auto_approve,
+            permission_posture: task.permission_posture.clone(),
         }
     }
 }
@@ -679,6 +693,7 @@ impl ExecutionTask {
             allow_shell: Some(self.allow_shell),
             trust_mode: Some(self.trust_mode),
             auto_approve: Some(self.auto_approve),
+            permission_posture: self.permission_posture.clone(),
             task_id: Some(self.id.clone()),
             ..Default::default()
         }
@@ -1671,6 +1686,18 @@ impl TaskManager {
         {
             bail!("A pinned task provider requires an explicit model");
         }
+        // The worker runs this same projection when it opens the task's
+        // thread. Running it here as well refuses an unknown mode or posture
+        // at the boundary the request crossed, instead of after the task has
+        // sat in the durable queue and a worker has claimed it.
+        crate::runtime_policy::RuntimePolicyProjection::from_request(
+            req.mode
+                .as_deref()
+                .filter(|mode| !mode.trim().is_empty())
+                .unwrap_or(&self.cfg.default_mode),
+            req.permission_posture.as_deref(),
+            req.auto_approve,
+        )?;
         validate_preallocated_task_id(&task_id)?;
 
         let task = TaskRecord {
@@ -1700,6 +1727,7 @@ impl TaskManager {
             // Auto-approval must be opted into explicitly
             // (GHSA-72w5-pf8h-xfp4).
             auto_approve: req.auto_approve.unwrap_or(false),
+            permission_posture: req.permission_posture,
             status: TaskStatus::Queued,
             created_at: Utc::now(),
             started_at: None,
@@ -3097,6 +3125,10 @@ pub(crate) fn validate_bound_task_request(
         || request
             .trust_mode
             .is_some_and(|value| value != task.trust_mode)
+        || request
+            .permission_posture
+            .as_deref()
+            .is_some_and(|value| Some(value) != task.permission_posture.as_deref())
         || task.auto_approve != request.auto_approve.unwrap_or(false)
     {
         bail!("Task admission replay does not match the bound request");
@@ -4228,6 +4260,7 @@ mod tests {
             allow_shell: true,
             trust_mode: false,
             auto_approve: false,
+            permission_posture: None,
             status: TaskStatus::Running,
             created_at: started_at,
             started_at: Some(started_at),
@@ -4430,6 +4463,7 @@ mod tests {
             allow_shell: None,
             trust_mode: None,
             auto_approve: None,
+            permission_posture: None,
             owner_session_id: None,
         };
         let task = manager.add_task(req).await?;
@@ -4447,6 +4481,68 @@ mod tests {
             "model-omitted trust_mode must default to false"
         );
         Ok(())
+    }
+
+    /// A task's own thread starts on the posture the request pinned, and the
+    /// posture is what the thread's policy is derived from — the legacy
+    /// `auto_approve` bit is only read when no posture is given.
+    #[tokio::test]
+    async fn add_task_pins_the_posture_its_thread_starts_on() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("deepseek-task-test-{}", Uuid::new_v4()));
+        let manager =
+            TaskManager::start_with_executor(test_config(root.clone()), Arc::new(MockExecutor))
+                .await?;
+
+        let task = manager
+            .add_task(NewTaskRequest {
+                permission_posture: Some("auto_review".to_string()),
+                ..NewTaskRequest::from_prompt("pin the posture")
+            })
+            .await?;
+
+        assert_eq!(task.permission_posture.as_deref(), Some("auto_review"));
+        let request = ExecutionTask::from(&task).thread_request();
+        assert_eq!(request.permission_posture.as_deref(), Some("auto_review"));
+        // `from_prompt` asks for auto-approval; the pinned posture outranks it,
+        // so the thread must not silently run wider than what was requested.
+        assert_eq!(request.auto_approve, Some(true));
+        Ok(())
+    }
+
+    /// The worker's thread projection refuses these postures, so admission
+    /// refuses them too: the request came through the Runtime API, and that
+    /// is where the refusal belongs, not in a worker after the task was
+    /// durably queued.
+    #[tokio::test]
+    async fn add_task_refuses_a_posture_the_thread_would_reject() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("deepseek-task-test-{}", Uuid::new_v4()));
+        let manager =
+            TaskManager::start_with_executor(test_config(root.clone()), Arc::new(MockExecutor))
+                .await?;
+
+        for posture in ["sideways", "never"] {
+            let error = manager
+                .add_task(NewTaskRequest {
+                    permission_posture: Some(posture.to_string()),
+                    ..NewTaskRequest::from_prompt("refuse me")
+                })
+                .await
+                .expect_err("a posture the thread cannot honour is refused at admission");
+            assert!(error.to_string().contains("permission posture"), "{error}");
+        }
+        assert!(manager.list_tasks(None).await?.is_empty());
+        Ok(())
+    }
+
+    /// The Runtime's `POST /v1/tasks` body may omit the posture entirely: it is
+    /// optional on the wire, and absent means "derive it from the legacy bits",
+    /// which is what every client that predates the field sends.
+    #[test]
+    fn new_task_request_accepts_a_body_without_a_posture() {
+        let request: NewTaskRequest =
+            serde_json::from_str(r#"{"prompt":"ship it","mode":"agent"}"#).expect("wire body");
+        assert!(request.permission_posture.is_none());
+        assert_eq!(request.mode.as_deref(), Some("agent"));
     }
 
     #[tokio::test]
@@ -4873,6 +4969,7 @@ mod tests {
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
+            permission_posture: None,
             status: TaskStatus::Running,
             created_at: Utc::now(),
             started_at: Some(Utc::now()),

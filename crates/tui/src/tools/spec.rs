@@ -18,6 +18,8 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use unicode_normalization::UnicodeNormalization;
 
+use codewhale_execpolicy::ApprovalMode;
+
 use crate::features::Features;
 use crate::lsp::LspManager;
 use crate::network_policy::NetworkPolicyDecider;
@@ -633,6 +635,13 @@ pub struct ToolExecutionState {
     /// Whether tools should auto-approve without safety checks (YOLO mode).
     /// When true, command safety analysis is skipped for shell execution.
     pub auto_approve: bool,
+    /// Effective approval posture for this execution context. A turn stamps the
+    /// posture it resolved here; a context built from the legacy bit alone
+    /// folds it with [`crate::core::authority::posture_from_auto_approve`].
+    /// Tools that create work of their own (a durable task) pin it, so the work
+    /// inherits the authority the caller was granted rather than re-deriving
+    /// one from a legacy bit.
+    pub approval_mode: ApprovalMode,
     /// Effective shell policy for this execution context.
     pub shell_policy: ShellPolicy,
     /// Effective feature flag set for the running session.
@@ -783,6 +792,7 @@ impl ToolContext {
                 persist_services_enabled: false,
                 shell_network_denied_hint: None,
                 auto_approve: false,
+                approval_mode: ApprovalMode::Suggest,
                 shell_policy,
                 features: Features::with_defaults(),
                 state_namespace: "workspace".to_string(),
@@ -816,6 +826,10 @@ impl ToolContext {
     ) -> Self {
         let mut context = Self::with_options(workspace, trust_mode, notes_path, mcp_config_path);
         context.auto_approve = auto_approve;
+        // The bit stands for a posture, so fold it here rather than leaving the
+        // two fields to disagree. A turn-level builder overwrites this with the
+        // session's resolved posture, which is the authority that counts.
+        context.approval_mode = crate::core::authority::posture_from_auto_approve(auto_approve);
         context
     }
 

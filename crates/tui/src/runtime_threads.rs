@@ -2540,6 +2540,150 @@ impl RuntimeThreadStore {
         Ok(out)
     }
 
+    /// The newest agent/user message text in each requested turn, in one pass.
+    ///
+    /// [`Self::list_items_for_turns_map`] materializes every item of every
+    /// requested turn. The thread summary needs only the last user/agent
+    /// message per turn, and one page can span most of the store, so retaining
+    /// that whole projection for a page held every item it covered in memory
+    /// at once — a page's peak that grew with the page instead of with one
+    /// thread. This holds at most two message texts per requested turn — the
+    /// newest dated one and the last undated one read — and nothing else:
+    /// tool calls, results and artifacts are read and dropped, and an older
+    /// dated message is dropped the moment a newer one is read.
+    ///
+    /// The winner is the message [`sort_turn_items_by_start`] would place
+    /// last: that comparator reads only `started_at`, substitutes one "now"
+    /// for a missing timestamp once everything has been read, and is stable,
+    /// so the later-read message wins a tie. The choice between the dated
+    /// and the undated candidate is therefore made after the scan, against a
+    /// "now" taken then: a message persisted mid-scan with a timestamp later
+    /// than a "now" taken up front would otherwise outrank an undated one
+    /// the sort would have placed last.
+    ///
+    /// Known limitation: peak memory is still up to two texts per turn of
+    /// the page, untruncated, because the caller decides which turn's text
+    /// becomes the row's preview and how much of it to show.
+    pub fn newest_message_text_by_turn(
+        &self,
+        turn_ids: &[String],
+    ) -> Result<HashMap<String, String>> {
+        if turn_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        for turn_id in turn_ids {
+            validated_record_id(turn_id, "turn id")?;
+        }
+
+        let wanted: HashSet<&str> = turn_ids.iter().map(String::as_str).collect();
+        #[derive(Default)]
+        struct Candidates {
+            /// Newest `started_at` read so far; a later read wins a tie.
+            dated: Option<(DateTime<Utc>, String)>,
+            /// Last message read without a `started_at`.
+            undated: Option<String>,
+        }
+        let mut per_turn: HashMap<String, Candidates> = HashMap::new();
+        let items_dir = checked_existing_runtime_store_dir(&self.items_dir)?;
+        for entry in fs::read_dir(&items_dir)
+            .with_context(|| format!("Failed to read {}", items_dir.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().is_none_or(|ext| ext != "json") {
+                continue;
+            }
+            let item_id = path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let raw = read_store_file(&path).with_context(|| {
+                RuntimeStoreRecordFailure::new(
+                    RuntimeStoreOperation::Read,
+                    RuntimeStoreRecordKind::Item,
+                    &item_id,
+                    &path,
+                )
+            })?;
+            #[cfg(test)]
+            self.item_dir_files_read
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let item: TurnItemRecord = serde_json::from_str(&raw).with_context(|| {
+                RuntimeStoreRecordFailure::new(
+                    RuntimeStoreOperation::Parse,
+                    RuntimeStoreRecordKind::Item,
+                    &item_id,
+                    &path,
+                )
+            })?;
+            if item.schema_version > MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION {
+                bail!(
+                    "Item schema v{} is newer than supported v{}",
+                    item.schema_version,
+                    MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION
+                );
+            }
+            if !wanted.contains(item.turn_id.as_str()) {
+                continue;
+            }
+            if !matches!(
+                item.kind,
+                TurnItemKind::AgentMessage | TurnItemKind::UserMessage
+            ) {
+                continue;
+            }
+            if matches!(
+                item.schema_version,
+                IMAGE_RUNTIME_SCHEMA_VERSION | OUTPUT_LIMIT_RUNTIME_SCHEMA_VERSION
+            ) && item.kind == TurnItemKind::UserMessage
+            {
+                item.user_content()?;
+            }
+            let text = item.detail.unwrap_or(item.summary);
+            if text.trim().is_empty() {
+                continue;
+            }
+            let slot = per_turn.entry(item.turn_id).or_default();
+            match item.started_at {
+                Some(started_at) => {
+                    if slot
+                        .dated
+                        .as_ref()
+                        .is_none_or(|(held, _)| *held <= started_at)
+                    {
+                        slot.dated = Some((started_at, text));
+                    }
+                }
+                None => slot.undated = Some(text),
+            }
+        }
+
+        // The sort's stand-in for a missing timestamp, taken once the scan
+        // is over exactly as `sort_turn_items_by_start` takes it after
+        // collection: an undated message reads as newest unless a dated one
+        // is timestamped later than this instant.
+        let fallback = Utc::now();
+        Ok(per_turn
+            .into_iter()
+            .filter_map(|(turn_id, slot)| {
+                let text = match (slot.dated, slot.undated) {
+                    (Some((started_at, dated)), Some(undated)) => {
+                        if started_at > fallback {
+                            dated
+                        } else {
+                            undated
+                        }
+                    }
+                    (Some((_, dated)), None) => dated,
+                    (None, Some(undated)) => undated,
+                    (None, None) => return None,
+                };
+                Some((turn_id, text))
+            })
+            .collect())
+    }
+
     pub async fn append_event(
         &self,
         thread_id: &str,
@@ -3632,6 +3776,27 @@ pub struct RunningThread {
     pub model: String,
     pub title: Option<String>,
     pub active_turns: Vec<ActiveTurn>,
+}
+
+/// The per-row facts `GET /v1/threads/summary` cannot read off a
+/// [`ThreadRecord`], harvested for a whole page in one pass over the store.
+///
+/// Everything else a row needs (`title`, `model`, `mode`, `workspace`,
+/// `archived`, `updated_at`, `latest_turn_id`) already comes from the thread
+/// record the caller holds.
+#[derive(Debug, Clone)]
+pub struct ThreadListFacts {
+    /// Status of the thread's newest turn, `Debug`-lowercased for the wire.
+    pub latest_turn_status: Option<String>,
+    /// Newest turn's `input_summary`, verbatim. The row uses it only as the
+    /// title fallback for a thread that has no title of its own.
+    pub latest_turn_input_summary: Option<String>,
+    /// Text of the newest agent/user message in the newest turn that has one,
+    /// untruncated. `None` when the thread has no such message.
+    pub preview: Option<String>,
+    /// Pending approvals plus pending user-input requests, from live request
+    /// state rather than the store.
+    pub pending_attention_count: usize,
 }
 
 /// One watchable notice on a thread, projected from engine events so
@@ -5983,6 +6148,7 @@ impl RuntimeThreadManager {
             false,
         )
         .await
+        .map(|(turn, _replayed)| turn)
     }
 
     /// Terminal goal settlement for one finished turn.
@@ -6506,7 +6672,7 @@ impl RuntimeThreadManager {
             .await;
 
         match turn_result {
-            Ok(turn) => {
+            Ok((turn, _replayed)) => {
                 let delivered = {
                     let _mail_mutation = self.store.mail_mutation.lock();
                     let mut envelope = self.store.load_agent_mail(message_id)?;
@@ -7287,6 +7453,113 @@ impl RuntimeThreadManager {
             }
         }
         Ok(out)
+    }
+
+    /// Flush queued recovery receipts for every thread on a page.
+    ///
+    /// [`Self::get_thread_detail`] flushes per thread, and the summary route
+    /// reached it row by row, so a listing used to settle every recovered turn
+    /// it displayed: the flush cancels that turn's pending user inputs and its
+    /// unresolvable dynamic tools, and publishes the `turn.completed` a crashed
+    /// turn is missing. `pending_attention_count` reads exactly that pending
+    /// state, so dropping the flush would leave a page reporting attention for
+    /// turns that are already over until somebody opened the thread. Now that
+    /// rows no longer go through detail, doing it here keeps what the route
+    /// publishes. A thread with nothing queued costs one lock and a map lookup
+    /// — only startup recovery queues receipts — and the flush has to precede
+    /// the scan, because it changes what the scan then reports.
+    pub async fn flush_recovery_receipts(&self, thread_ids: &[String]) -> Result<()> {
+        for thread_id in thread_ids {
+            self.flush_recovery_receipts_for_thread(thread_id).await?;
+        }
+        Ok(())
+    }
+
+    /// The [`ThreadListFacts`] for every id in `thread_ids`, read in one pass.
+    ///
+    /// `GET /v1/threads/summary` used to call [`Self::get_thread_detail`] once
+    /// per row. Detail is a whole-store walk — `list_turns_for_thread` scans
+    /// every turn record and `list_items_for_turns_map` scans every item record,
+    /// because item filenames carry only the item id —
+    /// so a listing of `T` threads cost `T x (N + M)` JSON reads and parses:
+    /// ~25s for 72 threads against a 189MB store, measured 2026-09-17, which is
+    /// the cheap end of the store growing. This harvests the same facts with one
+    /// turns scan and one items scan, so the cost is `T + N + M`.
+    ///
+    /// This is a best-effort snapshot, and deliberately cheaper than detail in
+    /// three ways: it takes no per-thread projection lock, and it does not flush
+    /// recovery receipts or read the event cursor. A listing may therefore lag a
+    /// turn that is mid-flight. That is the right trade for a list — the
+    /// alternative is what made the call seconds-per-thread — and
+    /// `pending_attention_count` still comes from live in-memory state, so
+    /// attention grouping stays immediate. Callers wanting a consistent
+    /// projection of one thread still want [`Self::get_thread_detail`].
+    pub async fn thread_list_facts(
+        &self,
+        thread_ids: &[String],
+    ) -> Result<HashMap<String, ThreadListFacts>> {
+        if thread_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let wanted: HashSet<String> = thread_ids.iter().cloned().collect();
+
+        let store = self.store.clone();
+        let scanned = wanted.clone();
+        let (turns_by_thread, preview_by_turn) = tokio::task::spawn_blocking(move || {
+            // One turns scan, grouped by thread. `list_all_turns` sorts by
+            // `created_at`, so each group keeps ascending turn order and a
+            // group's last element is the newest turn — the same turn a
+            // per-thread detail read would have called `turns.last()`.
+            let mut turns_by_thread: HashMap<String, Vec<TurnRecord>> = HashMap::new();
+            for turn in store.list_all_turns()? {
+                if scanned.contains(&turn.thread_id) {
+                    turns_by_thread
+                        .entry(turn.thread_id.clone())
+                        .or_default()
+                        .push(turn);
+                }
+            }
+            // One items scan covering every turn of those threads, keeping
+            // only the message text that could be a row's preview.
+            let turn_ids: Vec<String> = turns_by_thread
+                .values()
+                .flatten()
+                .map(|turn| turn.id.clone())
+                .collect();
+            let preview_by_turn = store.newest_message_text_by_turn(&turn_ids)?;
+            Ok::<_, anyhow::Error>((turns_by_thread, preview_by_turn))
+        })
+        .await
+        .context("Runtime thread list scan task failed")??;
+
+        let mut facts = HashMap::with_capacity(wanted.len());
+        for thread_id in &wanted {
+            let turns = turns_by_thread.get(thread_id);
+            let latest_turn = turns.and_then(|turns| turns.last());
+            // Newest turn first: the scan already picked the newest message
+            // within each turn, so the first turn holding one is the message a
+            // per-thread detail read would have found.
+            let preview = turns
+                .into_iter()
+                .flatten()
+                .rev()
+                .find_map(|turn| preview_by_turn.get(&turn.id).cloned());
+            let (pending_approvals, pending_user_inputs) =
+                self.pending_requests_for_thread(thread_id);
+            facts.insert(
+                thread_id.clone(),
+                ThreadListFacts {
+                    latest_turn_status: latest_turn
+                        .map(|turn| format!("{:?}", turn.status).to_ascii_lowercase()),
+                    latest_turn_input_summary: latest_turn.map(|turn| turn.input_summary.clone()),
+                    preview,
+                    pending_attention_count: pending_approvals
+                        .len()
+                        .saturating_add(pending_user_inputs.len()),
+                },
+            );
+        }
+        Ok(facts)
     }
 
     /// Raise a watchable notice on a thread (#6180). Kind names must stay in
@@ -9433,6 +9706,22 @@ impl RuntimeThreadManager {
         self.start_turn_inner(thread_id, req, None).await
     }
 
+    /// Start a turn and report whether the durable `operation_key` made it a
+    /// replay of an already-accepted submission.
+    ///
+    /// The distinction belongs to admission, not to the route: a client that
+    /// retried an ambiguous submit needs to be told "this is the turn you
+    /// already started" so it does not render a duplicate, and only the
+    /// admission path knows that for certain.
+    pub async fn start_turn_reporting_replay(
+        &self,
+        thread_id: &str,
+        req: StartTurnRequest,
+    ) -> Result<(TurnRecord, bool)> {
+        self.start_turn_inner_reporting_replay(thread_id, req, None)
+            .await
+    }
+
     pub(crate) async fn start_turn_with_reserved_id(
         &self,
         thread_id: &str,
@@ -9455,6 +9744,17 @@ impl RuntimeThreadManager {
         req: StartTurnRequest,
         reserved_turn_id: Option<&str>,
     ) -> Result<TurnRecord> {
+        self.start_turn_inner_reporting_replay(thread_id, req, reserved_turn_id)
+            .await
+            .map(|(turn, _replayed)| turn)
+    }
+
+    async fn start_turn_inner_reporting_replay(
+        &self,
+        thread_id: &str,
+        req: StartTurnRequest,
+        reserved_turn_id: Option<&str>,
+    ) -> Result<(TurnRecord, bool)> {
         if reserved_turn_id.is_some() && req.operation_key.is_none() {
             bail!("a reserved turn id requires an operation key");
         }
@@ -9484,8 +9784,11 @@ impl RuntimeThreadManager {
             true,
         )
         .await
+        .map(|(turn, _replayed)| turn)
     }
 
+    /// Returns the turn and whether the durable operation key made this a
+    /// replay of an already-accepted submission rather than a new admission.
     async fn start_turn_with_source(
         &self,
         thread_id: &str,
@@ -9493,7 +9796,7 @@ impl RuntimeThreadManager {
         input_source: RuntimeTurnInputSource,
         reserved_turn_id: Option<&str>,
         stored_image_bytes: bool,
-    ) -> Result<TurnRecord> {
+    ) -> Result<(TurnRecord, bool)> {
         // Heap-allocate the turn-start state machine. Its future holds two full
         // Config clones plus ThreadRecord/EngineHandle/TurnRecord/TurnItemRecord
         // and the Op::SendMessage, and inlines the large ensure_engine_loaded
@@ -9605,7 +9908,7 @@ impl RuntimeThreadManager {
         if let Some(operation) = operation.as_ref()
             && let Some(original_turn) = self.replay_turn_for_operation(operation)?
         {
-            return Ok(original_turn);
+            return Ok((original_turn, true));
         }
         if !image_blocks.is_empty() || req.max_output_tokens.is_some() {
             let identity = self.provider_identity_for_thread(&cfg_snapshot, &thread)?;
@@ -9927,7 +10230,7 @@ impl RuntimeThreadManager {
             if let Some(operation) = operation.as_ref()
                 && let Some(original_turn) = self.replay_turn_for_operation(operation)?
             {
-                return Ok(original_turn);
+                return Ok((original_turn, true));
             }
             let Some(state) = active.engines.get_mut(thread_id) else {
                 bail!("Thread engine not loaded");
@@ -10020,10 +10323,11 @@ impl RuntimeThreadManager {
             )
         };
 
-        acceptance_rx
+        let turn = acceptance_rx
             .await
             .map_err(|_| anyhow!("Turn lifecycle task ended before acknowledgement"))?
-            .map_err(anyhow::Error::msg)
+            .map_err(anyhow::Error::msg)?;
+        Ok((turn, false))
         })
         .await
     }

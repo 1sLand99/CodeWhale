@@ -4096,8 +4096,12 @@ fn validate_model_context_windows(
 
 #[derive(Debug, Clone, Deserialize, Default)]
 struct ConfigFile {
+    /// Boxed so the parsed document never carries the multi-kilobyte
+    /// `Config` by value through `toml::de` and `apply_profile` frames. A
+    /// `#[tokio::test]` runs those frames on libtest's default 2 MiB stack,
+    /// which the by-value copies overflowed (#6362).
     #[serde(flatten)]
-    base: Config,
+    base: Box<Config>,
     profiles: Option<HashMap<String, Config>>,
 }
 
@@ -11133,7 +11137,7 @@ fn apply_profile(config: ConfigFile, profile: Option<&str>) -> Result<Config> {
         let profiles = config.profiles.as_ref();
         match profiles.and_then(|profiles| profiles.get(profile_name)) {
             Some(override_cfg) => {
-                let mut merged = merge_config(config.base, override_cfg.clone());
+                let mut merged = merge_config(*config.base, override_cfg.clone());
                 apply_layer_root_model(&mut merged, override_cfg);
                 Ok(merged)
             }
@@ -11153,7 +11157,7 @@ fn apply_profile(config: ConfigFile, profile: Option<&str>) -> Result<Config> {
             }
         }
     } else {
-        Ok(config.base)
+        Ok(*config.base)
     }
 }
 
@@ -11541,7 +11545,7 @@ fn load_single_config_file(path: &Path) -> Result<Config> {
             codewhale_config::quote_os_path(path)
         )
     })?;
-    Ok(parsed.base)
+    Ok(*parsed.base)
 }
 
 /// Build a one-line warning when top-level-only keys are nested under a section

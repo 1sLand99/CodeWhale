@@ -329,6 +329,7 @@ impl Harness {
         let transcript = self.pty.transcript();
         let pid = self.pty.pid();
         let exit = self.pty.wait_until(Instant::now());
+        let signal = self.pty.signal().map(str::to_owned);
         let program = self.program.clone();
         let diagnostic_root = self.diagnostic_root.clone();
         let sealed_home = self.sealed_home.clone();
@@ -348,7 +349,7 @@ impl Harness {
                 let destination = diagnostic_root
                     .join(format!("{}-{nonce}", pid.unwrap_or_default()));
                 let mut report = format!(
-                    "program={:?} host={}/{} pid={pid:?} observed_exit={exit:?} wait_budget={budget:?} parent_CI={} {}\nPTY bytes={}\n",
+                    "program={:?} host={}/{} pid={pid:?} observed_exit={exit:?} signal={signal:?} wait_budget={budget:?} parent_CI={} {}\nPTY bytes={}\n",
                     program,
                     std::env::consts::OS,
                     std::env::consts::ARCH,

@@ -1094,18 +1094,38 @@ fn underwater_motion_keeps_its_smoother_cadence_during_live_status() {
     app.fancy_animations = true;
     app.constrained_frame_rate = false;
 
+    use crate::tui::display_refresh::DrawCadenceTier;
     assert_eq!(
-        animation_interval_ms(&app, true, false),
+        animation_interval_ms(&app, true, false, DrawCadenceTier::Interactive),
         UI_STATUS_ANIMATION_MS
     );
     assert_eq!(
-        animation_interval_ms(&app, false, true),
+        animation_interval_ms(&app, false, true, DrawCadenceTier::Interactive),
         UI_UNDERWATER_ANIMATION_MS
     );
     assert_eq!(
-        animation_interval_ms(&app, true, true),
+        animation_interval_ms(&app, true, true, DrawCadenceTier::Interactive),
         UI_UNDERWATER_ANIMATION_MS,
         "the slower status spinner must not throttle ambient fish"
+    );
+    // Only ambience moving: the tick lands on the interval the frame
+    // limiter draws at, instead of asking every 80 ms for a frame the
+    // limiter then holds until its 120 ms atmosphere cadence.
+    let atmosphere = crate::tui::display_refresh::adaptive_animation_interval_ms(false);
+    assert!(atmosphere >= UI_UNDERWATER_ANIMATION_MS);
+    assert_eq!(
+        animation_interval_ms(&app, false, true, DrawCadenceTier::Atmosphere),
+        atmosphere
+    );
+    assert_eq!(
+        underwater_animation_interval_ms(&app, DrawCadenceTier::Atmosphere),
+        crate::tui::display_refresh::content_driven_draw_interval(
+            DrawCadenceTier::Atmosphere,
+            crate::tui::display_refresh::probe_display_refresh().hz,
+            false,
+        )
+        .as_millis() as u64,
+        "the idle water ticks exactly when the limiter lets it draw"
     );
     // SAFETY: cleanup under the same lock.
     unsafe {
@@ -1135,16 +1155,19 @@ fn ghostty_caps_underwater_motion_without_slowing_interaction() {
     app.fancy_animations = true;
     app.constrained_frame_rate = false;
 
-    assert_eq!(
-        underwater_animation_interval_ms(&app),
-        UI_GHOSTTY_UNDERWATER_ANIMATION_MS
-    );
+    use crate::tui::display_refresh::DrawCadenceTier;
+    for tier in [DrawCadenceTier::Atmosphere, DrawCadenceTier::Interactive] {
+        assert_eq!(
+            underwater_animation_interval_ms(&app, tier),
+            UI_GHOSTTY_UNDERWATER_ANIMATION_MS
+        );
+    }
     const {
         assert!(UI_GHOSTTY_UNDERWATER_ANIMATION_MS < UI_UNDERWATER_ANIMATION_MS);
     }
     app.constrained_frame_rate = true;
     assert_eq!(
-        underwater_animation_interval_ms(&app),
+        underwater_animation_interval_ms(&app, DrawCadenceTier::Interactive),
         UI_CONSTRAINED_UNDERWATER_ANIMATION_MS,
         "tmux/SSH compatibility must override Ghostty's native atmosphere lane"
     );
