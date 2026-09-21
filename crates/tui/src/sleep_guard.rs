@@ -77,6 +77,16 @@ impl SleepGuard {
     }
 }
 
+#[cfg(unix)]
+impl Drop for SleepGuard {
+    fn drop(&mut self) {
+        // Releasing is dropping the child: `kill_on_drop` sends the signal
+        // here, synchronously, and the runtime reaps the process afterwards.
+        // Explicit so the field's purpose is code rather than a lint waiver.
+        drop(self.child.take());
+    }
+}
+
 /// `-i` prevents idle sleep. Without `-t` caffeinate runs until it is killed,
 /// which is what `Drop` does; macOS releases the assertion with the process.
 #[cfg(target_os = "macos")]
