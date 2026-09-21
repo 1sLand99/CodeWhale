@@ -3053,6 +3053,7 @@ impl SubAgentRuntime {
     pub fn child_runtime(&self) -> Self {
         let mut child_context = self.context.clone();
         child_context.auto_approve = self.context.auto_approve;
+        child_context.approval_mode = self.context.approval_mode;
         let cancel_token = self.cancel_token.child_token();
         child_context.cancel_token = Some(cancel_token.clone());
         Self {

@@ -5962,6 +5962,7 @@ impl Engine {
         );
         context.trust_mode = authority.trust_mode;
         context.auto_approve = authority.auto_approve;
+        context.approval_mode = authority.approval_mode;
         context.set_shell_policy(authority.shell_policy());
         context.elevated_sandbox_policy = Some(authority.sandbox_policy(
             &self.session.workspace,
@@ -6034,6 +6035,10 @@ impl Engine {
         .with_follow_symlinks(self.config.workspace_follow_symlinks);
         ctx.disallowed_tools = self.config.disallowed_tools.clone().unwrap_or_default();
         ctx.persist_services_enabled = self.config.runtime_services.persist_services_enabled;
+        // A tool that starts work of its own (a durable task) pins the posture
+        // this turn was authorized under, so the work cannot silently run wider
+        // or narrower than the session that asked for it.
+        ctx.approval_mode = authority.approval_mode;
 
         // Hand the user-memory path to tools so the model-callable
         // `remember` tool can append entries (#489). `None` when the
