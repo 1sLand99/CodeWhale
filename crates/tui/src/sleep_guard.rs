@@ -26,25 +26,35 @@
 //!
 //! Release is `Drop` and never cached: a leaked inhibitor would keep a laptop
 //! awake forever, which is worse than the problem this solves.
+//!
+//! The inhibitor is a `tokio::process` child, because the guard lives inside
+//! `Engine::run_turn` on the runtime: the spawn registers with the runtime,
+//! `kill_on_drop` sends the release signal, and the runtime reaps the child —
+//! no `wait` runs inline on a worker (#6149). `hold` therefore has to be
+//! called from within a Tokio runtime context.
 
 #[cfg(unix)]
-use std::process::Child;
+use tokio::process::Child;
 // Only the macOS and Linux inhibitors spawn anything; every other Unix
 // (Android, the BSDs, illumos) is a no-op and would see these as dead.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use tokio::process::Command;
 
 /// An idle-sleep assertion held for as long as this value lives.
 pub struct SleepGuard {
     /// The platform inhibitor process, when one was started. `None` means the
     /// platform has no implementation, or the process could not be started —
     /// keeping the host awake is best-effort and must never fail a turn.
+    /// Dropping it is the release: the child is spawned with `kill_on_drop`.
     #[cfg(unix)]
     child: Option<Child>,
 }
 
 impl SleepGuard {
-    /// Hold the host awake until the returned guard drops.
+    /// Hold the host awake until the returned guard drops. Call it from the
+    /// Tokio runtime: the inhibitor is a `tokio::process` child.
     #[must_use]
     pub fn hold() -> Self {
         #[cfg(unix)]
@@ -63,20 +73,7 @@ impl SleepGuard {
     /// platform is a no-op or the process did not start.
     #[cfg(all(test, unix))]
     pub(crate) fn inhibitor_pid(&self) -> Option<u32> {
-        self.child.as_ref().map(Child::id)
-    }
-}
-
-#[cfg(unix)]
-impl Drop for SleepGuard {
-    fn drop(&mut self) {
-        let Some(child) = self.child.as_mut() else {
-            return;
-        };
-        // Killing the inhibitor is what releases the assertion; reaping it
-        // keeps a zombie out of the process table.
-        let _ = child.kill();
-        let _ = child.wait();
+        self.child.as_ref().and_then(Child::id)
     }
 }
 
@@ -116,6 +113,9 @@ fn spawn(program: &str, args: &[&str]) -> Option<Child> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
+        // Killing the inhibitor is what releases the assertion; the runtime
+        // reaps the child afterwards, so nothing here waits inline.
+        .kill_on_drop(true)
         .spawn()
         .ok()
 }
@@ -131,9 +131,24 @@ mod tests {
         unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
     }
 
-    #[test]
+    /// The kill is sent on drop and the runtime reaps the child on the next
+    /// `SIGCHLD`, so "gone" is a short poll rather than an instant fact. If
+    /// the pid were reused by a new process in that window the test would be
+    /// racing itself, which is why callers assert on the guard's own child.
+    async fn released(pid: u32) -> bool {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while alive(pid) {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        true
+    }
+
+    #[tokio::test]
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    fn the_inhibitor_lives_exactly_as_long_as_the_guard() {
+    async fn the_inhibitor_lives_exactly_as_long_as_the_guard() {
         let guard = SleepGuard::hold();
         let pid = guard
             .inhibitor_pid()
@@ -142,22 +157,15 @@ mod tests {
 
         drop(guard);
 
-        // Reaping is synchronous in `Drop`, so the pid is gone immediately —
-        // and if it were reused by a new process in this window the test would
-        // be racing itself, which is why we assert on the guard's own child.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while alive(pid) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "a released guard must not leave an inhibitor keeping the host awake"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        assert!(
+            released(pid).await,
+            "a released guard must not leave an inhibitor keeping the host awake"
+        );
     }
 
-    #[test]
+    #[tokio::test]
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    fn holding_twice_holds_two_independent_inhibitors() {
+    async fn holding_twice_holds_two_independent_inhibitors() {
         // Turns are serialized, but nothing here should assume it: two guards
         // must not share one process, or the first drop would release both.
         let first = SleepGuard::hold();
@@ -168,7 +176,7 @@ mod tests {
         );
         assert_ne!(a, b, "each guard owns its own inhibitor process");
         drop(first);
-        assert!(!alive(a), "the first guard released only its own");
+        assert!(released(a).await, "the first guard released only its own");
         assert!(alive(b), "the second guard still holds the host awake");
     }
 }
