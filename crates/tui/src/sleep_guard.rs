@@ -32,6 +32,11 @@
 //! `kill_on_drop` sends the release signal, and the runtime reaps the child —
 //! no `wait` runs inline on a worker (#6149). `hold` therefore has to be
 //! called from within a Tokio runtime context.
+//!
+//! On Linux the lock is held by `systemd-inhibit` around a child of its own,
+//! and a kill is never forwarded to that grandchild. The command is therefore
+//! `cat` reading a pipe this guard holds: dropping the guard closes the pipe,
+//! `cat` exits on EOF, and `systemd-inhibit` follows — nothing is left behind.
 
 #[cfg(unix)]
 use tokio::process::Child;
@@ -95,7 +100,9 @@ fn start_inhibitor() -> Option<Child> {
 }
 
 /// `--what=idle` only: an explicit suspend or a closed lid is still honoured.
-/// `sleep infinity` is the command whose lifetime holds the block open.
+/// `cat` on the guard's pipe is the command whose lifetime holds the block
+/// open: it exits on EOF when the guard drops, which no signal sent to
+/// `systemd-inhibit` could make a `sleep infinity` grandchild do.
 #[cfg(target_os = "linux")]
 fn start_inhibitor() -> Option<Child> {
     spawn(
@@ -104,8 +111,7 @@ fn start_inhibitor() -> Option<Child> {
             "--what=idle",
             "--why=Codewhale turn in flight",
             "--mode=block",
-            "sleep",
-            "infinity",
+            "cat",
         ],
     )
 }
@@ -120,7 +126,9 @@ fn start_inhibitor() -> Option<Child> {
 fn spawn(program: &str, args: &[&str]) -> Option<Child> {
     Command::new(program)
         .args(args)
-        .stdin(Stdio::null())
+        // The pipe is never written to: closing it when the guard drops is
+        // what ends an inhibitor's own child (see the Linux inhibitor).
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         // Killing the inhibitor is what releases the assertion; the runtime
@@ -171,6 +179,38 @@ mod tests {
             released(pid).await,
             "a released guard must not leave an inhibitor keeping the host awake"
         );
+    }
+
+    /// Linux: `systemd-inhibit` holds the lock around a child of its own and a
+    /// kill never reaches that grandchild — the guard's pipe is what ends it.
+    /// Without logind the inhibitor exits at once and the list is empty, so
+    /// this proves something only where an inhibitor really runs.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn a_released_guard_leaves_no_grandchild_behind() {
+        let guard = SleepGuard::hold();
+        let pid = guard
+            .inhibitor_pid()
+            .expect("this platform starts an inhibitor");
+        // Give the inhibitor a moment to fork its command.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let grandchildren: Vec<u32> =
+            tokio::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
+                .await
+                .unwrap_or_default()
+                .split_whitespace()
+                .filter_map(|child| child.parse().ok())
+                .collect();
+
+        drop(guard);
+
+        assert!(released(pid).await, "the inhibitor itself must be gone");
+        for grandchild in grandchildren {
+            assert!(
+                released(grandchild).await,
+                "process {grandchild} outlived the guard: the inhibitor's command must end with the guard's pipe"
+            );
+        }
     }
 
     #[tokio::test]

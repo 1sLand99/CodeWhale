@@ -198,12 +198,21 @@ fn open_session(
         .ok_or_else(|| ApiError::not_found(format!("no live terminal session named '{name}'")))
 }
 
+/// How many terminal route calls may occupy blocking threads at once. The
+/// rest wait in `with_session` asynchronously, so a client that disconnects
+/// while queued simply disappears instead of holding a pool thread, and one
+/// stuck write (a child that stopped reading, lock held) can stall terminal
+/// routes but never the runtime's other blocking work.
+#[cfg(all(unix, not(target_env = "ohos")))]
+static ROUTE_GATE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
+
 /// Run one operation against the locked session on the blocking pool.
 ///
 /// The session mutex and the PTY behind it are synchronous: the agent's own
 /// tool holds the lock across a whole command, and a write to a child that
 /// stopped reading blocks until the kernel buffer drains. Neither may park a
-/// runtime worker (#6149), so a route never touches the session inline.
+/// runtime worker (#6149), so a route never touches the session inline, and
+/// `ROUTE_GATE` bounds how many such touches can be in flight.
 #[cfg(all(unix, not(target_env = "ohos")))]
 async fn with_session<T>(
     session: terminal_session::SharedSession,
@@ -214,7 +223,12 @@ async fn with_session<T>(
 where
     T: Send + 'static,
 {
+    let permit = ROUTE_GATE
+        .acquire()
+        .await
+        .map_err(|_| ApiError::internal("terminal route gate closed"))?;
     tokio::task::spawn_blocking(move || {
+        let _permit = permit;
         let mut guard = session
             .lock()
             .map_err(|_| ApiError::internal("terminal session lock poisoned"))?;
