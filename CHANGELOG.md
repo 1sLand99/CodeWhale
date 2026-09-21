@@ -41,6 +41,18 @@ tag, packages, checksums and release assets exist.
 
 ### Added
 
+- The runtime API tells a replayed submission apart from a new admission:
+  `POST /v1/threads/{id}/turns` answers `200` with `idempotent_replay: true`
+  when the operation key was already used, and `201` for a fresh admission, so a
+  client that retries after a dropped response can no longer create a second
+  turn. The flag is absent on a fresh admission, so responses existing clients
+  already parse are unchanged (#76).
+- Event streams resume where they left off: journal frames carry their durable
+  `seq` as the SSE event `id:`, `Last-Event-ID` is honoured as the cursor when
+  no explicit `since_seq` is asked for, and `RuntimeCapabilities` advertises
+  `event_stream_resume` so a client can gate its reconnect controls on the
+  capability instead of discovering it from a missing id (#76).
+
 - TTFT and average output rate stay visible in the compact working footer when
   space allows. `/statusline` now controls them separately; existing
   `session_metrics` settings still work.
