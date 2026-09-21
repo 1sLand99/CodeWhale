@@ -8511,6 +8511,7 @@ base_url = "https://api.xiaomimimo.com/v1"
             "mcp_reconnect",
             "mcp_diagnose",
             "plugins_open",
+            "sandbox_details",
             "mcp_config_path",
             "approval_mode",
             "permission_posture",

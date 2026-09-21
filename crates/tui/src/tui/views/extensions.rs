@@ -825,11 +825,14 @@ fn plugin_row_action(
         }
     } else {
         // The command opens the exact-content review with its confirmation
-        // control, so this panel yields to that review.
+        // control stacked on this panel. Confirming the digest runs the
+        // trust mutation and the host re-reads the inventory, so the row the
+        // person just reviewed reports its new state instead of the stale
+        // "not reviewed" it left with.
         ExtensionAction::Command {
             label: tr(locale, MessageId::AutomationActionInspect).into_owned(),
             command: format!("/plugin trust {}", plugin.name()),
-            disposition: RowActionDisposition::LeavePanel,
+            disposition: RowActionDisposition::InPlace,
         }
     }
 }
@@ -2412,8 +2415,10 @@ mod tests {
             row.state,
             tr(Locale::En, MessageId::ExtensionsStateFirstParty)
         );
+        // The exact-content review stacks on the panel so the confirmed
+        // digest lands on a row that then re-reads its trust state.
         assert!(
-            matches!(&row.action, Some(ExtensionAction::Command { command, disposition: RowActionDisposition::LeavePanel, .. }) if command == "/plugin trust computer-use")
+            matches!(&row.action, Some(ExtensionAction::Command { command, disposition: RowActionDisposition::InPlace, .. }) if command == "/plugin trust computer-use")
         );
         assert!(!builtin.trusted());
         assert!(!builtin.enabled);

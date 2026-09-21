@@ -1302,6 +1302,15 @@ pub(crate) async fn handle_view_events(
                     {
                         return Ok(true);
                     }
+                    // A command review confirmed over the Extensions panel
+                    // (the plugin trust digest) closes its pager and lands
+                    // back on the list, which must show the state the
+                    // confirmation just changed.
+                    if app.view_stack.extensions_is_top() {
+                        let snapshot =
+                            crate::tui::views::extensions::ExtensionsSnapshot::from_app(app);
+                        app.view_stack.refresh_extensions(snapshot);
+                    }
                 }
                 crate::tui::views::CommandPaletteAction::InsertText { text } => {
                     app.input = text;

@@ -7452,10 +7452,11 @@ mod tests {
 
         assert_ne!(buf[(0, 0)].bg, buf[(0, 19)].bg);
         let rendered = buffer_text(&buf, area);
-        // One loose wedge school: an eyed lead plus plain members, all
-        // facing the same way (facing equals travel by construction).
-        let rightward = rendered.matches("><>").count() + rendered.matches("><o>").count();
-        let leftward = rendered.matches("<><").count() + rendered.matches("<o><").count();
+        // One loose wedge school, every member facing the same way (facing
+        // equals travel by construction). The counter knows both silhouette
+        // families: the native braille poses this terminal paints and the
+        // ASCII bodies of `CODEWHALE_ASCII_SAFE=1`.
+        let (rightward, leftward) = crate::tui::ambient_life::fish_silhouette_counts(&rendered);
         assert!(
             rightward == 0 || leftward == 0,
             "one school shares one direction:\n{rendered}"
@@ -7465,8 +7466,6 @@ mod tests {
             (4..=7).contains(&fish_count),
             "wide idle water should show one cohesive wedge school (got {fish_count}):\n{rendered}"
         );
-        let leads = rendered.matches("><o>").count() + rendered.matches("<o><").count();
-        assert_eq!(leads, 1, "exactly one eyed lead fish:\n{rendered}");
 
         let context_x = ((100usize - UnicodeWidthStr::width(context.as_str())) / 2) as u16;
         let context_cell = (0..area.height)
@@ -7500,8 +7499,9 @@ mod tests {
         assert_eq!(buf[(0, 0)].bg, base);
         assert_eq!(buf[(0, 19)].bg, base, "flat keeps the plain theme surface");
         let rendered = buffer_text(&buf, area);
-        assert!(
-            !rendered.contains("><>") && !rendered.contains("<><"),
+        assert_eq!(
+            crate::tui::ambient_life::fish_silhouette_counts(&rendered),
+            (0, 0),
             "terminal-owned themes must keep a normal shell without decorative fish:\n{rendered}"
         );
     }
@@ -7532,8 +7532,9 @@ mod tests {
             "Solarized Light must keep canonical Base3 through the viewport"
         );
         let rendered = buffer_text(&buf, area);
-        assert!(
-            !rendered.contains("><>") && !rendered.contains("<><"),
+        assert_eq!(
+            crate::tui::ambient_life::fish_silhouette_counts(&rendered),
+            (0, 0),
             "a theme with no painted field earns no ambient life:\n{rendered}"
         );
     }
@@ -7575,8 +7576,9 @@ mod tests {
             "the Terminal treatment must never paint a background"
         );
         let rendered = buffer_text(&buf, area);
-        assert!(
-            !rendered.contains("><>") && !rendered.contains("<><"),
+        assert_eq!(
+            crate::tui::ambient_life::fish_silhouette_counts(&rendered),
+            (0, 0),
             "Terminal must remain a quiet host-owned shell without the selected Deepsea scene:\n{rendered}"
         );
     }
@@ -7842,8 +7844,9 @@ mod tests {
         // entire width. Browsing still holds the school in the clear water.
         let rows = history_field_rows(4);
         let rendered = rows.join("\n");
+        let (rightward, leftward) = crate::tui::ambient_life::fish_silhouette_counts(&rendered);
         assert!(
-            rendered.contains("><>") || rendered.contains("<><"),
+            rightward + leftward > 0,
             "open water below the transcript should hold fish:\n{rendered}"
         );
         for index in 0..4 {
@@ -7879,8 +7882,9 @@ mod tests {
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
         let rendered = buffer_text(&buf, area);
+        let (rightward, leftward) = crate::tui::ambient_life::fish_silhouette_counts(&rendered);
         assert!(
-            rendered.contains("><") || rendered.contains("<o"),
+            rightward + leftward > 0,
             "submitting a message must not empty the ocean:\n{rendered}"
         );
         assert!(rendered.contains("release check 17"), "{rendered}");
@@ -7903,8 +7907,9 @@ mod tests {
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
         let rendered = buffer_text(&buf, area);
+        let (rightward, leftward) = crate::tui::ambient_life::fish_silhouette_counts(&rendered);
         assert!(
-            rendered.contains("><") || rendered.contains("<o"),
+            rightward + leftward > 0,
             "the completion settle must not snap the ocean empty:\n{rendered}"
         );
         assert!(rendered.contains("release receipt"), "{rendered}");
@@ -7929,8 +7934,9 @@ mod tests {
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
         let rendered = buffer_text(&buf, area);
-        assert!(
-            !rendered.contains("><>") && !rendered.contains("<><"),
+        assert_eq!(
+            crate::tui::ambient_life::fish_silhouette_counts(&rendered),
+            (0, 0),
             "a full transcript is not an aquarium:\n{rendered}"
         );
     }
