@@ -1161,6 +1161,41 @@ fn format_session_line(session: &SessionMetadata, is_current: bool, locale: Loca
 }
 
 fn build_preview_lines(session: &SavedSession, locale: Locale) -> Vec<String> {
+    // Runtime control traffic is persisted with `role = "user"` because strict
+    // chat templates reject any other role mid-conversation. Both surfaces that
+    // already render a session drop it on this same predicate -- the live
+    // transcript in `history_cells_from_message` and the read-only pane in
+    // `session_peek::build_peek`. Showing it here attributed the runtime's own
+    // bookkeeping to the person: an Operate session previewed as `USER:`
+    // followed by the whole `<codewhale:runtime_event kind="operate_contract">`
+    // envelope.
+    //
+    // Render the turns first so the header can count exactly what the body
+    // draws. Filtering alone is not enough: a message can survive the filter
+    // and still draw nothing, because `message_text_for_history` yields an
+    // empty string for a thinking-only assistant turn (and for a user turn
+    // that `extract_user_prompt` reduces to nothing). Counting the filtered
+    // vector instead of the rendered turns reintroduced the same
+    // unaccountable total this function exists to remove.
+    let mut rendered_turns = 0usize;
+    let mut body: Vec<String> = Vec::new();
+    for message in session
+        .messages
+        .iter()
+        .filter(|message| !crate::runtime_handoff::is_internal_runtime_handoff(message))
+    {
+        let text = message_text_for_history(message, locale);
+        if text.trim().is_empty() {
+            continue;
+        }
+        rendered_turns += 1;
+        body.push(format!("{}:", message.role.as_str().to_ascii_uppercase()));
+        for line in text.lines() {
+            body.push(format!("  {line}"));
+        }
+        body.push(String::new());
+    }
+
     let mut out = vec![
         tr(locale, MessageId::SessionsPreviewTitle)
             .replace("{title}", extract_title(&session.metadata.title)),
@@ -1179,9 +1214,19 @@ fn build_preview_lines(session: &SavedSession, locale: Locale) -> Vec<String> {
                 .to_string(),
         ),
     );
+    // Count what the preview actually shows. `session_peek` already reports
+    // the conversation this way, for the same reason: a total the pane cannot
+    // account for is not a useful number. The persisted
+    // `metadata.message_count` stays untouched -- it is an index quantity
+    // (`forked_from_message_count` stores it as a position, and the
+    // empty-session tests key on it), not a display one.
+    //
+    // Known limitation: the list row still shows the persisted total, because
+    // rows are rendered from the session index without loading messages. For
+    // an Operate session the row can therefore read higher than the preview.
     out.push(
         tr(locale, MessageId::SessionsPreviewMessagesModel)
-            .replace("{count}", &session.metadata.message_count.to_string())
+            .replace("{count}", &rendered_turns.to_string())
             .replace("{model}", &session.metadata.model),
     );
     if let Some(mode) = session.metadata.mode.as_deref() {
@@ -1189,17 +1234,7 @@ fn build_preview_lines(session: &SavedSession, locale: Locale) -> Vec<String> {
     }
     out.push("".to_string());
 
-    for message in &session.messages {
-        let text = message_text_for_history(message, locale);
-        if text.trim().is_empty() {
-            continue;
-        }
-        out.push(format!("{}:", message.role.as_str().to_ascii_uppercase()));
-        for line in text.lines() {
-            out.push(format!("  {line}"));
-        }
-        out.push(String::new());
-    }
+    out.extend(body);
     if out.last().is_some_and(String::is_empty) {
         out.pop();
     }
@@ -1685,6 +1720,89 @@ mod tests {
                 .any(|line| line.contains("session-with-a-long-identifier")),
             "the row truncates the id; the preview is where the full handle lives (#6014)"
         );
+    }
+
+    /// The preview is a read-only view of a saved session, and runtime
+    /// control traffic rides `role = "user"` on disk. Rendering it verbatim
+    /// opened every Operate-mode preview with `USER:` and the whole internal
+    /// `operate_contract` envelope, attributing the runtime's own bookkeeping
+    /// to the person.
+    #[test]
+    fn preview_hides_internal_runtime_traffic() {
+        let saved = saved_session_with_messages(vec![
+            crate::runtime_handoff::operate_contract_runtime_message(),
+            text_message("user", "ship the release"),
+            text_message("assistant", "on it"),
+        ]);
+
+        let preview = build_preview_lines(&saved, Locale::En).join("\n");
+
+        assert!(
+            !preview.contains("codewhale:runtime_event"),
+            "internal runtime traffic must not be shown to a person: {preview}"
+        );
+        assert!(
+            !preview.contains("Input provenance:"),
+            "the runtime provenance envelope must not leak either: {preview}"
+        );
+        assert!(
+            preview.contains("ship the release") && preview.contains("on it"),
+            "the person's own conversation still belongs in the preview: {preview}"
+        );
+        // The header must count what the body shows. The persisted
+        // `metadata.message_count` is 3 here (it counts the runtime event);
+        // printing that beside two visible turns is a total the pane cannot
+        // account for.
+        assert_eq!(
+            saved.metadata.message_count, 3,
+            "guard the premise: the persisted count still includes runtime traffic"
+        );
+        assert!(
+            preview.contains("Messages: 2"),
+            "the preview counts the conversation it renders, not the persisted \
+             total: {preview}"
+        );
+    }
+
+    /// The header must count the turns the body actually draws, not the
+    /// messages that merely survived the runtime-traffic filter. A
+    /// thinking-only assistant turn renders nothing (`message_text_for_history`
+    /// yields an empty string for `ContentBlock::Thinking`), so counting the
+    /// filtered vector printed a total the pane could not account for --
+    /// the same defect the filter was added to remove.
+    #[test]
+    fn preview_count_excludes_turns_that_render_nothing() {
+        let thinking_only = codewhale_models::Message {
+            role: Role::from("assistant"),
+            content: vec![codewhale_models::ContentBlock::Thinking {
+                thinking: "silent deliberation".to_string(),
+                signature: None,
+                state: None,
+            }],
+        };
+        let saved = saved_session_with_messages(vec![
+            crate::runtime_handoff::operate_contract_runtime_message(),
+            thinking_only,
+            text_message("user", "ship the release"),
+            text_message("assistant", "on it"),
+        ]);
+
+        let preview = build_preview_lines(&saved, Locale::En).join("\n");
+
+        assert!(
+            preview.contains("Messages: 2"),
+            "two turns are drawn, so the header must say two: {preview}"
+        );
+        assert!(
+            !preview.contains("silent deliberation"),
+            "a thinking block is not a rendered turn: {preview}"
+        );
+        // The rendered `ROLE:` headings are the ground truth for the count.
+        let drawn = preview
+            .lines()
+            .filter(|line| *line == "USER:" || *line == "ASSISTANT:")
+            .count();
+        assert_eq!(drawn, 2, "header count must equal drawn turns: {preview}");
     }
 
     #[test]
