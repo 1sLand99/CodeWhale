@@ -245,6 +245,22 @@ tag, packages, checksums and release assets exist.
 
 ### Fixed
 
+- A Xiaomi MiMo key no longer fails verification with another vendor's 401.
+  The legacy top-level `base_url` is a DeepSeek field, and a route without an
+  endpoint of its own inherited it — so a config carrying
+  `base_url = "https://api.deepseek.com"` made that host the MiMo route's
+  endpoint. The custom-endpoint guard correctly withheld the MiMo credential
+  from a host the route does not own, and the setup wizard's probe, which
+  bypassed the guard, sent the key as `api-key:` — a header DeepSeek ignores.
+  The result was `HTTP 401 Unauthorized: Authentication Fails (governor)`,
+  DeepSeek's *unauthenticated* 401, shown to someone who believed they were
+  testing their own key. Every layer that reads the root now inherits it only
+  when the URL belongs to that provider's own official endpoint family;
+  DeepSeek, which owns the field, is unchanged, and any other host is still
+  expressible on `[providers.xiaomi_mimo] base_url`. Key verification
+  failures now also name the endpoint that was probed, so a wrong endpoint
+  reads as a wrong endpoint instead of a bad key.
+
 - Configuration parsing keeps the parsed base config boxed, so loading a
   profile no longer carries the full `Config` by value through the
   deserializer and overflows a default 2 MiB test-thread stack; the

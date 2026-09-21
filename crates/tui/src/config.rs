@@ -6538,9 +6538,16 @@ impl Config {
                 self.route_owned_root_base_url(provider, identity)
             }
             // Xiaomi MiMo honours a root `base_url` when the per-provider table
-            // has none — otherwise a minimal top-level config silently falls
-            // back to the official host.
-            ApiProvider::XiaomiMimo => self.route_owned_root_base_url(provider, identity),
+            // has none — but only when that root is an endpoint the MiMo family
+            // owns. A legacy DeepSeek root must not become this route's
+            // endpoint: the custom-endpoint guard withholds the MiMo credential
+            // from a foreign host, so the route would answer with the other
+            // vendor's unauthenticated 401 while the user believed they were
+            // testing their own key. A proxy or any other host is still
+            // expressible on `[providers.xiaomi_mimo] base_url`.
+            ApiProvider::XiaomiMimo => self
+                .route_owned_root_base_url(provider, identity)
+                .filter(|base| xiaomi_mimo_root_belongs_to_provider(base)),
             ApiProvider::DeepseekAnthropic => None,
             ApiProvider::NvidiaNim => self
                 .route_owned_root_base_url(provider, identity)
@@ -6856,9 +6863,18 @@ impl Config {
         let provider_base = self
             .provider_config_string_with_runtime_fallback(provider, |entry| entry.base_url.clone());
         match provider {
-            ApiProvider::Deepseek | ApiProvider::DeepseekCN | ApiProvider::XiaomiMimo => {
+            ApiProvider::Deepseek | ApiProvider::DeepseekCN => {
                 provider_base.or_else(|| self.route_owned_root_base_url(provider, &identity))
             }
+            // Same rule as `base_url_for_route`: the legacy root is a DeepSeek
+            // field, so only a MiMo-owned endpoint may be inherited from it.
+            // Every layer that reads the root has to agree, or route
+            // canonicalization and credential scoping disagree about which
+            // endpoint this route owns.
+            ApiProvider::XiaomiMimo => provider_base.or_else(|| {
+                self.route_owned_root_base_url(provider, &identity)
+                    .filter(|base| xiaomi_mimo_root_belongs_to_provider(base))
+            }),
             ApiProvider::NvidiaNim => provider_base.or_else(|| {
                 self.route_owned_root_base_url(provider, &identity)
                     .filter(|base| base.contains("integrate.api.nvidia.com"))
@@ -10302,6 +10318,19 @@ fn xiaomi_mimo_base_url_uses_token_plan(base_url: &str) -> bool {
     normalized == XIAOMI_MIMO_TOKEN_PLAN_CN_BASE_URL
         || normalized == XIAOMI_MIMO_TOKEN_PLAN_SGP_BASE_URL
         || normalized == XIAOMI_MIMO_TOKEN_PLAN_AMS_BASE_URL
+}
+
+/// Whether a legacy *root* `base_url` may be inherited by the MiMo route.
+///
+/// One owner for the family definition: `provider_base_url_is_official` in
+/// `codewhale-config` is the same predicate route canonicalization and
+/// credential scoping use, so the endpoint this route advertises and the
+/// endpoint its credential is scoped to cannot disagree.
+fn xiaomi_mimo_root_belongs_to_provider(base_url: &str) -> bool {
+    codewhale_config::provider_base_url_is_official(
+        codewhale_config::ProviderKind::XiaomiMimo,
+        base_url,
+    )
 }
 
 fn xiaomi_mimo_env_var(candidates: &[&str]) -> Option<String> {

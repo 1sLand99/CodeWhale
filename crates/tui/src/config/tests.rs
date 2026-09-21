@@ -8754,6 +8754,76 @@ fn xiaomi_mimo_scenario() -> Result<()> {
 }
 
 #[test]
+fn only_the_identity_that_owns_the_legacy_root_may_inherit_it() -> Result<()> {
+    // The legacy root `base_url` is the DeepSeek field. A foreign value must
+    // never become another route's endpoint: the custom-endpoint guard withholds
+    // that route's credential from the foreign host, so the route answers with
+    // the *other* vendor's unauthenticated 401 and the user reads it as a bad
+    // key. The literal `provider = "custom"` shape is deliberately excluded —
+    // it owns the root by design — and named custom providers read their own
+    // `[providers.<name>]` table.
+    let foreign = "https://api.deepseek.com";
+    for name in [
+        "deepseek",
+        "deepseek-cn",
+        "xiaomi-mimo",
+        "openai-codex",
+        "nvidia-nim",
+    ] {
+        let Some(provider) = ApiProvider::parse(name) else {
+            continue;
+        };
+        let config = Config {
+            provider: Some(name.to_string()),
+            base_url: Some(foreign.to_string()),
+            ..Default::default()
+        };
+        config.validate()?;
+        let resolved = config.active_route_base_url();
+        if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
+            assert_eq!(resolved, foreign, "{name} owns the legacy root");
+        } else {
+            assert!(
+                !resolved.contains("api.deepseek.com"),
+                "{name} inherited a foreign legacy root: {resolved}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn xiaomi_mimo_ignores_an_unrelated_legacy_root_base_url() -> Result<()> {
+    // The legacy root `base_url` is a DeepSeek field. Inheriting it aimed MiMo
+    // traffic — and the MiMo key probe — at api.deepseek.com, whose
+    // unauthenticated 401 ("Authentication Fails (governor)") then read as a
+    // rejected MiMo key. Only MiMo's own hosts may be inherited.
+    let config = Config {
+        provider: Some("xiaomi-mimo".to_string()),
+        base_url: Some("https://api.deepseek.com".to_string()),
+        ..Default::default()
+    };
+
+    config.validate()?;
+    assert_eq!(config.api_provider(), ApiProvider::XiaomiMimo);
+    assert_eq!(config.active_route_base_url(), DEFAULT_XIAOMI_MIMO_BASE_URL);
+
+    // A MiMo host on the same legacy field is still honoured.
+    let config = Config {
+        provider: Some("xiaomi-mimo".to_string()),
+        base_url: Some("https://token-plan-ams.xiaomimimo.com/v1".to_string()),
+        ..Default::default()
+    };
+
+    config.validate()?;
+    assert_eq!(
+        config.active_route_base_url(),
+        XIAOMI_MIMO_TOKEN_PLAN_AMS_BASE_URL
+    );
+    Ok(())
+}
+
+#[test]
 fn openai_codex_provider_ignores_legacy_root_base_url() -> Result<()> {
     let config = Config {
         provider: Some("openai-codex".to_string()),
