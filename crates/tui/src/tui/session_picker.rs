@@ -1161,6 +1161,19 @@ fn format_session_line(session: &SessionMetadata, is_current: bool, locale: Loca
 }
 
 fn build_preview_lines(session: &SavedSession, locale: Locale) -> Vec<String> {
+    // Runtime control traffic is persisted with `role = "user"` because strict
+    // chat templates reject any other role mid-conversation. Both surfaces that
+    // already render a session drop it on this same predicate -- the live
+    // transcript in `history_cells_from_message` and the read-only pane in
+    // `session_peek::build_peek`. Showing it here attributed the runtime's own
+    // bookkeeping to the person: an Operate session previewed as `USER:`
+    // followed by the whole `<codewhale:runtime_event kind="operate_contract">`
+    // envelope.
+    let conversation: Vec<&codewhale_models::Message> = session
+        .messages
+        .iter()
+        .filter(|message| !crate::runtime_handoff::is_internal_runtime_handoff(message))
+        .collect();
     let mut out = vec![
         tr(locale, MessageId::SessionsPreviewTitle)
             .replace("{title}", extract_title(&session.metadata.title)),
@@ -1179,14 +1192,19 @@ fn build_preview_lines(session: &SavedSession, locale: Locale) -> Vec<String> {
                 .to_string(),
         ),
     );
-    // Known limitation: this count, like the list row's, is the persisted
-    // total and so still includes the runtime traffic the body below hides.
-    // `session_peek` excludes it, but the row is rendered from the session
-    // index without loading messages, so filtering only the preview would
-    // contradict the row the person just selected on the same screen.
+    // Count what the preview actually shows. `session_peek` already reports
+    // the conversation this way, for the same reason: a total the pane cannot
+    // account for is not a useful number. The persisted
+    // `metadata.message_count` stays untouched -- it is an index quantity
+    // (`forked_from_message_count` stores it as a position, and the
+    // empty-session tests key on it), not a display one.
+    //
+    // Known limitation: the list row still shows the persisted total, because
+    // rows are rendered from the session index without loading messages. For
+    // an Operate session the row can therefore read higher than the preview.
     out.push(
         tr(locale, MessageId::SessionsPreviewMessagesModel)
-            .replace("{count}", &session.metadata.message_count.to_string())
+            .replace("{count}", &conversation.len().to_string())
             .replace("{model}", &session.metadata.model),
     );
     if let Some(mode) = session.metadata.mode.as_deref() {
@@ -1194,18 +1212,7 @@ fn build_preview_lines(session: &SavedSession, locale: Locale) -> Vec<String> {
     }
     out.push("".to_string());
 
-    for message in &session.messages {
-        // Runtime control traffic is persisted with `role = "user"` because
-        // strict chat templates reject any other role mid-conversation. Both
-        // of the surfaces that already render a session drop it on this same
-        // predicate -- the live transcript in `history_cells_from_message`
-        // and the read-only pane in `session_peek::build_peek`. Printing it
-        // here attributed the runtime's own bookkeeping to the person: an
-        // Operate session previewed as `USER:` followed by the whole
-        // `<codewhale:runtime_event kind="operate_contract">` envelope.
-        if crate::runtime_handoff::is_internal_runtime_handoff(message) {
-            continue;
-        }
+    for message in conversation {
         let text = message_text_for_history(message, locale);
         if text.trim().is_empty() {
             continue;
@@ -1729,6 +1736,19 @@ mod tests {
         assert!(
             preview.contains("ship the release") && preview.contains("on it"),
             "the person's own conversation still belongs in the preview: {preview}"
+        );
+        // The header must count what the body shows. The persisted
+        // `metadata.message_count` is 3 here (it counts the runtime event);
+        // printing that beside two visible turns is a total the pane cannot
+        // account for.
+        assert_eq!(
+            saved.metadata.message_count, 3,
+            "guard the premise: the persisted count still includes runtime traffic"
+        );
+        assert!(
+            preview.contains("Messages: 2"),
+            "the preview counts the conversation it renders, not the persisted \
+             total: {preview}"
         );
     }
 
