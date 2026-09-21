@@ -1169,11 +1169,33 @@ fn build_preview_lines(session: &SavedSession, locale: Locale) -> Vec<String> {
     // bookkeeping to the person: an Operate session previewed as `USER:`
     // followed by the whole `<codewhale:runtime_event kind="operate_contract">`
     // envelope.
-    let conversation: Vec<&codewhale_models::Message> = session
+    //
+    // Render the turns first so the header can count exactly what the body
+    // draws. Filtering alone is not enough: a message can survive the filter
+    // and still draw nothing, because `message_text_for_history` yields an
+    // empty string for a thinking-only assistant turn (and for a user turn
+    // that `extract_user_prompt` reduces to nothing). Counting the filtered
+    // vector instead of the rendered turns reintroduced the same
+    // unaccountable total this function exists to remove.
+    let mut rendered_turns = 0usize;
+    let mut body: Vec<String> = Vec::new();
+    for message in session
         .messages
         .iter()
         .filter(|message| !crate::runtime_handoff::is_internal_runtime_handoff(message))
-        .collect();
+    {
+        let text = message_text_for_history(message, locale);
+        if text.trim().is_empty() {
+            continue;
+        }
+        rendered_turns += 1;
+        body.push(format!("{}:", message.role.as_str().to_ascii_uppercase()));
+        for line in text.lines() {
+            body.push(format!("  {line}"));
+        }
+        body.push(String::new());
+    }
+
     let mut out = vec![
         tr(locale, MessageId::SessionsPreviewTitle)
             .replace("{title}", extract_title(&session.metadata.title)),
@@ -1204,7 +1226,7 @@ fn build_preview_lines(session: &SavedSession, locale: Locale) -> Vec<String> {
     // an Operate session the row can therefore read higher than the preview.
     out.push(
         tr(locale, MessageId::SessionsPreviewMessagesModel)
-            .replace("{count}", &conversation.len().to_string())
+            .replace("{count}", &rendered_turns.to_string())
             .replace("{model}", &session.metadata.model),
     );
     if let Some(mode) = session.metadata.mode.as_deref() {
@@ -1212,17 +1234,7 @@ fn build_preview_lines(session: &SavedSession, locale: Locale) -> Vec<String> {
     }
     out.push("".to_string());
 
-    for message in conversation {
-        let text = message_text_for_history(message, locale);
-        if text.trim().is_empty() {
-            continue;
-        }
-        out.push(format!("{}:", message.role.as_str().to_ascii_uppercase()));
-        for line in text.lines() {
-            out.push(format!("  {line}"));
-        }
-        out.push(String::new());
-    }
+    out.extend(body);
     if out.last().is_some_and(String::is_empty) {
         out.pop();
     }
@@ -1750,6 +1762,47 @@ mod tests {
             "the preview counts the conversation it renders, not the persisted \
              total: {preview}"
         );
+    }
+
+    /// The header must count the turns the body actually draws, not the
+    /// messages that merely survived the runtime-traffic filter. A
+    /// thinking-only assistant turn renders nothing (`message_text_for_history`
+    /// yields an empty string for `ContentBlock::Thinking`), so counting the
+    /// filtered vector printed a total the pane could not account for --
+    /// the same defect the filter was added to remove.
+    #[test]
+    fn preview_count_excludes_turns_that_render_nothing() {
+        let thinking_only = codewhale_models::Message {
+            role: Role::from("assistant"),
+            content: vec![codewhale_models::ContentBlock::Thinking {
+                thinking: "silent deliberation".to_string(),
+                signature: None,
+                state: None,
+            }],
+        };
+        let saved = saved_session_with_messages(vec![
+            crate::runtime_handoff::operate_contract_runtime_message(),
+            thinking_only,
+            text_message("user", "ship the release"),
+            text_message("assistant", "on it"),
+        ]);
+
+        let preview = build_preview_lines(&saved, Locale::En).join("\n");
+
+        assert!(
+            preview.contains("Messages: 2"),
+            "two turns are drawn, so the header must say two: {preview}"
+        );
+        assert!(
+            !preview.contains("silent deliberation"),
+            "a thinking block is not a rendered turn: {preview}"
+        );
+        // The rendered `ROLE:` headings are the ground truth for the count.
+        let drawn = preview
+            .lines()
+            .filter(|line| *line == "USER:" || *line == "ASSISTANT:")
+            .count();
+        assert_eq!(drawn, 2, "header count must equal drawn turns: {preview}");
     }
 
     #[test]
