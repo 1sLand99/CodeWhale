@@ -196,7 +196,15 @@ pub fn idle_and_catalog_keyword_matches(
         if let Some(display) = &candidate.display_name {
             keywords.push(display.clone());
         }
-        keywords.extend(candidate.categories.iter().cloned());
+        // Categories are deliberately *not* matchable, for the same reason a
+        // code-hosting homepage is not (see `matcher::effective_keywords`): a
+        // category names the bucket a catalog files the plugin under, not what
+        // the plugin is. The bundled catalog buckets read `development`,
+        // `productivity`, `design`, `testing`, `security` — ordinary English
+        // words, shared by up to 121 entries each — so folding them in made a
+        // normal sentence open an unsolicited install prompt. Scored
+        // `/plugin suggest` still weighs them (`index_entry_from_marketplace`);
+        // that path is user-invoked and ranked, not a proactive interruption.
         let mut domains = Vec::new();
         if let Some(homepage) = &candidate.homepage {
             domains.push(homepage.clone());
@@ -751,6 +759,47 @@ mod tests {
             .is_some(),
             "the same entry as a plugin still matches"
         );
+    }
+
+    /// A catalog category names the bucket an entry is filed under, not what
+    /// the plugin *is* — the same class of thing as a code-hosting homepage,
+    /// which the matcher already refuses. Folding categories into the
+    /// matchable keyword set made ordinary English in a draft ("productivity",
+    /// "development") open an unsolicited install prompt.
+    #[test]
+    fn catalog_categories_never_fire_a_plugin_suggestion() {
+        let _lock = lock_test_env();
+        let root = TempDir::new().unwrap();
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", root.path().join("home"));
+        let registry = crate::plugins::PluginRegistry::empty(root.path());
+        let mut candidate = marketplace_candidate("anthropic", "receipts", &["expense"]);
+        candidate.display_name = None;
+        candidate.categories = vec!["productivity".to_string(), "development".to_string()];
+        let slice = std::slice::from_ref(&candidate);
+        let candidates = idle_and_catalog_keyword_matches(&registry, slice);
+        assert_eq!(candidates.len(), 1, "fixture must supply one candidate");
+
+        for draft in [
+            "some notes on productivity today",
+            "walk me through the development workflow",
+        ] {
+            assert!(
+                match_plugin_for_draft_among(draft, &candidates).is_none(),
+                "a category must not fire an install prompt: {draft}"
+            );
+        }
+
+        // Control: the declared keyword and the entry name still match, so the
+        // exclusion is the category and not a dead fixture.
+        for (draft, term) in [
+            ("track this expense", "expense"),
+            ("open receipts", "receipts"),
+        ] {
+            let matched = match_plugin_for_draft_among(draft, &candidates)
+                .unwrap_or_else(|| panic!("declared term must still match: {draft}"));
+            assert_eq!(matched.name, "receipts");
+            assert_eq!(matched.matched_term.as_deref(), Some(term));
+        }
     }
 
     #[test]
