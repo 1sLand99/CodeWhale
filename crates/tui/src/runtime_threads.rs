@@ -2547,13 +2547,18 @@ impl RuntimeThreadStore {
     /// message per turn, and one page can span most of the store, so retaining
     /// that whole projection for a page held every item it covered in memory
     /// at once — a page's peak that grew with the page instead of with one
-    /// thread. This keeps only the messages that could be a preview; tool
-    /// calls, results and artifacts are read and dropped.
+    /// thread. This holds one message text per requested turn and nothing
+    /// else: tool calls, results and artifacts are read and dropped, and an
+    /// older message is dropped the moment a newer one is read.
     ///
-    /// Ordering matches [`sort_turn_items_by_start`]: the candidate subset
-    /// sorts identically because that comparator reads only `started_at`, so
-    /// the text returned for a turn is the one a caller would find by sorting
-    /// the turn's items and scanning back for the last user/agent message.
+    /// The winner is the message [`sort_turn_items_by_start`] would place
+    /// last: that comparator reads only `started_at`, substitutes one "now"
+    /// for a missing timestamp, and is stable, so the later-read message wins
+    /// a tie.
+    ///
+    /// Known limitation: peak memory is still one text per turn of the page,
+    /// untruncated, because the caller decides which turn's text becomes the
+    /// row's preview and how much of it to show.
     pub fn newest_message_text_by_turn(
         &self,
         turn_ids: &[String],
@@ -2567,10 +2572,10 @@ impl RuntimeThreadStore {
         }
 
         let wanted: HashSet<&str> = turn_ids.iter().map(String::as_str).collect();
-        // One candidate per retained message: the text to report, and the
-        // `started_at` the item ordering sorts it by.
-        type Candidate = (Option<DateTime<Utc>>, String);
-        let mut candidates: HashMap<String, Vec<Candidate>> = HashMap::new();
+        // One shared fallback, as `sort_turn_items_by_start` uses, so every
+        // undated message reads as newest and ties resolve by read order.
+        let fallback = Utc::now();
+        let mut newest: HashMap<String, (DateTime<Utc>, String)> = HashMap::new();
         let items_dir = checked_existing_runtime_store_dir(&self.items_dir)?;
         for entry in fs::read_dir(&items_dir)
             .with_context(|| format!("Failed to read {}", items_dir.display()))?
@@ -2630,24 +2635,19 @@ impl RuntimeThreadStore {
             if text.trim().is_empty() {
                 continue;
             }
-            candidates
-                .entry(item.turn_id)
-                .or_default()
-                .push((item.started_at, text));
-        }
-
-        let mut out = HashMap::with_capacity(candidates.len());
-        for (turn_id, mut per_turn) in candidates {
-            // `sort_turn_items_by_start` reads a missing `started_at` as "now",
-            // so it sorts last; the sort is stable, so equal keys keep the
-            // order the directory was read in and `pop` takes the last one.
-            let fallback = Utc::now();
-            per_turn.sort_by_key(|candidate| candidate.0.unwrap_or(fallback));
-            if let Some((_, text)) = per_turn.pop() {
-                out.insert(turn_id, text);
+            let started_at = item.started_at.unwrap_or(fallback);
+            match newest.get(&item.turn_id) {
+                Some((held, _)) if *held > started_at => {}
+                _ => {
+                    newest.insert(item.turn_id, (started_at, text));
+                }
             }
         }
-        Ok(out)
+
+        Ok(newest
+            .into_iter()
+            .map(|(turn_id, (_, text))| (turn_id, text))
+            .collect())
     }
 
     pub async fn append_event(
