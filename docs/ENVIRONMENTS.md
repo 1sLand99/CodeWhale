@@ -44,10 +44,12 @@ idle-sleep assertion, so an unattended machine does not idle into sleep
 mid-turn and lose the work:
 
 - macOS: `caffeinate -i`
-- Linux: `systemd-inhibit --what=idle --why="Codewhale turn in flight" --mode=block sleep infinity`
+- Linux: `systemd-inhibit --what=idle --why="Codewhale turn in flight" --mode=block cat`,
+  where `cat` reads a pipe Codewhale holds for the turn
 
-The assertion is released the moment the turn ends, and it covers *idle* sleep
-only: an explicit `sleep` / `pmset sleepnow`, a closed lid, or a low battery
+The assertion is released the moment the turn ends — on Linux by closing that
+pipe, so `cat` exits and `systemd-inhibit` follows without leaving a process
+behind — and it covers *idle* sleep only: an explicit `sleep` / `pmset sleepnow`, a closed lid, or a low battery
 still suspends the machine. Headless hosts — `exec`, app-server, CI — never
 hold it, so a shared runner's power policy is untouched. Windows is not
 implemented: `SetThreadExecutionState` is thread-affine and needs a holder that
