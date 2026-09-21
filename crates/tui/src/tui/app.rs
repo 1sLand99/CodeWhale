@@ -3625,15 +3625,17 @@ impl App {
         if self.reject_setting_change_while_busy(MessageId::SettingSubjectPermissions) {
             return None;
         }
-        if self.mode == AppMode::Plan {
-            self.push_status_toast(
-                "Plan is Read Only; switch to Act to change permissions".to_string(),
-                StatusToastLevel::Info,
-                Some(5_000),
-            );
-            self.needs_redraw = true;
-            return None;
-        }
+        // Plan used to refuse the change outright, which welded the two axes
+        // together on the keyboard: Tab cycles the mode, Shift+Tab cycles the
+        // posture, and in Plan the second key silently did nothing. They are
+        // independent settings and both must stay settable.
+        //
+        // Nothing is weakened by allowing it. Plan's read-only guarantee is
+        // derived from the mode, not from the posture: `authority` maps
+        // `(Plan, _, Bypass)` to `SandboxPolicy::ReadOnly` (there is a test
+        // pinning exactly that), and `tool_catalog` gates every write tool on
+        // `mode != AppMode::Plan`. Setting the posture here records the
+        // preference that takes effect on the next Act/Operate turn.
         if allow_root_policy && !self.approval_policy_root_editable {
             return None;
         }
@@ -3666,6 +3668,19 @@ impl App {
     fn finish_approval_posture_change(&mut self, next: ApprovalMode) {
         self.set_agent_approval_posture(next);
         self.needs_redraw = true;
+        // In Plan the new posture is real but dormant, and the footer chip
+        // alone would imply it is live. Say when it starts applying instead of
+        // refusing the change.
+        if self.mode == AppMode::Plan {
+            self.push_status_toast(
+                format!(
+                    "Permissions set to {}. Plan stays Read Only; this applies in Act and Operate.",
+                    next.permission_chip_label()
+                ),
+                StatusToastLevel::Info,
+                Some(5_000),
+            );
+        }
         // Footer permission chip is canonical — no status toast for the new
         // value, only the one-shot rebinding notice.
         self.notify_keybinding_migration_once();

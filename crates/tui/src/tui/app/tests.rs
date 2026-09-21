@@ -3856,8 +3856,17 @@ fn cycle_approval_scenario() {
     }
 }
 
+/// Tab cycles the mode, Shift+Tab cycles the permission posture. They are two
+/// independent axes, and Plan used to veto the second key — which welded them
+/// together on the keyboard: Shift+Tab silently did nothing in Plan.
+///
+/// Allowing it weakens nothing. Plan's read-only guarantee is mode-derived:
+/// `authority` maps `(Plan, _, Bypass)` to `SandboxPolicy::ReadOnly` and
+/// `tool_catalog` gates every write tool on `mode != AppMode::Plan`. So the
+/// cycle moves the durable Act/Operate baseline while the *live* Plan policy
+/// stays `Suggest`, and the new posture lands when the mode leaves Plan.
 #[test]
-fn plan_permission_cycle_is_rejected_without_mutating_agent_baseline() {
+fn plan_permission_cycle_moves_the_baseline_and_leaves_plan_read_only() {
     let _env_lock = lock_test_env();
     let tmp = tempfile::tempdir().expect("tempdir");
     let config_path = tmp.path().join("config.toml");
@@ -3868,18 +3877,44 @@ fn plan_permission_cycle_is_rejected_without_mutating_agent_baseline() {
     app.set_agent_approval_posture(ApprovalMode::Auto);
     app.set_mode(AppMode::Plan);
 
-    assert!(!app.cycle_approval_posture());
-    assert_eq!(app.approval_mode, ApprovalMode::Suggest);
-    assert_eq!(app.mode_prefs.agent_approval_mode, ApprovalMode::Auto);
-    assert!(!tmp.path().join("settings.toml").exists());
+    assert!(
+        app.cycle_approval_posture(),
+        "Shift+Tab must still change permissions while in Plan"
+    );
+    assert_eq!(
+        app.mode_prefs.agent_approval_mode,
+        ApprovalMode::Bypass,
+        "the durable baseline advances Auto -> Full Access"
+    );
+    assert_eq!(
+        app.approval_mode,
+        ApprovalMode::Suggest,
+        "Plan's live policy is untouched: it stays read-only and asks"
+    );
+    assert_eq!(
+        app.mode,
+        AppMode::Plan,
+        "changing permissions must not move the mode"
+    );
     assert!(
         app.status_toasts
             .iter()
-            .any(|toast| toast.text.contains("Read Only"))
+            .any(|toast| toast.text.contains("applies in Act and Operate")),
+        "the receipt must say when the new posture starts applying"
+    );
+
+    let persisted = std::fs::read_to_string(tmp.path().join("settings.toml")).expect("settings");
+    assert!(
+        persisted.contains("permission_posture = \"full-access\""),
+        "the posture is durable, not dropped because Plan was active: {persisted}"
     );
 
     app.set_mode(AppMode::Operate);
-    assert_eq!(app.approval_mode, ApprovalMode::Auto);
+    assert_eq!(
+        app.approval_mode,
+        ApprovalMode::Bypass,
+        "leaving Plan projects the posture chosen while in Plan"
+    );
 }
 
 #[test]
