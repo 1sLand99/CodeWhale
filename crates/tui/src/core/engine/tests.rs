@@ -507,6 +507,68 @@ fn registry_instruction_does_not_gate_ordinary_local_work() {
     assert!(prompt.contains("rather than installing or running its package command"));
 }
 
+/// A provider's input bill describes one route's tokenization of one prompt.
+/// The compaction gate and the preflight guard lift the honest estimate to
+/// it, so a bill carried across a route switch would measure the next
+/// request with the previous route's tokenizer and prefix. Re-installing the
+/// same route keeps the carry-over #5577 relies on; a different route drops
+/// it.
+#[test]
+fn route_switch_forgets_the_previous_routes_input_bill() {
+    let mut custom = HashMap::new();
+    for (name, base_url, model) in [
+        ("custom-a", "http://127.0.0.1:18181/v1", "model-a"),
+        ("custom-b", "http://127.0.0.1:18182/v1", "model-b"),
+    ] {
+        custom.insert(
+            name.to_string(),
+            crate::config::ProviderConfig {
+                kind: Some("openai-compatible".to_string()),
+                base_url: Some(base_url.to_string()),
+                model: Some(model.to_string()),
+                api_key: Some("local-test-key".to_string()),
+                ..crate::config::ProviderConfig::default()
+            },
+        );
+    }
+    let config = Config {
+        provider: Some("custom-a".to_string()),
+        providers: Some(crate::config::ProvidersConfig {
+            custom,
+            ..crate::config::ProvidersConfig::default()
+        }),
+        ..Config::default()
+    };
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &config);
+    let route_a = || {
+        resolve_runtime_route(&config, ApiProvider::Custom, Some("model-a"))
+            .expect("resolve custom A")
+            .validate()
+            .expect("preflight custom A")
+    };
+    engine.install_validated_runtime_route(route_a());
+    engine.session.latest_parent_input_tokens = Some(150_000);
+
+    engine.install_validated_runtime_route(route_a());
+    assert_eq!(
+        engine.session.latest_parent_input_tokens,
+        Some(150_000),
+        "re-installing the same route keeps the last bill"
+    );
+
+    let mut target = config.clone();
+    target.provider = Some("custom-b".to_string());
+    let route_b = resolve_runtime_route(&target, ApiProvider::Custom, Some("model-b"))
+        .expect("resolve custom B")
+        .validate()
+        .expect("preflight custom B");
+    engine.install_validated_runtime_route(route_b);
+    assert_eq!(
+        engine.session.latest_parent_input_tokens, None,
+        "a different route drops the previous route's bill"
+    );
+}
+
 #[test]
 fn custom_route_identity_change_rebuilds_client_for_new_named_endpoint() {
     let mut custom = HashMap::new();
