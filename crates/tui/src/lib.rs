@@ -8723,9 +8723,12 @@ Provide findings ordered by severity with file references, then open questions, 
                     index,
                     publication,
                     format!(
-                        "Review pass {}/{} request failed: {error}; no partial review was accepted or posted",
-                        index + 1,
-                        planned_passes
+                        "{}; no partial review was accepted or posted",
+                        crate::tools::review::request_failure_message(
+                            index + 1,
+                            planned_passes,
+                            &error
+                        )
                     ),
                 );
             }
