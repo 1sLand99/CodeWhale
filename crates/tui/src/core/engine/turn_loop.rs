@@ -1176,7 +1176,22 @@ impl Engine {
                 self.finish_compaction(&compaction_id);
             }
 
-            let estimated_input = self.estimated_input_tokens();
+            // The guard measures what the compaction gate measures: the honest
+            // estimate, lifted to the provider's last bill plus the growth
+            // since it. `estimated_input_tokens()` carries the ×1.5 overflow
+            // inflation; compared against the honest ceiling it refused at two
+            // thirds of the budget, and emergency compaction — which targets
+            // the honest budget — could never satisfy it (#6374). A request
+            // the estimate still undercounts is rejected by the provider and
+            // takes the bounded context-length recovery below.
+            let estimated_input = turn
+                .live_input_tokens_for_compaction(
+                    &self.session.messages,
+                    self.session.system_prompt.as_ref(),
+                    self.session.latest_parent_input_tokens,
+                )
+                .and_then(|tokens| usize::try_from(tokens).ok())
+                .unwrap_or(0);
             if let Some(budget) = route_context_budget_for_route(
                 self.api_provider,
                 &self.session.model,
@@ -1226,9 +1241,11 @@ impl Engine {
                 );
                 if triggered {
                     if context_recovery_attempts >= MAX_CONTEXT_RECOVERY_ATTEMPTS {
-                        let message = format!(
-                            "Context remains above model limit after {MAX_CONTEXT_RECOVERY_ATTEMPTS} recovery attempts \
-                             (~{estimated_input} token estimate, ~{input_budget} budget). Please run /compact or /clear."
+                        let message = context_overflow_exhausted_message(
+                            self.config.terminal_chrome_enabled,
+                            turn.stop_diagnostics.emergency_compaction_attempts,
+                            estimated_input,
+                            input_budget,
                         );
                         turn_error = Some(message.clone());
                         let _ = self

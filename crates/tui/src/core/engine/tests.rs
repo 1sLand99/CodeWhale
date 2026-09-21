@@ -16744,9 +16744,41 @@ async fn provider_runtime_status_reports_configured_zai_cap_without_client() {
 fn detects_context_length_errors_from_provider_payloads() {
     let msg = r#"SSE stream request failed: HTTP 400 Bad Request: {"error":{"message":"This model's maximum context length is 131072 tokens. However, you requested 153056 tokens (148960 in the messages, 4096 in the completion).","type":"invalid_request_error"}}"#;
     assert!(is_context_length_error_message(msg));
+    // llama.cpp's server wording (#6374): a genuine overflow on a local route
+    // must enter the bounded recovery path too.
+    assert!(is_context_length_error_message(
+        r#"SSE stream request failed: HTTP 400 Bad Request: {"error":{"code":400,"message":"the request exceeds the available context size. try increasing the context size or enable context shift","type":"invalid_request_error"}}"#
+    ));
     assert!(!is_context_length_error_message(
         "SSE stream request failed: HTTP 400 Bad Request: model not found"
     ));
+}
+
+/// #6374: the exhausted-recovery message must name levers the reader has.
+#[test]
+fn context_overflow_exhausted_message_names_levers_that_exist_in_the_mode() {
+    let headless = super::context::context_overflow_exhausted_message(false, 2, 98_739, 97_280);
+    assert!(
+        !headless.contains("/compact") && !headless.contains("/clear"),
+        "a headless host has no command layer: {headless}"
+    );
+    assert!(
+        headless.contains("2 emergency compaction passes"),
+        "{headless}"
+    );
+    assert!(
+        headless.contains("CODEWHALE_MAX_OUTPUT_TOKENS"),
+        "{headless}"
+    );
+    let interactive = super::context::context_overflow_exhausted_message(true, 1, 98_739, 97_280);
+    assert!(
+        interactive.contains("/compact") && interactive.contains("/clear"),
+        "{interactive}"
+    );
+    assert!(
+        interactive.contains("1 emergency compaction pass "),
+        "{interactive}"
+    );
 }
 
 #[test]
@@ -16868,6 +16900,115 @@ fn route_input_limit_blocks_oversized_preflight_before_transport() {
     assert!(
         estimated_input > usize::try_from(budget.input_budget_ceiling).unwrap(),
         "the turn-loop preflight must recover before constructing a network request"
+    );
+}
+
+/// #6374: the preflight guard measured a ×1.5-inflated estimate against the
+/// honest input ceiling, so a route refused at two thirds of its budget with
+/// the request never leaving the machine. The window here is calibrated so the
+/// honest estimate sits below the ceiling and the inflated one above it; the
+/// turn must reach the model with its history untouched.
+#[tokio::test]
+async fn preflight_guard_measures_honest_input_against_the_input_ceiling() {
+    let _lock = lock_test_env();
+    let _output_env = ScopedDeepSeekMaxOutputTokens::unset();
+    let workspace = tempdir().expect("workspace");
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", workspace.path());
+    let mock = std::sync::Arc::new(crate::llm_client::mock::MockLlmClient::new(vec![
+        crate::llm_client::mock::canned::simple_text_turn("continuing"),
+    ]));
+    let (mut engine, _handle) = Engine::new_with_model_client(
+        EngineConfig {
+            terminal_chrome_enabled: false,
+            ..deterministic_engine_config(workspace.path())
+        },
+        &Config::default(),
+        mock.clone(),
+    );
+    // Only the preflight guard is under test; the auto-compaction gate stays out.
+    engine.config.compaction.enabled = false;
+    let history: Vec<Message> = [
+        (Role::User, "x".repeat(120_000)),
+        (Role::Assistant, "y".repeat(100_000)),
+        (Role::User, "please continue".to_string()),
+    ]
+    .into_iter()
+    .map(|(role, text)| Message {
+        role,
+        content: vec![ContentBlock::Text {
+            text,
+            cache_control: None,
+        }],
+    })
+    .collect();
+    for message in &history {
+        engine.session.add_message(message.clone());
+    }
+    let system = engine.session.system_prompt.clone();
+    let honest = crate::compaction::estimate_input_tokens_for_pressure(&history, system.as_ref());
+    let inflated = crate::compaction::estimate_input_tokens_conservative(&history, system.as_ref());
+    assert!(
+        inflated > honest + 20_000,
+        "fixture must separate the estimators: honest {honest}, inflated {inflated}"
+    );
+    let output_cap = 4_096u64;
+    let target_ceiling = u64::try_from((honest + inflated) / 2).unwrap();
+    engine.active_route_limits = Some(codewhale_config::route::RouteLimits {
+        context_tokens: Some(
+            target_ceiling + output_cap + crate::context_budget::CONTEXT_HEADROOM_TOKENS,
+        ),
+        input_tokens: None,
+        output_tokens: Some(output_cap),
+    });
+    let ceiling = route_context_budget_for_route(
+        engine.api_provider,
+        &engine.session.model,
+        engine.active_route_limits,
+        0,
+    )
+    .expect("route limits produce a budget")
+    .input_budget_ceiling;
+    let ceiling = usize::try_from(ceiling).unwrap();
+    assert!(
+        honest < ceiling && ceiling < inflated,
+        "calibration: honest {honest} < ceiling {ceiling} < inflated {inflated}"
+    );
+
+    let registry =
+        crate::tools::ToolRegistry::new(crate::tools::spec::ToolContext::new(workspace.path()));
+    let catalog = registry.to_api_tools_with_cache(true);
+    let surface = crate::core::engine::tool_catalog::ToolSurfacePolicy::new(
+        registry,
+        Some(catalog),
+        codewhale_config::AppMode::Agent,
+        &engine.config.tools_always_load,
+        &[],
+        false,
+        None,
+        None,
+        Some(4),
+        engine.session.approval_mode,
+        crate::core::engine::tool_catalog::ToolMode::Direct,
+    );
+    let (status, error) = engine
+        .run_turn(
+            &mut crate::core::turn::TurnContext::new(8),
+            surface,
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    assert_eq!(
+        mock.call_count(),
+        1,
+        "the only model request is the turn itself, not an emergency compaction"
+    );
+    let request = mock.last_request().expect("the turn reached the model");
+    assert_eq!(
+        request.messages.len(),
+        history.len(),
+        "history reached the model without an emergency compaction pass"
     );
 }
 
