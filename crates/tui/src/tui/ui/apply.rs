@@ -3307,7 +3307,14 @@ pub(crate) async fn apply_provider_picker_api_key_with_verifier(
         Err(reason) => {
             // Verification failed - keep the picker open at the key-entry
             // stage with the provider's actual error so the user can fix
-            // the key instead of dead-ending with a status toast.
+            // the key instead of dead-ending with a status toast. Name the
+            // endpoint the probe actually used: a 401 from the wrong host
+            // (a legacy root `base_url` leaking into this route, say) is
+            // otherwise indistinguishable from a bad key.
+            let reason = match crate::llm_client::base_url_authority(&base_url) {
+                Some(authority) => format!("{reason} (endpoint: {authority})"),
+                None => reason,
+            };
             let runtime_status = query_provider_runtime_status(engine_handle).await;
             if let Some(picker) =
                 crate::tui::provider_picker::ProviderPickerView::new_for_key_entry_with_error(

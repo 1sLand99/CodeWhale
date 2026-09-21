@@ -3206,12 +3206,23 @@ impl ConfigToml {
         // endpoint of its own. Silently ignoring a configured root URL while
         // also dropping the root model made both routes unusable from a
         // minimal top-level config.
+        //
+        // A root that is not an endpoint this provider owns is not inherited.
+        // A legacy DeepSeek host otherwise became the MiMo route's endpoint:
+        // the custom-endpoint guard withheld the MiMo credential from it and the
+        // route answered with DeepSeek's unauthenticated 401 while the user
+        // believed they were testing their own key. DeepSeek itself owns the
+        // field, so its root stays unfiltered; every other reader must match its
+        // own official endpoint family (`provider_base_url_is_official`).
         let root_base_url = matches!(
             provider,
             ProviderKind::Deepseek | ProviderKind::XiaomiMimo | ProviderKind::OpenaiCodex
         )
         .then(|| self.base_url.clone())
-        .flatten();
+        .flatten()
+        .filter(|base| {
+            provider == ProviderKind::Deepseek || provider_base_url_is_official(provider, base)
+        });
         let auth_mode = cli
             .auth_mode
             .clone()
