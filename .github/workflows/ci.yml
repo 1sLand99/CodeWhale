@@ -428,7 +428,12 @@ jobs:
           python3 scripts/check-reqwest-builders.py
       # Clippy above runs without `--all-targets`, so it cannot see dead code
       # that only tests keep alive. This ratchet covers that blind spot by
-      # refusing to let the `#[allow(dead_code)]` total rise (#4785).
+      # refusing to let dead-code suppression rise (#4785). It counts both
+      # `#[allow(dead_code)]` and `#[expect(dead_code)]`: counting one spelling
+      # let a sweep rewrite allows as expects and book it as progress (#6241).
+      - name: Test dead-code budget script
+        if: needs.changes.outputs.heavy == 'true'
+        run: python3 scripts/test_check_dead_code_budget.py
       - name: Check dead-code budget
         if: needs.changes.outputs.heavy == 'true'
         # Advisory on pull requests: this asserts a whole-repo property, so a
