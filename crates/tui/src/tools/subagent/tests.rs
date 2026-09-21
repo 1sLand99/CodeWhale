@@ -11990,6 +11990,7 @@ fn child_runtime_increments_depth_and_preserves_auto_approve() {
     let mut parent = stub_runtime();
     parent.spawn_depth = 1;
     parent.context.auto_approve = false; // parent in suggest mode
+    parent.context.approval_mode = codewhale_execpolicy::ApprovalMode::Auto;
     let child = parent.child_runtime();
     assert_eq!(child.spawn_depth, 2, "child depth = parent + 1");
     assert_eq!(child.step_api_timeout, DEFAULT_STEP_API_TIMEOUT);
@@ -11997,13 +11998,25 @@ fn child_runtime_increments_depth_and_preserves_auto_approve() {
         !child.context.auto_approve,
         "child must inherit parent approval state"
     );
+    // Auto-Review is a posture, not a set bit: a child that pinned only the bit
+    // would run a task it creates one step stricter than the parent.
+    assert_eq!(
+        child.context.approval_mode,
+        codewhale_execpolicy::ApprovalMode::Auto,
+        "child inherits the parent's posture"
+    );
     assert!(!parent.context.auto_approve);
 
     parent.context.auto_approve = true;
+    parent.context.approval_mode = codewhale_execpolicy::ApprovalMode::Bypass;
     let auto_child = parent.child_runtime();
     assert!(
         auto_child.context.auto_approve,
         "auto-approved parents should still create auto-approved children"
+    );
+    assert_eq!(
+        auto_child.context.approval_mode,
+        codewhale_execpolicy::ApprovalMode::Bypass
     );
 }
 

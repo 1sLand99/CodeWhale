@@ -490,6 +490,13 @@ impl TasksTool {
             allow_shell: optional_bool_opt(input, "allow_shell")?,
             trust_mode: optional_bool_opt(input, "trust_mode")?,
             auto_approve: optional_bool_opt(input, "auto_approve")?,
+            // The task runs on the posture this session is in. The bits above
+            // are declarations the engine only reads when no posture is given,
+            // and a task started from a session must not run under authority
+            // that session was never granted.
+            permission_posture: Some(
+                crate::runtime_policy::approval_wire(context.approval_mode).to_string(),
+            ),
             owner_session_id: Some(context.state_namespace.clone()),
         };
         let task_id = crate::task_manager::TaskManager::new_task_id();
@@ -1553,6 +1560,69 @@ mod tests {
             .execute(json!({"task_id": task_id}), &context)
             .await
             .expect("cancel background shell");
+    }
+
+    /// Creating a task from a session runs it on the posture that session
+    /// holds: `auto_approve` is a legacy bit the engine only reads when no
+    /// posture is given, so a task cannot talk itself into more authority than
+    /// the session that asked for it was granted.
+    #[tokio::test]
+    async fn create_pins_the_session_posture_on_the_task() {
+        struct NoopExecutor;
+
+        #[async_trait::async_trait]
+        impl crate::task_manager::TaskExecutor for NoopExecutor {
+            async fn execute(
+                &self,
+                _task: crate::task_manager::ExecutionTask,
+                _events: tokio::sync::mpsc::Sender<crate::task_manager::TaskExecutionEvent>,
+                _cancel: tokio_util::sync::CancellationToken,
+            ) -> crate::task_manager::TaskExecutionResult {
+                crate::task_manager::TaskExecutionResult {
+                    status: crate::task_manager::TaskStatus::Completed,
+                    result_text: Some("noop".to_string()),
+                    error: None,
+                    terminal_reason: crate::task_manager::TaskTerminalReason::Completed,
+                }
+            }
+        }
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let manager = crate::task_manager::TaskManager::start_with_executor(
+            crate::task_manager::TaskManagerConfig {
+                data_dir: workspace.path().to_path_buf(),
+                worker_count: 1,
+                default_workspace: workspace.path().to_path_buf(),
+                default_model: "deepseek-v4-pro".to_string(),
+                default_mode: "agent".to_string(),
+                allow_shell: false,
+                trust_mode: false,
+                execution_limits: crate::task_manager::TaskExecutionLimits::default(),
+            },
+            std::sync::Arc::new(NoopExecutor),
+        )
+        .await
+        .expect("task manager");
+
+        let mut context = ToolContext::new(workspace.path());
+        context.approval_mode = codewhale_execpolicy::ApprovalMode::Auto;
+        context.runtime.task_manager = Some(manager.clone());
+
+        TasksTool::new("tasks")
+            .execute(
+                json!({"action": "create", "prompt": "run the sweep", "auto_approve": true}),
+                &context,
+            )
+            .await
+            .expect("create accepted");
+
+        let queued = manager.list_tasks(Some(1)).await.expect("queued task");
+        let created = manager.get_task(&queued[0].id).await.expect("created task");
+        assert_eq!(
+            created.permission_posture.as_deref(),
+            Some("auto_review"),
+            "the task runs under its session's posture, not the model's legacy bit"
+        );
     }
 
     #[test]

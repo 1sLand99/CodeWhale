@@ -2331,6 +2331,12 @@ pub(crate) async fn apply_command_result(
                     allow_shell: Some(app.allow_shell),
                     trust_mode: Some(app.trust_mode),
                     auto_approve: Some(app_auto_approve_enabled(app)),
+                    // Same as the task tool: the task's own thread runs under
+                    // the posture this session is in, not under whatever a
+                    // legacy bit happens to mean today.
+                    permission_posture: Some(
+                        crate::runtime_policy::approval_wire(app.approval_mode).to_string(),
+                    ),
                     owner_session_id: Some(owner_session_id),
                 };
                 match task_manager.add_task(request).await {

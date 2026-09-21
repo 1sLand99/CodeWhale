@@ -14887,6 +14887,27 @@ fn turn_tool_context_uses_planned_authority_and_route_not_installed_session() {
     );
     assert!(context.trust_mode);
     assert!(context.auto_approve);
+    assert_eq!(
+        context.approval_mode,
+        ApprovalMode::Bypass,
+        "the turn's posture travels with the context its tools see"
+    );
+    // Auto-Review is the case the legacy bit cannot express: folding `false`
+    // alone would read as Ask, so this is what proves the posture itself is
+    // carried rather than re-derived.
+    let auto_review = crate::core::authority::TurnAuthority::from_effective_fields(
+        AppMode::Agent,
+        true,
+        false,
+        false,
+        ApprovalMode::Auto,
+    );
+    assert_eq!(
+        engine
+            .build_tool_context_for_turn(&auto_review, &route)
+            .approval_mode,
+        ApprovalMode::Auto
+    );
     assert_eq!(context.route_context_window, Some(123_456));
     assert_eq!(context.route_capabilities, route.capabilities);
     assert_eq!(
@@ -15265,6 +15286,15 @@ async fn live_runtime_authority_applies_latest_posture_and_sandbox_before_tools(
                 .expect("live registry context")
                 .elevated_sandbox_policy,
             Some(expected_sandbox),
+        );
+        // Tools carry the posture the turn resolved, so a task they create can
+        // pin the authority it was actually granted.
+        assert_eq!(
+            engine
+                .live_tool_context(Some(&registry))
+                .expect("live registry context")
+                .approval_mode,
+            posture,
         );
     }
 }
