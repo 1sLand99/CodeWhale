@@ -2547,18 +2547,23 @@ impl RuntimeThreadStore {
     /// message per turn, and one page can span most of the store, so retaining
     /// that whole projection for a page held every item it covered in memory
     /// at once — a page's peak that grew with the page instead of with one
-    /// thread. This holds one message text per requested turn and nothing
-    /// else: tool calls, results and artifacts are read and dropped, and an
-    /// older message is dropped the moment a newer one is read.
+    /// thread. This holds at most two message texts per requested turn — the
+    /// newest dated one and the last undated one read — and nothing else:
+    /// tool calls, results and artifacts are read and dropped, and an older
+    /// dated message is dropped the moment a newer one is read.
     ///
     /// The winner is the message [`sort_turn_items_by_start`] would place
     /// last: that comparator reads only `started_at`, substitutes one "now"
-    /// for a missing timestamp, and is stable, so the later-read message wins
-    /// a tie.
+    /// for a missing timestamp once everything has been read, and is stable,
+    /// so the later-read message wins a tie. The choice between the dated
+    /// and the undated candidate is therefore made after the scan, against a
+    /// "now" taken then: a message persisted mid-scan with a timestamp later
+    /// than a "now" taken up front would otherwise outrank an undated one
+    /// the sort would have placed last.
     ///
-    /// Known limitation: peak memory is still one text per turn of the page,
-    /// untruncated, because the caller decides which turn's text becomes the
-    /// row's preview and how much of it to show.
+    /// Known limitation: peak memory is still up to two texts per turn of
+    /// the page, untruncated, because the caller decides which turn's text
+    /// becomes the row's preview and how much of it to show.
     pub fn newest_message_text_by_turn(
         &self,
         turn_ids: &[String],
@@ -2572,10 +2577,14 @@ impl RuntimeThreadStore {
         }
 
         let wanted: HashSet<&str> = turn_ids.iter().map(String::as_str).collect();
-        // One shared fallback, as `sort_turn_items_by_start` uses, so every
-        // undated message reads as newest and ties resolve by read order.
-        let fallback = Utc::now();
-        let mut newest: HashMap<String, (DateTime<Utc>, String)> = HashMap::new();
+        #[derive(Default)]
+        struct Candidates {
+            /// Newest `started_at` read so far; a later read wins a tie.
+            dated: Option<(DateTime<Utc>, String)>,
+            /// Last message read without a `started_at`.
+            undated: Option<String>,
+        }
+        let mut per_turn: HashMap<String, Candidates> = HashMap::new();
         let items_dir = checked_existing_runtime_store_dir(&self.items_dir)?;
         for entry in fs::read_dir(&items_dir)
             .with_context(|| format!("Failed to read {}", items_dir.display()))?
@@ -2635,18 +2644,43 @@ impl RuntimeThreadStore {
             if text.trim().is_empty() {
                 continue;
             }
-            let started_at = item.started_at.unwrap_or(fallback);
-            match newest.get(&item.turn_id) {
-                Some((held, _)) if *held > started_at => {}
-                _ => {
-                    newest.insert(item.turn_id, (started_at, text));
+            let slot = per_turn.entry(item.turn_id).or_default();
+            match item.started_at {
+                Some(started_at) => {
+                    if slot
+                        .dated
+                        .as_ref()
+                        .is_none_or(|(held, _)| *held <= started_at)
+                    {
+                        slot.dated = Some((started_at, text));
+                    }
                 }
+                None => slot.undated = Some(text),
             }
         }
 
-        Ok(newest
+        // The sort's stand-in for a missing timestamp, taken once the scan
+        // is over exactly as `sort_turn_items_by_start` takes it after
+        // collection: an undated message reads as newest unless a dated one
+        // is timestamped later than this instant.
+        let fallback = Utc::now();
+        Ok(per_turn
             .into_iter()
-            .map(|(turn_id, (_, text))| (turn_id, text))
+            .filter_map(|(turn_id, slot)| {
+                let text = match (slot.dated, slot.undated) {
+                    (Some((started_at, dated)), Some(undated)) => {
+                        if started_at > fallback {
+                            dated
+                        } else {
+                            undated
+                        }
+                    }
+                    (Some((_, dated)), None) => dated,
+                    (None, Some(undated)) => undated,
+                    (None, None) => return None,
+                };
+                Some((turn_id, text))
+            })
             .collect())
     }
 
