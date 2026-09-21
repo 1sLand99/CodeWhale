@@ -79,6 +79,7 @@ impl CodewhaleClient {
             .iter()
             .filter_map(message_to_anthropic)
             .collect();
+        merge_split_tool_results(&mut messages);
         repair_dangling_tool_uses(&mut messages);
         body["messages"] = Value::Array(messages);
 
@@ -453,6 +454,52 @@ fn compat_thinking_budget(effort: Option<&str>, max_tokens: u32) -> Option<u32> 
     };
     let budget = tier.min(max_tokens.checked_sub(1)?);
     (budget >= MIN_THINKING_BUDGET_TOKENS).then_some(budget)
+}
+
+/// Fold a user turn that carries `tool_result`s into the user turn before it
+/// (#6378).
+///
+/// The engine records each tool result as its own user message, so a parallel
+/// tool-call batch arrives here as `assistant{use_a, use_b}`, `user{result_a}`,
+/// `user{result_b}`. Anthropic wants every result in the user turn right after
+/// the `tool_use`s, and the repair below reads only that turn: it would answer
+/// `use_b` with an error placeholder while the real result sits in the next
+/// message. Only turns carrying a `tool_result` are folded, so any other
+/// consecutive user turns keep their shape; inside the merged turn the results
+/// stay ahead of other content so they still lead it.
+fn merge_split_tool_results(messages: &mut Vec<Value>) {
+    let is_user = |message: &Value| message.get("role").and_then(Value::as_str) == Some("user");
+    let is_tool_result =
+        |block: &Value| block.get("type").and_then(Value::as_str) == Some("tool_result");
+    let carries_tool_result = |message: &Value| {
+        message
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some_and(|blocks| blocks.iter().any(is_tool_result))
+    };
+    let mut merged: Vec<Value> = Vec::with_capacity(messages.len());
+    for mut message in messages.drain(..) {
+        if is_user(&message)
+            && carries_tool_result(&message)
+            && let Some(previous) = merged.last_mut()
+            && is_user(previous)
+        {
+            let mut blocks = match previous["content"].take() {
+                Value::Array(blocks) => blocks,
+                other => vec![other],
+            };
+            match message["content"].take() {
+                Value::Array(incoming) => blocks.extend(incoming),
+                other => blocks.push(other),
+            }
+            // Stable sort: results keep their order and lead the turn.
+            blocks.sort_by_key(|block| !is_tool_result(block));
+            previous["content"] = Value::Array(blocks);
+        } else {
+            merged.push(message);
+        }
+    }
+    *messages = merged;
 }
 
 /// Placeholder body for a `tool_use` that never produced a `tool_result`.
@@ -987,6 +1034,82 @@ mod tests {
 
     fn test_client() -> CodewhaleClient {
         anthropic_test_client(None)
+    }
+
+    /// #6378: the engine stores each tool result as its own user message, so
+    /// a parallel batch reaches the wire as `assistant{a, b}`, `user{a}`,
+    /// `user{b}`. Both results must land in the one user turn after the batch,
+    /// and the dangling-use repair must not answer `b` a second time.
+    #[test]
+    fn parallel_tool_results_split_across_user_turns_are_answered_once() {
+        let client = test_client();
+        let mut request = request_with("claude-sonnet-4-6", None, None, None);
+        let tool_use = |id: &str, path: &str| ContentBlock::ToolUse {
+            id: id.to_string(),
+            name: "read".to_string(),
+            input: json!({ "path": path }),
+            caller: None,
+            thought_signature: None,
+        };
+        let tool_result = |id: &str, content: &str| ContentBlock::ToolResult {
+            tool_use_id: id.to_string(),
+            content: content.to_string(),
+            is_error: None,
+            content_blocks: None,
+        };
+        request.messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "Read a.txt and b.txt".to_string(),
+                    cache_control: None,
+                }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "I will read both files in parallel.".to_string(),
+                        cache_control: None,
+                    },
+                    tool_use("toolu_a", "a.txt"),
+                    tool_use("toolu_b", "b.txt"),
+                ],
+            },
+            Message {
+                role: Role::User,
+                content: vec![tool_result("toolu_a", "content of file A")],
+            },
+            Message {
+                role: Role::User,
+                content: vec![tool_result("toolu_b", "content of file B")],
+            },
+        ];
+
+        let body = client.build_anthropic_body(&request, true);
+        let messages = body["messages"].as_array().expect("messages array");
+        assert_eq!(
+            messages.len(),
+            3,
+            "both results share one user turn: {body}"
+        );
+        let results = messages[2]["content"].as_array().expect("user content");
+        assert_eq!(
+            results
+                .iter()
+                .map(|block| (block["tool_use_id"].as_str(), block["content"].as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (Some("toolu_a"), Some("content of file A")),
+                (Some("toolu_b"), Some("content of file B")),
+            ],
+            "{body}"
+        );
+        assert!(
+            results.iter().all(|block| block.get("is_error").is_none()),
+            "{body}"
+        );
+        assert!(!body.to_string().contains(UNEXECUTED_TOOL_RESULT), "{body}");
     }
 
     fn anthropic_test_client(base_url: Option<&str>) -> CodewhaleClient {
