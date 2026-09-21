@@ -91,15 +91,14 @@ impl ExtensionsTab {
 /// A real capability contributed by one plugin product.
 ///
 /// Recommendations use the same component vocabulary as installed plugin
-/// bundles. An MCP, Skill, browser driver, or sandbox helper is therefore a
-/// component of a product, not a parallel kind of install pretending to be a
-/// complete plugin.
+/// bundles: a component is an MCP server or a Skill, the two things this
+/// panel can actually install and switch on. Kinds that named a runtime
+/// nobody could install from here — a browser driver, a sandbox helper —
+/// were removed rather than left advertising an unreachable action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginProductComponentKind {
     Mcp,
     Skills,
-    BrowserDriver,
-    SandboxRuntime,
 }
 
 impl PluginProductComponentKind {
@@ -107,8 +106,6 @@ impl PluginProductComponentKind {
         match self {
             Self::Mcp => tr(locale, MessageId::ConfigSectionMcp),
             Self::Skills => tr(locale, MessageId::HelpSkills),
-            Self::BrowserDriver => tr(locale, MessageId::ExtensionsComponentBrowserDriver),
-            Self::SandboxRuntime => tr(locale, MessageId::ExtensionsComponentSandboxRuntime),
         }
         .into_owned()
     }
@@ -371,7 +368,7 @@ impl ExtensionsSnapshot {
                     .find(|plugin| plugin.name() == "computer-use")
                 {
                     Some(plugin) => {
-                        item.state = localized_plugin_state(app.ui_locale, plugin.state_label());
+                        item.state = plugin_row_state(app.ui_locale, plugin);
                         Some(plugin_row_action(app.ui_locale, plugin))
                     }
                     None => Some(ExtensionAction::Status {
@@ -435,6 +432,12 @@ impl ExtensionsSnapshot {
 /// Pinned review metadata only. These rows do not contain install commands,
 /// do not fetch anything, and do not grant trust. The source-specific plugin
 /// manifests produced by the packaging lane remain the installation authority.
+///
+/// Every row here must resolve to a real action in
+/// [`ExtensionsSnapshot::with_recommended_actions`]. Rows that could only
+/// ever render `unavailable` — Browser Use, the sandbox runtime — were
+/// removed: a recommendation a person cannot act on is an advertisement, and
+/// it made the tab read as a list of things Codewhale would not do.
 fn reviewed_product_catalog(locale: Locale) -> Vec<PluginProduct> {
     vec![
         // First-party computer use. This is the only computer-use product
@@ -467,16 +470,10 @@ fn reviewed_product_catalog(locale: Locale) -> Vec<PluginProduct> {
             description: tr(locale, MessageId::ExtensionsProductPlaywrightDescription).into_owned(),
             publisher: "Microsoft".into(),
             source_reference: "microsoft/playwright-mcp".into(),
-            components: vec![
-                PluginProductComponent {
-                    kind: PluginProductComponentKind::Mcp,
-                    name: "Playwright MCP".into(),
-                },
-                PluginProductComponent {
-                    kind: PluginProductComponentKind::BrowserDriver,
-                    name: "Playwright browser driver".into(),
-                },
-            ],
+            components: vec![PluginProductComponent {
+                kind: PluginProductComponentKind::Mcp,
+                name: "Playwright MCP".into(),
+            }],
             maturity: tr(locale, MessageId::ExtensionsStateReviewedCandidate).into_owned(),
         },
         PluginProduct {
@@ -485,47 +482,11 @@ fn reviewed_product_catalog(locale: Locale) -> Vec<PluginProduct> {
             description: tr(locale, MessageId::ExtensionsProductChromeDescription).into_owned(),
             publisher: "Chrome DevTools".into(),
             source_reference: "ChromeDevTools/chrome-devtools-mcp".into(),
-            components: vec![
-                PluginProductComponent {
-                    kind: PluginProductComponentKind::Mcp,
-                    name: "Chrome DevTools MCP".into(),
-                },
-                PluginProductComponent {
-                    kind: PluginProductComponentKind::BrowserDriver,
-                    name: "Chrome".into(),
-                },
-            ],
-            maturity: tr(locale, MessageId::ExtensionsStateReviewedCandidate).into_owned(),
-        },
-        PluginProduct {
-            id: "browser-use".into(),
-            name: "Browser Use".into(),
-            description: tr(locale, MessageId::ExtensionsProductBrowserUseDescription).into_owned(),
-            publisher: "Browser Use".into(),
-            source_reference: "browser-use/browser-use".into(),
-            components: vec![
-                PluginProductComponent {
-                    kind: PluginProductComponentKind::Skills,
-                    name: "Browser Use Skill".into(),
-                },
-                PluginProductComponent {
-                    kind: PluginProductComponentKind::BrowserDriver,
-                    name: "Browser Use runtime".into(),
-                },
-            ],
-            maturity: tr(locale, MessageId::ExtensionsStateReviewedCandidate).into_owned(),
-        },
-        PluginProduct {
-            id: "anthropic-sandbox-runtime".into(),
-            name: "Sandbox Runtime".into(),
-            description: tr(locale, MessageId::ExtensionsProductSandboxDescription).into_owned(),
-            publisher: "Anthropic Experimental".into(),
-            source_reference: "anthropic-experimental/sandbox-runtime".into(),
             components: vec![PluginProductComponent {
-                kind: PluginProductComponentKind::SandboxRuntime,
-                name: "Sandbox Runtime".into(),
+                kind: PluginProductComponentKind::Mcp,
+                name: "Chrome DevTools MCP".into(),
             }],
-            maturity: tr(locale, MessageId::ExtensionsStateBetaCandidate).into_owned(),
+            maturity: tr(locale, MessageId::ExtensionsStateReviewedCandidate).into_owned(),
         },
     ]
 }
@@ -713,18 +674,42 @@ fn localized_bool(locale: Locale, value: bool) -> String {
     .into_owned()
 }
 
+/// Say what the row *is*, in the words a person already uses for a switch.
+///
+/// "enabled, untrusted" named an internal pair of booleans and gave no hint
+/// that anything could be done about it; a founder read the panel and said
+/// "i don't know what untrusted means and i can't even do anything about
+/// it". The switch now reads on/off and the review requirement reads
+/// "needs review", which is both what it is and the verb `e`/Enter runs.
 fn localized_plugin_state(locale: Locale, state: &str) -> String {
     let id = match state {
-        "active" => MessageId::CtxInspActive,
-        "disabled" => MessageId::HotbarSetupStatusDisabled,
-        "enabled-untrusted" => MessageId::ExtensionsStateEnabledUntrusted,
+        "active" => MessageId::ExtensionsStateOn,
+        "disabled" | "inactive" => MessageId::ExtensionsStateOff,
+        "enabled-untrusted" => MessageId::ExtensionsStateNeedsReview,
         "unstaged" => MessageId::ExtensionsStateUnstaged,
         "inapplicable" => MessageId::ExtensionsStateInapplicable,
         "unsupported" => MessageId::ExtensionsStateUnsupported,
-        "inactive" => MessageId::ExtensionsStateInactive,
         _ => return state.to_string(),
     };
     tr(locale, id).into_owned()
+}
+
+/// The row's state line, which must answer both "is the switch on?" and
+/// "is anything standing between this and running?" at once.
+///
+/// A bundle that is switched off *and* never reviewed reads `off · needs
+/// review`, so turning it on is visibly a two-part step rather than a dead
+/// `disabled` with no explanation — the exact row (`computer-use`) the
+/// founder could not enable.
+fn plugin_row_state(locale: Locale, plugin: &crate::plugins::types::LoadedPlugin) -> String {
+    let state = localized_plugin_state(locale, plugin.state_label());
+    if plugin.trusted() || plugin.enabled {
+        return state;
+    }
+    format!(
+        "{state} · {}",
+        tr(locale, MessageId::ExtensionsStateNeedsReview)
+    )
 }
 
 fn localized_trust(locale: Locale, trust: &str) -> String {
@@ -830,28 +815,31 @@ fn plugin_row_action(
         // person just reviewed reports its new state instead of the stale
         // "not reviewed" it left with.
         ExtensionAction::Command {
-            label: tr(locale, MessageId::AutomationActionInspect).into_owned(),
+            label: tr(locale, MessageId::ExtensionsActionReview).into_owned(),
             command: format!("/plugin trust {}", plugin.name()),
             disposition: RowActionDisposition::InPlace,
         }
     }
 }
 
-/// The reversible on/off control for a plugin row. A trusted plugin can be
-/// switched off and on from the panel; an untrusted one still goes through
-/// its reviewed trust flow first, so no toggle is offered.
+/// The reversible on/off control for a plugin row — offered on **every**
+/// plugin, reviewed or not.
+///
+/// Withholding the switch from an unreviewed bundle left `computer-use`
+/// reading `disabled` with no way to enable it: the panel said what was
+/// wrong and then refused the only gesture that could fix it. Nothing about
+/// the trust boundary required that. `/plugin enable` already routes an
+/// unreviewed bundle into the exact-capability review
+/// (`mutate_bundle` in `commands::groups::plugins`) and only flips the
+/// switch once the digest is confirmed, so handing `e` to every row widens
+/// the affordance without widening what runs unreviewed.
 fn plugin_row_toggle(
     locale: Locale,
     plugin: &crate::plugins::types::LoadedPlugin,
 ) -> Option<ExtensionAction> {
-    if !plugin.trusted() {
-        return None;
-    }
     Some(if plugin.enabled {
         ExtensionAction::Command {
-            // English fallback until the Extensions vocabulary gains a
-            // localized "disable" (#3167 tracks the panel's localization).
-            label: "disable".into(),
+            label: tr(locale, MessageId::ExtensionsActionDisable).into_owned(),
             command: format!("/plugin disable {}", plugin.name()),
             disposition: RowActionDisposition::InPlace,
         }
@@ -904,23 +892,35 @@ fn plugins_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                 .description
                 .clone()
                 .unwrap_or_else(|| inventory_summary(&plugin.inventory, locale)),
-            state: localized_plugin_state(locale, plugin.state_label()),
-            detail: localize(
-                locale,
-                MessageId::ExtensionsPluginDetail,
-                &[
-                    ("inventory", &inventory_summary(&plugin.inventory, locale)),
-                    (
-                        "trust",
-                        &localized_trust(locale, plugin.trust_status.as_str()),
-                    ),
-                    (
-                        "compatibility",
-                        &localized_compatibility(locale, plugin.compatibility().as_str()),
-                    ),
-                    ("diagnostics", &diagnostic_count.to_string()),
-                ],
-            ),
+            state: plugin_row_state(locale, plugin),
+            // An unreviewed bundle's detail line is the one place with room
+            // to say what the review *is*. `trust: not reviewed` restated
+            // the state word and taught nobody anything; the sentence says
+            // what Codewhale withholds and which key ends the wait.
+            detail: if plugin.trusted() {
+                localize(
+                    locale,
+                    MessageId::ExtensionsPluginDetail,
+                    &[
+                        ("inventory", &inventory_summary(&plugin.inventory, locale)),
+                        (
+                            "trust",
+                            &localized_trust(locale, plugin.trust_status.as_str()),
+                        ),
+                        (
+                            "compatibility",
+                            &localized_compatibility(locale, plugin.compatibility().as_str()),
+                        ),
+                        ("diagnostics", &diagnostic_count.to_string()),
+                    ],
+                )
+            } else {
+                format!(
+                    "{} · {}",
+                    tr(locale, MessageId::ExtensionsReviewExplainer),
+                    inventory_summary(&plugin.inventory, locale)
+                )
+            },
             action: Some(action),
             toggle,
             remove: None,
@@ -1050,7 +1050,7 @@ fn marketplace_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                                 {
                                     tr(locale, MessageId::ExtensionsStateFirstParty).into_owned()
                                 } else {
-                                    localized_plugin_state(locale, plugin.state_label())
+                                    plugin_row_state(locale, plugin)
                                 },
                                 detail: plugin.canonical_root.display().to_string(),
                                 action: Some(plugin_row_action(locale, plugin)),
@@ -1223,6 +1223,10 @@ fn mcp_model(app: &App, locale: Locale) -> ExtensionsTabModel {
         crate::mcp::load_config_with_workspace(&app.mcp_config_path, &app.workspace)
             .ok()
             .map(|config| config.servers.keys().cloned().collect());
+    // Where each row lives. A person asked to "say if they should be global
+    // or in a certain project"; the panel could not answer because nothing
+    // on the row carried its origin. Resolved once here, not per row.
+    let project_owned = crate::mcp::project_server_names(&app.mcp_config_path, &app.workspace);
     let snapshot = app.mcp_snapshot.as_ref();
     // Configured names are the count authority used by the surrounding shell.
     // Snapshot data enriches those exact rows; it must never independently
@@ -1316,12 +1320,32 @@ fn mcp_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                     disposition: RowActionDisposition::InPlace,
                 },
             };
+            let scope = config
+                .and_then(|server| server.reviewed_plugin.as_ref())
+                .map(|source| {
+                    localize(
+                        locale,
+                        MessageId::ExtensionsScopePlugin,
+                        &[("plugin", source.plugin_name())],
+                    )
+                })
+                .unwrap_or_else(|| {
+                    tr(
+                        locale,
+                        if project_owned.contains(&name) {
+                            MessageId::ExtensionsScopeProject
+                        } else {
+                            MessageId::ExtensionsScopeGlobal
+                        },
+                    )
+                    .into_owned()
+                });
             let command_safe = crate::mcp::mcp_name_is_command_safe(&name);
             let mutable = command_safe && mcp_row_is_mutable(user_owned.as_ref(), &name);
             let toggle = mutable.then(|| {
                 if enabled {
                     ExtensionAction::Command {
-                        label: "disable".into(),
+                        label: tr(locale, MessageId::ExtensionsActionDisable).into_owned(),
                         command: format!("/mcp disable {name}"),
                         disposition: RowActionDisposition::InPlace,
                     }
@@ -1334,7 +1358,7 @@ fn mcp_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                 }
             });
             let remove = mutable.then(|| ExtensionAction::Command {
-                label: "remove".into(),
+                label: tr(locale, MessageId::ExtensionsActionRemove).into_owned(),
                 command: format!("/mcp remove {name}"),
                 disposition: RowActionDisposition::InPlace,
             });
@@ -1366,21 +1390,24 @@ fn mcp_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                 state,
                 // The passive snapshot can carry a command line or URL. Do
                 // not mirror either into this broad inventory surface.
-                detail: observed.map_or_else(
-                    || tr(locale, MessageId::ExtensionsMcpNotInspected).into_owned(),
-                    |server| {
-                        server.error.clone().unwrap_or_else(|| {
-                            localize(
-                                locale,
-                                MessageId::ExtensionsMcpDetail,
-                                &[
-                                    ("tools", &server.tools.len().to_string()),
-                                    ("resources", &server.resources.len().to_string()),
-                                    ("prompts", &server.prompts.len().to_string()),
-                                ],
-                            )
-                        })
-                    },
+                detail: format!(
+                    "{scope} · {}",
+                    observed.map_or_else(
+                        || tr(locale, MessageId::ExtensionsMcpNotInspected).into_owned(),
+                        |server| {
+                            server.error.clone().unwrap_or_else(|| {
+                                localize(
+                                    locale,
+                                    MessageId::ExtensionsMcpDetail,
+                                    &[
+                                        ("tools", &server.tools.len().to_string()),
+                                        ("resources", &server.resources.len().to_string()),
+                                        ("prompts", &server.prompts.len().to_string()),
+                                    ],
+                                )
+                            })
+                        },
+                    )
                 ),
                 action: Some(action),
                 toggle,
@@ -1743,9 +1770,10 @@ impl ExtensionsView {
         if let Some(item) = self.selected_item()
             && self.pending_remove.as_deref() == Some(item.id.as_str())
         {
-            return format!(
-                "Remove {}? Press d, Enter or right-click again to confirm · Esc cancels",
-                item.label
+            return localize(
+                self.locale,
+                MessageId::ExtensionsRemoveArmed,
+                &[("name", &item.label)],
             );
         }
         let index = self.selected[self.active_tab.index()];
@@ -1880,7 +1908,21 @@ impl ModalView for ExtensionsView {
                 self.move_selection(1);
                 ViewAction::None
             }
-            KeyCode::Enter | KeyCode::Char(' ') => {
+            // Space is the switch. Both references this panel follows bind
+            // it that way — grokbuild's `space toggle` and Codex's
+            // `space enable/disable` — and it is the gesture a person
+            // reaches for on a list of things that are on or off. `e` stays
+            // as an alias. A row with no switch (a group heading, a
+            // marketplace candidate) keeps Space's old meaning rather than
+            // swallowing the key.
+            KeyCode::Char(' ') => {
+                self.focus = ExtensionsFocus::List;
+                match self.toggle_selected() {
+                    ViewAction::None => self.activate_selected(),
+                    action => action,
+                }
+            }
+            KeyCode::Enter => {
                 self.focus = ExtensionsFocus::List;
                 self.activate_selected()
             }
@@ -2225,7 +2267,7 @@ impl ModalView for ExtensionsView {
         }
         if let Some(item) = self.selected_item() {
             if let Some(toggle) = item.toggle.as_ref() {
-                full_hints.push(super::ActionHint::new("e", toggle.label().to_string()));
+                full_hints.push(super::ActionHint::new("Space", toggle.label().to_string()));
             }
             if let Some(remove) = item.remove.as_ref() {
                 full_hints.push(super::ActionHint::new("d", remove.label().to_string()));
@@ -2376,6 +2418,94 @@ mod tests {
     #[test]
     fn an_unreadable_config_keeps_the_gestures_rather_than_withdrawing_them() {
         assert!(mcp_row_is_mutable(None, "anything"));
+    }
+
+    /// The founder's report, as a test: `computer-use` ships disabled and
+    /// never reviewed, and the panel said `disabled` while offering no way
+    /// to enable it — "computer use is disabled but i can't enable it. tf?".
+    /// The row must now say what stands in the way and carry the switch.
+    #[test]
+    fn the_shipped_bundle_says_what_it_needs_and_carries_a_switch() {
+        let _env = crate::test_support::lock_test_env();
+        let root = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path());
+        let registry = crate::plugins::PluginDiscoveryContext::capture_pre_dotenv()
+            .registry_for_workspace(root.path());
+        let app = App::new_with_plugin_registry(
+            crate::test_support::test_tui_options(root.path()),
+            &crate::config::Config::default(),
+            registry,
+        );
+        let plugin = app.plugin_registry.get("computer-use").unwrap();
+        assert!(!plugin.enabled && !plugin.trusted(), "fixture precondition");
+
+        let model = plugins_model(&app, Locale::En);
+        let row = model
+            .groups
+            .iter()
+            .flat_map(|group| group.items.iter())
+            .find(|row| row.label == "computer-use")
+            .expect("built-in row");
+
+        // Both halves of the truth, in words a person uses for a switch.
+        assert_eq!(row.state, "off · needs review", "state: {}", row.state);
+        // The switch is offered even though the bundle is unreviewed:
+        // `/plugin enable` routes through the capability review itself.
+        assert!(
+            matches!(
+                &row.toggle,
+                Some(ExtensionAction::Command { command, .. })
+                    if command == "/plugin enable computer-use"
+            ),
+            "toggle: {:?}",
+            row.toggle
+        );
+        // And the verb on Enter is a verb, not the noun "inspect".
+        assert!(
+            matches!(
+                &row.action,
+                Some(ExtensionAction::Command { label, command, .. })
+                    if label == "review" && command == "/plugin trust computer-use"
+            ),
+            "action: {:?}",
+            row.action
+        );
+        assert!(
+            row.detail
+                .contains("only after you have seen exactly what it can do"),
+            "detail must explain the review, got: {}",
+            row.detail
+        );
+    }
+
+    /// Space is the switch, on the row the founder could not turn on.
+    #[test]
+    fn space_runs_the_selected_rows_switch() {
+        let _env = crate::test_support::lock_test_env();
+        let root = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", root.path());
+        let registry = crate::plugins::PluginDiscoveryContext::capture_pre_dotenv()
+            .registry_for_workspace(root.path());
+        let app = App::new_with_plugin_registry(
+            crate::test_support::test_tui_options(root.path()),
+            &crate::config::Config::default(),
+            registry,
+        );
+        let mut view = ExtensionsView::new(&app, ExtensionsTab::Plugins);
+        assert_eq!(
+            view.selected_item().map(|item| item.label.as_str()),
+            Some("computer-use"),
+            "the Plugins tab opens on the built-in row"
+        );
+        let action = view.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(
+            matches!(
+                action,
+                ViewAction::Emit(ViewEvent::ExecutePanelCommand { ref command, .. })
+                    if command == "/plugin enable computer-use"
+            ),
+            "Space must run the row's switch, got {action:?}"
+        );
     }
 
     #[test]

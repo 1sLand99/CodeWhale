@@ -66,11 +66,6 @@ impl PluginBootSummary {
     }
 
     #[must_use]
-    pub fn has_failures(self) -> bool {
-        self.invalid > 0 || self.duplicate > 0
-    }
-
-    #[must_use]
     pub fn from_registry(registry: &PluginRegistry) -> Self {
         let loaded = registry.list().len();
         let mut invalid = 0usize;
@@ -312,27 +307,23 @@ impl SessionBootSurface {
             }
         }
 
-        if self.plugins.is_quiet() {
-            return None;
-        }
-
-        let plugins = tr(locale, MessageId::ExtensionsTabPlugins);
-        let problems = tr(locale, MessageId::ExtensionsGroupProblems);
-        let count = self.plugins.problem_count();
-        let level = if self.plugins.has_failures() {
-            SessionBootActivityLevel::Failure
-        } else {
-            SessionBootActivityLevel::Attention
-        };
-        activity_notice_from_candidates(
-            level,
-            vec![
-                format!("{plugins}{ITEM_SEPARATOR}{problems}: {count}{ITEM_SEPARATOR}/plugins"),
-                format!("{plugins}{ITEM_SEPARATOR}{problems}: {count}"),
-                format!("{plugins}{ITEM_SEPARATOR}{count}"),
-            ],
-            budget,
-        )
+        // Plugins contribute no footer chip.
+        //
+        // "Plugins · Problems: N" sat in the footer of every session for as
+        // long as the condition held, and a person could do nothing about it
+        // from there. Worse, its number and the Plugins tab disagreed by
+        // construction: the chip counted enabled-but-unreviewed bundles,
+        // while the tab's Problems group lists only registry-level
+        // diagnostics, so the rows that made the count were somewhere else
+        // entirely — "it says 2 problems ... it's not even clear what the
+        // problems are because there are actually 3".
+        //
+        // A bundle waiting on a review is not an incident; it is a row with
+        // an action. `/plugins` states it per bundle, next to the key that
+        // resolves it. `self.plugins` is still computed: it decides whether
+        // this surface is `Hidden`, and the launch block reads the same
+        // summary.
+        None
     }
 }
 
@@ -536,64 +527,34 @@ mod tests {
         );
     }
 
+    /// Plugin state never reaches the footer, at any width and at any
+    /// severity. The chip it replaced was permanent, unactionable, and
+    /// counted a different set than the tab it pointed at.
     #[test]
-    fn plugin_problems_have_a_compact_footer_action() {
-        let surface = SessionBootSurface::from_parts(
-            None,
-            false,
-            &[],
-            0,
+    fn plugin_problems_never_produce_a_footer_chip() {
+        for summary in [
             PluginBootSummary {
                 loaded: 3,
                 invalid: 1,
                 duplicate: 1,
                 needs_setup: 1,
             },
-        );
-        assert_eq!(surface.phase, SessionBootPhase::Settled);
-        assert_eq!(
-            surface.activity_notice(Locale::En, 40),
-            Some(SessionBootActivityChip {
-                text: "Plugins · Problems: 3 · /plugins".to_string(),
-                level: SessionBootActivityLevel::Failure,
-            })
-        );
-    }
-
-    #[test]
-    fn plugin_review_notice_uses_attention_and_sheds_whole_fields() {
-        let surface = SessionBootSurface::from_parts(
-            None,
-            false,
-            &[],
-            0,
             PluginBootSummary {
                 loaded: 1,
                 needs_setup: 1,
                 ..PluginBootSummary::default()
             },
-        );
-        assert_eq!(
-            surface.activity_notice(Locale::En, 40),
-            Some(SessionBootActivityChip {
-                text: "Plugins · Problems: 1 · /plugins".to_string(),
-                level: SessionBootActivityLevel::Attention,
-            })
-        );
-        assert_eq!(
-            surface
-                .activity_notice(Locale::En, 22)
-                .map(|notice| notice.text)
-                .as_deref(),
-            Some("Plugins · Problems: 1")
-        );
-        assert_eq!(
-            surface
-                .activity_notice(Locale::En, 12)
-                .map(|notice| notice.text)
-                .as_deref(),
-            Some("Plugins · 1")
-        );
+        ] {
+            let surface = SessionBootSurface::from_parts(None, false, &[], 0, summary);
+            assert_eq!(surface.phase, SessionBootPhase::Settled);
+            for budget in [12, 22, 40, 80] {
+                assert_eq!(
+                    surface.activity_notice(Locale::En, budget),
+                    None,
+                    "plugin summary {summary:?} produced a chip at width {budget}"
+                );
+            }
+        }
     }
 
     #[test]

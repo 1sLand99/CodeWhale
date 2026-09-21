@@ -639,6 +639,13 @@ pub(crate) struct ReviewedPluginMcpSource {
 }
 
 impl ReviewedPluginMcpSource {
+    /// The plugin bundle that contributes this server. The panel names it
+    /// rather than parsing the synthesized `plugin-<len>-<plugin>-<server>`
+    /// key, which is an encoding detail and not a contract.
+    pub(crate) fn plugin_name(&self) -> &str {
+        &self.authority.plugin_name
+    }
+
     fn from_authority(
         authority: crate::plugins::types::PluginAuthority,
         remote_endpoint: Option<&str>,
@@ -5378,6 +5385,85 @@ pub fn workspace_mcp_config_path(workspace: &Path) -> PathBuf {
     normalize_workspace_path(workspace)
         .join(".codewhale")
         .join("mcp.json")
+}
+
+/// Which configuration file declares an MCP server.
+///
+/// The rows in `/mcp` are the union of the user's global file, the trusted
+/// workspace's own file, and every installed plugin's contribution. Until
+/// this existed the panel offered `e` and `d` on all three and then wrote to
+/// the global file regardless, so toggling or removing a project server
+/// failed with "MCP server '<name>' not found" — the row looked mutable and
+/// was not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpServerScope {
+    /// The user's own config file, shared by every workspace.
+    Global,
+    /// `<workspace>/.codewhale/mcp.json`, honoured only once the workspace
+    /// is trusted in user-owned config (#417).
+    Project(PathBuf),
+    /// Contributed by an installed plugin bundle. It lives in no config
+    /// file, so it is switched off by disabling the plugin that owns it.
+    Plugin,
+}
+
+impl McpServerScope {
+    /// The file a mutation for this server must write, or `None` when the
+    /// server has no config file of its own.
+    #[must_use]
+    pub fn config_path(&self, global_path: &Path) -> Option<PathBuf> {
+        match self {
+            Self::Global => Some(global_path.to_path_buf()),
+            Self::Project(path) => Some(path.clone()),
+            Self::Plugin => None,
+        }
+    }
+}
+
+/// Resolve the file that declares `name`.
+///
+/// Project entries are checked first because
+/// [`load_config_with_workspace_and_plugins`] lets them override a
+/// same-named global server, so the project file is the one a mutation has
+/// to edit for the change to be observable.
+/// Every server name declared by the trusted workspace's own config file.
+///
+/// Resolved once per panel snapshot so the row rendering can label scope
+/// without a file read per row.
+#[must_use]
+pub fn project_server_names(global_path: &Path, workspace: &Path) -> BTreeSet<String> {
+    let Ok(workspace) = checked_workspace_path(workspace) else {
+        return BTreeSet::new();
+    };
+    if !workspace_allows_project_mcp_config(&workspace) {
+        return BTreeSet::new();
+    }
+    let Ok(project_path) = checked_workspace_mcp_config_path(&workspace) else {
+        return BTreeSet::new();
+    };
+    if !project_path.exists() || paths_refer_to_same_config(global_path, &project_path) {
+        return BTreeSet::new();
+    }
+    load_config(&project_path)
+        .map(|config| config.servers.into_keys().collect())
+        .unwrap_or_default()
+}
+
+#[must_use]
+pub fn resolve_server_scope(global_path: &Path, workspace: &Path, name: &str) -> McpServerScope {
+    if let Ok(workspace) = checked_workspace_path(workspace)
+        && workspace_allows_project_mcp_config(&workspace)
+        && let Ok(project_path) = checked_workspace_mcp_config_path(&workspace)
+        && project_path.exists()
+        && !paths_refer_to_same_config(global_path, &project_path)
+        && load_config(&project_path).is_ok_and(|config| config.servers.contains_key(name))
+    {
+        return McpServerScope::Project(project_path);
+    }
+    if load_config(global_path).is_ok_and(|config| config.servers.contains_key(name)) {
+        return McpServerScope::Global;
+    }
+    McpServerScope::Plugin
 }
 
 pub fn load_config_with_workspace(global_path: &Path, workspace: &Path) -> Result<McpConfig> {

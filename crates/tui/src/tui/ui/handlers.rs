@@ -664,6 +664,26 @@ pub(crate) fn cancel_mcp_login(app: &mut App) {
     }
 }
 
+/// The config file that owns `name`, for a mutation that must land where the
+/// server is actually declared.
+///
+/// A plugin-contributed server has no config file: it is switched off by
+/// disabling the plugin that carries it, so say that instead of writing a
+/// stray entry into the user's file under the synthesized name.
+fn mcp_scoped_config_path(
+    app: &App,
+    global_path: &std::path::Path,
+    name: &str,
+) -> anyhow::Result<std::path::PathBuf> {
+    let scope = crate::mcp::resolve_server_scope(global_path, &app.workspace, name);
+    scope.config_path(global_path).ok_or_else(|| {
+        anyhow::anyhow!(
+            "MCP server '{name}' is provided by a plugin, not by a config file. \
+             Disable the plugin that contributes it from /plugins."
+        )
+    })
+}
+
 pub(crate) async fn handle_mcp_ui_action(
     app: &mut App,
     engine_handle: &EngineHandle,
@@ -741,19 +761,27 @@ pub(crate) async fn handle_mcp_ui_action(
             mcp::add_server_config(&path, name.clone(), None, Some(url), Vec::new(), transport)
                 .map(|()| message = Some(format!("Added MCP HTTP/SSE server '{name}'")))
         }
+        // Write where the server actually lives. `path` is the user's global
+        // file; a workspace-scoped server is declared in the trusted
+        // workspace's own file and overrides a same-named global entry, so
+        // editing the global file here reported success on the wrong server
+        // or failed with "not found" on a row the panel had just offered.
         crate::tui::app::McpUiAction::Enable { name } => {
             changed = true;
-            mcp::set_server_enabled(&path, &name, true)
+            mcp_scoped_config_path(app, &path, &name)
+                .and_then(|owner| mcp::set_server_enabled(&owner, &name, true))
                 .map(|()| message = Some(format!("Enabled MCP server '{name}'")))
         }
         crate::tui::app::McpUiAction::Disable { name } => {
             changed = true;
-            mcp::set_server_enabled(&path, &name, false)
+            mcp_scoped_config_path(app, &path, &name)
+                .and_then(|owner| mcp::set_server_enabled(&owner, &name, false))
                 .map(|()| message = Some(format!("Disabled MCP server '{name}'")))
         }
         crate::tui::app::McpUiAction::Remove { name } => {
             changed = true;
-            mcp::remove_server_config(&path, &name)
+            mcp_scoped_config_path(app, &path, &name)
+                .and_then(|owner| mcp::remove_server_config(&owner, &name))
                 .map(|()| message = Some(format!("Removed MCP server '{name}'")))
         }
         crate::tui::app::McpUiAction::Login { name, scopes } => {
