@@ -36,7 +36,9 @@ use crate::tools::subagent::{AgentWorkerStatus, SubAgentResult};
 use crate::tools::todo::{SharedTodoList, TodoList, new_shared_todo_list};
 use crate::tui::active_cell::ActiveCell;
 use crate::tui::clipboard::{ClipboardContent, ClipboardHandler};
-use crate::tui::history::{HistoryCell, TranscriptActionOwner, TranscriptRenderOptions};
+use crate::tui::history::{
+    HistoryCell, ThinkingFold, TranscriptActionOwner, TranscriptRenderOptions,
+};
 use crate::tui::hotbar::HotbarActionRegistry;
 use crate::tui::motion::MotionPolicy;
 use crate::tui::paste_burst::{FlushResult, PasteBurst};
@@ -2481,10 +2483,15 @@ pub struct App {
     /// Transcript cells the user has collapsed (hidden from view).
     /// Stores **original** virtual cell indices (pre-filtering).
     pub collapsed_cells: HashSet<usize>,
-    /// Thinking cells the user has folded (showing summary instead of full
-    /// content). Stores **original** virtual cell indices. Toggled by Space
-    /// when the composer is empty and the cursor is on a thinking cell.
-    pub folded_thinking: HashSet<usize>,
+    /// Explicit expand/collapse intents the user has recorded for thinking
+    /// cells, keyed by **original** virtual cell index. Set by Space when the
+    /// composer is empty and the cursor is on a thinking cell.
+    ///
+    /// An absent index means the user has not touched that cell, so the
+    /// display preferences decide it. A present index is absolute, so
+    /// changing `verbose` or `thinking_default_expanded` afterwards leaves
+    /// the user's own choice alone (#5847).
+    pub thinking_folds: HashMap<usize, ThinkingFold>,
     /// Mapping from filtered cell index → original virtual index.
     /// Populated during `ChatWidget::new` by filtering out collapsed cells.
     /// Used by `build_context_menu_entries` to convert line-meta indices
@@ -4408,7 +4415,7 @@ impl App {
             .into_iter()
             .filter_map(|idx| if idx >= n { Some(idx - n) } else { None })
             .collect();
-        self.folded_thinking.clear();
+        self.thinking_folds.clear();
         self.expanded_tool_runs = std::mem::take(&mut self.expanded_tool_runs)
             .into_iter()
             .filter_map(|idx| if idx >= n { Some(idx - n) } else { None })
@@ -4824,7 +4831,7 @@ impl App {
     pub(crate) fn prune_transcript_index_state(&mut self, len: usize) {
         self.transcript_identity_epoch = self.transcript_identity_epoch.wrapping_add(1);
         self.collapsed_cells.retain(|idx| *idx < len);
-        self.folded_thinking.retain(|idx| *idx < len);
+        self.thinking_folds.retain(|idx, _| *idx < len);
         self.expanded_tool_runs.retain(|idx| *idx < len);
         self.collapsed_cell_map.clear();
     }
