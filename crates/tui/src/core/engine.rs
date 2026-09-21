@@ -8052,9 +8052,10 @@ pub use context::context_input_budget_for_route;
 #[cfg(test)]
 use context::route_context_budget_for_provider;
 use context::{
-    MAX_CONTEXT_RECOVERY_ATTEMPTS, effective_max_output_tokens_for_route,
-    extract_compaction_summary_prompt, is_context_length_error_message,
-    is_image_input_rejection_message, route_context_budget_for_route, summarize_text,
+    MAX_CONTEXT_RECOVERY_ATTEMPTS, context_overflow_exhausted_message,
+    effective_max_output_tokens_for_route, extract_compaction_summary_prompt,
+    is_context_length_error_message, is_image_input_rejection_message,
+    route_context_budget_for_route, summarize_text,
 };
 #[cfg(test)]
 use context::{context_input_budget_for_provider, effective_max_output_tokens};
