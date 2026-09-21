@@ -2540,6 +2540,116 @@ impl RuntimeThreadStore {
         Ok(out)
     }
 
+    /// The newest agent/user message text in each requested turn, in one pass.
+    ///
+    /// [`Self::list_items_for_turns_map`] materializes every item of every
+    /// requested turn. The thread summary needs only the last user/agent
+    /// message per turn, and one page can span most of the store, so retaining
+    /// that whole projection for a page held every item it covered in memory
+    /// at once — a page's peak that grew with the page instead of with one
+    /// thread. This keeps only the messages that could be a preview; tool
+    /// calls, results and artifacts are read and dropped.
+    ///
+    /// Ordering matches [`sort_turn_items_by_start`]: the candidate subset
+    /// sorts identically because that comparator reads only `started_at`, so
+    /// the text returned for a turn is the one a caller would find by sorting
+    /// the turn's items and scanning back for the last user/agent message.
+    pub fn newest_message_text_by_turn(
+        &self,
+        turn_ids: &[String],
+    ) -> Result<HashMap<String, String>> {
+        if turn_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        for turn_id in turn_ids {
+            validated_record_id(turn_id, "turn id")?;
+        }
+
+        let wanted: HashSet<&str> = turn_ids.iter().map(String::as_str).collect();
+        // One candidate per retained message: the text to report, and the
+        // `started_at` the item ordering sorts it by.
+        type Candidate = (Option<DateTime<Utc>>, String);
+        let mut candidates: HashMap<String, Vec<Candidate>> = HashMap::new();
+        let items_dir = checked_existing_runtime_store_dir(&self.items_dir)?;
+        for entry in fs::read_dir(&items_dir)
+            .with_context(|| format!("Failed to read {}", items_dir.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().is_none_or(|ext| ext != "json") {
+                continue;
+            }
+            let item_id = path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let raw = read_store_file(&path).with_context(|| {
+                RuntimeStoreRecordFailure::new(
+                    RuntimeStoreOperation::Read,
+                    RuntimeStoreRecordKind::Item,
+                    &item_id,
+                    &path,
+                )
+            })?;
+            #[cfg(test)]
+            self.item_dir_files_read
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let item: TurnItemRecord = serde_json::from_str(&raw).with_context(|| {
+                RuntimeStoreRecordFailure::new(
+                    RuntimeStoreOperation::Parse,
+                    RuntimeStoreRecordKind::Item,
+                    &item_id,
+                    &path,
+                )
+            })?;
+            if item.schema_version > MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION {
+                bail!(
+                    "Item schema v{} is newer than supported v{}",
+                    item.schema_version,
+                    MAX_SUPPORTED_RUNTIME_SCHEMA_VERSION
+                );
+            }
+            if !wanted.contains(item.turn_id.as_str()) {
+                continue;
+            }
+            if !matches!(
+                item.kind,
+                TurnItemKind::AgentMessage | TurnItemKind::UserMessage
+            ) {
+                continue;
+            }
+            if matches!(
+                item.schema_version,
+                IMAGE_RUNTIME_SCHEMA_VERSION | OUTPUT_LIMIT_RUNTIME_SCHEMA_VERSION
+            ) && item.kind == TurnItemKind::UserMessage
+            {
+                item.user_content()?;
+            }
+            let text = item.detail.unwrap_or(item.summary);
+            if text.trim().is_empty() {
+                continue;
+            }
+            candidates
+                .entry(item.turn_id)
+                .or_default()
+                .push((item.started_at, text));
+        }
+
+        let mut out = HashMap::with_capacity(candidates.len());
+        for (turn_id, mut per_turn) in candidates {
+            // `sort_turn_items_by_start` reads a missing `started_at` as "now",
+            // so it sorts last; the sort is stable, so equal keys keep the
+            // order the directory was read in and `pop` takes the last one.
+            let fallback = Utc::now();
+            per_turn.sort_by_key(|candidate| candidate.0.unwrap_or(fallback));
+            if let Some((_, text)) = per_turn.pop() {
+                out.insert(turn_id, text);
+            }
+        }
+        Ok(out)
+    }
+
     pub async fn append_event(
         &self,
         thread_id: &str,
@@ -3632,6 +3742,27 @@ pub struct RunningThread {
     pub model: String,
     pub title: Option<String>,
     pub active_turns: Vec<ActiveTurn>,
+}
+
+/// The per-row facts `GET /v1/threads/summary` cannot read off a
+/// [`ThreadRecord`], harvested for a whole page in one pass over the store.
+///
+/// Everything else a row needs (`title`, `model`, `mode`, `workspace`,
+/// `archived`, `updated_at`, `latest_turn_id`) already comes from the thread
+/// record the caller holds.
+#[derive(Debug, Clone)]
+pub struct ThreadListFacts {
+    /// Status of the thread's newest turn, `Debug`-lowercased for the wire.
+    pub latest_turn_status: Option<String>,
+    /// Newest turn's `input_summary`, verbatim. The row uses it only as the
+    /// title fallback for a thread that has no title of its own.
+    pub latest_turn_input_summary: Option<String>,
+    /// Text of the newest agent/user message in the newest turn that has one,
+    /// untruncated. `None` when the thread has no such message.
+    pub preview: Option<String>,
+    /// Pending approvals plus pending user-input requests, from live request
+    /// state rather than the store.
+    pub pending_attention_count: usize,
 }
 
 /// One watchable notice on a thread, projected from engine events so
@@ -7288,6 +7419,113 @@ impl RuntimeThreadManager {
             }
         }
         Ok(out)
+    }
+
+    /// Flush queued recovery receipts for every thread on a page.
+    ///
+    /// [`Self::get_thread_detail`] flushes per thread, and the summary route
+    /// reached it row by row, so a listing used to settle every recovered turn
+    /// it displayed: the flush cancels that turn's pending user inputs and its
+    /// unresolvable dynamic tools, and publishes the `turn.completed` a crashed
+    /// turn is missing. `pending_attention_count` reads exactly that pending
+    /// state, so dropping the flush would leave a page reporting attention for
+    /// turns that are already over until somebody opened the thread. Now that
+    /// rows no longer go through detail, doing it here keeps what the route
+    /// publishes. A thread with nothing queued costs one lock and a map lookup
+    /// — only startup recovery queues receipts — and the flush has to precede
+    /// the scan, because it changes what the scan then reports.
+    pub async fn flush_recovery_receipts(&self, thread_ids: &[String]) -> Result<()> {
+        for thread_id in thread_ids {
+            self.flush_recovery_receipts_for_thread(thread_id).await?;
+        }
+        Ok(())
+    }
+
+    /// The [`ThreadListFacts`] for every id in `thread_ids`, read in one pass.
+    ///
+    /// `GET /v1/threads/summary` used to call [`Self::get_thread_detail`] once
+    /// per row. Detail is a whole-store walk — `list_turns_for_thread` scans
+    /// every turn record and `list_items_for_turns_map` scans every item record,
+    /// because item filenames carry only the item id —
+    /// so a listing of `T` threads cost `T x (N + M)` JSON reads and parses:
+    /// ~25s for 72 threads against a 189MB store, measured 2026-09-17, which is
+    /// the cheap end of the store growing. This harvests the same facts with one
+    /// turns scan and one items scan, so the cost is `T + N + M`.
+    ///
+    /// This is a best-effort snapshot, and deliberately cheaper than detail in
+    /// three ways: it takes no per-thread projection lock, and it does not flush
+    /// recovery receipts or read the event cursor. A listing may therefore lag a
+    /// turn that is mid-flight. That is the right trade for a list — the
+    /// alternative is what made the call seconds-per-thread — and
+    /// `pending_attention_count` still comes from live in-memory state, so
+    /// attention grouping stays immediate. Callers wanting a consistent
+    /// projection of one thread still want [`Self::get_thread_detail`].
+    pub async fn thread_list_facts(
+        &self,
+        thread_ids: &[String],
+    ) -> Result<HashMap<String, ThreadListFacts>> {
+        if thread_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let wanted: HashSet<String> = thread_ids.iter().cloned().collect();
+
+        let store = self.store.clone();
+        let scanned = wanted.clone();
+        let (turns_by_thread, preview_by_turn) = tokio::task::spawn_blocking(move || {
+            // One turns scan, grouped by thread. `list_all_turns` sorts by
+            // `created_at`, so each group keeps ascending turn order and a
+            // group's last element is the newest turn — the same turn a
+            // per-thread detail read would have called `turns.last()`.
+            let mut turns_by_thread: HashMap<String, Vec<TurnRecord>> = HashMap::new();
+            for turn in store.list_all_turns()? {
+                if scanned.contains(&turn.thread_id) {
+                    turns_by_thread
+                        .entry(turn.thread_id.clone())
+                        .or_default()
+                        .push(turn);
+                }
+            }
+            // One items scan covering every turn of those threads, keeping
+            // only the message text that could be a row's preview.
+            let turn_ids: Vec<String> = turns_by_thread
+                .values()
+                .flatten()
+                .map(|turn| turn.id.clone())
+                .collect();
+            let preview_by_turn = store.newest_message_text_by_turn(&turn_ids)?;
+            Ok::<_, anyhow::Error>((turns_by_thread, preview_by_turn))
+        })
+        .await
+        .context("Runtime thread list scan task failed")??;
+
+        let mut facts = HashMap::with_capacity(wanted.len());
+        for thread_id in &wanted {
+            let turns = turns_by_thread.get(thread_id);
+            let latest_turn = turns.and_then(|turns| turns.last());
+            // Newest turn first: the scan already picked the newest message
+            // within each turn, so the first turn holding one is the message a
+            // per-thread detail read would have found.
+            let preview = turns
+                .into_iter()
+                .flatten()
+                .rev()
+                .find_map(|turn| preview_by_turn.get(&turn.id).cloned());
+            let (pending_approvals, pending_user_inputs) =
+                self.pending_requests_for_thread(thread_id);
+            facts.insert(
+                thread_id.clone(),
+                ThreadListFacts {
+                    latest_turn_status: latest_turn
+                        .map(|turn| format!("{:?}", turn.status).to_ascii_lowercase()),
+                    latest_turn_input_summary: latest_turn.map(|turn| turn.input_summary.clone()),
+                    preview,
+                    pending_attention_count: pending_approvals
+                        .len()
+                        .saturating_add(pending_user_inputs.len()),
+                },
+            );
+        }
+        Ok(facts)
     }
 
     /// Raise a watchable notice on a thread (#6180). Kind names must stay in

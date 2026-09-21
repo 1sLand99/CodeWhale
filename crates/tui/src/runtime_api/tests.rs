@@ -8435,6 +8435,120 @@ async fn thread_summary_search_does_not_scan_the_whole_store_per_thread() -> Res
     Ok(())
 }
 
+/// The default listing carries no `search`, and it must read the store once
+/// rather than once per row.
+///
+/// This route used to call `get_thread_detail` for every row, and detail is a
+/// whole-store walk: `list_turns_for_thread` scans every turn record and
+/// `list_items_for_turns_map` scans every item record, because an item's
+/// filename carries only the item id. Listing `T` threads therefore cost
+/// `T x (all_turns + all_items)` reads — seconds-per-thread, and the reason a
+/// 72-thread rail went blank. The bound asserted here is one pass per
+/// directory, so any return to a per-row detail read fails loudly.
+#[tokio::test]
+async fn thread_summary_listing_reads_the_store_once_not_once_per_thread() -> Result<()> {
+    let Some((addr, runtime_threads, handle)) = spawn_test_server().await? else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    const THREADS: usize = 8;
+    const TURNS_PER_THREAD: usize = 4;
+    const ITEMS_PER_TURN: usize = 4;
+    const PREVIEW_TOKEN: &str = "listingreadsstoreonce";
+
+    for index in 0..THREADS {
+        let thread: serde_json::Value = client
+            .post(format!("http://{addr}/v1/threads"))
+            .json(&json!({}))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let id = thread["id"]
+            .as_str()
+            .context("missing thread id")?
+            .to_string();
+        seed_summary_search_transcript(
+            runtime_threads.test_store(),
+            &id,
+            index,
+            TURNS_PER_THREAD,
+            ITEMS_PER_TURN,
+            PREVIEW_TOKEN,
+        )?;
+    }
+
+    let total_turns = (THREADS * TURNS_PER_THREAD) as u64;
+    let total_items = (THREADS * TURNS_PER_THREAD * ITEMS_PER_TURN) as u64;
+    let per_thread_file_reads = THREADS as u64 * (total_turns + total_items);
+
+    runtime_threads.reset_whole_store_scan_file_reads();
+    let listed: serde_json::Value = client
+        .get(format!("http://{addr}/v1/threads/summary?limit={THREADS}"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let (turn_files, item_files) = runtime_threads.whole_store_scan_file_reads();
+    let rows = listed.as_array().context("summary should be an array")?;
+
+    assert_eq!(
+        rows.len(),
+        THREADS,
+        "every thread must still be listed; got {listed}"
+    );
+    assert_eq!(
+        turn_files, total_turns,
+        "the page must scan the turns directory exactly once: read {turn_files} of \
+         {total_turns} turn files, while reading one thread's detail per row would have \
+         been {per_thread_file_reads} reads in total"
+    );
+    assert_eq!(
+        item_files, total_items,
+        "the page must scan the items directory exactly once: read {item_files} of \
+         {total_items} item files, while reading one thread's detail per row would have \
+         been {per_thread_file_reads} reads in total"
+    );
+    assert!(
+        rows.iter().all(|row| row["preview"]
+            .as_str()
+            .is_some_and(|preview| preview.contains(PREVIEW_TOKEN))),
+        "one pass must still fill every row's preview; got {listed}"
+    );
+    assert!(
+        rows.iter()
+            .all(|row| row["latest_turn_status"] == "completed"),
+        "one pass must still report each thread's newest turn status; got {listed}"
+    );
+    assert!(
+        rows.iter().all(|row| row["pending_attention_count"] == 0),
+        "one pass must still read attention from live state; got {listed}"
+    );
+
+    handle.abort();
+    Ok(())
+}
+
+/// The summary resolves git metadata once per distinct workspace, so the
+/// resolve list must collapse repeated workspaces instead of keeping one entry
+/// per row: every entry costs up to five blocking `git` processes.
+#[test]
+fn thread_summary_resolves_git_metadata_once_per_distinct_workspace() {
+    let repo = PathBuf::from("/srv/repo");
+    let other = PathBuf::from("/srv/other");
+    let rows = vec![
+        repo.clone(),
+        repo.clone(),
+        other.clone(),
+        repo.clone(),
+        other.clone(),
+    ];
+    assert_eq!(distinct_paths(rows), vec![repo, other]);
+}
+
 fn seed_summary_search_transcript(
     store: &crate::runtime_threads::RuntimeThreadStore,
     thread_id: &str,

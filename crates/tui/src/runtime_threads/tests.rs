@@ -16982,3 +16982,104 @@ async fn shell_policy_uses_explicit_profile_and_actual_thread_workspace() -> Res
     );
     Ok(())
 }
+
+/// The thread summary's preview is read through `newest_message_text_by_turn`,
+/// so pin the selection rules it depends on: non-message items never win, an
+/// empty trailing message is skipped rather than reported, and a missing
+/// `started_at` reads as newest because that is what `sort_turn_items_by_start`
+/// does when it substitutes `Utc::now()`.
+#[test]
+fn newest_message_text_by_turn_picks_the_latest_message_ignoring_non_messages() {
+    let dir = test_runtime_dir();
+    let store = RuntimeThreadStore::open(dir.clone()).expect("open store");
+    let turn_id = "trn_preview".to_string();
+    let at = |seconds: i64| Some(Utc::now() - chrono::Duration::seconds(seconds));
+
+    let message = |item_id: &str, text: &str, started_at| {
+        let mut item = sample_item(&turn_id, item_id, TurnItemLifecycleStatus::Completed);
+        item.kind = TurnItemKind::AgentMessage;
+        item.summary = text.to_string();
+        item.detail = Some(text.to_string());
+        item.started_at = started_at;
+        item
+    };
+
+    // A late tool call is not a candidate; a later empty message is skipped.
+    let mut tool = sample_item(&turn_id, "itm_tool", TurnItemLifecycleStatus::Completed);
+    tool.kind = TurnItemKind::ToolCall;
+    tool.started_at = at(5);
+
+    for item in [
+        message("itm_old", "oldest", at(30)),
+        tool,
+        message("itm_mid", "newer", at(20)),
+        message("itm_blank", "   ", at(10)),
+        message("itm_undated", "undated", None),
+    ] {
+        store.save_item(&item).expect("save item");
+    }
+
+    let found = store
+        .newest_message_text_by_turn(std::slice::from_ref(&turn_id))
+        .expect("scan item store");
+    assert_eq!(
+        found.get(&turn_id).map(String::as_str),
+        Some("undated"),
+        "expected the newest non-empty message; got {found:?}"
+    );
+
+    // A turn with no message at all has no preview text, so the caller falls
+    // back to an older turn rather than reporting an empty row.
+    let empty = store
+        .newest_message_text_by_turn(&["trn_absent".to_string()])
+        .expect("scan item store");
+    assert!(empty.is_empty(), "expected no preview text; got {empty:?}");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The summary route settles recovered turns through
+/// `flush_recovery_receipts` now that its rows no longer go through
+/// `get_thread_detail`. That settled state is what the page's attention count
+/// reports, so the flush must drain every listed thread, not just the first.
+#[tokio::test]
+async fn flush_recovery_receipts_drains_every_listed_thread() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let mut thread_ids = Vec::new();
+    for index in 0..2 {
+        let thread = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        let turn = sample_turn(
+            &thread.id,
+            &format!("turn_flush_{index}"),
+            RuntimeTurnStatus::InProgress,
+        );
+        manager.store.save_turn(&turn)?;
+        manager.queue_recovery_receipt(RecoveredTurnReceipt {
+            turn,
+            unresolved_dynamic_tools: Vec::new(),
+        });
+        thread_ids.push(thread.id);
+    }
+    assert_eq!(
+        manager.recovery_receipts.lock().len(),
+        2,
+        "both threads should start with a queued receipt"
+    );
+
+    manager.flush_recovery_receipts(&thread_ids).await?;
+
+    let remaining = manager
+        .recovery_receipts
+        .lock()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        remaining.is_empty(),
+        "the flush must settle every listed thread; still queued: {remaining:?}"
+    );
+
+    Ok(())
+}
