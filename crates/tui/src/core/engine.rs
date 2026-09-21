@@ -886,6 +886,10 @@ pub struct Engine {
     api_provider_id: Option<String>,
     active_route_limits: Option<codewhale_config::route::RouteLimits>,
     active_route_capabilities: codewhale_config::route::RouteCapabilities,
+    /// The endpoint the current client was built from: base URL, endpoint
+    /// key, and wire protocol. Part of the route identity the input-bill
+    /// carry-over is keyed on; `None` until a route is installed.
+    active_route_endpoint: Option<codewhale_config::route::ResolvedEndpoint>,
     rx_op: mpsc::Receiver<Op>,
     live_runtime_authority: Arc<StdMutex<LiveRuntimeAuthorityState>>,
     compaction_cancellation: Arc<StdMutex<CompactionCancellationState>>,
@@ -1351,25 +1355,44 @@ impl Engine {
     /// change and let the first request on the new route re-bill. A
     /// re-install of the same route (every turn installs its host-resolved
     /// route) keeps the carry-over the compaction gate relies on (#5577).
-    /// The endpoint is part of the identity because a named custom provider
-    /// keeps its name, model string, and (usually absent) limits across a
-    /// config reload that points it at a different server, and a different
-    /// server is a different tokenizer.
+    /// The endpoint — base URL, endpoint key, and wire protocol — is part of
+    /// the identity: a named custom provider keeps its name, model string,
+    /// and (usually absent) limits across a config reload that points it at
+    /// a different server, and a catalog refresh can keep even the URL while
+    /// moving a model from Chat Completions to Responses. A different server
+    /// is a different tokenizer, and a different wire format serializes the
+    /// same prompt differently.
     ///
     /// Known limitation: a same-route change of the system prefix is not a
     /// route change here; its size shows up as growth once the next request
     /// bills.
+    /// The facts that make an endpoint the same endpoint for the bill
+    /// carry-over: where the request goes and how it is serialized.
+    fn endpoint_identity(
+        endpoint: &codewhale_config::route::ResolvedEndpoint,
+    ) -> (&str, &str, codewhale_config::route::RequestProtocol) {
+        (
+            endpoint.base_url.as_str(),
+            endpoint.endpoint_key.as_str(),
+            endpoint.protocol,
+        )
+    }
+
     fn forget_input_bill_if_route_changes(
         &mut self,
         identity: &str,
         provider_id: Option<&str>,
-        endpoint: &str,
+        endpoint: Option<&codewhale_config::route::ResolvedEndpoint>,
         model: &str,
         limits: Option<codewhale_config::route::RouteLimits>,
     ) {
         let same_route = self.api_provider_identity == identity
             && self.api_provider_id.as_deref() == provider_id
-            && self.api_config.active_route_base_url() == endpoint
+            && self
+                .active_route_endpoint
+                .as_ref()
+                .map(Self::endpoint_identity)
+                == endpoint.map(Self::endpoint_identity)
             && self.session.model == model
             && self.active_route_limits == limits;
         if !same_route {
@@ -1390,14 +1413,15 @@ impl Engine {
         let api_config = *route.config;
         let client = route.client;
 
-        let endpoint = route.candidate.endpoint().base_url.clone();
+        let endpoint = route.candidate.endpoint().clone();
         self.forget_input_bill_if_route_changes(
             &identity,
             provider_id.as_deref(),
-            &endpoint,
+            Some(&endpoint),
             &model,
             limits,
         );
+        self.active_route_endpoint = Some(endpoint);
         self.api_provider = provider;
         self.api_provider_identity = identity;
         self.api_provider_id = provider_id;
@@ -1440,14 +1464,15 @@ impl Engine {
             .map(Ok)
             .unwrap_or_else(|| CodewhaleClient::from_candidate(&api_config, &route.candidate));
 
-        let endpoint = route.candidate.endpoint().base_url.clone();
+        let endpoint = route.candidate.endpoint().clone();
         self.forget_input_bill_if_route_changes(
             &identity,
             provider_id.as_deref(),
-            &endpoint,
+            Some(&endpoint),
             &model,
             limits,
         );
+        self.active_route_endpoint = Some(endpoint);
         self.api_provider = provider;
         self.api_provider_identity = identity;
         self.api_provider_id = provider_id;
@@ -1793,6 +1818,7 @@ impl Engine {
             api_provider_id,
             active_route_limits,
             active_route_capabilities: codewhale_config::route::RouteCapabilities::default(),
+            active_route_endpoint: None,
             rx_op,
             live_runtime_authority: Arc::clone(&live_runtime_authority),
             compaction_cancellation: Arc::clone(&compaction_cancellation),
@@ -3004,11 +3030,11 @@ impl Engine {
                         let provider_id = self.api_provider_id.clone();
                         // SetModel carries no route: the endpoint stays the
                         // one the current client is built on.
-                        let endpoint = self.api_config.active_route_base_url().to_string();
+                        let endpoint = self.active_route_endpoint.clone();
                         self.forget_input_bill_if_route_changes(
                             &identity,
                             provider_id.as_deref(),
-                            &endpoint,
+                            endpoint.as_ref(),
                             &model,
                             route_limits,
                         );
