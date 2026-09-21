@@ -571,6 +571,57 @@ fn custom_route_endpoint_change_forgets_the_previous_bill() {
     );
 }
 
+/// A catalog refresh can keep a route's name, base URL, model, and limits and
+/// still move it to another endpoint key or wire protocol. Chat Completions
+/// and Responses serialize a prompt differently, so the bill from one must
+/// not measure the first request on the other (post-merge finding on #6381).
+#[test]
+fn route_protocol_change_forgets_the_previous_bill() {
+    use codewhale_config::route::{RequestProtocol, ResolvedEndpoint};
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    let chat = ResolvedEndpoint {
+        base_url: "https://gateway.example/v1".to_string(),
+        endpoint_key: "chat".to_string(),
+        protocol: RequestProtocol::ChatCompletions,
+    };
+    engine.active_route_endpoint = Some(chat.clone());
+    let identity = engine.api_provider_identity.clone();
+    let provider_id = engine.api_provider_id.clone();
+    let model = engine.session.model.clone();
+    let limits = engine.active_route_limits;
+
+    engine.session.latest_parent_input_tokens = Some(150_000);
+    engine.forget_input_bill_if_route_changes(
+        &identity,
+        provider_id.as_deref(),
+        Some(&chat),
+        &model,
+        limits,
+    );
+    assert_eq!(
+        engine.session.latest_parent_input_tokens,
+        Some(150_000),
+        "the same endpoint keeps the last bill"
+    );
+
+    let responses = ResolvedEndpoint {
+        endpoint_key: "responses".to_string(),
+        protocol: RequestProtocol::Responses,
+        ..chat
+    };
+    engine.forget_input_bill_if_route_changes(
+        &identity,
+        provider_id.as_deref(),
+        Some(&responses),
+        &model,
+        limits,
+    );
+    assert_eq!(
+        engine.session.latest_parent_input_tokens, None,
+        "a new endpoint key or protocol at the same URL drops the bill"
+    );
+}
+
 #[test]
 fn route_switch_forgets_the_previous_routes_input_bill() {
     let mut custom = HashMap::new();
