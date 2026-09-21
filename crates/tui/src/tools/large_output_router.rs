@@ -48,9 +48,15 @@ std::thread_local! {
 /// Holds every test-side workshop activation behind one process-wide gate.
 /// The thread-local marker lets the owning current-thread test call
 /// `install_active` without trying to acquire its own non-reentrant lock.
+///
+/// The guard also owns the process-wide test env barrier, because holding this
+/// gate across a `reload_config` is holding it across `Settings::load` and
+/// `Config`'s env reads, which take that barrier (#6306). Field order is the
+/// release order: the serial gate first, then the barrier.
 #[cfg(test)]
 pub(crate) struct ActiveWorkshopTestGuard {
     _serial: std::sync::MutexGuard<'static, ()>,
+    _env: Option<crate::test_support::TestEnvLock>,
 }
 
 #[cfg(test)]
@@ -60,18 +66,42 @@ impl Drop for ActiveWorkshopTestGuard {
     }
 }
 
+/// Take the workshop gate, and the env barrier under it, in that order (#6306).
+///
+/// A holder of this gate keeps it across whole product calls — `reload_config`
+/// installs the budgets and then loads settings — and those calls read the
+/// environment through `test_support::with_test_env_lock`. A test that sealed
+/// the environment first and then reaches `install_active` through the very
+/// same `reload_config` takes the two locks in the opposite order, and the
+/// pair wedges the whole binary: `cargo test -p codewhale-tui --lib config`
+/// never returned, with dozens of unrelated tests queued on the barrier.
+/// Acquiring the barrier here, before the gate, makes that inversion
+/// impossible for every caller at once — the same shape as
+/// `provider_lake::lock_live_snapshot`.
+///
+/// Known limitation: this orders these two locks and nothing else. A future
+/// process-wide test gate held across product code has to join the same order
+/// rather than invent a third one.
 #[cfg(test)]
 pub(crate) fn active_workshop_test_guard() -> ActiveWorkshopTestGuard {
     assert!(
         !ACTIVE_WORKSHOP_TEST_SERIAL_HELD.with(std::cell::Cell::get),
         "active workshop test guard is not reentrant"
     );
+    let env = if crate::test_support::current_thread_holds_test_env_lock() {
+        None
+    } else {
+        Some(crate::test_support::lock_test_env())
+    };
     let serial = ACTIVE_WORKSHOP_TEST_SERIAL
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     ACTIVE_WORKSHOP_TEST_SERIAL_HELD.with(|held| held.set(true));
-    ActiveWorkshopTestGuard { _serial: serial }
+    ActiveWorkshopTestGuard {
+        _serial: serial,
+        _env: env,
+    }
 }
 
 fn active_workshop_slot() -> &'static Mutex<WorkshopConfig> {
