@@ -883,9 +883,14 @@ async fn run_git_command_async(
         .map_err(|e| ToolError::execution_failed(format!("git task panicked: {e}")))?
 }
 
-/// Run git under a hard deadline. `Ok(None)` means the deadline passed; the
-/// child is killed when the dropped future releases it (`kill_on_drop`), so a
-/// timed-out fetch never lingers holding a blocking thread.
+/// Run git under a hard deadline. `Ok(None)` means the deadline passed and the
+/// child was killed, so a timed-out fetch never lingers.
+///
+/// On unix git runs in its own process group and the whole group is killed at
+/// the deadline: git hands the network to a transport child (`git-remote-http`,
+/// `ssh`) that survives a SIGKILL to git alone and would otherwise keep the
+/// stalled connection open indefinitely. `kill_on_drop` still covers the
+/// leader everywhere else.
 async fn run_git_command_bounded(
     working_dir: &Path,
     args: &[String],
@@ -899,16 +904,46 @@ async fn run_git_command_bounded(
     cmd.args(args)
         .current_dir(working_dir)
         .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    match tokio::time::timeout(timeout, cmd.output()).await {
-        Err(_) => Ok(None),
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ToolError::not_available(
+                "git is not installed or not in PATH",
+            ));
+        }
+        Err(e) => {
+            return Err(ToolError::execution_failed(format!(
+                "Failed to run git: {e}"
+            )));
+        }
+    };
+    let process_group = child.id();
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
         Ok(Ok(output)) => Ok(Some(output)),
-        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => Err(ToolError::not_available(
-            "git is not installed or not in PATH",
-        )),
         Ok(Err(e)) => Err(ToolError::execution_failed(format!(
             "Failed to run git: {e}"
         ))),
+        Err(_) => {
+            #[cfg(unix)]
+            if let Some(pgid) = process_group
+                .and_then(|id| libc::pid_t::try_from(id).ok())
+                .filter(|pgid| *pgid > 0)
+            {
+                // SAFETY: kill(2) dereferences no pointers; a negative pid
+                // targets the group this call created with process_group(0).
+                unsafe {
+                    libc::kill(-pgid, libc::SIGKILL);
+                }
+            }
+            #[cfg(not(unix))]
+            let _ = process_group;
+            Ok(None)
+        }
     }
 }
 
@@ -1240,24 +1275,18 @@ mod tests {
         assert!(!work.path().join("file.txt").exists());
     }
 
-    /// A loopback HTTP "remote" that answers every request with `response`
-    /// (or, when `None`, accepts and never answers). Returns its URL.
-    fn spawn_fake_http_remote(response: Option<&'static str>) -> String {
+    /// A loopback HTTP "remote" that answers every request with `response`.
+    /// Returns its URL.
+    fn spawn_fake_http_remote(response: &'static str) -> String {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
         std::thread::spawn(move || {
-            let mut held = Vec::new();
             for stream in listener.incoming().take(16) {
                 let Ok(mut stream) = stream else { continue };
                 let mut buf = [0u8; 4096];
                 let _ = stream.read(&mut buf);
-                match response {
-                    Some(reply) => {
-                        let _ = stream.write_all(reply.as_bytes());
-                    }
-                    None => held.push(stream),
-                }
+                let _ = stream.write_all(response.as_bytes());
             }
         });
         format!("http://{addr}/repo.git")
@@ -1277,10 +1306,10 @@ mod tests {
         if !git_available() {
             return;
         }
-        let url = spawn_fake_http_remote(Some(
+        let url = spawn_fake_http_remote(
             "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"codewhale\"\r\n\
              Content-Length: 0\r\nConnection: close\r\n\r\n",
-        ));
+        );
         let work = tempdir().expect("tempdir");
         init_repo_with_remote(work.path(), &url);
 
@@ -1316,7 +1345,15 @@ mod tests {
         if !git_available() {
             return;
         }
-        let url = spawn_fake_http_remote(None);
+        // Accept one connection and hand it back, never answering.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("http://{}/repo.git", listener.local_addr().expect("addr"));
+        let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let _ = accepted_tx.send(stream);
+            }
+        });
         let work = tempdir().expect("tempdir");
         init_repo_with_remote(work.path(), &url);
 
@@ -1330,6 +1367,30 @@ mod tests {
         .expect("git spawns");
         assert!(outcome.is_none(), "a silent remote must hit the deadline");
         assert!(started.elapsed() < std::time::Duration::from_secs(15));
+
+        // The connection belongs to git's transport child, not git itself.
+        // It must close too: a lingering helper would hold the stall open.
+        #[cfg(unix)]
+        {
+            use std::io::Read;
+            let mut stream = accepted_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("git connected to the fake remote");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .expect("read timeout");
+            let mut buf = [0u8; 4096];
+            loop {
+                match stream.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(_) => continue, // the request itself
+                    Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => break,
+                    Err(e) => panic!("transport child outlived the deadline: {e}"),
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        drop(accepted_rx);
     }
 
     #[tokio::test]
