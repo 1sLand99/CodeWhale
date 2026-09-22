@@ -2,11 +2,13 @@
 """Export the Codewhale palettes to the other Codewhale clients.
 
 `crates/palette/src/tokens.rs` is the single source for the product colors.
-This script parses its `WHALE_*_RGB`, `LIGHT_*_RGB`, `SHORELINE_*_RGB`, and
-`SHORELINE_LIGHT_*_RGB` consts (aliases included) and writes the same values
-as CSS custom properties so the web app stops hand-copying hexes. The
-Shoreline set is the Shoreline redesign's dark + light pair; `--whale-*` and
-`--light-*` stay until the components that use them migrate.
+This script parses its `WHALE_*_RGB`, `LIGHT_*_RGB`, `SHORELINE_*_RGB`,
+`SHORELINE_LIGHT_*_RGB`, `GPUI_*_RGB`, and `GPUI_LIGHT_*_RGB` consts (aliases
+included) and writes the same values as CSS custom properties so the web app
+stops hand-copying hexes. The GPUI pair mirrors the desktop client's
+`set_theme` and backs the website's role tokens; Shoreline is the TUI's
+charcoal theme; `--whale-*` and `--light-*` stay until the components that
+use them migrate.
 
 Target: <repo>/web/app/tokens.css. This script writes nothing outside this
 repository.
@@ -28,8 +30,8 @@ TOKENS_RS = REPO / "crates/palette/src/tokens.rs"
 SOURCE_LABEL = "crates/palette/src/tokens.rs"
 
 CONST_RE = re.compile(
-    r"^pub const ((?:SHORELINE_LIGHT|SHORELINE|WHALE|LIGHT)_[A-Z0-9_]+)_RGB: \(u8, u8, u8\) = "
-    r"(?:\((\d+), (\d+), (\d+)\)|((?:SHORELINE_LIGHT|SHORELINE|WHALE|LIGHT)_[A-Z0-9_]+)_RGB);",
+    r"^pub const ((?:GPUI_LIGHT|GPUI|SHORELINE_LIGHT|SHORELINE|WHALE|LIGHT)_[A-Z0-9_]+)_RGB: \(u8, u8, u8\) = "
+    r"(?:\((\d+), (\d+), (\d+)\)|((?:GPUI_LIGHT|GPUI|SHORELINE_LIGHT|SHORELINE|WHALE|LIGHT)_[A-Z0-9_]+)_RGB);",
     re.MULTILINE,
 )
 
@@ -59,8 +61,14 @@ def css_name(name: str) -> str:
     `LIGHT_*` consts export as `--light-*` so the website's paper surface can
     reference the same light-mode ink and border values the TUI ships. The
     Shoreline dark pair exports as `--shoreline-*` and its light pair as
-    `--shoreline-light-*`, matching the theme the TUI and GPUI clients open
-    on."""
+    `--shoreline-light-*`, the TUI's charcoal theme. The GPUI desktop's
+    `set_theme` pair exports as `--gpui-dark-*` and `--gpui-light-*`; the
+    `dark` infix keeps the generated names clear of the hand-kept `--gpui-*`
+    aliases in web/app/styles/tokens-roles.css."""
+    if name.startswith("GPUI_LIGHT_"):
+        return "--gpui-light-" + name.removeprefix("GPUI_LIGHT_").lower().replace("_", "-")
+    if name.startswith("GPUI_"):
+        return "--gpui-dark-" + name.removeprefix("GPUI_").lower().replace("_", "-")
     if name.startswith("SHORELINE_LIGHT_"):
         return "--shoreline-light-" + name.removeprefix("SHORELINE_LIGHT_").lower().replace(
             "_", "-"

@@ -6,8 +6,9 @@ export default {
     extend: {
       colors: {
         // The surface, ink, and accent tokens all resolve through CSS custom
-        // properties so the docs light sheet can re-theme the subtree, while
-        // the default values stay the Tideline dark whale palette.
+        // properties (app/styles/tokens-roles.css) so the dark subtrees can
+        // re-theme themselves; the values are the generated GPUI set_theme
+        // tokens. Hover is the primary at 0.9 opacity, as in set_theme.
         paper: "rgb(var(--c-paper) / <alpha-value>)",
         "paper-deep": "rgb(var(--c-paper-deep) / <alpha-value>)",
         "paper-edge": "rgb(var(--c-paper-edge) / <alpha-value>)",
@@ -18,7 +19,7 @@ export default {
         "ink-soft": "rgb(var(--c-ink-soft) / <alpha-value>)",
         "ink-mute": "rgb(var(--c-ink-mute) / <alpha-value>)",
         indigo: "rgb(var(--c-indigo) / <alpha-value>)",
-        "indigo-deep": "rgb(var(--c-indigo-deep) / <alpha-value>)",
+        "indigo-deep": "var(--indigo-deep)",
         "indigo-pale": "var(--indigo-pale)",
         ochre: "var(--ochre)",
         jade: "var(--jade)",

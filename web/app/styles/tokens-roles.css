@@ -1,52 +1,48 @@
-/* ---------- root tokens — GPUI theme ---------- */
+/* ---------- site tokens — the folio ---------- */
 /*
- * The site is a folio read in the product client's light: warm paper at the
- * surface, warm charcoal at depth. Above the waterline the field is the GPUI
- * light theme's paper and the ink is its plum-charcoal foreground. Below the
- * waterline (`.ocean-column`, the footer, every terminal plate) the same
- * names resolve to the dark charcoal tokens, so a component written once
- * reads correctly on either side.
+ * The site is still a folio read in the product client's light: warm paper
+ * at the surface, warm charcoal at depth. Above the waterline the field is
+ * the GPUI light theme; below it (`.ocean-column`, the footer, every
+ * terminal plate) the same names resolve to the GPUI dark theme, so a
+ * component written once reads correctly on either side. (The site-wide
+ * theme contract that moves these onto the role layer above is a separate
+ * slice.)
  *
  * The token NAMES keep their historical shape (`--paper`, `--ink`,
  * `--indigo`) so every component rule stays diffable; the VALUES resolve
- * through the `--gpui-*` block below, which now references the generated
- * Shoreline tokens in ./tokens.css (crates/palette/src/tokens.rs is the
- * single source — the same constants the GPUI client and the TUI open on).
- * Only values with no Shoreline slot stay literal: the hover tones, the
- * accent washes, and the AA-adapted state hues. `--whale-*`/`--light-*`
- * remain available to anything that genuinely wants the terminal palette.
+ * through the `--gpui-*` aliases below, which reference the generated GPUI
+ * tokens. Only the warm state hues (tan, moss, rust and their AA-adapted
+ * inks) stay literal: `set_theme` has no slot for them.
  */
 :root {
-  /* --- The GPUI source palette (generated Shoreline slots) --- */
-  --gpui-paper: var(--shoreline-light-surface);      /* light background — warm paper */
-  --gpui-paper-raised: var(--shoreline-light-elevated); /* light card/popover */
-  --gpui-paper-muted: var(--shoreline-light-panel);  /* light muted surface */
-  --gpui-ink: var(--shoreline-light-text-body);      /* light foreground */
-  --gpui-ink-soft: var(--shoreline-light-text-soft);
-  --gpui-ink-mute: var(--shoreline-light-text-muted); /* light muted_foreground */
-  --gpui-edge: var(--shoreline-light-border);        /* light border */
-  --gpui-primary: var(--shoreline-light-action);     /* light primary */
-  --gpui-primary-hover: #00536d;    /* light button_primary_hover — no Shoreline slot */
-  --gpui-accent: #dcebee;           /* light accent — no Shoreline slot */
-  --gpui-selection: var(--shoreline-light-selection); /* light selection */
+  /* --- GPUI light (above the waterline) --- */
+  --gpui-paper: var(--gpui-light-bg);                /* background — warm paper */
+  --gpui-paper-raised: var(--gpui-light-panel);      /* muted — card/popover */
+  --gpui-paper-muted: var(--gpui-light-sidebar);     /* sidebar — recessed */
+  --gpui-ink: var(--gpui-light-text);                /* foreground */
+  --gpui-ink-soft: var(--gpui-light-text-muted);     /* muted_foreground */
+  --gpui-ink-mute: var(--gpui-light-text-muted);     /* muted_foreground */
+  --gpui-edge: var(--gpui-light-border);             /* border */
+  --gpui-primary: var(--gpui-light-primary);         /* primary */
+  --gpui-primary-hover: rgb(var(--gpui-light-primary-rgb) / 0.9); /* button_primary_hover */
 
-  --gpui-stage: var(--shoreline-surface);           /* dark background — warm charcoal */
-  --gpui-stage-deep: var(--shoreline-chrome);       /* deepest dark */
-  --gpui-stage-muted: var(--shoreline-panel);       /* dark muted surface */
-  --gpui-stage-raised: var(--shoreline-elevated);   /* raised dark plate */
-  --gpui-stage-ink: var(--shoreline-text-body);     /* dark foreground */
-  --gpui-stage-ink-soft: var(--shoreline-text-muted); /* dark muted_foreground */
-  --gpui-stage-ink-dim: var(--shoreline-text-dim);
-  --gpui-stage-edge: var(--shoreline-border);       /* dark border */
-  --gpui-primary-dark: var(--shoreline-action);     /* dark primary */
-  --gpui-primary-hover-dark: #93cde1; /* dark button_primary_hover — no Shoreline slot */
-  --gpui-on-primary: #102d38;       /* dark primary_foreground — no Shoreline slot */
-  --gpui-accent-dark: #303f48;      /* dark accent — no Shoreline slot */
-  --gpui-selection-dark: var(--shoreline-selection); /* dark selection */
+  /* --- GPUI dark (below the waterline) --- */
+  --gpui-stage: var(--gpui-dark-bg);                 /* background — warm charcoal */
+  --gpui-stage-deep: var(--gpui-dark-sidebar);       /* sidebar — deepest dark */
+  --gpui-stage-muted: var(--gpui-dark-panel);        /* muted — raised input plate */
+  --gpui-stage-raised: var(--gpui-dark-list-active); /* list_active — top plate */
+  --gpui-stage-ink: var(--gpui-dark-text);           /* foreground */
+  --gpui-stage-ink-soft: var(--gpui-dark-text-muted); /* muted_foreground */
+  --gpui-stage-ink-dim: var(--gpui-dark-text-muted); /* muted_foreground (AA, UX-05) */
+  --gpui-stage-edge: var(--gpui-dark-border);        /* border */
+  --gpui-primary-dark: var(--gpui-dark-primary);     /* primary */
+  --gpui-primary-hover-dark: rgb(var(--gpui-dark-primary-rgb) / 0.9); /* button_primary_hover */
+  --gpui-accent-dark: var(--gpui-dark-accent);       /* accent — hover wash */
+  --gpui-selection-dark: rgb(var(--gpui-dark-primary-rgb) / 0.28); /* selection */
 
   /* Warm-muted state hues from the GPUI mockups, darkened or lifted per
-     side of the waterline so text uses of them still clear AA. No Shoreline
-     slots: these are site-specific adaptations. */
+     side of the waterline so text uses of them still clear AA. No
+     set_theme slots: these are site-specific adaptations. */
   --gpui-tan: #b1a17a;              /* human mark */
   --gpui-moss: #739686;             /* outcome */
   --gpui-rust: #aa6f6c;             /* attention */
@@ -54,17 +50,16 @@
   /* RGB channel triples backing the Tailwind surface/ink tokens (see
      tailwind.config.ts). `.ocean-column` and the opt-in docs dark sheet
      override them for their dark subtree. */
-  --c-paper: var(--shoreline-light-surface-rgb);
-  --c-paper-deep: var(--shoreline-light-panel-rgb);
-  --c-paper-edge: var(--shoreline-light-border-rgb);
-  --c-ink: var(--shoreline-light-text-body-rgb);
-  --c-ink-soft: var(--shoreline-light-text-soft-rgb);
-  --c-ink-mute: var(--shoreline-light-text-muted-rgb);
-  --c-indigo: var(--shoreline-light-action-rgb);
-  --c-indigo-deep: 0 83 109;       /* light primary hover — no Shoreline slot */
-  --c-stage-soft: var(--shoreline-text-muted-rgb);
-  --c-stage-deep: var(--shoreline-chrome-rgb);
-  --c-primary-dark: var(--shoreline-action-rgb);
+  --c-paper: var(--gpui-light-bg-rgb);
+  --c-paper-deep: var(--gpui-light-sidebar-rgb);
+  --c-paper-edge: var(--gpui-light-border-rgb);
+  --c-ink: var(--gpui-light-text-rgb);
+  --c-ink-soft: var(--gpui-light-text-muted-rgb);
+  --c-ink-mute: var(--gpui-light-text-muted-rgb);
+  --c-indigo: var(--gpui-light-primary-rgb);
+  --c-stage-soft: var(--gpui-dark-text-muted-rgb);
+  --c-stage-deep: var(--gpui-dark-sidebar-rgb);
+  --c-primary-dark: var(--gpui-dark-primary-rgb);
 
   /* The sheet. */
   --paper: var(--gpui-paper);
@@ -145,14 +140,13 @@
 .ocean-column,
 .site-footer,
 html[data-theme="dark"] .docs-portal {
-  --c-paper: var(--shoreline-surface-rgb);
-  --c-paper-deep: var(--shoreline-panel-rgb);
-  --c-paper-edge: var(--shoreline-border-rgb);
-  --c-ink: var(--shoreline-text-body-rgb);
-  --c-ink-soft: var(--shoreline-text-muted-rgb);
-  --c-ink-mute: var(--shoreline-text-dim-rgb);
-  --c-indigo: var(--shoreline-action-rgb);
-  --c-indigo-deep: 147 205 225; /* lifted primary — hover on dark, no Shoreline slot */
+  --c-paper: var(--gpui-dark-bg-rgb);
+  --c-paper-deep: var(--gpui-dark-panel-rgb);
+  --c-paper-edge: var(--gpui-dark-border-rgb);
+  --c-ink: var(--gpui-dark-text-rgb);
+  --c-ink-soft: var(--gpui-dark-text-muted-rgb);
+  --c-ink-mute: var(--gpui-dark-text-muted-rgb);
+  --c-indigo: var(--gpui-dark-primary-rgb);
   --paper: var(--gpui-stage);
   --paper-deep: var(--gpui-stage-muted);
   --paper-edge: var(--gpui-stage-edge);
@@ -173,4 +167,81 @@ html[data-theme="dark"] .docs-portal {
   --mark-ink: var(--gpui-stage-ink);
   --hairline: rgb(var(--c-stage-soft) / 0.2);
   color-scheme: dark;
+}
+
+/* ---------- role tokens — GPUI set_theme ---------- */
+/*
+ * One token authority: the GPUI desktop client's `set_theme`
+ * (codewhale-app/src/workspace/mod.rs), mirrored as the `GPUI_*` /
+ * `GPUI_LIGHT_*` consts in crates/palette/src/tokens.rs and generated into
+ * ./tokens.css as `--gpui-dark-*` / `--gpui-light-*`. Nothing below repeats a
+ * hex for a role: every role value is a generated token, or the primary at
+ * the opacity `set_theme` derives (hover 0.9, selection 0.28).
+ *
+ * The role layer follows the OS: light by default, dark under
+ * `prefers-color-scheme: dark` unless the page pins `data-theme="light"`,
+ * and dark whenever it pins `data-theme="dark"`.
+ *
+ *   --bg         background        the reading canvas
+ *   --surface    sidebar           recessed navigation and chrome
+ *   --panel      muted             raised inputs, cards, popovers
+ *   --text       foreground
+ *   --muted      muted_foreground  secondary text (AA on --bg and --panel)
+ *   --line       border
+ *   --accent     primary           action, links, whale blue
+ *   --on-accent  primary_foreground
+ *   --hover      accent            hover wash, distinct from --panel
+ *   --selected   list_active       the current row
+ *   --selection  primary @ 0.28    text selection
+ *   --ring       primary           focus ring
+ *
+ * Shoreline (`--shoreline-*`) is the TUI's charcoal theme and is not the
+ * GPUI palette; `--whale-*`/`--light-*` remain available to anything that
+ * genuinely wants the terminal palette.
+ */
+:root {
+  --bg: var(--gpui-light-bg);
+  --surface: var(--gpui-light-sidebar);
+  --panel: var(--gpui-light-panel);
+  --text: var(--gpui-light-text);
+  --muted: var(--gpui-light-text-muted);
+  --line: var(--gpui-light-border);
+  --accent: var(--gpui-light-primary);
+  --on-accent: var(--gpui-light-on-primary);
+  --hover: var(--gpui-light-accent);
+  --selected: var(--gpui-light-list-active);
+  --selection: rgb(var(--gpui-light-primary-rgb) / 0.28);
+  --ring: var(--gpui-light-primary);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: var(--gpui-dark-bg);
+    --surface: var(--gpui-dark-sidebar);
+    --panel: var(--gpui-dark-panel);
+    --text: var(--gpui-dark-text);
+    --muted: var(--gpui-dark-text-muted);
+    --line: var(--gpui-dark-border);
+    --accent: var(--gpui-dark-primary);
+    --on-accent: var(--gpui-dark-on-primary);
+    --hover: var(--gpui-dark-accent);
+    --selected: var(--gpui-dark-list-active);
+    --selection: rgb(var(--gpui-dark-primary-rgb) / 0.28);
+    --ring: var(--gpui-dark-primary);
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: var(--gpui-dark-bg);
+  --surface: var(--gpui-dark-sidebar);
+  --panel: var(--gpui-dark-panel);
+  --text: var(--gpui-dark-text);
+  --muted: var(--gpui-dark-text-muted);
+  --line: var(--gpui-dark-border);
+  --accent: var(--gpui-dark-primary);
+  --on-accent: var(--gpui-dark-on-primary);
+  --hover: var(--gpui-dark-accent);
+  --selected: var(--gpui-dark-list-active);
+  --selection: rgb(var(--gpui-dark-primary-rgb) / 0.28);
+  --ring: var(--gpui-dark-primary);
 }

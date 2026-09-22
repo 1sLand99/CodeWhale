@@ -5,13 +5,14 @@ import { siteCss } from "./site-css";
  * The design palette as the site actually resolves it.
  *
  * `app/tokens.css` is generated from `crates/palette/src/tokens.rs` by
- * `scripts/export-design-tokens.py`, and `app/styles/tokens-roles.css` carries the hand-kept
- * `--gpui-*` block that mirrors the GPUI client's theme. Site variables state
+ * `scripts/export-design-tokens.py` (including the GPUI desktop's `set_theme`
+ * pair as `--gpui-dark-*` / `--gpui-light-*`), and `app/styles/tokens-roles.css`
+ * carries the hand-kept `--gpui-*` aliases over them. Site variables state
  * which token each uses (`--paper: var(--gpui-paper)`) instead of repeating
  * the hex. The contract tests still need the literal color to check parity
  * and contrast, so this reads both files and flattens the alias chains
  * (`--whale-success` -> `--whale-working-green` -> `#9bd66f`,
- * `--paper` -> `--gpui-paper` -> `#f5f0e9`). The Blue Stage light preset's
+ * `--paper` -> `--gpui-paper` -> `--gpui-light-bg` -> `#faf8f5`). The Blue Stage light preset's
  * `LIGHT_*` consts export as `--light-*` beside them, and the Shoreline
  * redesign's dark/light pair exports as `--shoreline-*` /
  * `--shoreline-light-*`.
@@ -22,7 +23,7 @@ const RAW: Record<string, string> = (() => {
   const generated = readFileSync(new URL("../app/tokens.css", import.meta.url), "utf8");
   const globals = siteCss();
   const raw: Record<string, string> = {};
-  for (const match of generated.matchAll(/--((?:whale|light|shoreline-light|shoreline)-[\w-]+):\s*([^;]+);/g)) {
+  for (const match of generated.matchAll(/--((?:whale|light|shoreline-light|shoreline|gpui-dark|gpui-light)-[\w-]+):\s*([^;]+);/g)) {
     raw[match[1]] = match[2].trim();
   }
   for (const match of globals.matchAll(/--(gpui-[\w-]+):\s*([^;]+);/g)) {

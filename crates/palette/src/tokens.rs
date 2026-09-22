@@ -222,13 +222,14 @@ pub const MATRIX_TEXT_SOFT_RGB: (u8, u8, u8) = (221, 255, 221); // #DDFFDD
 pub const MATRIX_TEXT_DIM_RGB: (u8, u8, u8) = (0, 108, 0); // #006C00, lifted for 3:1
 pub const MATRIX_BORDER_RGB: (u8, u8, u8) = (0, 204, 0); // #00CC00
 
-// Shoreline — the product-client palette, shared with the GPUI desktop.
+// Shoreline — the TUI's charcoal theme.
 //
 // Warm charcoal ground and warm paper sheet, one restrained blue, and the
 // whale's ivory ink on both sides. This is the charcoal alternative to the
 // terminal's navy "Underwater" default in 0.10.0. The
 // 0.10.0 action pair uses glacial blue on charcoal and deep ocean blue on
-// paper. Shared tokens keep the terminal, desktop, and web in one system.
+// paper. The GPUI desktop does not paint these values: its theme is the
+// separate `GPUI_*` / `GPUI_LIGHT_*` set below.
 //
 // Every pair audited by `contrast::theme_contrast_violations` clears its
 // floor: body roles clear 4.5:1 on all four surfaces, hint/dim and the
@@ -298,6 +299,36 @@ pub const SHORELINE_LIGHT_DIFF_ADDED_FG_RGB: (u8, u8, u8) = (31, 107, 69); // #1
 pub const SHORELINE_LIGHT_DIFF_ADDED_BG_RGB: (u8, u8, u8) = (226, 242, 230); // #E2F2E6
 pub const SHORELINE_LIGHT_DIFF_DELETED_FG_RGB: (u8, u8, u8) = (168, 40, 80); // #A82850
 pub const SHORELINE_LIGHT_DIFF_DELETED_BG_RGB: (u8, u8, u8) = (251, 230, 236); // #FBE6EC
+
+// GPUI — the desktop client's theme, mirrored from `set_theme` in
+// codewhale-app/src/workspace/mod.rs (the GPUI app has no dependency on this
+// crate, so these are kept in step by hand). The website's role tokens are
+// generated from this set; Shoreline above stays the TUI's theme. Each const
+// names the `gpui_kit` theme field it mirrors. Derived roles are not
+// duplicated here: hover is `PRIMARY` at 0.9 opacity and selection is
+// `PRIMARY` at 0.28, exactly as `set_theme` derives them.
+pub const GPUI_BG_RGB: (u8, u8, u8) = (32, 33, 35); // #202123 background
+pub const GPUI_PANEL_RGB: (u8, u8, u8) = (42, 43, 46); // #2A2B2E muted — raised inputs, popovers
+pub const GPUI_SIDEBAR_RGB: (u8, u8, u8) = (25, 26, 28); // #191A1C sidebar — recessed navigation
+pub const GPUI_TEXT_RGB: (u8, u8, u8) = (239, 238, 235); // #EFEEEB foreground
+pub const GPUI_TEXT_MUTED_RGB: (u8, u8, u8) = (177, 177, 173); // #B1B1AD muted_foreground
+pub const GPUI_BORDER_RGB: (u8, u8, u8) = (59, 60, 63); // #3B3C3F border
+pub const GPUI_PRIMARY_RGB: (u8, u8, u8) = (144, 185, 255); // #90B9FF primary — whale blue
+pub const GPUI_ON_PRIMARY_RGB: (u8, u8, u8) = (21, 36, 62); // #15243E primary_foreground
+pub const GPUI_ACCENT_RGB: (u8, u8, u8) = (48, 49, 52); // #303134 accent — hover
+pub const GPUI_LIST_ACTIVE_RGB: (u8, u8, u8) = (55, 57, 61); // #37393D list_active — selected row
+
+// GPUI Light — the same `set_theme` on warm paper.
+pub const GPUI_LIGHT_BG_RGB: (u8, u8, u8) = (250, 248, 245); // #FAF8F5 background
+pub const GPUI_LIGHT_PANEL_RGB: (u8, u8, u8) = (255, 255, 255); // #FFFFFF muted — raised inputs, popovers
+pub const GPUI_LIGHT_SIDEBAR_RGB: (u8, u8, u8) = (240, 237, 232); // #F0EDE8 sidebar
+pub const GPUI_LIGHT_TEXT_RGB: (u8, u8, u8) = (40, 41, 43); // #28292B foreground
+pub const GPUI_LIGHT_TEXT_MUTED_RGB: (u8, u8, u8) = (95, 96, 93); // #5F605D muted_foreground
+pub const GPUI_LIGHT_BORDER_RGB: (u8, u8, u8) = (217, 213, 207); // #D9D5CF border
+pub const GPUI_LIGHT_PRIMARY_RGB: (u8, u8, u8) = (36, 91, 199); // #245BC7 primary
+pub const GPUI_LIGHT_ON_PRIMARY_RGB: (u8, u8, u8) = (251, 245, 238); // #FBF5EE primary_foreground
+pub const GPUI_LIGHT_ACCENT_RGB: (u8, u8, u8) = (232, 229, 224); // #E8E5E0 accent — hover
+pub const GPUI_LIGHT_LIST_ACTIVE_RGB: (u8, u8, u8) = (223, 220, 214); // #DFDCD6 list_active
 
 // Semantic colors
 pub const BORDER_COLOR_RGB: (u8, u8, u8) = WHALE_BORDER_RGB;
