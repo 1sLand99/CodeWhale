@@ -30,7 +30,7 @@ export const CHANGELOG: ChangelogRelease[] = [
   },
   {
     "version": "0.10.0",
-    "date": null,
+    "date": "2026-09-22",
     "unreleased": false,
     "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.9.13...HEAD",
     "sections": [
@@ -77,7 +77,7 @@ export const CHANGELOG: ChangelogRelease[] = [
           "StepFun’s current coding catalog includes Step 5 Preview, Step 3.7 Flash, Step 3.5 Flash and its 2603 version, with published reasoning controls and PAYG rates. Existing Step Plan routing remains subscription-based.",
           "read responses now always report the file's byte size, line count, and whether output was truncated, and truncation footers name the total size alongside the continuation offset — so paging through a large file is deliberate instead of a surprise (#6283)."
         ],
-        "itemCount": 31
+        "itemCount": 34
       },
       {
         "heading": "Changed",
@@ -95,7 +95,14 @@ export const CHANGELOG: ChangelogRelease[] = [
           "The launcher keeps the Codewhale mark while balancing its layout above the composer. A single cursor identifies the selected action; MCP faults retain their warning color even in compact terminals. Recent-session counts now read correctly for a single message.",
           "Model and provider settings use quieter selection surfaces, one focused cursor, clearer missing-key warnings, compact output limits, and less repetitive credential detail. Plugin actions use plain labels."
         ],
-        "itemCount": 22
+        "itemCount": 24
+      },
+      {
+        "heading": "Removed",
+        "items": [
+          "The host no longer parses prose into goals. Ten phrasings and a clause allow-list (\"make it your /goal to …\") were turned into durable goals before the provider call; prose now reaches the model, which calls create_goal when a goal is useful. The deterministic path — a leading /goals <objective> — is unchanged."
+        ],
+        "itemCount": 1
       },
       {
         "heading": "Fixed",
@@ -113,7 +120,7 @@ export const CHANGELOG: ChangelogRelease[] = [
           "The panel stopped saying \"untrusted\". A bundle that is waiting on its capability review now reads needs review — off · needs review when the switch is off too — and its detail line says what Codewhale is withholding and which key ends the wait, instead of restating an internal pair of booleans. Enter's verb on that row is review, not inspect.",
           "MCP servers say where they live, and mutations write there. Each row is labelled global, project, or plugin: <name>. Enabling, disabling or removing a workspace-scoped server previously edited the user's global file and failed with \"MCP server '<name>' not found\" on a row the panel had just offered; the write now lands in the file that declares the server, and a plugin-contributed server says it is switched off by disabling its plugin."
         ],
-        "itemCount": 41
+        "itemCount": 46
       }
     ]
   },
