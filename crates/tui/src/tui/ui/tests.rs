@@ -6638,15 +6638,20 @@ fn raw_paste_beginning_with_space_preserves_payload_over_reasoning_action() {
 }
 
 #[test]
-fn paste_safety_expiry_repaints_the_submit_cue_without_another_key() {
+fn paste_safety_window_keeps_the_submit_cue_steady_while_routing_waits() {
+    // #6397: the `[↵]` chip follows the time-independent draft predicate,
+    // so an open paste-burst window (re-extended on every fast keystroke)
+    // must not flip it to `[·]`. Enter routing still waits on the window.
     let mut app = create_test_app();
     app.use_paste_burst_detection = true;
     app.insert_str("/mcp");
     let now = Instant::now();
     app.paste_burst.extend_window(now);
     assert!(!app.composer_enter_would_submit());
+    assert!(app.composer_draft_is_submittable());
     let waiting = render_underwater_test_app(&mut app, 80, 24);
-    assert!(waiting.contains("[·]"), "{waiting}");
+    assert!(waiting.contains("[↵]"), "{waiting}");
+    assert!(!waiting.contains("[·]"), "{waiting}");
     app.needs_redraw = false;
     assert!(flush_paste_burst_before_composer(
         &mut app,

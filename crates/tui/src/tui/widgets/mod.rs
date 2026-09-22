@@ -1942,7 +1942,11 @@ impl Renderable for ComposerWidget<'_> {
                 area,
                 buf,
                 &self.app.ui_theme,
-                self.app.composer_enter_would_submit(),
+                // Display state, not key-routing state: the paste-burst
+                // window reopens on every fast keystroke, so drawing from
+                // `composer_enter_would_submit` strobed the chip while
+                // typing (#6397).
+                self.app.composer_draft_is_submittable(),
                 crate::tui::color_compat::ascii_safe_enabled(),
             );
         }
@@ -6969,7 +6973,7 @@ mod tests {
             let mut buf = Buffer::empty(area);
             widget.render(area, &mut buf);
             let submit = active_composer_submit_rect(&app, area).unwrap();
-            let ready = app.composer_enter_would_submit();
+            let ready = app.composer_draft_is_submittable();
             let painted: String = (submit.x..submit.right())
                 .map(|x| buf[(x, submit.y)].symbol())
                 .collect();
