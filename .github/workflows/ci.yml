@@ -202,6 +202,14 @@ jobs:
         # auto-tag.yml, release.yml, prepare-release.sh), which is where a
         # missing receipt actually matters.
         run: ./scripts/release/check-versions.sh --range-audit-advisory
+      - name: Check contributor credit
+        # The three credit surfaces were only ever cross-checked against
+        # `requiredCandidateCredits`, a hand-maintained list -- so they proved
+        # each other consistent while a contributor nobody remembered stayed
+        # invisible. Nine were missing from 0.10.0. This derives the expected
+        # set from the commit range instead (authors, co-author trailers, and
+        # `Harvested from PR #N by @handle`), so forgetting someone is red.
+        run: python3 scripts/check-contributor-credit.py
       - name: Check OHOS dependency graph
         run: ./scripts/release/check-ohos-deps.sh
       - name: Check release helper contracts
