@@ -179,10 +179,10 @@ describe("navigation parity and accessibility", () => {
     expect(mobileMenu).toContain('if (e.key !== "Tab") return');
     expect(mobileMenu).toContain('window.matchMedia("(min-width: 1280px)")');
     expect(mobileMenu).toContain("if (event.matches) closeImmediately()");
-    // Locale and docs-route handlers are shared so a regional tag cannot
-    // nest (`/ja/pt-BR/...`) or hide the theme control on `/pt-BR/docs`.
+    // Locale handlers are shared so a regional tag cannot nest
+    // (`/ja/pt-BR/...`); the theme control is site-wide, never route-gated.
     expect(webText("components/locale-switcher.tsx")).toContain("replacePathLocale(pathname, code)");
-    expect(webText("components/theme-toggle.tsx")).toContain("isDocsPath(pathname)");
+    expect(webText("components/theme-toggle.tsx")).not.toContain("isDocsPath");
     expect(webText("middleware.ts")).toContain("pathLocale(pathname)");
   });
 

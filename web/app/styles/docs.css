@@ -420,23 +420,15 @@
 }
 
 /* ------------------------------------------------------------------ */
-/*  Docs theme — paper is the site default                            */
+/*  Docs theme                                                        */
 /*                                                                    */
-/*  The docs sheet reads on the same paper as the rest of the folio.   */
-/*  The theme toggle (docs routes only) offers the whale's dark stage  */
-/*  as an opt-in, exactly the way the TUI keeps Blue Stage beside its  */
-/*  light preset. The dark override is set on                          */
-/*  `html[data-theme="dark"] .docs-theme` through the shared            */
-/*  below-the-waterline rule beside :root; the attribute is applied     */
-/*  before paint by the inline script in the locale layout, so there   */
-/*  is no theme flash.                                                 */
+/*  The docs sheet follows the site-wide theme like every other page:  */
+/*  the OS appearance by default, or the choice pinned by the theme    */
+/*  toggle. The sheet inks (`--docs-*`) are declared beside :root in   */
+/*  both schemes, so nothing here is scoped to a dark region.          */
 /* ------------------------------------------------------------------ */
 
 .docs-theme {
-  --docs-accent: var(--gpui-primary);
-  --docs-button-bg: var(--gpui-paper-raised);
-  --docs-button-border: var(--gpui-edge);
-  --docs-button-text: var(--gpui-ink);
   background: var(--paper);
   color: var(--ink);
 }
@@ -457,17 +449,4 @@
 .docs-sidebar-link:focus-visible {
   outline: 2px solid var(--docs-accent);
   outline-offset: 2px;
-}
-
-/* The opt-in dark sheet: the whale's stage tokens, scoped to the docs
-   subtree so the shared nav keeps the paper. Surface/ink tokens come from
-   the shared below-the-waterline rule; only the docs-specific inks are
-   restated here. */
-html[data-theme="dark"] .docs-theme {
-  --docs-accent: var(--gpui-primary-dark);
-  --docs-button-bg: var(--gpui-stage-muted);
-  --docs-button-border: var(--gpui-stage-edge);
-  --docs-button-text: var(--gpui-stage-ink);
-  --code-bg: var(--gpui-stage-deep);
-  --code-fg: var(--gpui-stage-ink);
 }

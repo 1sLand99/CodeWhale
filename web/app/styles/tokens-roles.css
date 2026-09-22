@@ -1,12 +1,16 @@
 /* ---------- site tokens — the folio ---------- */
 /*
- * The site is still a folio read in the product client's light: warm paper
- * at the surface, warm charcoal at depth. Above the waterline the field is
- * the GPUI light theme; below it (`.ocean-column`, the footer, every
- * terminal plate) the same names resolve to the GPUI dark theme, so a
- * component written once reads correctly on either side. (The site-wide
- * theme contract that moves these onto the role layer above is a separate
- * slice.)
+ * The site follows the OS appearance, exactly as the GPUI client follows its
+ * `set_theme` pair: the GPUI light theme (warm paper) by default, the GPUI
+ * dark theme (warm charcoal) under `prefers-color-scheme: dark` unless the
+ * page pins `data-theme="light"`, and dark whenever it pins
+ * `data-theme="dark"`. The pin comes from the theme toggle (every page), and
+ * the inline boot script in the locale layout applies it before paint.
+ *
+ * The homepage water column (`.ocean-column`) and the footer seabed
+ * (`.site-footer`) are the stage: a fixed dark material in both schemes, like
+ * a terminal plate, because the waterline strata that descend into them are
+ * drawn in the stage's own tokens. They share the one dark block below.
  *
  * The token NAMES keep their historical shape (`--paper`, `--ink`,
  * `--indigo`) so every component rule stays diffable; the VALUES resolve
@@ -48,8 +52,7 @@
   --gpui-rust: #aa6f6c;             /* attention */
 
   /* RGB channel triples backing the Tailwind surface/ink tokens (see
-     tailwind.config.ts). `.ocean-column` and the opt-in docs dark sheet
-     override them for their dark subtree. */
+     tailwind.config.ts). The dark block below re-points them. */
   --c-paper: var(--gpui-light-bg-rgb);
   --c-paper-deep: var(--gpui-light-sidebar-rgb);
   --c-paper-edge: var(--gpui-light-border-rgb);
@@ -92,6 +95,11 @@
   /* The whale mark is ink on paper; below the waterline it is the light
      stage foreground. The warm tan stays reserved for human moments. */
   --mark-ink: var(--gpui-ink);
+  /* Docs sheet inks: the sidebar's current link and the secondary button. */
+  --docs-accent: var(--gpui-primary);
+  --docs-button-bg: var(--gpui-paper-raised);
+  --docs-button-border: var(--gpui-edge);
+  --docs-button-text: var(--gpui-ink);
   --stage-text: var(--gpui-stage-ink);
   --stage-soft: var(--gpui-stage-ink-soft);
   --stage-muted: var(--gpui-stage-ink-dim);
@@ -131,43 +139,6 @@
   color-scheme: light;
 }
 
-/*
- * Below the waterline. One rule, applied to every dark subtree — the water
- * column on the homepage, the footer seabed, the opt-in docs dark sheet
- * (`.docs-portal` is the docs layout root, which also carries `.docs-theme`)
- * — so a component never needs to know which side of the surface it is on.
- */
-.ocean-column,
-.site-footer,
-html[data-theme="dark"] .docs-portal {
-  --c-paper: var(--gpui-dark-bg-rgb);
-  --c-paper-deep: var(--gpui-dark-panel-rgb);
-  --c-paper-edge: var(--gpui-dark-border-rgb);
-  --c-ink: var(--gpui-dark-text-rgb);
-  --c-ink-soft: var(--gpui-dark-text-muted-rgb);
-  --c-ink-mute: var(--gpui-dark-text-muted-rgb);
-  --c-indigo: var(--gpui-dark-primary-rgb);
-  --paper: var(--gpui-stage);
-  --paper-deep: var(--gpui-stage-muted);
-  --paper-edge: var(--gpui-stage-edge);
-  --paper-card: var(--gpui-stage-muted);
-  --paper-line: var(--gpui-stage-edge);
-  --paper-line-soft: var(--gpui-stage-edge);
-  --ink: var(--gpui-stage-ink);
-  --ink-soft: var(--gpui-stage-ink-soft);
-  --ink-mute: var(--gpui-stage-ink-dim);
-  --indigo: var(--gpui-primary-dark);
-  --indigo-deep: var(--gpui-primary-hover-dark);
-  --indigo-pale: rgb(var(--c-primary-dark) / 0.14);
-  --ochre: #d6c78f;
-  --jade: #9ec7b2;
-  --cyan: var(--gpui-primary-dark);
-  --ocean-coral: #d08a80;
-  --signal-gold: #d6c78f;
-  --mark-ink: var(--gpui-stage-ink);
-  --hairline: rgb(var(--c-stage-soft) / 0.2);
-  color-scheme: dark;
-}
 
 /* ---------- role tokens — GPUI set_theme ---------- */
 /*
@@ -228,9 +199,48 @@ html[data-theme="dark"] .docs-portal {
     --selected: var(--gpui-dark-list-active);
     --selection: rgb(var(--gpui-dark-primary-rgb) / 0.28);
     --ring: var(--gpui-dark-primary);
+
+    /* The folio names, re-inked in the GPUI charcoal ramp. */
+    --c-paper: var(--gpui-dark-bg-rgb);
+    --c-paper-deep: var(--gpui-dark-panel-rgb);
+    --c-paper-edge: var(--gpui-dark-border-rgb);
+    --c-ink: var(--gpui-dark-text-rgb);
+    --c-ink-soft: var(--gpui-dark-text-muted-rgb);
+    --c-ink-mute: var(--gpui-dark-text-muted-rgb);
+    --c-indigo: var(--gpui-dark-primary-rgb);
+    --paper: var(--gpui-stage);
+    --paper-deep: var(--gpui-stage-muted);
+    --paper-edge: var(--gpui-stage-edge);
+    --paper-card: var(--gpui-stage-muted);
+    --paper-line: var(--gpui-stage-edge);
+    --paper-line-soft: var(--gpui-stage-edge);
+    --ink: var(--gpui-stage-ink);
+    --ink-soft: var(--gpui-stage-ink-soft);
+    --ink-mute: var(--gpui-stage-ink-dim);
+    --indigo: var(--gpui-primary-dark);
+    --indigo-deep: var(--gpui-primary-hover-dark);
+    --indigo-pale: rgb(var(--c-primary-dark) / 0.14);
+    --ochre: #d6c78f;
+    --jade: #9ec7b2;
+    --cyan: var(--gpui-primary-dark);
+    --ocean-coral: #d08a80;
+    --signal-gold: #d6c78f;
+    --mark-ink: var(--gpui-stage-ink);
+    --docs-accent: var(--gpui-primary-dark);
+    --docs-button-bg: var(--gpui-stage-muted);
+    --docs-button-border: var(--gpui-stage-edge);
+    --docs-button-text: var(--gpui-stage-ink);
+    --hairline: rgb(var(--c-stage-soft) / 0.2);
+    color-scheme: dark;
   }
 }
 
+/* The pinned dark scheme repeats the OS-dark block exactly. The stage
+   subtrees (the water column and the footer seabed) take the same block in
+   either scheme, so a component never needs to know which side of the
+   waterline it is on. */
+.ocean-column,
+.site-footer,
 :root[data-theme="dark"] {
   --bg: var(--gpui-dark-bg);
   --surface: var(--gpui-dark-sidebar);
@@ -244,4 +254,37 @@ html[data-theme="dark"] .docs-portal {
   --selected: var(--gpui-dark-list-active);
   --selection: rgb(var(--gpui-dark-primary-rgb) / 0.28);
   --ring: var(--gpui-dark-primary);
+
+  /* The folio names, re-inked in the GPUI charcoal ramp. */
+  --c-paper: var(--gpui-dark-bg-rgb);
+  --c-paper-deep: var(--gpui-dark-panel-rgb);
+  --c-paper-edge: var(--gpui-dark-border-rgb);
+  --c-ink: var(--gpui-dark-text-rgb);
+  --c-ink-soft: var(--gpui-dark-text-muted-rgb);
+  --c-ink-mute: var(--gpui-dark-text-muted-rgb);
+  --c-indigo: var(--gpui-dark-primary-rgb);
+  --paper: var(--gpui-stage);
+  --paper-deep: var(--gpui-stage-muted);
+  --paper-edge: var(--gpui-stage-edge);
+  --paper-card: var(--gpui-stage-muted);
+  --paper-line: var(--gpui-stage-edge);
+  --paper-line-soft: var(--gpui-stage-edge);
+  --ink: var(--gpui-stage-ink);
+  --ink-soft: var(--gpui-stage-ink-soft);
+  --ink-mute: var(--gpui-stage-ink-dim);
+  --indigo: var(--gpui-primary-dark);
+  --indigo-deep: var(--gpui-primary-hover-dark);
+  --indigo-pale: rgb(var(--c-primary-dark) / 0.14);
+  --ochre: #d6c78f;
+  --jade: #9ec7b2;
+  --cyan: var(--gpui-primary-dark);
+  --ocean-coral: #d08a80;
+  --signal-gold: #d6c78f;
+  --mark-ink: var(--gpui-stage-ink);
+  --docs-accent: var(--gpui-primary-dark);
+  --docs-button-bg: var(--gpui-stage-muted);
+  --docs-button-border: var(--gpui-stage-edge);
+  --docs-button-text: var(--gpui-stage-ink);
+  --hairline: rgb(var(--c-stage-soft) / 0.2);
+  color-scheme: dark;
 }

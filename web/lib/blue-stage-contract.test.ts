@@ -28,7 +28,7 @@ function cssHexIn(block: string, name: string): string {
 
 const ROOT = selectorBlock(":root");
 const BELOW_WATERLINE = selectorBlock(
-  '.ocean-column,\n.site-footer,\nhtml[data-theme="dark"] .docs-portal',
+  '.ocean-column,\n.site-footer,\n:root[data-theme="dark"]',
 );
 
 describe("GPUI public-surface contract", () => {
@@ -59,10 +59,10 @@ describe("GPUI public-surface contract", () => {
   });
 
   it("re-inks every dark subtree with the GPUI charcoal tokens through one rule", () => {
-    // The ocean column, the footer seabed, and the opt-in docs dark sheet
-    // share one below-the-waterline rule, so a component never needs to know
-    // which side of the surface it is on.
-    expect(CSS).toMatch(/\.ocean-column,\s*\.site-footer,\s*html\[data-theme="dark"\] \.docs-portal\s*\{/);
+    // The ocean column, the footer seabed, and the pinned dark scheme share
+    // one dark rule (the OS-dark block repeats it), so a component never
+    // needs to know which side of the surface it is on.
+    expect(CSS).toMatch(/\.ocean-column,\s*\.site-footer,\s*:root\[data-theme="dark"\]\s*\{/);
     expect(cssHexIn(BELOW_WATERLINE, "paper")).toBe("#202123");
     expect(cssHexIn(BELOW_WATERLINE, "paper-deep")).toBe("#2a2b2e");
     expect(cssHexIn(BELOW_WATERLINE, "paper-edge")).toBe("#3b3c3f");
