@@ -6791,8 +6791,12 @@ async fn tool_result_followed_by_terminal_empty_assistant_fails_turn() {
         canned::message_delta("stop", None),
         canned::message_stop(),
     ];
+    // #6310: an answerless clean stop is retried (exact prefix, then nudged)
+    // before the turn fails, so the fixture stays empty for every attempt.
     let mock = std::sync::Arc::new(MockLlmClient::new(vec![
         canned::tool_call_turn("call-read", "read_file", r#"{"path":"README.md"}"#),
+        empty_terminal_turn.clone(),
+        empty_terminal_turn.clone(),
         empty_terminal_turn,
     ]));
     let client: crate::core::model_client::SharedModelClient = mock.clone();
@@ -6810,11 +6814,17 @@ async fn tool_result_followed_by_terminal_empty_assistant_fails_turn() {
 
     let (status, error) = engine.run_turn(&mut turn, surface, None, None).await;
     assert_eq!(status, TurnOutcomeStatus::Failed);
-    assert_eq!(mock.call_count(), 2, "tool step then empty provider step");
+    assert_eq!(
+        mock.call_count(),
+        4,
+        "tool step, empty provider step, then exactly two bounded retries"
+    );
+    assert_eq!(turn.stop_diagnostics.empty_stop_retries, 2);
     assert!(
         error
             .as_deref()
-            .is_some_and(|message| message.contains("terminal stop reason `stop`")),
+            .is_some_and(|message| message.contains("terminal stop reason `stop`")
+                && message.contains("after 2 retries")),
         "terminal empty response must produce a precise failure: {error:?}"
     );
 
@@ -6841,6 +6851,139 @@ async fn tool_result_followed_by_terminal_empty_assistant_fails_turn() {
             .iter()
             .all(|message| { message.role != Role::Assistant || !message.content.is_empty() }),
         "the engine must not fabricate an empty assistant message"
+    );
+}
+
+fn empty_clean_stop_turn() -> Vec<StreamEvent> {
+    use crate::llm_client::mock::canned;
+    vec![
+        canned::message_start("mock_empty_clean_stop"),
+        canned::message_delta("stop", None),
+        canned::message_stop(),
+    ]
+}
+
+async fn run_empty_stop_fixture(
+    turns: Vec<Vec<StreamEvent>>,
+) -> (
+    std::sync::Arc<crate::llm_client::mock::MockLlmClient>,
+    Engine,
+    crate::core::turn::TurnContext,
+    TurnOutcomeStatus,
+    Option<String>,
+) {
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(crate::llm_client::mock::MockLlmClient::new(turns));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (mut engine, _handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let registry = crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(
+        workspace.path().to_path_buf(),
+    ));
+    let surface = test_tool_surface(&engine, registry, None, AppMode::Agent);
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let (status, error) = engine.run_turn(&mut turn, surface, None, None).await;
+    (mock, engine, turn, status, error)
+}
+
+/// #6310: one clean `stop` with no text, reasoning or tool call is retried
+/// with the identical request and the turn completes on the real answer.
+#[tokio::test]
+async fn empty_clean_stop_is_retried_once_and_the_turn_completes() {
+    use crate::llm_client::mock::canned;
+
+    let (mock, engine, turn, status, error) = run_empty_stop_fixture(vec![
+        empty_clean_stop_turn(),
+        canned::simple_text_turn("the recovered answer"),
+    ])
+    .await;
+
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    assert_eq!(mock.call_count(), 2, "exactly one retry");
+    assert_eq!(turn.stop_diagnostics.empty_stop_retries, 1);
+    let requests = mock.captured_requests();
+    assert_eq!(
+        requests[0].messages.len(),
+        requests[1].messages.len(),
+        "the first retry is an exact-prefix re-request"
+    );
+    let transcript =
+        serde_json::to_string(&engine.session.messages.iter().collect::<Vec<_>>()).unwrap();
+    assert_eq!(transcript.matches("the recovered answer").count(), 1);
+    assert!(
+        engine
+            .session
+            .messages
+            .iter()
+            .all(|message| message.role != Role::Assistant || !message.content.is_empty()),
+        "the empty response must not be persisted"
+    );
+}
+
+/// #6310: the second retry carries the request-scoped nudge, which never
+/// joins the session; the retry after that budget is not attempted.
+#[tokio::test]
+async fn empty_clean_stop_second_retry_is_nudged_and_never_persisted() {
+    use crate::llm_client::mock::canned;
+
+    let (mock, engine, turn, status, error) = run_empty_stop_fixture(vec![
+        empty_clean_stop_turn(),
+        empty_clean_stop_turn(),
+        canned::simple_text_turn("answer after nudge"),
+    ])
+    .await;
+
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    assert_eq!(mock.call_count(), 3);
+    assert_eq!(turn.stop_diagnostics.empty_stop_retries, 2);
+    let requests = mock.captured_requests();
+    let nudge = crate::config::DEFAULT_REASONING_ONLY_REPROMPT_MESSAGE;
+    let carries_nudge = |request: &codewhale_models::MessageRequest| {
+        serde_json::to_string(&request.messages)
+            .unwrap()
+            .contains(nudge)
+    };
+    assert!(!carries_nudge(&requests[0]));
+    assert!(!carries_nudge(&requests[1]), "first retry is exact-prefix");
+    assert!(carries_nudge(&requests[2]), "second retry is nudged");
+    assert_eq!(requests[2].messages.len(), requests[0].messages.len() + 1);
+    assert!(
+        !serde_json::to_string(&engine.session.messages.iter().collect::<Vec<_>>())
+            .unwrap()
+            .contains(nudge),
+        "the nudge is request-scoped and never written to the session"
+    );
+}
+
+/// #6310: an empty response on every attempt fails visibly once the budget
+/// is spent, with the retries recorded in stop diagnostics.
+#[tokio::test]
+async fn empty_clean_stop_every_time_fails_after_the_retry_budget() {
+    let (mock, _engine, turn, status, error) = run_empty_stop_fixture(vec![
+        empty_clean_stop_turn(),
+        empty_clean_stop_turn(),
+        empty_clean_stop_turn(),
+    ])
+    .await;
+
+    assert_eq!(status, TurnOutcomeStatus::Failed);
+    assert_eq!(
+        mock.call_count(),
+        1 + crate::core::engine::turn_loop::EMPTY_STOP_MAX_RETRIES as usize
+    );
+    assert_eq!(
+        turn.stop_diagnostics.empty_stop_retries,
+        crate::core::engine::turn_loop::EMPTY_STOP_MAX_RETRIES
+    );
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|message| message.contains("terminal stop reason `stop`")
+                && message.contains("after 2 retries")),
+        "{error:?}"
     );
 }
 

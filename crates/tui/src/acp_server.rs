@@ -1318,14 +1318,64 @@ where
         ..
     } = context;
     let mut has_tool_receipts = false;
+    // #6310: the engine turn loop's empty-stop budget, shared so both loops
+    // recover the same way. It is turn-scoped, like the engine's.
+    let mut empty_stop_retries: u32 = 0;
+    let mut empty_stop_nudge = false;
     for _round in 0..MAX_ACP_TOOL_ROUNDS {
-        let stream = open_stream(messages.clone())
-            .await
-            .map_err(|error| AgenticPromptError::new(error, &messages, has_tool_receipts))?;
-        let (outcome, tool_calls) =
-            drive_prompt_stream(stream, session_id, response_id_policy, reader, writer)
+        let (outcome, tool_calls) = loop {
+            let mut outbound = messages.clone();
+            // Request-scoped: the nudge rides this one request and is never
+            // committed to the session history.
+            let nudge = context.config.reasoning_only_reprompt_message();
+            if std::mem::take(&mut empty_stop_nudge) && !nudge.trim().is_empty() {
+                outbound.push(Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: nudge.to_string(),
+                        cache_control: None,
+                    }],
+                });
+            }
+            let stream = open_stream(outbound)
                 .await
                 .map_err(|error| AgenticPromptError::new(error, &messages, has_tool_receipts))?;
+            let (outcome, tool_calls) =
+                drive_prompt_stream(stream, session_id, response_id_policy, reader, writer)
+                    .await
+                    .map_err(|error| {
+                        AgenticPromptError::new(error, &messages, has_tool_receipts)
+                    })?;
+            let answerless = matches!(&outcome, PromptOutcome::Completed(text) if text.trim().is_empty())
+                && tool_calls.is_empty();
+            if !answerless {
+                break (outcome, tool_calls);
+            }
+            // Nothing was streamed to the client for this response, so a
+            // retry is invisible to it until the budget is spent.
+            match crate::core::engine::turn_loop::plan_empty_stop_retry(empty_stop_retries) {
+                Some(retry) => {
+                    empty_stop_retries += 1;
+                    empty_stop_nudge = matches!(
+                        retry,
+                        crate::core::engine::turn_loop::EmptyStopRetry::Nudged
+                    );
+                    crate::logging::warn(format!(
+                        "ACP: model returned no answer or tool call (attempt {empty_stop_retries}/{}); re-requesting",
+                        crate::core::engine::turn_loop::EMPTY_STOP_MAX_RETRIES
+                    ));
+                }
+                None => {
+                    return Err(AgenticPromptError::new(
+                        anyhow!(
+                            "Model returned no answer or tool call (after {empty_stop_retries} retries)."
+                        ),
+                        &messages,
+                        has_tool_receipts,
+                    ));
+                }
+            }
+        };
 
         let text = match outcome {
             PromptOutcome::Cancelled => return Ok((PromptOutcome::Cancelled, messages)),
@@ -4841,6 +4891,97 @@ mod tests {
             panic!("expected tool_result for b.txt");
         };
         assert!(b_content.contains("contents-of-b"));
+    }
+
+    fn empty_stop_stream() -> StreamEventBox {
+        ready_stream(vec![StreamEvent::MessageStop])
+    }
+
+    async fn run_empty_stop_acp_turn(
+        streams: Vec<StreamEventBox>,
+    ) -> (
+        std::result::Result<(PromptOutcome, Vec<Message>), AgenticPromptError>,
+        Vec<Vec<Message>>,
+    ) {
+        let (_dir, registry) = workspace_registry();
+        let scripted = ScriptedStreams::new(streams);
+        let requests = RefCell::new(Vec::new());
+        let mut reader = lines_from("");
+        let mut out = Vec::new();
+        let result = run_agentic_prompt_turn(
+            AcpTurnContext {
+                config: &Config::default(),
+                model: "test-model",
+                session_id: "sess_1",
+                tool_registry: &registry,
+                response_id_policy: JsonRpcResponseIdPolicy::Preserve,
+            },
+            vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "Answer me".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            &mut reader,
+            &mut out,
+            |msgs| {
+                requests.borrow_mut().push(msgs);
+                scripted.next()
+            },
+        )
+        .await;
+        (result, requests.into_inner())
+    }
+
+    /// #6310 through the ACP prompt loop: one answerless clean stop is
+    /// retried with the identical request and the turn completes.
+    #[tokio::test]
+    async fn agentic_turn_retries_an_empty_clean_stop_then_completes() {
+        let (result, requests) = run_empty_stop_acp_turn(vec![
+            empty_stop_stream(),
+            ready_stream(vec![text_delta("recovered"), StreamEvent::MessageStop]),
+        ])
+        .await;
+        let (outcome, messages) = result.expect("turn completes after one retry");
+        assert_eq!(outcome, PromptOutcome::Completed("recovered".to_string()));
+        assert_eq!(requests.len(), 2, "exactly one retry");
+        assert_eq!(requests[0], requests[1], "exact-prefix retry");
+        // user -> assistant(text); the empty response left nothing behind.
+        assert_eq!(messages.len(), 2);
+    }
+
+    /// #6310 through the ACP prompt loop: an answerless clean stop on every
+    /// attempt fails visibly after the shared budget; the second retry is
+    /// nudged and the nudge never joins the committed history.
+    #[tokio::test]
+    async fn agentic_turn_fails_visibly_when_every_stop_is_empty() {
+        let (result, requests) = run_empty_stop_acp_turn(vec![
+            empty_stop_stream(),
+            empty_stop_stream(),
+            empty_stop_stream(),
+        ])
+        .await;
+        let Err(error) = result else {
+            panic!("an always-empty model must fail the turn");
+        };
+        assert!(
+            error.to_string().contains("no answer or tool call")
+                && error.to_string().contains("after 2 retries"),
+            "{error}"
+        );
+        assert!(error.partial_messages.is_none());
+        assert_eq!(
+            requests.len(),
+            1 + crate::core::engine::turn_loop::EMPTY_STOP_MAX_RETRIES as usize
+        );
+        assert_eq!(requests[0], requests[1]);
+        assert_eq!(requests[2].len(), requests[0].len() + 1, "nudged retry");
+        let nudge = crate::config::DEFAULT_REASONING_ONLY_REPROMPT_MESSAGE;
+        assert!(matches!(
+            requests[2].last().map(|m| &m.content[0]),
+            Some(ContentBlock::Text { text, .. }) if text == nudge
+        ));
     }
 
     #[tokio::test]

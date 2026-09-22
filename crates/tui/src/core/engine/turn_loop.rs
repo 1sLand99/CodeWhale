@@ -765,6 +765,10 @@ impl Engine {
         // transient; re-request a bounded number of times before surfacing
         // a hard failure. Each retry may incur provider usage and cost.
         let mut reasoning_only_reprompts: u32 = 0;
+        // Turn-scoped budget for a clean terminal stop that carried nothing at
+        // all — no text, no reasoning, no tool call (#6310). Same shape as the
+        // reasoning-only recovery: see `plan_empty_stop_retry`.
+        let mut empty_stop_retries: u32 = 0;
         // Nudge for the *next* request only. A reasoning-only reply persists
         // nothing (a bare Thinking block is not sendable), so the first retry
         // is an exact cached-prefix re-request. If that comes back answerless
@@ -2576,6 +2580,63 @@ impl Engine {
                     continue;
                 }
 
+                // #6310: a clean terminal stop with no text, no reasoning and
+                // no tool call. The stream finished without a transport error,
+                // so the NoContentStreamDeath resume above never sees it; it
+                // is the same transient failure all the same. Nothing was
+                // persisted for this response, so the first retry re-issues
+                // the identical request, the second carries the request-scoped
+                // nudge, and after that the turn fails visibly below.
+                let empty_clean_stop = no_sendable_assistant_content
+                    && !has_provider_reasoning
+                    && stream_errors == 0
+                    && stop_reason.is_some()
+                    && !stop_reason_is_output_limit(stop_reason.as_deref())
+                    && should_fail_no_sendable_content(
+                        tool_uses.is_empty(),
+                        turn_error.is_none(),
+                        self.cancel_token.is_cancelled(),
+                        !pending_steers.is_empty(),
+                        false,
+                    );
+                if empty_clean_stop && let Some(retry) = plan_empty_stop_retry(empty_stop_retries) {
+                    empty_stop_retries += 1;
+                    turn.stop_diagnostics.empty_stop_retries = empty_stop_retries;
+                    let attempt = empty_stop_retries;
+                    let reason = stop_reason_detail(stop_reason.as_deref());
+                    let how = match retry {
+                        EmptyStopRetry::ExactPrefix => "re-requesting the answer",
+                        EmptyStopRetry::Nudged => {
+                            let text = self
+                                .config
+                                .reasoning_only_reprompt_message
+                                .clone()
+                                .unwrap_or_else(|| {
+                                    crate::config::DEFAULT_REASONING_ONLY_REPROMPT_MESSAGE
+                                        .to_string()
+                                });
+                            if !text.trim().is_empty() {
+                                reasoning_only_nudge =
+                                    Some(self.runtime_text_message_with_turn_metadata(
+                                        text,
+                                        UserInputProvenance::Runtime,
+                                    ));
+                            }
+                            "re-requesting the answer with a nudge"
+                        }
+                    };
+                    crate::logging::warn(format!(
+                        "Model returned terminal stop reason `{reason}` with no answer or tool call (attempt {attempt}/{EMPTY_STOP_MAX_RETRIES}); {how}"
+                    ));
+                    let _ = self
+                        .tx_event
+                        .send(Event::status(format!(
+                            "Model returned an empty response; {how} ({attempt}/{EMPTY_STOP_MAX_RETRIES})"
+                        )))
+                        .await;
+                    continue;
+                }
+
                 if no_sendable_assistant_content
                     && should_fail_no_sendable_content(
                         tool_uses.is_empty(),
@@ -2603,9 +2664,15 @@ impl Engine {
                                 .collect::<String>()
                         )
                     } else if let Some(reason) = stop_reason.as_deref() {
-                        format!(
-                            "Model returned terminal stop reason `{reason}` with no answer or tool call."
-                        )
+                        if empty_stop_retries > 0 {
+                            format!(
+                                "Model returned terminal stop reason `{reason}` with no answer or tool call (after {empty_stop_retries} retries)."
+                            )
+                        } else {
+                            format!(
+                                "Model returned terminal stop reason `{reason}` with no answer or tool call."
+                            )
+                        }
                     } else {
                         "Model stream ended with no answer or tool call.".to_string()
                     };
@@ -6291,6 +6358,33 @@ fn stop_reason_is_output_limit(stop_reason: Option<&str>) -> bool {
                 | "max_completion_tokens"
         )
     )
+}
+
+/// Retries allowed after a clean terminal stop that carried no text, no
+/// reasoning and no tool call (#6310): one exact-prefix re-request, then one
+/// nudged re-request. Shared by the engine turn loop and the ACP prompt loop.
+pub(crate) const EMPTY_STOP_MAX_RETRIES: u32 = 2;
+
+/// How the next request after an answerless clean stop is shaped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EmptyStopRetry {
+    /// Re-issue the identical request: nothing was persisted for the empty
+    /// response, so the prefix is unchanged.
+    ExactPrefix,
+    /// An identical request already came back empty; carry a request-scoped
+    /// continue nudge that is never written to the session.
+    Nudged,
+}
+
+/// Plan the next retry given how many answerless clean stops were already
+/// retried this turn. `None` means the budget is spent and the caller must
+/// fail visibly instead of re-requesting.
+pub(crate) fn plan_empty_stop_retry(retries_so_far: u32) -> Option<EmptyStopRetry> {
+    match retries_so_far {
+        0 => Some(EmptyStopRetry::ExactPrefix),
+        n if n < EMPTY_STOP_MAX_RETRIES => Some(EmptyStopRetry::Nudged),
+        _ => None,
+    }
 }
 
 fn should_fail_no_sendable_content(
