@@ -69,6 +69,22 @@ tag, packages, checksums and release assets exist.
   than a shared one (#6247).
 
 ### Added
+- The statusline's performance readings survive compact mode and are separately
+  configurable. Measured TTFT and average output rate are kept when space
+  allows, shedding help text and secondary counts first; the existing metrics
+  and statusline settings gain individual toggles with a migration that
+  preserves a legacy single setting, and the picker takes mouse selection and
+  scrolling.
+- Tasks can be given their own run name. `NewTaskRequest`, `TaskRecord` and
+  `TaskSummary` carry an optional `name`, stored as given and omitted when
+  absent, so queues still fall back to prompt-derived titles; a run started by
+  an automation inherits the automation's name. The `tasks` tool's schema
+  extends backward-compatibly and legacy records decode through serde defaults
+  (APPS-153).
+- The offline catalog seeds Xiaomi's MiMo 2.6 family — `xiaomi/mimo-v2.6-pro`
+  and `xiaomi/mimo-v2.6-flash` — so a first boot without network no longer shows
+  the 2.5 generation. `DEFAULT_XIAOMI_MIMO_MODEL` stays on `mimo-v2.5-pro`, and
+  the rows carry no price because the published rates cover only `sk-` keys.
 - Native memory is a reviewed store, not a model-writable file. `codewhale-memory`
   backs the TUI with SQLite as the authority instead of Markdown, and the
   `remember` tool now only *proposes* candidates — a model can no longer write
@@ -232,24 +248,21 @@ tag, packages, checksums and release assets exist.
 - Child tool results are capped at capture time, and run
   tests/verifiers accept a bounded cwd (#6282, #6294, #6296).
 
-
-- The statusline's performance readings survive compact mode and are separately
-  configurable. Measured TTFT and average output rate are kept when space
-  allows, shedding help text and secondary counts first; the existing metrics
-  and statusline settings gain individual toggles with a migration that
-  preserves a legacy single setting, and the picker takes mouse selection and
-  scrolling.
-- Tasks can be given their own run name. `NewTaskRequest`, `TaskRecord` and
-  `TaskSummary` carry an optional `name`, stored as given and omitted when
-  absent, so queues still fall back to prompt-derived titles; a run started by
-  an automation inherits the automation's name. The `tasks` tool's schema
-  extends backward-compatibly and legacy records decode through serde defaults
-  (APPS-153).
-- The offline catalog seeds Xiaomi's MiMo 2.6 family — `xiaomi/mimo-v2.6-pro`
-  and `xiaomi/mimo-v2.6-flash` — so a first boot without network no longer shows
-  the 2.5 generation. `DEFAULT_XIAOMI_MIMO_MODEL` stays on `mimo-v2.5-pro`, and
-  the rows carry no price because the published rates cover only `sk-` keys.
 ### Changed
+- SearXNG results rank by the score the instance returns rather than by arrival
+  order. Integers, floats and numeric strings are accepted; anything else,
+  including NaN and infinity, becomes 0.0, and rows are stable-sorted descending
+  before the result cap, so equal scores keep instance order. The docs now spell
+  out the self-hosting requirement: the separate process must expose
+  `search.formats: [json]` — an HTML-only instance answers 403 — and bind to
+  loopback or a policy-allowed host, with no default instance discovered.
+- The bundled skills move to a new generation. social-media and health leave the
+  shipped pack (phone-export workflows rather than everyday skills), feedback
+  moves to `docs/skills/` beside contributor onboarding, and the exact earlier
+  body is retained so only unmodified shipped skills upgrade — a skill you have
+  edited is left in place. Google OAuth scopes and client setup, Photos exports,
+  forgetting limits, Spotify playback and plugin reload guidance were corrected
+  in the same pass.
 - `auto` is a declared default, not a guess about your wording. Reasoning
   effort no longer maps request vocabulary to tiers (debug/error to Max, search
   to Low) and Auto routing no longer infers cheap-versus-big from phrasing:
@@ -392,22 +405,6 @@ tag, packages, checksums and release assets exist.
   `$CODEWHALE_HOME/builtin-plugins` on first run but stays `NeverReviewed`,
   so Computer Use is never switched on without an explicit capability review.
 
-
-- SearXNG results rank by the score the instance returns rather than by arrival
-  order. Integers, floats and numeric strings are accepted; anything else,
-  including NaN and infinity, becomes 0.0, and rows are stable-sorted descending
-  before the result cap, so equal scores keep instance order. The docs now spell
-  out the self-hosting requirement: the separate process must expose
-  `search.formats: [json]` — an HTML-only instance answers 403 — and bind to
-  loopback or a policy-allowed host, with no default instance discovered.
-- The bundled skills move to a new generation. social-media and health leave the
-  shipped pack (phone-export workflows rather than everyday skills), feedback
-  moves to `docs/skills/` beside contributor onboarding, and the exact earlier
-  body is retained so only unmodified shipped skills upgrade — a skill you have
-  edited is left in place. Google OAuth scopes and client setup, Photos exports,
-  forgetting limits, Spotify playback and plugin reload guidance were corrected
-  in the same pass.
-
 ### Removed
 
 - The host no longer parses prose into goals. Ten phrasings and a clause
@@ -417,6 +414,36 @@ tag, packages, checksums and release assets exist.
   unchanged.
 
 ### Fixed
+- A thinking fold is an absolute choice again. The stored bit was relative to the
+  display preference (`folded ^ !(verbose || thinking_default_expanded)`), so
+  every recorded choice flipped meaning the moment a preference changed: turning
+  `thinking_default_expanded` on closed a block the reader had explicitly
+  expanded (#5847). An explicit tri-state intent now records Expanded or
+  Collapsed outright, and the absence of an entry means untouched, so the
+  preference baseline decides that cell's default. Space still toggles, and an
+  untouched cell still follows `verbose || thinking_default_expanded`.
+- A terminal byte-stream cursor past the head is clamped instead of echoed back.
+  `read_since` returned a future cursor as `next_cursor`, so a client that
+  continued from it skipped every byte the stream produced before reaching that
+  position — permanently. The start position now clamps to `total`: a future
+  cursor reads nothing, is not a gap, and hands back the head.
+- Language-server startup is bounded and a failed transport now terminates. The
+  client waits for successful initialization before sending notifications,
+  drains stderr without buffering it, bounds request queueing and replies, caps
+  protocol frames, and fails pending requests when the child transport dies.
+- Input no longer freezes for the rest of a turn when the engine's 32-slot op
+  mailbox is full. The remaining input-path sends no longer await: droppable ops
+  whose rejection is reported and retryable use `try_send` (CancelSubAgent,
+  PreviewOutboundRequest, bang shell input, PurgeContext, and the single-op
+  settings updates), ops that must land once the UI changed reserve first, and
+  `ChangeMode` publishes its live authority even on a full channel. Must-deliver
+  ordered transitions still await, and say why at `EngineHandle::send` (#6150).
+- The pet's whale is one body again. The same authored point set is checked in
+  three copies plus four fixtures, and the Rust and TypeScript cores disagreed
+  on particle positions from frame 0 while agreeing on every channel and
+  constant — so the v1 fixtures had never matched what Rust produced and the
+  conformance job had never passed. The bodies and the fixtures are reconciled
+  and that check now runs green.
 - The context meter and the auto-compact gate share one honest estimator. The
   status bar inflated `ctx %` by about half and disagreed with the gate, so
   "ctx 82%" could sit beside a `/compact` that refused to run; displayed
@@ -653,36 +680,6 @@ tag, packages, checksums and release assets exist.
   `iss` parameter from the redirect and hands it to the token exchange so the
   callback binds to the discovered issuer; servers that do not send `iss`
   keep working unchanged. (#6157)
-- A thinking fold is an absolute choice again. The stored bit was relative to the
-  display preference (`folded ^ !(verbose || thinking_default_expanded)`), so
-  every recorded choice flipped meaning the moment a preference changed: turning
-  `thinking_default_expanded` on closed a block the reader had explicitly
-  expanded (#5847). An explicit tri-state intent now records Expanded or
-  Collapsed outright, and the absence of an entry means untouched, so the
-  preference baseline decides that cell's default. Space still toggles, and an
-  untouched cell still follows `verbose || thinking_default_expanded`.
-- A terminal byte-stream cursor past the head is clamped instead of echoed back.
-  `read_since` returned a future cursor as `next_cursor`, so a client that
-  continued from it skipped every byte the stream produced before reaching that
-  position — permanently. The start position now clamps to `total`: a future
-  cursor reads nothing, is not a gap, and hands back the head.
-- Language-server startup is bounded and a failed transport now terminates. The
-  client waits for successful initialization before sending notifications,
-  drains stderr without buffering it, bounds request queueing and replies, caps
-  protocol frames, and fails pending requests when the child transport dies.
-- Input no longer freezes for the rest of a turn when the engine's 32-slot op
-  mailbox is full. The remaining input-path sends no longer await: droppable ops
-  whose rejection is reported and retryable use `try_send` (CancelSubAgent,
-  PreviewOutboundRequest, bang shell input, PurgeContext, and the single-op
-  settings updates), ops that must land once the UI changed reserve first, and
-  `ChangeMode` publishes its live authority even on a full channel. Must-deliver
-  ordered transitions still await, and say why at `EngineHandle::send` (#6150).
-- The pet's whale is one body again. The same authored point set is checked in
-  three copies plus four fixtures, and the Rust and TypeScript cores disagreed
-  on particle positions from frame 0 while agreeing on every channel and
-  constant — so the v1 fixtures had never matched what Rust produced and the
-  conformance job had never passed. The bodies and the fixtures are reconciled
-  and that check now runs green.
 
 ## [0.9.13] - 2026-09-13
 
