@@ -2238,7 +2238,7 @@
   "ExtensionsStateOn": "चालू",
   "ExtensionsStateOff": "बंद",
   "ExtensionsStateNeedsReview": "समीक्षा आवश्यक",
-  "ExtensionsReviewExplainer": "Codewhale किसी प्लगइन की स्किल्स, MCP सर्वर और हुक तभी लोड करता है जब आप ठीक-ठीक देख लें कि वह क्या कर सकता है। Enter वह सूची खोलता है और आपकी पुष्टि माँगता है।",
+  "ExtensionsReviewExplainer": "Codewhale किसी प्लगइन की स्किल्स, MCP सर्वर और हुक तभी चलाता है जब आप देख लें कि वह क्या कर सकता है। Enter समीक्षा खोलता है।",
   "ExtensionsScopeGlobal": "वैश्विक",
   "ExtensionsScopeProject": "प्रोजेक्ट",
   "ExtensionsScopePlugin": "प्लगइन: {plugin}",

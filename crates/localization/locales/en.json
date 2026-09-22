@@ -2238,7 +2238,7 @@
   "ExtensionsStateOn": "on",
   "ExtensionsStateOff": "off",
   "ExtensionsStateNeedsReview": "needs review",
-  "ExtensionsReviewExplainer": "Codewhale loads a plugin's skills, MCP servers, and hooks only after you have seen exactly what it can do. Enter opens that list and asks you to confirm.",
+  "ExtensionsReviewExplainer": "Codewhale runs a plugin's skills, MCP servers and hooks only after you review exactly what it can do. Enter opens that review.",
   "ExtensionsScopeGlobal": "global",
   "ExtensionsScopeProject": "project",
   "ExtensionsScopePlugin": "plugin: {plugin}",

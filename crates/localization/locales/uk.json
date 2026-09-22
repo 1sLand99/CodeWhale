@@ -2238,7 +2238,7 @@
   "ExtensionsStateOn": "увімкнено",
   "ExtensionsStateOff": "вимкнено",
   "ExtensionsStateNeedsReview": "потрібна перевірка",
-  "ExtensionsReviewExplainer": "Codewhale завантажує навички, MCP-сервери та хуки плагіна лише після того, як ви побачили, що саме він може робити. Enter відкриває цей список і просить підтвердження.",
+  "ExtensionsReviewExplainer": "Codewhale запускає навички, MCP-сервери та хуки плагіна лише після вашої перевірки його можливостей. Enter відкриває перевірку.",
   "ExtensionsScopeGlobal": "глобально",
   "ExtensionsScopeProject": "проєкт",
   "ExtensionsScopePlugin": "плагін: {plugin}",

@@ -2472,7 +2472,7 @@ mod tests {
         );
         assert!(
             row.detail
-                .contains("only after you have seen exactly what it can do"),
+                .contains("only after you review exactly what it can do"),
             "detail must explain the review, got: {}",
             row.detail
         );

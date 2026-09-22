@@ -2238,7 +2238,7 @@
   "ExtensionsStateOn": "activo",
   "ExtensionsStateOff": "inactivo",
   "ExtensionsStateNeedsReview": "requiere revisión",
-  "ExtensionsReviewExplainer": "Codewhale solo carga las skills, los servidores MCP y los hooks de un complemento después de que veas exactamente lo que puede hacer. Enter abre esa lista y te pide confirmación.",
+  "ExtensionsReviewExplainer": "Codewhale solo ejecuta las skills, los servidores MCP y los hooks de un complemento después de que revises lo que puede hacer. Enter abre la revisión.",
   "ExtensionsScopeGlobal": "global",
   "ExtensionsScopeProject": "proyecto",
   "ExtensionsScopePlugin": "complemento: {plugin}",

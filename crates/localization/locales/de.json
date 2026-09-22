@@ -2238,7 +2238,7 @@
   "ExtensionsStateOn": "an",
   "ExtensionsStateOff": "aus",
   "ExtensionsStateNeedsReview": "Prüfung nötig",
-  "ExtensionsReviewExplainer": "Codewhale lädt Skills, MCP-Server und Hooks eines Plugins erst, nachdem du genau gesehen hast, was es kann. Enter öffnet diese Liste und bittet um deine Bestätigung.",
+  "ExtensionsReviewExplainer": "Codewhale führt Skills, MCP-Server und Hooks eines Plugins erst aus, nachdem du geprüft hast, was es kann. Enter öffnet die Prüfung.",
   "ExtensionsScopeGlobal": "global",
   "ExtensionsScopeProject": "Projekt",
   "ExtensionsScopePlugin": "Plugin: {plugin}",

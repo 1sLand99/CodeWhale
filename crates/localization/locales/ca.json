@@ -2238,7 +2238,7 @@
   "ExtensionsStateOn": "actiu",
   "ExtensionsStateOff": "inactiu",
   "ExtensionsStateNeedsReview": "cal revisar-ho",
-  "ExtensionsReviewExplainer": "Codewhale només carrega les skills, els servidors MCP i els hooks d'un connector després que hagis vist exactament què pot fer. Enter obre aquesta llista i et demana confirmació.",
+  "ExtensionsReviewExplainer": "Codewhale només executa les skills, els servidors MCP i els hooks d'un connector després que revisis què pot fer. Enter obre la revisió.",
   "ExtensionsScopeGlobal": "global",
   "ExtensionsScopeProject": "projecte",
   "ExtensionsScopePlugin": "connector: {plugin}",

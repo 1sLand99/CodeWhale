@@ -2238,7 +2238,7 @@
   "ExtensionsStateOn": "activé",
   "ExtensionsStateOff": "désactivé",
   "ExtensionsStateNeedsReview": "examen requis",
-  "ExtensionsReviewExplainer": "Codewhale ne charge les skills, serveurs MCP et hooks d'un plugin qu'après que vous avez vu exactement ce qu'il peut faire. Entrée ouvre cette liste et demande votre confirmation.",
+  "ExtensionsReviewExplainer": "Codewhale n'exécute les skills, serveurs MCP et hooks d'un plugin qu'après votre examen de ce qu'il peut faire. Entrée ouvre cet examen.",
   "ExtensionsScopeGlobal": "global",
   "ExtensionsScopeProject": "projet",
   "ExtensionsScopePlugin": "plugin : {plugin}",

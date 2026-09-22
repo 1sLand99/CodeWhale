@@ -2238,7 +2238,7 @@
   "ExtensionsStateOn": "aktif",
   "ExtensionsStateOff": "nonaktif",
   "ExtensionsStateNeedsReview": "perlu ditinjau",
-  "ExtensionsReviewExplainer": "Codewhale hanya memuat skill, server MCP, dan hook sebuah plugin setelah Anda melihat persis apa yang bisa dilakukannya. Enter membuka daftar itu dan meminta konfirmasi Anda.",
+  "ExtensionsReviewExplainer": "Codewhale hanya menjalankan skill, server MCP, dan hook plugin setelah Anda meninjau apa yang bisa dilakukannya. Enter membuka tinjauan.",
   "ExtensionsScopeGlobal": "global",
   "ExtensionsScopeProject": "proyek",
   "ExtensionsScopePlugin": "plugin: {plugin}",

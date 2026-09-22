@@ -2238,7 +2238,7 @@
   "ExtensionsStateOn": "已开启",
   "ExtensionsStateOff": "已关闭",
   "ExtensionsStateNeedsReview": "待审阅",
-  "ExtensionsReviewExplainer": "Codewhale 只有在你确认插件的具体能力之后，才会加载它的技能、MCP 服务器和钩子。按 Enter 查看该清单并确认。",
+  "ExtensionsReviewExplainer": "Codewhale 只有在你确认插件的具体能力之后，才会运行它的技能、MCP 服务器和钩子。按 Enter 打开审阅。",
   "ExtensionsScopeGlobal": "全局",
   "ExtensionsScopeProject": "项目",
   "ExtensionsScopePlugin": "插件：{plugin}",

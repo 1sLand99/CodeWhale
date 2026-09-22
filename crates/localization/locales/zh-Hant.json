@@ -2238,7 +2238,7 @@
   "ExtensionsStateOn": "已開啟",
   "ExtensionsStateOff": "已關閉",
   "ExtensionsStateNeedsReview": "待審閱",
-  "ExtensionsReviewExplainer": "Codewhale 只有在你確認外掛的具體能力之後，才會載入它的技能、MCP 伺服器和掛鉤。按 Enter 檢視該清單並確認。",
+  "ExtensionsReviewExplainer": "Codewhale 只有在你確認外掛的具體能力之後，才會執行它的技能、MCP 伺服器和掛鉤。按 Enter 開啟審閱。",
   "ExtensionsScopeGlobal": "全域",
   "ExtensionsScopeProject": "專案",
   "ExtensionsScopePlugin": "外掛：{plugin}",

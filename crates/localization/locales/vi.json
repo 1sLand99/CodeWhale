@@ -2238,7 +2238,7 @@
   "ExtensionsStateOn": "bật",
   "ExtensionsStateOff": "tắt",
   "ExtensionsStateNeedsReview": "cần xem xét",
-  "ExtensionsReviewExplainer": "Codewhale chỉ nạp skill, máy chủ MCP và hook của một plugin sau khi bạn đã xem chính xác nó có thể làm gì. Nhấn Enter để mở danh sách đó và xác nhận.",
+  "ExtensionsReviewExplainer": "Codewhale chỉ chạy skill, máy chủ MCP và hook của plugin sau khi bạn xem lại nó có thể làm gì. Nhấn Enter để mở phần xem xét.",
   "ExtensionsScopeGlobal": "toàn cục",
   "ExtensionsScopeProject": "dự án",
   "ExtensionsScopePlugin": "plugin: {plugin}",

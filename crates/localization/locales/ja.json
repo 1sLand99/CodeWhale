@@ -2238,7 +2238,7 @@
   "ExtensionsStateOn": "オン",
   "ExtensionsStateOff": "オフ",
   "ExtensionsStateNeedsReview": "要確認",
-  "ExtensionsReviewExplainer": "Codewhale はプラグインのスキル・MCP サーバー・フックを、その権限を実際に確認したあとにのみ読み込みます。Enter で一覧を開き、確認を求めます。",
+  "ExtensionsReviewExplainer": "Codewhale はプラグインのスキル・MCP サーバー・フックを、権限を確認したあとにのみ実行します。Enter で確認画面を開きます。",
   "ExtensionsScopeGlobal": "グローバル",
   "ExtensionsScopeProject": "プロジェクト",
   "ExtensionsScopePlugin": "プラグイン: {plugin}",
