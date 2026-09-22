@@ -105,6 +105,173 @@ fn hosted_offering_keeps_prefixed_wire_id_and_explicit_canonical_join() {
 }
 
 #[test]
+fn model_only_rows_use_namespaced_keys_and_preserve_unpriced_facts() {
+    let catalog = ModelsDevCatalog::parse_json(
+        r#"{
+          "models": {
+            "moonshotai/synthetic/chat": {
+              "id": "",
+              "family": "synthetic",
+              "attachment": true,
+              "reasoning": true,
+              "tool_call": true,
+              "structured_output": false,
+              "limit": { "context": 123456, "output": 7890 },
+              "modalities": { "input": ["text", "image"], "output": ["text"] }
+            },
+            "new-vendor/solo": {},
+            "xiaomi/synthetic-chat": {},
+            "bare-model": {},
+            "/missing-provider": {},
+            "missing-model/": {},
+            "new-vendor/voice": {
+              "modalities": { "input": ["text"], "output": ["audio"] }
+            }
+          }
+        }"#,
+    )
+    .expect("fixture parses");
+
+    for live in [false, true] {
+        let (rows, provider, source) = if live {
+            (
+                live_offerings_from_models_dev(&catalog, 1_700),
+                "moonshot",
+                CatalogSource::ModelsDevLive { fetched_at: 1_700 },
+            )
+        } else {
+            (
+                bundled_offerings_from_models_dev(&catalog),
+                "moonshotai",
+                CatalogSource::Bundled,
+            )
+        };
+        assert_eq!(
+            rows.len(),
+            3,
+            "unqualified and audio-only rows stay excluded"
+        );
+        let row = find(&rows, provider, "synthetic/chat");
+        assert_eq!(
+            row.canonical_model.as_deref(),
+            Some("moonshotai/synthetic/chat")
+        );
+        assert_eq!(row.endpoint_key, "chat");
+        assert_eq!(row.family.as_deref(), Some("synthetic"));
+        assert_eq!(
+            row.limit.as_ref().and_then(|limit| limit.context),
+            Some(123456)
+        );
+        assert_eq!(
+            row.limit.as_ref().and_then(|limit| limit.output),
+            Some(7890)
+        );
+        assert_eq!(row.attachment, Some(true));
+        assert_eq!(row.reasoning, Some(true));
+        assert_eq!(row.tool_call, Some(true));
+        assert_eq!(row.structured_output, Some(false));
+        assert_eq!(row.modalities.as_ref().unwrap().input, ["text", "image"]);
+        assert_eq!(row.source, source);
+        assert!(rows.iter().all(|row| {
+            row.cost.is_none()
+                && row.cost_source.is_none()
+                && !row.default_for_provider
+                && row.reasoning_options.is_empty()
+        }));
+        find(
+            &rows,
+            if live { "xiaomi-mimo" } else { "xiaomi" },
+            "synthetic-chat",
+        );
+        find(&rows, "new-vendor", "solo");
+        assert!(crate::ProviderKind::parse("new-vendor").is_none());
+    }
+}
+
+#[test]
+fn model_only_rows_yield_to_provider_facts_and_non_chat_exclusions() {
+    let catalog = ModelsDevCatalog::parse_json(
+        r#"{
+          "models": {
+            "moonshotai/chat": { "reasoning": true },
+            "moonshotai/voice": {},
+            "moonshot/duplicate": {},
+            "moonshotai/duplicate": {}
+          },
+          "providers": {
+            "moonshot": {
+              "id": "moonshot",
+              "models": {
+                "chat": {
+                  "id": "chat",
+                  "base_model": "explicit/chat",
+                  "reasoning": false,
+                  "reasoning_options": [{ "type": "effort", "values": ["high"] }],
+                  "default": true,
+                  "cost": { "input": 2.0 }
+                },
+                "voice": {
+                  "id": "voice",
+                  "modalities": { "input": ["text"], "output": ["audio"] }
+                }
+              }
+            }
+          }
+        }"#,
+    )
+    .expect("fixture parses");
+    let rows = live_offerings_from_models_dev(&catalog, 1_700);
+    assert_eq!(
+        rows.len(),
+        2,
+        "aliases deduplicate; provider exclusions win"
+    );
+    let row = find(&rows, "moonshot", "chat");
+    assert_eq!(row.canonical_model.as_deref(), Some("explicit/chat"));
+    assert_eq!(row.reasoning, Some(false));
+    assert!(row.default_for_provider);
+    assert_eq!(row.cost.as_ref().and_then(|cost| cost.input), Some(2.0));
+    assert_eq!(row.reasoning_options.len(), 1);
+    find(&rows, "moonshot", "duplicate");
+}
+
+#[test]
+fn provider_map_keys_preserve_precedence_when_model_ids_are_missing() {
+    let catalog = ModelsDevCatalog::parse_json(
+        r#"{
+          "models": {
+            "moonshotai/chat": { "reasoning": true },
+            "moonshotai/voice": {},
+            "moonshotai/explicit": { "reasoning": true }
+          },
+          "providers": {
+            "moonshotai": {
+              "models": {
+                " chat ": { "id": " ", "reasoning": false },
+                "voice": { "modalities": { "output": ["audio"] } },
+                "different-map-key": { "id": " explicit ", "reasoning": false },
+                " ": {}
+              }
+            }
+          }
+        }"#,
+    )
+    .expect("fixture parses");
+
+    for (rows, provider) in [
+        (live_offerings_from_models_dev(&catalog, 1_700), "moonshot"),
+        (bundled_offerings_from_models_dev(&catalog), "moonshotai"),
+    ] {
+        assert_eq!(rows.len(), 2, "provider identities and exclusions win");
+        for wire_model_id in ["chat", "explicit"] {
+            let row = find(&rows, provider, wire_model_id);
+            assert_eq!(row.reasoning, Some(false));
+            assert_eq!(row.canonical_model, None);
+        }
+    }
+}
+
+#[test]
 fn to_offering_projects_routing_identity_and_limits() {
     let rows = bundled_offerings_from_models_dev(&fixture());
     let glm = find(&rows, "zhipuai", "glm-5.2").to_offering();
