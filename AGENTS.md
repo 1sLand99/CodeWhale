@@ -82,6 +82,12 @@ base prompt". Two more corollaries earned here:
 - **Write down what a design does not do**, beside the behaviour it owns — a
   short known-limitations note in the owning module. A stated limit stops the
   next reader from assuming a capability that was never built.
+- **Agents do not comment on issues or PRs** (founder, 2026-09-22). Spend the
+  time on code: evidence goes in the commit message and PR body, claims go in
+  Linear. Do not reply to review bots or post status, "superseded", or
+  "for the record" notes. The one exception is closing or superseding a human
+  contributor's PR or issue: one sentence saying why, with the link. The PR and
+  issue review workflows are disabled; re-enable one only by founder decision.
 
 ## Landing other people's work
 
