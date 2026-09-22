@@ -5817,6 +5817,46 @@ fn session_denied_cache_matches_only_approval_key() {
     assert!(is_session_denied_for_key(&app, "file:edit_file:retry"));
 }
 
+#[test]
+fn a_deny_holds_for_its_turn_and_prompts_again_after_the_next_message() {
+    let mut app = create_test_app();
+    let denied_key = "shell:rm -rf build:call-1";
+    app.approval_session_denied.insert(denied_key.to_string());
+    app.approval_session_approved
+        .insert("shell:git status".to_string());
+    assert!(
+        is_session_denied_for_key(&app, denied_key),
+        "the model's retry inside the same turn stays auto-denied"
+    );
+
+    // What the event loop runs on `TurnStarted` for the user's next message.
+    end_turn_scoped_denials(&mut app);
+
+    assert!(
+        !is_session_denied_for_key(&app, denied_key),
+        "a new user message must be able to reconsider the Deny"
+    );
+    assert!(
+        is_session_approved_for_tool(&app, "exec_shell", "shell:git status"),
+        "an approve-for-session grant is session-scoped, not turn-scoped"
+    );
+}
+
+#[test]
+fn switching_sessions_drops_denials_and_session_grants() {
+    let mut app = create_test_app();
+    app.approval_session_denied
+        .insert("shell:rm -rf build:call-1".to_string());
+    app.approval_session_approved
+        .insert("shell:git status".to_string());
+    let session = saved_session_with_messages(vec![]);
+
+    apply_loaded_session(&mut app, &mut Config::default(), &session).expect("restore session");
+
+    assert!(app.approval_session_denied.is_empty());
+    assert!(app.approval_session_approved.is_empty());
+}
+
 fn render_underwater_test_app(app: &mut App, width: u16, height: u16) -> String {
     app.onboarding_workspace_trust_gate = false;
     app.onboarding = OnboardingState::None;
@@ -7246,9 +7286,9 @@ async fn session_denied_cache_auto_deny_explains_the_cached_rejection() {
     let toast = app.status_toasts.back().expect("auto-deny warning toast");
     assert_eq!(toast.level, StatusToastLevel::Warning);
     assert_eq!(toast.ttl_ms, Some(12_000));
-    assert!(toast.text.contains("matching request was denied earlier"));
-    assert!(toast.text.contains("during this Codewhale run"));
-    assert!(toast.text.contains("Restart Codewhale"));
+    assert!(toast.text.contains("denied a matching request earlier"));
+    assert!(toast.text.contains("in this turn"));
+    assert!(toast.text.contains("Send a new message"));
     assert!(toast.text.contains("exec_shell"));
     let history_notice = app
         .history
@@ -7273,10 +7313,7 @@ async fn session_denied_cache_auto_deny_explains_the_cached_rejection() {
 
     let rendered = render_underwater_test_app(&mut app, 40, 12);
     assert!(rendered.contains("Auto-denied"), "{rendered:?}");
-    assert!(
-        rendered.contains("Restart") && rendered.contains("Codewhale"),
-        "{rendered:?}"
-    );
+    assert!(rendered.contains("Send a new message"), "{rendered:?}");
 }
 
 #[tokio::test]
@@ -7501,7 +7538,7 @@ async fn session_denied_cache_notice_renders_host_scope_in_zh_hans() {
             _ => None,
         })
         .expect("localized persistent auto-deny explanation");
-    assert!(notice.contains("本次 Codewhale 运行期间"));
+    assert!(notice.contains("本轮"));
     assert!(notice.contains("匹配请求"));
     assert!(!notice.contains("example.com"));
 
@@ -7513,7 +7550,7 @@ async fn session_denied_cache_notice_renders_host_scope_in_zh_hans() {
     assert!(rendered_compact.contains("已自动拒绝"), "{rendered:?}");
     assert!(rendered_compact.contains("匹配请求"), "{rendered:?}");
     assert!(
-        rendered_compact.contains("重启") && rendered_compact.contains("Codewhale"),
+        rendered_compact.contains("发送") && rendered_compact.contains("新消息"),
         "{rendered:?}"
     );
 }
@@ -7524,9 +7561,9 @@ fn session_denied_notice_explains_cached_decision_and_recovery() {
     let notice = session_denied_notice(&app, "exec_shell");
 
     assert!(notice.contains("exec_shell"));
-    assert!(notice.contains("matching request was denied earlier"));
-    assert!(notice.contains("during this Codewhale run"));
-    assert!(notice.contains("Restart Codewhale"));
+    assert!(notice.contains("denied a matching request earlier"));
+    assert!(notice.contains("in this turn"));
+    assert!(notice.contains("Send a new message"));
 }
 
 #[tokio::test]
@@ -7595,7 +7632,7 @@ async fn cached_denial_explanation_survives_tool_completion_and_done_render() {
                 cell,
                 HistoryCell::System { content }
                     if content.contains("Auto-denied exec_shell")
-                        && content.contains("Restart Codewhale")
+                        && content.contains("Send a new message")
             )
         })
         .expect("cached denial must leave a durable recovery receipt");
@@ -7632,7 +7669,7 @@ async fn cached_denial_explanation_survives_tool_completion_and_done_render() {
         "cached-decision explanation disappeared after completion:\n{rendered}"
     );
     assert!(
-        rendered.contains("Restart Codewhale"),
+        rendered.contains("new message to be asked again"),
         "cached-denial recovery path disappeared after completion:\n{rendered}"
     );
     assert_eq!(

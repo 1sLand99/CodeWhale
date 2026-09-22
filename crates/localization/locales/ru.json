@@ -1097,7 +1097,7 @@
   "ApprovalChooseAction": "Enter — выбранный вариант, или нажмите y/a/d напрямую",
   "ApprovalIntentLabel": "Намерение: ",
   "ApprovalMoreLines": "  … (ещё {count} строк)",
-  "ApprovalAutoDeniedSession": "{tool} отклонён автоматически: похожий запрос уже был отклонён в этом запуске Codewhale. Перезапустите Codewhale, чтобы пересмотреть.",
+  "ApprovalAutoDeniedSession": "{tool} отклонён автоматически: вы уже отклонили похожий запрос в этом ходе. Отправьте новое сообщение, чтобы вас спросили снова.",
   "ElevationTitleSandboxDenied": "  ⚠, Отказ песочницы ",
   "ElevationTitleRequired": " Требуется повышение прав песочницы ",
   "ElevationFieldTool": "  Инструмент: ",

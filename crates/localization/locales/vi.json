@@ -1118,7 +1118,7 @@
   "ApprovalChooseAction": "Enter để chọn, hoặc nhấn y/a/d trực tiếp",
   "ApprovalIntentLabel": "Ý định: ",
   "ApprovalMoreLines": "  … (+{count} dòng)",
-  "ApprovalAutoDeniedSession": "Đã tự động từ chối {tool}: một yêu cầu khớp đã bị từ chối trước đó trong lần chạy Codewhale này. Hãy khởi động lại Codewhale để xem xét lại.",
+  "ApprovalAutoDeniedSession": "Đã tự động từ chối {tool}: bạn đã từ chối một yêu cầu khớp trước đó trong lượt này. Hãy gửi tin nhắn mới để được hỏi lại.",
   "ElevationTitleSandboxDenied": "  ⚠ Sandbox Bị Từ Chối ",
   "ElevationTitleRequired": " Yêu Cầu Nâng Cấp Sandbox ",
   "ElevationFieldTool": "  Công cụ: ",

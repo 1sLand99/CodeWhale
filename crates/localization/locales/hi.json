@@ -1097,7 +1097,7 @@
   "ApprovalChooseAction": "चुना विकल्प भेजें, या सीधे y/a/d दबाएँ",
   "ApprovalIntentLabel": "इरादा: ",
   "ApprovalMoreLines": "  … (+{count} पंक्तियाँ)",
-  "ApprovalAutoDeniedSession": "स्वतः अस्वीकृत {tool}: इस Codewhale रन में पहले मिलता-जुलता अनुरोध अस्वीकृत हुआ था। पुनर्विचार के लिए Codewhale फिर शुरू करें।",
+  "ApprovalAutoDeniedSession": "स्वतः अस्वीकृत {tool}: आपने इसी टर्न में पहले मिलता-जुलता अनुरोध अस्वीकार किया था। फिर से पूछे जाने के लिए नया संदेश भेजें।",
   "ElevationTitleSandboxDenied": "  ⚠, सैंडबॉक्स अस्वीकृत ",
   "ElevationTitleRequired": " सैंडबॉक्स एलिवेशन आवश्यक ",
   "ElevationFieldTool": "  टूल: ",

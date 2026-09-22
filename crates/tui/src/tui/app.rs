@@ -3024,10 +3024,10 @@ impl App {
         self.needs_redraw = true;
     }
 
-    /// Mark the first-run follow-up as seen without inserting a transcript
-    /// message. The empty underwater launch surface owns setup guidance; a
-    /// synthetic history cell would hide that surface before the user sends
-    /// anything.
+    /// Show the one-time Fleet intro as a status line, the first time the
+    /// user opens `/fleet` or enters Operate — never as a first-run push.
+    /// It inserts no transcript message: a synthetic history cell would hide
+    /// the empty launch surface before the user sends anything.
     pub fn maybe_show_feature_intro(&mut self) {
         if self.onboarding != OnboardingState::None {
             return;

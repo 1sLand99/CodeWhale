@@ -124,7 +124,7 @@
   "AppModePlanHint": "先唯讀調研，行動前提出計畫",
   "AppModeYolo": "完全存取（已棄用標籤）",
   "AppModeYoloHint": "僅相容 — Act + 完全存取，不是可見模式",
-  "ApprovalAutoDeniedSession": "已自動拒絕 {tool}：在本次 Codewhale 執行期間，已有相符請求被拒絕。若要重新考慮，請重新啟動 Codewhale。",
+  "ApprovalAutoDeniedSession": "已自動拒絕 {tool}：本輪中已有相符請求被你拒絕。若要重新詢問，請傳送新訊息。",
   "ApprovalBlockTitle": "審批",
   "ApprovalCategoryAgent": "子代理",
   "ApprovalCategoryFileWrite": "檔案寫入",

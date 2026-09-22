@@ -43,8 +43,11 @@ For an existing direct install, run `codewhale update` (or `codewhale update --c
 to inspect it). The updater prints the executable path and keeps newer builds.
 
 
-The first run helps you connect a provider or configure Codewhale offline.
-Model replies require a connected hosted or local model. Codewhale also
+The first run opens straight to the composer; it does not walk you through
+setup. Model replies require a connected hosted or local model: until one is
+connected, the launch screen says "no model connected". Run `/provider` (or
+press F3) to add a hosted key or pick a local runtime. If Ollama is already
+running with a chat model, Codewhale switches to it on its own. Codewhale also
 supports npm and Cargo as secondary packaging routes, plus Docker, Nix, Scoop,
 Android/Termux, and an optional CNB mirror. Existing package-managed installs
 receive migration instructions. See [installation and PATH help](docs/INSTALL.md).

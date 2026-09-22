@@ -1097,7 +1097,7 @@
   "ApprovalChooseAction": "Enter untuk opsi terpilih, atau tekan y/a/d langsung",
   "ApprovalIntentLabel": "Maksud: ",
   "ApprovalMoreLines": "  … (+{count} baris)",
-  "ApprovalAutoDeniedSession": "Ditolak otomatis {tool}: permintaan yang cocok telah ditolak sebelumnya selama run Codewhale ini. Mulai ulang Codewhale untuk meninjaunya kembali.",
+  "ApprovalAutoDeniedSession": "Ditolak otomatis {tool}: Anda sudah menolak permintaan yang cocok pada giliran ini. Kirim pesan baru agar ditanya lagi.",
   "ElevationTitleSandboxDenied": "  ⚠ Sandbox Ditolak ",
   "ElevationTitleRequired": " Perlu Elevasi Sandbox ",
   "ElevationFieldTool": "  Tool: ",

@@ -1097,7 +1097,7 @@
   "ApprovalChooseAction": "Enter per a l'opció seleccionada, o prem y/a/d directament",
   "ApprovalIntentLabel": "Intenció: ",
   "ApprovalMoreLines": "  … (+{count} línies)",
-  "ApprovalAutoDeniedSession": "{tool} denegat automàticament: una sol·licitud coincident es va denegar abans en aquesta execució de Codewhale. Reinicia Codewhale per reconsiderar-la.",
+  "ApprovalAutoDeniedSession": "{tool} denegat automàticament: ja has denegat una sol·licitud coincident en aquest torn. Envia un missatge nou perquè se't torni a preguntar.",
   "ElevationTitleSandboxDenied": "  ⚠, Sandbox denegat ",
   "ElevationTitleRequired": " Cal elevació del sandbox ",
   "ElevationFieldTool": "  Eina: ",

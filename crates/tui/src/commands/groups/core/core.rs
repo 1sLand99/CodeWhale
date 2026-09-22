@@ -246,6 +246,10 @@ pub(crate) fn reset_conversation_state(app: &mut App) -> bool {
     app.session.last_warmup_key = None;
     app.session.last_tool_catalog = None;
     app.session.last_base_url = None;
+    // A fresh conversation inherits neither this one's denials nor its
+    // "approve for session" grants (UX-8).
+    app.approval_session_denied.clear();
+    app.approval_session_approved.clear();
     true
 }
 

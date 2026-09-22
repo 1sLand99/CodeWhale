@@ -1118,7 +1118,7 @@
   "ApprovalChooseAction": "Enter para selecionar, ou pressione y/a/d diretamente",
   "ApprovalIntentLabel": "Intenção: ",
   "ApprovalMoreLines": "  … (+{count} linhas)",
-  "ApprovalAutoDeniedSession": "{tool} foi negado automaticamente: uma solicitação correspondente foi negada anteriormente nesta execução do Codewhale. Reinicie o Codewhale para reconsiderá-la.",
+  "ApprovalAutoDeniedSession": "{tool} foi negado automaticamente: você negou uma solicitação correspondente antes neste turno. Envie uma nova mensagem para ser perguntado de novo.",
   "ElevationTitleSandboxDenied": "  ⚠, Sandbox Negado ",
   "ElevationTitleRequired": " Elevação de Sandbox Necessária ",
   "ElevationFieldTool": "  Ferramenta: ",

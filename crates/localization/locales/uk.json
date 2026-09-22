@@ -1097,7 +1097,7 @@
   "ApprovalChooseAction": "Enter — вибрати опцію, або натисніть y/a/d напряму",
   "ApprovalIntentLabel": "Намір: ",
   "ApprovalMoreLines": "  … (+{count} рядків)",
-  "ApprovalAutoDeniedSession": "Автоматично відхилено {tool}: подібний запит уже було відхилено під час цього запуску Codewhale. Перезапустіть Codewhale, щоб переглянути рішення.",
+  "ApprovalAutoDeniedSession": "Автоматично відхилено {tool}: ви вже відхилили подібний запит у цьому ході. Надішліть нове повідомлення, щоб вас запитали знову.",
   "ElevationTitleSandboxDenied": "  ⚠, Пісочниця відхилена ",
   "ElevationTitleRequired": " Потрібне підвищення прав пісочниці ",
   "ElevationFieldTool": "  Інструмент: ",

@@ -1097,7 +1097,7 @@
   "ApprovalChooseAction": "Enter wählt die Option, oder direkt y/a/d drücken",
   "ApprovalIntentLabel": "Absicht: ",
   "ApprovalMoreLines": "  … (+{count} Zeilen)",
-  "ApprovalAutoDeniedSession": "Auto-abgelehnt {tool}: eine passende Anfrage wurde früher in diesem Codewhale-Lauf abgelehnt. Codewhale neu starten, um sie erneut zu prüfen.",
+  "ApprovalAutoDeniedSession": "Auto-abgelehnt {tool}: Sie haben eine passende Anfrage in dieser Runde bereits abgelehnt. Senden Sie eine neue Nachricht, um erneut gefragt zu werden.",
   "ElevationTitleSandboxDenied": "  ⚠, Sandbox verweigert ",
   "ElevationTitleRequired": " Sandbox-Elevation erforderlich ",
   "ElevationFieldTool": "  Tool: ",
