@@ -23,8 +23,7 @@ example a prompt about Supabase suggesting `/plugin trust supabase` or
 not toast. While you type, a one-line composer CTA (`Install {name} plugin?`)
 offers the same review command after a short debounce; it never auto-installs,
 hides when the plugin is already active, and stays dismissed for that name
-this session. Matching idle or catalog plugins are also appended on send as
-an `<recommended_plugins>` user-turn block (not the pinned system prefix);
+this session. Nothing is appended to your message to advertise plugins;
 the model can call `request_plugin_install` to surface review for the human
 without changing disk. Codewhale does not invent a remote plugin URL; missing
 plugins are suggested only from catalogs you added. On-disk bundle changes

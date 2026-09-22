@@ -31,7 +31,7 @@ impl ToolSpec for RequestPluginInstallTool {
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "Plugin name as shown in <recommended_plugins> or /plugin suggest."
+                    "description": "Plugin name as shown by /plugin list or /plugin suggest."
                 },
                 "reason": {
                     "type": "string",

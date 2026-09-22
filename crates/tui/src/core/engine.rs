@@ -871,12 +871,6 @@ pub struct Engine {
     mcp_event_generation: u64,
     /// Workspace-scoped immutable plugin catalogue and authority receipts.
     plugin_registry: Arc<crate::plugins::PluginRegistry>,
-    /// Keeps the append-only `<recommended_plugins>` fragment once-per-
-    /// Engine-lifetime per plugin id, and suppresses plugins whose name a
-    /// catalogue skill already covers (#6274). The skill-name snapshot is
-    /// taken at construction from the same catalogue the system prompt
-    /// indexes (see the gate's known-limitations note).
-    recommended_plugin_gate: StdMutex<crate::plugins::recommend::RecommendedPluginGate>,
     api_provider: ApiProvider,
     /// Exact configured route key. Named custom providers share the `Custom`
     /// enum, so the enum alone cannot prove that the active client is current.
@@ -1810,9 +1804,6 @@ impl Engine {
             mcp_boot_generation: None,
             mcp_event_generation: 0,
             plugin_registry,
-            recommended_plugin_gate: StdMutex::new(
-                crate::plugins::recommend::RecommendedPluginGate::default(),
-            ),
             api_provider,
             api_provider_identity,
             api_provider_id,
@@ -3850,33 +3841,12 @@ impl Engine {
                 cache_control: None,
             }];
         }
-        let recommended_plugins = {
-            let mut recommended_plugin_gate = self
-                .recommended_plugin_gate
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            crate::plugins::recommend::recommended_plugins_user_fragment(
-                &text,
-                self.plugin_registry.as_ref(),
-                &crate::plugins::recommend::load_marketplace_candidates(
-                    self.plugin_registry.state_path(),
-                ),
-                &mut recommended_plugin_gate,
-            )
-        };
         let expanded = crate::image_attach::expand_attachment_blocks(&text);
-        let mut content = Vec::with_capacity(3 + expanded.blocks.len());
+        let mut content = Vec::with_capacity(2 + expanded.blocks.len());
         content.push(ContentBlock::Text {
             text,
             cache_control: None,
         });
-        // Append-only on this turn. Never spliced into the pinned system prefix.
-        if let Some(fragment) = recommended_plugins {
-            content.push(ContentBlock::Text {
-                text: fragment,
-                cache_control: None,
-            });
-        }
         content.extend(expanded.blocks);
         if let Some(notice) = crate::image_attach::notice_block(&expanded.notices) {
             content.push(notice);

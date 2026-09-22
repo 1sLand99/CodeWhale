@@ -506,15 +506,6 @@ mod tests {
         restarted.surface_plugin_review_request("supabase", "/plugin trust supabase");
         assert!(!restarted.plugin_cta.phase.is_visible());
         assert!(
-            crate::plugins::recommend::recommended_plugins_user_fragment(
-                &app.input,
-                restarted.plugin_registry.as_ref(),
-                &[],
-                &mut crate::plugins::recommend::RecommendedPluginGate::default(),
-            )
-            .is_none()
-        );
-        assert!(
             crate::plugins::recommend::lookup_reviewable_plugin(
                 "supabase",
                 restarted.plugin_registry.as_ref(),
