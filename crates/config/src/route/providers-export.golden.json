@@ -1255,6 +1255,12 @@
         {
           "id": "mimo-v2.5-pro",
           "default": true
+        },
+        {
+          "id": "mimo-v2.6-flash"
+        },
+        {
+          "id": "mimo-v2.6-pro"
         }
       ],
       "transport": "chat-completions"

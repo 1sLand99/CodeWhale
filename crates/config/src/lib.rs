@@ -4842,6 +4842,27 @@ pub fn provider_base_url_is_official(provider: ProviderKind, base_url: &str) -> 
             xiaomi_mimo_base_url_uses_token_plan(base_url)
                 || xiaomi_mimo_base_url_is_pay_as_you_go(base_url)
         }
+        // StepFun publishes one vendor over four hosts: global (.ai) and
+        // China (.com), each with a pay-as-you-go `/v1` and a Step Plan
+        // `/step_plan/v1` surface. All four are StepFun's own, documented in
+        // its console. Recognising only the global PAYG default made a Step
+        // Plan subscriber's route read as a custom endpoint, and
+        // `catalog_models_for_route` withholds the catalog from a custom
+        // endpoint — so the picker reported `0 bundled`, offered no model
+        // list, and fell back to a guessed context window on a route whose
+        // console lists `step-5-preview` at 1M context.
+        //
+        // Note the plan hosts are listed from StepFun's console, not from
+        // models.dev, whose `stepfun-ai-step-plan` entry is missing
+        // `step-5-preview` that the vendor itself advertises. An aggregator
+        // is a secondary source for what a host serves; the vendor is not.
+        ProviderKind::Stepfun => matches!(
+            normalized.as_str(),
+            "https://api.stepfun.ai/v1"
+                | "https://api.stepfun.ai/step_plan/v1"
+                | "https://api.stepfun.com/v1"
+                | "https://api.stepfun.com/step_plan/v1"
+        ),
         ProviderKind::Ollama => {
             normalized == DEFAULT_OLLAMA_BASE_URL
                 || provider::is_exact_ollama_cloud_route(provider, base_url)

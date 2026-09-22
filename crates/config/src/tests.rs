@@ -5959,6 +5959,38 @@ fn zhipu_aliases_fold_into_zai_provider() {
 }
 
 #[test]
+fn stepfun_step_plan_hosts_are_official_so_the_catalog_is_not_withheld() {
+    // A Step Plan subscriber's base URL is StepFun's own documented host.
+    // Treating it as custom made `catalog_models_for_route` return nothing,
+    // which the picker showed as `0 bundled`: no model list, and a guessed
+    // context window instead of the 1M `step-5-preview` actually has.
+    for official in [
+        "https://api.stepfun.ai/v1",
+        "https://api.stepfun.ai/step_plan/v1",
+        "https://api.stepfun.com/v1",
+        "https://api.stepfun.com/step_plan/v1",
+        "https://api.stepfun.ai/step_plan/v1/",
+    ] {
+        assert!(
+            provider_base_url_is_official(ProviderKind::Stepfun, official),
+            "{official} is a StepFun-owned endpoint"
+        );
+    }
+    // A host StepFun does not own stays custom: this predicate also scopes
+    // credentials, so it must not widen to arbitrary look-alikes.
+    for foreign in [
+        "https://api.stepfun.evil.com/v1",
+        "https://api.deepseek.com",
+        "https://stepfun.ai.attacker.test/step_plan/v1",
+    ] {
+        assert!(
+            !provider_base_url_is_official(ProviderKind::Stepfun, foreign),
+            "{foreign} must stay custom and keyless"
+        );
+    }
+}
+
+#[test]
 fn zai_official_endpoint_family_includes_zhipu_general_api() {
     let _lock = env_lock();
     let _env = EnvGuard::without_deepseek_runtime_overrides();
