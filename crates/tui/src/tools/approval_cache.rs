@@ -29,8 +29,28 @@
 //!   | `apply_patch`  | `patch:<hash of file paths>`             |
 //!   | shell tools    | `shell:<command prefix>`                 |
 //!   | `fetch_url`    | `net:<hostname>`                         |
+//!   | Computer Use consent / `app_script` | `cu:<tool_name>:<hash of input>` |
+//!   | other MCP tools| `mcp:<tool_name>` (the reviewed kind)    |
 //!   | everything else| `tool:<tool_name>:<hash of input>`       |
 //!
+//! ## Computer Use calls that need a human (K1 / K2)
+//!
+//! [`computer_use_user_gate`] names the Computer Use calls whose approval must
+//! come from a person: granting or revoking per-app consent (which includes the
+//! shared-pointer `scope: "foreground"` decision) and `app_script`, an
+//! unsandboxed osascript. Those calls are never covered by the MCP kind grant:
+//! their session grant is the exact call, so allowing app X never allows app Y
+//! and approving one script never approves a changed one. Engine preparation
+//! also refuses them in any posture that cannot open a human approval card,
+//! and refuses a `run_actions` batch that carries one as a step
+//! ([`computer_use_batch_hidden_gate`]).
+//!
+//! Known limits of this stopgap: the calls are matched by MCP tool-name suffix
+//! (`_consent`, `_consent_allow`, `_consent_revoke`, `_app_script`), so a
+//! different MCP server exposing a tool with one of those names is gated the
+//! same way (fail closed). The consent decision still travels through a model
+//! tool call; MCP elicitation, where the plugin asks the host for the user's
+//! answer directly, is the real fix and is not built.
 use std::fmt::Write as _;
 
 use serde_json::Value;
@@ -107,10 +127,131 @@ pub fn build_approval_grouping_key(tool_name: &str, input: &serde_json::Value) -
         // narrow the granted kind into a one-call grant (the regression the
         // plugin e2e acceptance catches). Shell keeps its command-family
         // key (R2); this arm never widens shell or file tools.
+        //
+        // Computer Use consent and `app_script` are the exception (K1/K2):
+        // a kind grant there would let one approval cover every app or every
+        // script, so their session grant is the exact call.
+        name if computer_use_user_gate(name, input).is_some() => {
+            format!("cu:{name}:{}", hash_json_value(input))
+        }
         name if crate::mcp::McpPool::is_mcp_tool(name) => format!("mcp:{name}"),
         _ => format!("tool:{tool_name}:{}", hash_json_value(input)),
     };
     ApprovalKey(fingerprint)
+}
+
+/// A Computer Use call whose approval must come from a person (K1 / K2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ComputerUseUserGate {
+    /// A consent ledger write that widens what the model may do: `allow`, or
+    /// `revoke` (which can clear a persisted deny).
+    Consent {
+        action: &'static str,
+        app: Option<String>,
+        bundle_id: Option<String>,
+        scope: &'static str,
+        remember: bool,
+    },
+    /// `app_script`: arbitrary AppleScript/JXA through osascript.
+    AppScript {
+        language: &'static str,
+        script_sha256: String,
+        first_line: String,
+    },
+}
+
+/// Classify an MCP tool call as a Computer Use call that needs a human
+/// decision. See the module docs for the matching rule and its limits.
+#[must_use]
+pub(crate) fn computer_use_user_gate(
+    tool_name: &str,
+    input: &Value,
+) -> Option<ComputerUseUserGate> {
+    if !tool_name.starts_with("mcp_") {
+        return None;
+    }
+    let text = |key: &str| {
+        input
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    let action = if tool_name.ends_with("_consent_allow") {
+        "allow"
+    } else if tool_name.ends_with("_consent_revoke") {
+        "revoke"
+    } else if tool_name.ends_with("_consent") {
+        match input.get("action").and_then(Value::as_str) {
+            Some("allow") => "allow",
+            Some("revoke") => "revoke",
+            // `status` reads; `deny` only narrows what the model may do.
+            _ => return None,
+        }
+    } else if tool_name.ends_with("_app_script") {
+        let script = input.get("script").and_then(Value::as_str).unwrap_or("");
+        let language = match input.get("language").and_then(Value::as_str) {
+            Some("javascript") => "JXA",
+            _ => "AppleScript",
+        };
+        let digest = Sha256::digest(script.as_bytes());
+        let mut script_sha256 = String::with_capacity(64);
+        for byte in digest {
+            write!(&mut script_sha256, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        let first_line = script
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("")
+            .chars()
+            .take(120)
+            .collect();
+        return Some(ComputerUseUserGate::AppScript {
+            language,
+            script_sha256,
+            first_line,
+        });
+    } else {
+        return None;
+    };
+    let pid = input
+        .get("pid")
+        .and_then(Value::as_i64)
+        .map(|pid| format!("pid:{pid}"));
+    Some(ComputerUseUserGate::Consent {
+        action,
+        app: text("app").or_else(|| text("name")).or(pid),
+        bundle_id: text("bundle_id"),
+        scope: if input.get("scope").and_then(Value::as_str) == Some("foreground") {
+            "foreground"
+        } else {
+            "app"
+        },
+        remember: input.get("remember").and_then(Value::as_bool) == Some(true),
+    })
+}
+
+/// The inner tool of the first `run_actions` step that would need a human
+/// decision (K1 / K2). Computer Use `run_actions` accepts any plugin tool name
+/// as a step — including the unlisted `consent_allow` / `consent_revoke` and
+/// `app_script` — so a batch would otherwise carry a consent grant or a
+/// script past the per-call card. Engine preparation refuses such a batch.
+#[must_use]
+pub(crate) fn computer_use_batch_hidden_gate(tool_name: &str, input: &Value) -> Option<String> {
+    if !tool_name.starts_with("mcp_") || !tool_name.ends_with("_run_actions") {
+        return None;
+    }
+    input
+        .get("steps")
+        .and_then(Value::as_array)?
+        .iter()
+        .find_map(|step| {
+            let inner = step.get("tool").and_then(Value::as_str)?;
+            let arguments = step.get("arguments").cloned().unwrap_or(Value::Null);
+            computer_use_user_gate(&format!("mcp_{inner}"), &arguments).map(|_| inner.to_string())
+        })
 }
 
 /// Return the canonical command prefix for the shell command in `input`.
@@ -359,6 +500,83 @@ mod tests {
             &json!({"text": "acceptance", "hang": true}),
         );
         assert_ne!(exact_a, exact_b, "denial keys remain argument-exact");
+    }
+
+    /// K1: one session grant for Computer Use consent must not cover a
+    /// consent request for a different app, a different scope, or a
+    /// persisted (`remember`) variant — the MCP kind grant is not used here.
+    #[test]
+    fn computer_use_consent_grants_are_per_exact_call_not_per_kind() {
+        let tool = "mcp_plugin-12-computer-use-computer_consent";
+        let safari = build_approval_grouping_key(
+            tool,
+            &json!({"action": "allow", "app": "Safari", "bundle_id": "com.apple.Safari"}),
+        );
+        let terminal = build_approval_grouping_key(
+            tool,
+            &json!({"action": "allow", "app": "Terminal", "bundle_id": "com.apple.Terminal"}),
+        );
+        let foreground =
+            build_approval_grouping_key(tool, &json!({"action": "allow", "scope": "foreground"}));
+        let persisted = build_approval_grouping_key(
+            tool,
+            &json!({"action": "allow", "app": "Safari", "bundle_id": "com.apple.Safari", "remember": true}),
+        );
+        assert_ne!(safari, terminal, "allowing app X must never allow app Y");
+        assert_ne!(safari, foreground);
+        assert_ne!(safari, persisted);
+        assert!(safari.0.starts_with("cu:"), "{safari:?}");
+        for name in [
+            "mcp_codewhale-cu_consent_allow",
+            "mcp_codewhale-cu_consent_revoke",
+        ] {
+            let a = build_approval_grouping_key(name, &json!({"app": "Safari"}));
+            let b = build_approval_grouping_key(name, &json!({"app": "Terminal"}));
+            assert_ne!(a, b, "{name}");
+        }
+        // Reads and self-narrowing decisions keep the ordinary kind grant.
+        assert_eq!(
+            build_approval_grouping_key(tool, &json!({"action": "status"})).0,
+            format!("mcp:{tool}")
+        );
+        assert!(
+            computer_use_user_gate(tool, &json!({"action": "deny", "app": "Safari"})).is_none()
+        );
+        assert!(computer_use_user_gate("mcp_codewhale-cu_consent_status", &json!({})).is_none());
+        assert!(computer_use_user_gate("consent_allow", &json!({"app": "Safari"})).is_none());
+    }
+
+    /// K2: an `app_script` session grant is the exact script; a changed
+    /// script is a new approval.
+    #[test]
+    fn app_script_grants_are_per_exact_script() {
+        let tool = "mcp_plugin-12-computer-use-computer_app_script";
+        let a = build_approval_grouping_key(
+            tool,
+            &json!({"script": "tell application \"Finder\" to get name of front window"}),
+        );
+        let same = build_approval_grouping_key(
+            tool,
+            &json!({"script": "tell application \"Finder\" to get name of front window"}),
+        );
+        let changed =
+            build_approval_grouping_key(tool, &json!({"script": "do shell script \"id\""}));
+        assert_eq!(a, same);
+        assert_ne!(a, changed, "a changed script must prompt again");
+        let Some(ComputerUseUserGate::AppScript {
+            language,
+            script_sha256,
+            first_line,
+        }) = computer_use_user_gate(
+            tool,
+            &json!({"script": "\n  ObjC.import('Foundation')\nrest", "language": "javascript"}),
+        )
+        else {
+            panic!("app_script must be gated");
+        };
+        assert_eq!(language, "JXA");
+        assert_eq!(script_sha256.len(), 64);
+        assert_eq!(first_line, "ObjC.import('Foundation')");
     }
 
     #[test]

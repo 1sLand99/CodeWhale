@@ -9,8 +9,11 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
+use codewhale_execpolicy::ApprovalMode;
+
 use crate::mcp::McpPool;
 use crate::tools::ToolRegistry;
+use crate::tools::approval_cache::{computer_use_batch_hidden_gate, computer_use_user_gate};
 use crate::tools::spec::{ApprovalRequirement, PreparedToolCall, ResourceClaim, ToolError};
 
 use super::dispatch::{
@@ -44,11 +47,56 @@ pub(super) fn prepare_tool_call(
                 authority.owner
             )));
         }
+        // K1/K2 stopgap: Computer Use consent and `app_script` need a human
+        // decision. Never auto-approve them, and refuse them outright in a
+        // posture that cannot open the approval card (Full Access,
+        // Auto-Review, Never) — otherwise the model's own tool call would be
+        // the consent.
+        if let Some(inner) = computer_use_batch_hidden_gate(name, &input) {
+            return Err(ToolError::permission_denied(format!(
+                "Computer Use {inner} cannot run inside {name}: consent and scripts need their own approval card. Call it on its own so the user can decide."
+            )));
+        }
+        if computer_use_user_gate(name, &input).is_some() {
+            let posture = registry.map(|registry| {
+                let context = registry.context();
+                (context.auto_approve, context.approval_mode)
+            });
+            let card_available = !session_auto_approve
+                && posture.is_none_or(|(auto_approve, approval_mode)| {
+                    !auto_approve && approval_mode == ApprovalMode::Suggest
+                });
+            if !card_available {
+                let label = posture.map_or("Full Access", |(auto_approve, approval_mode)| {
+                    if auto_approve {
+                        ApprovalMode::Bypass.permission_chip_label()
+                    } else {
+                        approval_mode.permission_chip_label()
+                    }
+                });
+                return Err(ToolError::permission_denied(format!(
+                    "Computer Use call {name} needs your own approval: consent and scripts cannot be granted by a model tool call, and the current {label} posture cannot show an approval card. Switch to Ask mode to review it."
+                )));
+            }
+            return Ok(PreparedToolPolicy {
+                call: PreparedToolCall {
+                    name: name.to_string(),
+                    description: mcp_tool_approval_description(name, &input),
+                    input,
+                    read_only: false,
+                    supports_parallel: false,
+                    starts_detached: false,
+                    approval: ApprovalRequirement::Required,
+                    resources: vec![ResourceClaim::GlobalExclusive],
+                },
+                auto_approve: false,
+            });
+        }
         return Ok(PreparedToolPolicy {
             call: PreparedToolCall {
                 name: name.to_string(),
+                description: mcp_tool_approval_description(name, &input),
                 input,
-                description: mcp_tool_approval_description(name),
                 read_only,
                 supports_parallel: mcp_tool_is_parallel_safe(name),
                 starts_detached: false,
@@ -488,6 +536,131 @@ mod tests {
             prepared.call.approval,
             prepared.auto_approve,
         ));
+    }
+
+    /// K1: the model cannot grant itself Computer Use consent. In a posture
+    /// that cannot show a human card the call is refused at preparation; in
+    /// Ask it always requires approval, is never session auto-approved, and a
+    /// session grant for one app does not cover another.
+    #[test]
+    fn model_issued_computer_use_consent_is_rejected_without_a_human_card() {
+        let consent = "mcp_plugin-12-computer-use-computer_consent";
+        let allow_safari =
+            json!({"action": "allow", "app": "Safari", "bundle_id": "com.apple.Safari"});
+        let foreground = json!({"action": "allow", "scope": "foreground"});
+
+        // Full Access (session bit, or the registry context) and every
+        // no-card posture refuse the call before any approval routing.
+        for (session_auto, context_auto, mode) in [
+            (true, false, ApprovalMode::Suggest),
+            (false, true, ApprovalMode::Suggest),
+            (false, false, ApprovalMode::Bypass),
+            (false, false, ApprovalMode::Auto),
+            (false, false, ApprovalMode::Never),
+        ] {
+            let root = tempdir().expect("tempdir");
+            let mut context = ToolContext::new(root.path().to_path_buf());
+            context.auto_approve = context_auto;
+            context.approval_mode = mode;
+            let registry = ToolRegistry::new(context);
+            for (name, input) in [
+                (consent, allow_safari.clone()),
+                (consent, foreground.clone()),
+                (
+                    "mcp_codewhale-cu_consent_revoke",
+                    json!({"app": "Terminal"}),
+                ),
+                (
+                    "mcp_plugin-12-computer-use-computer_app_script",
+                    json!({"script": "do shell script \"id\""}),
+                ),
+            ] {
+                let error = prepare_tool_call(name, input.clone(), Some(&registry), session_auto)
+                    .expect_err("model-issued consent must not run without a human");
+                assert!(
+                    matches!(error, ToolError::PermissionDenied { .. }),
+                    "{name} {mode:?}: {error}"
+                );
+            }
+        }
+        // No registry: the session bit alone decides.
+        assert!(prepare_tool_call(consent, allow_safari.clone(), None, true).is_err());
+
+        // Ask posture: a Required card that names the app, bundle and scope.
+        let root = tempdir().expect("tempdir");
+        let registry = ToolRegistry::new(ToolContext::new(root.path().to_path_buf()));
+        let prepared = prepare_tool_call(consent, allow_safari.clone(), Some(&registry), false)
+            .expect("Ask posture opens a card");
+        assert_eq!(prepared.call.approval, ApprovalRequirement::Required);
+        assert!(!prepared.auto_approve);
+        assert!(!prepared.call.read_only);
+        assert!(super::super::turn_loop::registered_tool_approval_required(
+            &prepared.call.name,
+            prepared.call.approval,
+            prepared.auto_approve,
+        ));
+        let description = &prepared.call.description;
+        assert!(description.contains("Safari"), "{description}");
+        assert!(description.contains("com.apple.Safari"), "{description}");
+        assert!(description.contains("scope: app"), "{description}");
+        let foreground_card = prepare_tool_call(consent, foreground, Some(&registry), false)
+            .expect("foreground card");
+        assert!(
+            foreground_card
+                .call
+                .description
+                .contains("scope: foreground")
+        );
+
+        // After a session grant for Safari, a consent for Terminal still
+        // prompts: the grant key is the exact call, not the MCP kind.
+        let granted =
+            crate::tools::approval_cache::build_approval_grouping_key(consent, &allow_safari);
+        let terminal = crate::tools::approval_cache::build_approval_grouping_key(
+            consent,
+            &json!({"action": "allow", "app": "Terminal", "bundle_id": "com.apple.Terminal"}),
+        );
+        assert_ne!(granted, terminal);
+
+        // K1: run_actions cannot smuggle a consent grant or a script past
+        // the per-call card, in any posture (Ask included).
+        let batch = "mcp_plugin-12-computer-use-computer_run_actions";
+        for (step, session_auto) in [
+            (
+                json!({"tool": "consent_allow", "arguments": {"app": "Terminal"}}),
+                false,
+            ),
+            (
+                json!({"tool": "consent", "arguments": {"action": "allow", "scope": "foreground"}}),
+                false,
+            ),
+            (
+                json!({"tool": "consent_revoke", "arguments": {"app": "Terminal"}}),
+                true,
+            ),
+            (
+                json!({"tool": "app_script", "arguments": {"script": "do shell script \"id\""}}),
+                false,
+            ),
+        ] {
+            let input = json!({"steps": [{"tool": "click", "arguments": {"x": 1, "y": 1}}, step]});
+            let error = prepare_tool_call(batch, input, Some(&registry), session_auto)
+                .expect_err("a batched consent or script must be refused");
+            assert!(
+                matches!(error, ToolError::PermissionDenied { .. }),
+                "{error}"
+            );
+        }
+        let plain_batch = json!({"steps": [
+            {"tool": "click", "arguments": {"x": 1, "y": 1}},
+            {"tool": "consent", "arguments": {"action": "status"}},
+        ]});
+        assert!(prepare_tool_call(batch, plain_batch, Some(&registry), false).is_ok());
+
+        // Reading the ledger is unaffected.
+        let status = prepare_tool_call(consent, json!({"action": "status"}), Some(&registry), true)
+            .expect("status is not gated");
+        assert!(status.auto_approve);
     }
 
     #[test]
