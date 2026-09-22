@@ -36,6 +36,14 @@ tag, packages, checksums and release assets exist.
 - **[@yetuge](https://github.com/yetuge)** — dropped the retired `token_budget` field from the subagent documentation ([#6335](https://github.com/Hmbown/Codewhale/pull/6335)).
 
 ### Security
+- Children never inherit desktop or computer-control tools. Desktop control is
+  the most machine-wide capability in the catalog, and a verifier child
+  inherited it by default: on 2026-09-17 one opened the host Terminal and typed
+  a blocked shell command into the user's live session. A family classifier now
+  removes those tools when a child's registry is built, so they are neither
+  eager nor searchable, and `execute_full` refuses the family at dispatch for
+  every child role — visibility is a grant, and hiding is not the only defense
+  (#6296).
 - Runtimes can be held to an organization's plugin allowlist. A managed policy
   document (`managed-policy.json` beside `state.json`, or
   `CODEWHALE_MANAGED_POLICY_PATH`) lists the plugin ids a Runtime may run,
@@ -61,6 +69,30 @@ tag, packages, checksums and release assets exist.
   than a shared one (#6247).
 
 ### Added
+- Native memory is a reviewed store, not a model-writable file. `codewhale-memory`
+  backs the TUI with SQLite as the authority instead of Markdown, and the
+  `remember` tool now only *proposes* candidates — a model can no longer write
+  an active memory. `/memory` and the Runtime API commit through
+  `remember_reviewed`, and a Context Lens surface (`/v1/memory/lens`,
+  `/lens/actions`, `/events`) shows what was kept and why.
+- Code mode (Experimental, default off): `execute_tools` runs a JavaScript
+  program against a QuickJS host surface so a model can express several tool
+  calls as one program. Nested calls must be read-only and auto-approved; the
+  tool is hidden in Plan and refused under worker authority. Enable with
+  `[features] code_mode`.
+- Two new built-in providers: **ZenMux** (`ZENMUX_API_KEY`) and **CSDN 星图**
+  (`CSDN_API_KEY`, Coding Plan quota billing), each with its own key slot,
+  bootstrap model and catalog rows.
+- The Runtime API gained the surface a native client actually needs: jobs with
+  stdin, kill and cursor reads; context, secrets, git, diagnostics, targets,
+  LSP and voice routes; `GET /v1/commands` for the slash-command catalog;
+  `GET /v1/workspace/instructions`; account-wide `GET /v1/approvals`; plan and
+  to-do inventory; `/v1/settings/schema`, with `POST /v1/config` now persisting
+  every declared `settings.toml` key rather than a curated allowlist; PTY byte
+  replay, resize and exit; and tool images as session artifacts.
+- Codewhale holds the host's idle-sleep assertion while a turn is in flight
+  (`caffeinate -i` on macOS, `systemd-inhibit` on Linux), so an unattended
+  machine no longer sleeps mid-run. You will see one child process per turn.
 - Skills are reachable in one call. The pinned `## Skills` index told the model
   to call `load_skill`, but the tool was deferred behind `tool_search`, so it
   was never in the tool array that instruction was printed beside: using a
@@ -129,8 +161,10 @@ tag, packages, checksums and release assets exist.
   today's unbounded wait, so nothing changes unless you opt in (#6101).
 - Transcript drag selection copies Markdown source by default: every cell the
   selection touches serializes through the same canonical path `Ctrl-Y` and
-  `/copy` use, partial intersections round out to whole cells joined with
-  blank lines, and the toast names the copied cell count.
+  `/copy` use, joined with blank lines, and the toast names the copied cell
+  count. A selection that does not cover every touched cell end to end copies
+  the exact rendered fragment instead: rounding a pinpoint selection out to
+  whole cells meant copying an entire model message (#6228).
   `tui.selection_copy_markdown = false` keeps the rendered-text payload
   (#6156).
 - The Runtime API serves the workspace files a native client browses and edits:
@@ -199,6 +233,23 @@ tag, packages, checksums and release assets exist.
   tests/verifiers accept a bounded cwd (#6282, #6294, #6296).
 
 ### Changed
+- `auto` is a declared default, not a guess about your wording. Reasoning
+  effort no longer maps request vocabulary to tiers (debug/error to Max, search
+  to Low) and Auto routing no longer infers cheap-versus-big from phrasing:
+  both resolve the configured default, with `[auto] cost_saving` as the
+  explicit opt-in. The same prompt now costs the same thing twice.
+- A workflow's shared token budget is opt-in. `[workflow] default_token_budget`
+  applied a silent 120,000-token cap across a run and all of its children, and
+  a fan-out died at the limit with no hand-back; the default is now 0, meaning
+  no shared cap.
+- The shipped `deepseek-flash` route speaks the Responses endpoint, and `xhigh`
+  effort maps to `high` per the vendor's own table.
+- Streamed text is paced at a steady rate rather than inheriting the provider's
+  SSE chunking, so output reveals at a readable beat instead of in bursts.
+- Broadening shell access for a conversation now requires an idle conversation
+  and rejects a stale-workspace check before it commits. Engines advertise a
+  `thread_shell_consent` capability, so an older Engine reads as unsupported to
+  a native consent client instead of silently accepting.
 - One base prompt now serves every host. `HEADLESS_BASE_PROMPT` was a second
   hand-maintained rendering of the same constitution — the drift pattern this
   repo forbids by convention — so headless runs compose the same `BASE_PROMPT`
@@ -246,9 +297,10 @@ tag, packages, checksums and release assets exist.
   uses: warm charcoal field `#211F23`, a raised plate for panels and the
   composer, one blue for action and selection `#90B9FF`, and the whale's ivory
   `#F2ECE5` for body text, with 4.5:1 floors on every muted step. The old
-  saturated navy gradient is not gone — `underwater` is a named theme now
-  rather than the ground the product opens on. Existing installs keep whatever
-  theme they have saved; `/theme` switches (#6222).
+  saturated navy gradient is not gone — it is a named `underwater` theme, and
+  after review it is once again what a fresh 0.10.0 install opens on
+  (`DEFAULT_TUI_THEME`); Shoreline is one `/theme` away. Existing installs keep
+  whatever theme they have saved (#6222).
 
 - Menu navigation is starting to mean the same thing everywhere. `menu_style`
   already single-sourced how a selected row *looks*; what a key *does* was still
@@ -324,6 +376,16 @@ tag, packages, checksums and release assets exist.
   so Computer Use is never switched on without an explicit capability review.
 
 ### Fixed
+- The context meter and the auto-compact gate share one honest estimator. The
+  status bar inflated `ctx %` by about half and disagreed with the gate, so
+  "ctx 82%" could sit beside a `/compact` that refused to run; displayed
+  percentages now read materially lower because they are correct (#6297).
+- A steer the engine never accepted is queued for the next turn instead of
+  being shown as held and then silently dropped with no turn and no answer
+  (#6297).
+- Every `reqwest` client routes through `codewhale_release::tls`. A bare
+  `Client::builder()` panics under rustls with no installed provider; 17 call
+  sites were swept.
 - The bundled OpenAI-compatible hosts have their `/provider` rows back.
   Retiring the `ProviderSetupTemplate` layer moved SenseNova, Baseten, Groq,
   Cerebras, DashScope and Command Code into `provider_descriptors.json` and
