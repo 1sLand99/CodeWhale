@@ -4442,6 +4442,11 @@ pub(crate) struct PreparedThreadFork {
     original_user_text: Option<String>,
     original_images: Vec<codewhale_protocol::runtime::RuntimeImageInput>,
     max_output_tokens: Option<std::num::NonZeroU32>,
+    /// The session document this fork will own, written only at publish time:
+    /// `(source session id, retained prefix, covered cloned turn id)`. Writing
+    /// it while preparing would leave an unreferenced document behind whenever
+    /// the caller abandons the fork (a refused or failed file undo).
+    own_session: Option<(String, Vec<Message>, Option<String>)>,
 }
 
 /// Shared ownership of an existing task's join. A canceled drain drops only
@@ -8687,29 +8692,15 @@ impl RuntimeThreadManager {
             forked.updated_at = now;
             cloned_records.push((cloned_turn, cloned_items));
         }
-        let fork_session = fork_prefix.as_ref().map(|(prefix, kept_turns)| {
-            (
-                prefix.as_slice(),
-                kept_turns
+        // Bound at publish time — see `PreparedThreadFork::own_session`.
+        let own_session = fork_prefix.zip(source.session_id.clone()).map(
+            |((prefix, kept_turns), source_session_id)| {
+                let covered_turn_id = kept_turns
                     .checked_sub(1)
-                    .map(|index| cloned_records[index].0.id.clone()),
-            )
-        });
-        if let Some((prefix, covered_turn_id)) = fork_session
-            && let Some(source_session_id) = source.session_id.as_deref()
-            && let Err(error) = self.bind_fork_to_own_session(
-                &mut forked,
-                source_session_id,
-                prefix,
-                covered_turn_id,
-            )
-        {
-            tracing::warn!(
-                thread_id = %forked.id,
-                session_id = %source_session_id,
-                "fork could not be given its own session; it keeps the shared one: {error:#}"
-            );
-        }
+                    .map(|index| cloned_records[index].0.id.clone());
+                (source_session_id, prefix, covered_turn_id)
+            },
+        );
         Ok(PreparedThreadFork {
             source_id: source.id,
             target_turn_id,
@@ -8719,18 +8710,33 @@ impl RuntimeThreadManager {
             original_user_text,
             original_images,
             max_output_tokens: source_turns[target_turn_idx].max_output_tokens,
+            own_session,
         })
     }
 
     pub(crate) async fn publish_prepared_fork(
         &self,
-        prepared: PreparedThreadFork,
+        mut prepared: PreparedThreadFork,
     ) -> Result<(
         ThreadRecord,
         Option<String>,
         Vec<codewhale_protocol::runtime::RuntimeImageInput>,
         Option<std::num::NonZeroU32>,
     )> {
+        if let Some((source_session_id, prefix, covered_turn_id)) = prepared.own_session.take()
+            && let Err(error) = self.bind_fork_to_own_session(
+                &mut prepared.thread,
+                &source_session_id,
+                &prefix,
+                covered_turn_id,
+            )
+        {
+            tracing::warn!(
+                thread_id = %prepared.thread.id,
+                session_id = %source_session_id,
+                "fork could not be given its own session; it keeps the shared one: {error:#}"
+            );
+        }
         self.publish_fork(&prepared.thread, &prepared.records)?;
         // The fork is durable once publish_fork returns. A failed event
         // append must not report the fork as unsaved: the caller already

@@ -364,6 +364,76 @@ mod recovery {
         Ok(())
     }
 
+    /// A backtracking fork is prepared before the caller's file undo runs and
+    /// published only after it succeeds. Its session document must be written
+    /// at publish time: writing it while preparing left an unreferenced copy
+    /// of the conversation behind every time the undo was refused (an
+    /// untrusted thread) or failed, which is the orphaned-document shape
+    /// #6406 exists to stop producing.
+    #[tokio::test]
+    async fn abandoned_backtrack_fork_leaves_no_session_document() -> Result<()> {
+        let _env = crate::test_support::lock_test_env();
+        let dir = tempfile::tempdir()?;
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+        let manager = RuntimeThreadManager::open(
+            config(),
+            dir.path().to_path_buf(),
+            test_manager_config(dir.path().join("runtime")),
+        )?;
+        let thread = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        let messages: Vec<Message> = serde_json::from_value(json!([
+            {"role":"user","content":[{"type":"text","text":"first"}]},
+            {"role":"assistant","content":[{"type":"text","text":"first answer"}]},
+            {"role":"user","content":[{"type":"text","text":"second"}]},
+            {"role":"assistant","content":[{"type":"text","text":"second answer"}]}
+        ]))?;
+        manager
+            .seed_thread_from_messages(&thread.id, &messages)
+            .await?;
+        let saved = crate::session_manager::create_saved_session_with_id_and_mode(
+            Uuid::new_v4().to_string(),
+            &messages,
+            &thread.model,
+            dir.path(),
+            0,
+            None,
+            Some("agent"),
+        );
+        let sessions_dir = crate::session_manager::default_sessions_dir()?;
+        let sessions = crate::session_manager::SessionManager::new(sessions_dir.clone())?;
+        {
+            let _admission = manager.session_checkpoint_guard().await;
+            sessions.save_session(&saved)?;
+            manager
+                .set_thread_session_checkpoint(&thread.id, &saved)
+                .await?;
+        }
+        let documents = || -> Result<usize> { Ok(std::fs::read_dir(&sessions_dir)?.count()) };
+        let before = documents()?;
+
+        let abandoned = manager.prepare_fork_at_user_message(&thread.id, 0).await?;
+        drop(abandoned);
+        assert_eq!(
+            documents()?,
+            before,
+            "an abandoned fork must not write a session document"
+        );
+
+        let prepared = manager.prepare_fork_at_user_message(&thread.id, 0).await?;
+        let (fork, _, _, _) = manager.publish_prepared_fork(prepared).await?;
+        let fork_session_id = fork
+            .session_id
+            .clone()
+            .context("a published fork should own a session document")?;
+        assert_ne!(fork_session_id, saved.metadata.id);
+        assert!(documents()? > before);
+        sessions.load_session(&fork_session_id)?;
+        assert_eq!(manager.restore_thread_messages(&fork)?, messages[..2]);
+        Ok(())
+    }
+
     async fn control_case(interrupt: bool, follow_up: bool) -> Result<()> {
         let _env = crate::test_support::lock_test_env();
         let dir = tempfile::tempdir()?;
