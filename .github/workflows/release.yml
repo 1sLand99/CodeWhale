@@ -589,8 +589,9 @@ jobs:
   # nothing wrote the record, so someone hand-committed it after each release.
   # This job writes the record, proves it against the web gates, and proposes
   # it to main as a bot PR. It never pushes to the default branch: the ruleset
-  # requires a PR there. While the PR is open, `check:latest-release` only
-  # warns on pull_request (see web/scripts/sync-latest-release.mjs).
+  # requires a PR there. While the PR is open (up to 24h after publish, and
+  # only when the record is exactly one release behind), `check:latest-release`
+  # warns instead of failing on every event (see web/scripts/sync-latest-release.mjs).
   #
   # Known limit: repo settings stop GITHUB_TOKEN from opening PRs, so the PR is
   # opened with RELEASE_TAG_PAT. Without it the job pushes the branch and fails
