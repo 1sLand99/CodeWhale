@@ -31,6 +31,7 @@ export const RELEASE_CONTRIBUTORS: string[] = [
   "@VincentCorleone",
   "@Serendo",
   "@yetuge",
+  "@Water-Run",
 ];
 
 /**
