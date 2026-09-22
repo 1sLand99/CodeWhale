@@ -5634,6 +5634,25 @@ fn merge_plugin_mcp_servers_from_plugins(
     )
 }
 
+/// Split a qualified plugin server key back into `(plugin, server)`.
+///
+/// The length prefix written by [`qualified_plugin_server_name`] exists so
+/// this split is unambiguous even when a plugin or server name contains `-`.
+/// Display surfaces use it to show `codewhale-account-plugins/codewhale-plugins`
+/// instead of the wire key `plugin-25-codewhale-account-plugins-codewhale-plugins`,
+/// which reads as noise in a list and tells a person nothing.
+#[must_use]
+pub fn split_qualified_plugin_server_name(qualified: &str) -> Option<(&str, &str)> {
+    let rest = qualified.strip_prefix("plugin-")?;
+    let (len, rest) = rest.split_once('-')?;
+    let len: usize = len.parse().ok()?;
+    if !rest.is_char_boundary(len) {
+        return None;
+    }
+    let (plugin, server) = rest.split_at(len);
+    Some((plugin, server.strip_prefix('-')?))
+}
+
 fn qualified_plugin_server_name(plugin_name: &str, server_name: &str) -> String {
     format!(
         "plugin-{}-{}-{}",
@@ -6345,6 +6364,44 @@ fn snapshot_from_config(
         config_exists,
         reload_required,
         servers,
+    }
+}
+
+#[cfg(test)]
+mod qualified_plugin_server_name_tests {
+    use super::{qualified_plugin_server_name, split_qualified_plugin_server_name};
+
+    /// The wire key round-trips even when both halves contain `-`, which is
+    /// what the length prefix is for. The Extensions panel relies on this to
+    /// show `plugin/server` instead of `plugin-25-plugin-server`.
+    #[test]
+    fn a_qualified_plugin_server_name_round_trips_through_its_split() {
+        for (plugin, server) in [
+            ("codewhale-account-plugins", "codewhale-plugins"),
+            ("kimi-datasource", "data"),
+            ("a", "b"),
+            ("dash-heavy-name-here", "server-with-dashes"),
+        ] {
+            let qualified = qualified_plugin_server_name(plugin, server);
+            assert_eq!(
+                split_qualified_plugin_server_name(&qualified),
+                Some((plugin, server)),
+                "round trip failed for {qualified}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_that_is_not_a_plugin_key_does_not_split() {
+        for plain in [
+            "aws",
+            "github",
+            "plugin-",
+            "plugin-x-a-b",
+            "plugin-99-short",
+        ] {
+            assert_eq!(split_qualified_plugin_server_name(plain), None, "{plain}");
+        }
     }
 }
 

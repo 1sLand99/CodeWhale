@@ -1375,7 +1375,14 @@ fn mcp_model(app: &App, locale: Locale) -> ExtensionsTabModel {
                     }
                     (true, false, Some(_)) => ExtensionTone::Attention,
                 },
-                label: name,
+                // A plugin's server is shown as `plugin/server`, not as the
+                // wire key `plugin-25-<plugin>-<server>`. The length-prefixed
+                // form is how the config layer keeps the name unambiguous; it
+                // was never meant to be read by a person.
+                label: crate::mcp::split_qualified_plugin_server_name(&name).map_or_else(
+                    || name.clone(),
+                    |(plugin, server)| format!("{plugin}/{server}"),
+                ),
                 description: observed.map_or_else(String::new, |server| {
                     localize(
                         locale,

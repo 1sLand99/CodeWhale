@@ -1913,14 +1913,25 @@ impl ProviderPickerView {
         // is opt-in via "explore offline" and the L toggle. A local-first
         // default (introduced 2026-08-15) hid hosted providers behind a
         // keypress, which read as "only local models are supported."
-        let _ = key_entry_for_missing_auth;
         picker.view = ProviderListView::Catalog;
         picker.setup_mode = true;
         if let Some(target) = target
             && let Some(idx) = picker.rows.iter().position(|row| row.provider == target)
         {
             picker.selected_idx = idx;
-            if key_entry_for_missing_auth && !picker.selected_has_key() {
+            // Naming a provider is the request. `/provider setup xiaomi-mimo`
+            // opens that provider's key entry whether or not a key is already
+            // stored: rotating a key is the commonest reason to run it, and
+            // the previous `&& !selected_has_key()` silently downgraded the
+            // command to "open the catalog" for exactly the providers already
+            // configured. Worse than useless — the catalog's search field
+            // takes the keystrokes, so a pasted key landed in a plaintext
+            // filter instead of a masked prompt.
+            //
+            // `key_entry_for_missing_auth` stays the caller's switch:
+            // onboarding (`new_for_onboarding`) passes false because a first
+            // run must show the navigable list before asking for a secret.
+            if key_entry_for_missing_auth {
                 picker.begin_setup();
             }
         }
@@ -9522,6 +9533,41 @@ mod tests {
         assert!(
             highlighted_cells >= 32,
             "selected provider row should use a visible continuous highlight"
+        );
+    }
+
+    /// `/provider setup <name>` names the provider, so it opens that
+    /// provider's key entry. Gating it on `!selected_has_key()` silently
+    /// downgraded the command to "open the catalog" for exactly the
+    /// providers already configured — and rotating a key is the commonest
+    /// reason to run it.
+    #[test]
+    fn provider_setup_opens_key_entry_even_when_a_key_is_already_saved() {
+        let config = Config {
+            providers: Some(crate::config::ProvidersConfig {
+                xiaomi_mimo: crate::config::ProviderConfig {
+                    api_key: Some("tp-already-saved".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+        let picker = ProviderPickerView::new_for_setup(
+            ApiProvider::Deepseek,
+            Some(ApiProvider::XiaomiMimo),
+            &config,
+            None,
+        );
+        assert!(
+            picker.selected_has_key(),
+            "fixture precondition: the target already has a key"
+        );
+        assert_eq!(
+            picker.stage,
+            Stage::KeyEntry,
+            "naming a provider must open its key entry; rotating a key is the \
+             commonest reason to run /provider setup <name>"
         );
     }
 
