@@ -551,6 +551,40 @@ pub(crate) fn persist_provider_base_url_key(
     Ok(path)
 }
 
+/// Persist the endpoint that `GET /v1/config` reports as `base_url`.
+///
+/// That value belongs to exactly one route, and the route keeps it in exactly
+/// one place: the root `base_url` for DeepSeek and the released legacy
+/// root-level custom route, or the provider's own typed `[providers.<table>]`
+/// table for every other built-in. Writing anywhere else reports success and
+/// changes nothing — which is what this key used to do, into a root
+/// `active_route_base_url` that no reader ever resolves. A user-defined
+/// `[providers.<name>]` route is refused with the same guidance the TUI's own
+/// `/config provider_url` gives: its endpoint lives in the named table, and
+/// writing it through this static-key path is out of the #1519 slice.
+pub(crate) fn persist_route_base_url(
+    config_path: Option<&Path>,
+    provider: ApiProvider,
+    provider_identity: &str,
+    value: &str,
+) -> anyhow::Result<PathBuf> {
+    let path = config_toml_path(config_path)?;
+    let root_route = matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN)
+        || (provider == ApiProvider::Custom
+            && provider_identity
+                .trim()
+                .eq_ignore_ascii_case(ApiProvider::Custom.as_str()));
+    if root_route {
+        mutate_config_document(&path, |doc| set_document_value(doc, &["base_url"], value))?;
+        return Ok(path);
+    }
+    let table = provider_base_url_table_key(provider)?;
+    mutate_config_document(&path, |doc| {
+        set_document_value(doc, &["providers", table, "base_url"], value)
+    })?;
+    Ok(path)
+}
+
 /// Persist the model for one exact provider route without rewriting the
 /// legacy root DeepSeek fallback used by unrelated providers.
 ///
