@@ -30,12 +30,12 @@ import type { LocalizedText } from "./content/vocabulary";
 
 /** Captured build identity is independent of the current source/release. */
 export const TERMINAL_SCREENSHOT = {
-  src: "/codewhale-tui-8565bc9.png",
-  width: 1162,
-  height: 774,
+  src: "/codewhale-tui-d7a9a1c.png",
+  width: 1132,
+  height: 632,
   version: "0.10.0",
-  sourceCommit: "8565bc94e79a1cb8a787661b8c9b6288d33d4edb",
-  sha256: "c6a90e76bf840e0829da5ac845354ad89ca4cf4b29760651816e2a799534b470",
+  sourceCommit: "d7a9a1c8c15635a84099d5fc2ee965146cf197c7",
+  sha256: "73e56158d6ec6c04933ce787c23c07322ce4d509b54050b54b12d181b09314b8",
 } as const;
 
 /** Published-asset budgets; see the module contract for what tests inspect. */
