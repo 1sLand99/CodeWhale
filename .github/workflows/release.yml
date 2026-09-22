@@ -583,3 +583,96 @@ jobs:
           TAP_REPO: Hmbown/homebrew-deepseek-tui
           TOKEN: ${{ secrets.HOMEBREW_TAP_PAT || secrets.RELEASE_TAG_PAT }}
         run: bash .github/scripts/update-homebrew-tap.sh
+
+  # Every publish used to turn Web Frontend red: `check:latest-release`
+  # compares the checked-in release record with GitHub's latest release, and
+  # nothing wrote the record, so someone hand-committed it after each release.
+  # This job writes the record, proves it against the web gates, and proposes
+  # it to main as a bot PR. It never pushes to the default branch: the ruleset
+  # requires a PR there. While the PR is open, `check:latest-release` only
+  # warns on pull_request (see web/scripts/sync-latest-release.mjs).
+  #
+  # Known limit: repo settings stop GITHUB_TOKEN from opening PRs, so the PR is
+  # opened with RELEASE_TAG_PAT. Without it the job pushes the branch and fails
+  # with the compare link, which is still one click instead of a hand commit.
+  sync-release-record:
+    timeout-minutes: 15
+    needs: [release, resolve]
+    if: ${{ !cancelled() && needs.release.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          # derive-facts.mjs dates model ids from git history (web.yml pins 0
+          # for the same reason); a shallow clone rewrites every addedAt.
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Refresh the release record from the published release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node web/scripts/sync-latest-release.mjs
+          node web/scripts/derive-facts.mjs
+      - name: Prove the record passes the web fact gates
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node web/scripts/sync-latest-release.mjs --check
+          node web/scripts/check-cloud-facts.mjs
+          node web/scripts/check-facts.mjs
+      - name: Propose the record to the default branch
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PR_TOKEN: ${{ secrets.RELEASE_TAG_PAT }}
+        run: |
+          set -euo pipefail
+          paths=(
+            web/data/latest-published-release.json
+            docs/public-surface-facts.json
+            docs/cloud-facts/stable.json
+            web/lib/facts.generated.ts
+          )
+          if git diff --quiet -- "${paths[@]}"; then
+            echo "Release record already current on ${DEFAULT_BRANCH}; nothing to propose."
+            exit 0
+          fi
+          # GitHub's latest may already be newer than this run's tag; the
+          # record always follows GitHub, so name the branch after what it says.
+          recorded="$(node -p "require('./web/data/latest-published-release.json').tag")"
+          branch="chore/release-record-${recorded}"
+          title="chore(web): record ${recorded} as the published release"
+
+          git config user.name "CodeWhale Bot"
+          git config user.email "bot@codewhale.net"
+          git switch --quiet -c "${branch}"
+          git add -- "${paths[@]}"
+          git commit --quiet \
+            -m "${title}" \
+            -m "Written by release.yml sync-release-record after ${TAG} published. Gates run in the job: sync-latest-release --check, check-cloud-facts, check-facts."
+          git show --stat --format='%h %s' HEAD
+
+          if git ls-remote --exit-code --heads origin "${branch}" >/dev/null; then
+            echo "::notice title=Release record already proposed::Branch ${branch} exists; leaving it for review."
+            exit 0
+          fi
+          git push origin "HEAD:refs/heads/${branch}"
+
+          compare="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/${DEFAULT_BRANCH}...${branch}?expand=1"
+          if [[ -n "${PR_TOKEN}" ]] && GH_TOKEN="${PR_TOKEN}" gh pr create \
+              --repo "${GITHUB_REPOSITORY}" --base "${DEFAULT_BRANCH}" --head "${branch}" \
+              --title "${title}" \
+              --body "Written by release.yml \`sync-release-record\` after ${TAG} published. Merging it turns \`check:latest-release\` green on ${DEFAULT_BRANCH}. No-Issue: release automation."; then
+            echo "::notice title=Release record proposed::Opened a PR from ${branch}."
+            exit 0
+          fi
+          echo "::error title=Release record PR not opened::Branch ${branch} is pushed; open and merge it: ${compare}"
+          exit 1
