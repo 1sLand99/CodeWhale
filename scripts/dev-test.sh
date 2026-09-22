@@ -230,18 +230,33 @@ CODEWHALE_CACHE_ROOT=$(codewhale_dev_cache_root)
 export CODEWHALE_CACHE_ROOT
 # libtest exits 0 when a filter matches nothing, which has been mistaken for
 # a pass. With an explicit filter, refuse that green. (nextest already fails
-# loud on an empty selection, so the guard only wraps libtest; shells without
-# pipefail keep the old direct exec.)
+# loud on an empty selection, so the guard only wraps libtest.)
+#
+# pipefail is not POSIX and probing it outside a subshell is fatal where it
+# is unsupported: `set` is a special builtin, so an illegal option exits the
+# shell outright with status 2 instead of returning a status a `&&` list can
+# absorb. That killed this script on every filtered libtest run under dash
+# (Ubuntu's /bin/sh, which is what CI and Debian users get) while passing on
+# macOS. Probe in a subshell, and on shells without pipefail capture the run
+# and replay it so the refusal below still applies; those shells lose live
+# streaming for the duration of the filtered run, not the guard.
 base_args=5
 if [ "$target" = "--test" ]; then
   base_args=6
 fi
-if [ "$use_nextest" -eq 0 ] && [ "$#" -gt "$base_args" ] && set -o pipefail 2>/dev/null; then
+if [ "$use_nextest" -eq 0 ] && [ "$#" -gt "$base_args" ]; then
   tmp_log=$(mktemp -t dev-test-log.XXXXXX)
   trap 'rm -f "$tmp_log"' EXIT INT TERM
   set +e
-  "$repo_root/scripts/with-hermetic-test-home.sh" "$repo_root/scripts/dev-cargo.sh" "$@" 2>&1 | tee "$tmp_log"
-  test_status=$?
+  if (set -o pipefail) 2>/dev/null; then
+    set -o pipefail
+    "$repo_root/scripts/with-hermetic-test-home.sh" "$repo_root/scripts/dev-cargo.sh" "$@" 2>&1 | tee "$tmp_log"
+    test_status=$?
+  else
+    "$repo_root/scripts/with-hermetic-test-home.sh" "$repo_root/scripts/dev-cargo.sh" "$@" > "$tmp_log" 2>&1
+    test_status=$?
+    cat "$tmp_log"
+  fi
   set -e
   if [ "$test_status" -eq 0 ]; then
     if grep -q 'test result:' "$tmp_log"; then
