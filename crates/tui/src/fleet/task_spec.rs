@@ -1517,6 +1517,20 @@ mod tests {
         assert_eq!(doc.tasks.len(), 2);
     }
 
+    #[test]
+    fn fleet_task_spec_toml_single_task_loads_with_fallback_name() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("solo.toml");
+        std::fs::write(
+            &path,
+            "id = \"a\"\nname = \"a\"\ninstructions = \"do it\"\n",
+        )
+        .unwrap();
+        let doc = load_task_spec_document(&path).unwrap();
+        assert_eq!(doc.name.as_deref(), Some("solo"));
+        assert_eq!(doc.tasks.len(), 1);
+    }
+
     fn repo_doc(relative: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")

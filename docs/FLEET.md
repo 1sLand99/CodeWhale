@@ -503,10 +503,10 @@ A spec file takes one of three shapes, chosen by its structure before any
 field is read:
 
 - a **document** — an object with `tasks` (and optionally `name`, `labels`,
-  `workers`, `usage_ceiling`); every TOML spec is this shape;
+  `workers`, `usage_ceiling`);
 - a **task array** — a bare JSON array of task objects;
 - a **single task** — one task object with `id` / `instructions` at the top
-  level.
+  level (JSON or TOML; a TOML file is never a task array).
 
 Array and single-task files take their run name from the file name. Because
 the shape is picked first, a malformed spec reports the real problem, for
