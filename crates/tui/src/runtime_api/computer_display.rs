@@ -155,6 +155,34 @@ pub(crate) struct ComputerState {
     inner: Arc<Inner>,
 }
 
+/// Accept a display socket path only if it is absolute and made of plain
+/// components: no `.`/`..`, no NUL. The configured value cannot walk the
+/// Engine out of the directory it names, and the socket-type check at use
+/// (`display_socket_present`) refuses anything that is not a Unix socket.
+fn validated_socket_path(raw: &str) -> Option<PathBuf> {
+    use std::path::Component;
+    let raw = raw.trim();
+    if raw.is_empty() || raw.contains('\0') {
+        return None;
+    }
+    let path = std::path::Path::new(raw);
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut clean = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir => clean.push(Component::RootDir.as_os_str()),
+            Component::Normal(part) => clean.push(part),
+            Component::Prefix(_) | Component::CurDir | Component::ParentDir => return None,
+        }
+    }
+    // `components()` silently drops interior `.` and repeated `/`; insist the
+    // value was already in that normal form so what we connect to is what
+    // the operator wrote.
+    (clean.as_os_str() == path.as_os_str() && clean.file_name().is_some()).then_some(clean)
+}
+
 impl ComputerState {
     pub(crate) fn new(socket_path: PathBuf, idle_close: Duration) -> Self {
         Self {
@@ -176,16 +204,25 @@ impl ComputerState {
     pub(crate) fn from_env() -> Self {
         let socket = std::env::var(DISPLAY_SOCKET_ENV)
             .ok()
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| DEFAULT_DISPLAY_SOCKET.to_string());
+            .and_then(|raw| {
+                let checked = validated_socket_path(&raw);
+                if checked.is_none() && !raw.trim().is_empty() {
+                    tracing::warn!(
+                        target: "codewhale::computer",
+                        "{DISPLAY_SOCKET_ENV} must be an absolute path with no `.`/`..` \
+                         components; using {DEFAULT_DISPLAY_SOCKET}"
+                    );
+                }
+                checked
+            })
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_DISPLAY_SOCKET));
         let idle = std::env::var(DISPLAY_IDLE_ENV)
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
             .filter(|secs| *secs > 0)
             .map(Duration::from_secs)
             .unwrap_or(DEFAULT_IDLE);
-        Self::new(PathBuf::from(socket), idle)
+        Self::new(socket, idle)
     }
 
     fn emit(&self, kind: &str, data: Value) {
@@ -288,7 +325,7 @@ impl ComputerState {
         let mut tokens = self.inner.client_tokens.lock();
         tokens.retain(|_, t| t.expires_at > now);
         let mut list: Vec<_> = tokens.values().map(ClientTokenView::from).collect();
-        list.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        list.sort_by_key(|a| a.created_at);
         list
     }
 
@@ -624,8 +661,10 @@ impl ClientParser {
             match message_type {
                 2 => {
                     let kept: Vec<[u8; 4]> = message[4..]
-                        .chunks_exact(4)
-                        .map(|c| [c[0], c[1], c[2], c[3]])
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .copied()
                         .filter(|c| encoding_allowed(i32::from_be_bytes(*c)))
                         .collect();
                     out.extend_from_slice(&[2, 0]);

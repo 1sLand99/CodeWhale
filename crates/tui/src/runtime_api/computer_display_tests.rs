@@ -85,6 +85,21 @@ fn parser_strips_encodings_that_start_unparsed_subprotocols() {
 }
 
 #[test]
+fn display_socket_path_must_be_absolute_and_plain() {
+    assert_eq!(
+        validated_socket_path(" /run/cw/vnc.sock "),
+        Some(PathBuf::from("/run/cw/vnc.sock"))
+    );
+    assert_eq!(validated_socket_path(""), None);
+    assert_eq!(validated_socket_path("vnc.sock"), None);
+    assert_eq!(validated_socket_path("./vnc.sock"), None);
+    assert_eq!(validated_socket_path("/run/cw/../../etc/passwd"), None);
+    assert_eq!(validated_socket_path("/run/./cw/vnc.sock"), None);
+    assert_eq!(validated_socket_path("/run/cw/vnc\0.sock"), None);
+    assert_eq!(validated_socket_path("/"), None);
+}
+
+#[test]
 fn redaction_hides_ticket_and_token_values() {
     let redacted = redact_query_secrets(
         "/v1/computer/display?ticket=cwdt_secret&mode=view&mobile_stream_ticket=abc&Token=x#frag",
@@ -165,6 +180,9 @@ mod live {
     }
 
     async fn harness() -> Harness {
+        // The workspace builds reqwest with `rustls-no-provider`; the binary
+        // installs ring at startup, so tests that build a Client must too.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("vnc.sock");
         let listener = UnixListener::bind(&sock).unwrap();
