@@ -611,6 +611,36 @@ mod tests {
                 .description
                 .contains("scope: foreground")
         );
+        // An irreversible-action confirm token is named as such, not as an
+        // "<unnamed app>" consent; a multi-line script says it is truncated.
+        let confirm_card = prepare_tool_call(
+            consent,
+            json!({"action": "allow", "confirm": "tok-1"}),
+            Some(&registry),
+            false,
+        )
+        .expect("confirm card");
+        assert_eq!(confirm_card.call.approval, ApprovalRequirement::Required);
+        assert!(
+            confirm_card
+                .call
+                .description
+                .contains("irreversible action"),
+            "{}",
+            confirm_card.call.description
+        );
+        let script_card = prepare_tool_call(
+            "mcp_plugin-12-computer-use-computer_app_script",
+            json!({"script": "tell application \"Finder\" to activate\ndo shell script \"id\""}),
+            Some(&registry),
+            false,
+        )
+        .expect("script card");
+        assert!(
+            script_card.call.description.contains("first of 2 lines"),
+            "{}",
+            script_card.call.description
+        );
 
         // After a session grant for Safari, a consent for Terminal still
         // prompts: the grant key is the exact call, not the MCP kind.

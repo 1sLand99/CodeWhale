@@ -819,7 +819,14 @@ pub(super) fn mcp_tool_approval_description(name: &str, input: &serde_json::Valu
             bundle_id,
             scope,
             remember,
+            confirm,
         }) => {
+            if confirm {
+                // The plugin paused on an action that cannot be taken back
+                // and handed the model a token; approving this card is the
+                // person's confirmation of that one action.
+                return "Computer Use confirmation requested by the model: allow the irreversible action (pay, buy, send, transfer or delete) the plugin just paused on. Approve only if you asked for exactly that action.".to_string();
+            }
             let target = match scope {
                 "foreground" => {
                     "shared-desktop foreground control (take the pointer and focus)".to_string()
@@ -832,7 +839,9 @@ pub(super) fn mcp_tool_approval_description(name: &str, input: &serde_json::Valu
                     }
                 }
             };
-            let lifetime = if remember {
+            let lifetime = if action == "revoke" {
+                "clears session and persisted decisions, including a saved deny"
+            } else if remember {
                 "persisted until revoked"
             } else {
                 "this session"
@@ -850,9 +859,15 @@ pub(super) fn mcp_tool_approval_description(name: &str, input: &serde_json::Valu
             language,
             script_sha256,
             first_line,
+            line_count,
         }) => {
+            let shown = if line_count > 1 {
+                format!("first of {line_count} lines")
+            } else {
+                "1 line".to_string()
+            };
             return format!(
-                "Computer Use app_script: run this exact {language} script outside the sandbox (sha256 {}): {first_line}",
+                "Computer Use app_script: run this exact {language} script outside the sandbox (sha256 {}, {shown}): {first_line}",
                 &script_sha256[..16]
             );
         }

@@ -151,12 +151,19 @@ pub(crate) enum ComputerUseUserGate {
         bundle_id: Option<String>,
         scope: &'static str,
         remember: bool,
+        /// An `allow` carrying a plugin `confirm` token: the person is
+        /// confirming an irreversible action (pay, buy, send, transfer,
+        /// delete) the plugin paused on, not consenting to an app.
+        confirm: bool,
     },
     /// `app_script`: arbitrary AppleScript/JXA through osascript.
     AppScript {
         language: &'static str,
         script_sha256: String,
         first_line: String,
+        /// Non-empty lines in the script, so the card can say how much is
+        /// not shown by `first_line`.
+        line_count: usize,
     },
 }
 
@@ -208,10 +215,15 @@ pub(crate) fn computer_use_user_gate(
             .chars()
             .take(120)
             .collect();
+        let line_count = script
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count();
         return Some(ComputerUseUserGate::AppScript {
             language,
             script_sha256,
             first_line,
+            line_count,
         });
     } else {
         return None;
@@ -230,6 +242,7 @@ pub(crate) fn computer_use_user_gate(
             "app"
         },
         remember: input.get("remember").and_then(Value::as_bool) == Some(true),
+        confirm: action == "allow" && text("confirm").is_some(),
     })
 }
 
@@ -567,6 +580,7 @@ mod tests {
             language,
             script_sha256,
             first_line,
+            line_count,
         }) = computer_use_user_gate(
             tool,
             &json!({"script": "\n  ObjC.import('Foundation')\nrest", "language": "javascript"}),
@@ -577,6 +591,7 @@ mod tests {
         assert_eq!(language, "JXA");
         assert_eq!(script_sha256.len(), 64);
         assert_eq!(first_line, "ObjC.import('Foundation')");
+        assert_eq!(line_count, 2);
     }
 
     #[test]
