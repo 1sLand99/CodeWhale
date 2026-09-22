@@ -54,6 +54,9 @@ use crate::tui::views::{
     centered_modal_area, render_modal_footer, render_modal_surface, render_underwater_surface,
 };
 use codewhale_config::catalog::{CatalogOffering, CatalogSnapshot};
+use codewhale_config::descriptors::{
+    ProviderDescriptor, bundled_provider_descriptors, provider_descriptor,
+};
 use codewhale_config::provider::{CredentialAcquisition, WireFormat};
 use codewhale_config::route::{PricingSku, RequestProtocol};
 use codewhale_localization::{Locale, MessageId, tr};
@@ -1718,6 +1721,7 @@ impl ProviderPickerView {
             })
             .collect();
         rows.extend(custom_rows);
+        rows.extend(descriptor_dashboard_rows(active, config, runtime_status));
         // Providers you have configured lead; the rest of the catalog follows
         // alphabetically. Founder live-test: "we should also make that list
         // ordered logically so like the ones you have configured at the top
@@ -1919,19 +1923,10 @@ impl ProviderPickerView {
             && let Some(idx) = picker.rows.iter().position(|row| row.provider == target)
         {
             picker.selected_idx = idx;
-            // Naming a provider is the request. `/provider setup xiaomi-mimo`
-            // opens that provider's key entry whether or not a key is already
-            // stored: rotating a key is the commonest reason to run it, and
-            // the previous `&& !selected_has_key()` silently downgraded the
-            // command to "open the catalog" for exactly the providers already
-            // configured. Worse than useless — the catalog's search field
-            // takes the keystrokes, so a pasted key landed in a plaintext
-            // filter instead of a masked prompt.
-            //
-            // `key_entry_for_missing_auth` stays the caller's switch:
-            // onboarding (`new_for_onboarding`) passes false because a first
-            // run must show the navigable list before asking for a secret.
-            if key_entry_for_missing_auth {
+            // A provider that already has a key is *focused*, not re-prompted:
+            // `R` is the rekey affordance and the footer advertises it. Only a
+            // provider missing auth drops straight onto its key prompt.
+            if key_entry_for_missing_auth && !picker.selected_has_key() {
                 picker.begin_setup();
             }
         }
@@ -2419,33 +2414,64 @@ impl ProviderPickerView {
         })
     }
 
-    fn enter_custom_form(&mut self) {
+    /// Open the custom-provider form with whatever a known host already
+    /// pins, leaving the cursor on the first field the user still has to
+    /// decide. Every entry point into `Stage::CustomForm` goes through here.
+    fn prefill_custom_form(
+        &mut self,
+        provider_id: &str,
+        base_url: &str,
+        model: &str,
+        api_key_env: &str,
+        field: CustomProviderField,
+    ) {
         self.stage = Stage::CustomForm;
-        self.custom_provider_field = CustomProviderField::Name;
-        self.custom_provider_id.clear();
-        self.custom_provider_base_url.clear();
-        self.custom_provider_model.clear();
-        self.custom_provider_api_key_env.clear();
+        self.custom_provider_field = field;
+        self.custom_provider_id = provider_id.to_string();
+        self.custom_provider_base_url = base_url.to_string();
+        self.custom_provider_model = model.to_string();
+        self.custom_provider_api_key_env = api_key_env.to_string();
+    }
+
+    fn enter_custom_form(&mut self) {
+        self.prefill_custom_form("", "", "", "", CustomProviderField::Name);
+    }
+
+    /// A bundled descriptor row (#6289) is set up as the named custom
+    /// provider it describes: the JSON pins id, endpoint, bootstrap model and
+    /// credential env var, so the only field left is which env var holds the
+    /// key. Submitting writes `[providers.<id>]` through the same path a
+    /// hand-entered custom provider uses.
+    fn enter_descriptor_form(&mut self, descriptor: &ProviderDescriptor) {
+        self.prefill_custom_form(
+            &descriptor.id,
+            &descriptor.base_url,
+            &descriptor.default_model,
+            &descriptor.api_key_env,
+            CustomProviderField::ApiKeyEnv,
+        );
     }
 
     fn enter_ds4_form(&mut self) {
-        self.stage = Stage::CustomForm;
-        self.custom_provider_field = CustomProviderField::ApiKeyEnv;
-        self.custom_provider_id = DS4_PROVIDER_ID.to_string();
-        self.custom_provider_base_url = DS4_BASE_URL.to_string();
-        self.custom_provider_model = DS4_DEFAULT_MODEL.to_string();
-        self.custom_provider_api_key_env.clear();
+        self.prefill_custom_form(
+            DS4_PROVIDER_ID,
+            DS4_BASE_URL,
+            DS4_DEFAULT_MODEL,
+            "",
+            CustomProviderField::ApiKeyEnv,
+        );
     }
 
     fn enter_lm_studio_form(&mut self) {
-        self.stage = Stage::CustomForm;
-        self.custom_provider_field = CustomProviderField::Model;
-        self.custom_provider_id = LM_STUDIO_PROVIDER_ID.to_string();
-        self.custom_provider_base_url = LM_STUDIO_BASE_URL.to_string();
         // LM Studio model identifiers depend on what the user has loaded, so
         // leave the model editable instead of guessing a stale default.
-        self.custom_provider_model.clear();
-        self.custom_provider_api_key_env.clear();
+        self.prefill_custom_form(
+            LM_STUDIO_PROVIDER_ID,
+            LM_STUDIO_BASE_URL,
+            "",
+            "",
+            CustomProviderField::Model,
+        );
     }
 
     fn custom_form_field_mut(&mut self) -> &mut String {
@@ -4104,7 +4130,12 @@ impl ProviderPickerView {
         let provider = self.selected_provider();
         let provider_id = self.selected_provider_id();
         if provider == ApiProvider::Custom && !self.rows[self.selected_idx].is_configured {
-            self.enter_custom_form();
+            // A bundled-descriptor row already knows the host; only the blank
+            // `Custom` placeholder starts from an empty form.
+            match provider_descriptor(&self.rows[self.selected_idx].provider_id) {
+                Some(descriptor) => self.enter_descriptor_form(descriptor),
+                None => self.enter_custom_form(),
+            }
             ViewAction::None
         } else if !self.selected_route_is_valid() {
             ViewAction::None
@@ -4982,6 +5013,74 @@ fn custom_provider_dashboard_rows(
         .collect()
 }
 
+/// Bundled compatible-host descriptors (#6289) that are not yet written to
+/// `[providers.*]`, rendered through the same named-custom-provider row
+/// builder a configured host uses. The descriptor JSON carries the endpoint,
+/// bootstrap model and credential env var, so the row can report `missing
+/// <ENV>` before anything is persisted.
+///
+/// Known limitations: these rows are a setup invitation, never a route. They
+/// are deliberately not `is_configured`, so they sort with the rest of the
+/// unconfigured catalog and stay out of the Configured view; activating one
+/// opens the prefilled custom-provider form, and only that form's submit
+/// writes `[providers.<id>]`. A descriptor whose id or alias already names a
+/// `[providers.*]` entry is dropped here so the configured row is the only
+/// one.
+fn descriptor_dashboard_rows(
+    active: ApiProvider,
+    config: &Config,
+    runtime_status: Option<&ProviderRuntimeStatus>,
+) -> Vec<ProviderDashboardRow> {
+    let configured: Vec<&str> = config
+        .providers
+        .as_ref()
+        .map(|providers| providers.custom.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    bundled_provider_descriptors()
+        .iter()
+        .filter(|descriptor| !configured.iter().any(|id| descriptor.matches(id)))
+        .map(|descriptor| descriptor_dashboard_row(descriptor, active, config, runtime_status))
+        .collect()
+}
+
+fn descriptor_dashboard_row(
+    descriptor: &ProviderDescriptor,
+    active: ApiProvider,
+    config: &Config,
+    runtime_status: Option<&ProviderRuntimeStatus>,
+) -> ProviderDashboardRow {
+    // Project the descriptor into the `[providers.<id>]` shape the user would
+    // write, so endpoint, model and credential reporting all come from the one
+    // existing row builder instead of a second pipeline. `scoped` is a local
+    // clone; nothing here touches the loaded or on-disk config.
+    let mut scoped = config.clone();
+    scoped
+        .providers
+        .get_or_insert_with(Default::default)
+        .custom
+        .insert(
+            descriptor.id.clone(),
+            crate::config::ProviderConfig {
+                kind: Some("openai-compatible".to_string()),
+                base_url: Some(descriptor.base_url.clone()),
+                model: Some(descriptor.default_model.clone()),
+                api_key_env: Some(descriptor.api_key_env.clone()),
+                ..Default::default()
+            },
+        );
+    let mut row = ProviderDashboardRow::from_custom_config_with_runtime_status(
+        &descriptor.id,
+        active,
+        &scoped,
+        runtime_status,
+    );
+    // The host's own name, not `<id> (custom)`: this is a catalog row.
+    row.display_name = descriptor.label.clone();
+    // Nothing is persisted yet, so this is an offer, not a configured host.
+    row.is_configured = false;
+    row
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5213,8 +5312,13 @@ mod tests {
             .collect();
 
         // Catalog surface: one identity per vendor (not dual-wire / plan
-        // kinds). Setup templates are retired (#6289): no extra rows.
-        assert_eq!(names.len(), ApiProvider::catalog().len());
+        // kinds). Setup templates are retired (#6289); the compatible hosts
+        // that replaced them are data rows from
+        // `provider_descriptors.json`, one each, on top of the catalog.
+        assert_eq!(
+            names.len(),
+            ApiProvider::catalog().len() + bundled_provider_descriptors().len()
+        );
         assert!(names.contains(&"DeepSeek"));
         assert!(names.contains(&"Alibaba Cloud Model Studio"));
         // Dialect is wire config — no second MiniMax / Model Studio rows.
@@ -5278,6 +5382,141 @@ mod tests {
             .collect();
         assert_eq!(baseten.len(), 1, "one Baseten row, the configured one");
         assert!(baseten[0].is_configured);
+    }
+
+    /// #6289 moved the compatible hosts into
+    /// `crates/config/assets/provider_descriptors.json` and wired the file to
+    /// nothing, so SenseNova, Baseten, Groq, Cerebras, DashScope and Command
+    /// Code silently lost their `/provider` rows (and AICraft never got one).
+    /// Every bundled descriptor is a findable row again — exactly one each,
+    /// carrying the host's own name, endpoint, bootstrap model and the
+    /// credential env var it is still missing.
+    #[test]
+    fn every_bundled_descriptor_is_a_picker_row_exactly_once() {
+        let _env = crate::test_support::lock_test_env();
+        let _keys: Vec<_> = bundled_provider_descriptors()
+            .iter()
+            .map(|descriptor| crate::test_support::EnvVarGuard::remove(&descriptor.api_key_env))
+            .collect();
+        let config = Config::default();
+        let picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
+        assert!(
+            !bundled_provider_descriptors().is_empty(),
+            "the bundled descriptor file must not be empty"
+        );
+        for descriptor in bundled_provider_descriptors() {
+            let rows: Vec<_> = picker
+                .rows
+                .iter()
+                .filter(|row| row.provider_id == descriptor.id)
+                .collect();
+            assert_eq!(rows.len(), 1, "one row for {}", descriptor.id);
+            let row = rows[0];
+            assert_eq!(row.provider, ApiProvider::Custom, "{}", descriptor.id);
+            assert_eq!(row.display_name, descriptor.label);
+            assert_eq!(row.base_url, descriptor.base_url, "{}", descriptor.id);
+            assert_eq!(
+                row.default_route.logical_model, descriptor.default_model,
+                "{}",
+                descriptor.id
+            );
+            assert!(
+                !row.has_key,
+                "{} has no credential with its env var unset",
+                descriptor.id
+            );
+            assert!(
+                !row.is_configured,
+                "{} is an offer to set up, not a configured host",
+                descriptor.id
+            );
+            assert!(
+                row.messages
+                    .iter()
+                    .any(|message| message.contains(&descriptor.api_key_env)),
+                "{} must name the credential it is missing: {:?}",
+                descriptor.id,
+                row.messages
+            );
+        }
+    }
+
+    /// The bundled offer never doubles a host the user already wrote down:
+    /// `[providers.groq]` keeps its own configured row and nothing else.
+    #[test]
+    fn a_configured_descriptor_id_does_not_duplicate_its_row() {
+        let descriptor = provider_descriptor("groq").expect("groq descriptor");
+        let mut config = Config::default();
+        config
+            .providers
+            .get_or_insert_with(Default::default)
+            .custom
+            .insert(
+                descriptor.id.clone(),
+                crate::config::ProviderConfig {
+                    kind: Some("openai-compatible".to_string()),
+                    base_url: Some(descriptor.base_url.clone()),
+                    model: Some(descriptor.default_model.clone()),
+                    api_key_env: Some(descriptor.api_key_env.clone()),
+                    ..Default::default()
+                },
+            );
+        let picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
+        let rows: Vec<_> = picker
+            .rows
+            .iter()
+            .filter(|row| row.provider_id == descriptor.id)
+            .collect();
+        assert_eq!(rows.len(), 1, "the configured row wins");
+        assert!(rows[0].is_configured);
+        assert_eq!(rows[0].display_name, "groq (custom)");
+    }
+
+    /// Setting a descriptor row up goes through the named-custom-provider
+    /// submit a hand-entered host uses, so `[providers.<id>]` lands with the
+    /// descriptor's endpoint and bootstrap model. The only field left open is
+    /// which env var holds the key, and that is where the cursor starts.
+    #[test]
+    fn activating_a_descriptor_row_submits_it_as_a_named_custom_provider() {
+        let _env = crate::test_support::lock_test_env();
+        let descriptor = provider_descriptor("groq").expect("groq descriptor");
+        let _key = crate::test_support::EnvVarGuard::remove(&descriptor.api_key_env);
+        let config = Config::default();
+        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
+        picker.view = ProviderListView::Catalog;
+        picker.selected_idx = picker
+            .rows
+            .iter()
+            .position(|row| row.provider_id == descriptor.id)
+            .expect("a Groq row");
+
+        assert!(matches!(
+            picker.handle_key(key(KeyCode::Enter)),
+            ViewAction::None
+        ));
+        assert_eq!(picker.stage, Stage::CustomForm);
+        assert_eq!(picker.custom_provider_field, CustomProviderField::ApiKeyEnv);
+        assert_eq!(picker.custom_provider_id, descriptor.id);
+        assert_eq!(picker.custom_provider_base_url, descriptor.base_url);
+        assert_eq!(picker.custom_provider_model, descriptor.default_model);
+
+        match picker.handle_key(key(KeyCode::Enter)) {
+            ViewAction::EmitAndClose(ViewEvent::ProviderPickerCustomProviderSubmitted {
+                provider_id,
+                base_url,
+                model,
+                api_key_env,
+            }) => {
+                assert_eq!(provider_id, descriptor.id);
+                assert_eq!(base_url, descriptor.base_url);
+                assert_eq!(model.as_deref(), Some(descriptor.default_model.as_str()));
+                assert_eq!(
+                    api_key_env.as_deref(),
+                    Some(descriptor.api_key_env.as_str())
+                );
+            }
+            other => panic!("expected custom provider submit event, got {other:?}"),
+        }
     }
 
     #[test]
@@ -7458,6 +7697,13 @@ mod tests {
         // `mode`/base_url, not picker rows. Setup templates are retired
         // (#6289), so every row is a first-class provider.
         let mut expected = ApiProvider::catalog().to_vec();
+        // Plus one `Custom` row per bundled compatible-host descriptor
+        // (#6289) — setup is where those hosts are found and configured.
+        expected.extend(
+            bundled_provider_descriptors()
+                .iter()
+                .map(|_| ApiProvider::Custom),
+        );
         listed.sort_by_key(|provider| provider.as_str());
         expected.sort_by_key(|provider| provider.as_str());
         assert_eq!(
@@ -9533,41 +9779,6 @@ mod tests {
         assert!(
             highlighted_cells >= 32,
             "selected provider row should use a visible continuous highlight"
-        );
-    }
-
-    /// `/provider setup <name>` names the provider, so it opens that
-    /// provider's key entry. Gating it on `!selected_has_key()` silently
-    /// downgraded the command to "open the catalog" for exactly the
-    /// providers already configured — and rotating a key is the commonest
-    /// reason to run it.
-    #[test]
-    fn provider_setup_opens_key_entry_even_when_a_key_is_already_saved() {
-        let config = Config {
-            providers: Some(crate::config::ProvidersConfig {
-                xiaomi_mimo: crate::config::ProviderConfig {
-                    api_key: Some("tp-already-saved".to_string()),
-                    ..Default::default()
-                },
-                ..Default::default()
-            }),
-            ..Config::default()
-        };
-        let picker = ProviderPickerView::new_for_setup(
-            ApiProvider::Deepseek,
-            Some(ApiProvider::XiaomiMimo),
-            &config,
-            None,
-        );
-        assert!(
-            picker.selected_has_key(),
-            "fixture precondition: the target already has a key"
-        );
-        assert_eq!(
-            picker.stage,
-            Stage::KeyEntry,
-            "naming a provider must open its key entry; rotating a key is the \
-             commonest reason to run /provider setup <name>"
         );
     }
 
