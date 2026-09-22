@@ -55,7 +55,9 @@ jobs:
           # not: PR #6371 said "does not close #6184", GitHub put #6184 in
           # closingIssuesReferences, and the P1 closed on merge. A keyword a
           # few words after a negation is always that mistake, so fail first.
-          keyword='(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]*:?[[:space:]]*#[0-9]+'
+          # The reference takes all three forms GitHub closes on: #N,
+          # owner/repo#N and a full issue URL.
+          keyword='(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]*:?[[:space:]]*([[:alnum:]_.-]+/[[:alnum:]_.-]+#|#|https?://github\.com/[[:alnum:]_.-]+/[[:alnum:]_.-]+/issues/)[0-9]+'
           negation="(\\b(not|never|no longer|without)|n't)([[:space:]]+[[:alnum:]'-]+){0,3}[[:space:]]+"
           # `|| true`, not `| head`: under pipefail a SIGPIPE'd grep would turn a
           # hit into a miss.
