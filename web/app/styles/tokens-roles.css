@@ -1,0 +1,176 @@
+/* ---------- root tokens — GPUI theme ---------- */
+/*
+ * The site is a folio read in the product client's light: warm paper at the
+ * surface, warm charcoal at depth. Above the waterline the field is the GPUI
+ * light theme's paper and the ink is its plum-charcoal foreground. Below the
+ * waterline (`.ocean-column`, the footer, every terminal plate) the same
+ * names resolve to the dark charcoal tokens, so a component written once
+ * reads correctly on either side.
+ *
+ * The token NAMES keep their historical shape (`--paper`, `--ink`,
+ * `--indigo`) so every component rule stays diffable; the VALUES resolve
+ * through the `--gpui-*` block below, which now references the generated
+ * Shoreline tokens in ./tokens.css (crates/palette/src/tokens.rs is the
+ * single source — the same constants the GPUI client and the TUI open on).
+ * Only values with no Shoreline slot stay literal: the hover tones, the
+ * accent washes, and the AA-adapted state hues. `--whale-*`/`--light-*`
+ * remain available to anything that genuinely wants the terminal palette.
+ */
+:root {
+  /* --- The GPUI source palette (generated Shoreline slots) --- */
+  --gpui-paper: var(--shoreline-light-surface);      /* light background — warm paper */
+  --gpui-paper-raised: var(--shoreline-light-elevated); /* light card/popover */
+  --gpui-paper-muted: var(--shoreline-light-panel);  /* light muted surface */
+  --gpui-ink: var(--shoreline-light-text-body);      /* light foreground */
+  --gpui-ink-soft: var(--shoreline-light-text-soft);
+  --gpui-ink-mute: var(--shoreline-light-text-muted); /* light muted_foreground */
+  --gpui-edge: var(--shoreline-light-border);        /* light border */
+  --gpui-primary: var(--shoreline-light-action);     /* light primary */
+  --gpui-primary-hover: #00536d;    /* light button_primary_hover — no Shoreline slot */
+  --gpui-accent: #dcebee;           /* light accent — no Shoreline slot */
+  --gpui-selection: var(--shoreline-light-selection); /* light selection */
+
+  --gpui-stage: var(--shoreline-surface);           /* dark background — warm charcoal */
+  --gpui-stage-deep: var(--shoreline-chrome);       /* deepest dark */
+  --gpui-stage-muted: var(--shoreline-panel);       /* dark muted surface */
+  --gpui-stage-raised: var(--shoreline-elevated);   /* raised dark plate */
+  --gpui-stage-ink: var(--shoreline-text-body);     /* dark foreground */
+  --gpui-stage-ink-soft: var(--shoreline-text-muted); /* dark muted_foreground */
+  --gpui-stage-ink-dim: var(--shoreline-text-dim);
+  --gpui-stage-edge: var(--shoreline-border);       /* dark border */
+  --gpui-primary-dark: var(--shoreline-action);     /* dark primary */
+  --gpui-primary-hover-dark: #93cde1; /* dark button_primary_hover — no Shoreline slot */
+  --gpui-on-primary: #102d38;       /* dark primary_foreground — no Shoreline slot */
+  --gpui-accent-dark: #303f48;      /* dark accent — no Shoreline slot */
+  --gpui-selection-dark: var(--shoreline-selection); /* dark selection */
+
+  /* Warm-muted state hues from the GPUI mockups, darkened or lifted per
+     side of the waterline so text uses of them still clear AA. No Shoreline
+     slots: these are site-specific adaptations. */
+  --gpui-tan: #b1a17a;              /* human mark */
+  --gpui-moss: #739686;             /* outcome */
+  --gpui-rust: #aa6f6c;             /* attention */
+
+  /* RGB channel triples backing the Tailwind surface/ink tokens (see
+     tailwind.config.ts). `.ocean-column` and the opt-in docs dark sheet
+     override them for their dark subtree. */
+  --c-paper: var(--shoreline-light-surface-rgb);
+  --c-paper-deep: var(--shoreline-light-panel-rgb);
+  --c-paper-edge: var(--shoreline-light-border-rgb);
+  --c-ink: var(--shoreline-light-text-body-rgb);
+  --c-ink-soft: var(--shoreline-light-text-soft-rgb);
+  --c-ink-mute: var(--shoreline-light-text-muted-rgb);
+  --c-indigo: var(--shoreline-light-action-rgb);
+  --c-indigo-deep: 0 83 109;       /* light primary hover — no Shoreline slot */
+  --c-stage-soft: var(--shoreline-text-muted-rgb);
+  --c-stage-deep: var(--shoreline-chrome-rgb);
+  --c-primary-dark: var(--shoreline-action-rgb);
+
+  /* The sheet. */
+  --paper: var(--gpui-paper);
+  --paper-deep: var(--gpui-paper-muted);
+  --paper-edge: var(--gpui-edge);
+  --paper-card: var(--gpui-paper-raised);
+  --paper-line: var(--gpui-edge);
+  --paper-line-soft: var(--gpui-edge);
+  --ink: var(--gpui-ink);
+  --ink-soft: var(--gpui-ink-soft);
+  --ink-mute: var(--gpui-ink-mute);
+  /* Action on paper is the GPUI light primary; hover sinks to its hover. */
+  --indigo: var(--gpui-primary);
+  --indigo-deep: var(--gpui-primary-hover);
+  --indigo-pale: rgb(var(--c-indigo) / 0.1);
+  --action-on-dark: var(--gpui-primary-dark);
+  /* State inks darkened from the mockup hues so they clear AA on paper:
+     moss is outcome, rust is attention, tan is the human mark. */
+  --ochre: #7d6a3f;
+  --jade: #4e6f61;
+  --seafoam: var(--gpui-moss);
+  --cobalt: var(--gpui-primary);
+  --cyan: var(--gpui-primary); /* reserved for the composer prompt glyph and the release line */
+  --ocean-deep: var(--gpui-stage-deep);
+  --ocean-mid: var(--gpui-stage-muted);
+  --ocean-current: var(--gpui-primary-dark);
+  --ocean-mist: var(--gpui-stage-ink-soft);
+  --ocean-coral: #8f5a56;
+  --signal-gold: #7d6a3f;
+  /* The whale mark is ink on paper; below the waterline it is the light
+     stage foreground. The warm tan stays reserved for human moments. */
+  --mark-ink: var(--gpui-ink);
+  --stage-text: var(--gpui-stage-ink);
+  --stage-soft: var(--gpui-stage-ink-soft);
+  --stage-muted: var(--gpui-stage-ink-dim);
+
+  /* The water column, re-inked in the GPUI dark ramp. */
+  --stage-field-top: var(--gpui-stage-muted); /* surface */
+  --stage-field-mid: var(--gpui-stage); /* the authored 42% break */
+  --stage-field-deep: var(--gpui-stage-deep); /* deep field, and the footer seabed */
+  --stage-ambient: var(--gpui-accent-dark);
+  --stage-composer: var(--gpui-stage-muted); /* the raised input plate */
+  --stage-elevated: var(--gpui-stage-raised);
+  --stage-line: var(--gpui-stage-edge); /* the charcoal border on stage */
+  --stage-hint: var(--gpui-stage-ink-dim);
+  --stage-dim: var(--gpui-stage-ink-soft);
+  --violet: var(--gpui-selection-dark); /* 1px rules only, never text */
+
+  /* Newsreader carries h1/h2; Shannon Sans supplies body and small headings.
+     The historic condensed role keeps its scale and weight, not a second face.
+     IBM Plex Mono and the Unicode fallback stacks retain their own roles. */
+  --font-body: var(--font-shannon-sans);
+  --font-display: var(--font-shannon-sans);
+  --font-cjk: "PingFang SC", "Hiragino Sans GB", "Source Han Serif SC",
+    "Noto Serif CJK SC", serif;
+
+  /* Hairline + code surfaces routed through vars so the dark subtrees can
+     re-ink them without touching every rule. Code plates are always the
+     stage's own deepest field, on either side of the waterline. */
+  --hairline: rgb(var(--c-ink) / 0.16);
+  --code-bg: var(--gpui-stage-deep);
+  --code-fg: var(--gpui-stage-ink);
+
+  /* One site container and one vertical rhythm. Every page gutter aligns
+     with the nav; every hero and section shares a single padding token. */
+  --container: min(100% - 2rem, 76rem);
+  --hero-pad: clamp(3rem, 6vw, 4.75rem);
+  --section-pad: clamp(2.75rem, 5vw, 4rem);
+  color-scheme: light;
+}
+
+/*
+ * Below the waterline. One rule, applied to every dark subtree — the water
+ * column on the homepage, the footer seabed, the opt-in docs dark sheet
+ * (`.docs-portal` is the docs layout root, which also carries `.docs-theme`)
+ * — so a component never needs to know which side of the surface it is on.
+ */
+.ocean-column,
+.site-footer,
+html[data-theme="dark"] .docs-portal {
+  --c-paper: var(--shoreline-surface-rgb);
+  --c-paper-deep: var(--shoreline-panel-rgb);
+  --c-paper-edge: var(--shoreline-border-rgb);
+  --c-ink: var(--shoreline-text-body-rgb);
+  --c-ink-soft: var(--shoreline-text-muted-rgb);
+  --c-ink-mute: var(--shoreline-text-dim-rgb);
+  --c-indigo: var(--shoreline-action-rgb);
+  --c-indigo-deep: 147 205 225; /* lifted primary — hover on dark, no Shoreline slot */
+  --paper: var(--gpui-stage);
+  --paper-deep: var(--gpui-stage-muted);
+  --paper-edge: var(--gpui-stage-edge);
+  --paper-card: var(--gpui-stage-muted);
+  --paper-line: var(--gpui-stage-edge);
+  --paper-line-soft: var(--gpui-stage-edge);
+  --ink: var(--gpui-stage-ink);
+  --ink-soft: var(--gpui-stage-ink-soft);
+  --ink-mute: var(--gpui-stage-ink-dim);
+  --indigo: var(--gpui-primary-dark);
+  --indigo-deep: var(--gpui-primary-hover-dark);
+  --indigo-pale: rgb(var(--c-primary-dark) / 0.14);
+  --ochre: #d6c78f;
+  --jade: #9ec7b2;
+  --cyan: var(--gpui-primary-dark);
+  --ocean-coral: #d08a80;
+  --signal-gold: #d6c78f;
+  --mark-ink: var(--gpui-stage-ink);
+  --hairline: rgb(var(--c-stage-soft) / 0.2);
+  color-scheme: dark;
+}

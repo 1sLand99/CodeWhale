@@ -1,10 +1,11 @@
 import { readFileSync } from "node:fs";
+import { siteCss } from "./site-css";
 
 /**
  * The design palette as the site actually resolves it.
  *
  * `app/tokens.css` is generated from `crates/palette/src/tokens.rs` by
- * `scripts/export-design-tokens.py`, and `globals.css` carries the hand-kept
+ * `scripts/export-design-tokens.py`, and `app/styles/tokens-roles.css` carries the hand-kept
  * `--gpui-*` block that mirrors the GPUI client's theme. Site variables state
  * which token each uses (`--paper: var(--gpui-paper)`) instead of repeating
  * the hex. The contract tests still need the literal color to check parity
@@ -19,7 +20,7 @@ import { readFileSync } from "node:fs";
  */
 const RAW: Record<string, string> = (() => {
   const generated = readFileSync(new URL("../app/tokens.css", import.meta.url), "utf8");
-  const globals = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  const globals = siteCss();
   const raw: Record<string, string> = {};
   for (const match of generated.matchAll(/--((?:whale|light|shoreline-light|shoreline)-[\w-]+):\s*([^;]+);/g)) {
     raw[match[1]] = match[2].trim();
@@ -28,7 +29,7 @@ const RAW: Record<string, string> = (() => {
     raw[match[1]] = match[2].trim();
   }
   if (Object.keys(raw).length === 0) {
-    throw new Error("no palette properties found in tokens.css/globals.css");
+    throw new Error("no palette properties found in tokens.css/styles");
   }
   return raw;
 })();

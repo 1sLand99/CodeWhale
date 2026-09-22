@@ -16,6 +16,7 @@ import { locales } from "./config";
 import { getChrome } from "./dictionaries";
 import { navLinks } from "./links";
 import { isDocsPath, replacePathLocale } from "./path";
+import { siteCss } from "../site-css";
 
 const webRoot = new URL("../../", import.meta.url);
 
@@ -35,7 +36,7 @@ function advance(text: string, fontRem: number): number {
 }
 
 describe("localized chrome keeps a clickable home control", () => {
-  const css = webText("app/globals.css");
+  const css = siteCss();
   const theme = webText("components/theme-toggle.tsx");
 
   it("keeps the wordmark and locale switcher from shrinking to zero", () => {

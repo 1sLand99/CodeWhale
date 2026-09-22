@@ -1,8 +1,9 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { resolveWhale } from "./whale-tokens";
+import { siteCss } from "./site-css";
 
-const CSS = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+const CSS = siteCss();
 
 function selectorBlock(selector: string): string {
   const match = CSS.match(

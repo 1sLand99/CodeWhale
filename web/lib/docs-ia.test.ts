@@ -24,6 +24,7 @@ import {
   secondaryNavLinks as buildSecondaryNavLinks,
 } from "./i18n/links";
 import { SITE_URL } from "./page-meta";
+import { siteCss } from "./site-css";
 
 const webRoot = new URL("../", import.meta.url);
 const repoRoot = new URL("../../", import.meta.url);
@@ -38,7 +39,7 @@ const navLinks = webText("components/nav-links.tsx");
 const mobileMenu = webText("components/mobile-menu.tsx");
 const footer = webText("components/footer.tsx");
 const localeLayout = webText("app/[locale]/layout.tsx");
-const css = webText("app/globals.css");
+const css = siteCss();
 
 describe("docs-map registration", () => {
   it("registers the guide and vocabulary topics as first-party pages", () => {
