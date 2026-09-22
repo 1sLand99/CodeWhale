@@ -199,6 +199,20 @@ tag, packages, checksums and release assets exist.
   tests/verifiers accept a bounded cwd (#6282, #6294, #6296).
 
 ### Changed
+- One base prompt now serves every host. `HEADLESS_BASE_PROMPT` was a second
+  hand-maintained rendering of the same constitution — the drift pattern this
+  repo forbids by convention — so headless runs compose the same `BASE_PROMPT`
+  plus language and output layers that interactive runs do, skipping only host
+  chrome (execution profile, authority recap). Headless and interactive can no
+  longer disagree about what the agent is.
+- `BASE_PROMPT` gains a **Bearing** article, which changes how the agent talks
+  to you: the user is a peer who gets honesty rather than deference, a blocking
+  gate is named plainly instead of dressed up as refusal, bad code is called
+  bad, a crude request is carried out without a lecture, and an apology appears
+  only when there is something to apologize for — not as punctuation. It also
+  states that the request is the whole mandate, so the scope law opens with
+  what is yours to do before it reaches the edge. Every pinned kernel invariant
+  survives verbatim.
 - The ocean reads as animals rather than a mechanism. The school used to
   translate as one rigid body — bob phase and tail pose were staggered per
   fish, but horizontal position was locked to an exact wedge offset — so each
