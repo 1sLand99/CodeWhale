@@ -234,6 +234,7 @@ jobs:
           bash scripts/release/generate-release-body.test.sh
           bash scripts/release/install-dogfood.test.sh
           bash scripts/release/prepare-release.test.sh
+          bash scripts/release/prune-actions-caches.test.sh
           bash scripts/release/require-release-tag-checkout.test.sh
           bash scripts/release/validate-crate-publish-order.test.sh
           python3 scripts/release/publish-crates.test.py
@@ -325,6 +326,10 @@ jobs:
           toolchain: stable
       - uses: mozilla-actions/sccache-action@v0.0.11
         id: sccache
+        # The GitHub Actions cache backend is main-only, mirroring
+        # rust-cache's save-if: PR runs wrote thousands of refs/pull/N
+        # entries that pushed the repo past its 10 GiB cache cap.
+        if: github.ref == 'refs/heads/main'
         continue-on-error: true
       - name: Enable sccache
         if: steps.sccache.outcome == 'success'
@@ -371,7 +376,8 @@ jobs:
         # Cache bootstrap failures (e.g. GitHub 504s fetching the sccache
         # binary) degrade to an uncached build instead of failing product CI.
         continue-on-error: true
-        if: needs.changes.outputs.heavy == 'true'
+        # Main-only GitHub Actions cache backend; see the Safety gate job.
+        if: needs.changes.outputs.heavy == 'true' && github.ref == 'refs/heads/main'
       - name: Enable sccache
         if: needs.changes.outputs.heavy == 'true' && steps.sccache.outcome == 'success'
         shell: bash
@@ -578,6 +584,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: mozilla-actions/sccache-action@v0.0.11
         id: sccache
+        # Main-only GitHub Actions cache backend; see the Safety gate job.
+        if: github.ref == 'refs/heads/main'
         continue-on-error: true
       - name: Enable sccache
         if: steps.sccache.outcome == 'success'
@@ -666,7 +674,8 @@ jobs:
       - uses: mozilla-actions/sccache-action@v0.0.11
         id: sccache
         continue-on-error: true
-        if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
+        # Main-only GitHub Actions cache backend; see the Safety gate job.
+        if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request') && github.ref == 'refs/heads/main'
       - name: Enable sccache
         if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request') && steps.sccache.outcome == 'success'
         shell: bash
@@ -732,8 +741,11 @@ jobs:
       # The Ubuntu lint lane validates non-RSS backlog fields. Run the same
       # source-bound measurement on macOS so loss or growth of RSS evidence
       # fails closed instead of becoming an unsupported-field skip.
+      # Trusted events only: here it reuses the warm self-hosted build. Fork
+      # PRs run it in the separate `macos-budget` job with its own timeout,
+      # because on a cold hosted Mac it pushed Test past 90 minutes.
       - name: Check persistence-backlog RSS budget
-        if: needs.changes.outputs.heavy == 'true' && matrix.os == 'macos-latest'
+        if: needs.changes.outputs.heavy == 'true' && matrix.os == 'macos-latest' && needs.changes.outputs.trusted == 'true'
         run: python3 scripts/check-persistence-backlog-budget.py
       - name: Lockfile drift guard
         if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
@@ -742,8 +754,9 @@ jobs:
         # The eval harness is OS-independent prompt/composition checking;
         # running it once (on the faster macOS leg, warm from the test build)
         # instead of once per desktop OS keeps the coverage while taking
-        # ~2min off the Windows critical path.
-        if: needs.changes.outputs.heavy == 'true' && matrix.os == 'macos-latest'
+        # ~2min off the Windows critical path. Trusted events only; fork PRs
+        # run it in `macos-budget` (see the RSS step above).
+        if: needs.changes.outputs.heavy == 'true' && matrix.os == 'macos-latest' && needs.changes.outputs.trusted == 'true'
         run: cargo run -p codewhale-tui --all-features -- eval
       - name: sccache stats
         if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request') && steps.sccache.outcome == 'success'
@@ -753,6 +766,31 @@ jobs:
       - name: Linux test location (CNB)
         if: needs.changes.outputs.heavy == 'true' && matrix.os == 'ubuntu-latest' && github.event_name != 'workflow_dispatch' && github.event_name != 'pull_request'
         run: echo "Linux workspace tests run on CNB for non-PR release/main pushes; pull requests run directly on Ubuntu."
+
+  macos-budget:
+    # Fork PRs build cold on a GitHub-hosted Mac, and the RSS budget and the
+    # offline eval each rebuild codewhale-tui there. Inside Test that cost
+    # cancelled fork PRs at the 90-minute limit (jobs 106749104684 and
+    # 106235312282) before Test could report. Running both here, in parallel
+    # with Test and under their own timeout, keeps the coverage without
+    # holding the required Test (macos-latest) context hostage. Trusted
+    # events run the same two steps inside Test on the warm build instead.
+    name: macOS budget and eval (fork PR)
+    needs: changes
+    if: needs.changes.outputs.heavy == 'true' && needs.changes.outputs.trusted != 'true'
+    timeout-minutes: 75
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          save-if: false
+      - name: Check persistence-backlog RSS budget
+        run: python3 scripts/check-persistence-backlog-budget.py
+      - name: Run Offline Eval Harness
+        run: cargo run -p codewhale-tui --all-features -- eval
 
   npm-wrapper-smoke:
     name: npm wrapper smoke
@@ -781,7 +819,8 @@ jobs:
       - uses: mozilla-actions/sccache-action@v0.0.11
         id: sccache
         continue-on-error: true
-        if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
+        # Main-only GitHub Actions cache backend; see the Safety gate job.
+        if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request') && github.ref == 'refs/heads/main'
       - name: Enable sccache
         if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request') && steps.sccache.outcome == 'success'
         shell: bash
@@ -847,6 +886,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: mozilla-actions/sccache-action@v0.0.11
         id: sccache
+        # Main-only GitHub Actions cache backend; see the Safety gate job.
+        if: github.ref == 'refs/heads/main'
         continue-on-error: true
       - name: Enable sccache
         if: steps.sccache.outcome == 'success'

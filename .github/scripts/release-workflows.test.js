@@ -83,15 +83,22 @@ const npmSmokeCases = [
   ["main Ubuntu", "push", true, "ubuntu-latest", true, true, false, false, true],
   ["main macOS", "push", true, "macos-latest", true, true, true, false, false],
   ["main Windows", "push", true, "windows-latest", true, true, true, false, false],
+  ["main cache failure", "push", true, "macos-latest", true, false, true, false, false],
   ["light main", "push", false, "ubuntu-latest", true, true, false, false, false],
   ["schedule", "schedule", true, "ubuntu-latest", true, true, false, false, false],
 ];
+// The sccache GitHub Actions backend is main-only, mirroring rust-cache's
+// save-if: pull requests never install or enable it (cache bloat, PLAN D).
+const sccacheInstallStep = "mozilla-actions/sccache-action@v0.0.11";
 for (const [label, event, heavy, os, trusted, cache, execute, linuxDeps, cnb] of npmSmokeCases) {
+  const ref = event === "pull_request" ? "refs/pull/1/merge" : "refs/heads/main";
+  const onMain = ref === "refs/heads/main";
+  const installed = execute && onMain;
   const context = {
     needs: { changes: { outputs: { heavy: String(heavy), trusted: String(trusted) } } },
-    github: { event_name: event },
+    github: { event_name: event, ref },
     matrix: { os },
-    steps: { sccache: { outcome: cache ? "success" : "failure" } },
+    steps: { sccache: { outcome: installed ? (cache ? "success" : "failure") : "skipped" } },
   };
   const jobGuard = npmSmokeJob.match(/^    if: (.+)$/m)?.[1];
   assert.ok(jobGuard, "the wrapper job must retain its event guard");
@@ -104,7 +111,8 @@ for (const [label, event, heavy, os, trusted, cache, execute, linuxDeps, cnb] of
     if (name === "Skip npm wrapper smoke for light change") expected = !heavy;
     else if (name === "Install Linux system dependencies") expected = linuxDeps;
     else if (name === "Linux smoke location") expected = cnb;
-    else if (name === "Enable sccache" || name === "sccache stats") expected = execute && cache;
+    else if (name === sccacheInstallStep) expected = installed;
+    else if (name === "Enable sccache" || name === "sccache stats") expected = installed && cache;
     assert.equal(
       Boolean(jobEnabled && vm.runInNewContext(guard, context)),
       expected,
