@@ -206,11 +206,22 @@ fn local_slash_navigation_does_not_create_rewindable_user_turns() {
 }
 
 #[test]
-fn raw_slash_input_reenables_its_submit_cue_without_another_key() {
+fn raw_slash_input_keeps_a_steady_submit_cue_and_runs_on_enter_without_another_key() {
+    // #6397: the `[↵]` chip follows the draft, not the paste-burst window, so
+    // it is already lit while a raw (non-bracketed) burst's Enter-suppression
+    // window is still open. It is therefore not a signal that Enter will
+    // submit; wait out the window (120ms) with a quiet PTY before pressing
+    // Enter, which must then run the command with no other key.
     let (_workspace, mut tui) = start_with_titles(24, 80, false, &[]);
     tui.send("/mcp").unwrap();
     wait(&mut tui, "enter:run");
     wait(&mut tui, "[↵]");
+    tui.wait_for_idle(Duration::from_millis(300), WAIT).unwrap();
+    assert!(
+        tui.frame().contains("[↵]") && !tui.frame().contains("[·]"),
+        "submit cue did not stay steady: {}",
+        tui.diagnostics()
+    );
     tui.send(keys::key::enter()).unwrap();
     wait(&mut tui, "Extensions");
     tui.shutdown();
