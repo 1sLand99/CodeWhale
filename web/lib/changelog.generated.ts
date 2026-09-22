@@ -45,9 +45,12 @@ export const CHANGELOG: ChangelogRelease[] = [
           "@Lujc0523 — reported /hooks edit splitting keystrokes between the editor and the composer, fixed by pausing the TUI input pump inside the editor handoff (#6165).",
           "@Statter — reported the Gemini /models failure that now surfaces the provider's reason instead of an empty error (#6173).",
           "@sequico — reported the ACP session/new ids that session/load could not resolve, fixed by minting resolvable session ids (#6174).",
-          "@bevis-wong — reported the mid-run engine freeze behind the bounded turn-end foreground-child join, and the resume path that re-ran identical tool-call repair on every load instead of persisting it (#6184, #6185)."
+          "@bevis-wong — reported the mid-run engine freeze behind the bounded turn-end foreground-child join, and the resume path that re-ran identical tool-call repair on every load instead of persisting it (#6184, #6185).",
+          "@gaord — recorded the mode each turn ran in (#6321, harvested), stated the approval posture a task thread starts on (#6386), and rebuilt the runtime-API thread summary in one store pass (#6376).",
+          "@zhuowp — preserved chat roles across compaction, protected user turns on recompaction, and kept the operate contract intact (#6286).",
+          "@h3c-hexin — rate-limit-adaptive subagent launch scheduling: the DynamicGate that replaces fixed spawn pacing under provider throttling (#6055, harvested)."
         ],
-        "itemCount": 9
+        "itemCount": 18
       },
       {
         "heading": "Security",

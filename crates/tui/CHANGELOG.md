@@ -25,6 +25,15 @@ tag, packages, checksums and release assets exist.
 - **[@Statter](https://github.com/Statter)** — reported the Gemini `/models` failure that now surfaces the provider's reason instead of an empty error ([#6173](https://github.com/Hmbown/Codewhale/issues/6173)).
 - **[@sequico](https://github.com/sequico)** — reported the ACP `session/new` ids that `session/load` could not resolve, fixed by minting resolvable session ids ([#6174](https://github.com/Hmbown/Codewhale/issues/6174)).
 - **[@bevis-wong](https://github.com/bevis-wong)** — reported the mid-run engine freeze behind the bounded turn-end foreground-child join, and the resume path that re-ran identical tool-call repair on every load instead of persisting it ([#6184](https://github.com/Hmbown/Codewhale/issues/6184), [#6185](https://github.com/Hmbown/Codewhale/issues/6185)).
+- **[@gaord](https://github.com/gaord)** — recorded the mode each turn ran in ([#6321](https://github.com/Hmbown/Codewhale/pull/6321), harvested), stated the approval posture a task thread starts on ([#6386](https://github.com/Hmbown/Codewhale/pull/6386)), and rebuilt the runtime-API thread summary in one store pass ([#6376](https://github.com/Hmbown/Codewhale/pull/6376)).
+- **[@zhuowp](https://github.com/zhuowp)** — preserved chat roles across compaction, protected user turns on recompaction, and kept the operate contract intact ([#6286](https://github.com/Hmbown/Codewhale/pull/6286)).
+- **[@h3c-hexin](https://github.com/h3c-hexin)** — rate-limit-adaptive subagent launch scheduling: the `DynamicGate` that replaces fixed spawn pacing under provider throttling ([#6055](https://github.com/Hmbown/Codewhale/pull/6055), harvested).
+- **[@asto18089](https://github.com/asto18089)** — co-authored the rate-limit-adaptive launch scheduling work ([#6055](https://github.com/Hmbown/Codewhale/pull/6055)).
+- **[@yrk111222](https://github.com/yrk111222)** — ModelScope provider support, landed through the shared `ChildGrant` fleet authority ([#6299](https://github.com/Hmbown/Codewhale/pull/6299), harvested).
+- **[@xiechimon](https://github.com/xiechimon)** — capped child tool results at capture time rather than at render ([#6294](https://github.com/Hmbown/Codewhale/pull/6294), harvested).
+- **[@VincentCorleone](https://github.com/VincentCorleone)** — defined and implemented the weixin-bridge Quick Start so a first run works from the README alone ([#6170](https://github.com/Hmbown/Codewhale/pull/6170), harvested).
+- **[@Serendo](https://github.com/Serendo)** — fixed the `/config` theme editor exiting the panel on an arrow key ([#6336](https://github.com/Hmbown/Codewhale/pull/6336)).
+- **[@yetuge](https://github.com/yetuge)** — dropped the retired `token_budget` field from the subagent documentation ([#6335](https://github.com/Hmbown/Codewhale/pull/6335)).
 
 ### Security
 - Runtimes can be held to an organization's plugin allowlist. A managed policy

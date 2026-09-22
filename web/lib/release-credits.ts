@@ -22,6 +22,15 @@
 export const RELEASE_CONTRIBUTORS: string[] = [
   "@AdityaVG13",
   "@aboimpinto",
+  "@gaord",
+  "@zhuowp",
+  "@h3c-hexin",
+  "@asto18089",
+  "@yrk111222",
+  "@xiechimon",
+  "@VincentCorleone",
+  "@Serendo",
+  "@yetuge",
 ];
 
 /**
