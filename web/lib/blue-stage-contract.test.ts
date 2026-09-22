@@ -13,7 +13,7 @@ function selectorBlock(selector: string): string {
   return match[1];
 }
 
-// globals.css names the palette token (`--paper: var(--gpui-paper)`)
+// The site stylesheet (app/styles/*.css) names the palette token (`--paper: var(--gpui-paper)`)
 // rather than repeating its hex; resolve one hop through the generated
 // app/tokens.css plus the hand-kept --gpui-* block.
 function cssHexIn(block: string, name: string): string {
