@@ -1902,7 +1902,6 @@ pub(crate) async fn run_event_loop(
         // potentially long engine batch so composer/modal input stays live.
         collect_pending_terminal_events(&terminal_input, &mut pending_terminal_events)?;
         app.maybe_poll_plugin_catalog_idle();
-        app.maybe_poll_plugin_cta();
 
         if drain_remote_control_events(app, config, &engine_handle).await? {
             app.needs_redraw = true;
@@ -6233,7 +6232,7 @@ pub(crate) async fn run_event_loop(
                         }
                         EscapeAction::DismissPluginCta => {
                             app.backtrack.reset();
-                            let _ = app.dismiss_plugin_cta();
+                            let _ = app.dismiss_plugin_cta_for_session();
                         }
                         EscapeAction::ClearInput => {
                             app.backtrack.reset();
