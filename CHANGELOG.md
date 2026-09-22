@@ -27,6 +27,18 @@ tag, packages, checksums and release assets exist.
 - **[@bevis-wong](https://github.com/bevis-wong)** — reported the mid-run engine freeze behind the bounded turn-end foreground-child join, and the resume path that re-ran identical tool-call repair on every load instead of persisting it ([#6184](https://github.com/Hmbown/Codewhale/issues/6184), [#6185](https://github.com/Hmbown/Codewhale/issues/6185)).
 
 ### Security
+- Runtimes can be held to an organization's plugin allowlist. A managed policy
+  document (`managed-policy.json` beside `state.json`, or
+  `CODEWHALE_MANAGED_POLICY_PATH`) lists the plugin ids a Runtime may run,
+  with an `allow_unlisted` flag and a schema version checked exactly like
+  `PluginStateFile`. Enforcement sits inside `apply_state`, so a plugin
+  enabled before the policy arrived — or hand-edited to `enabled: true` —
+  never comes back enabled, and `enable()` re-reads the document so a policy
+  landing after discovery refuses with a reason that names it. A malformed
+  document fails closed rather than degrading to unenforced. With no policy
+  present, behaviour is bit-for-bit what it was. This is the enforcement
+  primitive only; the authority that decides the allowlist is still local,
+  so it binds a cooperating Runtime, not a hostile one.
 
 - Approving an `apply_patch` "for the session" is now scoped to the file you
   approved. The grouping key that scopes a session grant was built by a second,
@@ -40,6 +52,14 @@ tag, packages, checksums and release assets exist.
   than a shared one (#6247).
 
 ### Added
+- A fast lane the router cannot serve now says so. `provider_router_candidates`
+  answers `cheap: None` for any pair its tables do not know, and a
+  `Faster`/`Auto` child on such a pair used to run at the parent's model and
+  price with no receipt and no way to tell "single tier by design" from
+  misconfiguration. The fallback stays — the router must not invent a model —
+  but the spawn receipt now carries a `fallback_note` naming the unserved lane,
+  the same field the pinned-provider fallback already uses. `Inherit` and
+  served lanes stay quiet: this reports a fallback, it does not nag.
 
 - The runtime API tells a replayed submission apart from a new admission:
   `POST /v1/threads/{id}/turns` answers `200` with `idempotent_replay: true`
@@ -160,6 +180,15 @@ tag, packages, checksums and release assets exist.
   tests/verifiers accept a bounded cwd (#6282, #6294, #6296).
 
 ### Changed
+- The ocean reads as animals rather than a mechanism. The school used to
+  translate as one rigid body — bob phase and tail pose were staggered per
+  fish, but horizontal position was locked to an exact wedge offset — so each
+  fish now eases a dot fore and aft of its slot on its own slow period, and the
+  formation breathes while it travels. Bubble emission and the per-animal
+  periods are hash-jittered instead of sharing one clock. Amplitude stays an
+  order of magnitude under the crossing speed, so no fish travels against the
+  school and `facing == velocity` still holds by construction. The species list
+  is unchanged.
 
 - Extensions keeps the exact-content plugin review on the panel: confirming
   a bundle's digest re-reads the inventory, so the row you just reviewed
@@ -256,6 +285,50 @@ tag, packages, checksums and release assets exist.
   source and the published notarized 0.4.0 Mac app.
 
 ### Fixed
+- The bundled OpenAI-compatible hosts have their `/provider` rows back.
+  Retiring the `ProviderSetupTemplate` layer moved SenseNova, Baseten, Groq,
+  Cerebras, DashScope and Command Code into `provider_descriptors.json` and
+  then wired that file to nothing, so six vendors silently lost their picker
+  rows; AICraft never had one. Each descriptor is a row again, built through
+  the same named-custom-provider builder a configured host uses, so endpoint,
+  bootstrap model and "missing `<ENV>`" reporting all come from one place. A
+  descriptor whose id or alias already names a `[providers.*]` entry is
+  dropped, so a configured row stays the only one. These rows are an
+  invitation, not a route: they are not `is_configured`, and only the form's
+  submit writes anything (#6289).
+- A StepFun Step Plan subscription reaches its own catalog. A subscriber's
+  `base_url` is `https://api.stepfun.ai/step_plan/v1`, but only the
+  pay-as-you-go `/v1` host was recognised as official, so the Step Plan host
+  read as a custom endpoint, the catalog was withheld, and the picker showed
+  `0 bundled` and a guessed context window for a route whose console
+  advertises `step-5-preview` at 1M context. The model was in the seed the
+  whole time. All four StepFun hosts — global (.ai) and China (.com), each
+  with a `/v1` and a `/step_plan/v1` surface — are now recognised; a host
+  StepFun does not own stays custom and keyless, since this predicate also
+  scopes credentials.
+- The send cue stopped strobing while you type. `[↵]` flickered between dim
+  `[·]` and bold blue once per character at an ordinary typing pace. The cue
+  was not lying — Enter really does insert a newline during the ~120 ms
+  paste-safety window, which every keystroke re-armed — but that window only
+  exists for terminals that deliver a paste as a burst of ordinary keystrokes.
+  Ghostty, iTerm2, WezTerm, Windows Terminal and Terminal.app now skip the
+  heuristic from the first keystroke instead of waiting for proof by paste.
+- Shift+Tab sets the permission posture in Plan. Tab cycles the mode and
+  Shift+Tab cycles Ask/Auto-Review/Full Access, but Plan refused the second
+  one outright, so the key silently did nothing there and the two axes read as
+  welded together. Plan's read-only guarantee comes from the mode, not the
+  posture — `authority` maps `(Plan, _, Bypass)` to `SandboxPolicy::ReadOnly`
+  and `tool_catalog` gates every write tool on `mode != Plan` — so the cycle
+  now moves the durable Act/Operate baseline while Plan's live policy stays
+  `Suggest`, and a toast says the posture lands when the mode leaves Plan.
+- A steer delivered mid-turn now clears its pending card. The transcript
+  showed the message and the model answered it, while the "sending into this
+  turn" card still listed it as pending: `turn_loop` commits a steer trimmed,
+  but the UI handed the engine the untrimmed text and kept that same copy for
+  matching, so a composer newline made the two differ by whitespace alone and
+  the steer was never promoted to a transcript cell. The text is trimmed once
+  at the source that feeds both, so they are the same string by construction;
+  the match stays an exact `==`.
 
 - A Xiaomi MiMo key no longer fails verification with another vendor's 401.
   The legacy top-level `base_url` is a DeepSeek field, and a route without an
