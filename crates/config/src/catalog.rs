@@ -345,14 +345,22 @@ fn offerings_from_models_dev(
             continue;
         }
         let provider_id = provider_id(raw_id);
-        for model in provider.models.values() {
-            provider_rows.insert((provider_id.clone(), model.id.clone()));
+        for (model_key, model) in &provider.models {
+            let wire_model_id = if model.id.trim().is_empty() {
+                model_key.trim()
+            } else {
+                model.id.trim()
+            };
+            if wire_model_id.is_empty() {
+                continue;
+            }
+            provider_rows.insert((provider_id.clone(), wire_model_id.to_string()));
             if !model.supports_text_chat() {
                 continue;
             }
             out.push(CatalogOffering {
                 provider: provider_id.clone(),
-                wire_model_id: model.id.clone(),
+                wire_model_id: wire_model_id.to_string(),
                 canonical_model: model.base_model.clone(),
                 endpoint_key: "chat".to_string(),
                 default_for_provider: model.default_for_provider,

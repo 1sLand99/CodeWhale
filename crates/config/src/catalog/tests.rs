@@ -236,6 +236,42 @@ fn model_only_rows_yield_to_provider_facts_and_non_chat_exclusions() {
 }
 
 #[test]
+fn provider_map_keys_preserve_precedence_when_model_ids_are_missing() {
+    let catalog = ModelsDevCatalog::parse_json(
+        r#"{
+          "models": {
+            "moonshotai/chat": { "reasoning": true },
+            "moonshotai/voice": {},
+            "moonshotai/explicit": { "reasoning": true }
+          },
+          "providers": {
+            "moonshotai": {
+              "models": {
+                " chat ": { "id": " ", "reasoning": false },
+                "voice": { "modalities": { "output": ["audio"] } },
+                "different-map-key": { "id": " explicit ", "reasoning": false },
+                " ": {}
+              }
+            }
+          }
+        }"#,
+    )
+    .expect("fixture parses");
+
+    for (rows, provider) in [
+        (live_offerings_from_models_dev(&catalog, 1_700), "moonshot"),
+        (bundled_offerings_from_models_dev(&catalog), "moonshotai"),
+    ] {
+        assert_eq!(rows.len(), 2, "provider identities and exclusions win");
+        for wire_model_id in ["chat", "explicit"] {
+            let row = find(&rows, provider, wire_model_id);
+            assert_eq!(row.reasoning, Some(false));
+            assert_eq!(row.canonical_model, None);
+        }
+    }
+}
+
+#[test]
 fn to_offering_projects_routing_identity_and_limits() {
     let rows = bundled_offerings_from_models_dev(&fixture());
     let glm = find(&rows, "zhipuai", "glm-5.2").to_offering();
