@@ -26,20 +26,27 @@ export default {
         cobalt: "var(--cobalt)",
       },
       fontFamily: {
-        // Body and the small-heading sans role share the local Shannon face.
-        // The folio's .font-display class remains Newsreader in globals.css;
-        // mono stays JetBrains Mono. All faces load in app/[locale]/layout.tsx.
-        display: ["var(--font-display)", "ui-sans-serif", "system-ui", "sans-serif"],
-        body: ["var(--font-body)", '"Noto Sans SC"', "ui-sans-serif", "system-ui", "sans-serif"],
-        cjk: ["var(--font-cjk)", '"PingFang SC"', '"Source Han Serif SC"', "serif"],
-        mono: ["var(--font-mono)", '"JetBrains Mono"', "ui-monospace", "Menlo", "monospace"],
-      },
-      letterSpacing: {
-        crisp: "-0.018em",
-        wider: "0.08em",
-        widest: "0.18em",
+        // One face, as GPUI set_theme: every family resolves through the
+        // role stacks in app/styles/tokens-roles.css (Shannon Sans subsets
+        // loaded in app/[locale]/layout.tsx; system mono for code).
+        display: ["var(--font-display)"],
+        body: ["var(--font-body)"],
+        cjk: ["var(--font-cjk)"],
+        mono: ["var(--font-mono)"],
       },
     },
+    // Replaces Tailwind's scale so wide tracking cannot be generated: labels
+    // are sentence case at normal tracking. `wide` stays for Han body copy.
+    letterSpacing: {
+      tighter: "-0.05em",
+      tight: "-0.025em",
+      crisp: "-0.018em",
+      normal: "0em",
+      wide: "0.025em",
+    },
   },
+  // No all-caps anywhere, as in the GPUI app: the `uppercase` utility and
+  // its siblings are not generated.
+  corePlugins: { textTransform: false },
   plugins: [],
 } satisfies Config;

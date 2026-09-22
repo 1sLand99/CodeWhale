@@ -100,7 +100,7 @@
   border: 1px solid var(--indigo-deep);
   border-radius: 5px;
   color: var(--indigo-deep);
-  font-family: var(--font-body), system-ui, sans-serif;
+  font-family: var(--font-body);
   font-size: 0.95rem;
   font-weight: 500;
   line-height: 1;
@@ -156,7 +156,7 @@
   border-top: 1px solid rgb(var(--c-stage-soft) / 0.14);
   background: var(--gpui-stage);
   color: var(--stage-soft);
-  font-family: var(--font-mono), "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 0.75rem;
   line-height: 1.5;
 }
@@ -195,15 +195,13 @@
   padding-bottom: 0.7rem;
   border-bottom: 1px solid rgb(var(--c-stage-soft) / 0.3);
   color: var(--action-on-dark);
-  font-family: var(--font-mono), "IBM Plex Mono", monospace;
+  font-family: var(--font-body);
   font-size: 0.75rem;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
 }
 
 .folio-chapter-title {
   margin: 0.9rem 0 0;
-  font-family: var(--font-serif), "Newsreader", Georgia, serif;
+  font-family: var(--font-display);
   font-size: clamp(1.35rem, 1.9vw, 1.7rem);
   line-height: 1.25;
 }
@@ -245,9 +243,9 @@
 }
 
 .folio-gain-grid h3 {
-  font-family: var(--font-serif), "Newsreader", Georgia, serif;
+  font-family: var(--font-display);
   font-size: 1.45rem;
-  font-weight: 500;
+  font-weight: 600;
   letter-spacing: -0.015em;
   line-height: 1.2;
 }
@@ -271,10 +269,8 @@
   display: block;
   margin-bottom: 1.1rem;
   color: var(--indigo);
-  font-family: var(--font-mono), "IBM Plex Mono", monospace;
+  font-family: var(--font-body);
   font-size: 0.75rem;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
 }
 
 .folio-fact-list {
@@ -291,7 +287,7 @@
 
 .folio-fact-list dt {
   color: var(--ink);
-  font-family: var(--font-mono), "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 0.8rem;
   font-weight: 500;
 }
@@ -397,7 +393,7 @@
 
 .gs-step-index {
   color: var(--indigo);
-  font-family: var(--font-mono), "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 0.75rem;
 }
 
@@ -427,7 +423,7 @@ pre.gs-step-commands {
   display: inline-block;
   margin-top: 0.9rem;
   color: var(--indigo);
-  font-family: var(--font-mono), "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 0.75rem;
 }
 
@@ -445,7 +441,7 @@ pre.gs-step-commands {
   padding: 0.55rem 0.9rem;
   background: var(--ink);
   color: var(--paper);
-  font-family: var(--font-mono), "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 0.75rem;
 }
 
@@ -463,10 +459,8 @@ pre.gs-step-commands {
   gap: 0.4rem;
   padding: 0.2rem 0.55rem;
   border: 1px solid var(--hairline);
-  font-family: var(--font-mono), "IBM Plex Mono", monospace;
-  font-size: 0.7rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  font-family: var(--font-body);
+  font-size: 0.75rem;
   color: var(--ink-soft);
 }
 
@@ -528,7 +522,7 @@ pre.gs-step-commands {
 
 .session-media-caption a {
   color: var(--indigo);
-  font-family: var(--font-mono), "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 0.75rem;
 }
 
@@ -642,9 +636,9 @@ pre.gs-step-commands {
 
 .folio-availability-list dt {
   color: var(--stage-text);
-  font-family: var(--font-serif), "Newsreader", Georgia, serif;
+  font-family: var(--font-display);
   font-size: 1.3rem;
-  font-weight: 500;
+  font-weight: 600;
   line-height: 1.2;
 }
 
@@ -689,7 +683,7 @@ pre.gs-step-commands {
 
 .product-surface-list strong {
   color: var(--stage-text);
-  font-family: var(--font-mono), "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 1rem;
 }
 
@@ -744,8 +738,8 @@ pre.gs-step-commands {
   left: 1.1rem;
   z-index: 1;
   color: var(--cyan);
-  font-family: var(--font-mono), "IBM Plex Mono", ui-monospace, monospace;
-  font-size: 0.78rem;
+  font-family: var(--font-mono);
+  font-size: var(--text-mono);
   line-height: 1.55;
   pointer-events: none;
 }

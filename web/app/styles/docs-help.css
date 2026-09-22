@@ -8,9 +8,7 @@
 
 .release-truth-label {
   color: var(--ink-mute);
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  font-size: 0.7rem;
+  font-size: 0.75rem;
 }
 
 .release-truth a {
@@ -80,7 +78,7 @@
 }
 
 .docs-help-source {
-  font-family: var(--font-mono), "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 0.75rem !important;
   color: var(--ink-mute) !important;
 }
@@ -104,7 +102,7 @@
   min-height: 2.5rem;
   align-items: center;
   color: var(--indigo);
-  font-family: var(--font-mono), "IBM Plex Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 0.75rem;
 }
 

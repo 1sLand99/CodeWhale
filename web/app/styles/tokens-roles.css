@@ -116,13 +116,20 @@
   --stage-dim: var(--gpui-stage-ink-soft);
   --violet: var(--gpui-selection-dark); /* 1px rules only, never text */
 
-  /* Newsreader carries h1/h2; Shannon Sans supplies body and small headings.
-     The historic condensed role keeps its scale and weight, not a second face.
-     IBM Plex Mono and the Unicode fallback stacks retain their own roles. */
-  --font-body: var(--font-shannon-sans);
-  --font-display: var(--font-shannon-sans);
-  --font-cjk: "PingFang SC", "Hiragino Sans GB", "Source Han Serif SC",
-    "Noto Serif CJK SC", serif;
+  /* Type, as GPUI set_theme: Shannon Sans for every role (the Latin and
+     extended subsets load in app/[locale]/layout.tsx), the system monospace
+     stack at 13px for code, prose at 15/23. Han, kana and
+     Hangul fall through to the platform's sans. No serif anywhere. */
+  --font-body: var(--font-shannon-latin), var(--font-shannon-ext), "Noto Sans SC",
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-display: var(--font-body);
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Monaco, Consolas,
+    "Liberation Mono", monospace;
+  --font-cjk: "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC",
+    "Source Han Sans SC", "Microsoft YaHei", sans-serif;
+  --text-mono: 0.8125rem;
+  --text-prose: 0.9375rem;
+  --leading-prose: 1.5334;
 
   /* Hairline + code surfaces routed through vars so the dark subtrees can
      re-ink them without touching every rule. Code plates are always the

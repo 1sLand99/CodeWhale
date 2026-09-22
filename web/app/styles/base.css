@@ -11,7 +11,7 @@ body {
      by the waterline band and the ocean column, never by a page gradient. */
   background: var(--paper);
   color: var(--ink);
-  font-family: var(--font-body), "Noto Sans SC", system-ui, sans-serif;
+  font-family: var(--font-body);
   font-feature-settings: "ss01", "cv11", "tnum";
   max-width: 100%;
   overflow-x: clip;
@@ -23,13 +23,12 @@ body {
 main, header, footer, nav { position: relative; z-index: 1; }
 
 /* ---------- type ---------- */
-/* The folio voice: Newsreader for the big headings, set at book weight with
-   a little negative tracking so it reads as a title page rather than a
-   blog. Small headings use the shared Shannon Sans label face. */
-.font-display { font-family: var(--font-serif), "Newsreader", Georgia, "Times New Roman", serif; font-weight: 500; }
-.font-serif { font-family: var(--font-serif), "Newsreader", Georgia, "Times New Roman", serif; }
-.font-condensed { font-family: var(--font-display), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; font-weight: 600; }
-.font-cjk { font-family: var(--font-cjk), "PingFang SC", "Source Han Serif SC", serif; }
+/* One face, as in the GPUI app: Shannon Sans for headings, body and labels,
+   with a little negative tracking on the big headings. Code uses the system
+   monospace stack. No serif, no all-caps, no wide tracking. */
+.font-display { font-family: var(--font-display); font-weight: 600; }
+.font-condensed { font-family: var(--font-display); font-weight: 600; }
+.font-cjk { font-family: var(--font-cjk); }
 
 /* CJK paragraph rhythm — looser leading, wider tracking for body; tighter for headings */
 .cjk-body {
@@ -48,20 +47,20 @@ main, header, footer, nav { position: relative; z-index: 1; }
 .cjk-prose {
   font-feature-settings: "halt", "pwid";
 }
-.font-mono { font-family: var(--font-mono), "IBM Plex Mono", ui-monospace, monospace; }
+.font-mono { font-family: var(--font-mono); }
 
 /* ---------- the ` · ` chain ---------- */
 /* The single most recognisable thing about the TUI — its header, empty state
    and footer all speak in dot chains — and the grammar the product's voice is
    carried by on this site, on both sides of the waterline. The separator is
    punctuation emitted by CSS, never copy: no locale translates it, and no
-   string is ever concatenated around one. No uppercase and no wide tracking:
+   string is ever concatenated around one. No all-caps and no wide tracking:
    the TUI header has neither, and both are what break Han. */
 .dotline {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  font-family: var(--font-mono), "IBM Plex Mono", ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-size: 0.75rem;
   letter-spacing: 0.02em;
   text-transform: none;
@@ -83,14 +82,14 @@ html[lang="ko"] .dotline {
 }
 
 h1, h2 {
-  font-family: var(--font-serif), "Newsreader", Georgia, "Times New Roman", serif;
-  font-weight: 500;
+  font-family: var(--font-display);
+  font-weight: 600;
   letter-spacing: -0.022em;
   color: var(--ink);
   text-wrap: balance;
 }
 h3, h4 {
-  font-family: var(--font-display), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-family: var(--font-display);
   font-weight: 600;
   letter-spacing: -0.01em;
   color: var(--ink);
@@ -99,9 +98,8 @@ h3, h4 {
 h1 { font-size: clamp(2.5rem, 5.6vw, 5rem); line-height: 1.02; word-break: keep-all; overflow-wrap: anywhere; }
 h2 { font-size: clamp(1.6rem, 2.9vw, 2.6rem); line-height: 1.1; word-break: keep-all; overflow-wrap: anywhere; }
 h3, h4 { font-size: 1.12rem; line-height: 1.25; font-weight: 600; }
-h1.font-display, h2.font-display { font-weight: 500; }
-/* Han has no serif/sans distinction to spend; the CJK stack already leads
-   with a serif. */
+/* Han headings gain nothing from Latin tracking; set them flat and a
+   touch heavier. */
 html[lang="zh"] h1, html[lang="ja"] h1, html[lang="ko"] h1,
 html[lang="zh"] h2, html[lang="ja"] h2, html[lang="ko"] h2 { letter-spacing: 0; font-weight: 600; }
 
@@ -186,13 +184,11 @@ html[lang="ko"] h3 {
   .col-rule > * + * { border-left: 0; border-top: 1px solid var(--hairline); }
 }
 
-/* small-caps eyebrow — muted mono chrome for compact labels */
+/* eyebrow — the 12px muted label, sentence case */
 .eyebrow {
-  font-family: var(--font-mono), "IBM Plex Mono", monospace;
-  font-size: 0.7rem;
+  font-family: var(--font-body);
+  font-size: 0.75rem;
   font-weight: 500;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
   color: var(--ink-mute);
 }
 
@@ -206,7 +202,7 @@ html[lang="ko"] h3 {
   background: var(--paper-deep);
   border: 1px solid var(--stage-line);
   color: var(--ink-mute);
-  font-family: var(--font-cjk), "PingFang SC", serif;
+  font-family: var(--font-cjk);
   font-weight: 700;
   width: 2.6rem;
   height: 2.6rem;
@@ -233,11 +229,9 @@ html[lang="ko"] h3 {
   align-items: center;
   gap: 0.35rem;
   padding: 0.12rem 0.45rem;
-  font-family: var(--font-mono), monospace;
-  font-size: 0.7rem;
+  font-family: var(--font-body);
+  font-size: 0.75rem;
   font-weight: 500;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
   border: 1px solid var(--paper-line);
   background: var(--paper-deep);
   color: var(--ink);
@@ -251,7 +245,7 @@ html[lang="ko"] h3 {
 /* ---------- numbers ---------- */
 .tabular { font-variant-numeric: tabular-nums; }
 .bignum {
-  font-family: var(--font-body), system-ui, sans-serif;
+  font-family: var(--font-body);
   font-weight: 600;
   font-size: 2.2rem;
   line-height: 1;
@@ -266,8 +260,8 @@ pre.code-block {
   max-width: 100%;
   min-width: 0;
   padding: 1rem 1.1rem;
-  font-family: var(--font-mono), monospace;
-  font-size: 0.82rem;
+  font-family: var(--font-mono);
+  font-size: var(--text-mono);
   line-height: 1.55;
   border: 1px solid var(--stage-line);
   border-radius: 6px;
@@ -288,14 +282,14 @@ pre.code-block .comment { color: var(--gpui-stage-ink-dim); }
 pre.code-block .key { color: var(--signal-gold); }
 
 @media (max-width: 640px) {
-  pre.code-block { font-size: 0.76rem; padding: 0.85rem 0.95rem; }
+  pre.code-block { padding: 0.85rem 0.95rem; }
 }
 
 code.inline {
   background: var(--paper-deep);
   border: 1px solid var(--hairline);
   padding: 0.05rem 0.32rem;
-  font-family: var(--font-mono), monospace;
+  font-family: var(--font-mono);
   font-size: 0.85em;
   border-radius: 2px;
 }
@@ -303,7 +297,7 @@ code.inline {
 
 /* ---------- search ---------- */
 .search-input {
-  font-family: var(--font-body), system-ui, sans-serif;
+  font-family: var(--font-body);
   font-size: 1rem;
   padding: 0.75rem 2.5rem 0.75rem 1rem;
   background: var(--paper);

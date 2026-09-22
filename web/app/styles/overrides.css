@@ -57,8 +57,8 @@
 }
 
 /* ---------- docs: the reading sheet ---------- */
-/* Read mode: comprehension first. The article gets a book measure, the serif
-   title voice on its headings, generous leading, and a contents rail that
+/* Read mode: comprehension first. The article gets a book measure, the
+   Shannon Sans heading voice, generous leading, and a contents rail that
    stays put while the sheet scrolls. */
 .docs-content {
   max-width: 46rem;
@@ -71,8 +71,8 @@
 }
 
 .docs-content h2 {
-  font-family: var(--font-serif), "Newsreader", Georgia, serif;
-  font-weight: 500;
+  font-family: var(--font-display);
+  font-weight: 600;
   font-size: clamp(1.5rem, 2.2vw, 1.9rem);
   line-height: 1.15;
   letter-spacing: -0.015em;
@@ -86,8 +86,8 @@
 .docs-content p,
 .docs-content li {
   max-width: 66ch;
-  font-size: 1rem;
-  line-height: 1.7;
+  font-size: var(--text-prose);
+  line-height: var(--leading-prose);
 }
 
 .docs-content > section + section {
@@ -115,15 +115,14 @@
 }
 
 .docs-sidebar-heading {
-  font-family: var(--font-serif), "Newsreader", Georgia, serif;
+  font-family: var(--font-display);
   font-size: 1.05rem;
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .docs-sidebar-category {
-  font-family: var(--font-mono), "IBM Plex Mono", monospace;
-  font-size: 0.68rem;
-  letter-spacing: 0.14em;
+  font-family: var(--font-body);
+  font-size: 0.75rem;
 }
 
 .docs-sidebar-link {
@@ -157,8 +156,8 @@
 }
 
 .docs-result-heading h2 {
-  font-family: var(--font-serif), "Newsreader", Georgia, serif;
-  font-weight: 500;
+  font-family: var(--font-display);
+  font-weight: 600;
   font-size: 1.6rem;
 }
 
@@ -170,9 +169,9 @@
 
 .docs-portal .portal-mark {
   color: var(--ink);
-  font-family: var(--font-serif), "Newsreader", Georgia, serif;
+  font-family: var(--font-display);
   font-size: 1.05rem;
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .release-truth {
@@ -186,8 +185,8 @@
 }
 
 .docs-help-copy h2 {
-  font-family: var(--font-serif), "Newsreader", Georgia, serif;
-  font-weight: 500;
+  font-family: var(--font-display);
+  font-weight: 600;
   font-size: 1.4rem;
 }
 

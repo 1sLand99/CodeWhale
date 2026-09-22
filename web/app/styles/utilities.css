@@ -132,7 +132,7 @@
 
 /* ---------- decorative big CJK in margin ---------- */
 .margin-glyph {
-  font-family: var(--font-cjk), "PingFang SC", "Source Han Serif SC", serif;
+  font-family: var(--font-cjk);
   font-weight: 700;
   color: var(--ink);
   opacity: 0.04;

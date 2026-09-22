@@ -158,7 +158,7 @@
 .connection-copy { min-width: 0; }
 .connection-title { font-size: 0.86rem; font-weight: 600; }
 .connection-body { margin-top: 0.15rem; color: var(--ink-soft); font-size: 0.78rem; line-height: 1.5; }
-.connection-checked { color: var(--ink-mute); font-family: var(--font-mono), "IBM Plex Mono", monospace; font-size: 0.75rem; }
+.connection-checked { color: var(--ink-mute); font-family: var(--font-mono); font-size: 0.75rem; }
 
 .connection-actions { display: flex; gap: 0.5rem; }
 
@@ -170,11 +170,9 @@
   border: 1px solid var(--stage-line);
   border-radius: 5px;
   color: var(--ink);
-  font-family: var(--font-mono), "IBM Plex Mono", monospace;
-  font-size: 0.75rem;
+  font-family: var(--font-body);
+  font-size: 0.8125rem;
   font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
   transition: border-color 150ms ease, background-color 150ms ease, color 150ms ease;
 }
 
