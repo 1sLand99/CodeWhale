@@ -257,6 +257,51 @@ tag, packages, checksums and release assets exist.
 
 ### Fixed
 
+- A Xiaomi MiMo key no longer fails verification with another vendor's 401.
+  The legacy top-level `base_url` is a DeepSeek field, and a route without an
+  endpoint of its own inherited it — so a config carrying
+  `base_url = "https://api.deepseek.com"` made that host the MiMo route's
+  endpoint. The custom-endpoint guard correctly withheld the MiMo credential
+  from a host the route does not own, and the setup wizard's probe, which
+  bypassed the guard, sent the key as `api-key:` — a header DeepSeek ignores.
+  The result was `HTTP 401 Unauthorized: Authentication Fails (governor)`,
+  DeepSeek's *unauthenticated* 401, shown to someone who believed they were
+  testing their own key. Every layer that reads the root now inherits it only
+  when the URL belongs to that provider's own official endpoint family;
+  DeepSeek, which owns the field, is unchanged, and any other host is still
+  expressible on `[providers.xiaomi_mimo] base_url`. Key verification
+  failures now also name the endpoint that was probed, so a wrong endpoint
+  reads as a wrong endpoint instead of a bad key.
+- The Extensions panel can act on the rows it shows. Every plugin now carries
+  its on/off switch — Space, or `e` — including one that has never been
+  reviewed: `/plugin enable` already routes an unreviewed bundle into the
+  exact-capability review and only flips the switch once you confirm the
+  digest, so withholding the control bought no safety and left the shipped
+  `computer-use` bundle reading `disabled` with nothing that could enable it.
+- The panel stopped saying "untrusted". A bundle that is waiting on its
+  capability review now reads `needs review` — `off · needs review` when the
+  switch is off too — and its detail line says what Codewhale is withholding
+  and which key ends the wait, instead of restating an internal pair of
+  booleans. Enter's verb on that row is `review`, not `inspect`.
+- MCP servers say where they live, and mutations write there. Each row is
+  labelled `global`, `project`, or `plugin: <name>`. Enabling, disabling or
+  removing a workspace-scoped server previously edited the user's global file
+  and failed with "MCP server '<name>' not found" on a row the panel had just
+  offered; the write now lands in the file that declares the server, and a
+  plugin-contributed server says it is switched off by disabling its plugin.
+- The permanent "Plugins · Problems: N" footer chip is gone. It could not be
+  acted on from the footer, and its count and the Plugins tab disagreed by
+  construction — the chip counted bundles waiting on a review while the tab's
+  Problems group lists only registry-level diagnostics, so the rows behind the
+  number were never the rows you found. A bundle waiting on a review is a row
+  with an action, and `/plugins` states it per bundle next to the key that
+  resolves it.
+- The Extensions marketplace no longer advertises what it cannot install.
+  Browser Use and the sandbox runtime were pinned rows whose only possible
+  action was `unavailable`; they are removed, along with the browser-driver
+  and sandbox-runtime component vocabulary that existed solely to describe
+  them.
+
 - Configuration parsing keeps the parsed base config boxed, so loading a
   profile no longer carries the full `Config` by value through the
   deserializer and overflows a default 2 MiB test-thread stack; the
