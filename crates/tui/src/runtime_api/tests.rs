@@ -1249,6 +1249,7 @@ async fn build_test_server(
             }
             Arc::new(cell)
         },
+        computer: super::computer_display::ComputerState::from_env(),
         compat_stream_test_hook: overrides.compat_stream_test_hook,
     };
     let app = build_router(state);

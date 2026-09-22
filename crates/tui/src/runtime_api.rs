@@ -98,6 +98,7 @@ use codewhale_protocol::fleet::{
 };
 
 mod auth;
+mod computer_display;
 mod context;
 mod diagnostics;
 mod git;
@@ -216,6 +217,9 @@ pub struct RuntimeApiState {
     /// per-thread managers; this one serves the file view and is built lazily
     /// so a server without LSP use never spawns a language server.
     lsp_manager: Arc<std::sync::OnceLock<Arc<crate::lsp::LspManager>>>,
+    /// The computer this Engine runs on: display socket, human control
+    /// lease, device client tokens and `computer.*` events (§3.3).
+    computer: computer_display::ComputerState,
     #[cfg(test)]
     compat_stream_test_hook: Option<tokio::sync::mpsc::UnboundedSender<CompatStreamTestPoint>>,
 }
@@ -1024,6 +1028,7 @@ pub async fn run_http_server(
         fleet_codewhale_binary: configured_codewhale_binary(),
         mcp_pool: Arc::new(Mutex::new(None)),
         lsp_manager: Arc::new(std::sync::OnceLock::new()),
+        computer: computer_display::ComputerState::from_env(),
         #[cfg(test)]
         compat_stream_test_hook: None,
     };
@@ -1563,6 +1568,12 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .route("/mobile", get(mobile_page))
         .route("/mobile/", get(mobile_page))
         .route("/v1/runtime/info", get(runtime_info))
+        // Authenticates per handler: the display WS also takes a single-use
+        // ticket, and client-token minting is master-token only.
+        .merge(computer_display::router(
+            state.computer.clone(),
+            state.runtime_token.clone(),
+        ))
         .merge(api_routes)
         .layer(cors_layer(&state.cors_origins))
         .with_state(state)
@@ -9720,6 +9731,7 @@ base_url = "http://127.0.0.1:9/v1"
             fleet_codewhale_binary: "unused-test-binary".to_string(),
             mcp_pool: Arc::new(Mutex::new(None)),
             lsp_manager: Arc::new(std::sync::OnceLock::new()),
+            computer: computer_display::ComputerState::from_env(),
             compat_stream_test_hook: None,
         };
         let router = build_router(state.clone());
