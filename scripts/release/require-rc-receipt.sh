@@ -51,5 +51,5 @@ while IFS=$'\t' read -r run_id run_url; do
   echo "::warning::Release-candidate run ${run_url} is green but has no successful Parity job; it is not a receipt." >&2
 done <<< "${runs}"
 
-echo "::error::No green release-candidate run with a passing Parity job for ${sha}. Validate that exact commit first: gh workflow run release-candidate.yml --ref main -f expected_sha=${sha}. Never move a tag to a different SHA to get past this." >&2
+echo "::error::No green release-candidate run with a passing Parity job for ${sha}. Validate that exact commit first: gh workflow run release-candidate.yml --ref main -f expected_sha=${sha} (use the release tag as --ref if main has moved past it), wait for it to go green, then re-run this Release. Never move a tag to a different SHA to get past this." >&2
 exit 1

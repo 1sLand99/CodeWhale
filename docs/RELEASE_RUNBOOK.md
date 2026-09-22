@@ -473,9 +473,13 @@ maintainer approval:
 gh release delete vX.Y.Z --repo Hmbown/CodeWhale --yes --cleanup-tag
 git push origin :refs/tags/vX.Y.Z    # belt-and-suspenders
 git tag -d vX.Y.Z                    # local
-# 3. recut at the fixed HEAD (workspace version unchanged)
+# 3. validate the fixed HEAD first: release.yml refuses a tag without a
+#    green release-candidate receipt (Parity included) for its exact SHA
+gh workflow run release-candidate.yml --repo Hmbown/CodeWhale --ref main \
+  -f expected_sha="$(git rev-parse origin/main)"
+# 4. once that RC run is green, recut at the same HEAD (version unchanged)
 gh workflow run auto-tag.yml --repo Hmbown/CodeWhale --ref main
-# 4. release.yml rebuilds assets; rebuild + reinstall locally from the new tag
+# 5. release.yml rebuilds assets; rebuild + reinstall locally from the new tag
 ```
 
 This is the sanctioned path from "do not delete/move/recreate a release tag
