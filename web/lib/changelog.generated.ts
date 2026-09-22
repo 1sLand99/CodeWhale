@@ -50,7 +50,7 @@ export const CHANGELOG: ChangelogRelease[] = [
           "@zhuowp — preserved chat roles across compaction, protected user turns on recompaction, and kept the operate contract intact (#6286).",
           "@h3c-hexin — rate-limit-adaptive subagent launch scheduling: the DynamicGate that replaces fixed spawn pacing under provider throttling (#6055, harvested)."
         ],
-        "itemCount": 18
+        "itemCount": 19
       },
       {
         "heading": "Security",
