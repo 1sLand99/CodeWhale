@@ -47,7 +47,7 @@ request orchestration explicitly.
 | `automatic` | `true` | Soft-auto orchestration is enabled |
 | `auto_start_read_only` | `true` | Read-only plans may start without a write-approval card |
 | `require_approval_for_writes` | `true` | Gates the plan-approval card for writes / elevated starts |
-| `max_children` / `max_concurrent` / `max_depth` | `1000` / `16` / `5` | Task count, concurrent children, and plan structure ceilings |
+| `max_children` / `max_concurrent` / `max_depth` | `1000` / `16` / `5` | Task count, concurrent children, and plan-structure (IR shape, not spawn depth) ceilings. The Runtime child-delegation budget (default 3, hard ceiling 8) is a separate quantity with an overlapping name; see `docs/SUBAGENTS.md`. |
 | `default_token_budget` | `0` | Shared admission cap for a run and its children; `0` = none — set it or pass `token_budget` on the call to bound spend |
 
 Elevated work (writes, shell beyond read-only, network, secrets, worktrees, high

@@ -167,14 +167,14 @@ have their own name:
   silently do a smaller thing — it reports `surface_not_supported` and names
   the CLI command.
 
-Before v0.9.2, `/fleet status` showed session sub-agents. That reading is gone;
-`/fleet workers` replaces it.
-
 The contract behind this — descriptors, availability reasons, exact-identity
 targets, receipts, typed unknowns, and bounds — is documented in
 [`docs/COMMAND_CONTROL_PLANE.md`](COMMAND_CONTROL_PLANE.md).
 
 ## Authoring agent profiles (`/fleet setup`)
+
+Agents: the durable artifact is the profile TOML described below; the
+key-by-key walkthrough is the human interactive path.
 
 `/fleet setup` (also `/fleet setup edit` / `new`) opens an in-TUI wizard for
 authoring a reusable agent-team profile. Bare `/fleet` and the
@@ -241,13 +241,12 @@ user-named OpenAI-compatible provider configured under `[providers.<name>]`
 such as `lm-studio`; the launch path preserves that id and fails closed if the
 provider is not configured.
 
-Profiles are also how the model-facing `agent` tool selects a route since the
-v0.9.9 schema slim (#5324, #5123): the advertised surface no longer carries
-`model` or `thinking` — a child either runs as a `profile` (whose saved route
-and thinking tier it uses exactly) or inherits the operator's model. Removed
-fields stay parse-accepted for saved transcripts, ACP/MCP clients and fleet
-configs; see docs/SUBAGENTS.md for the advertised 12-field list and the
-compat list.
+Profiles are also how the model-facing `agent` tool selects a route: a child
+either runs as a `profile` (whose saved route and thinking tier it uses
+exactly) or inherits the operator's model. Per-task `model`, `model_strength`,
+and `thinking` remain advertised for unpinned roles; saved profile and manual
+role pins refuse overrides. See docs/SUBAGENTS.md for the advertised field
+list and the parse-accepted compat list.
 
 When a provider is configured, the review step also offers model-assisted
 drafting behind an explicit preview-before-save gate:
@@ -341,7 +340,7 @@ model = "gpt-5.6"
 ```
 
 The workflow crate's older `schema = "exact"`, revision 1 files are migration
-input only. Do not author them for v0.9.11; the selected roster and setup UI
+input only. Do not author revision-1 files; the selected roster and setup UI
 read and write only `schema = "fleet"`, revision 2.
 
 Reasoning is a separate route-execution decision, not fleet identity. The
@@ -392,7 +391,7 @@ call actually carries is spelled by that route's own normalizer, not by the tier
 label: an OpenAI Codex route is asked for `xhigh`, not `max`, and cannot be
 asked for `off` at all.
 
-A v0.9.11 durable fleet CLI receipt keeps the selected profile id in
+A durable fleet CLI receipt keeps the selected profile id in
 `effective_permissions.profile_id`, the resolved semantic role in
 `resolved_route.role`, and the effective Runtime surface in the permission,
 shell, and tool-scope fields. An exact Workflow launch receipt records
@@ -513,7 +512,9 @@ or Runtime inputs applied after the member is resolved. A task can declare:
 
 None of those execution-policy fields becomes part of a fleet identity or an
 alternate member selector. Omitted or zero `max_steps` means no model-step
-ceiling; Codewhale must not synthesize a default step budget. Explicit positive
+ceiling; Codewhale must not synthesize a default step budget. (This is the
+fleet file task-spec convention; model-facing `agent` calls differ — the tool
+parser rejects an explicit zero. See `docs/SUBAGENTS.md`.) Explicit positive
 step limits, timeouts, cancellation, provider safeguards, heartbeats, and
 admission control are enforced independently by the delegated coordinator and
 Runtime.

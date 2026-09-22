@@ -50,8 +50,8 @@ normal turn. Explicit interruption or cancellation remains authoritative.
 it does not remove child budgets or the headless host's deadline.
 
 This doc covers roles and individual worker controls. Use `workflow` to coordinate
-multiple assignments through the same worker runtime; see the sub-agent guidance in
-`crates/tui/src/prompts/text.rs` (`AGENT_MODE`) and the in-line
+multiple assignments through the same worker runtime; see the per-role prompts in
+`crates/tui/src/tools/subagent/mod.rs` (`*_AGENT_INTRO`) and the in-line
 tool description.
 
 ## Role taxonomy
@@ -322,9 +322,9 @@ checkpoints before scope expansion or after repeated failures.
 Good delegation prompt examples:
 
 ```text
-QUESTION: Does PR #3124 introduce release-risk behavior around provider routing?
-SCOPE: PR #3124 diff, linked issue, provider routing tests, docs/PROVIDERS.md.
-ALREADY_KNOWN: Branch is hunter/0.8.62-glm-subagents; workspace version stays 0.8.61.
+QUESTION: Does PR #N introduce release-risk behavior around provider routing?
+SCOPE: PR #N diff, linked issue, provider routing tests, docs/PROVIDERS.md.
+ALREADY_KNOWN: Branch is <release-branch>; workspace version is <live-version>.
 EFFORT: medium
 STOP_CONDITION: Return once you have either one BLOCKER/MAJOR issue or enough evidence for no MAJOR+ issues.
 OUTPUT: VERDICT, EVIDENCE with file:line refs or PR refs, GAPS, NEXT.
@@ -555,7 +555,9 @@ finite budget.
 `max_steps` and `wall_time_secs` are optional per-call limits.
 Each can only narrow the applicable role, operator, parent, and saved-run
 limits. Omission inherits those limits; explicit zero, null, negative, or
-out-of-range values are rejected by the tool parser.
+out-of-range values are rejected by the tool parser (schema minimum is 1).
+Fleet file task-specs use a different convention — there, omitted-or-zero
+means unbounded; see `docs/FLEET.md`.
 
 `max_steps` counts model turns and accepts 1 through 2000. All roles default
 to no model-turn cap unless an operator or ancestor supplies one; the internal
@@ -959,11 +961,11 @@ scout that discovers a project convention worth carrying across
 sessions, or a verifier that learns "this test is flaky".
 
 `remember` takes a `scope` of `global` or `workspace`
-(`crates/tui/src/tools/remember.rs:79-108`) and writes through
-`NativeMemoryStore` to `~/.codewhale/memory/global/MEMORY.md` or
-`~/.codewhale/memory/workspace/<id>/MEMORY.md`. Writes do not go through the
-standard write-approval flow. The legacy single-file `memory.md` path was
-removed in v0.9.4 (remember.rs:165); see `docs/MEMORY.md` for the full layout.
+(`crates/tui/src/tools/remember.rs`, schema enum plus scope handling) and
+writes through `NativeMemoryStore` to `~/.codewhale/memory/global/MEMORY.md`
+or `~/.codewhale/memory/workspace/<id>/MEMORY.md`. Writes do not go through
+the standard write-approval flow. The legacy single-file `memory.md` path was
+removed in v0.9.4; see `docs/MEMORY.md` for the full layout.
 
 ## Implementation notes
 

@@ -4,6 +4,8 @@
 # new worktree actually gets isolated build-dir (+ sccache only when
 # incremental is already off). Tests run under the shared temporary HOME
 # boundary; compiler caches and toolchain homes remain persistent.
+# A libtest run with an explicit filter refuses green when the filter
+# matches zero tests (nextest already fails loud on empty selections).
 #
 # Usage:
 #   scripts/dev-test.sh <area|path> [filter...]
@@ -226,4 +228,36 @@ printf '+ cargo %s\n' "$*"
 # topology once, retaining Cargo's build-dir template and any caller overrides.
 CODEWHALE_CACHE_ROOT=$(codewhale_dev_cache_root)
 export CODEWHALE_CACHE_ROOT
+# libtest exits 0 when a filter matches nothing, which has been mistaken for
+# a pass. With an explicit filter, refuse that green. (nextest already fails
+# loud on an empty selection, so the guard only wraps libtest; shells without
+# pipefail keep the old direct exec.)
+base_args=5
+if [ "$target" = "--test" ]; then
+  base_args=6
+fi
+if [ "$use_nextest" -eq 0 ] && [ "$#" -gt "$base_args" ] && set -o pipefail 2>/dev/null; then
+  tmp_log=$(mktemp -t dev-test-log.XXXXXX)
+  trap 'rm -f "$tmp_log"' EXIT INT TERM
+  set +e
+  "$repo_root/scripts/with-hermetic-test-home.sh" "$repo_root/scripts/dev-cargo.sh" "$@" 2>&1 | tee "$tmp_log"
+  test_status=$?
+  set -e
+  if [ "$test_status" -eq 0 ]; then
+    if grep -q 'test result:' "$tmp_log"; then
+      if grep 'test result:' "$tmp_log" | grep -Eqv '(^|[^0-9])0 passed;'; then
+        : # at least one binary ran tests
+      else
+        printf '%s\n' "dev-test: filter matched zero tests (every binary reports 0 passed); refusing green." >&2
+        test_status=1
+      fi
+    else
+      printf '%s\n' "dev-test: no 'test result:' lines in output; refusing green." >&2
+      test_status=1
+    fi
+  fi
+  rm -f "$tmp_log"
+  trap - EXIT INT TERM
+  exit "$test_status"
+fi
 exec "$repo_root/scripts/with-hermetic-test-home.sh" "$repo_root/scripts/dev-cargo.sh" "$@"

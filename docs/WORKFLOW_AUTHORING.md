@@ -57,7 +57,7 @@ See the Workflow JS sandbox tests for the fail-closed host surface inventory.
 
 ## Language Choice
 
-| Surface | Strength | Tradeoff | v0.8.60 stance |
+| Surface | Strength | Tradeoff | Stance |
 |---|---|---|---|
 | YAML / JSON IR | Simple, reviewable, no runtime | Verbose for generated workflows | Keep as interchange/debug format |
 | JavaScript | Familiar object syntax and easy agent generation | Unsafe if executed as a general runtime | First-class authoring through declarative compile-only subset |

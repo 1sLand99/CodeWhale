@@ -7936,8 +7936,9 @@ impl TurnMailboxBarrier {
     /// Seal the turn mailbox and wait for the drainer *under a bound* (#6184).
     /// The drainer forwards into the event channel with an untimed send; a
     /// UI that has stopped draining parks it, and the flush signal cannot be
-    /// observed from inside that send. Without the bound this await held the
-    /// turn — and every later user message — for hours.
+    /// observed from inside that send. The bound prevents this wait from
+    /// withholding completion; it does not establish the cause of the
+    /// hours-long freeze reported in #6184.
     async fn flush(self) {
         self.mailbox.seal();
         let _ = self.flush_tx.send(());
@@ -7948,15 +7949,10 @@ impl TurnMailboxBarrier {
 
 /// Bound the mailbox drainer's exit (#6184).
 ///
-/// The drainer forwards envelopes into the 256-slot event channel with an
-/// untimed `send().await`; when the UI stops draining that channel the
-/// forward parks, and because `select!` stops observing its other branches
-/// once one is taken, a flush signal sent afterwards is never seen. Awaiting
-/// the drainer then holds the turn with no clock on it. On expiry the
-/// drainer is aborted: a UI that is not draining the event channel cannot
-/// receive these envelopes anyway, so turn liveness wins over best-effort
-/// delivery of the in-flight message — the same trade the bounded child
-/// join above makes for children.
+/// A full event channel with a live, non-draining consumer can park a
+/// forward. The flush signal remains pending until that forward returns.
+/// Abort the drainer on expiry so best-effort delivery cannot indefinitely
+/// withhold turn completion, matching the bounded child join above.
 async fn await_mailbox_drain_bounded(
     drain_handle: &mut tokio::task::JoinHandle<()>,
     grace: Duration,

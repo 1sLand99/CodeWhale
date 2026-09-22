@@ -270,8 +270,8 @@ cargo test --locked -p codewhale-tui --lib core::engine::tests::print_mode_tool_
 
 Check the test names against the source before trusting a green run: `cargo test`
 exits 0 with "0 passed; N filtered out" when a filter matches nothing, so a
-misspelled filter is indistinguishable from a pass. (Three filters printed here
-before v0.9.4 named tests that did not exist.)
+misspelled filter is indistinguishable from a pass. See
+`scripts/check-doc-test-filters.py`, which verifies the filters below.
 
 The provider-free receipt must report the eleven default-active names listed
 above. A separate repository-wide tool count may include deferred, dynamic,
