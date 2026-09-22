@@ -1853,7 +1853,7 @@ operations and four-state To-do list as plain text, running work first. It
 reads the same snapshots as the styled Work surface and owns no parallel
 progress state.
 
-Plan and Act are the everyday visible modes in the UI; Operate is an explicit
+Plan and Work are the everyday visible modes in the UI; Operate is an explicit
 preview entry while its Workflow control surface is still being built. Switch
 between them with `/mode`. For compatibility, older settings files with
 `default_mode = "normal"` still load as `agent`.

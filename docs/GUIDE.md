@@ -323,7 +323,7 @@ Or switch directly:
 
 ```text
 /mode plan
-/mode act
+/mode work
 /mode operate
 ```
 
