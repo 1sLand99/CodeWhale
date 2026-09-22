@@ -2512,21 +2512,6 @@ impl HookExecutor {
     }
 }
 
-/// Classify a tool call for `condition = { type = "tool_category", … }`.
-///
-/// Categories are `shell`, `file_write`, `safe`, and `other`, as documented in
-/// `docs/HOOKS.md`. This must be kept in step with the names the registry
-/// actually registers: before 2026-08-04 the map knew only the retired
-/// `exec_shell`/`write_file`/`read_file` spellings, so EVERY live call fell
-/// through to `other` and a `tool_category` **deny** hook silently never
-/// fired — the exact failure `docs/HOOKS.md` warns about ("a deny gate the
-/// operator believes is armed").
-///
-/// `File`, `Git`, and `Run` are multi-action, so the action decides the
-/// category: a `File` read is `safe` while a `File` write is `file_write`.
-/// An unparseable or absent argument blob is treated as the tool's most
-/// dangerous action, because a gate that cannot see the action must not
-/// assume the harmless one.
 /// Whether `name` is a tool some MCP server owns, as opposed to one of the
 /// built-in MCP helpers the TUI itself registers (`McpPool::is_mcp_tool`
 /// counts both). Server tools are named by `McpPool::mcp_model_tool_name`.
@@ -2542,6 +2527,21 @@ fn is_mcp_server_tool(name: &str) -> bool {
         )
 }
 
+/// Classify a tool call for `condition = { type = "tool_category", … }`.
+///
+/// Categories are `shell`, `file_write`, `safe`, and `other`, as documented in
+/// `docs/HOOKS.md`. This must be kept in step with the names the registry
+/// actually registers: before 2026-08-04 the map knew only the retired
+/// `exec_shell`/`write_file`/`read_file` spellings, so EVERY live call fell
+/// through to `other` and a `tool_category` **deny** hook silently never
+/// fired — the exact failure `docs/HOOKS.md` warns about ("a deny gate the
+/// operator believes is armed").
+///
+/// `File`, `Git`, and `Run` are multi-action, so the action decides the
+/// category: a `File` read is `safe` while a `File` write is `file_write`.
+/// An unparseable or absent argument blob is treated as the tool's most
+/// dangerous action, because a gate that cannot see the action must not
+/// assume the harmless one.
 fn tool_category_for(tool_name: &str, tool_args: Option<&str>) -> &'static str {
     let action = tool_args
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
