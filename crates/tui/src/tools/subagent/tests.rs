@@ -7912,6 +7912,7 @@ fn small_surface_starts_with_core_tools_and_read_only_goal_control() {
             "bash",
             "edit",
             "get_goal",
+            "load_skill",
             "read",
             "todo_write",
             "tool_search",
@@ -8190,6 +8191,7 @@ fn small_surface_depth_cap_removes_only_agent() {
             "bash",
             "edit",
             "get_goal",
+            "load_skill",
             "read",
             "todo_write",
             "tool_search",
@@ -20519,7 +20521,10 @@ const READ_ONLY_CHILD_ENVELOPE_BYTE_CEILING: usize = 89_000;
 /// margin. Re-measured at 87,529B on 2026-09-17, with the bounded Git
 /// fetch / merge_tree verify tools (b89349286f) and this slice's grant
 /// text both in the shared catalog.
-const PARENT_SURFACE_BYTE_CEILING: usize = 88_398;
+// Re-measured when `load_skill` joined the eager catalog: +244B for its
+// name, description and schema, against the `## Skills` index the prefix
+// already carries and a `change:tool_surface` re-pin per skill use avoided.
+const PARENT_SURFACE_BYTE_CEILING: usize = 88_642;
 
 #[tokio::test]
 async fn read_only_child_envelope_stays_within_measured_ceiling() {

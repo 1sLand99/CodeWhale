@@ -10733,7 +10733,7 @@ fn core_primitives_and_todo_write_default_to_eager() {
 
 #[test]
 fn default_active_contract_keeps_discovery_and_core_tools_eager() {
-    const EXPECTED_NATIVE: [&str; 10] = [
+    const EXPECTED_NATIVE: [&str; 11] = [
         "read",
         "write",
         "edit",
@@ -10744,6 +10744,7 @@ fn default_active_contract_keeps_discovery_and_core_tools_eager() {
         "create_goal",
         "get_goal",
         "update_goal",
+        "load_skill",
     ];
     assert_eq!(
         default_active_native_tool_names(),
@@ -10783,7 +10784,15 @@ fn default_active_contract_keeps_discovery_and_core_tools_eager() {
 #[test]
 fn non_yolo_mode_retains_default_defer_policy() {
     let always_load = HashSet::new();
-    for core in ["read", "write", "edit", "bash", "agent", "todo_write"] {
+    for core in [
+        "read",
+        "write",
+        "edit",
+        "bash",
+        "agent",
+        "todo_write",
+        "load_skill",
+    ] {
         assert!(!should_default_defer_tool(core, &always_load));
     }
     for searchable in [
@@ -10791,7 +10800,6 @@ fn non_yolo_mode_retains_default_defer_policy() {
         "File",
         "Git",
         "Run",
-        "load_skill",
         "remember",
         REQUEST_USER_INPUT_NAME,
         "read_file",
@@ -11284,6 +11292,7 @@ async fn runtime_contract_tool_metric_uses_canonical_mode_surfaces() {
         "tool_search",
         "workflow",
         "write",
+        "load_skill",
     ]);
 
     for mode in ["plan", "act", "operate"] {

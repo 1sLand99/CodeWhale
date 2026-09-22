@@ -109,7 +109,8 @@
       "todo_write",
       "create_goal",
       "get_goal",
-      "update_goal"
+      "update_goal",
+      "load_skill"
     ],
     "schemas": {
       "read": [

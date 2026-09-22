@@ -2063,8 +2063,9 @@ mod tests {
         // The real child catalog fixture (not a hand-built tool list) must
         // survive Messages serialization with exactly one canonical `read`
         // entry — no dedup, filter, or sanitizer may drop or duplicate it.
-        // Skills are discoverable through tool_search, so the child wire
-        // catalog carries no load_skill at all.
+        // `load_skill` is eager in DEFAULT_ACTIVE_NATIVE_TOOLS, and children
+        // resolve the same catalog authority the parent does, so it appears
+        // here exactly once like any other default tool.
         let tools = crate::tools::subagent::kimi_general_child_request_tools_fixture();
         assert_eq!(
             tools.iter().filter(|tool| tool.name == "read").count(),
@@ -2076,8 +2077,8 @@ mod tests {
                 .iter()
                 .filter(|tool| tool.name == "load_skill")
                 .count(),
-            0,
-            "load_skill is not part of the child wire catalog"
+            1,
+            "child wire catalog carries one canonical load_skill"
         );
         let client = test_client();
         let mut request = request_with("claude-sonnet-4-6", None, None, None);
@@ -2100,9 +2101,13 @@ mod tests {
             "read keeps a valid object schema: {}",
             reads[0]
         );
-        assert!(
-            serialized.iter().all(|tool| tool["name"] != "load_skill"),
-            "load_skill must not appear on the child Messages wire"
+        assert_eq!(
+            serialized
+                .iter()
+                .filter(|tool| tool["name"] == "load_skill")
+                .count(),
+            1,
+            "exactly one canonical load_skill definition reaches the Messages wire"
         );
     }
 

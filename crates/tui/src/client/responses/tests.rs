@@ -388,8 +388,8 @@ async fn responses_stream_fails_fast_on_non_retryable_provider_error() {
 fn responses_body_serializes_the_child_catalog_without_duplication() {
     // Mirror of the Anthropic contract: the real child catalog fixture
     // maps 1:1 into Responses function tools with one canonical `read` entry.
-    // Skills are discoverable through tool_search, so the child wire catalog
-    // carries no load_skill at all.
+    // `load_skill` is eager in DEFAULT_ACTIVE_NATIVE_TOOLS and children resolve
+    // the same catalog authority, so it maps through exactly once too.
     let tools = crate::tools::subagent::kimi_general_child_request_tools_fixture();
     let mut request = minimal_responses_request();
     request.tools = Some(tools);
@@ -411,9 +411,13 @@ fn responses_body_serializes_the_child_catalog_without_duplication() {
         "read keeps a valid parameters schema: {}",
         reads[0]
     );
-    assert!(
-        serialized.iter().all(|tool| tool["name"] != "load_skill"),
-        "load_skill must not appear on the child Responses wire"
+    assert_eq!(
+        serialized
+            .iter()
+            .filter(|tool| tool["name"] == "load_skill")
+            .count(),
+        1,
+        "exactly one canonical load_skill definition reaches the Responses wire"
     );
 }
 

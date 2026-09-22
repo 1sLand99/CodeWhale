@@ -61,6 +61,16 @@ tag, packages, checksums and release assets exist.
   than a shared one (#6247).
 
 ### Added
+- Skills are reachable in one call. The pinned `## Skills` index told the model
+  to call `load_skill`, but the tool was deferred behind `tool_search`, so it
+  was never in the tool array that instruction was printed beside: using a
+  skill cost a discovery hop, a `name="list"` round trip, and a
+  `change:tool_surface` re-pin of the whole cached prefix. `load_skill` is now
+  eager for the parent and for children — +244B of pinned catalog, measured,
+  against a re-prefill avoided every time a skill is used — and it takes a
+  `query` that searches names and descriptions, so a truncated index no longer
+  forces pulling the whole catalogue to find one skill. The usage line now says
+  to load the matching skill by name before starting the work.
 - A fast lane the router cannot serve now says so. `provider_router_candidates`
   answers `cheap: None` for any pair its tables do not know, and a
   `Faster`/`Auto` child on such a pair used to run at the parent's model and

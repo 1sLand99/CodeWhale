@@ -82,7 +82,8 @@ fn first_turn_surface_is_stable_across_plan_work_and_operate() {
             "todo_write",
             "create_goal",
             "get_goal",
-            "update_goal"
+            "update_goal",
+            "load_skill"
         ]
     );
     let expected = [
@@ -92,6 +93,7 @@ fn first_turn_surface_is_stable_across_plan_work_and_operate() {
         "get_goal",
         "update_goal",
         "edit",
+        "load_skill",
         "read",
         "todo_write",
         "tool_search",

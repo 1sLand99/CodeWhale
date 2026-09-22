@@ -5882,6 +5882,10 @@ command = "echo project"
             ("create_goal", "other"),
             ("get_goal", "other"),
             ("update_goal", "other"),
+            // Reads the skill registry, not caller-named paths, so it keeps
+            // the classification it already had as a deferred tool. Making it
+            // eager must not silently re-gate it.
+            ("load_skill", "other"),
         ];
         for name in crate::core::engine::tool_catalog::DEFAULT_ACTIVE_NATIVE_TOOLS {
             let expected = EXPECTED.iter().find(|(n, _)| n == name).map(|(_, c)| *c);

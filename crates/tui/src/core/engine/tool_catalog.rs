@@ -54,6 +54,12 @@ pub(crate) const DEFAULT_ACTIVE_NATIVE_TOOLS: &[&str] = &[
     // Continuation instructions require these controls. Hiding them behind
     // discovery leaves a model unable to stop the work it was asked to run.
     "create_goal", "get_goal", "update_goal",
+    // The pinned `## Skills` index tells the model to call `load_skill`, so
+    // the tool has to be on the wire for that instruction to be true. Behind
+    // `tool_search` it cost a discovery hop plus a `change:tool_surface`
+    // re-pin every time a skill was used, against ~134 pinned bytes to have
+    // it eager beside the index the prefix already carries.
+    "load_skill",
 ];
 
 const CORE_ACTION_TOOL_FALLBACKS: &[CoreActionToolFallback] = &[

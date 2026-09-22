@@ -96,6 +96,9 @@ thread_local! {
 /// from inside the sandbox, and it says nothing about `/dev` or `/proc`, which
 /// bwrap also replaces. Use it for the sandbox probes; plain `tempfile::tempdir`
 /// stays correct everywhere else.
+// Every caller is `#[cfg(unix)]` (the bwrap probes); on Windows these would
+// be dead code and CI builds tests with `-Dwarnings`.
+#[cfg(unix)]
 pub(crate) fn sandbox_visible_tempdir() -> tempfile::TempDir {
     let root = sandbox_visible_fixture_root();
     tempfile::tempdir_in(root).unwrap_or_else(|error| {
@@ -111,6 +114,7 @@ pub(crate) fn sandbox_visible_tempdir() -> tempfile::TempDir {
 /// already owns and that is outside `/tmp` in every normal layout. A target
 /// directory deliberately placed under `/tmp` would silently reintroduce
 /// #6305, so say so instead of handing back a shadowed path.
+#[cfg(unix)]
 fn sandbox_visible_fixture_root() -> &'static Path {
     static ROOT: OnceLock<PathBuf> = OnceLock::new();
     ROOT.get_or_init(|| {
