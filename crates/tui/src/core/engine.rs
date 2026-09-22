@@ -5815,6 +5815,10 @@ impl Engine {
             .await;
     }
 
+    /// The pressure estimate (`estimate_input_tokens_for_pressure`) over the
+    /// installed history: the number compaction receipts, the refusal trace
+    /// and the context-budget snapshot report, equal to what the gate and the
+    /// meter read. Not the 1.5x overflow guard.
     fn estimated_input_tokens(&mut self) -> usize {
         // Memoized on (session.messages_revision, system-prompt fingerprint).
         // The cache invalidates as soon as either input changes; until then

@@ -262,8 +262,15 @@ def cfg_test_module_files() -> set[Path]:
             text = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
+        # `mod foo;` in `mod.rs`/`lib.rs`/`main.rs` resolves beside the file;
+        # in any other `bar.rs` it resolves under `bar/` (non-mod-rs layout).
+        base = (
+            path.parent
+            if path.name in ("mod.rs", "lib.rs", "main.rs")
+            else path.parent / path.stem
+        )
         for name in CFG_TEST_MOD.findall(text):
-            for candidate in (path.parent / f"{name}.rs", path.parent / name / "mod.rs"):
+            for candidate in (base / f"{name}.rs", base / name / "mod.rs"):
                 if candidate.is_file():
                     excluded.add(candidate.resolve())
     return excluded

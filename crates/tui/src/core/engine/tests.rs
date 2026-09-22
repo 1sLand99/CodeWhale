@@ -15877,7 +15877,7 @@ async fn compaction_completed_reports_complete_post_input_tokens() {
     ))));
 
     let messages_only =
-        crate::compaction::estimate_input_tokens_conservative(&engine.session.messages, None);
+        crate::compaction::estimate_input_tokens_for_pressure(&engine.session.messages, None);
     let expected = engine.estimated_input_tokens();
     assert!(expected > messages_only);
 

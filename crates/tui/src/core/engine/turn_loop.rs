@@ -1182,8 +1182,8 @@ impl Engine {
 
             // The guard measures what the compaction gate measures: the honest
             // estimate, lifted to the provider's last bill plus the growth
-            // since it. `estimated_input_tokens()` carries the ×1.5 overflow
-            // inflation; compared against the honest ceiling it refused at two
+            // since it. The ×1.5-inflated overflow estimate, compared against
+            // the honest ceiling, refused at two
             // thirds of the budget, and emergency compaction — which targets
             // the honest budget — could never satisfy it (#6374). A request
             // the estimate still undercounts is rejected by the provider and

@@ -2189,7 +2189,12 @@ pub(crate) fn context_usage_snapshot_for_window(app: &App, max: u32) -> Option<(
         .last_prompt_tokens
         .map(i64::from)
         .map(|tokens| tokens.max(0));
-    let estimated = estimated_context_tokens(app).map(|tokens| tokens.max(0));
+    // Lift to the provider-billed prompt exactly as the auto-compaction gate,
+    // the context inspector and the `/context` headline do (#5577): a provider
+    // billing above the local estimate must not leave the footer under-showing
+    // the pressure those surfaces report.
+    let billed = app.last_billed_input_tokens.map_or(0, i64::from);
+    let estimated = estimated_context_tokens(app).map(|tokens| tokens.max(0).max(billed));
 
     // Always prefer the estimated current-context size (computed from
     // `app.api_messages`) when we have it. Reported `last_prompt_tokens`

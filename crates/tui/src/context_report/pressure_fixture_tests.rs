@@ -9,7 +9,6 @@
 //! 1.5x-inflated overflow guard, which `/context` shows only as a labeled
 //! secondary line.
 
-use std::path::Path;
 use std::time::Duration;
 
 use codewhale_models::MessageRequest;
@@ -60,9 +59,15 @@ fn resolve(config: &Config, model: &str) -> ResolvedRuntimeRoute {
     resolve_runtime_route(config, config.api_provider(), Some(model)).expect("resolve route")
 }
 
+fn fixture_compaction() -> CompactionConfig {
+    CompactionConfig {
+        token_threshold: THRESHOLD,
+        ..CompactionConfig::default()
+    }
+}
+
 fn turn_op(content: &str, route: &ResolvedRuntimeRoute) -> Op {
-    let mut compaction = CompactionConfig::default();
-    compaction.token_threshold = THRESHOLD;
+    let compaction = fixture_compaction();
     Op::SendMessage(TurnSpec {
         max_output_tokens: None,
         content: content.to_string(),
@@ -168,8 +173,7 @@ fn assert_one_pressure_number(
 
     // Auto-compaction gate.
     let gate = estimate_input_tokens_for_pressure(messages, system);
-    let mut compaction = CompactionConfig::default();
-    compaction.token_threshold = THRESHOLD;
+    let compaction = fixture_compaction();
     assert_eq!(
         compaction_pressure_reached_with_billed(messages, system, &compaction, None),
         gate >= THRESHOLD,
@@ -225,7 +229,45 @@ fn assert_one_pressure_number(
             "{label}: {text}"
         );
     }
+
+    // Once the provider bills a prompt above the local estimate, every
+    // surface lifts to the bill together — the footer meter included.
+    let billed = gate + 7_000;
+    app.last_billed_input_tokens = Some(u32::try_from(billed).expect("fixture bill"));
+    let billed_u64 = billed as u64;
+    assert_eq!(
+        compaction_pressure_reached_with_billed(messages, system, &compaction, Some(billed_u64)),
+        billed >= THRESHOLD,
+        "{label}: billed gate decision"
+    );
+    let billed_preflight = crate::core::turn::TurnContext::new(8)
+        .live_input_tokens_for_compaction(
+            messages,
+            system,
+            Some(u32::try_from(billed).expect("fixture bill")),
+        )
+        .expect("non-empty request");
+    let (billed_meter, _, _) = crate::tui::ui::context_usage_snapshot(app).expect("meter reading");
+    let billed_report = build_context_report(app);
+    assert_eq!(billed_preflight, billed_u64, "{label}: billed preflight");
+    assert_eq!(billed_meter, billed as i64, "{label}: billed meter");
+    assert_eq!(
+        billed_report.active_context_estimated_tokens, billed,
+        "{label}: billed /context headline"
+    );
+    app.last_billed_input_tokens = None;
     gate
+}
+
+/// The `~before → ~after tokens` pair a compaction receipt prints.
+fn receipt_token_pair(message: &str) -> (usize, usize) {
+    let (_, tail) = message.split_once("), ~").expect("receipt token clause");
+    let (before, rest) = tail.split_once(" → ~").expect("receipt arrow");
+    let (after, _) = rest.split_once(" tokens").expect("receipt tokens");
+    (
+        before.parse().expect("before tokens"),
+        after.parse().expect("after tokens"),
+    )
 }
 
 fn streaming(requests: &[MessageRequest]) -> Vec<MessageRequest> {
@@ -234,10 +276,6 @@ fn streaming(requests: &[MessageRequest]) -> Vec<MessageRequest> {
         .filter(|request| request.stream == Some(true))
         .cloned()
         .collect()
-}
-
-fn setup_workspace(path: &Path) {
-    std::fs::write(path.join("README.md"), "verified fixture evidence").expect("write fixture");
 }
 
 #[test]
@@ -253,7 +291,8 @@ fn one_pressure_number_across_mid_turn_compaction_and_route_switch() {
         .expect("runtime");
     runtime.block_on(async {
         let workspace = tempdir().expect("workspace");
-        setup_workspace(workspace.path());
+        std::fs::write(workspace.path().join("README.md"), "verified fixture evidence")
+            .expect("write fixture");
 
         let default_config = Config::default();
         let route_a = resolve(&default_config, crate::config::DEFAULT_TEXT_MODEL);
@@ -368,6 +407,27 @@ fn one_pressure_number_across_mid_turn_compaction_and_route_switch() {
         assert_eq!(window_b, PRIVATE_WINDOW, "meter follows the switched route");
         assert_ne!(window_a, window_b, "the route switch changes the window");
 
-        eprintln!("receipts turn1={:?} readings={readings:?}", turn_one.receipts);
+        // Compaction receipts report the same pressure number: the printed
+        // `after` equals `post_input_tokens`, which is the reading of the
+        // first request sent after that compaction. The printed `before`
+        // crossed the gate's threshold.
+        let shrinks: Vec<usize> = turn_one_requests
+            .windows(2)
+            .enumerate()
+            .filter(|(_, pair)| pair[1].messages.len() < pair[0].messages.len())
+            .map(|(index, _)| index + 1)
+            .collect();
+        assert_eq!(
+            shrinks.len(),
+            turn_one.receipts.len(),
+            "one shrink per receipt: {:?}",
+            turn_one.receipts
+        );
+        for ((message, post_input_tokens), next) in turn_one.receipts.iter().zip(&shrinks) {
+            let (before, after) = receipt_token_pair(message);
+            assert_eq!(Some(after as u64), *post_input_tokens, "{message}");
+            assert_eq!(after, readings[*next], "receipt vs next request: {message}");
+            assert!(before >= THRESHOLD, "receipt before crossed the gate: {message}");
+        }
     });
 }
