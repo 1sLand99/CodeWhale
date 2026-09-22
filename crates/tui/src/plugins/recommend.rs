@@ -139,11 +139,33 @@ pub fn load_marketplace_candidates(
 }
 
 /// Keyword candidates that can still be reviewed: installed-but-idle plugins
-/// and uninstalled catalog entries. Already-active plugins are omitted.
+/// and uninstalled catalog entries. Already-active plugins are omitted, and so
+/// are:
+///
+/// - bundled (`PluginScope::Builtin`) plugins, which are never advertised and
+///   appear passively in `/plugin list` and Extensions only (policy rule 5);
+/// - plugins that cannot run on this machine: an installed bundle whose
+///   `when` gate is not met, or a catalog entry whose `when.os` excludes the
+///   current OS (policy rule 7).
 #[must_use]
 pub fn idle_and_catalog_keyword_matches(
     registry: &PluginRegistry,
     marketplace: &[MarketplaceCandidate],
+) -> Vec<PluginKeywordMatch> {
+    idle_and_catalog_keyword_matches_for_os(registry, marketplace, std::env::consts::OS)
+}
+
+/// True when a catalog entry's `when.os` (if any) admits `os`. Binary gates
+/// are left to install review: the binary may arrive with the plugin.
+fn catalog_os_allows(when: Option<&super::manifest::PluginWhen>, os: &str) -> bool {
+    when.and_then(|when| when.os.as_ref())
+        .is_none_or(|os_list| os_list.iter().any(|entry| entry.eq_ignore_ascii_case(os)))
+}
+
+fn idle_and_catalog_keyword_matches_for_os(
+    registry: &PluginRegistry,
+    marketplace: &[MarketplaceCandidate],
+    os: &str,
 ) -> Vec<PluginKeywordMatch> {
     let installed = registry.list();
     let installed_names = installed
@@ -152,7 +174,10 @@ pub fn idle_and_catalog_keyword_matches(
         .collect::<BTreeSet<_>>();
     let mut out = Vec::new();
     for plugin in &installed {
-        if plugin.active() {
+        if plugin.active()
+            || plugin.scope == super::types::PluginScope::Builtin
+            || !plugin.applicable
+        {
             continue;
         }
         let next_step = if !plugin.trusted() {
@@ -184,7 +209,9 @@ pub fn idle_and_catalog_keyword_matches(
         if candidate.kind != crate::plugins::marketplace::types::MarketplaceEntryKind::Plugin {
             continue;
         }
-        if installed_names.contains(&candidate.name.to_ascii_lowercase()) {
+        if installed_names.contains(&candidate.name.to_ascii_lowercase())
+            || !catalog_os_allows(candidate.when.as_ref(), os)
+        {
             continue;
         }
         let mut keywords = candidate.keywords.clone();
@@ -595,6 +622,138 @@ mod tests {
             },
         );
         assert!(recs.is_empty(), "{recs:?}");
+    }
+
+    /// Policy rule 5: a bundled plugin is never advertised, however well its
+    /// keywords match; it stays visible in `/plugin list` and Extensions.
+    #[test]
+    fn builtin_plugins_are_never_suggested() {
+        let root = TempDir::new().unwrap();
+        let config = crate::plugins::discovery::DiscoveryConfig {
+            workspace: root.path().join("project"),
+            user_plugins_dir: root.path().join("user"),
+            workspace_plugins_dir: root.path().join("workspace"),
+            builtin_plugin_dirs: vec![root.path().join("builtin")],
+            state_path: root.path().join("state.json"),
+        };
+        let bundle = root.path().join("builtin/computer-use");
+        fs::create_dir_all(&bundle).unwrap();
+        fs::write(
+            bundle.join("plugin.toml"),
+            "schema_version = 1\n[plugin]\nname = \"computer-use\"\nversion = \"1.0.0\"\nkeywords = [\"accessibility\", \"screenshot\", \"desktop control\"]\n",
+        )
+        .unwrap();
+        let registry = crate::plugins::discovery::discover_with_config(&config);
+        let plugin = registry.get("computer-use").expect("builtin discovered");
+        assert_eq!(plugin.scope, crate::plugins::types::PluginScope::Builtin);
+        assert!(!plugin.active(), "fixture must be idle to prove the skip");
+
+        let catalog = [marketplace_candidate(
+            "official",
+            "computer-use",
+            &["desktop control"],
+        )];
+        assert!(idle_and_catalog_keyword_matches(&registry, &catalog).is_empty());
+        for draft in [
+            "improve accessibility",
+            "take a screenshot",
+            "fix the accessibility of the login form",
+            "use desktop control to click the button",
+        ] {
+            assert_eq!(
+                match_plugin_for_draft(draft, &registry, &catalog, &BTreeSet::new()),
+                None,
+                "{draft}"
+            );
+        }
+        assert!(lookup_reviewable_plugin("computer-use", &registry, &catalog).is_none());
+    }
+
+    /// Policy rule 6: generic words never trigger an offer, even for a
+    /// non-bundled plugin that declares them.
+    #[test]
+    fn generic_words_do_not_suggest_an_installed_plugin() {
+        let _lock = lock_test_env();
+        let root = TempDir::new().unwrap();
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", root.path().join("home"));
+        write_keyword_bundle(
+            root.path(),
+            "chromewhale",
+            "Codewhale in your own Chrome",
+            &["chrome", "browser", "extension", "side-panel", "web"],
+        );
+        let registry = crate::plugins::PluginDiscoveryContext::capture_pre_dotenv()
+            .registry_for_workspace(root.path());
+        let catalog = [marketplace_candidate(
+            "official",
+            "screen-tools",
+            &["accessibility", "screenshot", "automation"],
+        )];
+        for draft in [
+            "improve accessibility",
+            "take a screenshot",
+            "open chrome and check the web page",
+            "write a browser extension",
+            "add automation to the docs site",
+        ] {
+            assert_eq!(
+                match_plugin_for_draft(draft, &registry, &catalog, &BTreeSet::new()),
+                None,
+                "{draft}"
+            );
+        }
+        // Specific terms still work.
+        assert_eq!(
+            match_plugin_for_draft("open the side-panel", &registry, &catalog, &BTreeSet::new())
+                .map(|matched| matched.name),
+            Some("chromewhale".to_string())
+        );
+    }
+
+    /// Policy rule 7: only offer what can run here.
+    #[test]
+    fn plugins_for_another_os_are_not_suggested() {
+        let _lock = lock_test_env();
+        let root = TempDir::new().unwrap();
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", root.path().join("home"));
+        let registry = crate::plugins::PluginRegistry::empty(root.path());
+        let mut mac_only = marketplace_candidate("official", "mac-control", &["mac control"]);
+        mac_only.when = Some(crate::plugins::manifest::PluginWhen {
+            os: Some(vec!["macos".to_string()]),
+            binaries: None,
+        });
+        let catalog = std::slice::from_ref(&mac_only);
+        assert!(idle_and_catalog_keyword_matches_for_os(&registry, catalog, "linux").is_empty());
+        assert!(idle_and_catalog_keyword_matches_for_os(&registry, catalog, "windows").is_empty());
+        assert_eq!(
+            idle_and_catalog_keyword_matches_for_os(&registry, catalog, "macos").len(),
+            1,
+            "control: the same entry is offered on macOS"
+        );
+
+        // An installed bundle whose `when` gate fails here is not offered.
+        let bundle = root.path().join(".codewhale/plugins/elsewhere");
+        fs::create_dir_all(&bundle).unwrap();
+        let other_os = if cfg!(target_os = "windows") {
+            "linux"
+        } else {
+            "windows"
+        };
+        fs::write(
+            bundle.join("plugin.toml"),
+            format!(
+                "schema_version = 1\n[plugin]\nname = \"elsewhere\"\nversion = \"1.0.0\"\nkeywords = [\"elsewhere\"]\n[when]\nos = [\"{other_os}\"]\n"
+            ),
+        )
+        .unwrap();
+        let registry = crate::plugins::PluginDiscoveryContext::capture_pre_dotenv()
+            .registry_for_workspace(root.path());
+        let plugin = registry.get("elsewhere").expect("bundle discovered");
+        assert!(!plugin.applicable);
+        assert_eq!(
+            match_plugin_for_draft("run elsewhere", &registry, &[], &BTreeSet::new()),
+            None
+        );
     }
 
     /// A skill entry in a catalog is installable but is never a plugin
