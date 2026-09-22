@@ -64,6 +64,12 @@ describe("site-wide theme contract", () => {
     expect(selectorBlock(PINNED_DARK)).toMatch(/color-scheme:\s*dark/);
   });
 
+  it("re-inks the navy nav wordmark under both dark selectors", () => {
+    // wordmark.svg is fixed #142352 ink (~1.2:1 on the dark charcoal).
+    expect(CSS).toMatch(/:root:not\(\[data-theme="light"\]\) \.paper-wordmark-logo\s*\{\s*filter:/);
+    expect(CSS).toMatch(/:root\[data-theme="dark"\] \.paper-wordmark-logo\s*\{\s*filter:/);
+  });
+
   it("shows the toggle on every page with one system|light|dark storage contract", () => {
     const toggle = readFileSync(new URL("../components/theme-toggle.tsx", import.meta.url), "utf8");
     expect(toggle).not.toMatch(/isDocsPath|return null/);

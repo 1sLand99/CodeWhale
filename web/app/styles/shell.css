@@ -71,6 +71,18 @@
   object-position: left center;
 }
 
+/* The traced wordmark is navy ink (#142352), which disappears on the dark
+   scheme's charcoal. Under dark (OS or pinned) it is re-inked to the light
+   stage foreground; the footer already uses the reversed cut. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .paper-wordmark-logo {
+    filter: brightness(0) invert(0.93);
+  }
+}
+:root[data-theme="dark"] .paper-wordmark-logo {
+  filter: brightness(0) invert(0.93);
+}
+
 .paper-star-badge {
   font-family: var(--font-body);
   font-size: 0.75rem;
