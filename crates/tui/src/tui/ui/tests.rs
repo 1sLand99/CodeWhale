@@ -14131,22 +14131,262 @@ fn turn_liveness_keeps_max_duration_exec_shell_wait_alive_with_heartbeat() {
     assert!(app.status_toasts.is_empty());
 }
 
+fn stall_heartbeat(
+    phase: crate::core::engine::turn_heartbeat::TurnPhase,
+    bound: Option<Duration>,
+    stall: Option<crate::core::engine::turn_heartbeat::StallReport>,
+) -> crate::core::engine::turn_heartbeat::HeartbeatSnapshot {
+    crate::core::engine::turn_heartbeat::HeartbeatSnapshot {
+        phase,
+        since_progress: Duration::from_secs(1),
+        bound,
+        stall,
+    }
+}
+
+fn stall_report(phase: &str) -> crate::core::engine::turn_heartbeat::StallReport {
+    crate::core::engine::turn_heartbeat::StallReport {
+        source: "engine",
+        phase: phase.to_string(),
+        detail: Some("mock / model".to_string()),
+        turn_id: Some("turn-1".to_string()),
+        provider_request: None,
+        since_progress: Duration::from_secs(360),
+        bound: Some(Duration::from_secs(330)),
+    }
+}
+
+fn stall_records(dir: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[test]
-fn turn_liveness_respects_stream_idle_budget_for_quiet_model_waits() {
+fn stall_ui_watchdog_bound_is_decoupled_from_chunk_timeout() {
     let mut app = create_test_app();
-    let started_at = Instant::now();
-    app.is_loading = true;
-    app.runtime_turn_status = Some("in_progress".to_string());
-    app.stream_chunk_timeout_secs = 900;
-    app.turn_started_at = Some(started_at);
-    app.turn_last_activity_at = Some(started_at);
-    let now = started_at + TURN_STALL_WATCHDOG_TIMEOUT + Duration::from_secs(31);
+    app.stream_chunk_timeout_secs = crate::config::DEFAULT_STREAM_CHUNK_TIMEOUT_SECS;
+    let default_chunk = Duration::from_secs(crate::config::DEFAULT_STREAM_CHUNK_TIMEOUT_SECS);
+    assert!(turn_stall_watchdog_timeout(&app) < default_chunk);
+    let bound = turn_stall_watchdog_timeout(&app);
+    app.stream_chunk_timeout_secs = 3600;
+    assert_eq!(turn_stall_watchdog_timeout(&app), bound, "no longer tracks the chunk budget");
+}
 
-    let recovered = reconcile_turn_liveness(&mut app, now, false);
+#[test]
+fn turn_liveness_defers_to_engine_heartbeat_for_quiet_model_waits() {
+    use crate::core::engine::turn_heartbeat::TurnPhase;
+    let quiet_turn = || {
+        let mut app = create_test_app();
+        let started_at = Instant::now();
+        app.is_loading = true;
+        app.runtime_turn_status = Some("in_progress".to_string());
+        app.turn_started_at = Some(started_at);
+        app.turn_last_activity_at = Some(started_at);
+        (app, started_at + TURN_STALL_WATCHDOG_TIMEOUT + Duration::from_secs(31))
+    };
 
-    assert!(!recovered);
+    // A live, bounded model wait the engine has not flagged: the UI defers.
+    let (mut app, now) = quiet_turn();
+    let live = stall_heartbeat(TurnPhase::Streaming, Some(Duration::from_secs(330)), None);
+    assert!(!reconcile_turn_liveness_with(&mut app, now, false, Some(&live)));
     assert!(app.is_loading);
     assert!(app.status_toasts.is_empty());
+
+    // The engine reported that wait overdue: the UI recovers.
+    let (mut app, now) = quiet_turn();
+    let stalled = stall_heartbeat(
+        TurnPhase::Streaming,
+        Some(Duration::from_secs(330)),
+        Some(stall_report("while streaming the model response")),
+    );
+    assert!(reconcile_turn_liveness_with(&mut app, now, false, Some(&stalled)));
+    assert!(!app.is_loading);
+
+    // The engine is idle (a lost completion): the UI recovers.
+    let (mut app, now) = quiet_turn();
+    let idle = stall_heartbeat(TurnPhase::Idle, None, None);
+    assert!(reconcile_turn_liveness_with(&mut app, now, false, Some(&idle)));
+}
+
+#[test]
+fn stall_engine_report_shows_phase_and_held_queue() {
+    use crate::core::engine::turn_heartbeat::TurnPhase;
+    let mut app = create_test_app();
+    app.is_loading = true;
+    app.runtime_turn_status = Some("in_progress".to_string());
+    app.turn_started_at = Some(Instant::now());
+    app.queue_message(QueuedMessage::new("follow-up".into(), None));
+    let stalled = stall_heartbeat(
+        TurnPhase::Streaming,
+        Some(Duration::from_secs(330)),
+        Some(stall_report("while streaming the model response")),
+    );
+
+    reconcile_turn_liveness_supervised(&mut app, Instant::now(), &stalled);
+    reconcile_turn_liveness_supervised(&mut app, Instant::now(), &stalled);
+
+    let stall_toasts: Vec<_> = app
+        .status_toasts
+        .iter()
+        .filter(|toast| toast.text.contains("Turn stalled while streaming"))
+        .collect();
+    assert_eq!(stall_toasts.len(), 1, "one toast per stall episode");
+    assert!(stall_toasts[0].text.contains("Esc to cancel and retry"));
+    assert!(stall_toasts[0].text.contains("1 queued message is held"));
+}
+
+/// Fault injection: a sub-agent still marked Running long past every child's
+/// wall budget (its AgentComplete was lost) no longer vetoes recovery; the
+/// recovery leaves a log line, a `crashes/` record naming the suspect, and a
+/// UI status.
+#[test]
+fn stall_parked_subagent_past_bound_is_suspect_not_a_veto() {
+    use crate::core::engine::turn_heartbeat::{TurnPhase, set_test_stall_record_dir};
+    let dir = tempfile::tempdir().expect("tempdir");
+    set_test_stall_record_dir(Some(dir.path().to_path_buf()));
+
+    let mut app = create_test_app();
+    let now = Instant::now();
+    app.is_loading = true;
+    app.runtime_turn_status = Some("in_progress".to_string());
+    app.runtime_turn_id = Some("turn-with-ghost".to_string());
+    let last_activity = now
+        .checked_sub(TURN_STALL_WATCHDOG_TIMEOUT + Duration::from_secs(1))
+        .expect("monotonic clock has run long enough");
+    app.turn_started_at = Some(last_activity);
+    app.turn_last_activity_at = Some(last_activity);
+    let mut ghost = make_subagent("agent_ghost", crate::tools::subagent::SubAgentStatus::Running);
+    ghost.started_at = now.checked_sub(SUBAGENT_SUSPECT_AFTER + Duration::from_secs(1));
+    assert!(ghost.started_at.is_some(), "monotonic clock has run long enough");
+    app.subagent_cache = vec![ghost];
+    let idle = stall_heartbeat(TurnPhase::Idle, None, None);
+
+    assert_eq!(suspect_running_agents(&app, now), vec!["agent_ghost".to_string()]);
+    assert_eq!(live_running_agent_count(&app, now), 0);
+    assert!(reconcile_turn_liveness_supervised(&mut app, now, &idle));
+    assert!(!app.is_loading);
+    assert!(
+        app.status_toasts
+            .iter()
+            .any(|toast| toast.text.contains("Turn stalled")),
+        "UI status names the stall"
+    );
+    let records = stall_records(dir.path());
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert!(records[0].contains("Kind: turn-stall"));
+    assert!(records[0].contains("agent_ghost"), "{}", records[0]);
+    assert!(records[0].contains("Turn: turn-with-ghost"));
+
+    // A fresh Running child still holds the turn open.
+    let mut app = create_test_app();
+    app.is_loading = true;
+    app.runtime_turn_status = Some("in_progress".to_string());
+    app.turn_started_at = Some(last_activity);
+    app.turn_last_activity_at = Some(last_activity);
+    let mut fresh = make_subagent("agent_fresh", crate::tools::subagent::SubAgentStatus::Running);
+    fresh.started_at = Some(now);
+    app.subagent_cache = vec![fresh];
+    assert!(!reconcile_turn_liveness_supervised(&mut app, now, &idle));
+    assert!(app.is_loading);
+    set_test_stall_record_dir(None);
+}
+
+#[test]
+fn stall_recovery_hands_held_queued_message_back_to_composer() {
+    let mut app = create_test_app();
+    let now = Instant::now();
+    app.is_loading = true;
+    app.runtime_turn_status = Some("in_progress".to_string());
+    let last_activity = now
+        .checked_sub(TURN_STALL_WATCHDOG_TIMEOUT + Duration::from_secs(1))
+        .expect("monotonic clock has run long enough");
+    app.turn_started_at = Some(last_activity);
+    app.queue_message(QueuedMessage::new("first follow-up".into(), None));
+    app.queue_message(QueuedMessage::new("second follow-up".into(), None));
+
+    assert!(reconcile_turn_liveness(&mut app, now, false));
+
+    assert_eq!(app.input, "second follow-up");
+    assert!(app.queued_draft.is_some());
+    assert_eq!(app.queued_messages.len(), 1);
+    let toast = app.status_toasts.back().expect("recovery toast");
+    assert!(toast.text.contains("back in the composer"), "{}", toast.text);
+    assert!(toast.text.contains("1 more queued message"), "{}", toast.text);
+}
+
+/// Fault injection: a dispatch whose route planning / engine admission never
+/// finishes is failed back within its bound, restores the message, and leaves
+/// a stall record.
+#[tokio::test]
+async fn stall_dispatch_task_overrun_reports_and_restores_message() {
+    use crate::core::engine::turn_heartbeat::set_test_stall_record_dir;
+    let dir = tempfile::tempdir().expect("tempdir");
+    set_test_stall_record_dir(Some(dir.path().to_path_buf()));
+    let mut app = create_test_app();
+    let config = Config::default();
+    let prepare = prepare_user_dispatch(
+        &mut app,
+        &config,
+        QueuedMessage::new("never admitted".into(), None),
+    )
+    .expect("prepare");
+    app.dispatch_in_flight = true;
+
+    let bound = Duration::from_millis(100);
+    let apply = tokio::time::timeout(
+        Duration::from_secs(10),
+        super::dispatch::supervised_dispatch(
+            prepare,
+            DispatchRecovery::Immediate,
+            bound,
+            |_prepare, _recovery| std::future::pending(),
+        ),
+    )
+    .await
+    .expect("supervision returns within the bound");
+    let engine = mock_engine_handle();
+    let error = apply(&mut app, &engine.handle, &config).expect_err("dispatch fails back");
+
+    assert!(error.to_string().contains("dispatch stalled"), "{error}");
+    assert!(!app.dispatch_in_flight);
+    assert_eq!(app.input, "never admitted", "message restored to the composer");
+    let records = stall_records(dir.path());
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert!(records[0].contains("while dispatching the message"));
+    set_test_stall_record_dir(None);
+}
+
+#[tokio::test]
+async fn stall_dispatch_task_panic_still_reports_back() {
+    let mut app = create_test_app();
+    let config = Config::default();
+    let prepare = prepare_user_dispatch(
+        &mut app,
+        &config,
+        QueuedMessage::new("panicking dispatch".into(), None),
+    )
+    .expect("prepare");
+    app.dispatch_in_flight = true;
+
+    let apply = super::dispatch::supervised_dispatch(
+        prepare,
+        DispatchRecovery::Immediate,
+        Duration::from_secs(60),
+        |_prepare, _recovery| async { panic!("route planner exploded") },
+    )
+    .await;
+    let engine = mock_engine_handle();
+    let error = apply(&mut app, &engine.handle, &config).expect_err("dispatch fails back");
+
+    assert!(error.to_string().contains("route planner exploded"), "{error}");
+    assert!(!app.dispatch_in_flight);
+    assert_eq!(app.input, "panicking dispatch");
 }
 
 #[test]

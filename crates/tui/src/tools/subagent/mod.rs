@@ -268,7 +268,7 @@ fn read_bounded_resident_context(
 /// the unbounded sentinel used by the default agent loop.
 const MAX_SUBAGENT_STEPS: u32 = 2_000;
 /// Default wall-clock budget for one child run, including model and tool work.
-const DEFAULT_CHILD_WALL_TIME: Duration = Duration::from_secs(30 * 60);
+pub(crate) const DEFAULT_CHILD_WALL_TIME: Duration = Duration::from_secs(30 * 60);
 const MAX_CHILD_WALL_TIME: Duration = Duration::from_secs(24 * 60 * 60);
 /// Default wall-clock budget for a single sub-agent tool execution. The active
 /// value travels on `SubAgentRuntime::tool_timeout` so a long-but-legitimate

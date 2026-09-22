@@ -4293,7 +4293,8 @@ pub(crate) async fn run_event_loop(
         }
 
         let has_running_agents = running_agent_count(app) > 0;
-        if reconcile_turn_liveness(app, Instant::now(), has_running_agents) {
+        let turn_heartbeat = engine_handle.turn_heartbeat().snapshot();
+        if reconcile_turn_liveness_supervised(app, Instant::now(), &turn_heartbeat) {
             app.needs_redraw = true;
         }
         maybe_throttled_recovery_snapshot(app, Instant::now(), &mut last_recovery_snapshot_at);

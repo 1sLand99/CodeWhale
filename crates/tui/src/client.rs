@@ -5156,6 +5156,14 @@ mod provider_native_search;
 mod responses;
 mod role_placement;
 mod stream_entry;
+
+/// Longest a request may take to open its stream and deliver the first body
+/// byte before the client itself times out (#6184): the header wait plus the
+/// first-byte bound. The engine heartbeat uses it as its awaiting-model bound.
+#[must_use]
+pub(crate) fn stream_first_response_bound(idle: Duration) -> Duration {
+    stream_entry::stream_open_timeout().saturating_add(stream_entry::first_byte_timeout(idle))
+}
 mod wire;
 
 // Retain the crate-visible accounting helpers at the existing client seam.

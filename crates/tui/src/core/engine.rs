@@ -704,6 +704,8 @@ pub struct EngineHandle {
     /// be awaiting a provider while its bounded op mailbox is unable to drain,
     /// so cancellation cannot depend on processing a later mailbox entry.
     compaction_cancellation: Arc<StdMutex<CompactionCancellationState>>,
+    /// Read-only view of the engine's turn-phase heartbeat (#6184).
+    turn_heartbeat: Arc<turn_heartbeat::TurnHeartbeat>,
 }
 
 const MAX_PENDING_COMPACTION_CANCELLATIONS: usize = 64;
@@ -973,6 +975,10 @@ pub struct Engine {
     /// `None` until the first turn completes with the advisor enabled, then
     /// held for the session lifetime so state persists across turns.
     advisor_emission_guard: Option<Arc<tokio::sync::Mutex<crate::tools::subagent::EmissionGuard>>>,
+    /// Turn-phase heartbeat (#6184): where the active turn is and when it
+    /// last made progress. Shared with `EngineHandle` and supervised by the
+    /// stall watchdog spawned in `run`.
+    pub(crate) turn_heartbeat: Arc<turn_heartbeat::TurnHeartbeat>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1842,6 +1848,7 @@ impl Engine {
             token_estimate_cache: TokenEstimateCache::new(),
             shared_paused: shared_paused.clone(),
             advisor_emission_guard: None,
+            turn_heartbeat: turn_heartbeat::TurnHeartbeat::new(),
         };
         let handle = EngineHandle {
             goal_state: engine.config.goal_state.clone(),
@@ -1857,6 +1864,7 @@ impl Engine {
             client_preflight_required: true,
             live_runtime_authority,
             compaction_cancellation,
+            turn_heartbeat: Arc::clone(&engine.turn_heartbeat),
         };
 
         (engine, handle)
@@ -2683,6 +2691,14 @@ impl Engine {
         // engine must wait for its host to claim and explicitly dispatch the
         // next turn so events cannot be attached to the wrong durable record.
         let host_managed_turns = self.host_managed_turns();
+        // #6184: supervise the turn heartbeat from outside the turn future,
+        // so a wedged await still produces a log line, a stall record and a
+        // status event. The watchdog exits once the event channel closes.
+        let stall_watchdog = turn_heartbeat::spawn_turn_stall_watchdog(
+            Arc::clone(&self.turn_heartbeat),
+            self.tx_event.clone(),
+        );
+        let _stall_watchdog_guard = turn_heartbeat::AbortOnDrop(stall_watchdog);
         if let Err(error) = self
             .start_mcp_session_boot(McpConnectRefresh::IfChanged)
             .await
@@ -5443,6 +5459,9 @@ impl Engine {
         })
         .catch_unwind()
         .await;
+        // Every return path (including a caught panic) leaves the phase idle,
+        // so the stall watchdog never reports a turn that already ended.
+        self.turn_heartbeat.idle();
         let (mut status, error) = match turn_result {
             Ok(outcome) => outcome,
             Err(panic) => {
@@ -7712,6 +7731,7 @@ pub(crate) fn mock_engine_handle() -> MockEngineHandle {
         client_preflight_required: false,
         live_runtime_authority,
         compaction_cancellation,
+        turn_heartbeat: turn_heartbeat::TurnHeartbeat::new(),
     };
 
     MockEngineHandle {
@@ -8135,6 +8155,7 @@ mod tool_media;
 mod tool_preparation;
 mod tool_setup;
 pub(crate) mod turn_budget;
+pub(crate) mod turn_heartbeat;
 pub(crate) mod turn_loop;
 pub(crate) use dispatch::{
     FLEET_FINAL_REPORT_NOTICE, FLEET_NO_PROGRESS_STOP, FLEET_STRATEGY_SWITCH_NOTICE,

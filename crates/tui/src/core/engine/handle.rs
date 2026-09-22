@@ -197,6 +197,14 @@ impl SteerPermit {
 }
 
 impl EngineHandle {
+    /// The engine's turn-phase heartbeat (#6184). Hosts read it to tell a
+    /// bounded model wait from a wedged turn without inferring liveness from
+    /// the stream-chunk timeout.
+    #[must_use]
+    pub(crate) fn turn_heartbeat(&self) -> &Arc<super::turn_heartbeat::TurnHeartbeat> {
+        &self.turn_heartbeat
+    }
+
     /// Called only while Runtime holds the idle turn admission claim. The
     /// following SendMessage refreshes the existing prompt/config projection.
     pub(crate) fn restore_runtime_goal(

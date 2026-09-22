@@ -22509,6 +22509,7 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
             ),
         ))),
         compaction_cancellation: Arc::new(StdMutex::new(CompactionCancellationState::default())),
+        turn_heartbeat: turn_heartbeat::TurnHeartbeat::new(),
     };
 
     // Fill the op channel with one message (capacity = 1).

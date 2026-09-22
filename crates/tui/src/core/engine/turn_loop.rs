@@ -685,6 +685,7 @@ impl Engine {
         // only place it is started, so exactly one turn owns it at a time.
         self.turn_wall_clock =
             crate::core::engine::turn_budget::TurnWallClock::start(self.config.turn_wall_clock);
+        self.turn_heartbeat.begin_turn(&turn.id);
 
         // Only interactive TUI hosts own terminal chrome. Headless exec,
         // app-server, and stream-json stdout must remain byte-clean.
@@ -792,6 +793,11 @@ impl Engine {
                 let _ = self.tx_event.send(Event::status("Request cancelled")).await;
                 return (TurnOutcomeStatus::Interrupted, None);
             }
+            self.turn_heartbeat.enter(
+                super::turn_heartbeat::TurnPhase::Preparing,
+                None,
+                Some(super::turn_heartbeat::PREPARING_PHASE_BOUND),
+            );
             self.refresh_boot_mcp_catalog(&tool_policy, &mut tool_catalog, &mut active_tool_names)
                 .await;
 
@@ -1053,6 +1059,9 @@ impl Engine {
                 let turn_cancel = self.cancel_token.clone();
                 let started = Instant::now();
                 let mut compaction_usage = Usage::default();
+                // Parked: the compaction pass owns its own bound.
+                self.turn_heartbeat
+                    .enter(super::turn_heartbeat::TurnPhase::Compacting, None, None);
                 let (compaction_result, turn_was_canceled) = tokio::select! {
                     biased;
                     _ = turn_cancel.cancelled() => (None, true),
@@ -1570,6 +1579,15 @@ impl Engine {
             // instant (connection setup included), and time-to-first-token is
             // the gap to the first content-bearing stream event.
             let request_dispatched_at = Instant::now();
+            self.turn_heartbeat.enter(
+                super::turn_heartbeat::TurnPhase::AwaitingModel,
+                Some(format!(
+                    "{} / {}",
+                    self.api_provider.display_name(),
+                    stream_request.model
+                )),
+                Some(awaiting_model_bound(&self.config)),
+            );
             let stream_result = tokio::select! {
                 biased;
                 () = self.cancel_token.cancelled() => {
@@ -1665,6 +1683,11 @@ impl Engine {
                     &mut turn.stop_diagnostics,
                 )
                 .await;
+            self.turn_heartbeat.enter(
+                super::turn_heartbeat::TurnPhase::Preparing,
+                None,
+                Some(super::turn_heartbeat::PREPARING_PHASE_BOUND),
+            );
             turn_error = turn_error.or(stream_error);
             turn.stop_diagnostics
                 .observe_provider_response(stop_reason.as_deref(), tool_uses.len());
@@ -2746,6 +2769,19 @@ impl Engine {
             // that overlapped MCP startup. Search the ready catalog now.
             self.refresh_boot_mcp_catalog(&tool_policy, &mut tool_catalog, &mut active_tool_names)
                 .await;
+            // Parked: per-tool timeouts, approvals, and the UI tool-hang
+            // watchdog own a tool batch's bound.
+            self.turn_heartbeat.enter(
+                super::turn_heartbeat::TurnPhase::Tools,
+                Some(
+                    tool_uses
+                        .iter()
+                        .map(|tool| tool.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
+                None,
+            );
             let PlannedToolCalls {
                 plans,
                 hook_contexts,
@@ -2783,6 +2819,11 @@ impl Engine {
 
             let authority_changed =
                 authority_changed_before_tools || authority_changed_during_tools;
+            self.turn_heartbeat.enter(
+                super::turn_heartbeat::TurnPhase::Preparing,
+                None,
+                Some(super::turn_heartbeat::PREPARING_PHASE_BOUND),
+            );
             let denial_action = self
                 .process_tool_results(
                     outcomes,
@@ -4855,6 +4896,23 @@ impl Engine {
                             }
                             .into_envelope();
                             crate::logging::warn(&envelope.message);
+                            // #6184: every silent provider wait leaves a
+                            // `crashes/` stall record, not only a toast.
+                            super::turn_heartbeat::report_stall(
+                                &super::turn_heartbeat::StallReport {
+                                    source: "engine",
+                                    phase: "while waiting for the next stream event".to_string(),
+                                    detail: Some(format!(
+                                        "{} / {}",
+                                        self.api_provider.display_name(),
+                                        stream_request.model
+                                    )),
+                                    turn_id: None,
+                                    provider_request: None,
+                                    since_progress: chunk_timeout,
+                                    bound: Some(chunk_timeout),
+                                },
+                            );
                             // A stall is a stream error like any other:
                             // count it so the nothing-streamed retry can
                             // fire, and record it so an unrecovered stall
@@ -4914,6 +4972,12 @@ impl Engine {
 
             let event = match event_result {
                 Ok(e) => {
+                    self.turn_heartbeat.stream_progress(
+                        chunk_timeout.saturating_add(super::turn_heartbeat::STALL_BOUND_GRACE),
+                    );
+                    if let StreamEvent::MessageStart { message } = &e {
+                        self.turn_heartbeat.set_provider_request(message.id.clone());
+                    }
                     last_progress_mono = Instant::now();
                     last_progress_wall = std::time::SystemTime::now();
                     // Only content-bearing events make a stream productive.
@@ -5723,9 +5787,32 @@ fn should_hold_turn_for_subagents(queued_completions: usize, running_children: u
     queued_completions > 0
 }
 
+/// Inter-chunk bound for interactive hosts (#6184). The configured default
+/// (900s) exists so quiet reasoning is not cut off; SSE keep-alives now reach
+/// the engine as pings, so a provider that is alive but silent keeps resetting
+/// this bound. A stream with no event of any kind for five minutes has
+/// stopped. Only the default is tightened: an explicitly configured
+/// `stream_chunk_timeout_secs` is used as-is, and headless hosts keep the
+/// configured budget.
+pub(crate) const INTERACTIVE_STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(300);
+
 fn stream_chunk_timeout_budget(config: &EngineConfig) -> (u64, Duration) {
-    let secs = config.stream_chunk_timeout.as_secs();
-    (secs, Duration::from_secs(secs))
+    let configured = config.stream_chunk_timeout;
+    let default_budget = Duration::from_secs(crate::config::DEFAULT_STREAM_CHUNK_TIMEOUT_SECS);
+    let effective = if config.terminal_chrome_enabled && configured == default_budget {
+        INTERACTIVE_STREAM_CHUNK_TIMEOUT
+    } else {
+        configured
+    };
+    (effective.as_secs(), effective)
+}
+
+/// Heartbeat bound for a request that has not produced its first stream
+/// event: the client's own open + first-byte bounds, plus grace so the
+/// client's timeout fires (and is retried) before the watchdog reports.
+fn awaiting_model_bound(config: &EngineConfig) -> Duration {
+    crate::client::stream_first_response_bound(config.stream_chunk_timeout)
+        .saturating_add(super::turn_heartbeat::STALL_BOUND_GRACE)
 }
 
 /// Whether a per-tool pre-execution snapshot should be taken before running
@@ -5978,6 +6065,37 @@ mod pre_tool_snapshot_gate_tests {
 #[cfg(test)]
 mod stream_timeout_tests {
     use super::*;
+
+    #[test]
+    fn stall_interactive_chunk_timeout_is_well_under_default_budget() {
+        let default_budget = Duration::from_secs(crate::config::DEFAULT_STREAM_CHUNK_TIMEOUT_SECS);
+        let interactive = EngineConfig {
+            stream_chunk_timeout: default_budget,
+            terminal_chrome_enabled: true,
+            ..EngineConfig::default()
+        };
+        let (_, bound) = stream_chunk_timeout_budget(&interactive);
+        assert_eq!(bound, INTERACTIVE_STREAM_CHUNK_TIMEOUT);
+        assert!(bound * 3 <= default_budget);
+        // Headless hosts and explicit configuration keep their budget.
+        let headless = EngineConfig {
+            stream_chunk_timeout: default_budget,
+            terminal_chrome_enabled: false,
+            ..EngineConfig::default()
+        };
+        assert_eq!(stream_chunk_timeout_budget(&headless).1, default_budget);
+        let explicit = EngineConfig {
+            stream_chunk_timeout: Duration::from_secs(1800),
+            terminal_chrome_enabled: true,
+            ..EngineConfig::default()
+        };
+        assert_eq!(
+            stream_chunk_timeout_budget(&explicit).1,
+            Duration::from_secs(1800)
+        );
+        // The awaiting-model heartbeat bound stays under the default budget too.
+        assert!(awaiting_model_bound(&interactive) < default_budget);
+    }
 
     #[test]
     fn stream_chunk_timeout_budget_uses_engine_config() {
