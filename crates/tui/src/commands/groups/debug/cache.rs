@@ -448,11 +448,13 @@ fn format_cache_stats(app: &App) -> String {
 /// Render three-zone prefix contract status for `/cache zones` (#2264).
 ///
 /// Displays the PinnedPrefix fingerprint, AppendLog size, and TurnScratch
-/// state. The zones are type scaffolding only (Phase 1) — not yet
-/// enforcing the full contract at request time.
+/// state. PinnedPrefix is frozen and checked for drift each turn, and
+/// AppendLog is the backing store for the engine's session history
+/// (`core::session::Session::messages`). TurnScratch is still type
+/// scaffolding: nothing on the request path populates it.
 fn format_cache_zones(app: &App) -> String {
     let mut out = String::new();
-    out.push_str("Cache Zones (#2264 three-zone contract, Phase 1 foundation)\n");
+    out.push_str("Cache Zones (#2264 three-zone contract)\n");
 
     // ── PinnedPrefix ─────────────────────────────────────────────────
     out.push_str("\n── PinnedPrefix (system + tools, frozen baseline)\n");
@@ -485,7 +487,7 @@ fn format_cache_zones(app: &App) -> String {
 
     // ── AppendLog ────────────────────────────────────────────────────
     out.push_str("\n── AppendLog (conversation history, append-only)\n");
-    out.push_str("  Status:      Phase 1 scaffolding — not yet wired into engine\n");
+    out.push_str("  Status:      wired — backs the engine session history\n");
     let msg_count = app.api_messages.len();
     out.push_str(&format!("  Messages:    {msg_count}\n"));
     let history_count = app
@@ -497,7 +499,7 @@ fn format_cache_zones(app: &App) -> String {
 
     // ── TurnScratch ──────────────────────────────────────────────────
     out.push_str("\n── TurnScratch (per-turn ephemeral data)\n");
-    out.push_str("  Status:      Phase 1 scaffolding — not yet wired into engine\n");
+    out.push_str("  Status:      not wired — type scaffolding, unused by requests\n");
 
     // ── Zone contract summary ────────────────────────────────────────
     out.push_str("\n── Contract Status\n");
@@ -514,8 +516,8 @@ fn format_cache_zones(app: &App) -> String {
             "not frozen"
         }
     ));
-    out.push_str("  AppendLog:    Phase 1 foundation\n");
-    out.push_str("  TurnScratch:  Phase 1 foundation\n");
+    out.push_str("  AppendLog:    wired (session history)\n");
+    out.push_str("  TurnScratch:  not wired\n");
 
     out
 }
@@ -857,5 +859,45 @@ mod route_tests {
         };
 
         assert_eq!(format_turn_cache_route(&record), "lm-studio/local-code-...");
+    }
+}
+
+#[cfg(test)]
+mod zones_tests {
+    use super::*;
+    use crate::config::Config;
+    use std::path::PathBuf;
+
+    #[test]
+    fn cache_zones_output_reports_real_wiring() {
+        let mut app = App::new(
+            crate::test_support::test_tui_options(PathBuf::from(".")),
+            &Config::default(),
+        );
+        app.api_messages = std::sync::Arc::new(Vec::new());
+        app.last_pinned_prefix_hash = None;
+        app.prefix_change_count = 0;
+
+        let expected = "\
+Cache Zones (#2264 three-zone contract)
+
+── PinnedPrefix (system + tools, frozen baseline)
+  Status:    unavailable (not yet frozen)
+  Run a turn first to freeze the baseline.
+
+── AppendLog (conversation history, append-only)
+  Status:      wired — backs the engine session history
+  Messages:    0
+  History msgs: 0
+
+── TurnScratch (per-turn ephemeral data)
+  Status:      not wired — type scaffolding, unused by requests
+
+── Contract Status
+  PinnedPrefix: not frozen
+  AppendLog:    wired (session history)
+  TurnScratch:  not wired
+";
+        assert_eq!(format_cache_zones(&app), expected);
     }
 }

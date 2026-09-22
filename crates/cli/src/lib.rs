@@ -1439,8 +1439,14 @@ struct RemoteSetupArgs {
     /// Emit the bundle, do not provision (default).
     #[arg(long, default_value_t = false)]
     generate_only: bool,
-    /// Run the cloud CLI to auto-provision (not yet implemented).
-    #[arg(long, default_value_t = false, conflicts_with = "generate_only")]
+    /// Reserved for cloud auto-provisioning, which is not implemented.
+    /// Hidden from `--help`; passing it makes `remote-setup` fail.
+    #[arg(
+        long,
+        default_value_t = false,
+        conflicts_with = "generate_only",
+        hide = true
+    )]
     apply: bool,
     /// Skip the final confirmation gate (CI / non-interactive).
     #[arg(long, default_value_t = false)]
