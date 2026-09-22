@@ -148,6 +148,16 @@
    restyles it; inputs keep the same ring rather than a glow. */
 ::selection { background: var(--selection); }
 :focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+/* The dark stage keeps the light scheme's page but a sidebar-dark field;
+   there the light primary ring is ~2.8:1 (#245bc7 on #191a1c), under the 3:1
+   a focus indicator needs, so stage surfaces take the dark scheme's ring. */
+.ocean-column,
+.site-footer,
+.folio-shot,
+.portal-quickstart,
+.portal-community,
+.contribute-dev-loop,
+pre.code-block { --ring: var(--gpui-dark-primary); }
 
 /* ---------- link reset ---------- */
 a { color: inherit; text-decoration: none; }

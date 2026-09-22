@@ -25,6 +25,8 @@ describe("design grammar contract", () => {
     expect(CSS).toMatch(/:focus-visible \{ outline: 2px solid var\(--ring\); outline-offset: 2px; \}/);
     expect(CSS).not.toMatch(/outline:\s*none/);
     expect(CSS).toMatch(/::selection \{ background: var\(--selection\); \}/);
+    // The light ring on the dark stage would fall under 3:1.
+    expect(CSS).toMatch(/\.site-footer,[\s\S]*?\{ --ring: var\(--gpui-dark-primary\); \}/);
   });
 
   it("hovers a primary fill at the primary @ 0.9", () => {
@@ -41,6 +43,8 @@ describe("design grammar contract", () => {
     expect(CSS).toMatch(
       /@media \(prefers-reduced-motion: reduce\) \{\s*:root \{\s*--dur-state: 0ms;\s*--dur-spring: 0ms;/,
     );
+    expect(TAILWIND).toMatch(/transitionDuration: \{ DEFAULT: "var\(--dur-state\)" \}/);
+    expect(TAILWIND).toMatch(/transitionTimingFunction: \{ DEFAULT: "var\(--ease-spring\)" \}/);
     expect(CSS).not.toMatch(/caustic/);
     expect(WHALE).not.toMatch(/caustic|<animate|clipPath/);
   });

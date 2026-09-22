@@ -34,6 +34,10 @@ export default {
         cjk: ["var(--font-cjk)"],
         mono: ["var(--font-mono)"],
       },
+      // `transition-colors` and friends use the same motion tokens as
+      // app/styles, so reduced motion stills them too.
+      transitionDuration: { DEFAULT: "var(--dur-state)" },
+      transitionTimingFunction: { DEFAULT: "var(--ease-spring)" },
     },
     // Replaces Tailwind's scale with the GPUI radius grammar
     // (app/styles/tokens-roles.css): 6px controls, 10px surfaces (cards,
