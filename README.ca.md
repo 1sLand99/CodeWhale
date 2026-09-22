@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:29c349b6f2b4 -->
+<!-- source: README.md sha256:83d705f2dca6 -->
 # Codewhale
 
 Codewhale és un agent de codi obert que llegeix el teu projecte, edita fitxers, executa ordres i comprova la seva feina amb un model allotjat o local que tu tries. Comença amb una tasca al terminal. Per a una feina més gran, assigna parts de la feina a agents amb models i rols diferents.
@@ -53,7 +53,7 @@ El terminal i els clients gràfics es connecten al Runtime de Codewhale, que exe
 
 - **Terminal:** `codewhale` obre la interfície interactiva; `codewhale exec` executa una tasca des d’un script o d’una feina de CI.
 - **Navegador local:** `codewhale web` obre el [client web local](docs/WEB.md) inclòs, que fa servir el mateix runtime.
-- **Aplicació d'escriptori Codewhale (GPUI):** l'aplicació d'escriptori nativa GPUI és la direcció del client de producte (decisió del 2026-09-14; el mapa de fases és a docs/TRANSITION.md del repositori privat codehwhale-gpui). L'aplicació web allotjada a app.codewhale.net es retira per fases; el lloc de màrqueting, l'inici de sessió, la facturació i les pàgines legals i de descàrrega queden al web permanentment. La seva disponibilitat s'indica a la [pàgina del producte](https://codewhale.net/en/product).
+- **Aplicació d'escriptori Codewhale (GPUI):** una aplicació d'escriptori nativa, desenvolupada en un repositori separat, és la direcció del client de producte amb sessió iniciada. L'aplicació web allotjada a app.codewhale.net es reconstruirà a imatge seva; el lloc de màrqueting, l'inici de sessió, la facturació i les pàgines legals i de descàrrega es queden al web. La seva disponibilitat s'indica a la [pàgina del producte](https://codewhale.net/en/product).
 
 **Computer Use afegeix eines per observar altres aplicacions i interactuar-hi.** El connector està inclòs en el codi font actual. Revisa l’accés que demana i activa’l abans de fer-lo servir; els permisos del sistema operatiu i els requisits de la plataforma continuen sent necessaris. Consulta la [guia de Computer Use](crates/tui/plugins/computer-use/README.md) inclosa i la [configuració de connectors](docs/PLUGINS.md).
 
@@ -80,7 +80,7 @@ Llegeix l’[ordre d’autorització](docs/AUTHORIZATION_ORDER.md) per conèixer
 - [Equips d’agents](docs/FLEET.md)
 - [MCP](docs/MCP.md), [hooks](docs/HOOKS.md) i [configuració](docs/CONFIGURATION.md)
 - [Client web local](docs/WEB.md)
-- [Tota la documentació](docs)
+- [Tota la documentació](docs/README.md)
 - [Estructura del repositori i guia de contribució](CONTRIBUTING.md#project-structure)
 
 ## Uneix-te a la comunitat

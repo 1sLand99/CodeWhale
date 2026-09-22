@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:29c349b6f2b4 -->
+<!-- source: README.md sha256:83d705f2dca6 -->
 # Codewhale
 
 Codewhale, seçtiğiniz barındırılan veya yerel bir modeli kullanarak projenizi okuyan, dosyaları düzenleyen, komutları çalıştıran ve yaptığı işi kontrol eden açık kaynaklı bir ajandır. Terminalde tek bir görevle başlayın. Daha büyük bir işte, işin bölümlerini farklı model ve rollere sahip ajanlara verin.
@@ -53,7 +53,7 @@ Terminal ve grafik istemciler, ajanı ve araçlarını çalıştıran Codewhale 
 
 - **Terminal:** `codewhale` etkileşimli arayüzü açar; `codewhale exec` bir betikten veya CI işinden görev çalıştırır.
 - **Yerel tarayıcı:** `codewhale web`, aynı çalışma zamanı için paketle birlikte gelen [yerel web istemcisini](docs/WEB.md) açar.
-- **Codewhale masaüstü uygulaması (GPUI):** yerel GPUI masaüstü uygulaması ürün istemcisi yönüdür (2026-09-14 kararı; aşama haritası özel codehwhale-gpui deposundaki docs/TRANSITION.md dosyasındadır). app.codewhale.net'teki barındırılan web uygulaması aşamalı olarak kaldırılır; pazarlama sitesi, oturum açma, faturalandırma, yasal ve indirme sayfaları web'de kalıcı olarak kalır. Kullanılabilirlikleri [ürün sayfasında](https://codewhale.net/en/product) belirtilir.
+- **Codewhale masaüstü uygulaması (GPUI):** ayrı bir depoda geliştirilen yerel masaüstü uygulaması, oturum açmış kullanıcılar için ürün istemcisinin yönüdür. app.codewhale.net'teki barındırılan web uygulaması ona göre yeniden oluşturulacak; pazarlama sitesi, oturum açma, faturalandırma, yasal ve indirme sayfaları web'de kalır. Kullanılabilirlik [ürün sayfasında](https://codewhale.net/en/product) belirtilir.
 
 **Computer Use, diğer uygulamaları gözlemlemek ve onlarla etkileşime girmek için araçlar ekler.** Eklenti mevcut kaynak koduna dahildir. Kullanmadan önce istediği erişimi gözden geçirin ve eklentiyi etkinleştirin; işletim sistemi izinleri ve platform gereksinimleri geçerliliğini korur. Birlikte gelen [Computer Use kılavuzuna](crates/tui/plugins/computer-use/README.md) ve [eklenti kurulumuna](docs/PLUGINS.md) bakın.
 
@@ -80,7 +80,7 @@ Politikaların kesin sıralaması için [yetkilendirme sırasını](docs/AUTHORI
 - [Ajan ekipleri](docs/FLEET.md)
 - [MCP](docs/MCP.md), [hook’lar](docs/HOOKS.md) ve [yapılandırma](docs/CONFIGURATION.md)
 - [Yerel web istemcisi](docs/WEB.md)
-- [Tüm belgeler](docs)
+- [Tüm belgeler](docs/README.md)
 - [Depo yapısı ve katkıda bulunma rehberi](CONTRIBUTING.md#project-structure)
 
 ## Topluluğa katılın

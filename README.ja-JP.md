@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:29c349b6f2b4 -->
+<!-- source: README.md sha256:83d705f2dca6 -->
 # Codewhale
 
 Codewhale は、選んだホスト型またはローカルのモデルを使ってプロジェクトを読み、ファイルを編集し、コマンドを実行して、自分の作業結果を確認するオープンソースのエージェントです。まずはターミナルで一つのタスクから始めましょう。大きな仕事では、異なるモデルや役割を持つエージェントに作業の一部を分担させられます。
@@ -53,7 +53,7 @@ Codewhale はリポジトリを読み、ファイルを編集し、コマンド�
 
 - **ターミナル：** `codewhale` は対話型インターフェースを開き、`codewhale exec` はスクリプトや CI ジョブからタスクを実行します。
 - **ローカルブラウザー：** `codewhale web` は、同じ Runtime を使う同梱の[ローカル Web クライアント](docs/WEB.md)を開きます。
-- **Codewhale デスクトップアプリ（GPUI）：** ネイティブ GPUI デスクトップアプリが製品クライアントの方向性です（2026-09-14 に決定。フェーズ計画は非公開 codehwhale-gpui リポジトリの docs/TRANSITION.md にあります）。app.codewhale.net のホステッド Web アプリは段階的に終了し、マーケティングサイト・サインイン・課金・法務・ダウンロードの各ページは Web に恒久に残ります。提供状況は[製品ページ](https://codewhale.net/en/product)をご覧ください。
+- **Codewhale デスクトップアプリ（GPUI）：** 別リポジトリで開発しているネイティブデスクトップアプリが、サインイン後に使う製品クライアントの方向性です。app.codewhale.net のホステッド Web アプリはこれに合わせて作り直します。マーケティングサイト・サインイン・課金・法務・ダウンロードの各ページは Web に残ります。提供状況は[製品ページ](https://codewhale.net/en/product)をご覧ください。
 
 **Computer Use は、ほかのアプリケーションの状態を確認し、操作するためのツールを追加します。** このプラグインは現在のソースコードに含まれています。使用前に要求されるアクセス権を確認し、有効にしてください。OS の権限やプラットフォームの要件も満たす必要があります。同梱の [Computer Use ガイド](crates/tui/plugins/computer-use/README.md)と[プラグインの設定](docs/PLUGINS.md)を参照してください。
 
@@ -80,7 +80,7 @@ Codewhale は、あなたが許可した範囲のアクセス権で、あなた�
 - [エージェントチーム](docs/FLEET.md)
 - [MCP](docs/MCP.md)、[フック](docs/HOOKS.md)、[設定](docs/CONFIGURATION.md)
 - [ローカル Web クライアント](docs/WEB.md)
-- [すべてのドキュメント](docs)
+- [すべてのドキュメント](docs/README.md)
 - [リポジトリ構成とコントリビューションガイド](CONTRIBUTING.md#project-structure)
 
 ## コミュニティに参加

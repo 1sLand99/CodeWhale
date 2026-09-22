@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:29c349b6f2b4 -->
+<!-- source: README.md sha256:83d705f2dca6 -->
 # Codewhale
 
 Codewhale es un agente de código abierto que lee tu proyecto, edita archivos, ejecuta comandos y comprueba su trabajo con un modelo alojado o local que tú eliges. Empieza con una tarea en la terminal. Para un trabajo más grande, asigna partes del trabajo a agentes con distintos modelos y roles.
@@ -53,7 +53,7 @@ La terminal y los clientes gráficos se conectan al Runtime de Codewhale, que ej
 
 - **Terminal:** `codewhale` abre la interfaz interactiva; `codewhale exec` ejecuta una tarea desde un script o un trabajo de CI.
 - **Navegador local:** `codewhale web` abre el [cliente web local](docs/WEB.md) incluido, que usa el mismo runtime.
-- **Aplicación de escritorio Codewhale (GPUI):** la aplicación de escritorio nativa GPUI es la dirección del cliente de producto (decisión del 2026-09-14; el mapa de fases está en docs/TRANSITION.md del repositorio privado codehwhale-gpui). La aplicación web alojada en app.codewhale.net se retira por fases; el sitio de marketing, el inicio de sesión, la facturación y las páginas legales y de descarga permanecen en la web de forma permanente. Su disponibilidad se indica en la [página del producto](https://codewhale.net/en/product).
+- **Aplicación de escritorio Codewhale (GPUI):** una aplicación de escritorio nativa, desarrollada en un repositorio separado, es la dirección del cliente de producto con sesión iniciada. La aplicación web alojada en app.codewhale.net se reconstruirá a su imagen; el sitio de marketing, el inicio de sesión, la facturación y las páginas legales y de descarga permanecen en la web. Su disponibilidad se indica en la [página del producto](https://codewhale.net/en/product).
 
 **Computer Use agrega herramientas para observar otras aplicaciones e interactuar con ellas.** El plugin está incluido en el código fuente actual. Revisa el acceso que solicita y habilítalo antes de usarlo; los permisos del sistema operativo y los requisitos de la plataforma siguen siendo necesarios. Consulta la [guía de Computer Use](crates/tui/plugins/computer-use/README.md) incluida y la [configuración de plugins](docs/PLUGINS.md).
 
@@ -80,7 +80,7 @@ Lee el [orden de autorización](docs/AUTHORIZATION_ORDER.md) para conocer la jer
 - [Equipos de agentes](docs/FLEET.md)
 - [MCP](docs/MCP.md), [hooks](docs/HOOKS.md) y [configuración](docs/CONFIGURATION.md)
 - [Cliente web local](docs/WEB.md)
-- [Toda la documentación](docs)
+- [Toda la documentación](docs/README.md)
 - [Estructura del repositorio y guía de contribución](CONTRIBUTING.md#project-structure)
 
 ## Únete a la comunidad

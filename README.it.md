@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:29c349b6f2b4 -->
+<!-- source: README.md sha256:83d705f2dca6 -->
 # Codewhale
 
 Codewhale è un agente open source che legge il tuo progetto, modifica file, esegue comandi e verifica il proprio lavoro usando un modello ospitato o locale a tua scelta. Parti da un’attività nel terminale. Per un lavoro più grande, assegna parti del lavoro ad agenti con modelli e ruoli diversi.
@@ -53,7 +53,7 @@ Il terminale e i client grafici si collegano al Runtime di Codewhale, che esegue
 
 - **Terminale:** `codewhale` apre l’interfaccia interattiva; `codewhale exec` esegue un’attività da uno script o da un job di CI.
 - **Browser locale:** `codewhale web` apre il [client web locale](docs/WEB.md) incluso, che usa lo stesso runtime.
-- **App desktop Codewhale (GPUI):** l'app desktop nativa GPUI è la direzione del client di prodotto (decisione del 2026-09-14; la mappa delle fasi è in docs/TRANSITION.md nel repository privato codehwhale-gpui). L'app web ospitata su app.codewhale.net viene ritirata per fasi; il sito marketing, l'accesso, la fatturazione e le pagine legali e di download restano permanentemente sul web. La disponibilità è indicata nella [pagina del prodotto](https://codewhale.net/en/product).
+- **App desktop Codewhale (GPUI):** un'app desktop nativa, sviluppata in un repository separato, è la direzione del client di prodotto con accesso. L'app web ospitata su app.codewhale.net verrà ricostruita a sua immagine; il sito marketing, l'accesso, la fatturazione e le pagine legali e di download restano sul web. La disponibilità è indicata nella [pagina del prodotto](https://codewhale.net/en/product).
 
 **Computer Use aggiunge strumenti per osservare altre applicazioni e interagire con esse.** Il plugin è incluso nel codice sorgente attuale. Controlla l’accesso richiesto e abilitalo prima dell’uso; i permessi del sistema operativo e i requisiti della piattaforma continuano ad applicarsi. Consulta la [guida a Computer Use](crates/tui/plugins/computer-use/README.md) inclusa e la [configurazione dei plugin](docs/PLUGINS.md).
 
@@ -80,7 +80,7 @@ Leggi l’[ordine di autorizzazione](docs/AUTHORIZATION_ORDER.md) per conoscere 
 - [Team di agenti](docs/FLEET.md)
 - [MCP](docs/MCP.md), [hook](docs/HOOKS.md) e [configurazione](docs/CONFIGURATION.md)
 - [Client web locale](docs/WEB.md)
-- [Tutta la documentazione](docs)
+- [Tutta la documentazione](docs/README.md)
 - [Struttura del repository e guida ai contributi](CONTRIBUTING.md#project-structure)
 
 ## Unisciti alla comunità

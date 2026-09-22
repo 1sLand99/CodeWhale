@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:29c349b6f2b4 -->
+<!-- source: README.md sha256:83d705f2dca6 -->
 # Codewhale
 
 Codewhale là tác nhân mã nguồn mở có thể đọc dự án, chỉnh sửa tệp, chạy lệnh và kiểm tra công việc của mình bằng mô hình do nhà cung cấp lưu trữ hoặc mô hình cục bộ mà bạn chọn. Hãy bắt đầu với một tác vụ trong terminal. Với công việc lớn hơn, bạn có thể giao từng phần cho các tác nhân dùng mô hình và đảm nhiệm vai trò khác nhau.
@@ -53,7 +53,7 @@ Terminal và các ứng dụng khách đồ họa kết nối với Codewhale Ru
 
 - **Terminal:** `codewhale` mở giao diện tương tác; `codewhale exec` chạy tác vụ từ tập lệnh hoặc công việc CI.
 - **Trình duyệt cục bộ:** `codewhale web` mở [ứng dụng web cục bộ](docs/WEB.md) đi kèm, dùng cùng Runtime.
-- **Ứng dụng máy tính để bàn Codewhale (GPUI):** ứng dụng máy tính để bàn gốc GPUI là định hướng client sản phẩm (quyết định ngày 2026-09-14; bản đồ giai đoạn nằm trong docs/TRANSITION.md ở repo riêng tư codehwhale-gpui). Ứng dụng web lưu trữ tại app.codewhale.net sẽ ngừng theo từng giai đoạn; trang marketing, đăng nhập, thanh toán, pháp lý và tải xuống vẫn ở trên web vĩnh viễn. Thông tin về khả năng sử dụng được liệt kê trên [trang sản phẩm](https://codewhale.net/en/product).
+- **Ứng dụng máy tính để bàn Codewhale (GPUI):** một ứng dụng máy tính để bàn gốc, được phát triển trong một repo riêng, là định hướng client sản phẩm cho người dùng đã đăng nhập. Ứng dụng web lưu trữ tại app.codewhale.net sẽ được xây dựng lại theo ứng dụng này; trang marketing, đăng nhập, thanh toán, pháp lý và tải xuống vẫn ở trên web. Thông tin về khả năng sử dụng được liệt kê trên [trang sản phẩm](https://codewhale.net/en/product).
 
 **Computer Use bổ sung công cụ để quan sát và tương tác với các ứng dụng khác.** Plugin này có trong mã nguồn hiện tại. Hãy xem xét quyền truy cập được yêu cầu và bật plugin trước khi sử dụng; các yêu cầu về quyền của hệ điều hành và nền tảng vẫn được áp dụng. Xem [hướng dẫn Computer Use](crates/tui/plugins/computer-use/README.md) đi kèm và [thiết lập plugin](docs/PLUGINS.md).
 
@@ -80,7 +80,7 @@ Codewhale chạy trên máy của bạn với quyền truy cập do bạn cấp.
 - [Nhóm tác nhân](docs/FLEET.md)
 - [MCP](docs/MCP.md), [hook](docs/HOOKS.md) và [cấu hình](docs/CONFIGURATION.md)
 - [Ứng dụng web cục bộ](docs/WEB.md)
-- [Toàn bộ tài liệu](docs)
+- [Toàn bộ tài liệu](docs/README.md)
 - [Cấu trúc kho mã và hướng dẫn đóng góp](CONTRIBUTING.md#project-structure)
 
 ## Tham gia cộng đồng
