@@ -210,6 +210,11 @@ jobs:
         # set from the commit range instead (authors, co-author trailers, and
         # `Harvested from PR #N by @handle`), so forgetting someone is red.
         run: python3 scripts/check-contributor-credit.py
+      - name: Check bundled plugin claims
+        # The 0.10.0 section claimed Computer Use 0.4.0 at revision ca6be22
+        # while the tree shipped 0.11.2 at d8640b17f275 -- three upstream
+        # releases apart, with nothing comparing the prose to the assets.
+        run: python3 scripts/check-bundled-plugin-claims.py
       - name: Check OHOS dependency graph
         run: ./scripts/release/check-ohos-deps.sh
       - name: Check release helper contracts

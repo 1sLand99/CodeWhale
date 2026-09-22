@@ -94,7 +94,7 @@ export const CHANGELOG: ChangelogRelease[] = [
           "Configured MCP servers now connect lazily instead of all at session boot. The pool owns a connecting set marked at spawn and cleared on resolution or abort, so \"connecting\" is no longer inferred as enabled-minus-connected. The boot pass scopes to the eager set — required servers plus those covered by tools.always_load / allowed_tools — and a turn naming an unstarted server spawns its connects alongside, under the existing five-second deadline. A configured-but-unstarted…",
           "The launch card's MCP problems row runs its own remedy. It already printed /mcp login <name> or /mcp; it now joins the shared paint/click/keyboard ordering, so Up/Down lands on it and Enter or a click types the printed command into the composer for you to send. Typing beats copying: no clipboard dependency over SSH, and you see the command before a second Enter runs it (#6085)."
         ],
-        "itemCount": 14
+        "itemCount": 15
       },
       {
         "heading": "Fixed",

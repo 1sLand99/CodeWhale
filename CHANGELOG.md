@@ -285,13 +285,19 @@ tag, packages, checksums and release assets exist.
 - Computer Use is the only computer-use product in Extensions and
   `/mcp recommendations`. Cua is no longer suggested as a parallel
   desktop-control MCP; enable the first-party `computer-use` plugin
-  instead. The bundled plugin is 0.4.0: Return/Enter from `type`,
-  filtered and paginated `get_app_state`, `focus`/`get_value`, and
-  `strategy:"app"` window-scoped clicks. Shared-desktop pointer
-  gestures stay gated.
-- The bundled first-party catalog pins marketplace revision `ca6be22`, so
-  installing Computer Use from the Extensions listing fetches the same 0.4.0
-  source and the published notarized 0.4.0 Mac app.
+  instead. The bundled plugin is 0.11.2 — macOS beta, with the Windows and
+  Linux backends experimental and source-only. It carries the per-app consent
+  ledger, background-by-default control, and a focus lease that refuses rather
+  than stealing the foreground, alongside `get_app_state`, `focus`/`get_value`
+  and `stop_computer_control`. Shared-desktop pointer gestures stay gated, and
+  arbitrary background dragging remains unavailable.
+- The bundled first-party catalog pins marketplace revision
+  `d8640b17f27542e7122c76368724196f92a0af61`, so installing Computer Use from
+  the Extensions listing fetches the same 0.11.2 source the binary already
+  carries.
+- Materializing is not enabling: the built-in bundle is written under
+  `$CODEWHALE_HOME/builtin-plugins` on first run but stays `NeverReviewed`,
+  so Computer Use is never switched on without an explicit capability review.
 
 ### Fixed
 - The bundled OpenAI-compatible hosts have their `/provider` rows back.
