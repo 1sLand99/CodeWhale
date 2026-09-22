@@ -35,6 +35,17 @@ export default {
         mono: ["var(--font-mono)"],
       },
     },
+    // Replaces Tailwind's scale with the GPUI radius grammar
+    // (app/styles/tokens-roles.css): 6px controls, 10px surfaces (cards,
+    // code, menus), 14px raised sheets, and pills. Nothing in between.
+    borderRadius: {
+      none: "0",
+      sm: "var(--radius-control)",
+      DEFAULT: "var(--radius-control)",
+      lg: "var(--radius-surface)",
+      xl: "var(--radius-sheet)",
+      full: "var(--radius-pill)",
+    },
     // Replaces Tailwind's scale so wide tracking cannot be generated: labels
     // are sentence case at normal tracking. `wide` stays for Han body copy.
     letterSpacing: {

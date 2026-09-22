@@ -206,7 +206,7 @@ html[lang="ko"] h3 {
   font-weight: 700;
   width: 2.6rem;
   height: 2.6rem;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   letter-spacing: -0.04em;
 }
 
@@ -264,7 +264,7 @@ pre.code-block {
   font-size: var(--text-mono);
   line-height: 1.55;
   border: 1px solid var(--stage-line);
-  border-radius: 6px;
+  border-radius: var(--radius-surface);
   overflow-x: auto;
   position: relative;
   white-space: pre;
@@ -291,7 +291,7 @@ code.inline {
   padding: 0.05rem 0.32rem;
   font-family: var(--font-mono);
   font-size: 0.85em;
-  border-radius: 2px;
+  border-radius: var(--radius-control);
 }
 
 
@@ -303,18 +303,14 @@ code.inline {
   background: var(--paper);
   color: var(--ink);
   border: 1px solid var(--hairline);
-  transition: border-color 180ms ease, box-shadow 180ms ease;
+  transition: border-color var(--dur-state) var(--ease-spring);
 }
 .search-input::placeholder { color: var(--ink-mute); }
-.search-input:focus {
-  outline: none;
-  border-color: var(--indigo);
-  box-shadow: 0 0 0 3px var(--indigo-pale);
-}
+.search-input:focus { border-color: var(--ring); }
 
 mark.search-highlight {
   background: var(--indigo-pale);
   color: var(--indigo-deep);
   padding: 0.02em 0.08em;
-  border-radius: 2px;
+  border-radius: var(--radius-control);
 }

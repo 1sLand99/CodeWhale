@@ -78,10 +78,10 @@
   justify-content: center;
   padding: 0.65rem 1rem;
   border: 1px solid transparent;
-  border-radius: 5px;
+  border-radius: var(--radius-control);
   font-size: 0.82rem;
   font-weight: 600;
-  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+  transition: background-color var(--dur-state) var(--ease-spring), border-color var(--dur-state) var(--ease-spring), color var(--dur-state) var(--ease-spring);
 }
 
 .portal-button-primary {
@@ -102,8 +102,7 @@
 }
 
 .portal-button-secondary:hover {
-  border-color: var(--indigo);
-  color: var(--indigo);
+  background: var(--hover);
 }
 
 .portal-meta {
@@ -117,7 +116,7 @@
 .portal-quickstart {
   padding: clamp(1.35rem, 3vw, 2rem);
   border: 1px solid rgb(var(--c-stage-soft) / 0.2);
-  border-radius: 8px;
+  border-radius: var(--radius-surface);
   background: var(--ocean-deep);
   box-shadow: 0 1.25rem 3rem rgba(0, 0, 0, 0.45);
   color: var(--stage-soft);
@@ -224,7 +223,7 @@
   width: 64px;
   height: 64px;
   margin: 0 0 1.15rem;
-  border-radius: 14px;
+  border-radius: var(--radius-sheet);
 }
 
 .portal-section-grid {
@@ -267,12 +266,12 @@
   align-items: start;
   padding-block: 1.15rem;
   border-bottom: 1px solid var(--hairline);
-  transition: background-color 150ms ease, color 150ms ease;
+  transition: background-color var(--dur-state) var(--ease-spring), color var(--dur-state) var(--ease-spring);
 }
 
 .portal-topic-list > a:hover {
   color: var(--indigo);
-  background: color-mix(in srgb, var(--indigo) 7%, transparent);
+  background: var(--hover);
 }
 
 .portal-topic-list strong {
@@ -343,18 +342,12 @@
   color: var(--indigo-deep);
 }
 
-.models-sort:focus-visible {
-  outline: 2px solid var(--indigo);
-  outline-offset: 3px;
-  border-radius: 2px;
-}
-
 .models-reasoning {
   display: inline-block;
   margin-left: 0.5rem;
   padding: 0.05rem 0.4rem;
   border: 1px solid var(--hairline);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--ink-mute);
   font-family: var(--font-mono);
   font-size: 0.62rem;

@@ -80,17 +80,17 @@
   align-items: center;
   min-height: 2.25rem;
   padding: 0.35rem 0.85rem;
-  background: var(--indigo-deep);
+  background: var(--indigo);
   color: var(--paper);
   font-family: var(--font-body);
   font-size: 0.8125rem;
   font-weight: 600;
-  border-radius: 5px;
-  transition: background-color 150ms ease;
+  border-radius: var(--radius-control);
+  transition: background-color var(--dur-state) var(--ease-spring);
 }
 
 .paper-install-cta:hover {
-  background: var(--indigo);
+  background: var(--indigo-deep);
   color: var(--paper);
 }
 
@@ -108,7 +108,7 @@
   font-family: var(--font-body);
   font-size: 0.8125rem;
   font-weight: 600;
-  transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
+  transition: background-color var(--dur-state) var(--ease-spring), color var(--dur-state) var(--ease-spring), border-color var(--dur-state) var(--ease-spring);
 }
 
 .paper-auth-signin,
@@ -145,7 +145,7 @@
   align-items: center;
   padding: 0.35rem 0.75rem;
   border: 1px solid var(--hairline);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   font-family: var(--font-body);
   font-size: 0.75rem;
   font-weight: 600;
@@ -173,7 +173,7 @@
   background: var(--indigo);
   transform: scaleX(0);
   transform-origin: left;
-  transition: transform 180ms ease;
+  transition: transform var(--dur-state) var(--ease-spring);
 }
 .nav-link:hover::after, .nav-link[aria-current="page"]::after { transform: scaleX(1); }
 
@@ -325,15 +325,16 @@ main:has(.ocean-column) + .site-footer .site-footer-main { border-top-color: tra
 
 /* ---------- ambient ---------- */
 /*
- * Two effects, both OPT-IN under `no-preference` rather than opted out under
+ * One effect, OPT-IN under `no-preference` rather than opted out under
  * `reduce`. A `reduce` override can be defeated by specificity; a gate cannot.
  * Reduced motion freezes the field — it never removes it, so the column's
  * gradient and the whale below are unconditional and only the movement is not.
+ * The whale mark itself is always the still pose.
  *
  * The TUI's ambient life — fish, jellyfish, bubbles, the whale cameo — stays
  * out of scope. This page quotes the product's restraint doctrine in its own
- * copy. The standing loops on the whole site are four — ticker, caret, and
- * these two. Entrances are transitions, and the one-shot settles live in the
+ * copy. The standing loops on the whole site are three — ticker, caret, and
+ * this one. Entrances are transitions, and the one-shot settles live in the
  * Motion section below under the same no-preference gate.
  */
 
@@ -346,15 +347,6 @@ main:has(.ocean-column) + .site-footer .site-footer-main { border-top-color: tra
   50% { opacity: 0.045; }
 }
 
-/* M2 — the caustic. `ambient_life.rs`'s literal behaviour: ~1.3s crossing the
-   mark, parked off-canvas for the remaining ~2.7s, peak 0.33. The easing is a
-   sine in-out, i.e. the raised cosine it is meant to be. */
-@keyframes cw-caustic {
-  0% { transform: translateX(0); }
-  32.5% { transform: translateX(1560px); }
-  100% { transform: translateX(1560px); }
-}
-
 @media (prefers-reduced-motion: no-preference) {
   .ocean-column::after {
     content: "";
@@ -365,9 +357,5 @@ main:has(.ocean-column) + .site-footer .site-footer-main { border-top-color: tra
     background: var(--stage-ambient);
     opacity: 0;
     animation: cw-breath 90s ease-in-out infinite;
-  }
-
-  .codewhale-caustic {
-    animation: cw-caustic 4s cubic-bezier(0.37, 0, 0.63, 1) infinite;
   }
 }

@@ -98,27 +98,28 @@
   gap: 0.5rem;
   padding: 0.7rem 1.35rem;
   border: 1px solid var(--indigo-deep);
-  border-radius: 5px;
+  border-radius: var(--radius-control);
   color: var(--indigo-deep);
   font-family: var(--font-body);
   font-size: 0.95rem;
   font-weight: 500;
   line-height: 1;
-  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+  transition: background-color var(--dur-state) var(--ease-spring), border-color var(--dur-state) var(--ease-spring), color var(--dur-state) var(--ease-spring);
 }
 
 .folio-button:hover {
-  background: var(--indigo-pale);
+  background: var(--hover);
 }
 
 .folio-button-primary {
-  background: var(--indigo-deep);
+  border-color: var(--indigo);
+  background: var(--indigo);
   color: var(--paper);
 }
 
 .folio-button-primary:hover {
-  background: var(--indigo);
-  border-color: var(--indigo);
+  background: var(--indigo-deep);
+  border-color: var(--indigo-deep);
   color: var(--paper);
 }
 
@@ -133,7 +134,7 @@
   margin-top: clamp(4rem, 12vw, 11rem);
   margin: 0;
   border: 1px solid rgb(var(--c-stage-soft) / 0.2);
-  border-radius: 8px;
+  border-radius: var(--radius-surface);
   overflow: hidden;
   background: var(--gpui-stage-deep);
   /* The one shadow on the site: the plate is lifted off the water, so the
@@ -170,7 +171,7 @@
 
 .folio-shot .paper-facts .dotline-chip {
   padding: 0.08rem 0.36rem;
-  border-radius: 3px;
+  border-radius: var(--radius-control);
   background: var(--gpui-stage-muted);
   color: var(--stage-text);
   font-weight: 600;
@@ -307,7 +308,7 @@
   text-decoration: underline;
   text-decoration-color: rgb(var(--c-indigo) / 0.35);
   text-underline-offset: 0.25em;
-  transition: text-decoration-color 150ms ease;
+  transition: text-decoration-color var(--dur-state) var(--ease-spring);
 }
 
 .folio-link:hover {
@@ -447,8 +448,6 @@ pre.gs-step-commands {
 
 .skip-link:focus-visible {
   top: 0.5rem;
-  outline: 2px solid var(--indigo);
-  outline-offset: 2px;
 }
 
 /* ---------- honest status badges ---------- */
@@ -467,7 +466,7 @@ pre.gs-step-commands {
 .status-badge-dot {
   width: 0.45rem;
   height: 0.45rem;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
 }
 
 .status-badge-experimental .status-badge-dot { background: var(--ochre); }
@@ -568,7 +567,7 @@ pre.gs-step-commands {
   gap: 1.5rem;
   padding: 1.25rem 1.4rem;
   border: 1px solid var(--stage-line);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   background: var(--paper-card);
 }
 
@@ -773,7 +772,7 @@ pre.gs-step-commands {
   border-bottom: 1px solid var(--stage-line);
   color: var(--action-on-dark);
   font-size: 0.95rem;
-  transition: border-color 150ms ease;
+  transition: border-color var(--dur-state) var(--ease-spring);
 }
 
 .product-install-band a:hover {
@@ -815,11 +814,6 @@ pre.gs-step-commands {
 
 .product-community nav a:hover {
   color: var(--stage-text);
-}
-
-.product-home a:focus-visible {
-  outline: 3px solid var(--signal-gold);
-  outline-offset: 4px;
 }
 
 @media (max-width: 1050px) {

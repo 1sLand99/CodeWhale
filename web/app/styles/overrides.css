@@ -39,21 +39,16 @@
   align-items: center;
   padding: 0.5rem 1.1rem;
   border: 1px solid var(--indigo);
-  border-radius: 5px;
+  border-radius: var(--radius-control);
   color: var(--indigo);
   font-size: 0.95rem;
   font-weight: 500;
   cursor: pointer;
-  transition: background-color 150ms ease, color 150ms ease;
+  transition: background-color var(--dur-state) var(--ease-spring), color var(--dur-state) var(--ease-spring);
 }
 
 .usage-counting-button:hover {
-  background: rgb(var(--c-indigo) / 0.1);
-}
-
-.usage-counting-button:focus-visible {
-  outline: 2px solid var(--indigo);
-  outline-offset: 2px;
+  background: var(--hover);
 }
 
 /* ---------- docs: the reading sheet ---------- */
