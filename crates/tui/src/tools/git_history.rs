@@ -414,9 +414,17 @@ impl ToolSpec for GitBlameTool {
 /// or push. The execution envelope classes this as bounded fetch — shell plus
 /// network authority, not write authority.
 ///
-/// Known limitation: shares the existing git tools' no-timeout behavior; a
-/// hung remote is bounded by the caller's wall clock, not the tool.
+/// Never interactive and always bounded: the spawn carries the shared no-prompt
+/// environment (`GIT_TERMINAL_PROMPT=0`, BatchMode ssh), so a remote that wants
+/// credentials, a passphrase or a host-key confirmation fails fast instead of
+/// prompting on `/dev/tty` inside the raw-mode TUI; and the child runs under
+/// [`GIT_FETCH_TIMEOUT`] with `kill_on_drop`, so a remote that never answers
+/// ends the call with a clear error instead of freezing the turn.
 pub struct GitFetchTool;
+
+/// Upper bound on one `git_fetch`. Generous enough for a first fetch of a
+/// large repository; short enough that a silent remote cannot pass for a hang.
+const GIT_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 #[async_trait]
 impl ToolSpec for GitFetchTool {
@@ -478,7 +486,20 @@ impl ToolSpec for GitFetchTool {
         args.extend(refspecs.clone());
 
         let command_str = format_command(&git_ctx.working_dir, &args);
-        let output = run_git_command_async(git_ctx.working_dir.clone(), args).await?;
+        let Some(output) =
+            run_git_command_bounded(&git_ctx.working_dir, &args, GIT_FETCH_TIMEOUT).await?
+        else {
+            let seconds = GIT_FETCH_TIMEOUT.as_secs();
+            return Ok(ToolResult::error(format!(
+                "git fetch from remote '{remote}' timed out after {seconds}s and was stopped; \
+                 the remote did not finish answering. No refs were changed by this call."
+            ))
+            .with_metadata(json!({
+                "command": command_str,
+                "timed_out": true,
+                "timeout_secs": seconds,
+            })));
+        };
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Ok(ToolResult::error(format!(
@@ -862,6 +883,35 @@ async fn run_git_command_async(
         .map_err(|e| ToolError::execution_failed(format!("git task panicked: {e}")))?
 }
 
+/// Run git under a hard deadline. `Ok(None)` means the deadline passed; the
+/// child is killed when the dropped future releases it (`kill_on_drop`), so a
+/// timed-out fetch never lingers holding a blocking thread.
+async fn run_git_command_bounded(
+    working_dir: &Path,
+    args: &[String],
+    timeout: std::time::Duration,
+) -> Result<Option<Output>, ToolError> {
+    let Some(mut cmd) = crate::dependencies::Git::tokio_command() else {
+        return Err(ToolError::not_available(
+            "git is not installed or not in PATH",
+        ));
+    };
+    cmd.args(args)
+        .current_dir(working_dir)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    match tokio::time::timeout(timeout, cmd.output()).await {
+        Err(_) => Ok(None),
+        Ok(Ok(output)) => Ok(Some(output)),
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => Err(ToolError::not_available(
+            "git is not installed or not in PATH",
+        )),
+        Ok(Err(e)) => Err(ToolError::execution_failed(format!(
+            "Failed to run git: {e}"
+        ))),
+    }
+}
+
 fn format_command(working_dir: &Path, args: &[String]) -> String {
     format!(
         "git -C {} {}",
@@ -1188,6 +1238,98 @@ mod tests {
         let refs = String::from_utf8_lossy(&refs.stdout);
         assert!(refs.contains("origin/"), "{refs}");
         assert!(!work.path().join("file.txt").exists());
+    }
+
+    /// A loopback HTTP "remote" that answers every request with `response`
+    /// (or, when `None`, accepts and never answers). Returns its URL.
+    fn spawn_fake_http_remote(response: Option<&'static str>) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming().take(16) {
+                let Ok(mut stream) = stream else { continue };
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                match response {
+                    Some(reply) => {
+                        let _ = stream.write_all(reply.as_bytes());
+                    }
+                    None => held.push(stream),
+                }
+            }
+        });
+        format!("http://{addr}/repo.git")
+    }
+
+    fn init_repo_with_remote(root: &Path, url: &str) {
+        init_git_repo(root);
+        run_git(root, &["remote", "add", "origin", url]);
+        // Isolate from the developer's credential helpers and askpass so the
+        // only thing standing between git and a prompt is our environment.
+        run_git(root, &["config", "credential.helper", ""]);
+        run_git(root, &["config", "core.askPass", ""]);
+    }
+
+    #[tokio::test]
+    async fn git_fetch_fails_fast_when_remote_requires_credentials() {
+        if !git_available() {
+            return;
+        }
+        let url = spawn_fake_http_remote(Some(
+            "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"codewhale\"\r\n\
+             Content-Length: 0\r\nConnection: close\r\n\r\n",
+        ));
+        let work = tempdir().expect("tempdir");
+        init_repo_with_remote(work.path(), &url);
+
+        let ctx = ToolContext::new(work.path());
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            GitFetchTool.execute(json!({ "remote": "origin" }), &ctx),
+        )
+        .await
+        .expect("git_fetch must not wait on a credential prompt")
+        .expect("execute");
+        assert!(!result.success, "{}", result.content);
+        assert!(
+            result
+                .content
+                .contains("git fetch failed for remote 'origin'"),
+            "{}",
+            result.content
+        );
+        // Git names the refusal to prompt rather than blocking on /dev/tty.
+        let lower = result.content.to_lowercase();
+        assert!(
+            lower.contains("terminal prompts disabled") || lower.contains("authentication"),
+            "{}",
+            result.content
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn git_fetch_runner_kills_a_remote_that_never_answers() {
+        if !git_available() {
+            return;
+        }
+        let url = spawn_fake_http_remote(None);
+        let work = tempdir().expect("tempdir");
+        init_repo_with_remote(work.path(), &url);
+
+        let started = std::time::Instant::now();
+        let outcome = run_git_command_bounded(
+            work.path(),
+            &["fetch".to_string(), "origin".to_string()],
+            std::time::Duration::from_secs(2),
+        )
+        .await
+        .expect("git spawns");
+        assert!(outcome.is_none(), "a silent remote must hit the deadline");
+        assert!(started.elapsed() < std::time::Duration::from_secs(15));
     }
 
     #[tokio::test]
