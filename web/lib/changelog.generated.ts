@@ -25,14 +25,14 @@ export const CHANGELOG: ChangelogRelease[] = [
     "version": "Unreleased",
     "date": null,
     "unreleased": true,
-    "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.9.13...HEAD",
+    "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.10.0...HEAD",
     "sections": []
   },
   {
     "version": "0.10.0",
     "date": "2026-09-22",
     "unreleased": false,
-    "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.9.13...HEAD",
+    "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.9.13...v0.10.0",
     "sections": [
       {
         "heading": "Contributors",

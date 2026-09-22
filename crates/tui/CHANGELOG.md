@@ -9,10 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.10.0] - 2026-09-22
 
-The v0.10.0 source candidate brings a redesigned terminal workbench, clearer
-settings, and more reliable session and runtime behavior. It supersedes the
-unpublished v0.9.14 candidate. Nothing below is published until the matching
-tag, packages, checksums and release assets exist.
+Codewhale v0.10.0 brings a redesigned terminal workbench, clearer settings, and
+more reliable session and runtime behavior. It supersedes the unpublished
+v0.9.14 candidate.
 
 ### Contributors
 
