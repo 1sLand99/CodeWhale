@@ -338,8 +338,10 @@ def main() -> int:
             print(f"  {line}", file=sys.stderr)
         print(
             "Move the work into `tokio::task::spawn_blocking` (or use tokio::fs "
-            "/ tokio::time), or raise the budget with --update if the site can "
-            "only run on synchronous code. See #6149.",
+            "/ tokio::time). If the site can only run on synchronous code, land "
+            "the raised budget in this PR and say why in the PR description:\n"
+            "  python3 scripts/check-blocking-calls-budget.py --update\n"
+            "See #6149.",
             file=sys.stderr,
         )
         return 1

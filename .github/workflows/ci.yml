@@ -202,6 +202,16 @@ jobs:
         # auto-tag.yml, release.yml, prepare-release.sh), which is where a
         # missing receipt actually matters.
         run: ./scripts/release/check-versions.sh --range-audit-advisory
+      - name: Check this PR's feature release-note receipts
+        # The range audit above is advisory because previous-tag..HEAD blames
+        # every open PR for receipts other merges forgot. This is the same
+        # check scoped to the PR's own commits, so it blocks: a `feat:` commit
+        # that references #N must add #N to CHANGELOG.md in the same PR.
+        # Locally: scripts/preflight.sh.
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: ./scripts/release/check-feature-release-notes.sh "${PR_BASE_SHA}" HEAD
       - name: Check contributor credit
         # The three credit surfaces were only ever cross-checked against
         # `requiredCandidateCredits`, a hand-maintained list -- so they proved
@@ -445,24 +455,54 @@ jobs:
       # both `#[allow(dead_code)]` and `#[expect(dead_code)]`, because counting
       # one spelling let a sweep rewrite allows as expects and book it as
       # progress (#6241).
-      - name: Test dead-code budget script
+      - name: Test dead-code and blocking-calls budget scripts
         if: needs.changes.outputs.heavy == 'true'
-        run: python3 scripts/test_check_dead_code_budget.py
+        run: |
+          python3 scripts/test_check_dead_code_budget.py
+          python3 scripts/test_check_blocking_calls_budget.py
+      # The four budget ratchets below (dead-code, blocking-calls,
+      # runtime-contract, persistence-backlog) assert whole-repo properties.
+      # They used to be advisory on every pull request and fatal on push, so
+      # every PR looked green and main went red after merge (38 of 154
+      # main-push runs green, 2026-09-16..22). Now scripts/ratchet-gate.sh
+      # blocks a same-repo PR that adds debt and prints the `--update` receipt
+      # command that lands the fix in that PR. It stays advisory in exactly
+      # two cases: the PR's merge base fails the same check (inherited debt,
+      # re-checked on a throwaway checkout of the base), or the PR comes from
+      # a fork. Pushes to main, schedule and dispatch have no base and block.
+      - name: Resolve ratchet merge base
+        if: needs.changes.outputs.heavy == 'true' && github.event_name == 'pull_request'
+        shell: bash
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          # The PR checkout is the synthetic merge commit; its first parent is
+          # the base tip this PR actually merges into.
+          if git rev-parse -q --verify HEAD^2 >/dev/null; then
+            base="$(git rev-parse HEAD^1)"
+          else
+            base="${PR_BASE_SHA}"
+          fi
+          echo "Ratchet merge base: ${base}"
+          echo "RATCHET_BASE_SHA=${base}" >> "${GITHUB_ENV}"
       - name: Check dead-code budget
         if: needs.changes.outputs.heavy == 'true'
-        # Advisory on pull requests: this asserts a whole-repo property, so a
-        # branch can fail it for debt it inherited rather than added, and the
-        # fix would be rebasing instead of editing code. It stays blocking on
-        # pushes to main, where the number is actually actionable.
-        continue-on-error: ${{ github.event_name == 'pull_request' }}
-        run: python3 scripts/check-dead-code-budget.py
+        continue-on-error: ${{ github.event_name == 'pull_request' && needs.changes.outputs.trusted != 'true' }}
+        run: >-
+          bash scripts/ratchet-gate.sh --name dead-code
+          --update "python3 scripts/check-dead-code-budget.py --update"
+          -- python3 scripts/check-dead-code-budget.py
       # Ratchet for blocking calls that could park Tokio workers: any new
       # thread::sleep/std::fs site outside spawn_blocking, dedicated-thread,
       # or test scopes must be isolated or budgeted (#6149).
       - name: Check blocking-calls budget
         if: needs.changes.outputs.heavy == 'true'
-        continue-on-error: ${{ github.event_name == 'pull_request' }}
-        run: python3 scripts/check-blocking-calls-budget.py
+        continue-on-error: ${{ github.event_name == 'pull_request' && needs.changes.outputs.trusted != 'true' }}
+        run: >-
+          bash scripts/ratchet-gate.sh --name blocking-calls
+          --update "python3 scripts/check-blocking-calls-budget.py --update"
+          -- python3 scripts/check-blocking-calls-budget.py
       - name: Test runtime-contract measurement harness
         if: needs.changes.outputs.heavy == 'true'
         run: |
@@ -483,12 +523,12 @@ jobs:
       # the measurement script runs only locked, ignored Rust metric tests.
       - name: Check runtime-contract budget
         if: needs.changes.outputs.heavy == 'true'
-        # Advisory on pull requests: this asserts a whole-repo property, so a
-        # branch can fail it for debt it inherited rather than added, and the
-        # fix would be rebasing instead of editing code. It stays blocking on
-        # pushes to main, where the number is actually actionable.
-        continue-on-error: ${{ github.event_name == 'pull_request' }}
-        run: python3 scripts/check-runtime-contract-budget.py
+        # Blocking for same-repo PRs; see the ratchet note above.
+        continue-on-error: ${{ github.event_name == 'pull_request' && needs.changes.outputs.trusted != 'true' }}
+        run: >-
+          bash scripts/ratchet-gate.sh --name runtime-contract
+          --update "python3 scripts/check-runtime-contract-budget.py --update --allow-increase"
+          -- python3 scripts/check-runtime-contract-budget.py
       # Provider-free paused-consumer measurement of the production
       # persistence request channel. RSS is sampled only on macOS; every host
       # enforces the accepted/retained request and payload contract.
@@ -499,12 +539,12 @@ jobs:
           python3 scripts/test_check_persistence_backlog_budget.py
       - name: Check persistence-backlog budget
         if: needs.changes.outputs.heavy == 'true'
-        # Advisory on pull requests: this asserts a whole-repo property, so a
-        # branch can fail it for debt it inherited rather than added, and the
-        # fix would be rebasing instead of editing code. It stays blocking on
-        # pushes to main, where the number is actually actionable.
-        continue-on-error: ${{ github.event_name == 'pull_request' }}
-        run: python3 scripts/check-persistence-backlog-budget.py
+        # Blocking for same-repo PRs; see the ratchet note above.
+        continue-on-error: ${{ github.event_name == 'pull_request' && needs.changes.outputs.trusted != 'true' }}
+        run: >-
+          bash scripts/ratchet-gate.sh --name persistence-backlog
+          --update "python3 scripts/check-persistence-backlog-budget.py --update"
+          -- python3 scripts/check-persistence-backlog-budget.py
       - name: Check README translations stay in sync
         if: github.event_name != 'schedule'
         run: python3 scripts/check-readme-translations.py
