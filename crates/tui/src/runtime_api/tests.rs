@@ -5340,6 +5340,165 @@ async fn session_resume_thread_creates_thread_from_saved_session() -> Result<()>
 }
 
 #[tokio::test]
+async fn session_resume_thread_reuses_the_thread_that_already_holds_it() -> Result<()> {
+    // Resuming a conversation that is already open must hand back the thread
+    // holding it: minting a second one per visit is what made "continue this
+    // conversation" add a rail row for history the user already had open.
+    let _env = lock_test_env();
+    let dir = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+    let root = dir.path().join("server");
+    let sessions_dir = dir.path().join("sessions");
+    fs::create_dir_all(&sessions_dir)?;
+    let session = json!({
+        "schema_version": 1,
+        "metadata": {
+            "id": "sess_reuse_resume",
+            "title": "Reused resume session",
+            "created_at": "2025-01-01T00:00:00Z",
+            "updated_at": "2025-01-01T00:10:00Z",
+            "message_count": 2,
+            "total_tokens": 100,
+            "model": "deepseek-v4-pro",
+            "workspace": "/tmp/test",
+            "mode": "agent"
+        },
+        "messages": [
+            {
+                "role": "user",
+                "content": [{ "type": "text", "text": "Hello, world!" }]
+            },
+            {
+                "role": "assistant",
+                "content": [{ "type": "text", "text": "Hello! How can I help you?" }]
+            }
+        ],
+        "system_prompt": null
+    });
+    fs::write(
+        sessions_dir.join("sess_reuse_resume.json"),
+        serde_json::to_string_pretty(&session)?,
+    )?;
+
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_root(root.clone(), sessions_dir.clone()).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+    let url = format!("http://{addr}/v1/sessions/sess_reuse_resume/resume-thread");
+
+    let first = client.post(&url).json(&json!({})).send().await?;
+    assert_eq!(first.status(), StatusCode::CREATED);
+    let first: serde_json::Value = first.json().await?;
+    let thread_id = first["thread_id"]
+        .as_str()
+        .context("missing resumed thread id")?
+        .to_string();
+
+    let second = client.post(&url).json(&json!({})).send().await?;
+    assert_eq!(second.status(), StatusCode::OK);
+    let second: serde_json::Value = second.json().await?;
+    assert_eq!(second["thread_id"], thread_id.as_str());
+    assert_eq!(second["session_id"], "sess_reuse_resume");
+    assert_eq!(second["message_count"], 2);
+
+    let threads: Vec<serde_json::Value> = client
+        .get(format!("http://{addr}/v1/threads"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(
+        threads.len(),
+        1,
+        "resuming the same conversation twice must not add a second thread"
+    );
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_resume_thread_ignores_an_archived_thread_holding_the_session() -> Result<()> {
+    // Archiving is how a conversation is taken off the rail. Handing the
+    // archived thread back to a client that asked to continue the conversation
+    // would move it somewhere the user cannot see it, so a new thread is the
+    // honest answer even though the binding exists.
+    let _env = lock_test_env();
+    let dir = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+    let root = dir.path().join("server");
+    let sessions_dir = dir.path().join("sessions");
+    fs::create_dir_all(&sessions_dir)?;
+    let session = json!({
+        "schema_version": 1,
+        "metadata": {
+            "id": "sess_archived_reuse",
+            "title": "Archived holder",
+            "created_at": "2025-01-01T00:00:00Z",
+            "updated_at": "2025-01-01T00:10:00Z",
+            "message_count": 2,
+            "total_tokens": 100,
+            "model": "deepseek-v4-pro",
+            "workspace": "/tmp/test",
+            "mode": "agent"
+        },
+        "messages": [
+            {
+                "role": "user",
+                "content": [{ "type": "text", "text": "Hello, world!" }]
+            },
+            {
+                "role": "assistant",
+                "content": [{ "type": "text", "text": "Hello! How can I help you?" }]
+            }
+        ],
+        "system_prompt": null
+    });
+    fs::write(
+        sessions_dir.join("sess_archived_reuse.json"),
+        serde_json::to_string_pretty(&session)?,
+    )?;
+
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_root(root.clone(), sessions_dir.clone()).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+    let url = format!("http://{addr}/v1/sessions/sess_archived_reuse/resume-thread");
+
+    let first = client.post(&url).json(&json!({})).send().await?;
+    assert_eq!(first.status(), StatusCode::CREATED);
+    let first: serde_json::Value = first.json().await?;
+    let archived_id = first["thread_id"]
+        .as_str()
+        .context("missing resumed thread id")?
+        .to_string();
+
+    client
+        .patch(format!("http://{addr}/v1/threads/{archived_id}"))
+        .json(&json!({ "archived": true }))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let second = client.post(&url).json(&json!({})).send().await?;
+    assert_eq!(second.status(), StatusCode::CREATED);
+    let second: serde_json::Value = second.json().await?;
+    assert_ne!(
+        second["thread_id"].as_str(),
+        Some(archived_id.as_str()),
+        "an archived thread is not somewhere to send the user back to"
+    );
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn session_create_from_completed_thread_saves_messages() -> Result<()> {
     let root = std::env::temp_dir().join(format!("deepseek-thread-session-{}", Uuid::new_v4()));
     let sessions_dir = root.join("sessions");

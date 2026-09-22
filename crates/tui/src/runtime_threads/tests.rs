@@ -210,8 +210,37 @@ mod recovery {
         let thread = manager.get_thread(&thread.id).await?;
         let fork = manager.fork_thread(&thread.id).await?;
         assert_eq!(manager.restore_thread_messages(&fork)?, messages);
+        // A fork owns its own session document. It used to inherit the
+        // source's, which pointed two threads at one file: whichever side
+        // saved last left the other's checkpoint describing bytes that were
+        // gone, and hydrating that thread then failed outright.
+        let fork_session_id = fork
+            .session_id
+            .clone()
+            .context("fork should own a session document")?;
+        assert_ne!(fork_session_id, saved.metadata.id);
+        let fork_session = sessions.load_session(&fork_session_id)?;
+        assert_eq!(fork_session.messages, messages);
+        assert_eq!(
+            fork_session.metadata.parent_session_id.as_deref(),
+            Some(saved.metadata.id.as_str())
+        );
+        assert_eq!(
+            fork_session.metadata.forked_from_message_count,
+            Some(messages.len())
+        );
+
         let (backtrack, _, _, _) = manager.fork_at_user_message(&thread.id, 0).await?;
         assert_eq!(manager.restore_thread_messages(&backtrack)?, messages[..2]);
+        let backtrack_session_id = backtrack
+            .session_id
+            .clone()
+            .context("a backtracking fork should own a session document")?;
+        assert_ne!(backtrack_session_id, saved.metadata.id);
+        assert_eq!(
+            sessions.load_session(&backtrack_session_id)?.messages,
+            messages[..2].to_vec()
+        );
         let (empty, _, _, _) = manager.fork_at_user_message(&thread.id, 1).await?;
         assert!(manager.restore_thread_messages(&empty)?.is_empty());
         assert_eq!(manager.restore_thread_messages(&thread)?, messages);
@@ -258,6 +287,10 @@ mod recovery {
                 .to_string()
                 .contains("changed after this thread's checkpoint")
         );
+        // The source saving new content is precisely what used to break the
+        // fork: both threads named this file, so the source's save rewrote the
+        // bytes under the fork's checkpoint.
+        assert_eq!(manager.restore_thread_messages(&fork)?, messages);
         assert!(
             manager
                 .restore_thread_messages(&legacy)
@@ -269,6 +302,65 @@ mod recovery {
         assert!(manager.active.lock().await.engines.is_empty());
         sessions.save_session(&saved)?;
         assert_eq!(manager.restore_thread_messages(&thread)?, expected);
+        Ok(())
+    }
+
+    /// A thread can carry `session_id` without a checkpoint: the binding
+    /// outlived the field that records where its prefix ends (45 of 124 threads
+    /// in one real store). Such a thread resolves its prefix by walking turn
+    /// projections instead, so a fork of it has to learn the same boundary. A
+    /// fork that stored "the prefix covers no turns" hydrated as the prefix
+    /// *plus* the turns the prefix already contains — its history, twice.
+    #[tokio::test]
+    async fn fork_of_a_legacy_session_link_keeps_one_copy_of_the_history() -> Result<()> {
+        let _env = crate::test_support::lock_test_env();
+        let dir = tempfile::tempdir()?;
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+        let manager = RuntimeThreadManager::open(
+            config(),
+            dir.path().to_path_buf(),
+            test_manager_config(dir.path().join("runtime")),
+        )?;
+        let thread = manager
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        let messages: Vec<Message> = serde_json::from_value(json!([
+            {"role":"user","content":[{"type":"text","text":"first"}]},
+            {"role":"assistant","content":[{"type":"text","text":"first answer"}]},
+            {"role":"user","content":[{"type":"text","text":"second"}]},
+            {"role":"assistant","content":[{"type":"text","text":"second answer"}]}
+        ]))?;
+        manager
+            .seed_thread_from_messages(&thread.id, &messages)
+            .await?;
+        let saved = crate::session_manager::create_saved_session_with_id_and_mode(
+            Uuid::new_v4().to_string(),
+            &messages,
+            &thread.model,
+            dir.path(),
+            0,
+            None,
+            Some("agent"),
+        );
+        let sessions = crate::session_manager::SessionManager::new(
+            crate::session_manager::default_sessions_dir()?,
+        )?;
+        sessions.save_session(&saved)?;
+        // Bind it the way the older writer did: id only, no cursor.
+        let mut linked = manager.get_thread(&thread.id).await?;
+        linked.session_id = Some(saved.metadata.id.clone());
+        linked.saved_session_checkpoint = None;
+        manager.store.save_thread(&linked)?;
+
+        let fork = manager.fork_thread(&thread.id).await?;
+        assert_ne!(
+            fork.session_id.as_deref(),
+            Some(saved.metadata.id.as_str()),
+            "the fork must own its own document"
+        );
+        assert_eq!(manager.restore_thread_messages(&fork)?, messages);
+        let (backtrack, _, _, _) = manager.fork_at_user_message(&thread.id, 0).await?;
+        assert_eq!(manager.restore_thread_messages(&backtrack)?, messages[..2]);
         Ok(())
     }
 
