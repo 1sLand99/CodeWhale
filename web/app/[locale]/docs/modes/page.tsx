@@ -60,7 +60,7 @@ export default async function ModesPage({ params }: { params: Promise<{ locale: 
         <p className={`${t.bodyClassName} mt-3`}>{renderRichText(t.switchingLead)}</p>
         <p className={`${t.bodyClassName} mt-3`}>{t.switchingCommandLead}</p>
         <pre className="code-block mt-4">{`/mode plan
-/mode act
+/mode work
 /mode operate`}</pre>
       </section>
 
