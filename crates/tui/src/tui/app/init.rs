@@ -878,6 +878,7 @@ impl App {
             use_bracketed_paste,
             use_paste_burst_detection,
             bracketed_paste_seen: false,
+            bracketed_paste_trusted: crate::tui::paste::terminal_delivers_bracketed_paste(),
             system_prompt: None,
             auto_compact,
             auto_compact_user_configured,
