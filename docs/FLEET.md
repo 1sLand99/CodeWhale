@@ -158,8 +158,8 @@ neither creates the ledger as a side effect of reading it.
 The current interactive session's sub-agents are a **different set**, and now
 have their own name:
 
-- `/fleet workers` (or `/subagents`, or `n`) shows sub-agents attached to the
-  current TUI session. It does not read the persistent ledger.
+- `/fleet workers` (or `/subagents`, or Tab / `w` from the `/fleet` roster)
+  shows sub-agents attached to the current TUI session. It does not read the persistent ledger.
 - `/fleet list|status|interrupt|resume` and `codewhale fleet
   list|status|interrupt|resume` act on the durable ledger.
 - `codewhale fleet restart <worker-id>` is CLI-only: it re-leases the task and
@@ -498,6 +498,22 @@ next recursive ring rather than trying to show the whole tree at once.
 
 Workers are optional. If omitted, Codewhale creates local worker slots up to
 `--max-workers`.
+
+A spec file takes one of three shapes, chosen by its structure before any
+field is read:
+
+- a **document** — an object with `tasks` (and optionally `name`, `labels`,
+  `workers`, `usage_ceiling`); every TOML spec is this shape;
+- a **task array** — a bare JSON array of task objects;
+- a **single task** — one task object with `id` / `instructions` at the top
+  level.
+
+Array and single-task files take their run name from the file name. Because
+the shape is picked first, a malformed spec reports the real problem, for
+example ``JSON spec document at tasks[1] (id "review"): missing field
+`instructions` at line 7 column 5``. The checked-in
+[`docs/examples/fleet-dogfood.toml`](examples/fleet-dogfood.toml) and the
+tutorial's `tasks.json` are parsed by the test suite, so they stay valid.
 
 Task specs are typed in Rust and keep verification data separate from worker
 transcripts. Only the `worker` member/role reference participates in fleet

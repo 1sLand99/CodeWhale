@@ -2635,6 +2635,14 @@ async fn provider_success_without_usage_records_one_route_aware_gap_and_no_zero_
     assert_eq!(worker.usage_source_fingerprints, [fingerprint].into());
 }
 
+/// A server-side delay no test outlives: the request is accepted and counted
+/// but never answered, so a step timeout can never lose a race to the reply.
+const NEVER_ANSWERS: Duration = Duration::from_secs(3600);
+
+/// Upper bound for waits on real loopback I/O. Hitting it means the child hung;
+/// the assertions themselves never depend on how fast the runner is.
+const HANG_GUARD: Duration = Duration::from_secs(30);
+
 /// Like [`delayed_chat_client`] but delays *every* attempt, so the per-step
 /// API timeout fires on the first call and on every retry — the shape needed
 /// to drive the timeout-retry budget to exhaustion.
@@ -9358,14 +9366,18 @@ async fn api_timeout_preserves_checkpoint_and_returns_needs_input_without_parkin
         manager.register_worker(make_worker_spec(&agent_id, tmp.path().to_path_buf()));
     }
 
-    // Every attempt outlasts the 50ms step timeout, so the timeout-retry
-    // budget (SUBAGENT_API_TIMEOUT_MAX_RETRIES) is driven to exhaustion
-    // before the step interrupts. The backoff base is shrunk to 1ms so the
-    // test does not wait out the production backoff sequence.
-    let (client, calls) =
-        always_delayed_chat_client(Duration::from_millis(150), "resumed answer").await;
+    // Every attempt outlasts the step timeout, so the timeout-retry budget
+    // (SUBAGENT_API_TIMEOUT_MAX_RETRIES) is driven to exhaustion before the
+    // step interrupts. The backoff base is shrunk to 1ms so the test does not
+    // wait out the production backoff sequence.
+    //
+    // Determinism (fleet-6): the server never answers within the test, so the
+    // step timeout always wins; a 150ms reply used to race a 50ms timeout on a
+    // loaded runner. The 250ms step timeout is the window each attempt has to
+    // reach the loopback server and be counted.
+    let (client, calls) = always_delayed_chat_client(NEVER_ANSWERS, "resumed answer").await;
     let mut runtime = stub_runtime()
-        .with_step_api_timeout(Duration::from_millis(50))
+        .with_step_api_timeout(Duration::from_millis(250))
         .with_api_timeout_retry_base_backoff(Duration::from_millis(1));
     runtime.client = client;
     runtime.manager = Arc::clone(&manager);
@@ -9392,7 +9404,7 @@ async fn api_timeout_preserves_checkpoint_and_returns_needs_input_without_parkin
     };
     let task_handle = tokio::spawn(run_subagent_task(task));
 
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(HANG_GUARD, async {
         loop {
             if calls.load(Ordering::SeqCst) >= 1 {
                 break;
@@ -9403,7 +9415,7 @@ async fn api_timeout_preserves_checkpoint_and_returns_needs_input_without_parkin
     .await
     .expect("first timed-out API attempt should reach the test server");
 
-    let interrupted_envelope = tokio::time::timeout(Duration::from_secs(5), async {
+    let interrupted_envelope = tokio::time::timeout(HANG_GUARD, async {
         loop {
             for env in mailbox_rx.drain() {
                 if let MailboxMessage::Interrupted {
@@ -9426,7 +9438,7 @@ async fn api_timeout_preserves_checkpoint_and_returns_needs_input_without_parkin
         interrupted_envelope.1
     );
 
-    tokio::time::timeout(Duration::from_secs(5), task_handle)
+    tokio::time::timeout(HANG_GUARD, task_handle)
         .await
         .expect("sub-agent task must not park waiting for checkpoint input")
         .expect("sub-agent task should finish");
@@ -9533,13 +9545,14 @@ async fn subagent_retries_api_timeout_before_succeeding() {
         manager.register_worker(make_worker_spec(&agent_id, tmp.path().to_path_buf()));
     }
 
-    // Only the first attempt outlasts the 50ms step timeout; the retry
-    // answers immediately, so a single timed-out attempt must be retried
-    // exactly once and then complete.
-    let (client, calls, _bodies) =
-        delayed_chat_client(Duration::from_millis(150), "recovered answer").await;
+    // Only the first attempt outlasts the step timeout; the retry answers
+    // immediately, so a single timed-out attempt must be retried exactly once
+    // and then complete. The first reply never arrives within the test, so it
+    // cannot race the timeout (fleet-6); 500ms is the window the immediate
+    // retry has to answer on a loaded runner.
+    let (client, calls, _bodies) = delayed_chat_client(NEVER_ANSWERS, "recovered answer").await;
     let mut runtime = stub_runtime()
-        .with_step_api_timeout(Duration::from_millis(50))
+        .with_step_api_timeout(Duration::from_millis(500))
         .with_api_timeout_retry_base_backoff(Duration::from_millis(1));
     runtime.client = client;
     runtime.manager = Arc::clone(&manager);
@@ -9562,13 +9575,10 @@ async fn subagent_retries_api_timeout_before_succeeding() {
         _foreground_child_registration: None,
     };
 
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        tokio::spawn(run_subagent_task(task)),
-    )
-    .await
-    .expect("sub-agent task should finish")
-    .expect("sub-agent join should succeed");
+    tokio::time::timeout(HANG_GUARD, tokio::spawn(run_subagent_task(task)))
+        .await
+        .expect("sub-agent task should finish")
+        .expect("sub-agent join should succeed");
 
     assert_eq!(
         calls.load(Ordering::SeqCst),
@@ -15546,6 +15556,11 @@ async fn run_subagent_task_claims_before_delivery_and_then_finalizes() {
 
     let (completion_tx, mut completion_rx) = mpsc::channel::<SubAgentCompletion>(16);
     let mut runtime = runtime_with_depth(1, Some(completion_tx));
+    // Answer the child's single model call from a loopback stub instead of the
+    // stub client's real provider URL: the old network round-trip (DNS, TLS,
+    // a 401) is what made the post-release wait flaky (fleet-6).
+    let (client, _calls, _bodies) = delayed_chat_client(Duration::ZERO, "done").await;
+    runtime.client = client;
     runtime.manager = Arc::clone(&manager);
     agent.terminal_delivery = Some(SubAgentTerminalDeliveryContext::from_runtime(&runtime));
     manager.write().await.agents.insert(agent_id.clone(), agent);
@@ -15580,14 +15595,16 @@ async fn run_subagent_task_claims_before_delivery_and_then_finalizes() {
     );
     drop(manager_lock);
 
-    let completion = tokio::time::timeout(Duration::from_secs(1), completion_rx.recv())
+    // Hang guard only: the completion is ordered after the claim, not timed.
+    let completion = tokio::time::timeout(Duration::from_secs(30), completion_rx.recv())
         .await
         .expect("completion should follow the successful terminal claim");
     let completion = completion.expect("completion channel should remain open");
     assert_eq!(completion.agent_id, agent_id);
 
-    task_handle
+    tokio::time::timeout(Duration::from_secs(30), task_handle)
         .await
+        .expect("run_subagent_task should not hang after lock release")
         .expect("run_subagent_task should complete after lock release");
 
     let snapshot = manager
