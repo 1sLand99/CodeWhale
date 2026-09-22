@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::activation::{PluginActivationCapability, PluginActivationPolicy};
+use super::managed_policy::{
+    ManagedPluginPolicy, ManagedPolicyOutcome, load_managed_policy, resolve_managed_policy_path,
+};
 use super::manifest::PluginInventory;
 use super::path_identity::metadata_is_link_or_reparse;
 #[cfg(windows)]
@@ -66,6 +69,9 @@ pub struct PluginRegistry {
     state: PluginStateFile,
     state_path: Option<PathBuf>,
     state_error: Option<String>,
+    managed_policy: Option<ManagedPluginPolicy>,
+    managed_policy_path: Option<PathBuf>,
+    managed_policy_error: Option<String>,
     workspace: PathBuf,
     discovery_context: Option<std::sync::Arc<super::context::PluginDiscoveryContext>>,
     catalog_stamp: super::discovery::PluginCatalogStamp,
@@ -109,6 +115,24 @@ impl PluginRegistry {
             .as_ref()
             .map(|context| context.catalog_stamp_for_workspace(&workspace))
             .unwrap_or_default();
+        let host_environment = discovery_context
+            .as_ref()
+            .map(|context| context.host_environment());
+        let policy_path = resolve_managed_policy_path(&state_path, host_environment.as_deref());
+        let (managed_policy, managed_policy_error) = match load_managed_policy(&policy_path) {
+            ManagedPolicyOutcome::Absent => (None, None),
+            ManagedPolicyOutcome::Loaded(policy) => (Some(policy), None),
+            ManagedPolicyOutcome::Invalid(error) => {
+                diagnostics.push(PluginDiagnostic::error(
+                    "policy-invalid",
+                    format!(
+                        "Managed plugin policy is fail-closed; no plugin may stay enabled until it is repaired or removed: {error}"
+                    ),
+                    Some(policy_path.clone()),
+                ));
+                (None, Some(error))
+            }
+        };
         let mut registry = Self {
             plugins: BTreeMap::new(),
             names: BTreeMap::new(),
@@ -116,6 +140,9 @@ impl PluginRegistry {
             state,
             state_path: Some(state_path),
             state_error,
+            managed_policy,
+            managed_policy_path: Some(policy_path),
+            managed_policy_error,
             workspace,
             discovery_context,
             catalog_stamp,
@@ -135,6 +162,11 @@ impl PluginRegistry {
 
     fn apply_state(&mut self) {
         let state_path = self.state_path.clone();
+        // Hoisted so the loop below can borrow `self.plugins` mutably: a
+        // malformed policy fails closed (nothing stays enabled), a valid one
+        // forbids whatever it does not allow, and an absent one forbids nothing.
+        let managed_policy_invalid = self.managed_policy_error.is_some();
+        let managed_policy = self.managed_policy.clone();
         for (id, plugin) in &mut self.plugins {
             let persisted = self.state.plugins.get(id);
             plugin.state_generation = persisted.map_or(0, |state| state.generation);
@@ -152,6 +184,18 @@ impl PluginRegistry {
             if self.state_error.is_some() {
                 plugin.enabled = false;
                 plugin.trust_status = PluginTrustStatus::NeverReviewed;
+            }
+            // The managed policy is enforced here — inside the single choke
+            // point that turns persisted state into live enablement — so a
+            // plugin enabled before the policy arrived, or hand-edited to
+            // `enabled: true`, never comes back enabled. There is no window
+            // in which a forbidden plugin is observably active.
+            let policy_forbids = managed_policy_invalid
+                || managed_policy
+                    .as_ref()
+                    .is_some_and(|policy| !policy.allows(id));
+            if policy_forbids {
+                plugin.enabled = false;
             }
             plugin.staged_root = state_path.as_deref().and_then(|state_path| {
                 let staged_root = runtime_stage_path(state_path, id, &plugin.content_hash);
@@ -325,6 +369,21 @@ impl PluginRegistry {
         self.state_path.as_deref()
     }
 
+    /// The fail-closed load error for the managed plugin policy, if the
+    /// document exists but could not be used. `None` means no policy file was
+    /// found or the loaded policy is valid.
+    #[must_use]
+    pub fn managed_policy_error(&self) -> Option<&str> {
+        self.managed_policy_error.as_deref()
+    }
+
+    /// The resolved managed policy source: the env override when set,
+    /// otherwise `managed-policy.json` next to the plugin state file.
+    #[must_use]
+    pub fn managed_policy_path(&self) -> Option<&Path> {
+        self.managed_policy_path.as_deref()
+    }
+
     /// The pre-dotenv user plugins root, when this registry was built from a
     /// discovery context. Registries without one (tests, fail-closed ad-hoc
     /// values) return `None`, and the mutation controller refuses to write.
@@ -406,7 +465,32 @@ impl PluginRegistry {
     pub fn enable(&mut self, selector: &str) -> Result<(), String> {
         let plugin = self
             .get(selector)
-            .ok_or_else(|| format!("Plugin bundle `{selector}` was not found"))?;
+            .ok_or_else(|| format!("Plugin bundle `{selector}` was not found"))?
+            .clone();
+        // The organization policy is the outermost gate: re-read it so a
+        // document that landed after discovery still refuses, and refuse
+        // before diagnosing trust or staging the user can never act on.
+        self.refresh_managed_policy();
+        if let Some(error) = self.managed_policy_error.as_deref() {
+            let path = self.managed_policy_path.as_deref().map_or_else(
+                || "(unknown path)".to_string(),
+                |path| path.display().to_string(),
+            );
+            return Err(format!(
+                "Managed plugin policy at {path} is invalid, so no plugin may be enabled: {error}"
+            ));
+        }
+        if self
+            .managed_policy
+            .as_ref()
+            .is_some_and(|policy| !policy.allows(&plugin.id))
+        {
+            return Err(format!(
+                "Plugin bundle `{}` is forbidden by the managed plugin policy: `{}` is not on the plugin allowlist",
+                plugin.name(),
+                plugin.id.as_str()
+            ));
+        }
         if !plugin.trusted() {
             return Err(format!(
                 "Plugin bundle `{}` requires capability review before enablement (trust: {})",
@@ -489,6 +573,30 @@ impl PluginRegistry {
         self.state = next;
         self.apply_state();
         Ok(())
+    }
+
+    /// Re-read the policy document from its resolved path so `enable`
+    /// enforces the on-disk document even when it landed or changed after
+    /// discovery. Refreshing never touches diagnostics: the discovery-time
+    /// `policy-invalid` diagnostic and the `enable` refusal carry the error.
+    fn refresh_managed_policy(&mut self) {
+        let Some(path) = self.managed_policy_path.clone() else {
+            return;
+        };
+        match load_managed_policy(&path) {
+            ManagedPolicyOutcome::Absent => {
+                self.managed_policy = None;
+                self.managed_policy_error = None;
+            }
+            ManagedPolicyOutcome::Loaded(policy) => {
+                self.managed_policy = Some(policy);
+                self.managed_policy_error = None;
+            }
+            ManagedPolicyOutcome::Invalid(error) => {
+                self.managed_policy = None;
+                self.managed_policy_error = Some(error);
+            }
+        }
     }
 
     fn resolve_id(&self, selector: &str) -> Option<&PluginId> {

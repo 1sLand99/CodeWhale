@@ -2,7 +2,7 @@ use super::*;
 use crate::tools::plan::PlanSnapshot;
 use crate::tui::history::{
     ExecCell, ExecSource, HistoryCell, PlanUpdateCell, ReasoningAction, ReasoningActionTarget,
-    ToolCell, ToolStatus, TranscriptActionOwner,
+    ThinkingFold, ToolCell, ToolStatus, TranscriptActionOwner,
 };
 use codewhale_localization::Locale;
 use codewhale_palette as palette;
@@ -937,7 +937,7 @@ fn hidden_reasoning_cache_never_advertises_or_leaks_content() {
                 show_thinking: false,
                 ..TranscriptRenderOptions::default()
             },
-            &HashSet::new(),
+            &HashMap::new(),
             None,
             Some(reasoning_owner(0)),
         );
@@ -1214,7 +1214,7 @@ fn ensure_filtered_matches_ensure_split_output() {
         &revisions,
         40,
         options,
-        &HashSet::new(),
+        &HashMap::new(),
         Some(&index_map),
         None,
     );
@@ -1226,7 +1226,7 @@ fn ensure_filtered_matches_ensure_split_output() {
         &revisions,
         40,
         options,
-        &HashSet::new(),
+        &HashMap::new(),
         Some(&index_map),
         None,
     );
@@ -1254,7 +1254,7 @@ fn ensure_filtered_reuses_unchanged_cells() {
         &revisions,
         80,
         TranscriptRenderOptions::default(),
-        &HashSet::new(),
+        &HashMap::new(),
         None,
         None,
     );
@@ -1265,7 +1265,7 @@ fn ensure_filtered_reuses_unchanged_cells() {
         &revisions,
         80,
         TranscriptRenderOptions::default(),
-        &HashSet::new(),
+        &HashMap::new(),
         None,
         None,
     );
@@ -1284,7 +1284,7 @@ fn ensure_filtered_reuses_unchanged_cells() {
         &revisions,
         80,
         TranscriptRenderOptions::default(),
-        &HashSet::new(),
+        &HashMap::new(),
         None,
         None,
     );
@@ -1332,7 +1332,7 @@ fn prose_cells_fill_full_width_on_ultrawide_by_default() {
     };
 
     let mut cache = TranscriptViewCache::new();
-    cache.ensure_filtered(&refs, &revisions, 220, options, &HashSet::new(), None, None);
+    cache.ensure_filtered(&refs, &revisions, 220, options, &HashMap::new(), None, None);
 
     for idx in 0..3 {
         let width = max_line_width(&cache.per_cell[idx].lines);
@@ -1386,7 +1386,7 @@ fn transcript_prose_measure_caps_prose_but_not_tools() {
     };
 
     let mut cache = TranscriptViewCache::new();
-    cache.ensure_filtered(&refs, &revisions, 220, options, &HashSet::new(), None, None);
+    cache.ensure_filtered(&refs, &revisions, 220, options, &HashMap::new(), None, None);
 
     for idx in 0..3 {
         let width = max_line_width(&cache.per_cell[idx].lines);
@@ -1515,7 +1515,7 @@ fn folded_thinking_cache_invalidation() {
         &revisions,
         width,
         options,
-        &HashSet::new(),
+        &HashMap::new(),
         None,
         None,
     );
@@ -1523,8 +1523,8 @@ fn folded_thinking_cache_invalidation() {
 
     // Second render: fold the thinking cell → should invalidate and
     // produce fewer lines (collapsed summary).
-    let mut folded = HashSet::new();
-    folded.insert(0usize);
+    let mut folded = HashMap::new();
+    folded.insert(0usize, ThinkingFold::Collapsed);
     cache.ensure_split(&[&cells], &revisions, width, options, &folded, None, None);
     let folded_line_count = cache.total_lines();
 
@@ -1539,7 +1539,7 @@ fn folded_thinking_cache_invalidation() {
         &revisions,
         width,
         options,
-        &HashSet::new(),
+        &HashMap::new(),
         None,
         None,
     );
@@ -1581,7 +1581,7 @@ fn folded_thinking_with_collapsed_cells_uses_original_indices() {
         &revisions,
         width,
         options,
-        &HashSet::new(),
+        &HashMap::new(),
         None,
         None,
     );
@@ -1594,8 +1594,8 @@ fn folded_thinking_with_collapsed_cells_uses_original_indices() {
     let filtered_revs = [2u64];
     let index_map: Vec<usize> = vec![1]; // filtered 0 → original 1
 
-    let mut folded = HashSet::new();
-    folded.insert(1usize); // fold original index 1
+    let mut folded = HashMap::new();
+    folded.insert(1usize, ThinkingFold::Collapsed); // fold original index 1
 
     let mut cache2 = TranscriptViewCache::new();
     cache2.ensure_split(
@@ -1619,7 +1619,7 @@ fn folded_thinking_with_collapsed_cells_uses_original_indices() {
         &filtered_revs,
         width,
         options,
-        &HashSet::new(),
+        &HashMap::new(),
         Some(&index_map),
         None,
     );
@@ -1652,7 +1652,7 @@ fn reasoning_target_transfer_rewrites_same_revision_cells() {
         &revisions,
         80,
         options,
-        &HashSet::new(),
+        &HashMap::new(),
         None,
         Some(reasoning_owner(0)),
     );
@@ -1730,7 +1730,7 @@ fn layout_aware_reasoning_budget_applies_only_to_the_newest_cell() {
         &revisions,
         80,
         constrained,
-        &HashSet::new(),
+        &HashMap::new(),
         None,
         Some(reasoning_owner(1)),
     );
@@ -1763,7 +1763,7 @@ fn layout_aware_reasoning_budget_applies_only_to_the_newest_cell() {
         &revisions,
         80,
         roomy,
-        &HashSet::new(),
+        &HashMap::new(),
         None,
         Some(reasoning_owner(1)),
     );
@@ -1789,7 +1789,7 @@ fn layout_aware_reasoning_budget_applies_only_to_the_newest_cell() {
         &[1, 1, 1],
         80,
         roomy,
-        &HashSet::new(),
+        &HashMap::new(),
         None,
         Some(reasoning_owner(2)),
     );
@@ -1814,7 +1814,7 @@ fn filtered_reasoning_owner_keeps_original_identity() {
         &revisions,
         80,
         TranscriptRenderOptions::default(),
-        &HashSet::new(),
+        &HashMap::new(),
         Some(&original_map),
         Some(reasoning_owner(1)),
     );
@@ -1838,7 +1838,7 @@ fn filtered_reasoning_owner_keeps_original_identity() {
         &revisions,
         80,
         TranscriptRenderOptions::default(),
-        &HashSet::new(),
+        &HashMap::new(),
         Some(&original_map),
         Some(reasoning_owner(0)),
     );
@@ -1855,7 +1855,7 @@ fn streaming_tail_fast_path_cannot_skip_reasoning_retarget() {
         &[1, 1],
         80,
         TranscriptRenderOptions::default(),
-        &HashSet::new(),
+        &HashMap::new(),
         None,
         Some(reasoning_owner(0)),
     );
@@ -1867,7 +1867,7 @@ fn streaming_tail_fast_path_cannot_skip_reasoning_retarget() {
         &[1, 2],
         80,
         TranscriptRenderOptions::default(),
-        &HashSet::new(),
+        &HashMap::new(),
         None,
         None,
     );
@@ -1885,7 +1885,7 @@ fn narrow_reasoning_hint_never_changes_cache_geometry() {
             &[1],
             width,
             TranscriptRenderOptions::default(),
-            &HashSet::new(),
+            &HashMap::new(),
             None,
             None,
         );
@@ -1895,7 +1895,7 @@ fn narrow_reasoning_hint_never_changes_cache_geometry() {
             &[1],
             width,
             TranscriptRenderOptions::default(),
-            &HashSet::new(),
+            &HashMap::new(),
             None,
             Some(reasoning_owner(0)),
         );
@@ -1931,7 +1931,7 @@ fn reasoning_hint_uses_the_render_locale() {
         &[1],
         80,
         options,
-        &HashSet::new(),
+        &HashMap::new(),
         None,
         Some(reasoning_owner(0)),
     );

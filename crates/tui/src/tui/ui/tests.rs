@@ -6233,10 +6233,15 @@ fn selected_reasoning_hint_and_space_share_one_owner() {
         "{copied}"
     );
     assert!(handle_transcript_space(&mut app));
-    assert!(app.folded_thinking.contains(&0));
+    assert_eq!(
+        app.thinking_folds.get(&0),
+        Some(&ThinkingFold::Expanded),
+        "Space on a collapsed cell records an explicit expand"
+    );
     assert!(!handle_transcript_space(&mut app));
-    assert!(
-        app.folded_thinking.contains(&0),
+    assert_eq!(
+        app.thinking_folds.get(&0),
+        Some(&ThinkingFold::Expanded),
         "rendered action is single-use"
     );
 
@@ -6256,7 +6261,11 @@ fn selected_reasoning_hint_and_space_share_one_owner() {
     );
 
     assert!(handle_transcript_space(&mut app));
-    assert!(!app.folded_thinking.contains(&0));
+    assert_eq!(
+        app.thinking_folds.get(&0),
+        Some(&ThinkingFold::Collapsed),
+        "Space on an expanded cell records an explicit collapse"
+    );
     let collapsed_again = render_underwater_test_app(&mut app, 100, 32);
     assert!(collapsed_again.contains("Space:expand"));
 }
@@ -6267,14 +6276,18 @@ fn selected_reasoning_actions_roundtrip_for_every_expansion_baseline() {
 
     for verbose in [false, true] {
         for default_expanded in [false, true] {
-            for folded in [false, true] {
+            for initial_fold in [
+                None,
+                Some(ThinkingFold::Expanded),
+                Some(ThinkingFold::Collapsed),
+            ] {
                 let mut app = create_test_app();
                 app.verbose_transcript = verbose;
                 app.thinking_default_expanded = default_expanded;
                 app.thinking_preview_lines = 4;
                 app.history = vec![oversized_reasoning("baseline", false)];
-                if folded {
-                    app.folded_thinking.insert(0);
+                if let Some(fold) = initial_fold {
+                    app.thinking_folds.insert(0, fold);
                 }
                 app.resync_history_revisions();
                 // The adaptive preview fills spare viewport rows. Keep the
@@ -6282,7 +6295,11 @@ fn selected_reasoning_actions_roundtrip_for_every_expansion_baseline() {
                 let _ = render_underwater_test_app(&mut app, 100, 32);
                 select_original_cell(&mut app, 0);
 
-                let initially_expanded = (verbose || default_expanded) != folded;
+                let initially_expanded = match initial_fold {
+                    Some(ThinkingFold::Expanded) => true,
+                    Some(ThinkingFold::Collapsed) => false,
+                    None => verbose || default_expanded,
+                };
                 for (step, expanded) in
                     [initially_expanded, !initially_expanded, initially_expanded]
                         .into_iter()
@@ -6300,7 +6317,7 @@ fn selected_reasoning_actions_roundtrip_for_every_expansion_baseline() {
                     assert_eq!(
                         rendered_full_body, expanded,
                         "verbose={verbose}, default_expanded={default_expanded}, \
-                         folded={folded}, step={step}: {surface}"
+                         initial_fold={initial_fold:?}, step={step}: {surface}"
                     );
                     let target = app
                         .viewport
@@ -6320,10 +6337,78 @@ fn selected_reasoning_actions_roundtrip_for_every_expansion_baseline() {
                         assert!(handle_transcript_space(&mut app));
                     }
                 }
-                assert_eq!(app.folded_thinking.contains(&0), folded);
+                // Two toggles land back on the state the cell started in —
+                // now recorded outright rather than inferred from a baseline.
+                assert_eq!(
+                    app.thinking_folds.get(&0),
+                    Some(&if initially_expanded {
+                        ThinkingFold::Expanded
+                    } else {
+                        ThinkingFold::Collapsed
+                    }),
+                );
             }
         }
     }
+}
+
+/// An explicit expand or collapse is the user's own decision about *this*
+/// cell, so it must outlive a later change to the display preference. The
+/// preference only decides the default for cells nobody has touched. The
+/// stored bit used to be relative to that preference, so flipping
+/// `thinking_default_expanded` silently re-read every recorded choice as its
+/// opposite (#5847).
+#[test]
+fn explicit_reasoning_fold_survives_a_preference_flip() {
+    fn body_rendered(app: &App) -> bool {
+        app.viewport
+            .transcript_cache
+            .lines()
+            .iter()
+            .any(|line| line.to_string().contains("pinned line 40"))
+    }
+
+    let mut app = create_test_app();
+    app.thinking_preview_lines = 4;
+    app.history = vec![oversized_reasoning("pinned", false)];
+    app.resync_history_revisions();
+    let _ = render_underwater_test_app(&mut app, 100, 32);
+    select_original_cell(&mut app, 0);
+    let _ = render_underwater_test_app(&mut app, 100, 32);
+
+    // Default preferences collapse reasoning, so Space is an explicit expand.
+    assert!(handle_transcript_space(&mut app));
+    let surface = render_underwater_test_app(&mut app, 100, 32);
+    assert!(
+        body_rendered(&app),
+        "an explicit expand must show the whole body: {surface}"
+    );
+
+    // Turning the default-expanded preference on must leave the explicitly
+    // expanded cell expanded, not flip it closed.
+    app.thinking_default_expanded = true;
+    let surface = render_underwater_test_app(&mut app, 100, 32);
+    assert!(
+        body_rendered(&app),
+        "an explicit expand must survive turning thinking_default_expanded on: {surface}"
+    );
+
+    // And the mirror case: an explicit collapse must survive the preference
+    // being turned back off.
+    select_original_cell(&mut app, 0);
+    let _ = render_underwater_test_app(&mut app, 100, 32);
+    assert!(handle_transcript_space(&mut app));
+    let surface = render_underwater_test_app(&mut app, 100, 32);
+    assert!(
+        !body_rendered(&app),
+        "Space on an expanded cell must collapse it: {surface}"
+    );
+    app.thinking_default_expanded = false;
+    let surface = render_underwater_test_app(&mut app, 100, 32);
+    assert!(
+        !body_rendered(&app),
+        "an explicit collapse must survive turning thinking_default_expanded off: {surface}"
+    );
 }
 
 #[test]
@@ -6368,7 +6453,7 @@ fn mouse_selection_redraws_and_retargets_reasoning_with_unchanged_revisions() {
     let _ = render_underwater_test_app(&mut app, 100, 32);
     assert_eq!(reasoning_hint_cells(&app), vec![0]);
     assert!(handle_transcript_space(&mut app));
-    assert!(app.folded_thinking.contains(&0));
+    assert_eq!(app.thinking_folds.get(&0), Some(&ThinkingFold::Expanded));
 }
 
 #[test]
@@ -6487,7 +6572,7 @@ fn advertised_reasoning_space_dispatches_after_first_char_paste_hold() {
     let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
     assert!(handle_plain_key_before_composer(&mut app, &space, now));
     assert!(
-        app.folded_thinking.is_empty(),
+        app.thinking_folds.is_empty(),
         "Space remains ambiguous until the first-character hold expires"
     );
     assert!(app.input.is_empty(), "Space must not enter the composer");
@@ -6499,8 +6584,9 @@ fn advertised_reasoning_space_dispatches_after_first_char_paste_hold() {
         &mut app,
         now + crate::tui::paste_burst::PasteBurst::recommended_flush_delay()
     ));
-    assert!(
-        app.folded_thinking.contains(&0),
+    assert_eq!(
+        app.thinking_folds.get(&0),
+        Some(&ThinkingFold::Expanded),
         "a lone Space must dispatch the rendered transcript action after the hold"
     );
     assert!(
@@ -6540,7 +6626,7 @@ fn raw_paste_beginning_with_space_preserves_payload_over_reasoning_action() {
         now + Duration::from_millis(1),
     ));
     assert!(
-        app.folded_thinking.is_empty(),
+        app.thinking_folds.is_empty(),
         "a leading-space raw paste must not trigger transcript actions"
     );
     assert!(flush_paste_burst_before_composer(
@@ -6624,7 +6710,7 @@ fn active_raw_paste_keeps_space_as_payload_over_reasoning_action() {
         now + Duration::from_millis(1),
     ));
     assert!(
-        app.folded_thinking.is_empty(),
+        app.thinking_folds.is_empty(),
         "an in-flight raw paste must not trigger transcript actions"
     );
     assert!(app.flush_paste_burst_if_due(
@@ -6776,7 +6862,7 @@ fn active_streaming_reasoning_keeps_its_visible_owner_across_a_delta() {
     assert_ne!(app.history_version, rendered_version);
     assert_eq!(app.transcript_identity_epoch, rendered_epoch);
     assert!(handle_transcript_space(&mut app));
-    assert!(app.folded_thinking.contains(&1));
+    assert_eq!(app.thinking_folds.get(&1), Some(&ThinkingFold::Expanded));
 }
 
 #[test]
@@ -6799,7 +6885,7 @@ fn interrupted_active_reasoning_remains_actionable_after_flush() {
     assert!(app.active_cell.is_none());
     assert_eq!(app.transcript_identity_epoch, epoch);
     assert!(handle_transcript_space(&mut app));
-    assert!(app.folded_thinking.contains(&0));
+    assert_eq!(app.thinking_folds.get(&0), Some(&ThinkingFold::Expanded));
     let _ = render_underwater_test_app(&mut app, 60, 16);
 }
 
@@ -6851,7 +6937,7 @@ fn visible_older_reasoning_owns_space_over_a_newer_offscreen_tool() {
     );
     assert_eq!(detail_target_cell_index(&app), Some(1));
     assert!(handle_transcript_space(&mut app));
-    assert!(app.folded_thinking.contains(&0));
+    assert_eq!(app.thinking_folds.get(&0), Some(&ThinkingFold::Expanded));
     assert!(!app.collapsed_cells.contains(&1) && app.expanded_tool_runs.is_empty());
 }
 
@@ -6867,7 +6953,7 @@ fn hidden_reasoning_is_unhidden_instead_of_folded() {
     app.collapsed_cells.insert(0);
     assert!(handle_transcript_space(&mut app));
     assert!(!app.collapsed_cells.contains(&0));
-    assert!(!app.folded_thinking.contains(&0));
+    assert!(!app.thinking_folds.contains_key(&0));
 
     app.collapsed_cells.insert(0);
     let surface = render_underwater_test_app(&mut app, 60, 16);
@@ -6881,7 +6967,7 @@ fn hidden_reasoning_is_unhidden_instead_of_folded() {
 
     assert!(handle_transcript_space(&mut app));
     assert!(!app.collapsed_cells.contains(&0));
-    assert!(!app.folded_thinking.contains(&0));
+    assert!(!app.thinking_folds.contains_key(&0));
     let visible = render_underwater_test_app(&mut app, 60, 16);
     assert!(visible.contains("Space:expand"));
 }
@@ -6897,11 +6983,11 @@ fn stale_rendered_reasoning_owner_cannot_toggle_replacement() {
     app.push_history_cell(long_reasoning("replacement", false));
     assert_ne!(app.transcript_identity_epoch, rendered_epoch);
     assert!(!handle_transcript_space(&mut app));
-    assert!(app.folded_thinking.is_empty());
+    assert!(app.thinking_folds.is_empty());
 
     let _ = render_underwater_test_app(&mut app, 80, 24);
     assert!(handle_transcript_space(&mut app));
-    assert!(app.folded_thinking.contains(&0));
+    assert_eq!(app.thinking_folds.get(&0), Some(&ThinkingFold::Expanded));
 }
 
 #[test]
@@ -6916,16 +7002,13 @@ fn pop_and_truncate_prune_index_state_before_replacement() {
         streaming: false,
     });
     let _ = render_underwater_test_app(&mut app, 60, 16);
-    for set in [
-        &mut app.collapsed_cells,
-        &mut app.folded_thinking,
-        &mut app.expanded_tool_runs,
-    ] {
+    for set in [&mut app.collapsed_cells, &mut app.expanded_tool_runs] {
         set.insert(1);
     }
+    app.thinking_folds.insert(1, ThinkingFold::Expanded);
     app.collapsed_cell_map = vec![0, 1];
     app.pop_history();
-    assert!(app.collapsed_cells.is_empty() && app.folded_thinking.is_empty());
+    assert!(app.collapsed_cells.is_empty() && app.thinking_folds.is_empty());
     assert!(app.expanded_tool_runs.is_empty() && app.collapsed_cell_map.is_empty());
     app.push_history_cell(HistoryCell::Assistant {
         content: "after pop".into(),
@@ -6935,20 +7018,17 @@ fn pop_and_truncate_prune_index_state_before_replacement() {
     let first = render_underwater_test_app(&mut app, 60, 16);
     assert!(first.contains("after pop") && !first.contains("old tail"));
 
-    for set in [
-        &mut app.collapsed_cells,
-        &mut app.folded_thinking,
-        &mut app.expanded_tool_runs,
-    ] {
+    for set in [&mut app.collapsed_cells, &mut app.expanded_tool_runs] {
         set.insert(1);
     }
+    app.thinking_folds.insert(1, ThinkingFold::Expanded);
     app.truncate_history_to(1);
     app.push_history_cell(HistoryCell::Assistant {
         content: "after truncate".into(),
         streaming: false,
     });
     assert!(!handle_transcript_space(&mut app));
-    assert!(app.collapsed_cells.is_empty() && app.folded_thinking.is_empty());
+    assert!(app.collapsed_cells.is_empty() && app.thinking_folds.is_empty());
     assert!(render_underwater_test_app(&mut app, 60, 16).contains("after truncate"));
 }
 
@@ -6964,7 +7044,7 @@ fn dispatch_rollback_prunes_tail_state_and_keeps_revisions_monotonic() {
     .expect("prepare");
     let _ = render_underwater_test_app(&mut app, 60, 16);
     app.collapsed_cells.insert(0);
-    app.folded_thinking.insert(0);
+    app.thinking_folds.insert(0, ThinkingFold::Expanded);
     app.expanded_tool_runs.insert(0);
     app.collapsed_cell_map.push(0);
     let next_revision = app.next_history_revision;
@@ -6973,7 +7053,7 @@ fn dispatch_rollback_prunes_tail_state_and_keeps_revisions_monotonic() {
     let error = apply(&mut app, &engine.handle, &config).expect_err("dispatch fails");
     assert_eq!(error.to_string(), "failed");
     assert_eq!(app.next_history_revision, next_revision);
-    assert!(app.collapsed_cells.is_empty() && app.folded_thinking.is_empty());
+    assert!(app.collapsed_cells.is_empty() && app.thinking_folds.is_empty());
     assert!(app.expanded_tool_runs.is_empty() && app.collapsed_cell_map.is_empty());
     app.push_history_cell(HistoryCell::Assistant {
         content: "replacement".into(),
@@ -6997,7 +7077,7 @@ fn dispatch_rollback_prunes_tail_state_and_keeps_revisions_monotonic() {
 fn restored_reasoning_and_answer_clear_prior_fold_ownership() {
     let mut app = create_test_app();
     app.push_history_cell(long_reasoning("old session", false));
-    app.folded_thinking.insert(0);
+    app.thinking_folds.insert(0, ThinkingFold::Expanded);
     let _ = render_underwater_test_app(&mut app, 80, 24);
     let old_epoch = app.transcript_identity_epoch;
     let session = saved_session_with_messages(vec![codewhale_models::Message {
@@ -7019,7 +7099,7 @@ fn restored_reasoning_and_answer_clear_prior_fold_ownership() {
     }]);
 
     apply_loaded_session(&mut app, &mut Config::default(), &session).expect("restore session");
-    assert!(app.folded_thinking.is_empty());
+    assert!(app.thinking_folds.is_empty());
     assert_ne!(app.transcript_identity_epoch, old_epoch);
     assert!(matches!(
         app.history.first(),
@@ -7083,8 +7163,8 @@ fn filtered_selection_toggles_the_original_reasoning_index() {
     let _ = render_underwater_test_app(&mut app, 60, 16);
     assert_eq!(reasoning_hint_cells(&app), vec![1]);
     assert!(handle_transcript_space(&mut app));
-    assert!(app.folded_thinking.contains(&1));
-    assert!(!app.folded_thinking.contains(&0));
+    assert_eq!(app.thinking_folds.get(&1), Some(&ThinkingFold::Expanded));
+    assert!(!app.thinking_folds.contains_key(&0));
 }
 
 #[test]
@@ -12186,6 +12266,68 @@ async fn live_steer_crosses_message_submit_transform_exactly_once() {
             ContentBlock::Text { text, .. } if text == "transformed steer"
         )),
         "a steer the engine has not recorded yet must not be in the local transcript"
+    );
+}
+
+/// `turn_loop` commits a steer as `pending.commit().trim()`. The UI used to
+/// hand `EngineHandle::steer` the untrimmed text and keep that same copy for
+/// matching, so any steer carrying a composer newline differed from its own
+/// record by whitespace alone, never matched, was never promoted, and left
+/// the "sending into this turn" card showing a message the transcript had
+/// already delivered — the duplicate that would not clear.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn a_steer_settles_even_though_the_engine_stored_it_trimmed() {
+    let _environment = crate::test_support::lock_test_env();
+    let mut app = create_test_app();
+    let session = super::event_loop::ensure_runtime_session_id(&mut app);
+    app.api_messages = std::sync::Arc::new(vec![text_message("user", "original request")]);
+    app.is_loading = true;
+    let mut engine = crate::core::engine::mock_engine_handle();
+
+    attempt_steer_with_queue_fallback(
+        &mut app,
+        &Config::default(),
+        &engine.handle,
+        QueuedMessage::new("check the job status\n".to_string(), None),
+        DispatchRecovery::Immediate,
+    )
+    .await;
+    // The UI now sends exactly what the engine will store, so the held copy
+    // and the record cannot differ by whitespace alone.
+    assert_eq!(
+        engine.rx_steer.recv().await.as_deref(),
+        Some("check the job status"),
+        "the composer newline must not reach the engine"
+    );
+
+    app.is_loading = false;
+    let model = app.model.clone();
+    let workspace = app.workspace.clone();
+    // The engine's record carries the trimmed form, which is what
+    // `turn_loop` stores for a committed steer.
+    assert!(super::event_loop::apply_engine_session_projection(
+        &mut app,
+        &Config::default(),
+        EngineEvent::SessionUpdated {
+            session_id: session,
+            messages: std::sync::Arc::new(vec![
+                text_message("user", "original request"),
+                text_message("user", "check the job status"),
+            ]),
+            system_prompt: None,
+            model,
+            workspace,
+        }
+    ));
+
+    assert!(
+        app.inflight_steers.is_empty(),
+        "a trimmed record must still settle the steer it came from"
+    );
+    assert!(
+        build_pending_input_preview(&app).pending_steers.is_empty(),
+        "the pending card must clear once the turn has delivered the message"
     );
 }
 
@@ -18904,7 +19046,7 @@ fn open_tool_details_pager_supports_active_virtual_tool_cell() {
         &[1],
         100,
         app.transcript_render_options(),
-        &app.folded_thinking,
+        &app.thinking_folds,
         None,
         None,
     );

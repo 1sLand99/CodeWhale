@@ -36,7 +36,9 @@ use crate::tools::subagent::{AgentWorkerStatus, SubAgentResult};
 use crate::tools::todo::{SharedTodoList, TodoList, new_shared_todo_list};
 use crate::tui::active_cell::ActiveCell;
 use crate::tui::clipboard::{ClipboardContent, ClipboardHandler};
-use crate::tui::history::{HistoryCell, TranscriptActionOwner, TranscriptRenderOptions};
+use crate::tui::history::{
+    HistoryCell, ThinkingFold, TranscriptActionOwner, TranscriptRenderOptions,
+};
 use crate::tui::hotbar::HotbarActionRegistry;
 use crate::tui::motion::MotionPolicy;
 use crate::tui::paste_burst::{FlushResult, PasteBurst};
@@ -2481,10 +2483,15 @@ pub struct App {
     /// Transcript cells the user has collapsed (hidden from view).
     /// Stores **original** virtual cell indices (pre-filtering).
     pub collapsed_cells: HashSet<usize>,
-    /// Thinking cells the user has folded (showing summary instead of full
-    /// content). Stores **original** virtual cell indices. Toggled by Space
-    /// when the composer is empty and the cursor is on a thinking cell.
-    pub folded_thinking: HashSet<usize>,
+    /// Explicit expand/collapse intents the user has recorded for thinking
+    /// cells, keyed by **original** virtual cell index. Set by Space when the
+    /// composer is empty and the cursor is on a thinking cell.
+    ///
+    /// An absent index means the user has not touched that cell, so the
+    /// display preferences decide it. A present index is absolute, so
+    /// changing `verbose` or `thinking_default_expanded` afterwards leaves
+    /// the user's own choice alone (#5847).
+    pub thinking_folds: HashMap<usize, ThinkingFold>,
     /// Mapping from filtered cell index → original virtual index.
     /// Populated during `ChatWidget::new` by filtering out collapsed cells.
     /// Used by `build_context_menu_entries` to convert line-meta indices
@@ -3618,15 +3625,17 @@ impl App {
         if self.reject_setting_change_while_busy(MessageId::SettingSubjectPermissions) {
             return None;
         }
-        if self.mode == AppMode::Plan {
-            self.push_status_toast(
-                "Plan is Read Only; switch to Act to change permissions".to_string(),
-                StatusToastLevel::Info,
-                Some(5_000),
-            );
-            self.needs_redraw = true;
-            return None;
-        }
+        // Plan used to refuse the change outright, which welded the two axes
+        // together on the keyboard: Tab cycles the mode, Shift+Tab cycles the
+        // posture, and in Plan the second key silently did nothing. They are
+        // independent settings and both must stay settable.
+        //
+        // Nothing is weakened by allowing it. Plan's read-only guarantee is
+        // derived from the mode, not from the posture: `authority` maps
+        // `(Plan, _, Bypass)` to `SandboxPolicy::ReadOnly` (there is a test
+        // pinning exactly that), and `tool_catalog` gates every write tool on
+        // `mode != AppMode::Plan`. Setting the posture here records the
+        // preference that takes effect on the next Act/Operate turn.
         if allow_root_policy && !self.approval_policy_root_editable {
             return None;
         }
@@ -3659,6 +3668,19 @@ impl App {
     fn finish_approval_posture_change(&mut self, next: ApprovalMode) {
         self.set_agent_approval_posture(next);
         self.needs_redraw = true;
+        // In Plan the new posture is real but dormant, and the footer chip
+        // alone would imply it is live. Say when it starts applying instead of
+        // refusing the change.
+        if self.mode == AppMode::Plan {
+            self.push_status_toast(
+                format!(
+                    "Permissions set to {}. Plan stays Read Only; this applies in Act and Operate.",
+                    next.permission_chip_label()
+                ),
+                StatusToastLevel::Info,
+                Some(5_000),
+            );
+        }
         // Footer permission chip is canonical — no status toast for the new
         // value, only the one-shot rebinding notice.
         self.notify_keybinding_migration_once();
@@ -4408,7 +4430,7 @@ impl App {
             .into_iter()
             .filter_map(|idx| if idx >= n { Some(idx - n) } else { None })
             .collect();
-        self.folded_thinking.clear();
+        self.thinking_folds.clear();
         self.expanded_tool_runs = std::mem::take(&mut self.expanded_tool_runs)
             .into_iter()
             .filter_map(|idx| if idx >= n { Some(idx - n) } else { None })
@@ -4824,7 +4846,7 @@ impl App {
     pub(crate) fn prune_transcript_index_state(&mut self, len: usize) {
         self.transcript_identity_epoch = self.transcript_identity_epoch.wrapping_add(1);
         self.collapsed_cells.retain(|idx| *idx < len);
-        self.folded_thinking.retain(|idx| *idx < len);
+        self.thinking_folds.retain(|idx, _| *idx < len);
         self.expanded_tool_runs.retain(|idx| *idx < len);
         self.collapsed_cell_map.clear();
     }

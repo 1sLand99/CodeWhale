@@ -1192,6 +1192,14 @@ pub(crate) async fn steer_user_message(
     if let Some(note) = paused_note.as_deref() {
         content.push_str(note);
     }
+    // Send exactly what the engine will store. `turn_loop` commits a steer as
+    // `pending.commit().trim()`, so a composer newline or an appended note
+    // left the held copy differing from the record by whitespace alone --
+    // `accepted_steer_index` then never matched, the steer was never
+    // promoted, and the "sending into this turn" card kept showing a message
+    // the transcript had already delivered. Trimming here keeps that match an
+    // exact comparison, which is the stronger invariant.
+    let content = content.trim().to_string();
     let message_index = app.api_messages.len();
 
     // A foreground shell blocks the turn loop that consumes steer input.

@@ -435,7 +435,9 @@ fn disjoint_sibling_write_paths_admit_and_ancestor_overlap_names_actual_remedy()
 #[tokio::test]
 #[allow(clippy::print_stderr)] // Test receipt must distinguish refused probes from exercised isolation.
 async fn enforced_readonly_python_queries_sqlite_under_a_live_peer_write_claim() {
-    let tmp = tempdir().unwrap();
+    // #6305: the sandbox replaces /tmp with a fresh tmpfs, so a fixture
+    // rooted there vanishes before --chdir reaches it.
+    let tmp = crate::test_support::sandbox_visible_tempdir();
     let database = rusqlite::Connection::open(tmp.path().join("fixture.sqlite")).unwrap();
     database
         .execute_batch(

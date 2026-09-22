@@ -1737,9 +1737,10 @@ Common settings keys:
 - `show_thinking` (on/off)
 - `thinking_default_expanded` (on/off, default off): renders thinking blocks
   expanded initially when `show_thinking` is enabled. Space still toggles the
-  selected block, so setting this to `true` inverts the default without
-  removing per-block folding. This is useful in SSH/tmux environments where
-  the Space binding may be intercepted.
+  selected block, and it decides only the blocks you have not touched: a block
+  you expanded or collapsed yourself keeps that state if you change this
+  setting later. This is useful in SSH/tmux environments where the Space
+  binding may be intercepted.
 - `thinking_preview_lines` (integer, default `2`): how many body rows a
   **collapsed** completed thought still shows. `0` is header-only; `10` is
   the older dump. Live streaming preview is unchanged. Expand a block with

@@ -431,7 +431,7 @@ impl ChatWidget {
                 &cell_revisions,
                 transcript_width,
                 render_options,
-                &app.folded_thinking,
+                &app.thinking_folds,
                 None,
                 provisional_action_owner,
             );
@@ -532,7 +532,7 @@ impl ChatWidget {
                 &filtered_revs,
                 transcript_width,
                 render_options,
-                &app.folded_thinking,
+                &app.thinking_folds,
                 Some(&app.collapsed_cell_map),
                 provisional_action_owner,
             );

@@ -25,10 +25,10 @@ use super::constants::{
 use super::thinking::cached_color_depth;
 use super::{
     ASSISTANT_GLYPH, ExecCell, ExecSource, GenericToolCell, HistoryCell, PlanUpdateCell,
-    REASONING_CURSOR, REASONING_OPENER, REASONING_RAIL, RenderMode, ToolCell, ToolStatus,
-    TranscriptRenderOptions, WebSearchCell, assistant_label_style_for, extract_reasoning_summary,
-    render_spillover_annotation, render_thinking, render_thinking_with_analysis,
-    running_status_label_with_elapsed,
+    REASONING_CURSOR, REASONING_OPENER, REASONING_RAIL, RenderMode, ThinkingFold, ToolCell,
+    ToolStatus, TranscriptRenderOptions, WebSearchCell, assistant_label_style_for,
+    extract_reasoning_summary, render_spillover_annotation, render_thinking,
+    render_thinking_with_analysis, running_status_label_with_elapsed,
 };
 use crate::tools::plan::{PlanSnapshot, StepStatus};
 use crate::tui::motion::MotionMode;
@@ -506,17 +506,17 @@ fn reasoning_folds_in_live_and_the_fold_is_reversible() {
             low_motion: true,
             ..TranscriptRenderOptions::default()
         };
-        // `folded` is the Space toggle *relative to* the configured default,
-        // so the expanded state is whichever call disagrees with it. Running
-        // both defaults proves the toggle survives the inversion.
+        // An explicit intent says expanded or collapsed outright, so the same
+        // two calls answer for either configured default. Running both proves
+        // the intent is not re-read through the preference.
         let expanded = lines_text(
             &cell
-                .lines_with_options_folded(80, options, !default_expanded)
+                .lines_with_options_folded(80, options, Some(ThinkingFold::Expanded))
                 .0,
         );
         let collapsed = lines_text(
             &cell
-                .lines_with_options_folded(80, options, default_expanded)
+                .lines_with_options_folded(80, options, Some(ThinkingFold::Collapsed))
                 .0,
         );
 
@@ -544,12 +544,14 @@ fn reasoning_folds_in_live_and_the_fold_is_reversible() {
     }
 }
 
-/// The fold toggle is relative to the expanded baseline (verbose session or
-/// expanded default): Space inverts the baseline, never the other flag.
-/// In particular verbose plus an expanded default renders expanded — the
-/// old triple-XOR collapsed exactly that cell.
+/// The preference baseline (verbose session or expanded default) decides only
+/// the cells nobody has touched; an explicit intent decides its own cell in
+/// both directions. Verbose plus an expanded default renders expanded — the
+/// old triple-XOR collapsed exactly that cell — and an explicit expand stays
+/// expanded under every preference combination, which the later relative bit
+/// still got wrong (#5847).
 #[test]
-fn thinking_fold_toggle_is_relative_to_the_expanded_baseline() {
+fn explicit_thinking_fold_outranks_every_preference_baseline() {
     let body = (1..=20)
         .map(|i| format!("step {i:02}: baseline check"))
         .collect::<Vec<_>>()
@@ -559,16 +561,23 @@ fn thinking_fold_toggle_is_relative_to_the_expanded_baseline() {
         streaming: false,
         duration_secs: Some(1.0),
     };
-    // (folded, verbose, default_expanded, expect_expanded)
-    for (folded, verbose, default_expanded, expect_expanded) in [
-        (false, false, false, false),
-        (false, false, true, true),
-        (false, true, false, true),
-        (false, true, true, true),
-        (true, false, false, true),
-        (true, false, true, false),
-        (true, true, false, false),
-        (true, true, true, false),
+    // (fold, verbose, default_expanded, expect_expanded)
+    for (fold, verbose, default_expanded, expect_expanded) in [
+        // No explicit intent: the preference baseline decides.
+        (None, false, false, false),
+        (None, false, true, true),
+        (None, true, false, true),
+        (None, true, true, true),
+        // An explicit expand renders expanded whatever the preferences say.
+        (Some(ThinkingFold::Expanded), false, false, true),
+        (Some(ThinkingFold::Expanded), false, true, true),
+        (Some(ThinkingFold::Expanded), true, false, true),
+        (Some(ThinkingFold::Expanded), true, true, true),
+        // And an explicit collapse renders collapsed whatever they say.
+        (Some(ThinkingFold::Collapsed), false, false, false),
+        (Some(ThinkingFold::Collapsed), false, true, false),
+        (Some(ThinkingFold::Collapsed), true, false, false),
+        (Some(ThinkingFold::Collapsed), true, true, false),
     ] {
         let options = TranscriptRenderOptions {
             verbose,
@@ -576,11 +585,11 @@ fn thinking_fold_toggle_is_relative_to_the_expanded_baseline() {
             low_motion: true,
             ..TranscriptRenderOptions::default()
         };
-        let text = lines_text(&cell.lines_with_options_folded(80, options, folded).0);
+        let text = lines_text(&cell.lines_with_options_folded(80, options, fold).0);
         let expanded = text.contains("step 20: baseline check");
         assert_eq!(
             expanded, expect_expanded,
-            "[folded={folded} verbose={verbose} default_expanded={default_expanded}]"
+            "[fold={fold:?} verbose={verbose} default_expanded={default_expanded}]"
         );
     }
 }

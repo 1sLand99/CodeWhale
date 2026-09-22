@@ -81,6 +81,56 @@ thread_local! {
     static HOLDER_ROOT: OnceLock<PathBuf> = const { OnceLock::new() };
 }
 
+/// A fixture workspace an OS sandbox can still see (#6305).
+///
+/// The Linux bwrap wrapper mounts a fresh `--tmpfs /tmp` before it binds the
+/// policy's writable roots (`sandbox/bwrap.rs`), and an enforced read-only
+/// command has no writable roots at all — nothing re-exposes the host `/tmp`.
+/// A fixture rooted there is shadowed inside the sandbox, so the trailing
+/// `--chdir <workspace>` lands on a path that no longer exists and bwrap exits
+/// with `Can't chdir to /tmp/.tmpXXXXXX`. The tmpfs is deliberate isolation and
+/// a security boundary, so the fixture moves instead of the mount.
+///
+/// Known limitations: this relocates only the directory the sandboxed command
+/// chdirs into. It does not make anything else under the host `/tmp` reachable
+/// from inside the sandbox, and it says nothing about `/dev` or `/proc`, which
+/// bwrap also replaces. Use it for the sandbox probes; plain `tempfile::tempdir`
+/// stays correct everywhere else.
+pub(crate) fn sandbox_visible_tempdir() -> tempfile::TempDir {
+    let root = sandbox_visible_fixture_root();
+    tempfile::tempdir_in(root).unwrap_or_else(|error| {
+        panic!(
+            "failed to create a sandbox-visible fixture workspace in {}: {error}",
+            root.display()
+        )
+    })
+}
+
+/// `OUT_DIR` is this crate's own build directory, so it follows the Cargo
+/// target directory rather than `TMPDIR` — the one path every test binary
+/// already owns and that is outside `/tmp` in every normal layout. A target
+/// directory deliberately placed under `/tmp` would silently reintroduce
+/// #6305, so say so instead of handing back a shadowed path.
+fn sandbox_visible_fixture_root() -> &'static Path {
+    static ROOT: OnceLock<PathBuf> = OnceLock::new();
+    ROOT.get_or_init(|| {
+        let root = Path::new(env!("OUT_DIR")).join("sandbox-fixtures");
+        assert!(
+            !root.starts_with("/tmp"),
+            "sandbox fixtures need a root outside /tmp, which bwrap replaces with a fresh \
+             tmpfs: {} is under it. Point CARGO_TARGET_DIR somewhere else.",
+            root.display()
+        );
+        std::fs::create_dir_all(&root).unwrap_or_else(|error| {
+            panic!(
+                "failed to create the sandbox fixture root {}: {error}",
+                root.display()
+            )
+        });
+        root
+    })
+}
+
 /// Build a syntactically valid, non-secret JWT fixture without embedding a
 /// high-entropy token-shaped literal in Git history.
 pub(crate) fn future_test_jwt(label: &str) -> String {

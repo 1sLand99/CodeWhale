@@ -386,13 +386,14 @@ pub(super) fn handle_transcript_space(app: &mut App) -> bool {
         if !app.show_thinking || !is_thinking {
             return false;
         }
-        let options = app.transcript_render_options();
-        let folded = !(options.verbose || options.thinking_default_expanded)
-            ^ (target.action == ReasoningAction::Collapse);
-        app.folded_thinking.remove(&idx);
-        if folded {
-            app.folded_thinking.insert(idx);
-        }
+        // The rendered action names the state the user is asking for, so
+        // record that outright. A relative bit would be re-read as its
+        // opposite the next time a display preference changed (#5847).
+        let intent = match target.action {
+            ReasoningAction::Expand => ThinkingFold::Expanded,
+            ReasoningAction::Collapse => ThinkingFold::Collapsed,
+        };
+        app.thinking_folds.insert(idx, intent);
     } else if app.toggle_tool_run_expansion_at(idx) {
         return true;
     } else if !app.collapsed_cells.remove(&idx) {
