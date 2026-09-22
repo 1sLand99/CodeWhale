@@ -41,7 +41,7 @@
 //! from internal types and trivially auditable for "no secrets" (see
 //! [`ProviderCatalogCache`] tests).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -280,8 +280,9 @@ pub fn bundled_catalog_offerings() -> Vec<CatalogOffering> {
 /// Only text-chat offerings are emitted (TTS/audio-only rows stay in the parsed
 /// catalog but are excluded from route candidates, matching
 /// [`ModelsDevCatalog::provider_offerings`]). Each row is tagged
-/// [`CatalogSource::Bundled`]. No canonical model is inferred from a prefix; the
-/// canonical link is set only from an explicit `base_model`.
+/// [`CatalogSource::Bundled`]. Provider rows link canonical models only through
+/// an explicit `base_model`. Namespaced entries in the canonical `models` map
+/// fill missing offerings, retaining their map key as the canonical identity.
 ///
 /// Provider ids are kept verbatim from the Models.dev payload (the committed
 /// bundled asset already uses CodeWhale ids). Live refresh normalizes aliases
@@ -323,6 +324,17 @@ fn offerings_from_models_dev(
     normalize_provider_ids: bool,
 ) -> Vec<CatalogOffering> {
     let mut out = Vec::new();
+    let mut provider_rows = BTreeSet::new();
+    let provider_id = |raw_id: &str| {
+        if normalize_provider_ids {
+            // Unknown upstream ids remain discoverable catalog rows, not routes.
+            crate::ProviderKind::parse(raw_id)
+                .map(|kind| kind.as_str().to_string())
+                .unwrap_or_else(|| raw_id.to_string())
+        } else {
+            raw_id.to_string()
+        }
+    };
     for (provider_key, provider) in &catalog.providers {
         let raw_id = if provider.id.trim().is_empty() {
             provider_key.trim()
@@ -332,16 +344,9 @@ fn offerings_from_models_dev(
         if raw_id.is_empty() {
             continue;
         }
-        let provider_id = if normalize_provider_ids {
-            // Normalize Models.dev provider ids onto CodeWhale kinds when known
-            // (#4186). Unknown upstream ids are kept verbatim for catalog browsing.
-            crate::ProviderKind::parse(raw_id)
-                .map(|kind| kind.as_str().to_string())
-                .unwrap_or_else(|| raw_id.to_string())
-        } else {
-            raw_id.to_string()
-        };
+        let provider_id = provider_id(raw_id);
         for model in provider.models.values() {
+            provider_rows.insert((provider_id.clone(), model.id.clone()));
             if !model.supports_text_chat() {
                 continue;
             }
@@ -364,6 +369,39 @@ fn offerings_from_models_dev(
                 cost_source: None,
             });
         }
+    }
+
+    // Namespaced model facts fill gaps without overriding provider-owned rows,
+    // including their non-chat exclusions. Bare legacy seed keys cannot name a
+    // provider; migrating that offline snapshot is a separate slice of #6396.
+    for (canonical_id, model) in &catalog.models {
+        let Some((provider_key, wire_model_id)) = canonical_id.trim().split_once('/') else {
+            continue;
+        };
+        let provider_key = provider_key.trim();
+        let wire_model_id = wire_model_id.trim();
+        if provider_key.is_empty() || wire_model_id.is_empty() || !model.supports_text_chat() {
+            continue;
+        }
+        let provider = provider_id(provider_key);
+        if !provider_rows.insert((provider.clone(), wire_model_id.to_string())) {
+            continue;
+        }
+        out.push(CatalogOffering {
+            provider,
+            wire_model_id: wire_model_id.to_string(),
+            canonical_model: Some(canonical_id.trim().to_string()),
+            endpoint_key: "chat".to_string(),
+            family: model.family.clone(),
+            limit: model.limit.clone(),
+            modalities: model.modalities.clone(),
+            attachment: model.attachment,
+            reasoning: model.reasoning,
+            tool_call: model.tool_call,
+            structured_output: model.structured_output,
+            source: source.clone(),
+            ..Default::default()
+        });
     }
     out
 }
