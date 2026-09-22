@@ -141,10 +141,15 @@ impl LifeDensity {
 
     #[must_use]
     fn bubble_streams(self) -> usize {
+        // Raised from 1/2/2 (founder, "screw the cap … more alive more
+        // ocean"). Bubbles are the cheapest life in the field: one mark
+        // each, no silhouette to degrade, and `water()` already refuses any
+        // column the composition has claimed, so a denser field thins itself
+        // automatically as a transcript fills.
         match self {
-            Self::Sparse => 1,
-            Self::Normal => 2,
-            Self::Rich => 2,
+            Self::Sparse => 2,
+            Self::Normal => 4,
+            Self::Rich => 6,
         }
     }
 }
@@ -189,11 +194,11 @@ pub struct AmbientFrameStats {
     pub cells_written: u32,
 }
 
-/// Bounded school (7), jellyfish (4), bubbles (2), plus at most three
+/// Bounded school (7), jellyfish (4), bubbles (6), plus at most three
 /// 18-by-6 dot-whale widgets including their labels. No particle allocations
 /// or simulation steps occur per paint after the fixed cameo tapes are cached.
 #[cfg(test)]
-pub const MAX_FRAME_MARKS: u32 = 13 + pet_cameo::MAX_MARKS;
+pub const MAX_FRAME_MARKS: u32 = 17 + pet_cameo::MAX_MARKS;
 
 /// Optional pointer reaction for fish dart / bubble rise.
 #[derive(Debug, Clone, Copy, Default)]
@@ -354,10 +359,28 @@ fn build_frame_marks(
         // lead relative to travel, so the wedge follows instead of leading.
         // Right-swimmers enter from the left edge, left-swimmers from the
         // right edge — both facing exactly the way they move.
+        // Formation drift. Every fish used to sit at an exact offset in the
+        // wedge, so seven animals crossed the field as one rigid object —
+        // the single biggest reason the water read as decoration rather than
+        // life. Each fish now eases one dot fore and aft of its slot on its
+        // own slow period, so the wedge breathes while it travels.
+        //
+        // The period is deliberately off both the bob (`3_400 + m * 640`)
+        // and the tail cycle (300 ms), per this module's rule that entity
+        // periods never match so nothing strobes in step. One dot of
+        // amplitude over ~6 s is far slower than the crossing speed, so a
+        // fish never travels against the school and `facing == velocity`
+        // still holds by construction. Costs no marks: the school's
+        // population, band and budget are unchanged.
+        let drift = i32::from(sine_bob(
+            t,
+            5_200 + entity_jitter(m as u128 + 617) % 3_400,
+            2,
+        )) - 1;
         let x_dots = if swims_right {
-            cycle_dot_step - i32::from(*dx) * 2 - i32::from(body_w) * 2
+            cycle_dot_step - i32::from(*dx) * 2 - i32::from(body_w) * 2 + drift
         } else {
-            i32::from(area.width) * 2 - cycle_dot_step + i32::from(*dx) * 2
+            i32::from(area.width) * 2 - cycle_dot_step + i32::from(*dx) * 2 - drift
         };
         let mut x_i32 = if ascii_safe {
             if swims_right {
@@ -369,7 +392,7 @@ fn build_frame_marks(
             x_dots.div_euclid(2)
         };
         // Native fish bob by one dot inside a cell, never by a whole text row.
-        let bob = sine_bob(t, 3_400 + (m as u128) * 640, 1);
+        let bob = sine_bob(t, 3_000 + entity_jitter(m as u128 + 41) % 2_600, 1);
         let y_i32 =
             i32::from(anchor_y) + i32::from(*dy) + if ascii_safe { i32::from(bob) } else { 0 };
         let body = if ascii_safe {
@@ -587,14 +610,14 @@ fn build_frame_marks(
     // Floating particles rise smoothly through the water column, dissolving
     // gently with continuous time-based floating physics.
     for b in 0..density.bubble_streams() {
-        let phase = (b as u128).saturating_mul(1_900);
-        // Edge columns — avoid center brand.
-        let column = if b % 2 == 0 {
-            area.width / 8
-        } else {
-            area.width.saturating_mul(7) / 8
-        };
-        let rise_period = BUBBLE_RISE_MS.saturating_add(phase % 900);
+        // Irregular phase, period and lane. Two fixed lanes at `width/8`
+        // and `7*width/8` meant extra streams stacked into the same two
+        // columns and rose on an arithmetic beat; spread them over the whole
+        // width and let `water()` below reject any column the composition
+        // owns, which is the one placement rule this module has.
+        let phase = entity_jitter(b as u128) % 9_000;
+        let column = (entity_jitter(b as u128 + 977) % u128::from(area.width.max(1))) as u16;
+        let rise_period = BUBBLE_RISE_MS.saturating_add(entity_jitter(b as u128 + 313) % 2_600);
         let cycle = (t.saturating_add(phase) % rise_period) as f64 / rise_period as f64;
         let boost = if cursor.flee_elapsed_ms.is_some() && column.abs_diff(ptr) < 10 {
             2
@@ -1101,7 +1124,25 @@ pub fn occupied_text_bounds(line: &Line<'_>) -> Option<(usize, usize)> {
     Some((leading, total.saturating_sub(trailing_run)))
 }
 
+/// Deterministic per-entity jitter.
+///
+/// Every period in this module used to be an arithmetic series — bubble
+/// phases at `b * 1_900`, fish bobs at `3_400 + m * 640` — so the field read
+/// as a mechanism keeping time rather than as animals. This spreads entity
+/// constants irregularly while staying a pure function of the index, which
+/// the delta/interpolation path requires: the module still owns no clock, no
+/// simulation and no RNG state, and two runs at the same `t` paint the same
+/// frame.
 #[must_use]
+fn entity_jitter(seed: u128) -> u128 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in seed.to_le_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    u128::from(hash)
+}
+
 fn sine_bob(elapsed_ms: u128, period_ms: u128, amplitude: u16) -> u16 {
     if period_ms == 0 || amplitude == 0 {
         return 0;

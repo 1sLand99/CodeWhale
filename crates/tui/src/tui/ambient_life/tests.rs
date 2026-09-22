@@ -1186,7 +1186,15 @@ fn native_temporal_sweep_retains_population_and_paint_bounds() {
             );
             saw_jelly |= count == 3;
             saw_absence |= count == 0;
-            assert!(frame.marks.len() <= 13);
+            // Bound from the one constant, not a second copy of the
+            // number: a hardcoded 13 here outlived the budget it was meant
+            // to mirror when the bubble streams grew.
+            assert!(
+                frame.marks.len() as u32 <= super::MAX_FRAME_MARKS,
+                "frame built {} marks, budget is {}",
+                frame.marks.len(),
+                super::MAX_FRAME_MARKS
+            );
             let mut buf = Buffer::empty(area);
             let mut stats = AmbientFrameStats {
                 marks_built: frame.marks.len() as u32,
