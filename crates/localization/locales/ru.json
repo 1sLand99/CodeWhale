@@ -20,6 +20,7 @@
   "PetWatchExportQueued": "Сохранение записи Watch…",
   "PetWatchExportUnavailable": "Откройте /pet в сохранённой сессии или дождитесь завершения текущего экспорта.",
   "PetUnobserved": "нет наблюдений",
+  "PetOffline": "не в сети — codewhale pet serve разбудит его",
   "PetDozing": "дремлет",
   "PetWatchUnavailable": "Телеметрия питомца приостановлена. /pet on повторит попытку.",
   "SessionArchiveExported": "Сеанс экспортирован",

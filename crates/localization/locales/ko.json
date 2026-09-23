@@ -20,6 +20,7 @@
   "PetWatchExportQueued": "Watch 기록 저장 중…",
   "PetWatchExportUnavailable": "저장된 세션에서 /pet를 열거나 현재 내보내기가 끝날 때까지 기다리세요.",
   "PetUnobserved": "미관측",
+  "PetOffline": "오프라인 — codewhale pet serve로 깨울 수 있어요",
   "PetDozing": "졸고 있음",
   "PetWatchUnavailable": "펫 원격 측정이 일시 중지되었습니다. /pet on 으로 재시도합니다.",
   "SessionArchiveExported": "세션을 내보냈습니다",

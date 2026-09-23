@@ -20,6 +20,7 @@
   "PetWatchExportQueued": "Watch रिकॉर्डिंग सहेजी जा रही है…",
   "PetWatchExportUnavailable": "सहेजे गए सत्र में /pet खोलें या मौजूदा निर्यात पूरा होने की प्रतीक्षा करें।",
   "PetUnobserved": "अवलोकन नहीं हुआ",
+  "PetOffline": "ऑफ़लाइन — codewhale pet serve इसे जगाता है",
   "PetDozing": "ऊँघ रहा है",
   "PetWatchUnavailable": "पालतू की टेलीमेट्री रुकी हुई है। /pet on से फिर कोशिश करें।",
   "SessionArchiveExported": "सत्र निर्यात किया गया",

@@ -422,9 +422,7 @@ fn run(
                     producer_seq = None;
                     if last_failure.elapsed() > Duration::from_secs(3) {
                         last_failure = Instant::now();
-                        let _ = notices.try_send(Notice::Message(
-                            "Shared pet reconnecting · unobserved".into(),
-                        ));
+                        let _ = notices.try_send(Notice::Message("Shared pet reconnecting".into()));
                         if let Ok(next) = Client::connect() {
                             client = next;
                         }

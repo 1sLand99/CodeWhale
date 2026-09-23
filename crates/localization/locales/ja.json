@@ -20,6 +20,7 @@
   "PetWatchExportQueued": "Watch の記録を保存中…",
   "PetWatchExportUnavailable": "保存済みのセッションで /pet を開くか、現在のエクスポートが完了するまでお待ちください。",
   "PetUnobserved": "未観測",
+  "PetOffline": "オフライン — codewhale pet serve で起こせます",
   "PetDozing": "うたた寝",
   "PetWatchUnavailable": "ペットの計測が一時停止しました。/pet on で再試行します。",
   "SessionArchiveExported": "セッションをエクスポートしました",

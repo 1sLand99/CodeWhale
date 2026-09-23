@@ -20,6 +20,7 @@
   "PetWatchExportQueued": "Đang lưu bản ghi Watch…",
   "PetWatchExportUnavailable": "Mở /pet trong một phiên đã lưu hoặc đợi quá trình xuất hiện tại hoàn tất.",
   "PetUnobserved": "chưa quan sát",
+  "PetOffline": "ngoại tuyến — codewhale pet serve sẽ đánh thức nó",
   "PetDozing": "ngủ gật",
   "PetWatchUnavailable": "Đã tạm dừng dữ liệu thú cưng. /pet on sẽ thử lại.",
   "SessionArchiveExported": "Đã xuất phiên",

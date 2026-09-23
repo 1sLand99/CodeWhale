@@ -20,6 +20,7 @@
   "PetWatchExportQueued": "正在儲存 Watch 重播…",
   "PetWatchExportUnavailable": "請在已儲存的工作階段中開啟 /pet，或等待目前的匯出完成。",
   "PetUnobserved": "未觀測",
+  "PetOffline": "離線 — 執行 codewhale pet serve 喚醒它",
   "PetDozing": "打盹",
   "PetWatchUnavailable": "寵物遙測已暫停。/pet on 重試。",
   "SessionArchiveExported": "工作階段已匯出",

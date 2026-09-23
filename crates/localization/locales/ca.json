@@ -20,6 +20,7 @@
   "PetWatchExportQueued": "S’està desant la reproducció de Watch…",
   "PetWatchExportUnavailable": "Obre /pet en una sessió desada o espera que acabi l’exportació actual.",
   "PetUnobserved": "sense observació",
+  "PetOffline": "fora de línia — codewhale pet serve el desperta",
   "PetDozing": "endormiscat",
   "PetWatchUnavailable": "La telemetria de la mascota està en pausa. /pet on ho torna a intentar.",
   "SessionArchiveExported": "Sessió exportada",

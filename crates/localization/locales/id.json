@@ -20,6 +20,7 @@
   "PetWatchExportQueued": "Menyimpan rekaman Watch…",
   "PetWatchExportUnavailable": "Buka /pet dalam sesi tersimpan atau tunggu ekspor saat ini selesai.",
   "PetUnobserved": "belum teramati",
+  "PetOffline": "luring — codewhale pet serve membangunkannya",
   "PetDozing": "terlelap",
   "PetWatchUnavailable": "Telemetri hewan peliharaan dijeda. /pet on mencoba lagi.",
   "SessionArchiveExported": "Sesi diekspor",

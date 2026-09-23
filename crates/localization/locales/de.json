@@ -20,6 +20,7 @@
   "PetWatchExportQueued": "Watch-Aufzeichnung wird gespeichert…",
   "PetWatchExportUnavailable": "Öffne /pet in einer gespeicherten Sitzung oder warte auf den laufenden Export.",
   "PetUnobserved": "unbeobachtet",
+  "PetOffline": "offline — codewhale pet serve weckt ihn",
   "PetDozing": "dösend",
   "PetWatchUnavailable": "Die Haustier-Telemetrie pausiert. /pet on versucht es erneut.",
   "SessionArchiveExported": "Sitzung exportiert",

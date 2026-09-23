@@ -20,6 +20,7 @@
   "PetWatchExportQueued": "正在保存 Watch 回放…",
   "PetWatchExportUnavailable": "请在已保存的会话中打开 /pet，或等待当前导出完成。",
   "PetUnobserved": "未观测",
+  "PetOffline": "离线 — 运行 codewhale pet serve 唤醒它",
   "PetDozing": "打盹",
   "PetWatchUnavailable": "宠物遥测已暂停。/pet on 重试。",
   "SessionArchiveExported": "会话已导出",
