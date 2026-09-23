@@ -23,7 +23,9 @@ Never retry a refusal unchanged — re-observe, re-target, or change route.
 
 | code | meaning | move |
 | --- | --- | --- |
-| `shared_pointer_required` | background mode refuses pointer gestures | use element targets; shared desktop needs the user's explicit authorization |
+| `background_focus_required` | background mode refuses raw pointer gestures (the window route borrows key focus) | use element targets; foreground control needs the user's explicit authorization |
+| `bg_dispatch_unavailable` | the window-routed pointer cannot be resolved on this helper | update Computer Use or use element targets — the user's cursor is never used instead |
+| `real_pointer_refused` | a request tried to drive the user's cursor | there is no such route; use the window-routed pointer tools |
 | `background_scroll_unavailable` | no scrollbar at that point | target an observed scroll area |
 | `menu_item_not_found` | exact title not present (menus expose items only while open) | check the exact title; an ellipsis is part of it |
 | `menu_item_disabled` | item present but the app refuses it right now (often a missing key window) | use the window's own control element instead |

@@ -57,9 +57,10 @@ Select an application before sending input. On macOS, background selection
 (`activate:false`) supports process-directed typing and accessibility actions.
 It refuses gestures and keyboard shortcuts that would borrow the user's keyboard focus or move the shared pointer. Some Unicode and hosted-panel
 typing also refuses rather than taking a focus lease. Explicit
-foreground selection (`activate:true`) enables guarded shared-desktop input
-when the user has authorized exclusive desktop use. Neither mode is an isolated
-computer; cursor restoration does not make concurrent pointer control safe.
+foreground selection (`activate:true`) enables guarded foreground input
+when the user has authorized exclusive desktop use. In both modes pointer input
+goes to the bound app's window as window-routed events; the user's cursor is
+never moved. Neither mode is an isolated computer.
 Screenshots and zoom return actual image content to compatible vision models.
 The nonactivating preview is on by default after binding; recording is explicit.
 Application observations return a concise default summary; request full detail
