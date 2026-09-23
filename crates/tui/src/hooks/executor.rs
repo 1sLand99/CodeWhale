@@ -2072,6 +2072,13 @@ impl HookExecutor {
         if tool_name == pattern {
             return true;
         }
+        // The shell tool is spelled `bash` / `Bash` on the model surface, and
+        // `exec_shell` is still stamped for the `shell_env` event and lives
+        // on in older hook configs. Treat the three as one tool, matching
+        // `tool_category_for`, so a condition written with any spelling fires.
+        if is_shell_tool_name(tool_name) && is_shell_tool_name(pattern) {
+            return true;
+        }
         if let Some(rest) = pattern.strip_prefix("mcp_") {
             let documented = rest.strip_prefix('_');
             if documented.is_some() || pattern.contains('*') {
@@ -2542,6 +2549,11 @@ fn is_mcp_server_tool(name: &str) -> bool {
 /// An unparseable or absent argument blob is treated as the tool's most
 /// dangerous action, because a gate that cannot see the action must not
 /// assume the harmless one.
+/// The spellings of the one shell tool (see `tool_category_for`).
+fn is_shell_tool_name(name: &str) -> bool {
+    matches!(name, "bash" | "Bash" | "exec_shell")
+}
+
 fn tool_category_for(tool_name: &str, tool_args: Option<&str>) -> &'static str {
     let action = tool_args
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
@@ -2555,7 +2567,7 @@ fn tool_category_for(tool_name: &str, tool_args: Option<&str>) -> &'static str {
     match tool_name {
         // The shell surface. `exec_shell` is retired but kept here because
         // `shell.rs` still stamps it for the `shell_env` hook event.
-        "bash" | "Bash" | "exec_shell" => "shell",
+        name if is_shell_tool_name(name) => "shell",
         // The lowercase primitives ship without an action envelope.
         "read" | "todo_write" => "safe",
         "write" | "edit" => "file_write",
@@ -4395,6 +4407,29 @@ exit 7
             "read_files",
             "read_file"
         ));
+    }
+
+    #[test]
+    fn tool_name_shell_spellings_match_each_other_in_both_directions() {
+        let spellings = ["bash", "Bash", "exec_shell"];
+        for tool in spellings {
+            for pattern in spellings {
+                assert!(
+                    HookExecutor::tool_name_matches_condition(tool, pattern),
+                    "tool {tool} should match condition {pattern}"
+                );
+            }
+        }
+        // The alias is exact: it does not widen to other shell-ish tools.
+        assert!(!HookExecutor::tool_name_matches_condition(
+            "task_shell_start",
+            "bash"
+        ));
+        assert!(!HookExecutor::tool_name_matches_condition(
+            "bash",
+            "read_file"
+        ));
+        assert!(!HookExecutor::tool_name_matches_condition("BASH", "bash"));
     }
 
     #[test]
