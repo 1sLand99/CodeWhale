@@ -3,7 +3,7 @@
 //! `SnapshotRepo` shells out to the system `git` binary (we deliberately
 //! avoid `git2` to dodge its LGPL surface). The two paths that matter:
 //!
-//! - `git_dir`  → `~/.deepseek/snapshots/<project_hash>/<worktree_hash>/.git`
+//! - `git_dir`  → `<snapshot state dir>/<project_hash>/<worktree_hash>/.git`
 //! - `work_tree` → the user's actual workspace
 //!
 //! Every git invocation passes both `--git-dir` AND `--work-tree`. That is
@@ -313,7 +313,7 @@ impl SnapshotRepo {
         let work_tree = workspace
             .canonicalize()
             .unwrap_or_else(|_| workspace.to_path_buf());
-        let git_dir = snapshot_git_dir(&work_tree);
+        let git_dir = snapshot_git_dir(&work_tree)?;
         if !git_dir.exists() || !git_dir.join("HEAD").exists() {
             return Ok(None);
         }
@@ -323,7 +323,7 @@ impl SnapshotRepo {
     /// Open or initialize the snapshot repo for `workspace`.
     ///
     /// On first use this:
-    /// 1. Creates the `~/.deepseek/snapshots/<…>/.git` dir.
+    /// 1. Creates the `.git` dir under the resolved snapshot store.
     /// 2. Runs `git init --bare=false --quiet`.
     /// 3. Sets a fixed `user.name` / `user.email` so commits don't pick up
     ///    the user's global git identity (we don't want our snapshots to
@@ -357,8 +357,7 @@ impl SnapshotRepo {
             ));
         }
 
-        let _ = ensure_snapshot_dir(&work_tree)?;
-        let git_dir = snapshot_git_dir(&work_tree);
+        let git_dir = ensure_snapshot_dir(&work_tree)?.join(".git");
 
         let needs_init = !git_dir.exists();
         if needs_init {
@@ -1625,45 +1624,26 @@ mod tests {
     /// owns the process-wide env-var mutex so tests across modules
     /// don't trample each other's home env vars.
     pub(super) struct ScopedHome {
-        prev_vars: Vec<(&'static str, Option<std::ffi::OsString>)>,
+        _vars: Vec<crate::test_support::EnvVarGuard>,
         _guard: crate::test_support::TestEnvLock,
     }
-    impl Drop for ScopedHome {
-        fn drop(&mut self) {
-            // SAFETY: process-wide lock still held.
-            unsafe {
-                for (key, prev) in self.prev_vars.drain(..) {
-                    match prev {
-                        Some(value) => std::env::set_var(key, value),
-                        None => std::env::remove_var(key),
-                    }
-                }
-            }
-        }
-    }
     pub(super) fn scoped_home(home: &Path) -> ScopedHome {
+        use crate::test_support::EnvVarGuard;
         let guard = lock_test_env();
-        let prev_vars = ["HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"]
-            .into_iter()
-            .map(|key| (key, std::env::var_os(key)))
-            .collect();
-        // SAFETY: serialised by the global env lock.
-        unsafe {
-            std::env::set_var("HOME", home);
-            std::env::set_var("USERPROFILE", home);
-            std::env::remove_var("HOMEDRIVE");
-            std::env::remove_var("HOMEPATH");
-        }
         ScopedHome {
-            prev_vars,
+            _vars: vec![
+                EnvVarGuard::set("HOME", home),
+                EnvVarGuard::set("USERPROFILE", home),
+                EnvVarGuard::remove("HOMEDRIVE"),
+                EnvVarGuard::remove("HOMEPATH"),
+                EnvVarGuard::set("CODEWHALE_HOME", home.join(".codewhale")),
+            ],
             _guard: guard,
         }
     }
 
-    /// Build a side-repo whose snapshot dir lives under the same
-    /// tempdir we're using for `HOME` — so the inner `crate::config::effective_home_dir()`
-    /// lookup stays inside our sandbox. Returns the guard alongside so
-    /// the caller can keep HOME pinned for the rest of the test.
+    /// Build a side-repo inside the test's selected profile. Return its
+    /// environment guard so reads and writes stay isolated for the whole test.
     fn make_repo(tmp: &Path) -> (SnapshotRepo, ScopedHome) {
         let workspace = tmp.join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
@@ -1700,7 +1680,9 @@ mod tests {
         let before = SnapshotRepo::open_existing(&workspace).expect("open existing");
         assert!(before.is_none());
         assert!(
-            !snapshot_git_dir(&workspace).exists(),
+            !snapshot_git_dir(&workspace)
+                .expect("snapshot path")
+                .exists(),
             "read-only open must not create the side repo"
         );
 
