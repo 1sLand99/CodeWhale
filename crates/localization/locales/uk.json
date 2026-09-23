@@ -1855,6 +1855,7 @@
   "StatusApprovalNever": "ніколи",
   "StatusMcpConfigured": "налаштовано: {count}",
   "StatusFleetDrifted": "{fleet} · {count} збережених маршрутів немає в поточному каталозі: {ids}",
+  "StatusModelNotInRoster": "Моделі {model} немає в поточному каталозі {provider} — закріплення збережено; модель може й далі відповідати",
   "StatusContextUsage": "використано {percent}% ({used} / {max} токенів)",
   "StatusContextSourceConfigured": "налаштовано",
   "StatusContextSourceConfiguredModel": "налаштовано (для моделі)",

@@ -1855,6 +1855,7 @@
   "StatusApprovalNever": "कभी नहीं",
   "StatusMcpConfigured": "{count} कॉन्फ़िगर",
   "StatusFleetDrifted": "{fleet} · {count} सहेजे गए रूट मौजूदा कैटलॉग में नहीं: {ids}",
+  "StatusModelNotInRoster": "मॉडल {model} {provider} के मौजूदा कैटलॉग में नहीं है — पिन बना रहेगा; यह अब भी जवाब दे सकता है",
   "StatusContextUsage": "{percent}% उपयोग ({used} / {max} टोकन)",
   "StatusContextSourceConfigured": "कॉन्फ़िगर किया गया",
   "StatusContextSourceConfiguredModel": "कॉन्फ़िगर किया गया (प्रति मॉडल)",

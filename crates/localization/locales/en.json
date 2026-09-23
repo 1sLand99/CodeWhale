@@ -1855,6 +1855,7 @@
   "StatusApprovalNever": "never",
   "StatusMcpConfigured": "{count} configured",
   "StatusFleetDrifted": "{fleet} · {count} saved routes not in the current catalog: {ids}",
+  "StatusModelNotInRoster": "Model {model} is not in {provider}'s current roster — kept as pinned; it may still answer",
   "StatusContextUsage": "{percent}% used ({used} / {max} tokens)",
   "StatusContextSourceConfigured": "configured",
   "StatusContextSourceConfiguredModel": "configured (per-model)",

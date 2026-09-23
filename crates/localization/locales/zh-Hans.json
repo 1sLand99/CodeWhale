@@ -1855,6 +1855,7 @@
   "StatusApprovalNever": "从不允许",
   "StatusMcpConfigured": "已配置 {count} 个",
   "StatusFleetDrifted": "{fleet} · {count} 条已保存路由不在当前目录中：{ids}",
+  "StatusModelNotInRoster": "模型 {model} 不在 {provider} 当前的模型列表中——已保留固定设置；它可能仍可响应",
   "StatusContextUsage": "已使用 {percent}%（{used} / {max} 令牌）",
   "StatusContextSourceConfigured": "配置值",
   "StatusContextSourceConfiguredModel": "配置值（按模型）",

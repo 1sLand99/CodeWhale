@@ -718,6 +718,38 @@ pub(crate) fn cached_entry_for_route(
         .cloned())
 }
 
+/// Whether a saved `(provider, model)` pin is absent from that exact route's
+/// FRESH live roster (#6035). `None` when no fresh roster exists: a stale,
+/// failed, or absent roster cannot prove drift, and bundled catalog rows say
+/// nothing about what the account serves today. Absence is a warning, never a
+/// reason to rewrite the pin: the id may still answer (soft deprecation) and
+/// other hosts may serve it on their own routes.
+pub(crate) fn pin_missing_from_fresh_roster(
+    config: &Config,
+    provider: &str,
+    model: &str,
+) -> Option<bool> {
+    let kind = ApiProvider::parse(provider).unwrap_or(ApiProvider::Custom);
+    let identity = match kind {
+        ApiProvider::Custom => provider.to_string(),
+        _ => kind.as_str().to_string(),
+    };
+    let base_url = config.base_url_for_route_identity(kind, &identity);
+    if status_for_route(kind, &identity, &base_url) != CatalogStatus::Fresh {
+        return None;
+    }
+    let listed = cached_entry_for_route(kind, &identity, &base_url)
+        .ok()
+        .flatten()
+        .is_some_and(|entry| {
+            entry.offerings.iter().any(|offering| {
+                offering.wire_model_id == model
+                    || offering.canonical_model.as_deref() == Some(model)
+            })
+        });
+    Some(!listed)
+}
+
 fn merge_durable_scope(
     mut durable_cache: ProviderCatalogCache,
     process_cache: &ProviderCatalogCache,

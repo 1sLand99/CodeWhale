@@ -1855,6 +1855,7 @@
   "StatusApprovalNever": "mai",
   "StatusMcpConfigured": "{count} configurats",
   "StatusFleetDrifted": "{fleet} · {count} rutes desades que no són al catàleg actual: {ids}",
+  "StatusModelNotInRoster": "El model {model} no és al catàleg actual de {provider}; es manté fixat i encara pot respondre",
   "StatusContextUsage": "{percent}% utilitzat ({used} / {max} tokens)",
   "StatusContextSourceConfigured": "configurada",
   "StatusContextSourceConfiguredModel": "configurada (per model)",

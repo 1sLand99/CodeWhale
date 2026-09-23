@@ -1855,6 +1855,7 @@
   "StatusApprovalNever": "jangan pernah",
   "StatusMcpConfigured": "{count} dikonfigurasi",
   "StatusFleetDrifted": "{fleet} · {count} rute tersimpan tidak ada di katalog saat ini: {ids}",
+  "StatusModelNotInRoster": "Model {model} tidak ada di katalog {provider} saat ini — tetap disematkan; model mungkin masih menjawab",
   "StatusContextUsage": "{percent}% terpakai ({used} / {max} token)",
   "StatusContextSourceConfigured": "dikonfigurasi",
   "StatusContextSourceConfiguredModel": "dikonfigurasi (per model)",

@@ -1855,6 +1855,7 @@
   "StatusApprovalNever": "허용 안 함",
   "StatusMcpConfigured": "{count}개 구성됨",
   "StatusFleetDrifted": "{fleet} · 저장된 경로 {count}개가 현재 카탈로그에 없습니다: {ids}",
+  "StatusModelNotInRoster": "모델 {model}이(가) {provider}의 현재 카탈로그에 없습니다 — 고정은 유지되며 계속 응답할 수 있습니다",
   "StatusContextUsage": "{percent}% 사용 중 ({used} / {max} 토큰)",
   "StatusContextSourceConfigured": "구성 값",
   "StatusContextSourceConfiguredModel": "구성 값(모델별)",

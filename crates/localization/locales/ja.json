@@ -1855,6 +1855,7 @@
   "StatusApprovalNever": "常に拒否",
   "StatusMcpConfigured": "{count} 件設定済み",
   "StatusFleetDrifted": "{fleet} · 保存済みルート {count} 件が現在のカタログにありません: {ids}",
+  "StatusModelNotInRoster": "モデル {model} は {provider} の現在のカタログにありません — 固定はそのまま保持します（引き続き応答する場合があります）",
   "StatusContextUsage": "{percent}% 使用中（{used} / {max} トークン）",
   "StatusContextSourceConfigured": "設定値",
   "StatusContextSourceConfiguredModel": "設定値（モデル別）",

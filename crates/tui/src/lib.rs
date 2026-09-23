@@ -6565,30 +6565,13 @@ fn doctor_model_pin_drift(
     let drifted = pins
         .iter()
         .filter_map(|((provider, model), owners)| {
-            let kind = crate::config::ApiProvider::parse(provider)
-                .unwrap_or(crate::config::ApiProvider::Custom);
-            let identity = match kind {
-                crate::config::ApiProvider::Custom => provider.clone(),
-                _ => kind.as_str().to_string(),
-            };
-            let base_url = config.base_url_for_route_identity(kind, &identity);
-            if crate::provider_catalog_live::status_for_route(kind, &identity, &base_url)
-                != codewhale_config::catalog::CatalogStatus::Fresh
-            {
+            let Some(missing) = crate::provider_catalog_live::pin_missing_from_fresh_roster(
+                config, provider, model,
+            ) else {
                 unverifiable += 1;
                 return None;
-            }
-            let listed =
-                crate::provider_catalog_live::cached_entry_for_route(kind, &identity, &base_url)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|entry| {
-                        entry.offerings.iter().any(|offering| {
-                            offering.wire_model_id == *model
-                                || offering.canonical_model.as_deref() == Some(model.as_str())
-                        })
-                    });
-            (!listed).then(|| {
+            };
+            missing.then(|| {
                 json!({
                     "provider": provider,
                     "model": model,

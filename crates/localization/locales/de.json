@@ -1855,6 +1855,7 @@
   "StatusApprovalNever": "nie",
   "StatusMcpConfigured": "{count} konfiguriert",
   "StatusFleetDrifted": "{fleet} · {count} gespeicherte Routen nicht im aktuellen Katalog: {ids}",
+  "StatusModelNotInRoster": "Modell {model} ist nicht im aktuellen Katalog von {provider} — bleibt fixiert; es kann weiterhin antworten",
   "StatusContextUsage": "{percent}% belegt ({used} / {max} Token)",
   "StatusContextSourceConfigured": "konfiguriert",
   "StatusContextSourceConfiguredModel": "konfiguriert (pro Modell)",

@@ -1855,6 +1855,7 @@
   "StatusApprovalNever": "nunca",
   "StatusMcpConfigured": "{count} configurados",
   "StatusFleetDrifted": "{fleet} · {count} rotas salvas fora do catálogo atual: {ids}",
+  "StatusModelNotInRoster": "O modelo {model} não está no catálogo atual de {provider} — fixação mantida; ele ainda pode responder",
   "StatusContextUsage": "{percent}% usado ({used} / {max} tokens)",
   "StatusContextSourceConfigured": "configurada",
   "StatusContextSourceConfiguredModel": "configurada (por modelo)",

@@ -1855,6 +1855,7 @@
   "StatusApprovalNever": "jamais",
   "StatusMcpConfigured": "{count} configurés",
   "StatusFleetDrifted": "{fleet} · {count} itinéraires enregistrés absents du catalogue actuel : {ids}",
+  "StatusModelNotInRoster": "Le modèle {model} n'est pas dans le catalogue actuel de {provider} — épinglage conservé ; il peut encore répondre",
   "StatusContextUsage": "{percent}% utilisé ({used} / {max} jetons)",
   "StatusContextSourceConfigured": "configurée",
   "StatusContextSourceConfiguredModel": "configurée (par modèle)",

@@ -1855,6 +1855,7 @@
   "StatusApprovalNever": "không bao giờ",
   "StatusMcpConfigured": "đã cấu hình {count}",
   "StatusFleetDrifted": "{fleet} · {count} tuyến đã lưu không có trong danh mục hiện tại: {ids}",
+  "StatusModelNotInRoster": "Mô hình {model} không có trong danh mục hiện tại của {provider} — vẫn giữ ghim; mô hình có thể vẫn phản hồi",
   "StatusContextUsage": "đã dùng {percent}% ({used} / {max} token)",
   "StatusContextSourceConfigured": "đã cấu hình",
   "StatusContextSourceConfiguredModel": "đã cấu hình (theo mô hình)",
