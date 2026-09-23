@@ -2851,6 +2851,126 @@ async fn agent_runs_runtime_api_exposes_persisted_worker_receipts() -> Result<()
 }
 
 #[tokio::test]
+async fn agent_run_cancel_stops_a_live_child_and_returns_its_receipt() -> Result<()> {
+    let root = std::env::temp_dir().join(format!("codewhale-agent-run-cancel-{}", Uuid::new_v4()));
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace)?;
+    let manager = crate::tools::subagent::new_shared_subagent_manager(workspace.clone(), 2);
+    let agent_id = {
+        let mut guard = manager.write().await;
+        let id = guard.insert_test_running_agent("stoppable", &workspace);
+        guard.assign_test_session_owner(&id, "session-stop");
+        id
+    };
+
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_root_token_mobile_workspace_and_subagents(
+            root.clone(),
+            root.join("sessions"),
+            None,
+            false,
+            workspace,
+            Some(manager.clone()),
+            None,
+        )
+        .await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let response = client
+        .post(format!("http://{addr}/v1/agent-runs/{agent_id}/cancel"))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let receipt: serde_json::Value = response.json().await?;
+    assert_eq!(receipt["spec"]["worker_id"], agent_id.as_str());
+    assert_eq!(receipt["status"], "cancelled");
+    assert_eq!(
+        manager.read().await.get_result(&agent_id)?.status,
+        crate::tools::subagent::SubAgentStatus::Cancelled
+    );
+
+    // Stopping a stopped run is a no-op that answers with the same receipt.
+    let again = client
+        .post(format!("http://{addr}/v1/agent-runs/{agent_id}/cancel"))
+        .send()
+        .await?;
+    assert_eq!(again.status(), StatusCode::OK);
+    let again: serde_json::Value = again.json().await?;
+    assert_eq!(again["status"], "cancelled");
+
+    let missing = client
+        .post(format!("http://{addr}/v1/agent-runs/missing/cancel"))
+        .send()
+        .await?
+        .status();
+    assert_eq!(missing, StatusCode::NOT_FOUND);
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_run_cancel_refuses_a_run_owned_by_a_session_it_does_not_host() -> Result<()> {
+    let root = std::env::temp_dir().join(format!(
+        "codewhale-agent-run-cancel-foreign-{}",
+        Uuid::new_v4()
+    ));
+    let workspace = root.join("workspace");
+    fs::create_dir_all(workspace.join(".codewhale/state"))?;
+    // A child parked on a question in another terminal session: in flight on
+    // disk, but no engine in this runtime owns it.
+    let mut record = {
+        let manager = crate::tools::subagent::new_shared_subagent_manager(workspace.clone(), 1);
+        let mut guard = manager.write().await;
+        let id = guard.insert_test_running_agent("elsewhere", &workspace);
+        guard.assign_test_session_owner(&id, "terminal-session");
+        guard
+            .list_worker_records()
+            .into_iter()
+            .find(|record| record.spec.worker_id == id)
+            .expect("seeded record")
+    };
+    record.status = crate::tools::subagent::AgentWorkerStatus::WaitingForUser;
+    fs::write(
+        workspace.join(".codewhale/state/subagents.v1.json"),
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 1,
+            "agents": [],
+            "workers": [record],
+        }))?,
+    )?;
+
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_root_token_mobile_workspace(
+            root.clone(),
+            root.join("sessions"),
+            None,
+            false,
+            workspace,
+        )
+        .await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+    let response = client
+        .post(format!(
+            "http://{addr}/v1/agent-runs/agent_elsewhere/cancel"
+        ))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = response.text().await?;
+    assert!(body.contains("not hosting"), "{body}");
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn stream_requires_prompt() -> Result<()> {
     let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
         return Ok(());

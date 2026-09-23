@@ -563,8 +563,8 @@ impl PluginRegistry {
     ///   user reviews the changes.
     ///
     /// Fail-closed: nothing is carried when the new id already has state,
-    /// when any same-named predecessor has no receipt (it was revoked, or
-    /// never reviewed), or when the state file is invalid. Older ids are left
+    /// when the most recently reviewed same-named predecessor has since been
+    /// revoked, or when the state file is invalid. Older ids are left
     /// untouched, so a still-running older binary keeps its own authority.
     /// Only the built-in scope is ever carried; user and workspace bundles
     /// still require review of the exact bytes on disk.
@@ -1227,9 +1227,13 @@ pub(crate) fn harden_plugin_state_file(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// The newest persisted review of another built-in with this name, when one
-/// may be carried to `id`: `id` has no state yet, and every same-named
-/// built-in entry still holds a receipt (a revocation anywhere blocks it).
+/// The newest persisted review of another built-in with this name, when it
+/// may be carried to `id`: `id` has no state yet, and the same-named built-in
+/// entry with the most recent review still holds its receipt. A revoked entry
+/// is dated by its last review, so revoking blocks carrying until the user
+/// reviews a build again; ties go to the revocation. Entries that were never
+/// reviewed (for example, disabled before any review) granted nothing and are
+/// ignored.
 fn builtin_predecessor<'a>(
     state: &'a PluginStateFile,
     id: &PluginId,
@@ -1245,14 +1249,19 @@ fn builtin_predecessor<'a>(
         if parts.next() != Some(builtin) || parts.nth(1) != Some(name) {
             continue;
         }
-        let receipt = entry.trust.as_ref()?;
-        let reviewed = chrono::DateTime::parse_from_rfc3339(&receipt.reviewed_at)
+        let Some(last_review) = entry.trust.as_ref().or(entry.review_history.last()) else {
+            continue;
+        };
+        let reviewed = chrono::DateTime::parse_from_rfc3339(&last_review.reviewed_at)
             .map_or(i64::MIN, |at| at.timestamp_micros());
-        if newest.is_none_or(|(_, at)| reviewed > at) {
+        let revoked = entry.trust.is_none();
+        if newest.is_none_or(|(_, at)| reviewed > at || (reviewed == at && revoked)) {
             newest = Some((entry, reviewed));
         }
     }
-    newest.map(|(entry, _)| entry)
+    newest
+        .map(|(entry, _)| entry)
+        .filter(|entry| entry.trust.is_some())
 }
 
 fn runtime_stage_path(state_path: &Path, id: &PluginId, content_hash: &str) -> PathBuf {

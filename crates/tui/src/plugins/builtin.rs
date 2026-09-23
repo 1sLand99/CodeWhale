@@ -675,7 +675,7 @@ mod tests {
 
         const MANIFEST: &[u8] = br#"{"$schema":"https://agent-plugins.org/schemas/plugin.json","name":"fixture","version":"1.0.0"}"#;
         const SKILL: &[u8] = b"---\nname: extra\ndescription: An added skill.\n---\nBody.\n";
-        let builds: [&[(&str, &[u8])]; 4] = [
+        let builds: [&[(&str, &[u8])]; 5] = [
             &[("plugin.json", MANIFEST), ("body.txt", b"v1")],
             &[("plugin.json", MANIFEST), ("body.txt", b"v2")],
             &[
@@ -686,6 +686,11 @@ mod tests {
             &[
                 ("plugin.json", MANIFEST),
                 ("body.txt", b"v4"),
+                ("skills/extra/SKILL.md", SKILL),
+            ],
+            &[
+                ("plugin.json", MANIFEST),
+                ("body.txt", b"v5"),
                 ("skills/extra/SKILL.md", SKILL),
             ],
         ];
@@ -747,10 +752,19 @@ mod tests {
         // A revocation anywhere in the line blocks carrying.
         let mut v3 = v3;
         v3.revoke_trust("fixture").unwrap();
-        let v4 = registry_for(builds[3]);
+        let mut v4 = registry_for(builds[3]);
         let plugin = v4.get("fixture").unwrap();
         assert_eq!(plugin.trust_status, PluginTrustStatus::NeverReviewed);
         assert!(!plugin.enabled);
+
+        // A revocation blocks only until the next review: once the user
+        // reviews and enables a later build, upgrades carry that review again.
+        v4.trust("fixture").unwrap();
+        v4.enable("fixture").unwrap();
+        let v5 = registry_for(builds[4]);
+        let plugin = v5.get("fixture").unwrap();
+        assert_eq!(plugin.trust_status, PluginTrustStatus::Trusted);
+        assert!(plugin.active());
     }
 
     #[test]

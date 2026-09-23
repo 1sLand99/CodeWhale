@@ -1999,6 +1999,7 @@ a read-only inspection surface:
 |---|---|
 | List persisted agent runs | `GET /v1/agent-runs` |
 | Inspect one run | `GET /v1/agent-runs/{run_id}` |
+| Stop one run | `POST /v1/agent-runs/{run_id}/cancel` |
 
 The response is the same worker-record shape surfaced by `agent` receipts:
 `spec.run_id`, `actor_kind`, lifecycle `status`, bounded `events`,
@@ -2006,9 +2007,22 @@ The response is the same worker-record shape surfaced by `agent` receipts:
 falls back to the worker id for older records, and `{run_id}` may be either the
 run id or the worker id.
 
-These endpoints do not start, cancel, or steer sub-agents. The API surface
-exists so app/editor/headless clients can inspect the same handoff receipts that
-the TUI and parent model see.
+These endpoints do not start or steer sub-agents. The API surface exists so
+app/editor/headless clients can inspect the same handoff receipts that the TUI
+and parent model see, and stop a run they are showing.
+
+`POST /v1/agent-runs/{run_id}/cancel` takes no body. It stops the run through
+the same session-scoped path as the TUI's stop and the `agent/cancel` tool:
+descendants stop with it, and a write-scoped child's changed files are named in
+its result rather than dropped. It answers with the worker record:
+
+- `200` when the record is terminal (stopping an already-finished run is a
+  no-op that returns its receipt);
+- `202` when the owning engine accepted the stop but has not recorded the
+  terminal receipt within a few seconds; poll `GET /v1/agent-runs/{run_id}`;
+- `404` for an unknown run;
+- `409` when the run belongs to a session this runtime is not hosting (for
+  example a separate terminal session); stop it from that session.
 
 ## Session lifecycle (native UI supervision)
 

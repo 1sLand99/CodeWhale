@@ -11215,6 +11215,18 @@ impl RuntimeThreadManager {
         }
     }
 
+    /// The thread's engine only when it is already live in this process.
+    /// Control routes that act on in-flight work (stopping an agent run) use
+    /// this: loading a cold engine cannot reach work that is not running here.
+    pub async fn loaded_engine(&self, thread_id: &str) -> Option<EngineHandle> {
+        self.active
+            .lock()
+            .await
+            .engines
+            .get(thread_id)
+            .map(|state| state.engine.clone())
+    }
+
     /// Get the engine handle for a thread, loading it if necessary.
     /// Public wrapper around the private `ensure_engine_loaded`.
     pub async fn get_engine(&self, thread_id: &str) -> Result<EngineHandle> {

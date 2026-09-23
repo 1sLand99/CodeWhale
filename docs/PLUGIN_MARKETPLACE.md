@@ -38,8 +38,9 @@ hash is unchanged: a bundle you trusted and enabled stays trusted and enabled
 on the new build. When the capabilities changed, it shows
 `capabilities-changed` and stays off until you review it again with
 `/plugin show computer-use` and `/plugin trust computer-use`. If you revoked
-trust on any earlier build, nothing carries and the new build waits for a
-fresh review. User and workspace plugins never carry trust: changed bytes
+trust after your most recent review, nothing carries and the new build waits
+for a fresh review; once you review a build again, later upgrades carry that
+review. User and workspace plugins never carry trust: changed bytes
 always need review.
 
 ## Chromewhale

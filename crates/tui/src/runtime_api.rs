@@ -86,8 +86,8 @@ use crate::task_manager::{
     NewTaskRequest, SharedTaskManager, TaskManager, TaskManagerConfig, TaskRecord, TaskSummary,
 };
 use crate::tools::subagent::{
-    AgentWorkerRecord, SharedSubAgentManager, load_persisted_agent_worker_records,
-    new_shared_subagent_manager_with_timeout,
+    AgentWorkerRecord, AgentWorkerStatus, SharedSubAgentManager, SubAgentStatus,
+    load_persisted_agent_worker_records, new_shared_subagent_manager_with_timeout,
 };
 #[cfg(test)]
 pub(super) use codewhale_models::{ContentBlock, Message};
@@ -1205,6 +1205,7 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .route("/v1/workspace/instructions", get(workspace_instructions))
         .route("/v1/agent-runs", get(list_agent_runs))
         .route("/v1/agent-runs/{run_id}", get(get_agent_run))
+        .route("/v1/agent-runs/{run_id}/cancel", post(cancel_agent_run))
         .route("/v1/fleet/profiles", get(list_fleet_profiles))
         .route(
             "/v1/fleet/runs",
@@ -2075,16 +2076,143 @@ async fn get_agent_run(
     })?;
     let run = runs
         .into_iter()
-        .find(|record| {
-            let effective_run_id = if record.spec.run_id.is_empty() {
-                record.spec.worker_id.as_str()
-            } else {
-                record.spec.run_id.as_str()
-            };
-            effective_run_id == run_id || record.spec.worker_id == run_id
-        })
+        .find(|record| agent_run_matches(record, &run_id))
         .ok_or_else(|| ApiError::not_found(format!("agent run '{run_id}' not found")))?;
     Ok(Json(run))
+}
+
+/// A run is addressed by its run id, or by its worker id for records that
+/// predate run ids.
+fn agent_run_matches(record: &AgentWorkerRecord, run_id: &str) -> bool {
+    let effective_run_id = if record.spec.run_id.is_empty() {
+        record.spec.worker_id.as_str()
+    } else {
+        record.spec.run_id.as_str()
+    };
+    effective_run_id == run_id || record.spec.worker_id == run_id
+}
+
+/// How long a stop request waits for the owning engine to record the
+/// terminal receipt before answering `202 Accepted` with the live record.
+const AGENT_RUN_CANCEL_SETTLE: Duration = Duration::from_secs(3);
+
+/// `POST /v1/agent-runs/{run_id}/cancel`: stop a delegated agent run and
+/// answer with its receipt (addendum F2).
+///
+/// The stop goes through the same session-scoped path as the TUI's `X` and
+/// the `agent/cancel` tool, so descendants stop with it and a write-scoped
+/// child's work is inventoried rather than dropped. The answer is:
+/// - `200` with the terminal record once the run is stopped (or was already
+///   finished — stopping is idempotent);
+/// - `202` with the current record when the owning engine accepted the stop
+///   but has not recorded the terminal receipt yet;
+/// - `404` for an unknown run;
+/// - `409` when the run belongs to a session this runtime does not host, so
+///   nothing here can reach it.
+async fn cancel_agent_run(
+    State(state): State<RuntimeApiState>,
+    Path(run_id): Path<String>,
+) -> Result<(StatusCode, Json<AgentWorkerRecord>), ApiError> {
+    // Runs this runtime is executing itself (Fleet-launched children) stop
+    // in place. Only a child running in this process qualifies: records the
+    // manager loaded from disk belong to whichever process wrote them.
+    let owned = {
+        let manager = state.sub_agent_manager.read().await;
+        manager
+            .list_worker_records()
+            .into_iter()
+            .find(|record| agent_run_matches(record, &run_id))
+            .filter(|record| {
+                manager
+                    .get_result(&record.spec.worker_id)
+                    .is_ok_and(|agent| agent.status == SubAgentStatus::Running)
+            })
+    };
+    if let Some(record) = owned {
+        let agent_id = record.spec.worker_id.clone();
+        let cancelled = {
+            let mut manager = state.sub_agent_manager.write().await;
+            if record.owner_session_id.is_empty() {
+                manager.cancel_agent(&agent_id)
+            } else {
+                manager.cancel_agent_for_session(&record.owner_session_id, &agent_id)
+            }
+        }
+        .map_err(|err| {
+            ApiError::conflict(format!("agent run '{run_id}' could not be stopped: {err}"))
+        })?;
+        crate::tools::subagent::preserve_cancelled_work(&state.sub_agent_manager, cancelled).await;
+        let manager = state.sub_agent_manager.read().await;
+        let record = manager
+            .list_worker_records()
+            .into_iter()
+            .find(|record| record.spec.worker_id == agent_id)
+            .unwrap_or(record);
+        let status = if record.status.is_terminal() {
+            StatusCode::OK
+        } else {
+            StatusCode::ACCEPTED
+        };
+        return Ok((status, Json(record)));
+    }
+
+    let find_persisted = |workspace: &FsPath| -> Result<Option<AgentWorkerRecord>, ApiError> {
+        load_persisted_agent_worker_records(workspace)
+            .map(|runs| {
+                runs.into_iter()
+                    .find(|record| agent_run_matches(record, &run_id))
+            })
+            .map_err(|err| {
+                ApiError::internal(format!("Failed to load persisted agent run records: {err}"))
+            })
+    };
+    let record = find_persisted(&state.workspace)?
+        .ok_or_else(|| ApiError::not_found(format!("agent run '{run_id}' not found")))?;
+
+    // A runtime thread's session id is its thread id: its live engine owns
+    // the child and stops it through the session-scoped cancel path. The
+    // on-disk projection cannot tell a live child from an orphan (loading it
+    // marks every in-flight record interrupted), so a hosted thread is always
+    // asked, and only its own write settles the answer.
+    let engine = if record.owner_session_id.is_empty() {
+        None
+    } else {
+        state
+            .runtime_threads
+            .loaded_engine(&record.owner_session_id)
+            .await
+    };
+    let Some(engine) = engine else {
+        if record.status.is_terminal() {
+            return Ok((StatusCode::OK, Json(record)));
+        }
+        return Err(ApiError::conflict(format!(
+            "agent run '{run_id}' belongs to a session this runtime is not hosting; stop it from that session"
+        )));
+    };
+    engine
+        .send(crate::core::ops::Op::CancelSubAgent {
+            agent_id: record.spec.worker_id.clone(),
+        })
+        .await
+        .map_err(|err| ApiError::internal(format!("Failed to reach the run's engine: {err}")))?;
+
+    let settled = |current: &AgentWorkerRecord| {
+        current.status.is_terminal()
+            && (current.status != AgentWorkerStatus::Interrupted
+                || current.latest_message != record.latest_message)
+    };
+    let deadline = tokio::time::Instant::now() + AGENT_RUN_CANCEL_SETTLE;
+    loop {
+        let current = find_persisted(&state.workspace)?.unwrap_or_else(|| record.clone());
+        if settled(&current) {
+            return Ok((StatusCode::OK, Json(current)));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok((StatusCode::ACCEPTED, Json(current)));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 async fn list_fleet_profiles(
