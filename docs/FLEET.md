@@ -859,3 +859,42 @@ For current enforcement behavior, use [Modes](MODES.md),
 [Command Control Plane](COMMAND_CONTROL_PLANE.md). Keep secret values out of
 task instructions, arguments, logs, and receipts; adapter and Runtime layers
 must continue to redact or reject them independently of fleet selection.
+
+## Child grants: 0.10.1 scope and the 0.11 rework (#6298)
+
+Today a child's authority is assembled from several layers: role postures, a
+permission ceiling, the shell policy, inherited tool scope, deny-list unions,
+sentinels, and a single-command read-only grammar. That grammar is both too
+narrow and not a real boundary. A verifier cannot run the builds and fetches
+it is handed, and the grammar is a classifier, not a sandbox.
+
+**Shipped before 0.10.1** (narrow fixes on the current model):
+
+- Children never inherit desktop or computer-control tools (b5e48cd31, #6296).
+- A bounded verify surface for Git: `fetch` against a configured remote name
+  and a read-only `merge_tree` (b89349286).
+- Refusals name the sanctioned alternative and tell a child to report a
+  blocked probe to its parent instead of working around it (23747acea).
+- One reasoning vocabulary (c2bc1244d). Token budgets are tracked but never
+  enforced (a7a8bdb33).
+
+**0.10.1 re-scope.** This release adds no grant-model code. #6298 is re-scoped
+to the design below, and the rework lands in 0.11 as its own slices.
+
+**0.11 rework** (size L, one slice at a time):
+
+1. **One grant object per child.** It has `files` (none / read / write),
+   `shell` (none / inspect / verify / full), `network`, `desktop` (off unless
+   granted), and a preset tool allowlist. Roles become presets over it. Catalog
+   visibility and execution denial come from the same grant, which retires the
+   ceiling, sentinel, and posture re-mapping layers.
+2. **A `verify` shell mode that works.** `cargo test`/`check` and Git fetch run
+   under an explicit, bounded write scope (`target/`, refs), replacing the
+   command allowlist that pretends to be read-only.
+3. **Classified tool families that fail closed.** MCP and desktop tools form a
+   labeled family. A child gets that family only when the spawn grants it with
+   a reason, and an unclassified tool is not granted.
+4. **Legible grants.** The role picker, roster, and receipts show the effective
+   grant, model, and thinking tier in plain words.
+
+Related work is tracked in #6015, #5633, #6194, and #6232.
