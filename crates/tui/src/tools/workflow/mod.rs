@@ -1703,17 +1703,19 @@ fn workflow_fleet_binding(
         return Ok(WorkflowFleetBinding::None);
     };
     let roots = crate::fleet::exact::fleet_search_roots(&context.workspace);
-    let (document, id) = crate::fleet::exact::load_fleet_document(&name, &context.workspace)
-        .map_err(|err| {
-            ToolError::invalid_input(format!(
-                "Failed to load workflow Fleet '{name}' from {}: {err}",
-                roots
-                    .iter()
-                    .map(|root| format!("{}/{}", root.origin, root.root.display()))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ))
-        })?;
+    let (document, id) =
+        crate::fleet::exact::load_fleet_document(&name, &context.workspace, api_config).map_err(
+            |err| {
+                ToolError::invalid_input(format!(
+                    "Failed to load workflow Fleet '{name}' from {}: {err}",
+                    roots
+                        .iter()
+                        .map(|root| format!("{}/{}", root.origin, root.root.display()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            },
+        )?;
 
     if let Some(legacy) = document.legacy() {
         let roles = FleetRoleMap::from_pairs(

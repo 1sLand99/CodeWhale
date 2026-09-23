@@ -348,6 +348,15 @@ The workflow crate's older `schema = "exact"`, revision 1 files are migration
 input only. Do not author revision-1 files; the selected roster and setup UI
 read and write only `schema = "fleet"`, revision 2.
 
+`workflow(fleet: "release")` runs a saved Fleet without selecting it. At
+Workflow start, a member with no pin takes the Fleet's `[operator]` route or,
+without one, the session route and reasoning tier; that frozen route is what
+runs and what receipts name, and editing the file mid-run changes only the next
+Workflow. If a saved Fleet and an older exact/legacy file share a name, the
+Workflow refuses to guess; qualify the saved one as `user/<name>` or
+`folder/<name>`. Members with `instructions` or `requires` cannot run in a
+Workflow yet.
+
 Reasoning is a separate route-execution decision, not fleet identity. The
 optional Reasoning Router is a reusable Runtime service, not a fleet member.
 Save one profile at `routers/<name>.toml` in either search root and reference it
