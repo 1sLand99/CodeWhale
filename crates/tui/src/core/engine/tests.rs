@@ -12073,6 +12073,139 @@ fn deferred_apply_patch_first_use_hydrates_schema_without_execution() {
     );
 }
 
+/// E3: the first call to a deferred tool hydrates its schema and tells the
+/// model to retry. That hint is model-facing; it reaches the model in the
+/// tool result and must not surface as a user status line.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn deferred_tool_first_use_does_not_emit_a_retry_status() {
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _lock = lock_test_env();
+    let workspace = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+    let tool_call_sse = concat!(
+        "data: {\"id\":\"chatcmpl-e3\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[",
+        "{\"index\":0,\"id\":\"call_e3_map\",\"type\":\"function\",\"function\":{\"name\":\"project_map\",",
+        "\"arguments\":\"{}\"}}",
+        "]},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-e3\",\"choices\":[{\"index\":0,\"delta\":{},",
+        "\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let done_sse = concat!(
+        "data: {\"id\":\"chatcmpl-e3-done\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-e3-done\",\"choices\":[{\"index\":0,\"delta\":{},",
+        "\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("call_e3_map"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(done_sse),
+        )
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(tool_call_sse),
+        )
+        .expect(1)
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let (engine, handle) = Engine::new(
+        EngineConfig {
+            model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+            workspace: workspace.path().to_path_buf(),
+            snapshots_enabled: false,
+            subagents_enabled: false,
+            terminal_chrome_enabled: false,
+            ..EngineConfig::default()
+        },
+        &api_config,
+    );
+    let run_task = tokio::spawn(engine.run());
+    handle
+        .send(Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
+            content: "Map this project".to_string(),
+            images: Vec::new(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
+            compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: true,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+        }))
+        .await
+        .expect("send model turn");
+
+    let mut hydration_result = None;
+    let mut statuses = Vec::new();
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for turn event")
+    {
+        match event {
+            Event::Status { message, .. } => statuses.push(message),
+            Event::ToolCallComplete { name, result, .. } if name == "project_map" => {
+                hydration_result = Some(result);
+            }
+            Event::TurnComplete { .. } => break,
+            _ => {}
+        }
+    }
+    drop(rx);
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
+
+    let hydration = hydration_result
+        .expect("the deferred call completes")
+        .expect("hydration result");
+    assert!(
+        hydration.content.contains("was deferred"),
+        "the model still gets the retry hint: {}",
+        hydration.content
+    );
+    assert!(
+        statuses
+            .iter()
+            .all(|status| !status.contains("Loaded deferred tool")),
+        "{statuses:?}"
+    );
+}
+
 #[test]
 fn model_tool_catalog_defers_non_core_native_tools_in_act_mode() {
     let always_load = HashSet::new();

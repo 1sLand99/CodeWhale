@@ -3474,7 +3474,7 @@ impl Engine {
                 }
             }
 
-            let should_emit_hydration_status =
+            let first_hydration_this_batch =
                 !deferred_tools_hydrated_this_batch.contains(&tool_name);
             if blocked_error.is_none()
                 && let Some(result) = maybe_hydrate_requested_deferred_tool(
@@ -3485,7 +3485,7 @@ impl Engine {
                     &mut deferred_tools_hydrated_this_batch,
                 )
             {
-                if should_emit_hydration_status {
+                if first_hydration_this_batch {
                     // Retain first-proposal order separately from the set
                     // used to deduplicate calls in this batch. LRU bounds
                     // must not depend on randomized HashSet iteration.
@@ -3498,18 +3498,10 @@ impl Engine {
                     "auto_retry_same_turn": false,
                     "metadata": result.metadata,
                 }));
-                if should_emit_hydration_status {
-                    let status = if requested_tool_name == tool_name {
-                        format!(
-                            "Loaded deferred tool '{tool_name}'. Retry the call with its visible schema."
-                        )
-                    } else {
-                        format!(
-                            "Loaded deferred tool '{tool_name}' after resolving '{requested_tool_name}'. Retry the call with its visible schema."
-                        )
-                    };
-                    let _ = self.tx_event.send(Event::status(status)).await;
-                }
+                // No user-facing status here: "retry the call with its
+                // visible schema" is addressed to the model, which already
+                // receives it in the tool result below (E3). The audit
+                // record above is the receipt.
                 // The provider did not advertise this schema in the current
                 // request. Hydration is discovery, never execution authority:
                 // return the schema now and require a subsequent model call.
