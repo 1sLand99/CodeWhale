@@ -153,7 +153,8 @@ boundary has held since v0.9.1):
 - **`llm_client/`** - LLM client trait, retry logic, and error classification
   (`LlmClient`, `RetryConfig`, `with_retry`) consumed by `client.rs`; `mock.rs`
   is test-only (`#[cfg(test)]`).
-- **`models.rs`** - Data structures for API requests/responses
+- **`crates/models`** (`codewhale_models`) - Data structures for API
+  requests/responses; the TUI crate has no local `models.rs`.
 
 #### DeepSeek API Endpoints
 
@@ -183,16 +184,19 @@ drives turns through Chat Completions.
     discoverable through `tool_search`
   - `automation.rs` - Model-visible scheduling tools over `AutomationManager`
   - `plan.rs` - Planning tools
-  - `subagent/` - Sub-agent launch and supervision. The one model-facing tool
-    is `agent`; the `agent_open`/`agent_eval`/`agent_close` lifecycle surface
-    was retired (see `subagent/coord.rs:5`)
+  - `subagent/` - Sub-agent launch and supervision. `agent` is the one
+    creation surface; `subagent/coord.rs` adds narrow coordination tools
+    (`agents/list`, `agents/message`, `agents/followup`, `agents/interrupt`,
+    `agents/wait`, `agents/coordinate`) over the existing manager. The
+    `agent_open`/`agent_eval`/`agent_close` lifecycle surface was retired
+    (see the `subagent/coord.rs` module doc)
   - `spec.rs` - Tool specifications
   - `rlm.rs` - Persistent Recursive Language Model (RLM) sessions — sandboxed Python REPLs with semantic helper calls and `var_handle` output support
 
 ### Extension Systems
 
 - **`mcp.rs`** - Model Context Protocol client for external tool servers
-- **`skills.rs`** - Plugin/skill loading and execution
+- **`skills/`** - Skill discovery and registry for local `SKILL.md` files, plus install and audit
 - **`hooks.rs`** - Pre/post execution hooks with conditions
 
 ### User Interface

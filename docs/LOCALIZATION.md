@@ -43,23 +43,23 @@ only at exact raw key parity with it, enforced by
 `crates/localization/src/lib.rs`. See `crates/localization/locales/AGENTS.md` for the
 authoring contract.
 
-| Locale | File | Keys vs `en.json` (1299) | Status | Notes |
+| Locale | File | Keys vs `en.json` | Status | Notes |
 |--------|------|--------------------------|--------|-------|
-| English | `en.json` | 1299/1299 | **shipped** | Reference pack. |
-| Japanese | `ja.json` | 1299/1299 | **shipped** | Complete. |
-| Simplified Chinese | `zh-Hans.json` | 1299/1299 | **shipped** | Complete. |
-| Traditional Chinese | `zh-Hant.json` | 1299/1299 | **shipped** | Complete (#5143). Awaiting native-speaker review. |
-| Brazilian Portuguese | `pt-BR.json` | 1299/1299 | **shipped** | Complete. |
-| Latin American Spanish | `es-419.json` | 1299/1299 | **shipped** | Complete. Note the website tracks `es` — the shipped TUI pack is Latin American Spanish, not `es-ES`. |
-| Vietnamese | `vi.json` | 1299/1299 | **shipped** | Complete. |
-| Korean | `ko.json` | 1299/1299 | **shipped** | Complete. |
-| Catalan | `ca.json` | 1299/1299 | **shipped** | Complete (#4749/#4788). Awaiting native-speaker review. |
-| German | `de.json` | 1299/1299 | **shipped** | Complete (#4788). Awaiting native-speaker review. |
-| French | `fr.json` | 1299/1299 | **shipped** | Complete (#4788). Awaiting native-speaker review. |
-| Indonesian | `id.json` | 1299/1299 | **shipped** | Complete (#4789). Awaiting native-speaker review. |
-| Hindi | `hi.json` | 1299/1299 | **shipped** | Complete (#4790). Devanagari shaping spike: `docs/evidence/v092-devanagari-terminal-shaping.md` — code-level guarantees only; terminal visual QA and native review still open. |
-| Russian | `ru.json` | 1299/1299 | **shipped** | Complete (#3092). Cyrillic script fixtures guard against mixed-language copy. Awaiting native-speaker review. |
-| Ukrainian | `uk.json` | 1299/1299 | **shipped** | Complete (#4791). Cyrillic script fixtures keep it distinct from Russian (no ы/э/ъ; і/ї/є/ґ present). Awaiting native-speaker review. |
+| English | `en.json` | all | **shipped** | Reference pack. |
+| Japanese | `ja.json` | all | **shipped** | Complete. |
+| Simplified Chinese | `zh-Hans.json` | all | **shipped** | Complete. |
+| Traditional Chinese | `zh-Hant.json` | all | **shipped** | Complete (#5143). Awaiting native-speaker review. |
+| Brazilian Portuguese | `pt-BR.json` | all | **shipped** | Complete. |
+| Latin American Spanish | `es-419.json` | all | **shipped** | Complete. Note the website tracks `es` — the shipped TUI pack is Latin American Spanish, not `es-ES`. |
+| Vietnamese | `vi.json` | all | **shipped** | Complete. |
+| Korean | `ko.json` | all | **shipped** | Complete. |
+| Catalan | `ca.json` | all | **shipped** | Complete (#4749/#4788). Awaiting native-speaker review. |
+| German | `de.json` | all | **shipped** | Complete (#4788). Awaiting native-speaker review. |
+| French | `fr.json` | all | **shipped** | Complete (#4788). Awaiting native-speaker review. |
+| Indonesian | `id.json` | all | **shipped** | Complete (#4789). Awaiting native-speaker review. |
+| Hindi | `hi.json` | all | **shipped** | Complete (#4790). The Devanagari shaping spike (moved out of this repository in `7242381022`) gave code-level guarantees only; terminal visual QA and native review still open. |
+| Russian | `ru.json` | all | **shipped** | Complete (#3092). Cyrillic script fixtures guard against mixed-language copy. Awaiting native-speaker review. |
+| Ukrainian | `uk.json` | all | **shipped** | Complete (#4791). Cyrillic script fixtures keep it distinct from Russian (no ы/э/ъ; і/ї/є/ґ present). Awaiting native-speaker review. |
 
 ## Website locales
 
