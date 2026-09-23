@@ -545,11 +545,7 @@ pub(crate) async fn print_update_report(probes: DoctorProbeRequest) {
     } else {
         DoctorUpdateReport::NotChecked
     };
-    let method = std::env::current_exe()
-        .ok()
-        .map_or(codewhale_release::InstallMethod::Binary, |exe| {
-            codewhale_release::InstallMethod::detect(&exe)
-        });
+    let method = codewhale_release::current_install_method();
     for (index, line) in doctor_update_report_lines(&report, method.update_command())
         .into_iter()
         .enumerate()
