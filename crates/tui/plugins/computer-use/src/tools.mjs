@@ -109,6 +109,7 @@ export const TOOLS = [
         name: { type: "string" }, bundle_id: { type: "string" }, pid: { type: "integer" },
         scope: { enum: ["app", "foreground"], description: "app (default): consent to use one application. foreground: consent to foreground control and key focus (darwin activate:true)" },
         remember: { type: "boolean", description: "Persist the decision across sessions (default: this session only)" },
+        confirm: { type: "string", description: "allow only: the token from a confirmation_required refusal. Record it only after the user approved that exact action (pay, buy, send, transfer, delete) in their own words; it admits one identical call." },
         computer: computerParam,
       },
       additionalProperties: false,
@@ -122,7 +123,7 @@ export const TOOLS = [
   {
     name: "consent_allow",
     description: "Record an allow decision: app (name/bundle_id/pid/app string) or scope:'foreground'. remember:true persists it.",
-    inputSchema: { type: "object", properties: { computer: computerParam, app: { type: "string" }, name: { type: "string" }, bundle_id: { type: "string" }, pid: { type: "integer" }, scope: { enum: ["app", "foreground"] }, remember: { type: "boolean" } }, additionalProperties: false },
+    inputSchema: { type: "object", properties: { computer: computerParam, app: { type: "string" }, name: { type: "string" }, bundle_id: { type: "string" }, pid: { type: "integer" }, scope: { enum: ["app", "foreground"] }, remember: { type: "boolean" }, confirm: { type: "string", description: "Token from a confirmation_required refusal, recorded only after the user approved that exact action." } }, additionalProperties: false },
   },
   {
     name: "consent_deny",
@@ -264,6 +265,7 @@ export const TOOLS = [
       properties: {
         action: { enum: ["start", "status", "navigate", "click", "type", "screenshot", "stop"] },
         url: { type: "string", description: "http(s):// or about:blank (start, navigate)" },
+        tab: { type: "string", description: "attach mode only (start): a tab id from status to work in — a person's tab is used only when named" },
         selector: { type: "string", description: "CSS selector (click, or type focus)" },
         point: { type: "object", properties: { x: { type: "number" }, y: { type: "number" } }, required: ["x", "y"], additionalProperties: false, description: "page-viewport pixels — the browser screenshot space, never screen points" },
         text: { type: "string", description: "text to insert (type)" },
@@ -276,8 +278,8 @@ export const TOOLS = [
   },
   {
     name: "browser_start",
-    description: "Launch or reuse the self-owned Chromium profile and open this session's tab. The user's own browser is never touched.",
-    inputSchema: { type: "object", properties: { url: { type: "string", description: "optional http(s) URL to open" }, computer: computerParam }, additionalProperties: false },
+    description: "Launch or reuse the self-owned Chromium profile and open this session's tab. The user's own browser is never touched. On a Codewhale Computer (attach mode) it attaches to the computer's shared browser instead; `tab` picks one of its tabs.",
+    inputSchema: { type: "object", properties: { url: { type: "string", description: "optional http(s) URL to open" }, tab: { type: "string", description: "attach mode: tab id from browser_status" }, computer: computerParam }, additionalProperties: false },
   },
   {
     name: "browser_status",
@@ -311,7 +313,7 @@ export const TOOLS = [
   },
   {
     name: "trajectory",
-    description: "Record this session's tool calls to a local JSONL and replay them later. Actions: start | stop | status (file, turns, recent files) | replay {id?, dry_run?} — replay re-enters the normal tool pipeline, so permissions, grants and the kill switch still apply, and it stops at the first refusal. Off unless started; arguments are stored verbatim (typed text included) so replay is faithful; files stay in the recordings dir on this machine.",
+    description: "Record this session's tool calls to a local JSONL and replay them later. Actions: start | stop | status (file, turns, recent files) | replay {id?, dry_run?} — replay re-enters the normal tool pipeline, so permissions, grants and the kill switch still apply, and it stops at the first refusal. Off unless started; entered text (typed text, set values, clipboard writes) is redacted and those steps are not replayable; files are owner-only and stay in the recordings dir on this machine.",
     inputSchema: { type: "object", required: ["action"], properties: { action: { enum: ["start", "stop", "status", "replay"] }, id: { type: "string", description: "traj-*.jsonl name from status; defaults to the most recent" }, dry_run: { type: "boolean", description: "list what replay would do without executing anything" }, computer: computerParam }, additionalProperties: false },
   },
   {
@@ -540,7 +542,7 @@ export const TOOLS = [
   // ---- programmatic interface ----
   {
     name: "app_script",
-    description: "macOS, local computer only: run an AppleScript or JXA (JavaScript for Automation) script through osascript — the programmatic interface inside apps that have a scripting dictionary (Finder, Mail, Safari, Calendar, Notes, Reminders, Music, System Events and most native apps). Prefer this over clicking when the app exposes one: deterministic, returns values, needs no Accessibility grant and never touches the pointer. The receipt carries stdout as `result`; a non-zero exit fails `script_error` with stderr, a user-declined consent fails `automation_denied` (the fix is System Settings → Privacy & Security → Automation, not a retry). Refused on ssh/hdc computers (`unsupported_on_transport`) — the remote channel stays computer-use only, never a shell.",
+    description: "macOS, local computer only: run an AppleScript or JXA (JavaScript for Automation) script through osascript — the programmatic interface inside apps that have a scripting dictionary (Finder, Mail, Safari, Calendar, Notes, Reminders, Music, System Events and most native apps). Prefer this over clicking when the app exposes one: deterministic, returns values, needs no Accessibility grant and never touches the pointer. The receipt carries stdout as `result`; a non-zero exit fails `script_error` with stderr, a user-declined consent fails `automation_denied` (the fix is System Settings → Privacy & Security → Automation, not a retry). Refused on ssh/hdc computers (`unsupported_on_transport`) — the remote channel stays computer-use only, never a shell. Not a shell locally either: shell escapes (do shell script, doShellScript), the ObjC bridge, dynamic code and terminal apps fail `script_refused`, and every app the script names needs the user's consent like any other target.",
     inputSchema: {
       type: "object", required: ["script"],
       properties: {
@@ -725,6 +727,21 @@ for (const tool of TOOLS) {
 export const OBSERVATION_TOOLS = new Set(TOOLS.filter((t) => t.annotations.readOnlyHint === true).map((t) => t.name));
 
 /**
+ * Tools refused with `computer_busy_human_driving` while a person holds the
+ * control lease (src/lease.mjs). Derived fail-closed: every tool that is not
+ * an observation and acts on the world is gated unless it is listed here as
+ * session bookkeeping. run_actions and trajectory_replay are gated per step
+ * (they re-enter callTool); browser_stop only detaches in attach mode.
+ */
+const LEASE_EXEMPT = new Set([
+  "computer", "computer_switch", "computer_register", "computer_spawn", "computer_remove",
+  "trajectory_replay", "run_actions", "browser_stop",
+]);
+export const LEASE_GATED_TOOLS = new Set(TOOLS.filter((t) =>
+  !OBSERVATION_TOOLS.has(t.name) && !READ_ONLY_TOOLS.has(t.name) && !LEASE_EXEMPT.has(t.name)
+  && (t.annotations.openWorldHint === true || t.annotations.destructiveHint === true)).map((t) => t.name));
+
+/**
  * Merged-away names. They stay callable as aliases (receipts, pinned hosts and
  * existing tests keep working) but never appear in tools/list — the advertised
  * surface is what costs every session context.
@@ -814,7 +831,8 @@ export function resolveTool(name, args = {}) {
       if (!wire) throw bad(`consent action must be status, allow, deny or revoke (got ${JSON.stringify(args.action)})`);
       if (args.action === "status") return { name: wire, args: { computer: rest.computer } };
       const foreground = rest.scope === "foreground";
-      if (!foreground && rest.app == null && rest.name == null && rest.bundle_id == null && rest.pid == null) {
+      const confirming = args.action === "allow" && typeof rest.confirm === "string";
+      if (!foreground && !confirming && rest.app == null && rest.name == null && rest.bundle_id == null && rest.pid == null) {
         throw bad(`consent action "${args.action}" needs an app (name, bundle_id, pid or app string) — or scope:"foreground" for the shared-pointer decision`);
       }
       return { name: wire, args: rest };

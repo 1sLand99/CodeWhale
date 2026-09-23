@@ -27,7 +27,7 @@ Use `request_access` to inspect readiness; a loaded plugin alone does not prove
 its OS permissions work.
 
 When the standalone Computer Use helper is registered, it owns local input
-even when Codewhale carries an embedded native helper. Version 0.11.2 keeps its
+even when Codewhale carries an embedded native helper. Version 0.11.3 keeps its
 whale menu, permission setup, disposable background check and human
 Pause/Stop controls, and retires the daemon when its native owner disappears. A registered helper that cannot start causes a clear
 error; the client does not silently bypass its controls. Without a registered
@@ -72,8 +72,8 @@ The Engine permits one inline image up to 5 MiB per tool result; use a scoped
 capture or zoom when a larger image receives an omission receipt.
 
 Each task owns its MCP connection and computer selection, observations and
-held input. Subagents within that task share the task's Computer Use session.
-Stopping control or closing the task releases that session's input. Stale
+held input. Sub-agents never receive Computer Use tools: only the task's own
+agent operates the computer. Stopping control or closing the task releases that session's input. Stale
 observations, unexpected foreground changes and unavailable capabilities fail
 closed with a receipt; successful dispatch still needs application-state
 verification.

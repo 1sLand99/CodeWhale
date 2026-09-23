@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Upgrading Codewhale no longer turns off the built-in Computer Use. Each build
+  writes the built-in bundle to its own directory, so an upgrade used to present
+  it as never reviewed and disabled. Now the review and enablement carry to the
+  new build when its capabilities are unchanged. Changed capabilities show
+  `capabilities-changed` and wait for review, and a revoked trust never carries.
+
+### Changed
+
+- The bundled Computer Use plugin is 0.11.3, synced from upstream `0f54bf6`.
+  `app_script` refuses shell escapes. Clicks on irreversible actions such as
+  pay, send or delete need confirmation. Consent decisions cannot ride inside
+  `run_actions` or trajectory replay, and trajectories redact secure fields.
+  Also new: a shared-computer control lease that pauses agent input while a
+  person drives, and a browser attach mode for a shared Chromium. The vendored
+  README no longer claims sub-agents share the Computer Use session; they never
+  receive its tools.
+- The bundled first-party catalog pins marketplace revision
+  `93b0e0e4e441384533ca586b59890c0d5942bc0a`. It lists Computer Use 0.11.3 and
+  the same five plugins as before. Chromewhale is not in the bundled catalog
+  yet.
+
 ## [0.10.0] - 2026-09-22
 
 Codewhale v0.10.0 brings a redesigned terminal workbench, clearer settings, and
