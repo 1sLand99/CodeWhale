@@ -27,7 +27,10 @@
 //! * **Each build keeps its own complete tree.** A unique private stage is
 //!   published once under its embedded-content digest. Discovery receives
 //!   only that snapshot root, so another binary cannot replace a live bundle.
-//!   Neither old bundles nor their path-bound trust receipts are migrated.
+//!   Old bundles are not migrated. Their review is: when a new build's
+//!   bundle has the same capability hash, the prior review and enablement
+//!   carry to its new id; otherwise it reports `capabilities-changed`
+//!   ([`super::registry::PluginRegistry::carry_forward_builtin_trust`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -658,6 +661,92 @@ mod tests {
         verify_plugin_authority(&old_authority).unwrap();
         next.revoke_trust("fixture").unwrap();
         assert!(verify_plugin_authority(&next_authority).is_err());
+    }
+
+    #[test]
+    fn an_upgrade_carries_builtin_review_unless_capabilities_change_or_trust_was_revoked() {
+        use crate::plugins::context::{HostEnvironment, PluginDiscoveryContext};
+        use crate::plugins::discovery::DiscoveryConfig;
+        use crate::plugins::registry::verify_plugin_authority;
+
+        const MANIFEST: &[u8] = br#"{"$schema":"https://agent-plugins.org/schemas/plugin.json","name":"fixture","version":"1.0.0"}"#;
+        const SKILL: &[u8] = b"---\nname: extra\ndescription: An added skill.\n---\nBody.\n";
+        let builds: [&[(&str, &[u8])]; 4] = [
+            &[("plugin.json", MANIFEST), ("body.txt", b"v1")],
+            &[("plugin.json", MANIFEST), ("body.txt", b"v2")],
+            &[
+                ("plugin.json", MANIFEST),
+                ("body.txt", b"v3"),
+                ("skills/extra/SKILL.md", SKILL),
+            ],
+            &[
+                ("plugin.json", MANIFEST),
+                ("body.txt", b"v4"),
+                ("skills/extra/SKILL.md", SKILL),
+            ],
+        ];
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir(&cache).unwrap();
+        fs::create_dir(&workspace).unwrap();
+        let registry_for = |files: &[(&str, &[u8])]| {
+            let config = DiscoveryConfig {
+                workspace: workspace.clone(),
+                user_plugins_dir: temp.path().join("plugins"),
+                workspace_plugins_dir: workspace.join(".codewhale/plugins"),
+                builtin_plugin_dirs: vec![write_bundle(&cache, "fixture", files).unwrap()],
+                state_path: temp.path().join("plugins/state.json"),
+            };
+            let context = PluginDiscoveryContext::from_config_and_environment(
+                &config,
+                HostEnvironment::default(),
+            );
+            (*context.registry_for_workspace(&workspace)).clone()
+        };
+
+        // A first install has nothing to carry: it waits for review.
+        let mut v1 = registry_for(builds[0]);
+        let plugin = v1.get("fixture").unwrap();
+        assert_eq!(plugin.trust_status, PluginTrustStatus::NeverReviewed);
+        assert!(!plugin.enabled);
+        v1.trust("fixture").unwrap();
+        v1.enable("fixture").unwrap();
+        let v1_id = v1.get("fixture").unwrap().id.clone();
+        let v1_authority = v1.authority_for("fixture").unwrap();
+
+        // New bytes, same capabilities: the review and enablement carry, the
+        // new build is live, and the older build keeps its own authority.
+        let v2 = registry_for(builds[1]);
+        let plugin = v2.get("fixture").unwrap();
+        assert_ne!(plugin.id, v1_id);
+        assert_eq!(plugin.trust_status, PluginTrustStatus::Trusted);
+        assert!(plugin.enabled);
+        assert!(plugin.active());
+        verify_plugin_authority(&v2.authority_for("fixture").unwrap()).unwrap();
+        verify_plugin_authority(&v1_authority).unwrap();
+        // Carrying is once per build: rediscovery changes nothing.
+        let state = fs::read(temp.path().join("plugins/state.json")).unwrap();
+        let again = registry_for(builds[1]);
+        assert!(again.get("fixture").unwrap().active());
+        assert_eq!(
+            fs::read(temp.path().join("plugins/state.json")).unwrap(),
+            state
+        );
+
+        // Changed capabilities never carry silently: review the changes.
+        let v3 = registry_for(builds[2]);
+        let plugin = v3.get("fixture").unwrap();
+        assert_eq!(plugin.trust_status, PluginTrustStatus::CapabilitiesChanged);
+        assert!(!plugin.enabled);
+
+        // A revocation anywhere in the line blocks carrying.
+        let mut v3 = v3;
+        v3.revoke_trust("fixture").unwrap();
+        let v4 = registry_for(builds[3]);
+        let plugin = v4.get("fixture").unwrap();
+        assert_eq!(plugin.trust_status, PluginTrustStatus::NeverReviewed);
+        assert!(!plugin.enabled);
     }
 
     #[test]
