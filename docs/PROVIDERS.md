@@ -36,10 +36,12 @@ vendor's own docs before trusting any value here):
 | Groq | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` | `GROQ_API_KEY` |
 | Cerebras | `https://api.cerebras.ai/v1` | `llama-3.3-70b` | `CEREBRAS_API_KEY` |
 | Command Code | `https://api.commandcode.ai/provider/v1` | `deepseek/deepseek-v4-flash` | `COMMAND_CODE_API_KEY` |
-| AICraft | `https://aicraftapi.com/v1` | DeepSeek / Qwen / GLM / MiniMax / Doubao families | `AICRAFT_API_KEY` |
+| AICraft | `https://aicraftapi.com/v1` | `claude-4.6-sonnet`; DeepSeek / Claude / Gemini / Qwen / GLM / MiniMax / Doubao families | `AICRAFT_API_KEY` |
 
-AICraft advertises DeepSeek, Qwen, GLM, MiniMax and Doubao and lists no
-Anthropic models — pick a model from their roster, not from this table.
+AICraft's roster spans DeepSeek, Anthropic Claude, Google Gemini, Qwen, GLM,
+MiniMax and Doubao ids on its OpenAI-compatible endpoint. The authority is
+`GET https://aicraftapi.com/v1/models` with your key — pick a model from that
+list, not from this table.
 OpenCode Zen and OpenCode Go are first-class provider routes, configured like
 any other provider below; they are not part of this table. `/provider` `P`
 opens the template list; `S` still fills SenseNova; `T` probes `/models` and
