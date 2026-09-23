@@ -2640,21 +2640,40 @@ impl FleetSetupView {
         section(
             &mut lines,
             "Workspace & org",
-            format!(
-                "{} · sub-agents {} ({} concurrent, {} launch slots, {} admitted) · recursion agent {} / Fleet {} (ceiling {})",
-                self.snapshot.workspace.display(),
-                if self.snapshot.subagents_enabled {
-                    "enabled"
-                } else {
-                    "disabled"
-                },
-                self.snapshot.max_subagents,
-                self.snapshot.launch_concurrency,
-                self.snapshot.max_admitted,
-                self.snapshot.subagent_spawn_depth,
-                self.snapshot.fleet_spawn_depth,
-                codewhale_config::MAX_SPAWN_DEPTH_CEILING,
-            ),
+            tr(locale, MessageId::FleetReviewWorkspaceLimits)
+                .replace("{concurrent}", &self.snapshot.max_subagents.to_string())
+                .replace(
+                    "{launch_slots}",
+                    &self.snapshot.launch_concurrency.to_string(),
+                )
+                .replace("{admitted}", &self.snapshot.max_admitted.to_string())
+                .replace(
+                    "{agent_depth}",
+                    &self.snapshot.subagent_spawn_depth.to_string(),
+                )
+                .replace(
+                    "{fleet_depth}",
+                    &self.snapshot.fleet_spawn_depth.to_string(),
+                )
+                .replace(
+                    "{ceiling}",
+                    &codewhale_config::MAX_SPAWN_DEPTH_CEILING.to_string(),
+                )
+                .replace(
+                    "{enabled}",
+                    &tr(
+                        locale,
+                        if self.snapshot.subagents_enabled {
+                            MessageId::ExtensionsStateEnabled
+                        } else {
+                            MessageId::HotbarSetupStatusDisabled
+                        },
+                    ),
+                )
+                .replace(
+                    "{workspace}",
+                    &self.snapshot.workspace.display().to_string(),
+                ),
         );
         section(&mut lines, "Review policy", self.review_policy_summary());
 
@@ -2718,10 +2737,12 @@ impl FleetSetupView {
     }
 
     fn review_policy_summary(&self) -> String {
-        format!(
-            "Workers run without a token cap by default · {}s api, {}s heartbeat. Launch with Fleet → exec; /fleet workers (or /subagents) shows sub-agents in the current interactive session; /fleet status and codewhale fleet status both read the persistent .codewhale/fleet.jsonl ledger.",
-            self.snapshot.api_timeout_secs, self.snapshot.heartbeat_timeout_secs
-        )
+        tr(self.snapshot.locale, MessageId::FleetReviewPolicy)
+            .replace("{api_secs}", &self.snapshot.api_timeout_secs.to_string())
+            .replace(
+                "{heartbeat_secs}",
+                &self.snapshot.heartbeat_timeout_secs.to_string(),
+            )
     }
 }
 
