@@ -14846,12 +14846,19 @@ async fn terminal_routes_serve_a_live_engine_session_over_http() -> Result<()> {
             .await
             .expect("terminal output route answers");
         let data = chunk["data"].as_str().unwrap_or_default();
-        if data.contains("terminal-route-proof") {
-            // Reads are non-consuming: the same cursor returns the same bytes.
+        if data
+            .lines()
+            .any(|line| line.trim() == "terminal-route-proof")
+        {
+            // Wait for the command's output, not its echoed input. Reads are
+            // non-consuming, but the shell can append its prompt between them.
             let again = read_chunk(base.clone(), client.clone())
                 .await
                 .expect("terminal output route answers");
-            assert_eq!(again["data"], chunk["data"]);
+            assert!(
+                again["data"].as_str().unwrap_or_default().starts_with(data),
+                "a repeated read must retain every byte already observed"
+            );
             break;
         }
         assert!(
