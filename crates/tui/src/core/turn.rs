@@ -666,7 +666,7 @@ fn snapshot_with_label(
         Ok(repo) => {
             clear_snapshots_disabled_status(workspace, session_id);
             let id = match repo.snapshot_with_session(label, session_id) {
-                Ok(id) => Some(id.0),
+                Ok(id) => Some(id.into_string()),
                 Err(e) => {
                     tracing::warn!(target: "snapshot", "snapshot '{label}' failed: {e}");
                     return None;

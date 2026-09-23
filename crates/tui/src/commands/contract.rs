@@ -3076,7 +3076,7 @@ impl CommandSkillGroupContext for SkillGroupAdapter<'_> {
         Ok(snapshots
             .into_iter()
             .map(|snapshot| SnapshotEntry {
-                id: snapshot.id.0,
+                id: snapshot.id.into_string(),
                 label: snapshot.label,
                 timestamp: snapshot.timestamp,
             })
@@ -3094,7 +3094,9 @@ impl CommandSkillGroupContext for SkillGroupAdapter<'_> {
                 ));
             }
         };
-        repo.restore(&crate::snapshot::SnapshotId(id.to_string()))
+        let id = crate::snapshot::SnapshotId::parse(id)
+            .map_err(|err| format!("Restore failed: {err}"))?;
+        repo.restore(&id)
             .map_err(|err| format!("Restore failed: {err}"))
     }
 

@@ -22,11 +22,38 @@ use crate::dependencies::ExternalTool;
 
 use super::paths::{ensure_snapshot_dir, snapshot_git_dir};
 
-/// Identifier for a snapshot — currently the underlying git commit SHA.
+/// Identifier for a snapshot — the underlying git commit id.
+///
+/// The field is private: [`SnapshotId::parse`] is the only way to build one,
+/// so every value handed to `git` as a revision is a full SHA-1 or SHA-256
+/// hex object id and can never be read as an option or a revision expression.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SnapshotId(pub String);
+pub struct SnapshotId(String);
 
 impl SnapshotId {
+    /// Accept exactly a full hex object id: 40 (SHA-1) or 64 (SHA-256)
+    /// ASCII hex digits. Anything else is `InvalidInput`.
+    pub fn parse(id: &str) -> io::Result<Self> {
+        if Self::is_well_formed(id) {
+            Ok(Self(id.to_string()))
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "snapshot id must be a full hexadecimal commit id",
+            ))
+        }
+    }
+
+    /// Whether `id` would be accepted by [`SnapshotId::parse`].
+    pub fn is_well_formed(id: &str) -> bool {
+        matches!(id.len(), 40 | 64) && id.bytes().all(|b| b.is_ascii_hexdigit())
+    }
+
+    /// Take the id string out.
+    pub fn into_string(self) -> String {
+        self.0
+    }
+
     /// Borrow the SHA as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
@@ -504,7 +531,11 @@ impl SnapshotRepo {
             )));
         }
 
-        Ok(SnapshotId(sha))
+        SnapshotId::parse(&sha).map_err(|_| {
+            io_other(format!(
+                "git commit-tree returned a malformed commit id: {sha:?}"
+            ))
+        })
     }
 
     /// Prefix a snapshot label with its owning session id, if any.
@@ -614,7 +645,7 @@ impl SnapshotRepo {
         let checkout = run_git(
             &self.git_dir,
             &self.work_tree,
-            &["checkout", id.as_str(), "--", ":/"],
+            &["checkout", "--end-of-options", id.as_str(), "--", ":/"],
         )?;
         if !checkout.status.success() {
             return Err(io_other(format!(
@@ -674,6 +705,7 @@ impl SnapshotRepo {
                 "--literal-pathspecs",
                 "ls-tree",
                 "-z",
+                "--end-of-options",
                 id.as_str(),
                 "--",
                 rel.to_str()
@@ -726,6 +758,7 @@ impl SnapshotRepo {
                         "--literal-pathspecs",
                         "diff",
                         "--quiet",
+                        "--end-of-options",
                         id.as_str(),
                         "--",
                         rel.as_str(),
@@ -826,6 +859,7 @@ impl SnapshotRepo {
             let mut args: Vec<String> = vec![
                 "--literal-pathspecs".to_string(),
                 "checkout".to_string(),
+                "--end-of-options".to_string(),
                 id.as_str().to_string(),
                 "--".to_string(),
             ];
@@ -893,7 +927,14 @@ impl SnapshotRepo {
         let diff = run_git(
             &self.git_dir,
             &self.work_tree,
-            &["diff", "--stat", id.as_str(), "--", ":/"],
+            &[
+                "diff",
+                "--stat",
+                "--end-of-options",
+                id.as_str(),
+                "--",
+                ":/",
+            ],
         )?;
         if !diff.status.success() {
             return Err(io_other(format!(
@@ -918,7 +959,14 @@ impl SnapshotRepo {
         let diff = run_git(
             &self.git_dir,
             &self.work_tree,
-            &["diff", "--quiet", id.as_str(), "--", ":/"],
+            &[
+                "diff",
+                "--quiet",
+                "--end-of-options",
+                id.as_str(),
+                "--",
+                ":/",
+            ],
         )?;
         git_diff_matches(diff)
     }
@@ -927,7 +975,14 @@ impl SnapshotRepo {
         let ls = run_git(
             &self.git_dir,
             &self.work_tree,
-            &["ls-tree", "-r", "-z", "--name-only", treeish],
+            &[
+                "ls-tree",
+                "-r",
+                "-z",
+                "--name-only",
+                "--end-of-options",
+                treeish,
+            ],
         )?;
         if !ls.status.success() {
             return Err(io_other(format!(
@@ -1018,12 +1073,14 @@ impl SnapshotRepo {
                 .and_then(|s| s.parse::<i64>().ok())
                 .unwrap_or(0);
             let subject = parts.next().unwrap_or("").to_string();
-            if sha.is_empty() {
+            // `git log --pretty=format:%H` only emits full hex ids; skip anything
+            // else rather than let it become a revision argument later.
+            let Ok(id) = SnapshotId::parse(&sha) else {
                 continue;
-            }
+            };
             let (session_id, label) = Self::decode_session_label(&subject);
             out.push(Snapshot {
-                id: SnapshotId(sha),
+                id,
                 label,
                 timestamp: ts,
                 session_id,
@@ -1542,6 +1599,27 @@ mod tests {
     use crate::test_support::lock_test_env;
     use std::fs::{File, FileTimes};
     use tempfile::tempdir;
+
+    #[test]
+    fn snapshot_id_parse_accepts_only_full_hex_object_ids() {
+        let sha1 = "0123456789abcdefABCDEF0123456789abcdef01";
+        let sha256 = "a".repeat(64);
+        assert_eq!(SnapshotId::parse(sha1).expect("sha1").as_str(), sha1);
+        assert!(SnapshotId::parse(&sha256).is_ok());
+        for bad in [
+            "",
+            "HEAD",
+            "abc123",
+            "--output=/tmp/x",
+            "-0123456789abcdef0123456789abcdef0123456",
+            "0123456789abcdef0123456789abcdef0123456g",
+            "0123456789abcdef0123456789abcdef01234567~1",
+            "0123456789abcdef0123456789abcdef012345678",
+        ] {
+            let err = SnapshotId::parse(bad).expect_err(bad);
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{bad:?}");
+        }
+    }
 
     /// Holds the home directory pinned to a tempdir for the lifetime of a test. Also
     /// owns the process-wide env-var mutex so tests across modules

@@ -5139,6 +5139,12 @@ async fn check_operate_auto_merge(
     State(state): State<RuntimeApiState>,
     Json(req): Json<OperateAutoMergeCheckRequest>,
 ) -> Result<Json<OperateAutoMergeCheckView>, ApiError> {
+    crate::operate::validate_auto_merge_request(&crate::operate::AutoMergeRequest {
+        repo: &req.repo,
+        pr: &req.pr,
+        role: &req.agent,
+    })
+    .map_err(ApiError::bad_request)?;
     let checker = crate::operate::discover_auto_merge_checker(&state.workspace);
     let repo = req.repo.clone();
     let pr = req.pr.clone();
@@ -5596,7 +5602,7 @@ async fn revert_thread_file(
 }
 
 fn snapshot_id_is_well_formed(id: &str) -> bool {
-    matches!(id.len(), 40 | 64) && id.bytes().all(|b| b.is_ascii_hexdigit())
+    crate::snapshot::SnapshotId::is_well_formed(id)
 }
 
 fn expected_hash_is_well_formed(hash: &str) -> bool {
@@ -7200,7 +7206,8 @@ async fn restore_snapshot(
 fn restore_snapshot_for_workspace(workspace: &FsPath, id: &str) -> Result<(), ApiError> {
     let repo = crate::snapshot::SnapshotRepo::open_or_init(workspace)
         .map_err(|e| ApiError::internal(format!("Snapshot repo init failed: {e}")))?;
-    let snapshot_id = crate::snapshot::SnapshotId(id.to_string());
+    let snapshot_id = crate::snapshot::SnapshotId::parse(id)
+        .map_err(|e| ApiError::bad_request(format!("Invalid snapshot id: {e}")))?;
     repo.restore(&snapshot_id)
         .map_err(|e| ApiError::internal(format!("Snapshot restore failed: {e}")))
 }
