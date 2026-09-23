@@ -15,7 +15,7 @@ quieter, and Fleet runs can be checked before they spend anything.
 
 - A turn that stops producing output now reports itself: the turn loop records
   its phase and last progress, and an overdue phase surfaces instead of
-  hanging silently until the stream idle timeout. A sub-agent's final result is
+  hanging silently until the stream idle timeout. A delegated agent's final result is
   never dropped when the host is busy, so a finished child no longer leaves a
   ghost Running row behind ([#6184](https://github.com/Hmbown/Codewhale/issues/6184)).
 - Git commands run by tools never stop to ask for a password, passphrase or
@@ -35,10 +35,10 @@ quieter, and Fleet runs can be checked before they spend anything.
   ([#6303](https://github.com/Hmbown/Codewhale/issues/6303)).
 - "Allow for this conversation" records a grant for that tool and argument
   class instead of switching the whole thread to Full Access, so the call you
-  just approved is no longer failed by a posture change. An approval also
-  survives a posture change that only widens what is allowed, grants end when
-  a thread is archived or deleted, and `web.run` open grants are scoped by
-  host. Full Access covers MCP tools that declare themselves destructive in
+  just approved is no longer failed by a Permissions change. An approval
+  also survives a Permissions change that only widens what is allowed, grants
+  end when a thread is archived or deleted, and `web.run` open grants are
+  scoped by host. Full Access covers MCP tools that declare themselves destructive in
   every host, including `codewhale exec`
   ([#3866](https://github.com/Hmbown/Codewhale/issues/3866)).
 - `web.run` retries a refused page once with a browser user agent, and one
@@ -76,7 +76,7 @@ quieter, and Fleet runs can be checked before they spend anything.
   copy says agent, Fleet, Permissions and Work consistently, help lists one
   summary per row, provider rows without a key say "needs key", `/setup` says
   what it sets up, and the pet tank rests when it is offline.
-- ACP clients can see the permission posture the server started with,
+- ACP clients can see the Permissions setting the server started with,
   including Full Access and how to turn it on, but cannot select it
   ([#6310](https://github.com/Hmbown/Codewhale/issues/6310)).
 - `GET /v1/commands` tells clients each command's argument shape, so they do
@@ -87,10 +87,10 @@ quieter, and Fleet runs can be checked before they spend anything.
 
 - `codewhale fleet run <spec> --check` runs every validation a real run would
   and stops there: nothing is created, launched or spent.
-- A queued sub-agent says why it is waiting, for example when launches are
+- A queued agent says why it is waiting, for example when launches are
   throttled after provider rate limits, and when its time budget ends
   ([#6277](https://github.com/Hmbown/Codewhale/issues/6277)).
-- Stopping a sub-agent that writes files keeps and names the work it had
+- Stopping an agent that writes files keeps and names the work it had
   changed, as a budget stop already did
   ([#5529](https://github.com/Hmbown/Codewhale/issues/5529)).
 - `workflow(fleet:)` runs Fleets saved from the Fleet UI, and finds
@@ -114,8 +114,8 @@ quieter, and Fleet runs can be checked before they spend anything.
   `run_actions` or trajectory replay, and trajectories redact secure fields.
   Also new: a shared-computer control lease that pauses agent input while a
   person drives, and a browser attach mode for a shared Chromium. The vendored
-  README no longer claims sub-agents share the Computer Use session; they never
-  receive its tools.
+  README no longer claims delegated agents share the Computer Use session; they
+  never receive its tools.
 - The bundled first-party catalog pins marketplace revision
   `93b0e0e4e441384533ca586b59890c0d5942bc0a`. It lists Computer Use 0.11.3 and
   the same five plugins as before. Chromewhale is not in the bundled catalog

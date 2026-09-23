@@ -30,12 +30,12 @@ export const CHANGELOG: ChangelogRelease[] = [
       {
         "heading": "Fixed",
         "items": [
-          "A turn that stops producing output now reports itself: the turn loop records its phase and last progress, and an overdue phase surfaces instead of hanging silently until the stream idle timeout. A sub-agent's final result is never dropped when the host is busy, so a finished child no longer leaves a ghost Running row behind (#6184).",
+          "A turn that stops producing output now reports itself: the turn loop records its phase and last progress, and an overdue phase surfaces instead of hanging silently until the stream idle timeout. A delegated agent's final result is never dropped when the host is busy, so a finished child no longer leaves a ghost Running row behind (#6184).",
           "Git commands run by tools never stop to ask for a password, passphrase or host-key confirmation inside the terminal, and git_fetch has a timeout (#6184).",
           "A provider response that ends cleanly with no text and no tool call is retried before the turn fails, and the failure names how many retries ran (#6310).",
           "The context meter, the compaction gate, preflight, /context and turn receipts show one pressure number instead of disagreeing (#6407).",
           "Upgrading Codewhale no longer turns off the built-in Computer Use. Each build writes the built-in bundle to its own directory, so an upgrade used to present it as never reviewed and disabled. Now the review and enablement carry to the new build when its capabilities are unchanged. Changed capabilities show capabilities-changed and wait for review, and a revoked trust never carries (#6303).",
-          "\"Allow for this conversation\" records a grant for that tool and argument class instead of switching the whole thread to Full Access, so the call you just approved is no longer failed by a posture change. An approval also survives a posture change that only widens what is allowed, grants end when a thread is archived or deleted, and web.run open grants are scoped by host. Full Access covers MCP tools that declare themselves destructive in every host, including codewhale exec…",
+          "\"Allow for this conversation\" records a grant for that tool and argument class instead of switching the whole thread to Full Access, so the call you just approved is no longer failed by a Permissions change. An approval also survives a Permissions change that only widens what is allowed, grants end when a thread is archived or deleted, and web.run open grants are scoped by host. Full Access covers MCP tools that declare themselves destructive in every host, including…",
           "web.run retries a refused page once with a browser user agent, and one site's failure no longer fails the whole call or drops its search results.",
           "Hooks treat bash, Bash and exec_shell as one tool in tool_name conditions, so the documented example fires.",
           "macOS no longer reports Codewhale's ordinary heap as GPU (IOAccelerator) memory (#6033).",
@@ -54,7 +54,7 @@ export const CHANGELOG: ChangelogRelease[] = [
           "The approval card leads with a plain summary of the action, such as \"Run cargo test\", and shows workspace-relative paths. The footer labels its values.",
           "/status warns when the session's pinned model is no longer in its provider's live model list (#6035).",
           "Error messages give one true sentence and one next step. The TUI's English copy says agent, Fleet, Permissions and Work consistently, help lists one summary per row, provider rows without a key say \"needs key\", /setup says what it sets up, and the pet tank rests when it is offline.",
-          "ACP clients can see the permission posture the server started with, including Full Access and how to turn it on, but cannot select it (#6310).",
+          "ACP clients can see the Permissions setting the server started with, including Full Access and how to turn it on, but cannot select it (#6310).",
           "GET /v1/commands tells clients each command's argument shape, so they do not re-derive composer behaviour from the usage string (#6230)."
         ],
         "itemCount": 8
@@ -63,8 +63,8 @@ export const CHANGELOG: ChangelogRelease[] = [
         "heading": "Fleet and agents",
         "items": [
           "codewhale fleet run <spec> --check runs every validation a real run would and stops there: nothing is created, launched or spent.",
-          "A queued sub-agent says why it is waiting, for example when launches are throttled after provider rate limits, and when its time budget ends (#6277).",
-          "Stopping a sub-agent that writes files keeps and names the work it had changed, as a budget stop already did (#5529).",
+          "A queued agent says why it is waiting, for example when launches are throttled after provider rate limits, and when its time budget ends (#6277).",
+          "Stopping an agent that writes files keeps and names the work it had changed, as a budget stop already did (#5529).",
           "workflow(fleet:) runs Fleets saved from the Fleet UI, and finds workspace Fleets under .codewhale/fleets.",
           "The runtime API can stop a delegated agent run from the desktop."
         ],
