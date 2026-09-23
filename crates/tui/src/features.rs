@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! Feature flags and metadata for codewhale.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,8 +11,6 @@ pub enum Stage {
     Experimental,
     Beta,
     Stable,
-    Deprecated,
-    Removed,
 }
 
 impl Stage {
@@ -23,8 +19,6 @@ impl Stage {
             Self::Experimental => "experimental",
             Self::Beta => "beta",
             Self::Stable => "stable",
-            Self::Deprecated => "deprecated",
-            Self::Removed => "removed",
         }
     }
 }
