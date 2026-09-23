@@ -6999,11 +6999,16 @@ pub(crate) async fn run_cache_warmup(app: &App, config: &Config) -> Result<Cache
 }
 
 /// Whether the telemetry disclosure may become a transcript cell now: never
-/// while the launch card is still the screen, since a cell hides the card,
+/// while the launch card can still come back, since a cell hides the card,
 /// and never under a live active cell, whose tool indices address
 /// `history ++ active_cell`.
+///
+/// A dissolving card is not a departed one: Esc on an empty composer, or
+/// leaving the session picker, restores it, and it only renders over an
+/// empty history. So the cell waits until the card is dismissed or the
+/// conversation has its first entry.
 fn telemetry_notice_may_enter_transcript(app: &App) -> bool {
-    let card_leaving = !app.launch.visible || app.launch.dissolve_started_ms.is_some();
+    let card_leaving = !app.launch.visible || !app.history.is_empty();
     let no_live_cell = app
         .active_cell
         .as_ref()
@@ -7489,8 +7494,20 @@ mod telemetry_notice_tests {
             !telemetry_notice_may_enter_transcript(&app),
             "a transcript cell would hide the launch card's no-model line"
         );
-        app.launch.dissolve_started_ms = Some(0);
+        // A first keystroke only starts the dissolve; Esc on an empty
+        // composer (or leaving the picker) restores the card, which renders
+        // only over an empty history. A cell now would strand it.
+        app.launch.dissolve_card(0);
+        assert!(!telemetry_notice_may_enter_transcript(&app));
+        app.launch.restore_card();
+        assert!(crate::tui::widgets::should_render_empty_state(&app));
+        // Once the conversation has an entry, the card cannot come back.
+        app.launch.dissolve_card(0);
+        app.add_message(super::HistoryCell::System {
+            content: "first entry".to_string(),
+        });
         assert!(telemetry_notice_may_enter_transcript(&app));
+        app.history.clear();
         app.launch.visible = false;
         app.launch.dissolve_started_ms = None;
         assert!(telemetry_notice_may_enter_transcript(&app));
