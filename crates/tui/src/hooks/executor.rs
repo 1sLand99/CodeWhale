@@ -2534,6 +2534,11 @@ fn is_mcp_server_tool(name: &str) -> bool {
         )
 }
 
+/// The spellings of the one shell tool (see `tool_category_for`).
+fn is_shell_tool_name(name: &str) -> bool {
+    matches!(name, "bash" | "Bash" | "exec_shell")
+}
+
 /// Classify a tool call for `condition = { type = "tool_category", … }`.
 ///
 /// Categories are `shell`, `file_write`, `safe`, and `other`, as documented in
@@ -2549,11 +2554,6 @@ fn is_mcp_server_tool(name: &str) -> bool {
 /// An unparseable or absent argument blob is treated as the tool's most
 /// dangerous action, because a gate that cannot see the action must not
 /// assume the harmless one.
-/// The spellings of the one shell tool (see `tool_category_for`).
-fn is_shell_tool_name(name: &str) -> bool {
-    matches!(name, "bash" | "Bash" | "exec_shell")
-}
-
 fn tool_category_for(tool_name: &str, tool_args: Option<&str>) -> &'static str {
     let action = tool_args
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())

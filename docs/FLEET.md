@@ -359,7 +359,7 @@ Workflow yet.
 
 Reasoning is a separate route-execution decision, not fleet identity. The
 optional Reasoning Router is a reusable Runtime service, not a fleet member.
-Save one profile at `routers/<name>.toml` in either search root and reference it
+Save one profile at `routers/<name>.toml` in any search root and reference it
 from any number of fleets:
 
 ```toml
