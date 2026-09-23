@@ -14811,12 +14811,12 @@ async fn terminal_routes_serve_a_live_engine_session_over_http() -> Result<()> {
     )
     .map_err(anyhow::Error::msg)?;
 
-    // Input through the route, then the shell's own echo back through the
-    // route. Bytes in, bytes out, no direct access to the session object.
+    // Input and command output through the route, without direct session
+    // access. Start output on its own line even if the shell paints a prompt.
     let write: serde_json::Value = client
         .post(format!("{base}/input"))
         .json(&serde_json::json!({
-            "data": "printf 'terminal-route-proof\\n'\n",
+            "data": "printf '\\nterminal-route-proof\\n'\n",
             "encoding": "text"
         }))
         .send()
