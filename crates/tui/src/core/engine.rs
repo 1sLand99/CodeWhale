@@ -3152,8 +3152,8 @@ impl Engine {
                             let _ = self
                                 .tx_event
                                 .send(Event::status(format!(
-                                    "Auto-compaction {}",
-                                    if enabled { "enabled" } else { "disabled" }
+                                    "Make room automatically: {}",
+                                    if enabled { "on" } else { "off" }
                                 )))
                                 .await;
                         }

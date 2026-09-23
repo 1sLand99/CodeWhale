@@ -1477,7 +1477,7 @@ mod launch_resume_tests {
         assert_eq!(app.onboarding, OnboardingState::Provider);
         assert!(app.onboarding_needs_api_key);
 
-        app.status_message = Some("Auto-compaction enabled".to_string());
+        app.status_message = Some("Make room automatically: on".to_string());
         let shown = app
             .active_status_toast(crate::tui::underwater::ShellPhase::Idle)
             .expect("footer notice");

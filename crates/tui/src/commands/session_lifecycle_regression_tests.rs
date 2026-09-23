@@ -802,7 +802,7 @@ fn test_compact_toggles_state() {
     let result = compact(&mut app, None);
     assert!(result.message.is_some());
     let msg = result.message.unwrap();
-    assert!(msg.contains("compaction") || msg.contains("Compact"));
+    assert!(msg.contains("Making room"), "{msg}");
     assert!(matches!(
         result.action,
         Some(AppAction::CompactContext { focus: None })
