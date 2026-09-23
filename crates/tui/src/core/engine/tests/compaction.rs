@@ -480,7 +480,7 @@ fn a_request_that_cannot_fit_names_the_cause_and_one_next_step() {
     assert!(!window.contains("compaction"), "{window}");
     let message = context_does_not_fit_message(false, false, "small-model", 9_000, 6_000, 2_000);
     assert!(
-        message.contains("no earlier conversation to summarize"),
+        message.contains("there is not enough earlier conversation to summarize"),
         "{message}"
     );
     assert!(message.ends_with("choose a larger model."), "{message}");

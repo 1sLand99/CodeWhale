@@ -2168,10 +2168,15 @@ impl Engine {
                 // the bar's notice shedder cuts at clause joints and keeps the
                 // head — so the user read "Runtime policy changed to" with the
                 // policy itself gone, which is the one word the notice exists
-                // to carry.
-                "Policy: {} / {}",
+                // to carry. Product words only (§19): Permissions, then
+                // Plan / Work / Operate — not "Policy" or the ACT tag.
+                "Permissions: {} · {}",
                 effective_approval.permission_chip_label(),
-                mode.label(),
+                match mode {
+                    AppMode::Plan => "Plan",
+                    AppMode::Agent => "Work",
+                    AppMode::Operate => "Operate",
+                },
             )))
             .await;
         true

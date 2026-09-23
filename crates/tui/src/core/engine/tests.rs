@@ -15718,6 +15718,46 @@ async fn change_mode_refreshes_session_prompt_and_updates_session() {
     );
 }
 
+/// A posture change announces itself in product words (§19): Permissions,
+/// then Plan / Work / Operate. A republished identical posture says nothing.
+#[tokio::test]
+async fn posture_change_status_uses_permissions_and_work() {
+    let tmp = tempdir().expect("tempdir");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, handle) = Engine::new(config, &Config::default());
+    let publish = |handle: &EngineHandle| {
+        handle
+            .try_send(Op::ChangeMode {
+                mode: AppMode::Agent,
+                allow_shell: true,
+                trust_mode: false,
+                auto_approve: true,
+                approval_mode: ApprovalMode::Bypass,
+                configured_sandbox_mode: None,
+            })
+            .expect("publish live runtime authority");
+    };
+    publish(&handle);
+    assert!(engine.apply_pending_runtime_authority().await);
+    publish(&handle);
+    assert!(!engine.apply_pending_runtime_authority().await);
+
+    let mut statuses = Vec::new();
+    let mut rx = handle.rx_event.write().await;
+    while let Ok(event) = rx.try_recv() {
+        if let Event::Status { message } = event {
+            statuses.push(message);
+        }
+    }
+    assert_eq!(
+        statuses,
+        vec!["Permissions: Full Access · Work".to_string()]
+    );
+}
+
 #[tokio::test]
 async fn live_runtime_authority_applies_latest_posture_and_sandbox_before_tools() {
     use crate::sandbox::SandboxPolicy;

@@ -636,8 +636,8 @@ pub(super) fn context_overflow_exhausted_message(
     )
 }
 
-/// The single error line for a request that cannot fit the route and has no
-/// earlier conversation to summarize (experience mark 2). It names the real
+/// The single error line for a request that cannot fit the route and has
+/// too little earlier conversation to summarize (experience mark 2). It names the real
 /// cause and one next step instead of blaming a compaction that never had
 /// anything to work with.
 pub(super) fn context_does_not_fit_message(
@@ -672,8 +672,8 @@ pub(super) fn context_does_not_fit_message(
     } else {
         format!(
             "This message (~{estimated_input} tokens with Codewhale's instructions) does not \
-             fit {model}'s window (~{input_budget} tokens usable), and there is no earlier \
-             conversation to summarize. Shorten it, or {}",
+             fit {model}'s window (~{input_budget} tokens usable), and there is not enough \
+             earlier conversation to summarize. Shorten it, or {}",
             pick(larger).to_lowercase()
         )
     }
