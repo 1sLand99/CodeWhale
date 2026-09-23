@@ -16770,21 +16770,14 @@ fn gpt55_faster_route_stays_on_gpt55_with_low_reasoning() {
     // because the Codex adapter has no true "off" on the wire.
     //
     // The Codex client validates OAuth credentials at construction time, so we
-    // stub the access-token env var for the duration of this test (save/restore
-    // to avoid leaking into parallel tests).
-    let prev_token = std::env::var_os("OPENAI_CODEX_ACCESS_TOKEN");
-    // Safety: this test does not run concurrently with other tests that read
-    // OPENAI_CODEX_ACCESS_TOKEN, and we restore the original value below.
-    unsafe {
-        std::env::set_var("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
-    }
-    let mut codex = stub_runtime_for_provider("openai-codex");
-    unsafe {
-        match prev_token {
-            Some(prev) => std::env::set_var("OPENAI_CODEX_ACCESS_TOKEN", prev),
-            None => std::env::remove_var("OPENAI_CODEX_ACCESS_TOKEN"),
-        }
-    }
+    // stub the access-token env var while the client is built, under the
+    // process-wide env lock.
+    let mut codex = {
+        let _env = crate::test_support::lock_test_env();
+        let _token =
+            crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
+        stub_runtime_for_provider("openai-codex")
+    };
     codex.model = "gpt-5.5".to_string();
     let route = fallback_subagent_assignment_route(
         &codex,

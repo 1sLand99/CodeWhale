@@ -13883,15 +13883,15 @@ mod tests {
             .expect("custom route should resolve");
 
         // Provide the key the route's auth path will read.
-        // SAFETY: single-threaded unit test mutating a uniquely-named var.
-        unsafe {
-            std::env::set_var("EXAMPLE_API_KEY_FROM_CANDIDATE_TEST", "sk-custom");
-        }
-        let client = CodewhaleClient::from_candidate(&route.config, &route.candidate)
-            .expect("client should construct from custom candidate");
-        unsafe {
-            std::env::remove_var("EXAMPLE_API_KEY_FROM_CANDIDATE_TEST");
-        }
+        let client = {
+            let _env = crate::test_support::lock_test_env();
+            let _key = crate::test_support::EnvVarGuard::set(
+                "EXAMPLE_API_KEY_FROM_CANDIDATE_TEST",
+                "sk-custom",
+            );
+            CodewhaleClient::from_candidate(&route.config, &route.candidate)
+                .expect("client should construct from custom candidate")
+        };
 
         assert_eq!(client.base_url, "https://api.example.com/v1");
         assert_eq!(client.default_model, "custom-model-v1");
