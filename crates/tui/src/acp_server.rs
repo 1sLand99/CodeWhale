@@ -1725,13 +1725,45 @@ impl AcpServer {
         let mut modes = vec![
             json!({"id": "plan", "name": tr(locale, MessageId::AppModePlan), "description": tr(locale, MessageId::AppModePlanHint)}),
         ];
+        // #6310: the permission posture is server-owned (a client can never
+        // relax it), but it must be discoverable. Work under Full Access must
+        // not claim that edits ask for approval, and the posture is surfaced
+        // below as a read-only select that names how Full Access is enabled.
+        let posture = acp_approval_mode(&session.config);
+        let agent_hint = if posture == ApprovalMode::Bypass {
+            tr(locale, MessageId::HomeYoloModeTip)
+        } else {
+            tr(locale, MessageId::AppModeAgentHint)
+        };
         if acp_mode(&self.config) != AppMode::Plan {
-            modes.insert(0, json!({"id": "agent", "name": tr(locale, MessageId::AppModeAgent), "description": tr(locale, MessageId::AppModeAgentHint)}));
+            modes.insert(0, json!({"id": "agent", "name": tr(locale, MessageId::AppModeAgent), "description": agent_hint}));
         }
         let current_mode = if acp_mode(&session.config) == AppMode::Plan {
             "plan"
         } else {
             "agent"
+        };
+        let (posture_value, posture_name, posture_description) = match posture {
+            ApprovalMode::Bypass => (
+                "full-access",
+                MessageId::ConfigChoiceFullAccess,
+                MessageId::PermissionsPostureBypass,
+            ),
+            ApprovalMode::Auto => (
+                "auto-review",
+                MessageId::ConfigChoiceAutoReview,
+                MessageId::PermissionsPostureAuto,
+            ),
+            ApprovalMode::Never => (
+                "never",
+                MessageId::ConfigChoiceNever,
+                MessageId::PermissionsPostureNever,
+            ),
+            ApprovalMode::Suggest => (
+                "ask",
+                MessageId::ConfigChoiceAsk,
+                MessageId::PermissionsPostureAsk,
+            ),
         };
         json!({
             "sessionId": session_id,
@@ -1744,7 +1776,17 @@ impl AcpServer {
                 {"id": "mode", "name": tr(locale, MessageId::SettingSubjectMode), "category": "mode", "type": "select", "currentValue": current_mode,
                  "options": modes.iter().map(|mode| json!({"value": mode["id"], "name": mode["name"], "description": mode["description"]})).collect::<Vec<_>>()},
                 {"id": "model", "name": tr(locale, MessageId::SettingSubjectModel), "category": "model", "type": "select", "currentValue": session.model,
-                 "options": models.iter().map(|model| json!({"value": model, "name": model})).collect::<Vec<_>>()}
+                 "options": models.iter().map(|model| json!({"value": model, "name": model})).collect::<Vec<_>>()},
+                // Exactly one option: the posture the server was started
+                // with. Offering a looser value here would let a client relax
+                // the operator's floor.
+                {"id": "permission", "name": tr(locale, MessageId::SettingSubjectPermissions), "category": "_permission", "type": "select", "currentValue": posture_value,
+                 "options": [{"value": posture_value, "name": tr(locale, posture_name), "description": tr(locale, posture_description)}],
+                 "_meta": {"codewhale": {
+                     "readOnly": true,
+                     "fullAccess": posture == ApprovalMode::Bypass,
+                     "enableFullAccess": ACP_FULL_ACCESS_HINT,
+                 }}}
             ]
         })
     }
@@ -1801,6 +1843,8 @@ impl AcpServer {
                     self.client_supports_terminal,
                 ));
             }
+            // The only offered permission value is the current posture.
+            "permission" => {}
             _ => unreachable!("validated offered option"),
         }
         Ok(json!({"configOptions": self.session_configuration(session_id)["configOptions"]}))
@@ -2151,6 +2195,10 @@ fn build_acp_system_prompt(
         crate::prompts::PromptHost::Headless,
     )
 }
+
+/// How an operator starts an ACP server in Full Access. The posture is chosen
+/// when the server is launched, never by a client request (#6310).
+const ACP_FULL_ACCESS_HINT: &str = "Start the server with `codewhale --approval-policy full-access serve --acp`, or set approval_policy = \"full-access\" in config.toml. Full Access also turns off Codewhale's own sandbox unless sandbox_mode tightens it; Plan stays read-only.";
 
 fn acp_mode(config: &Config) -> AppMode {
     if config.sandbox_mode.as_deref() == Some("read-only") {
@@ -2835,7 +2883,7 @@ mod tests {
         assert!(
             loaded["configOptions"]
                 .as_array()
-                .is_some_and(|options| options.len() == 2)
+                .is_some_and(|options| options.len() == 3)
         );
         let session = server
             .sessions
@@ -2968,7 +3016,8 @@ mod tests {
         else {
             panic!("configuration response")
         };
-        assert_eq!(configured["configOptions"].as_array().unwrap().len(), 2);
+        assert_eq!(configured["configOptions"].as_array().unwrap().len(), 3);
+        assert_eq!(configured["configOptions"][2]["currentValue"], "ask");
         assert_eq!(configured["configOptions"][0]["currentValue"], "plan");
         assert_eq!(configured["configOptions"][1]["currentValue"], alternative);
         assert_eq!(
@@ -3045,6 +3094,71 @@ mod tests {
             "the shared authority must reject mutation: {outcome:?}"
         );
         assert!(!target.exists());
+    }
+
+    #[test]
+    fn full_access_posture_is_discoverable_but_never_client_selectable() {
+        // #6310: the mode list alone gave an ACP client no way to see or
+        // learn about Full Access, and Work claimed edits ask for approval
+        // even under `--yolo`.
+        let workspace = tempfile::tempdir().unwrap();
+        let mut ask = AcpServer::new(
+            Config::default(),
+            "deepseek-v4-flash".into(),
+            workspace.path().into(),
+        );
+        let state = ask.new_session(json!({})).unwrap();
+        let id = state["sessionId"].as_str().unwrap().to_string();
+        let permission = &state["configOptions"][2];
+        assert_eq!(permission["id"], "permission");
+        assert_eq!(permission["currentValue"], "ask");
+        assert_eq!(permission["options"].as_array().unwrap().len(), 1);
+        assert_eq!(permission["_meta"]["codewhale"]["fullAccess"], false);
+        assert!(
+            permission["_meta"]["codewhale"]["enableFullAccess"]
+                .as_str()
+                .unwrap()
+                .contains("--approval-policy full-access"),
+            "the posture names how Full Access is enabled"
+        );
+        for value in ["full-access", "bypass"] {
+            let error = ask
+                .set_session_config(
+                    json!({"sessionId": id, "configId": "permission", "value": value}),
+                )
+                .unwrap_err();
+            assert_eq!(error.code, -32602, "a client cannot select {value}");
+        }
+        assert_eq!(
+            acp_approval_mode(&ask.sessions[&id].config),
+            ApprovalMode::Suggest
+        );
+        // Re-selecting the offered (current) value is a harmless no-op.
+        ask.set_session_config(json!({"sessionId": id, "configId": "permission", "value": "ask"}))
+            .unwrap();
+
+        // The hint's own spelling must actually reach Full Access.
+        let mut yolo = AcpServer::new(
+            Config {
+                approval_policy: Some("full-access".into()),
+                ..Config::default()
+            },
+            "deepseek-v4-flash".into(),
+            workspace.path().into(),
+        );
+        let state = yolo.new_session(json!({})).unwrap();
+        let permission = &state["configOptions"][2];
+        assert_eq!(permission["currentValue"], "full-access");
+        assert_eq!(permission["_meta"]["codewhale"]["fullAccess"], true);
+        let agent_hint = state["modes"]["availableModes"][0]["description"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(
+            state["modes"]["availableModes"][0]["description"],
+            ask.session_configuration(&id)["modes"]["availableModes"][0]["description"],
+            "Work under Full Access must not reuse the ask-for-approval hint: {agent_hint}"
+        );
     }
 
     #[test]
