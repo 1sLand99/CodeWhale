@@ -347,15 +347,21 @@ pub trait ExternalTool {
         Some(cmd)
     }
 
+    /// The error a caller sees when the tool is not installed. It names the
+    /// binary the user would install (`git`, `python3`), never the Rust type
+    /// path (`codewhale_tui::dependencies::Git`).
+    fn not_found_error() -> std::io::Error {
+        let name = Self::candidates().first().copied().unwrap_or("tool");
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("{name} not found on PATH"),
+        )
+    }
+
     /// Convenience: run the tool with arguments in a working directory
     /// and return the captured output.
     fn output(args: &[&str], cwd: &std::path::Path) -> std::io::Result<std::process::Output> {
-        let mut cmd = Self::command().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("{} not found on PATH", std::any::type_name::<Self>()),
-            )
-        })?;
+        let mut cmd = Self::command().ok_or_else(Self::not_found_error)?;
         cmd.args(args).current_dir(cwd).output()
     }
 
@@ -363,12 +369,7 @@ pub trait ExternalTool {
     /// exit status (discards stdout/stderr).
     #[cfg_attr(not(test), expect(dead_code))]
     fn status(args: &[&str], cwd: &std::path::Path) -> std::io::Result<std::process::ExitStatus> {
-        let mut cmd = Self::command().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("{} not found on PATH", std::any::type_name::<Self>()),
-            )
-        })?;
+        let mut cmd = Self::command().ok_or_else(Self::not_found_error)?;
         cmd.args(args).current_dir(cwd).status()
     }
 
@@ -839,6 +840,29 @@ mod tests {
     #[test]
     fn rustc_candidates_is_rustc_only() {
         assert_eq!(RustC::candidates(), &["rustc"]);
+    }
+
+    #[test]
+    fn missing_tool_error_names_the_binary_not_the_rust_type() {
+        struct Missing;
+        impl ExternalTool for Missing {
+            fn candidates() -> &'static [&'static str] {
+                &["codewhale-imaginary-tool", "fallback-name"]
+            }
+            fn resolve() -> Option<String> {
+                None
+            }
+        }
+
+        let error = Missing::output(&["--version"], std::path::Path::new("."))
+            .expect_err("an unresolvable tool must not spawn");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(
+            error.to_string(),
+            "codewhale-imaginary-tool not found on PATH"
+        );
+        assert!(!error.to_string().contains("::"), "{error}");
+        assert_eq!(Git::not_found_error().to_string(), "git not found on PATH");
     }
 
     #[test]

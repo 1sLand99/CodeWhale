@@ -492,7 +492,11 @@ fn doctor_safe_release_tag(raw: &str) -> Option<String> {
         .map(|version| format!("v{version}"))
 }
 
-fn doctor_update_report_lines(report: &DoctorUpdateReport) -> Vec<String> {
+/// `update_command` is the install-method-aware upgrade command
+/// ([`codewhale_release::InstallMethod::update_command`]): an npm, Homebrew,
+/// cargo or Omarchy install must be upgraded by its package manager, never by
+/// `codewhale update`, which refuses to replace a managed binary.
+fn doctor_update_report_lines(report: &DoctorUpdateReport, update_command: &str) -> Vec<String> {
     match report {
         DoctorUpdateReport::NotChecked => vec![
             "latest: unknown (not checked; offline default)".to_string(),
@@ -500,7 +504,7 @@ fn doctor_update_report_lines(report: &DoctorUpdateReport) -> Vec<String> {
         ],
         DoctorUpdateReport::UpdateAvailable { latest } => vec![
             format!("latest: {latest}"),
-            "Update available. Run `codewhale update` to install.".to_string(),
+            format!("Update available. Run `{update_command}` to install."),
         ],
         DoctorUpdateReport::UpToDate { latest } => {
             vec![
@@ -541,7 +545,15 @@ pub(crate) async fn print_update_report(probes: DoctorProbeRequest) {
     } else {
         DoctorUpdateReport::NotChecked
     };
-    for (index, line) in doctor_update_report_lines(&report).into_iter().enumerate() {
+    let method = std::env::current_exe()
+        .ok()
+        .map_or(codewhale_release::InstallMethod::Binary, |exe| {
+            codewhale_release::InstallMethod::detect(&exe)
+        });
+    for (index, line) in doctor_update_report_lines(&report, method.update_command())
+        .into_iter()
+        .enumerate()
+    {
         let indent = if index == 0 { "  ·" } else { "   " };
         println!("{indent} {line}");
     }

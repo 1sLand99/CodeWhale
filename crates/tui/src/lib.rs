@@ -196,7 +196,7 @@ fn install_rustls_crypto_provider() {
 #[derive(Parser, Debug)]
 #[command(
     name = "codewhale-tui",
-    bin_name = "codewhale-tui",
+    bin_name = "codewhale",
     author,
     version = env!("CODEWHALE_BUILD_VERSION"),
     about = "Codewhale terminal coding agent",
@@ -3617,7 +3617,7 @@ fn init_skills_dir(skills_dir: &Path, force: bool) -> Result<(PathBuf, WriteStat
 fn tools_readme_template() -> &'static str {
     "# Local tools\n\n\
      Drop self-describing scripts here so they can be discovered by\n\
-     `codewhale-tui setup --status` and surfaced in `codewhale-tui doctor`.\n\n\
+     `codewhale setup --status` and surfaced in `codewhale doctor`.\n\n\
      When `[tools.plugin_dir]` is set in config.toml (or when the default\n\
      `~/.codewhale/tools/` directory exists), they are auto-discovered and\n\
      registered as model-visible tools.\n\n\
@@ -3639,7 +3639,7 @@ fn tools_example_script() -> &'static str {
      # name: example\n\
      # description: Print a confirmation that local tool discovery works\n\
      # usage: example [name]\n\
-     printf 'codewhale-tui local tool ok: %s\\n' \"${1:-world}\"\n"
+     printf 'codewhale local tool ok: %s\\n' \"${1:-world}\"\n"
 }
 
 fn init_tools_dir(tools_dir: &Path, force: bool) -> Result<(PathBuf, WriteStatus, WriteStatus)> {
@@ -4507,8 +4507,10 @@ async fn run_doctor(
 
     // Version info
     println!("{}", "Version Information:".bold());
-    println!("  codewhale-tui: {}", env!("CODEWHALE_BUILD_VERSION"));
-    println!("  rust: {}", rustc_version());
+    println!("  codewhale: {}", env!("CODEWHALE_BUILD_VERSION"));
+    // A release binary needs no Rust toolchain; this line describes the host,
+    // not the build, so a missing rustc must not read as a fault.
+    println!("  host rustc: {}", rustc_version());
     println!();
 
     println!("{}", "Updates:".bold());
@@ -8094,7 +8096,7 @@ fn rustc_version() -> String {
     // banner as a side effect of the probe; reuse it instead of launching a
     // second rustc process (each launch loads libLLVM).
     if !crate::dependencies::RustC::available() {
-        return "unknown".to_string();
+        return "not installed (only needed to build from source)".to_string();
     }
     crate::dependencies::rustc_version_banner().unwrap_or_else(|| "unknown".to_string())
 }
@@ -15409,6 +15411,21 @@ mod terminal_mode_tests {
     #[test]
     fn companion_binary_reports_its_own_name() {
         assert_eq!(Cli::command().get_name(), "codewhale-tui");
+    }
+
+    #[test]
+    fn usage_errors_name_the_codewhale_command() {
+        let error = Cli::try_parse_from(["codewhale-tui", "doctor", "--bogus"])
+            .expect_err("an unknown doctor flag must not parse");
+        let rendered = error.render().to_string();
+        assert!(
+            rendered.contains("codewhale doctor"),
+            "usage should name `codewhale doctor`: {rendered}"
+        );
+        assert!(
+            !rendered.contains("codewhale-tui"),
+            "usage must not name the retired binary: {rendered}"
+        );
     }
 
     #[test]
