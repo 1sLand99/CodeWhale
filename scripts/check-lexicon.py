@@ -86,6 +86,7 @@ ALLOW: dict[str, dict[str, set[str]]] = {
     "crates/localization/locales/en.json": {
         # Names the compatibility slash command the user typed.
         "CmdSubagentsDescription": {"worker", "sub-agent"},
+        "HomeQuickSubagents": {"worker"},
     },
 }
 
@@ -93,7 +94,12 @@ ALLOW: dict[str, dict[str, set[str]]] = {
 TS_STRING = re.compile(r'"((?:[^"\\\n]|\\.)*)"|\'((?:[^\'\\\n]|\\.)*)\'|`((?:[^`\\]|\\.)*)`')
 
 
+PLACEHOLDER = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\}")
+
+
 def findings_for(text: str) -> list[tuple[str, str]]:
+    # `{posture}` is a substitution slot, not a word the reader sees.
+    text = PLACEHOLDER.sub("", text)
     hits = [(label, instead) for label, instead, rx in RULES if rx.search(text)]
     if CONFIG_TITLE.match(text):
         hits.append(("Config", "Settings"))
