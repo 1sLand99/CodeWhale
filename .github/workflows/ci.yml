@@ -719,6 +719,38 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@nextest
         if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
+      - name: Hold this machine's build lock (self-hosted)
+        # The self-hosted Mac is also a developer machine: local agents build
+        # through scripts/dev-cargo.sh, which holds this lock, and two Cargo
+        # builds at once exhaust its memory. Opt-in: the runner's `.env` names
+        # the same file as CODEWHALE_BUILD_LOCK_FILE. The holder is a
+        # background process; the runner kills orphans when the job ends, so a
+        # cancelled or crashed job cannot leave the lock held.
+        # (`env.*` in `if:` cannot see the runner's `.env`, so the opt-in is
+        # checked in the script.)
+        if: needs.changes.outputs.heavy == 'true' && runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          if [ -z "${CODEWHALE_BUILD_LOCK_FILE:-}" ]; then
+            echo "CODEWHALE_BUILD_LOCK_FILE is not set on this runner; building without the machine lock."
+            exit 0
+          fi
+          hold="$RUNNER_TEMP/cw-build-lock.hold"
+          ready="$RUNNER_TEMP/cw-build-lock.ready"
+          log="$RUNNER_TEMP/cw-build-lock.log"
+          touch "$hold"
+          rm -f "$ready"
+          nohup python3 scripts/build-lock.py "$CODEWHALE_BUILD_LOCK_FILE" -- \
+            sh -c 'touch "$1"; while [ -e "$2" ]; do sleep 2; done' _ "$ready" "$hold" \
+            >"$log" 2>&1 &
+          shown=0
+          until [ -e "$ready" ]; do
+            if [ "$shown" -eq 0 ] && [ -s "$log" ]; then cat "$log"; shown=1; fi
+            sleep 2
+          done
+          cat "$log"
+          # Scripts inside this job already run under the lock.
+          echo "CODEWHALE_BUILD_LOCK_HELD=1" >> "$GITHUB_ENV"
       - name: Run tests
         # Same test binaries as `cargo test`, run by cargo-nextest: one
         # process per test, all runner cores busy, slow tests named instead
@@ -786,6 +818,10 @@ jobs:
       - name: Linux test location (CNB)
         if: needs.changes.outputs.heavy == 'true' && matrix.os == 'ubuntu-latest' && github.event_name != 'workflow_dispatch' && github.event_name != 'pull_request'
         run: echo "Linux workspace tests run on CNB for non-PR release/main pushes; pull requests run directly on Ubuntu."
+      - name: Release this machine's build lock (self-hosted)
+        if: always() && runner.environment == 'self-hosted'
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/cw-build-lock.hold"
 
   macos-budget:
     # Fork PRs build cold on a GitHub-hosted Mac, and the RSS budget and the

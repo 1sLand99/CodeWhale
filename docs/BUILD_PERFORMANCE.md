@@ -356,7 +356,10 @@ build lock (`<cache root>/build.lock`, via `scripts/build-lock.py`) for the
 whole Cargo invocation. Cargo's own lock is per target directory, so two
 agents building into different target dirs still ran concurrently and exhausted
 memory. A second build waits and prints who holds the lock. Set
-`CODEWHALE_BUILD_LOCK=0` to skip it. The lock is advisory: Cargo started
+`CODEWHALE_BUILD_LOCK=0` to skip it, or `CODEWHALE_BUILD_LOCK_FILE` to name the
+lock file. A self-hosted CI runner on the same machine joins the lock when its
+`.env` sets `CODEWHALE_BUILD_LOCK_FILE` to the same path: the macOS Test job
+then holds it from the first test build to the end of the job. The lock is advisory: Cargo started
 directly, outside these scripts, does not take it, and on platforms without
 `fcntl` (Windows) the build runs unlocked after a warning.
 
