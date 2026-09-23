@@ -136,13 +136,10 @@ elapsed: 18m
         </p>
       </section>
 
-      <section id="source" className="hairline-t pt-8">
-        <p className="text-sm text-ink-mute">
-          {isZh
+      {/* Maintainer pointer: kept out of the rendered copy (experience mark 5). */}
+      <div hidden data-source-note={isZh
             ? "来源文档：docs/TOOL_SURFACE.md, docs/TOOL_LIFECYCLE.md · 更新时请同步修改 docs-map.ts。"
-            : "Source documents: docs/TOOL_SURFACE.md, docs/TOOL_LIFECYCLE.md · Update docs-map.ts when changing."}
-        </p>
-      </section>
+            : "Source documents: docs/TOOL_SURFACE.md, docs/TOOL_LIFECYCLE.md · Update docs-map.ts when changing."} />
     </section>
   );
 }
