@@ -578,6 +578,16 @@ fn resolve_asr_choice(_config: &Config) -> (String, String) {
     }
 }
 
+/// Status line while recording: the localized recording label, followed by
+/// the latest interim transcript once one exists.
+fn recording_status(locale: codewhale_localization::Locale, interim: Option<&str>) -> String {
+    let label = tr(locale, MessageId::VoiceRecording);
+    match interim.map(str::trim).filter(|text| !text.is_empty()) {
+        Some(text) => format!("{label} \u{2014} \u{201c}{text}\u{201d}"),
+        None => label.to_string(),
+    }
+}
+
 pub async fn capture_and_transcribe(
     app: &mut App,
     config: &Config,
@@ -595,10 +605,10 @@ pub async fn capture_and_transcribe(
         .openrouter_vendor()
         .map_err(|error| error.to_string())?;
 
-    // Spark-style: show "● Recording (⌥V to finish)" + live interim in composer.
+    // Show the localized recording status plus the live interim in the composer.
     let original_input = app.composer.input.clone();
     let original_cursor = app.composer.cursor_position;
-    app.status_message = Some("● Recording  (⌥V to finish)  ·  speak naturally".to_string());
+    app.status_message = Some(recording_status(locale, None));
 
     // Streaming interim: poll every 700ms and show partial transcript like Grok Build's
     // VoiceEvent::Interim → VoiceState::Recording{interim}. We re-transcribe the
@@ -680,8 +690,7 @@ pub async fn capture_and_transcribe(
             };
             app.composer.input = display;
             app.composer.cursor_position = original_cursor;
-            // Also keep status as Spark does
-            app.status_message = Some(format!("● Listening — “{trimmed}”  (⌥V to finish)"));
+            app.status_message = Some(recording_status(locale, Some(trimmed)));
         }
         if ticks > 40 {
             break; // safety: ~28s max interim polling
@@ -974,6 +983,27 @@ pub fn voice_control(app: &mut App) -> CommandResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recording_status_is_localized_and_keeps_the_interim() {
+        use codewhale_localization::Locale;
+
+        for locale in [Locale::En, Locale::De, Locale::Ja] {
+            let label = tr(locale, MessageId::VoiceRecording).to_string();
+            assert_eq!(recording_status(locale, None), label);
+            assert_eq!(recording_status(locale, Some("   ")), label);
+
+            let with_interim = recording_status(locale, Some(" hello there "));
+            assert!(with_interim.starts_with(&label), "{with_interim}");
+            assert!(with_interim.contains("\u{201c}hello there\u{201d}"));
+            assert!(!with_interim.contains("\u{2325}V"), "no hardcoded key hint");
+            assert!(!with_interim.contains("to finish"), "no English hint");
+        }
+        assert_ne!(
+            recording_status(Locale::En, None),
+            recording_status(Locale::De, None)
+        );
+    }
 
     #[tokio::test]
     async fn voice_requests_preserve_openrouter_vendor_pin() {
