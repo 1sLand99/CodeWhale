@@ -154,15 +154,50 @@ fn web_run_action_class(input: &Value) -> String {
         "screenshot",
         "search_query",
     ];
-    let present: Vec<&str> = ACTIONS
+    let present: Vec<String> = ACTIONS
         .into_iter()
         .filter(|action| input.get(*action).is_some_and(|value| !value.is_null()))
+        .map(|action| {
+            if action == "open" {
+                format!("open({})", web_run_open_targets(input))
+            } else {
+                action.to_string()
+            }
+        })
         .collect();
     if present.is_empty() {
         "none".to_string()
     } else {
         present.join("+")
     }
+}
+
+/// The sorted target set of a `web.run` `open`: the host of each raw URL, or
+/// `ref` for a result reference. `open` fetches any raw URL it is given, and a
+/// URL can carry local data out in its path or query, so an "open" grant
+/// covers the hosts the person approved — as `fetch_url` grants do — never
+/// every host.
+fn web_run_open_targets(input: &Value) -> String {
+    let mut targets: Vec<String> = input
+        .get("open")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|item| {
+            let ref_id = item.get("ref_id").and_then(Value::as_str).unwrap_or("");
+            if ref_id.starts_with("http://") || ref_id.starts_with("https://") {
+                reqwest::Url::parse(ref_id)
+                    .ok()
+                    .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+                    .unwrap_or_else(|| format!("url:{}", hash_json_value(item)))
+            } else {
+                "ref".to_string()
+            }
+        })
+        .collect();
+    targets.sort_unstable();
+    targets.dedup();
+    targets.join(",")
 }
 
 /// A Computer Use call whose approval must come from a person (K1 / K2).
@@ -842,6 +877,22 @@ mod tests {
                 &json!({"open": [{"ref_id": "https://x.test"}]})
             ),
             "a search grant never covers opening a page"
+        );
+        let open = |url: &str| json!({"open": [{"ref_id": url}]});
+        assert_eq!(
+            build_approval_grouping_key("web.run", &open("https://docs.rs/a")),
+            build_approval_grouping_key("web.run", &open("https://DOCS.rs/b?x=1")),
+            "an open grant covers later pages on the approved host"
+        );
+        assert_ne!(
+            build_approval_grouping_key("web.run", &open("https://docs.rs/a")),
+            build_approval_grouping_key("web.run", &open("https://evil.test/?q=secret")),
+            "an open grant never covers another host"
+        );
+        assert_ne!(
+            build_approval_grouping_key("web.run", &open("turn0search0")),
+            build_approval_grouping_key("web.run", &open("https://evil.test/")),
+            "a result-reference open grant never covers a raw URL"
         );
         assert_ne!(
             build_approval_key("web.run", &search("espresso")),

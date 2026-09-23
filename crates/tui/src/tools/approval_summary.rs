@@ -168,7 +168,14 @@ fn relative_path(raw: &str, workspace: Option<&Path>) -> String {
 }
 
 fn clip(value: &str) -> String {
-    let single_line = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Keep line breaks visible: `a\nb` joined with a space would read as one
+    // command with arguments on an approval card.
+    let single_line = value
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ⏎ ");
     if single_line.chars().count() <= MAX_QUOTED_CHARS {
         return single_line;
     }
@@ -228,10 +235,19 @@ mod tests {
         assert_eq!(
             approval_summary(
                 "exec_shell",
-                &json!({"command": "cargo  test\n-p tui"}),
+                &json!({"command": "cargo  test  -p tui"}),
                 None
             ),
             "Run `cargo test -p tui`"
+        );
+        assert_eq!(
+            approval_summary(
+                "exec_shell",
+                &json!({"command": "cargo test\n\nrm -rf target"}),
+                None
+            ),
+            "Run `cargo test ⏎ rm -rf target`",
+            "a second command line never reads as arguments of the first"
         );
         let long = "x".repeat(500);
         let summary = approval_summary("exec_shell", &json!({ "command": long }), None);
