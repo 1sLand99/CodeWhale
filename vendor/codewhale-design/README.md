@@ -15,3 +15,7 @@ Typography and palette come from the shipping desktop theme. Icons retain the
 24-unit, 1.7-pixel rounded stroke family; semantic names and accessible labels
 stay with the host controls. Desktop spring constants and reduced-motion poll
 cadence are shared without introducing decorative animation on web or phones.
+
+CSS consumers use `font-family: var(--font-family), var(--font-fallbacks), sans-serif`
+to keep the shared family and CJK fallbacks together. The generator rejects
+selection and primary-hover opacity values outside the inclusive 0–1 range.

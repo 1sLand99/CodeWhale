@@ -43,6 +43,8 @@
   --focus-width: 2px;
   --focus-offset: 3px;
   --icon-stroke: 1.7;
+  --font-family: "Shannon Sans";
+  --font-fallbacks: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC";
   --font-body-size: 14px;
   --font-code-size: 13px;
 }

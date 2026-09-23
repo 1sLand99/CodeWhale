@@ -12,6 +12,10 @@ ROOT = Path(__file__).resolve().parent
 def render():
     source = (ROOT / "tokens.json").read_bytes()
     data = json.loads(source)
+    for name in ["selection_opacity", "primary_hover_opacity"]:
+        value = data[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
+            raise ValueError(f"{name} must be a number between 0 and 1")
     digest = hashlib.sha256(source).hexdigest()
     header = f"Generated from Codewhale GPUI design {data['version']}; sha256 {digest}. Do not edit."
     keys = list(data["colors"]["dark"])
@@ -51,6 +55,8 @@ def render():
     for section in ["spacing", "radius", "focus"]:
         css += [f"  --{section}-{name}: {value}px;" for name, value in data[section].items()]
     css += [f'  --icon-stroke: {data["icons"]["stroke"]};',
+            f'  --font-family: {json.dumps(data["typography"]["family"], ensure_ascii=False)};',
+            f'  --font-fallbacks: {", ".join(json.dumps(v, ensure_ascii=False) for v in data["typography"]["fallbacks"])};',
             f'  --font-body-size: {data["typography"]["body_px"]}px;',
             f'  --font-code-size: {data["typography"]["mono_px"]}px;', "}"]
     return {"tokens.rs":"\n".join(rust) + "\n", "tokens.css":"\n".join(css) + "\n"}
