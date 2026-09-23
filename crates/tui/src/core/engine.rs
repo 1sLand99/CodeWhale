@@ -1025,6 +1025,49 @@ impl LiveRuntimeAuthority {
         }
     }
 
+    /// Whether `self` grants less than `prior` along any axis: a stricter
+    /// approval posture, a lost shell/trust/auto-approve bit, a stricter
+    /// configured sandbox, or a mode switch that is not a step out of Plan.
+    ///
+    /// A call the user approved under `prior` stays approved under a posture
+    /// that is equal or broader; only a narrowing sends it back for a retry.
+    fn narrows(&self, prior: &Self) -> bool {
+        fn posture_rank(mode: ApprovalMode) -> u8 {
+            match mode {
+                ApprovalMode::Never => 0,
+                ApprovalMode::Suggest => 1,
+                ApprovalMode::Auto => 2,
+                ApprovalMode::Bypass => 3,
+            }
+        }
+        fn sandbox_rank(mode: Option<&str>) -> Option<u8> {
+            match mode {
+                Some("read-only") => Some(0),
+                Some("workspace-write") => Some(1),
+                Some("external-sandbox") => Some(2),
+                None => Some(3),
+                // An unknown value cannot be ordered; treat any move to or
+                // from it as a narrowing.
+                Some(_) => None,
+            }
+        }
+        let mode_narrowed = self.mode != prior.mode && prior.mode != AppMode::Plan;
+        let sandbox_narrowed = self.configured_sandbox_mode != prior.configured_sandbox_mode
+            && match (
+                sandbox_rank(self.configured_sandbox_mode.as_deref()),
+                sandbox_rank(prior.configured_sandbox_mode.as_deref()),
+            ) {
+                (Some(now), Some(before)) => now < before,
+                _ => true,
+            };
+        mode_narrowed
+            || sandbox_narrowed
+            || posture_rank(self.approval_mode) < posture_rank(prior.approval_mode)
+            || (prior.allow_shell && !self.allow_shell)
+            || (prior.trust_mode && !self.trust_mode)
+            || (prior.auto_approve && !self.auto_approve)
+    }
+
     fn permission_snapshot(&self) -> RuntimePermissionAuthority {
         RuntimePermissionAuthority {
             auto_approve: self.auto_approve,
@@ -2095,7 +2138,7 @@ impl Engine {
         auto_approve: bool,
         approval_mode: ApprovalMode,
         configured_sandbox_mode: Option<String>,
-    ) {
+    ) -> bool {
         let authority = TurnAuthority::from_effective_fields(
             mode,
             allow_shell,
@@ -2114,7 +2157,7 @@ impl Engine {
         self.api_config.sandbox_mode = configured_sandbox_mode;
         self.apply_runtime_mode_policy(&authority);
         if !changed {
-            return;
+            return false;
         }
         self.emit_session_updated().await;
         let _ = self
@@ -2131,6 +2174,7 @@ impl Engine {
                 mode.label(),
             )))
             .await;
+        true
     }
 
     fn take_pending_runtime_authority(&self) -> Option<LiveRuntimeAuthority> {
@@ -2153,7 +2197,7 @@ impl Engine {
             .clone()
     }
 
-    async fn apply_runtime_authority(&mut self, authority: LiveRuntimeAuthority) {
+    async fn apply_runtime_authority(&mut self, authority: LiveRuntimeAuthority) -> bool {
         self.apply_change_mode(
             authority.mode,
             authority.allow_shell,
@@ -2162,15 +2206,31 @@ impl Engine {
             authority.approval_mode,
             authority.configured_sandbox_mode,
         )
-        .await;
+        .await
     }
 
+    /// Apply the newest published authority, if any. Returns whether the
+    /// live posture actually changed: a republished identical posture (a
+    /// PATCH that only renamed the thread, a repeated mode pick) is not a
+    /// change and must not invalidate planned or approved calls.
     async fn apply_pending_runtime_authority(&mut self) -> bool {
         let Some(authority) = self.take_pending_runtime_authority() else {
             return false;
         };
-        self.apply_runtime_authority(authority).await;
-        true
+        self.apply_runtime_authority(authority).await
+    }
+
+    /// The posture this engine is enforcing right now, read from the live
+    /// session rather than the shared (possibly newer, unapplied) snapshot.
+    fn applied_runtime_authority(&self) -> LiveRuntimeAuthority {
+        LiveRuntimeAuthority {
+            mode: self.current_mode,
+            allow_shell: self.session.allow_shell,
+            trust_mode: self.session.trust_mode,
+            auto_approve: self.session.auto_approve,
+            approval_mode: self.session.approval_mode,
+            configured_sandbox_mode: self.api_config.sandbox_mode.clone(),
+        }
     }
 
     fn record_applied_runtime_authority(&self, authority: &TurnAuthority) {

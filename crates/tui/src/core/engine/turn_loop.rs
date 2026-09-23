@@ -3641,6 +3641,10 @@ impl Engine {
         questions_allowed: &mut bool,
     ) -> (Vec<Option<ToolExecOutcome>>, bool) {
         let mut authority_changed = false;
+        // Every plan below was classified under this posture. A narrowing
+        // applied mid-batch (for example while an earlier call waited on its
+        // approval) must still stop later plans that assumed the old grant.
+        let planned_posture = self.applied_runtime_authority();
         let collect_fleet_evidence =
             tool_registry.is_some_and(|registry| registry.context().tool_authority.is_some());
         // --- Intent summary for write tools (#2381) ---
@@ -3713,7 +3717,8 @@ impl Engine {
             // changed after this batch was planned, never execute it with
             // stale approval or sandbox facts. Return one typed retry to
             // the model; the next call is planned under the new posture.
-            if self.apply_pending_runtime_authority().await {
+            let changed_now = self.apply_pending_runtime_authority().await;
+            if changed_now || self.applied_runtime_authority().narrows(&planned_posture) {
                 authority_changed = true;
                 *mode = self.current_mode;
                 *questions_allowed = crate::core::authority::permission_posture_allows_questions(
@@ -4313,10 +4318,13 @@ impl Engine {
                         (None, None, None)
                     };
 
-                    // An approval wait can outlive a posture switch. Do
-                    // not start a tool from the stale plan; the
-                    // model can retry immediately under the newly applied
-                    // authority.
+                    // An approval wait can outlive a posture switch. A
+                    // call the user just approved stays approved when the
+                    // new posture is equal or broader: approving must never
+                    // invalidate the call it approves. Only a narrowing, or
+                    // a change under a call nobody approved, sends it back
+                    // to the model to retry under the new authority.
+                    let posture_before_drain = self.applied_runtime_authority();
                     let mut result_override = if self.apply_pending_runtime_authority().await {
                         authority_changed = true;
                         *mode = self.current_mode;
@@ -4324,12 +4332,20 @@ impl Engine {
                             crate::core::authority::permission_posture_allows_questions(
                                 self.session.approval_mode,
                             );
-                        result_override.or_else(|| {
-                            Some(Err(ToolError::permission_denied(
-                                "Runtime permission posture changed before this tool call executed; retry it under the current posture."
-                                    .to_string(),
-                            )))
-                        })
+                        let approval_survives = approval_stamp.is_some()
+                            && !self
+                                .applied_runtime_authority()
+                                .narrows(&posture_before_drain);
+                        if approval_survives {
+                            result_override
+                        } else {
+                            result_override.or_else(|| {
+                                Some(Err(ToolError::permission_denied(
+                                    "Runtime permission posture changed before this tool call executed; retry it under the current posture."
+                                        .to_string(),
+                                )))
+                            })
+                        }
                     } else {
                         result_override
                     };
@@ -4355,6 +4371,7 @@ impl Engine {
                         self.emit_pending_snapshot_notices().await;
                     }
 
+                    let posture_before_drain = self.applied_runtime_authority();
                     if self.apply_pending_runtime_authority().await {
                         authority_changed = true;
                         *mode = self.current_mode;
@@ -4362,12 +4379,18 @@ impl Engine {
                             crate::core::authority::permission_posture_allows_questions(
                                 self.session.approval_mode,
                             );
-                        result_override.get_or_insert_with(|| {
-                            Err(ToolError::permission_denied(
-                                "Runtime permission posture changed before this tool call executed; retry it under the current posture."
-                                    .to_string(),
-                            ))
-                        });
+                        if approval_stamp.is_none()
+                            || self
+                                .applied_runtime_authority()
+                                .narrows(&posture_before_drain)
+                        {
+                            result_override.get_or_insert_with(|| {
+                                Err(ToolError::permission_denied(
+                                    "Runtime permission posture changed before this tool call executed; retry it under the current posture."
+                                        .to_string(),
+                                ))
+                            });
+                        }
                     }
 
                     let started_at = Instant::now();

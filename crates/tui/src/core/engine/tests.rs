@@ -12892,6 +12892,219 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
     assert_eq!(written.trim_end(), "operate-approved");
 }
 
+/// Drives one model turn whose single `Bash` call needs approval, publishes
+/// `change_to` (as a runtime PATCH does) while the approval is pending, then
+/// approves. Returns the call's result and whether the file was written.
+async fn posture_change_during_approval_wait(
+    change_to: (AppMode, ApprovalMode, bool),
+) -> (Result<crate::tools::spec::ToolResult, ToolError>, bool) {
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let workspace = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+    let tool_call_sse = concat!(
+        "data: {\"id\":\"chatcmpl-e2\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[",
+        "{\"index\":0,\"id\":\"call_e2_shell\",\"type\":\"function\",\"function\":{\"name\":\"Bash\",",
+        "\"arguments\":\"{\\\"action\\\":\\\"run\\\",\\\"command\\\":\\\"echo approved > e2-approved.txt\\\"}\"}}",
+        "]},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-e2\",\"choices\":[{\"index\":0,\"delta\":{},",
+        "\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let done_sse = concat!(
+        "data: {\"id\":\"chatcmpl-e2-done\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-e2-done\",\"choices\":[{\"index\":0,\"delta\":{},",
+        "\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("call_e2_shell"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(done_sse),
+        )
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(tool_call_sse),
+        )
+        .expect(1)
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let (engine, handle) = Engine::new(
+        EngineConfig {
+            model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+            workspace: workspace.path().to_path_buf(),
+            snapshots_enabled: false,
+            subagents_enabled: false,
+            terminal_chrome_enabled: false,
+            ..EngineConfig::default()
+        },
+        &api_config,
+    );
+    let run_task = tokio::spawn(engine.run());
+    handle
+        .send(Op::SendMessage(TurnSpec {
+            max_output_tokens: None,
+            content: "Record the approval fixture in the workspace".to_string(),
+            images: Vec::new(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
+            compaction: Box::new(CompactionConfig::default()),
+            initial_routed_usage: Box::default(),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: true,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+        }))
+        .await
+        .expect("send model turn");
+
+    let (mode, approval_mode, auto_approve) = change_to;
+    let mut shell_result = None;
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for turn event")
+    {
+        match event {
+            Event::ApprovalRequired { id, .. } => {
+                // The PATCH lands while the approval card is open.
+                handle
+                    .try_send(Op::ChangeMode {
+                        mode,
+                        allow_shell: true,
+                        trust_mode: false,
+                        auto_approve,
+                        approval_mode,
+                        configured_sandbox_mode: None,
+                    })
+                    .expect("publish posture change");
+                handle.approve_tool_call(id).await.expect("approve shell");
+            }
+            Event::ToolCallComplete { name, result, .. } if name == "Bash" => {
+                shell_result = Some(result);
+            }
+            Event::TurnComplete { .. } => break,
+            _ => {}
+        }
+    }
+    drop(rx);
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
+    let written = workspace.path().join("e2-approved.txt").exists();
+    (shell_result.expect("the approved call completes"), written)
+}
+
+#[test]
+fn live_runtime_authority_narrows_only_when_a_grant_is_withdrawn() {
+    let at = |mode, approval_mode, sandbox: Option<&str>| {
+        LiveRuntimeAuthority::from_fields(
+            mode,
+            true,
+            false,
+            approval_mode == ApprovalMode::Bypass,
+            approval_mode,
+            sandbox.map(str::to_string),
+        )
+    };
+    let ask = at(AppMode::Agent, ApprovalMode::Suggest, None);
+    assert!(!ask.narrows(&ask));
+    assert!(!at(AppMode::Agent, ApprovalMode::Auto, None).narrows(&ask));
+    assert!(!at(AppMode::Agent, ApprovalMode::Bypass, None).narrows(&ask));
+    assert!(!ask.narrows(&at(AppMode::Plan, ApprovalMode::Suggest, None)));
+    assert!(at(AppMode::Plan, ApprovalMode::Suggest, None).narrows(&ask));
+    assert!(at(AppMode::Operate, ApprovalMode::Suggest, None).narrows(&ask));
+    assert!(ask.narrows(&at(AppMode::Agent, ApprovalMode::Bypass, None)));
+    assert!(at(AppMode::Agent, ApprovalMode::Never, None).narrows(&ask));
+    assert!(at(AppMode::Agent, ApprovalMode::Suggest, Some("read-only")).narrows(&ask));
+    assert!(
+        !at(
+            AppMode::Agent,
+            ApprovalMode::Suggest,
+            Some("workspace-write")
+        )
+        .narrows(&at(
+            AppMode::Agent,
+            ApprovalMode::Suggest,
+            Some("read-only")
+        ))
+    );
+    assert!(at(AppMode::Agent, ApprovalMode::Suggest, Some("custom")).narrows(&ask));
+    let mut no_shell = ask.clone();
+    no_shell.allow_shell = false;
+    assert!(no_shell.narrows(&ask));
+}
+
+/// E2: approving a call must never invalidate the call it approves. A posture
+/// PATCH that is equal or broader (Ask -> Auto-Review, Ask -> Full Access)
+/// while the approval card is open leaves the approved call running.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn broader_posture_patch_during_approval_wait_keeps_the_approved_call() {
+    let _lock = lock_test_env();
+    for change_to in [
+        (AppMode::Agent, ApprovalMode::Auto, false),
+        (AppMode::Agent, ApprovalMode::Bypass, true),
+        (AppMode::Agent, ApprovalMode::Suggest, false),
+    ] {
+        let (result, written) = posture_change_during_approval_wait(change_to).await;
+        let result = result.unwrap_or_else(|err| panic!("{change_to:?}: {err}"));
+        assert!(result.success, "{change_to:?}: {result:?}");
+        assert!(written, "{change_to:?}: the approved shell ran");
+    }
+}
+
+/// E2 counterpart: a narrowing PATCH (Work -> Plan, Ask -> Never) still sends
+/// the approved call back to the model instead of running it under a grant
+/// the user has since withdrawn.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn narrower_posture_patch_during_approval_wait_fails_the_call() {
+    let _lock = lock_test_env();
+    for change_to in [
+        (AppMode::Plan, ApprovalMode::Suggest, false),
+        (AppMode::Agent, ApprovalMode::Never, false),
+    ] {
+        let (result, written) = posture_change_during_approval_wait(change_to).await;
+        let err = result.expect_err("narrowed posture fails the call");
+        assert!(
+            err.to_string()
+                .contains("posture changed before this tool call executed"),
+            "{change_to:?}: {err}"
+        );
+        assert!(!written, "{change_to:?}: the shell must not run");
+    }
+}
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn full_access_subagent_handoff_keeps_model_shell_free_of_approval_prompts() {
