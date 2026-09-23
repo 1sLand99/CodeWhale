@@ -9688,6 +9688,34 @@ async fn get_provider_models(
         .expect("GET /v1/providers/{id}/models should return valid JSON")
 }
 
+/// Helper: GET `/v1/providers/{id}/models` for one exact configured identity —
+/// the read a client performs with the `model_provider_id` the provider
+/// catalog published.
+async fn get_provider_models_with_identity(
+    client: &reqwest::Client,
+    addr: &SocketAddr,
+    provider: &str,
+    model_provider_id: &str,
+) -> serde_json::Value {
+    client
+        .get({
+            let mut url =
+                reqwest::Url::parse(&format!("http://{addr}/v1/providers/{provider}/models"))
+                    .expect("provider models URL");
+            url.query_pairs_mut()
+                .append_pair("model_provider_id", model_provider_id);
+            url
+        })
+        .send()
+        .await
+        .expect("GET /v1/providers/{id}/models should not fail at transport level")
+        .error_for_status()
+        .expect("GET /v1/providers/{id}/models should return 200")
+        .json()
+        .await
+        .expect("GET /v1/providers/{id}/models should return valid JSON")
+}
+
 /// Helper: GET `/v1/settings/schema` and return the parsed response body.
 async fn get_settings_schema(client: &reqwest::Client, addr: &SocketAddr) -> serde_json::Value {
     client
@@ -11001,6 +11029,392 @@ api_key = "local-test-key"
     let config_after = get_config(&client, &addr).await;
     assert_eq!(config_after["provider"], config_before["provider"]);
     assert_eq!(config_after["model"], config_before["model"]);
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_catalog_lists_configured_named_custom_routes() -> Result<()> {
+    // A user-defined `[providers.<name>]` route is first-class in the TUI
+    // picker and in this API's own model catalog, but `GET /v1/providers`
+    // walked only the built-in enum — so a route configured in the TUI never
+    // reached the GUI provider picker at all. This pins the whole path a GUI
+    // client needs: the route is listed as (generic kind, exact id), the pair
+    // it reports is the pair the switch endpoint accepts, and switching to it
+    // persists the route name the config actually selects.
+    let root = std::env::temp_dir().join(format!(
+        "codewhale-provider-named-custom-route-{}",
+        Uuid::new_v4()
+    ));
+    fs::create_dir_all(&root)?;
+    let config_file = root.join("custom-config.toml");
+    fs::write(
+        &config_file,
+        r#"provider = "deepseek"
+default_text_model = "deepseek-v4-pro"
+
+[providers.deepseek]
+api_key = "fixture-key"
+
+[providers.bigmodel-cn]
+kind = "openai-compatible"
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+api_key = "fixture-key"
+model = "glm-5.3"
+
+[providers.not-a-routable-route]
+base_url = "http://127.0.0.1:18191/v1"
+"#,
+    )?;
+
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_config_path(config_file.clone()).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let providers = get_providers(&client, &addr).await;
+    assert_eq!(providers["current"], "deepseek");
+    assert_eq!(
+        providers["current_provider_id"], "deepseek",
+        "the active route's exact id travels with the generic one"
+    );
+
+    let catalog = providers["providers"]
+        .as_array()
+        .context("providers array")?;
+    let route_entries: Vec<_> = catalog
+        .iter()
+        .filter(|entry| entry["model_provider_id"] == "bigmodel-cn")
+        .collect();
+    assert_eq!(
+        route_entries.len(),
+        1,
+        "a configured route must be listed exactly once: {providers}"
+    );
+    let route = route_entries[0];
+    assert_eq!(route["id"], "custom");
+    assert_eq!(route["display_name"], "bigmodel-cn (custom)");
+    assert_eq!(route["default_model"], "glm-5.3");
+    assert_eq!(
+        route["has_model_catalog"], true,
+        "the flag must describe what this route's own model endpoint returns"
+    );
+    assert!(
+        catalog
+            .iter()
+            .all(|entry| entry["model_provider_id"] != "not-a-routable-route"),
+        "a table without the openai-compatible kind is not a routable route: {providers}"
+    );
+    // Only the selected route carries an exact id. An inactive entry that
+    // borrowed the active route's id would be read by a client as the route
+    // that is selected — which is worse than carrying none.
+    for entry in catalog {
+        if entry["id"] != "deepseek" && entry["id"] != "custom" {
+            assert!(
+                entry["model_provider_id"].is_null(),
+                "an inactive provider must not carry an exact id: {entry}"
+            );
+        }
+    }
+
+    // The route's model catalog is reachable with the identity the catalog
+    // just published — no other spelling is needed by a client.
+    let models = get_provider_models_with_identity(&client, &addr, "custom", "bigmodel-cn").await;
+    let model_ids: Vec<_> = models["models"]
+        .as_array()
+        .context("models array")?
+        .iter()
+        .filter_map(|entry| entry["id"].as_str())
+        .collect();
+    assert_eq!(model_ids, vec!["glm-5.3"]);
+
+    // Switching with that same pair selects and persists the route.
+    let (status, body) = post_switch_provider(
+        &client,
+        &addr,
+        "custom",
+        &json!({ "model_provider_id": "bigmodel-cn" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "switch should succeed, body: {body}"
+    );
+    assert_eq!(body["provider"], "bigmodel-cn");
+    assert_eq!(body["model"], "glm-5.3");
+
+    let persisted = fs::read_to_string(&config_file)?;
+    assert!(
+        persisted.contains("provider = \"bigmodel-cn\""),
+        "the selected route name is what the config selects. Actual config:\n{persisted}"
+    );
+
+    // Now active, the route is still listed once — as the active entry rather
+    // than duplicated beside it — and it keeps naming itself: an active route
+    // that fell back to the unconfigured `custom` placeholder would show the
+    // user a name they never chose and tell a client its catalog is empty.
+    let providers = get_providers(&client, &addr).await;
+    assert_eq!(providers["current"], "custom");
+    assert_eq!(providers["current_provider_id"], "bigmodel-cn");
+    let catalog = providers["providers"]
+        .as_array()
+        .context("providers array")?;
+    let active_entries: Vec<_> = catalog
+        .iter()
+        .filter(|entry| entry["model_provider_id"] == "bigmodel-cn")
+        .collect();
+    assert_eq!(
+        active_entries.len(),
+        1,
+        "the active route is listed once: {providers}"
+    );
+    assert_eq!(active_entries[0]["display_name"], "bigmodel-cn (custom)");
+    assert_eq!(active_entries[0]["has_model_catalog"], true);
+    assert_eq!(active_entries[0]["default_model"], "glm-5.3");
+
+    // The config-key path the GUI's config panel uses accepts the same
+    // route name, because that is what the persistent `provider` key holds.
+    let (status, body) = post_set_config(&client, &addr, "provider", "bigmodel-cn", true).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "set provider should succeed: {body}"
+    );
+    let config_after = get_config(&client, &addr).await;
+    assert_eq!(config_after["provider"], "bigmodel-cn");
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn switch_provider_names_a_custom_route_instead_of_denying_it() -> Result<()> {
+    // Addressing a configured route by its own name in the path is the obvious
+    // mistake; the refusal must point at the pair that works rather than claim
+    // the route does not exist.
+    let root = std::env::temp_dir().join(format!(
+        "codewhale-switch-named-route-hint-{}",
+        Uuid::new_v4()
+    ));
+    fs::create_dir_all(&root)?;
+    let config_file = root.join("custom-config.toml");
+    fs::write(
+        &config_file,
+        r#"provider = "deepseek"
+
+[providers.bigmodel-cn]
+kind = "openai-compatible"
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+model = "glm-5.3"
+"#,
+    )?;
+
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_config_path(config_file).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let (status, body) = post_switch_provider(&client, &addr, "bigmodel-cn", &json!({})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("bigmodel-cn") && message.contains("model_provider_id"),
+        "the refusal must name the working pair, got: {message}"
+    );
+
+    // A pair that contradicts itself fails closed rather than picking one half:
+    // the path says generic `custom`, the body names a built-in route.
+    let (status, body) = post_switch_provider(
+        &client,
+        &addr,
+        "custom",
+        &json!({ "model_provider_id": "deepseek" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("custom") && message.contains("deepseek"),
+        "a contradictory pair must be refused by name, got: {message}"
+    );
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn set_config_base_url_writes_the_field_the_active_route_reads() -> Result<()> {
+    // `GET /v1/config` reports the active route's endpoint as `base_url`, so a
+    // client reads it and writes it back. The write used to land in a root
+    // `active_route_base_url` key that no reader resolves: it reported success,
+    // the file gained a dead key, and the endpoint never moved. Each route shape
+    // owns exactly one endpoint slot, and the write has to find it.
+    let root = std::env::temp_dir().join(format!("codewhale-config-base-url-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root)?;
+    let config_file = root.join("config.toml");
+    fs::write(
+        &config_file,
+        r#"provider = "volcengine"
+base_url = "http://127.0.0.1:1/v1"
+
+[providers.volcengine]
+api_key = "fixture-key"
+base_url = "http://127.0.0.1:2/v1"
+model = "glm-5.2"
+"#,
+    )?;
+
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_config_path(config_file.clone()).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+    let before = get_config(&client, &addr).await;
+    assert_eq!(
+        before["base_url"], "http://127.0.0.1:2/v1",
+        "a built-in reports its own table's endpoint"
+    );
+
+    let (status, body) = post_set_config(
+        &client,
+        &addr,
+        "base_url",
+        "https://moved.example.test/v1",
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "write should succeed, body: {body}");
+    let resp = client
+        .post(format!("http://{addr}/v1/config/reload"))
+        .send()
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let after = get_config(&client, &addr).await;
+    assert_eq!(
+        after["base_url"], "https://moved.example.test/v1",
+        "the written value is what the route now reads"
+    );
+    let persisted = fs::read_to_string(&config_file)?;
+    assert!(
+        persisted.contains("[providers.volcengine]"),
+        "the built-in keeps its endpoint in its own table:\n{persisted}"
+    );
+    assert!(
+        persisted.contains("https://moved.example.test/v1"),
+        "the endpoint moved on disk:\n{persisted}"
+    );
+    assert!(
+        !persisted.contains("active_route_base_url"),
+        "no dead key may be written:\n{persisted}"
+    );
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn set_config_base_url_moves_the_root_route_endpoint() -> Result<()> {
+    // DeepSeek owns the root slot; writing it must be visible to the same read
+    // that reports it, and to nothing else.
+    let root =
+        std::env::temp_dir().join(format!("codewhale-config-base-url-root-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root)?;
+    let config_file = root.join("config.toml");
+    fs::write(
+        &config_file,
+        "provider = \"deepseek\"\napi_key = \"fixture-key\"\nbase_url = \"http://127.0.0.1:1/v1\"\n",
+    )?;
+
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_config_path(config_file.clone()).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let (status, body) = post_set_config(
+        &client,
+        &addr,
+        "base_url",
+        "https://root-moved.example.test/v1",
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "write should succeed, body: {body}");
+    client
+        .post(format!("http://{addr}/v1/config/reload"))
+        .send()
+        .await?;
+
+    let after = get_config(&client, &addr).await;
+    assert_eq!(after["base_url"], "https://root-moved.example.test/v1");
+    let persisted = fs::read_to_string(&config_file)?;
+    assert!(
+        persisted.contains("base_url = \"https://root-moved.example.test/v1\""),
+        "the root route keeps its endpoint at the root:\n{persisted}"
+    );
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn set_config_base_url_refuses_a_named_route_with_guidance() -> Result<()> {
+    // A user-defined `[providers.<name>]` route keeps its endpoint in the table
+    // it is named by. This path cannot write it, and saying so beats writing a
+    // key that changes nothing while reporting success.
+    let root = std::env::temp_dir().join(format!(
+        "codewhale-config-base-url-custom-{}",
+        Uuid::new_v4()
+    ));
+    fs::create_dir_all(&root)?;
+    let config_file = root.join("config.toml");
+    fs::write(
+        &config_file,
+        r#"provider = "bigmodel-cn"
+
+[providers.bigmodel-cn]
+kind = "openai-compatible"
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+api_key = "fixture-key"
+model = "glm-5.3"
+"#,
+    )?;
+
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_config_path(config_file.clone()).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let (status, body) = post_set_config(
+        &client,
+        &addr,
+        "base_url",
+        "https://moved.example.test/v1",
+        true,
+    )
+    .await;
+    assert_ne!(status, StatusCode::OK, "body: {body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("providers.<name>") || message.contains("named"),
+        "the refusal must say where the endpoint lives, got: {message}"
+    );
+    let persisted = fs::read_to_string(&config_file)?;
+    assert!(
+        !persisted.contains("active_route_base_url") && !persisted.contains("moved.example.test"),
+        "a refused write changes nothing:\n{persisted}"
+    );
 
     handle.abort();
     Ok(())

@@ -7229,10 +7229,13 @@ fn snapshot_entries_for_workspace(
 /// Entry in `GET /v1/providers`.
 ///
 /// Exposes the static provider registry so the GUI can render a dynamic
-/// provider picker instead of hard-coding `deepseek` only. The `id` matches
-/// `ApiProvider::as_str()`; callers must also preserve `model_provider_id`
-/// when present. Both can be pinned to one new thread via `POST /v1/threads`
-/// without mutating the runtime's global provider configuration.
+/// provider picker instead of hard-coding `deepseek` only, plus one entry per
+/// user-defined `[providers.<name>]` route (#1519) — the same routes the TUI's
+/// own provider picker lists, so a route configured in one surface is not
+/// missing from the other. The `id` matches `ApiProvider::as_str()`; callers
+/// must also preserve `model_provider_id` when present. Both can be pinned to
+/// one new thread via `POST /v1/threads` without mutating the runtime's global
+/// provider configuration.
 #[derive(Debug, Clone, Serialize)]
 struct ProviderEntry {
     /// Stable generic provider kind — matches `ApiProvider::as_str()` and is
@@ -7314,6 +7317,12 @@ impl From<crate::provider_readiness::CredentialState> for ProviderCredentialStat
 struct ProvidersResponse {
     /// Currently active provider id (matches `GET /v1/config`'s `provider`).
     current: String,
+    /// Exact configured id of the active route, when it has one — the same
+    /// additive identity a [`ProviderEntry`] carries as `model_provider_id`.
+    /// A named custom route reports `current = "custom"` plus this field, so a
+    /// client marks the one route that is actually selected instead of
+    /// whichever entry happens to share the generic kind.
+    current_provider_id: Option<String>,
     providers: Vec<ProviderEntry>,
 }
 
@@ -7830,6 +7839,90 @@ pub(crate) fn runtime_chat_relay_catalog(
     }))
 }
 
+/// Names of the user-defined `[providers.<name>]` routes this runtime can
+/// route to, sorted case-insensitively.
+///
+/// Mirrors the TUI provider picker's own row filter
+/// (`custom_provider_dashboard_rows`), so the routes one surface offers are the
+/// routes the other offers. A table without the `openai-compatible` kind is not
+/// a routable custom route and stays out of both.
+fn configured_custom_provider_routes(config: &Config) -> Vec<String> {
+    let Some(providers) = config.providers.as_ref() else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = providers
+        .custom
+        .iter()
+        .filter(|(_, entry)| entry.is_openai_compatible_custom())
+        .map(|(name, _)| name.clone())
+        .collect();
+    names.sort_by_key(|name| name.to_ascii_lowercase());
+    names
+}
+
+/// Project one provider route into the `GET /v1/providers` wire shape.
+///
+/// `exact_route` names the user-defined `[providers.<name>]` entry being
+/// listed, and `config` must already be scoped to it. The entry then describes
+/// that route — its own name and its own catalog — while `id` stays the generic
+/// kind every other endpoint addresses it by. Without it, the entry describes
+/// the built-in provider as before.
+fn provider_entry_for_api(
+    config: &Config,
+    active_provider: ApiProvider,
+    active_identity: &crate::config::ProviderIdentity,
+    api_provider: ApiProvider,
+    exact_route: Option<&str>,
+) -> ProviderEntry {
+    let (display_name, has_model_catalog) = match exact_route {
+        Some(route) => (
+            format!("{route} (custom)"),
+            // The same question this route's own model endpoint answers, so a
+            // client that trusts the flag and calls it is never wrong.
+            !provider_models_for_api(config, api_provider, api_provider).is_empty(),
+        ),
+        None => {
+            let identity = config.provider_identity_for(api_provider);
+            let base_url = config.base_url_for_route_identity(api_provider, &identity);
+            (
+                api_provider.display_name().to_string(),
+                !crate::provider_lake::configured_catalog_models_for_route(
+                    config,
+                    api_provider,
+                    &identity,
+                    &base_url,
+                )
+                .is_empty(),
+            )
+        }
+    };
+    let writeability = secrets::credential_writeability(config, api_provider);
+    ProviderEntry {
+        id: api_provider.as_str().to_string(),
+        // An exact id belongs to one route: the one the caller named, or — for
+        // a built-in entry — the active route's own entry. Every other entry
+        // carries none, so a client cannot mistake it for the selected route.
+        model_provider_id: if let Some(route) = exact_route {
+            Some(route.to_string())
+        } else if api_provider == active_provider {
+            active_identity.persisted_id().map(str::to_string)
+        } else {
+            None
+        },
+        display_name,
+        default_model: provider_default_model_for_api(config, active_provider, api_provider),
+        has_model_catalog,
+        credential_state: crate::provider_readiness::credential_state_for_provider(
+            config,
+            api_provider,
+        )
+        .into(),
+        credential_source: writeability.source,
+        credential_writable: writeability.writable,
+        credential_writable_reason: writeability.reason,
+    }
+}
+
 async fn list_providers(
     State(state): State<RuntimeApiState>,
 ) -> Result<Json<ProvidersResponse>, ApiError> {
@@ -7847,37 +7940,72 @@ async fn list_providers(
         let current = active_provider.as_str().to_string();
         let mut providers = Vec::new();
         for api_provider in ApiProvider::sorted_for_display() {
-            let default_model =
-                provider_default_model_for_api(&config, active_provider, api_provider);
-            let identity = config.provider_identity_for(api_provider);
-            let base_url = config.base_url_for_route_identity(api_provider, &identity);
-            let has_model_catalog = !crate::provider_lake::configured_catalog_models_for_route(
-                &config,
-                api_provider,
-                &identity,
-                &base_url,
-            )
-            .is_empty();
-            let writeability = secrets::credential_writeability(&config, api_provider);
-            providers.push(ProviderEntry {
-                id: api_provider.as_str().to_string(),
-                model_provider_id: (api_provider == active_provider)
-                    .then(|| active_identity.persisted_id().map(str::to_string))
-                    .flatten(),
-                display_name: api_provider.display_name().to_string(),
-                default_model,
-                has_model_catalog,
-                credential_state: crate::provider_readiness::credential_state_for_provider(
+            // An active user-defined route is listed as that route rather than
+            // as the generic kind it routes through: the picker must go on
+            // naming what the user selected, with the catalog its own model
+            // endpoint serves — not the unconfigured `custom` placeholder.
+            let active_named_route = (api_provider == active_provider
+                && api_provider == ApiProvider::Custom)
+                .then(|| active_identity.persisted_id())
+                .flatten();
+            match active_named_route {
+                Some(route) => {
+                    let mut scoped = config.clone();
+                    scoped.scope_to_provider_identity(&active_identity);
+                    providers.push(provider_entry_for_api(
+                        &scoped,
+                        active_provider,
+                        &active_identity,
+                        api_provider,
+                        Some(route),
+                    ));
+                }
+                None => providers.push(provider_entry_for_api(
                     &config,
+                    active_provider,
+                    &active_identity,
                     api_provider,
-                )
-                .into(),
-                credential_source: writeability.source,
-                credential_writable: writeability.writable,
-                credential_writable_reason: writeability.reason,
-            });
+                    None,
+                )),
+            }
         }
-        Ok(Json(ProvidersResponse { current, providers }))
+        // User-defined `[providers.<name>]` routes (#1519) are first-class in
+        // the TUI picker, in saved thread records, and in this API's own model
+        // catalog (`?model_provider_id=`), but the registry loop above walks
+        // only the built-in enum — so a route a user configured in the TUI
+        // never reached a GUI picker driven by this endpoint. Each one is
+        // projected the way the additive route contract already describes:
+        // generic `custom` kind plus the exact configured id, which is exactly
+        // the pair `POST /v1/providers/custom/switch` and `POST /v1/threads`
+        // accept. The active route stays the single entry the loop above
+        // emitted, so no route is listed twice.
+        for route in configured_custom_provider_routes(&config) {
+            if active_provider == ApiProvider::Custom
+                && active_identity.persisted_id() == Some(route.as_str())
+            {
+                continue;
+            }
+            let Ok(identity) = config.resolve_persisted_provider_identity(None, Some(&route))
+            else {
+                // A route this runtime refuses to resolve is not offered: an
+                // entry the client cannot select is worse than an absent one.
+                continue;
+            };
+            let mut scoped = config.clone();
+            scoped.scope_to_provider_identity(&identity);
+            providers.push(provider_entry_for_api(
+                &scoped,
+                active_provider,
+                &active_identity,
+                ApiProvider::Custom,
+                Some(&route),
+            ));
+        }
+        Ok(Json(ProvidersResponse {
+            current_provider_id: active_identity.persisted_id().map(str::to_string),
+            current,
+            providers,
+        }))
     })
     .await
     .map_err(|_| ApiError::internal("Provider listing failed"))?
@@ -8022,6 +8150,16 @@ async fn refresh_provider_models(
 struct SwitchProviderRequest {
     #[serde(default)]
     model: Option<String>,
+    /// Exact configured provider id for the target route.
+    ///
+    /// Named `[providers.<name>]` routes are addressed the same way this API
+    /// addresses them everywhere else: the generic kind in the id (`custom`)
+    /// plus this additive exact id, exactly as `ProviderEntry`
+    /// `model_provider_id` and `POST /v1/threads` already carry it. Omitted
+    /// keeps the pre-existing meaning — the built-in id, or the active
+    /// legacy root-level custom route.
+    #[serde(default)]
+    model_provider_id: Option<String>,
 }
 
 /// Response for `POST /v1/providers/{id}/switch`.
@@ -8046,6 +8184,11 @@ struct SwitchProviderResponse {
 
 /// `POST /v1/providers/{id}/switch` — switch the active provider, optionally
 /// overriding the model.
+///
+/// `{id}` is the generic provider kind (`custom` for every user-defined route).
+/// A named `[providers.<name>]` route is named by `model_provider_id` in the
+/// body, not by the path: the path keeps naming the kind, so one endpoint
+/// cannot disagree with `GET /v1/providers` about what an entry's `id` means.
 ///
 /// This is the GUI-facing counterpart of the TUI's `/provider` slash command
 /// (`commands/groups/core/provider.rs`) and `AppAction::SwitchProvider`
@@ -8076,14 +8219,37 @@ async fn switch_provider(
 ) -> Result<Json<SwitchProviderResponse>, ApiError> {
     use crate::config_persistence;
 
-    let target = ApiProvider::parse(&id)
-        .ok_or_else(|| ApiError::bad_request(format!("Unknown provider id '{id}'")))?;
+    let trimmed_id = id.trim();
+    let target = ApiProvider::parse(trimmed_id).ok_or_else(|| {
+        // A configured `[providers.<name>]` route is a route this runtime can
+        // and does switch to — but only through the generic kind, because the
+        // same name is what `GET /v1/providers` reports as
+        // `model_provider_id`. Tell the caller exactly that instead of
+        // pretending the route does not exist.
+        let named_route = configured_custom_provider_routes(&state.config.read())
+            .iter()
+            .any(|route| route == trimmed_id);
+        if named_route {
+            ApiError::bad_request(format!(
+                "'{trimmed_id}' is a user-defined route: switch to the generic 'custom' kind with model_provider_id = \"{trimmed_id}\" instead"
+            ))
+        } else {
+            ApiError::bad_request(format!(
+                "Unknown provider id '{trimmed_id}'. Call GET /v1/providers for the list of supported ids."
+            ))
+        }
+    })?;
     // Reject the legacy deepseek-cn alias — same guard as list_provider_models.
     if target == ApiProvider::DeepseekCN {
         return Err(ApiError::bad_request(
             "provider 'deepseek-cn' is a legacy alias; use 'deepseek' instead",
         ));
     }
+    let exact_provider_id = req
+        .model_provider_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
 
     // Normalize the optional model override against the *target* provider.
     // Mirrors `set_config`'s `model` branch, which validates against the
@@ -8092,9 +8258,17 @@ async fn switch_provider(
     // Read normalization and persistence identity from the same route snapshot.
     let (target, model_override, provider_identity) = {
         let config = state.config.read();
-        let identity = config
-            .resolve_provider_pin_identity(&id)
-            .map_err(ApiError::bad_request)?;
+        // An additive exact id is the stronger selector: it names one
+        // configured route, so it resolves through the same pinned-identity
+        // path saved threads use. Absent, the id keeps its previous meaning.
+        let identity = match exact_provider_id {
+            Some(exact) => config
+                .resolve_persisted_provider_identity(Some(&id), Some(exact))
+                .map_err(ApiError::bad_request)?,
+            None => config
+                .resolve_provider_pin_identity(&id)
+                .map_err(ApiError::bad_request)?,
+        };
         let mut scoped = config.clone();
         scoped.scope_to_provider_identity(&identity);
         let model = match req.model.as_deref().map(str::trim) {
@@ -8156,27 +8330,28 @@ async fn switch_provider(
     };
 
     let model_available = !active_model.is_empty();
+    // Name the route the user selected, not the kind it routes through: a
+    // named custom route reports `custom` as its kind, which names nothing the
+    // user ever typed. Every other route keeps reporting its canonical kind.
+    let active_label = if active_provider == ApiProvider::Custom {
+        provider_identity.clone()
+    } else {
+        active_provider.as_str().to_string()
+    };
     let message = if !model_available {
         format!(
-            "Provider switched to {}; refresh its catalog or select an explicit model.",
-            active_provider.as_str()
+            "Provider switched to {active_label}; refresh its catalog or select an explicit model."
         )
     } else if model_override.is_some() {
-        format!(
-            "Provider switched to {} (model: {}).",
-            active_provider.as_str(),
-            active_model
-        )
+        format!("Provider switched to {active_label} (model: {active_model}).")
     } else {
         format!(
-            "Provider switched to {} (model: {}, resolved from config).",
-            active_provider.as_str(),
-            active_model
+            "Provider switched to {active_label} (model: {active_model}, resolved from config)."
         )
     };
 
     Ok(Json(SwitchProviderResponse {
-        provider: active_provider.as_str().to_string(),
+        provider: active_label,
         model: active_model,
         model_available,
         message,
@@ -8463,21 +8638,36 @@ async fn set_config(
             "approval_mode" | "approval_policy" => {
                 config_persistence::persist_root_string_key(config_path, "approval_policy", &value)
             }
-            "base_url" => config_persistence::persist_root_string_key(
-                config_path,
-                "active_route_base_url",
-                &value,
-            ),
+            "base_url" | "provider_url" | "provider_base_url" => {
+                // `GET /v1/config` reports the active route's endpoint as
+                // `base_url`, and writing it back has to land on the field that
+                // route actually reads. It used to write a root
+                // `active_route_base_url` key that no reader resolves, so the
+                // write reported success and the endpoint never moved.
+                let config = state.config.read();
+                let provider = config.api_provider();
+                let identity = config.provider_identity_for(provider);
+                config_persistence::persist_route_base_url(config_path, provider, &identity, &value)
+            }
             "provider" => {
                 // Validate the provider id against the static registry so the
                 // GUI gets a clear error instead of silently persisting an
                 // unknown value that `Config::api_provider()` would later
-                // ignore (falling back to DeepSeek).
-                ApiProvider::parse(&value).ok_or_else(|| {
-                    ApiError::bad_request(format!(
+                // ignore (falling back to DeepSeek). A user-defined
+                // `[providers.<name>]` route is a valid selection as well: the
+                // persistent `provider` key holds exactly that name, and
+                // `Config::resolve_provider_identity` resolves it back to the
+                // route, so refusing it here would refuse a value the runtime
+                // honours. Anything else is still refused.
+                let configured_custom_route =
+                    configured_custom_provider_routes(&state.config.read())
+                        .iter()
+                        .any(|route| route == value.trim());
+                if ApiProvider::parse(&value).is_none() && !configured_custom_route {
+                    return Err(ApiError::bad_request(format!(
                         "Unknown provider '{value}'. Call GET /v1/providers for the list of supported ids."
-                    ))
-                })?;
+                    )));
+                }
                 let result =
                     config_persistence::persist_root_string_key(config_path, "provider", &value);
                 if result.is_ok() {
@@ -8488,10 +8678,6 @@ async fn set_config(
                     state.config.write().provider = Some(value.clone());
                 }
                 result
-            }
-            "provider_url" | "provider_base_url" => {
-                let provider = state.config.read().api_provider();
-                config_persistence::persist_provider_base_url_key(config_path, provider, &value)
             }
             "cost_currency"
             | "default_mode"
