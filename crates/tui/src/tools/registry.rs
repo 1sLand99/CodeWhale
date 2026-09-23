@@ -1660,6 +1660,7 @@ pub(super) fn mcp_tool_adapter_for_test(name: &str) -> Arc<dyn ToolSpec> {
             name: name.to_string(),
             description: None,
             input_schema: serde_json::json!({"type": "object"}),
+            annotations: None,
         },
         pool: Arc::new(tokio::sync::Mutex::new(crate::mcp::McpPool::new(
             crate::mcp::McpConfig::default(),

@@ -873,10 +873,15 @@ pub(super) fn mcp_tool_approval_description(name: &str, input: &serde_json::Valu
         }
         None => {}
     }
-    if mcp_tool_is_read_only(name) {
-        format!("Read-only MCP tool '{name}'")
-    } else {
-        format!("MCP tool '{name}' may have side effects")
+    match crate::mcp::mcp_tool_approval_hint(name) {
+        _ if mcp_tool_is_read_only(name) => format!("Read-only MCP tool '{name}'"),
+        Some(crate::mcp::McpToolApprovalHint::TrustedReadOnly) => {
+            format!("Read-only MCP tool '{name}' (declared by a reviewed plugin)")
+        }
+        Some(crate::mcp::McpToolApprovalHint::Destructive) => {
+            format!("MCP tool '{name}' is marked destructive by its server")
+        }
+        None => format!("MCP tool '{name}' may have side effects"),
     }
 }
 

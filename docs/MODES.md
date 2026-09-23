@@ -314,6 +314,12 @@ built-in tools. Read-only MCP helpers may auto-run in Ask and Auto-Review when
 policy permits; MCP tools with possible side effects require approval. Full
 Access does not bypass hard policy holds.
 
+A tool's own MCP annotations count only as far as their source is trusted. A
+tool from a reviewed, enabled plugin that declares `readOnlyHint: true` runs
+like the built-in read helpers, with no prompt; the same claim from any other
+server is ignored. A tool that declares `destructiveHint: true` keeps its
+prompt even when you have approved tools for the rest of the session.
+
 See `MCP.md`.
 
 ## Related CLI Flags

@@ -2175,6 +2175,7 @@ fn registration_adapter_origins_are_bounded_and_exclude_execution_payloads() {
                     name: hostile.clone(),
                     description: Some(command.into()),
                     input_schema: json!({"description":schema_payload}),
+                    annotations: None,
                 },
                 pool: Arc::new(tokio::sync::Mutex::new(crate::mcp::McpPool::new(
                     crate::mcp::McpConfig::default(),

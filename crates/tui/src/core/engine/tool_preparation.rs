@@ -37,7 +37,13 @@ pub(super) fn prepare_tool_call(
     session_auto_approve: bool,
 ) -> Result<PreparedToolPolicy, ToolError> {
     if McpPool::is_mcp_tool(name) {
-        let read_only = mcp_tool_is_read_only(name);
+        // CW-11: a reviewed plugin's `readOnlyHint` makes its tool run like
+        // the built-in resource reads; a declared `destructiveHint` keeps the
+        // prompt even when the session auto-approves tools.
+        let hint = crate::mcp::mcp_tool_approval_hint(name);
+        let read_only = mcp_tool_is_read_only(name)
+            || hint == Some(crate::mcp::McpToolApprovalHint::TrustedReadOnly);
+        let destructive = hint == Some(crate::mcp::McpToolApprovalHint::Destructive);
         if !read_only
             && let Some(authority) =
                 registry.and_then(|registry| registry.context().tool_authority.as_ref())
@@ -107,7 +113,7 @@ pub(super) fn prepare_tool_call(
                 },
                 resources: vec![ResourceClaim::GlobalExclusive],
             },
-            auto_approve: session_auto_approve,
+            auto_approve: session_auto_approve && !destructive,
         });
     }
 
@@ -516,6 +522,31 @@ mod tests {
             assert!(!prepared.call.starts_detached, "{}", expected.name);
             assert!(!prepared.auto_approve, "{}", expected.name);
         }
+    }
+
+    #[test]
+    fn mcp_annotation_hints_drive_approval() {
+        use crate::mcp::{McpToolApprovalHint, set_mcp_tool_approval_hint_for_test};
+
+        let read_only = "mcp_plugin-9-cw11test_page_snapshot";
+        set_mcp_tool_approval_hint_for_test(read_only, Some(McpToolApprovalHint::TrustedReadOnly));
+        let prepared = prepare_tool_call(read_only, json!({}), None, false)
+            .expect("prepare trusted read-only MCP tool");
+        assert_eq!(prepared.call.approval, ApprovalRequirement::Auto);
+        assert!(prepared.call.read_only);
+
+        let destructive = "mcp_cw11test_drop_table";
+        set_mcp_tool_approval_hint_for_test(destructive, Some(McpToolApprovalHint::Destructive));
+        let prepared = prepare_tool_call(destructive, json!({}), None, true)
+            .expect("prepare destructive MCP tool");
+        assert_eq!(prepared.call.approval, ApprovalRequirement::Suggest);
+        assert!(
+            !prepared.auto_approve,
+            "session auto-approve must not cover a destructive tool"
+        );
+
+        set_mcp_tool_approval_hint_for_test(read_only, None);
+        set_mcp_tool_approval_hint_for_test(destructive, None);
     }
 
     #[test]
