@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:83d705f2dca6 -->
+<!-- source: README.md sha256:bbb8bfb61e57 -->
 # Codewhale
 
 Codewhale, seçtiğiniz barındırılan veya yerel bir modeli kullanarak projenizi okuyan, dosyaları düzenleyen, komutları çalıştıran ve yaptığı işi kontrol eden açık kaynaklı bir ajandır. Terminalde tek bir görevle başlayın. Daha büyük bir işte, işin bölümlerini farklı model ve rollere sahip ajanlara verin.
@@ -27,7 +27,7 @@ Yükleyici, yayımlanmış en son sürümü seçer. [Değişiklik günlüğü](C
 
 Windows’ta [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases/latest) üzerinden uygun yükleyiciyi veya arşivi indirin. Mevcut doğrudan kurulumu güncellemek için `codewhale update`, yalnızca kontrol etmek için `codewhale update --check` çalıştırın. Güncelleyici çalıştırılabilir dosyanın yolunu gösterir ve daha yeni derlemeleri korur. npm ve Cargo ikincil paketleme seçenekleridir. Paket yöneticisinden geçiş ve PATH ayarları için [kurulum kılavuzuna](docs/INSTALL.md) bakın.
 
-Codewhale ilk çalıştırmada bir sağlayıcıya bağlanmanıza veya Codewhale’i çevrimdışı yapılandırmanıza yardımcı olur. Model yanıtları için barındırılan ya da yerel bir modele bağlantı gerekir. Codewhale, ikincil paketleme seçenekleri olarak npm ve Cargo’nun yanı sıra Docker, Nix, Scoop, Android/Termux ve isteğe bağlı CNB aynasını da destekler. Paket yöneticisiyle yönetilen mevcut kurulumlar için geçiş talimatları sağlanır. [Kurulum ve PATH yardımına](docs/INSTALL.md) bakın.
+İlk çalıştırma doğrudan mesaj yazma alanını açar; sizi bir kurulum adımından geçirmez. Model yanıtları için barındırılan ya da yerel bir modele bağlantı gerekir: bağlanana kadar açılış ekranında "no model connected" yazar. Barındırılan bir anahtar eklemek veya yerel bir çalışma ortamı seçmek için `/provider` komutunu çalıştırın (ya da F3’e basın). Ollama zaten bir sohbet modeliyle çalışıyorsa Codewhale kendiliğinden ona geçer. Codewhale, ikincil paketleme seçenekleri olarak npm ve Cargo’nun yanı sıra Docker, Nix, Scoop, Android/Termux ve isteğe bağlı CNB aynasını da destekler. Paket yöneticisiyle yönetilen mevcut kurulumlar için geçiş talimatları sağlanır. [Kurulum ve PATH yardımına](docs/INSTALL.md) bakın.
 
 Her kabukta Tab tamamlama tek bir komutla etkinleştirilir — `codewhale completion bash|zsh|fish|powershell|elvish`. [Kabuk tamamlamalarına](docs/INSTALL.md#8-shell-completions) bakın.
 

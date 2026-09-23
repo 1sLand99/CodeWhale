@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:83d705f2dca6 -->
+<!-- source: README.md sha256:bbb8bfb61e57 -->
 # Codewhale
 
 Codewhale là tác nhân mã nguồn mở có thể đọc dự án, chỉnh sửa tệp, chạy lệnh và kiểm tra công việc của mình bằng mô hình do nhà cung cấp lưu trữ hoặc mô hình cục bộ mà bạn chọn. Hãy bắt đầu với một tác vụ trong terminal. Với công việc lớn hơn, bạn có thể giao từng phần cho các tác nhân dùng mô hình và đảm nhiệm vai trò khác nhau.
@@ -27,7 +27,7 @@ Trình cài đặt chọn bản phát hành mới nhất đã được công b�
 
 Trên Windows, tải bộ cài hoặc gói lưu trữ phù hợp từ [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases/latest). Với bản cài trực tiếp đã có, chạy `codewhale update`; dùng `codewhale update --check` nếu chỉ muốn kiểm tra. Trình cập nhật hiển thị đường dẫn tệp thực thi và giữ lại các bản dựng mới hơn. npm và Cargo là lựa chọn phụ; xem [hướng dẫn cài đặt](docs/INSTALL.md) để chuyển từ trình quản lý gói và thiết lập PATH.
 
-Trong lần chạy đầu tiên, Codewhale sẽ giúp bạn kết nối với nhà cung cấp hoặc cấu hình Codewhale ngoại tuyến. Để nhận phản hồi từ mô hình, bạn cần kết nối với mô hình do nhà cung cấp lưu trữ hoặc mô hình cục bộ. Codewhale cũng hỗ trợ npm và Cargo như các hình thức đóng gói thứ cấp, cùng với Docker, Nix, Scoop, Android/Termux và bản sao CNB tùy chọn. Các bản cài đặt hiện có qua trình quản lý gói sẽ được hướng dẫn chuyển đổi. Xem [trợ giúp cài đặt và PATH](docs/INSTALL.md).
+Lần chạy đầu tiên mở thẳng vào ô soạn tin; không có bước hướng dẫn thiết lập. Để nhận phản hồi từ mô hình, bạn cần kết nối với mô hình do nhà cung cấp lưu trữ hoặc mô hình cục bộ: cho đến khi kết nối, màn hình khởi động hiển thị "no model connected". Chạy `/provider` (hoặc nhấn F3) để thêm khóa dịch vụ lưu trữ hoặc chọn runtime cục bộ. Nếu Ollama đang chạy sẵn với một mô hình trò chuyện, Codewhale sẽ tự chuyển sang đó. Codewhale cũng hỗ trợ npm và Cargo như các hình thức đóng gói thứ cấp, cùng với Docker, Nix, Scoop, Android/Termux và bản sao CNB tùy chọn. Các bản cài đặt hiện có qua trình quản lý gói sẽ được hướng dẫn chuyển đổi. Xem [trợ giúp cài đặt và PATH](docs/INSTALL.md).
 
 Mỗi shell chỉ cần một lệnh để bật tính năng hoàn thành bằng phím Tab — `codewhale completion bash|zsh|fish|powershell|elvish`. Xem [tính năng hoàn thành của shell](docs/INSTALL.md#8-shell-completions).
 

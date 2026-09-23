@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:83d705f2dca6 -->
+<!-- source: README.md sha256:bbb8bfb61e57 -->
 # Codewhale
 
 Codewhale est un agent open source qui lit votre projet, modifie des fichiers, exécute des commandes et vérifie son travail avec un modèle hébergé ou local de votre choix. Commencez par une tâche dans votre terminal. Pour un travail plus important, confiez-en des parties à des agents utilisant différents modèles et rôles.
@@ -27,7 +27,7 @@ L’installeur sélectionne la dernière version publiée. Le [journal des modif
 
 Sur Windows, téléchargez l’installeur ou l’archive adaptés depuis [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases/latest). Pour une installation directe existante, lancez `codewhale update`, ou `codewhale update --check` pour vérifier sans installer. L’outil affiche le chemin de l’exécutable et conserve les versions de développement plus récentes. npm et Cargo sont des options secondaires ; consultez le [guide d’installation](docs/INSTALL.md) pour migrer depuis un gestionnaire de paquets et configurer PATH.
 
-Au premier lancement, Codewhale vous aide à connecter un fournisseur ou à configurer Codewhale hors ligne. Les réponses nécessitent un modèle hébergé ou local connecté. Codewhale prend aussi en charge npm et Cargo comme options de distribution secondaires, ainsi que Docker, Nix, Scoop, Android/Termux et un miroir CNB facultatif. Les installations existantes gérées par un gestionnaire de paquets reçoivent des instructions de migration. Consultez l’[aide à l’installation et à la configuration du PATH](docs/INSTALL.md).
+Le premier lancement ouvre directement l’éditeur de messages ; il ne vous guide pas à travers une configuration. Les réponses du modèle nécessitent un modèle hébergé ou local connecté : tant qu’aucun ne l’est, l’écran de démarrage indique "no model connected". Lancez `/provider` (ou appuyez sur F3) pour ajouter une clé hébergée ou choisir un environnement local. Si Ollama tourne déjà avec un modèle de chat, Codewhale bascule dessus de lui-même. Codewhale prend aussi en charge npm et Cargo comme options de distribution secondaires, ainsi que Docker, Nix, Scoop, Android/Termux et un miroir CNB facultatif. Les installations existantes gérées par un gestionnaire de paquets reçoivent des instructions de migration. Consultez l’[aide à l’installation et à la configuration du PATH](docs/INSTALL.md).
 
 L’autocomplétion avec Tab s’active avec une commande par shell — `codewhale completion bash|zsh|fish|powershell|elvish`. Consultez [l’autocomplétion du shell](docs/INSTALL.md#8-shell-completions).
 

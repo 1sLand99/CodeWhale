@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:83d705f2dca6 -->
+<!-- source: README.md sha256:bbb8bfb61e57 -->
 # Codewhale
 
 Codewhale és un agent de codi obert que llegeix el teu projecte, edita fitxers, executa ordres i comprova la seva feina amb un model allotjat o local que tu tries. Comença amb una tasca al terminal. Per a una feina més gran, assigna parts de la feina a agents amb models i rols diferents.
@@ -27,7 +27,7 @@ L’instal·lador selecciona l’última versió publicada. El [registre de canv
 
 A Windows, descarrega l’instal·lador o l’arxiu corresponent de [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases/latest). Per actualitzar una instal·lació directa existent, executa `codewhale update`, o `codewhale update --check` només per comprovar-la. L’actualitzador mostra el camí de l’executable i conserva les compilacions més noves. npm i Cargo són opcions secundàries; consulta la [guia d’instal·lació](docs/INSTALL.md) per migrar una instal·lació gestionada per paquets i configurar PATH.
 
-En la primera execució, Codewhale t’ajuda a connectar un proveïdor o a configurar Codewhale sense connexió. Les respostes requereixen un model allotjat o local connectat. Codewhale també admet npm i Cargo com a opcions secundàries de distribució, a més de Docker, Nix, Scoop, Android/Termux i un mirall CNB opcional. Les instal·lacions existents gestionades per paquets reben instruccions de migració. Consulta l’[ajuda d’instal·lació i PATH](docs/INSTALL.md).
+La primera execució obre directament el compositor; no et guia per cap configuració. Les respostes del model requereixen un model allotjat o local connectat: fins que n’hi hagi un, la pantalla d’inici indica "no model connected". Executa `/provider` (o prem F3) per afegir una clau allotjada o triar un entorn local. Si Ollama ja s’està executant amb un model de xat, Codewhale hi canvia automàticament. Codewhale també admet npm i Cargo com a opcions secundàries de distribució, a més de Docker, Nix, Scoop, Android/Termux i un mirall CNB opcional. Les instal·lacions existents gestionades per paquets reben instruccions de migració. Consulta l’[ajuda d’instal·lació i PATH](docs/INSTALL.md).
 
 L’autocompleció amb Tab s’activa amb una sola ordre per shell — `codewhale completion bash|zsh|fish|powershell|elvish`. Consulta [l’autocompleció del shell](docs/INSTALL.md#8-shell-completions).
 

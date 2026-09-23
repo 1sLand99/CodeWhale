@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:83d705f2dca6 -->
+<!-- source: README.md sha256:bbb8bfb61e57 -->
 # Codewhale
 
 Codewhale è un agente open source che legge il tuo progetto, modifica file, esegue comandi e verifica il proprio lavoro usando un modello ospitato o locale a tua scelta. Parti da un’attività nel terminale. Per un lavoro più grande, assegna parti del lavoro ad agenti con modelli e ruoli diversi.
@@ -27,7 +27,7 @@ L’installer seleziona l’ultima versione pubblicata. Il [registro delle modif
 
 Su Windows, scarica l’installer o l’archivio adatto da [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases/latest). Per aggiornare un’installazione diretta esistente, esegui `codewhale update`, oppure `codewhale update --check` per la sola verifica. L’aggiornamento mostra il percorso dell’eseguibile e conserva le build più recenti. npm e Cargo sono opzioni secondarie; consulta la [guida all’installazione](docs/INSTALL.md) per migrare da un gestore di pacchetti e configurare PATH.
 
-Al primo avvio, Codewhale ti aiuta a collegare un provider oppure a configurare Codewhale offline. Le risposte richiedono un modello ospitato o locale collegato. Codewhale supporta anche npm e Cargo come opzioni secondarie di distribuzione, oltre a Docker, Nix, Scoop, Android/Termux e un mirror CNB facoltativo. Le installazioni esistenti gestite da un gestore di pacchetti ricevono istruzioni per la migrazione. Consulta la [guida all’installazione e a PATH](docs/INSTALL.md).
+Il primo avvio apre direttamente il compositore; non ti guida attraverso una configurazione. Le risposte del modello richiedono un modello ospitato o locale collegato: finché non ce n’è uno, la schermata iniziale mostra "no model connected". Esegui `/provider` (o premi F3) per aggiungere una chiave ospitata o scegliere un runtime locale. Se Ollama è già in esecuzione con un modello di chat, Codewhale passa a quello da solo. Codewhale supporta anche npm e Cargo come opzioni secondarie di distribuzione, oltre a Docker, Nix, Scoop, Android/Termux e un mirror CNB facoltativo. Le installazioni esistenti gestite da un gestore di pacchetti ricevono istruzioni per la migrazione. Consulta la [guida all’installazione e a PATH](docs/INSTALL.md).
 
 Il completamento con Tab si attiva con un solo comando per ogni shell — `codewhale completion bash|zsh|fish|powershell|elvish`. Consulta il [completamento della shell](docs/INSTALL.md#8-shell-completions).
 

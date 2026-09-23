@@ -1328,7 +1328,17 @@ async fn start_workflow(
     .min()
     .or((workflow_cfg.default_token_budget > 0).then_some(workflow_cfg.default_token_budget));
     let verify_on_complete = optional_bool(&input, "verify", false)?;
-    let fleet = workflow_fleet_binding(&input, context, runtime.api_config.as_deref())?;
+    let fleet = if let Some(name) = workflow_fleet_name(&input)? {
+        let workspace = context.workspace.clone();
+        let api_config = runtime.api_config.clone();
+        tokio::task::spawn_blocking(move || {
+            workflow_fleet_binding(&name, &workspace, api_config.as_deref())
+        })
+        .await
+        .map_err(|error| ToolError::execution_failed(format!("Fleet loading failed: {error}")))??
+    } else {
+        WorkflowFleetBinding::None
+    };
     let run_id = format!("workflow_{}", &Uuid::new_v4().to_string()[..8]);
     let gate_specs = source
         .spec
@@ -1694,28 +1704,24 @@ impl WorkflowFleetBinding {
     }
 }
 
+// Reads Fleet/profile files; the runtime caller must use spawn_blocking.
 fn workflow_fleet_binding(
-    input: &Value,
-    context: &ToolContext,
+    name: &str,
+    workspace: &std::path::Path,
     api_config: Option<&crate::config::Config>,
 ) -> Result<WorkflowFleetBinding, ToolError> {
-    let Some(name) = workflow_fleet_name(input)? else {
-        return Ok(WorkflowFleetBinding::None);
-    };
-    let roots = crate::fleet::exact::fleet_search_roots(&context.workspace);
-    let (document, id) =
-        crate::fleet::exact::load_fleet_document(&name, &context.workspace, api_config).map_err(
-            |err| {
-                ToolError::invalid_input(format!(
-                    "Failed to load workflow Fleet '{name}' from {}: {err}",
-                    roots
-                        .iter()
-                        .map(|root| format!("{}/{}", root.origin, root.root.display()))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ))
-            },
-        )?;
+    let roots = crate::fleet::exact::fleet_search_roots(workspace);
+    let (document, id) = crate::fleet::exact::load_fleet_document(name, workspace, api_config)
+        .map_err(|err| {
+            ToolError::invalid_input(format!(
+                "Failed to load workflow Fleet '{name}' from {}: {err}",
+                roots
+                    .iter()
+                    .map(|root| format!("{}/{}", root.origin, root.root.display()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        })?;
 
     if let Some(legacy) = document.legacy() {
         let roles = FleetRoleMap::from_pairs(
@@ -1725,7 +1731,10 @@ fn workflow_fleet_binding(
                 .map(|(role, profile)| (role.as_str(), profile.as_str())),
         )
         .map_err(|err| ToolError::invalid_input(err.to_string()))?;
-        return Ok(WorkflowFleetBinding::Legacy { name, roles });
+        return Ok(WorkflowFleetBinding::Legacy {
+            name: name.to_owned(),
+            roles,
+        });
     }
 
     // Exact: freeze the definition now. Everything the run launches afterwards
@@ -3342,6 +3351,16 @@ fn leaf_task_options_expression(
     parallel: bool,
 ) -> Result<String, ToolError> {
     validate_leaf_runtime_contract(spec)?;
+    // Reject invalid plans before accepting a background run, using the same
+    // path policy as direct task() dispatch rather than a second validator.
+    let cwd = spec
+        .cwd
+        .as_deref()
+        .map(codewhale_workflow_js::normalize_task_cwd)
+        .transpose()
+        .map_err(|error| {
+            ToolError::invalid_input(format!("Workflow leaf '{}': {error}", spec.id))
+        })?;
     let worktree = leaf_wants_worktree(spec, parallel);
     let write_authority = match spec.mode {
         TaskMode::ReadOnly => "read_only",
@@ -3373,7 +3392,7 @@ fn leaf_task_options_expression(
         &spec.id,
         phase,
         leaf_allowed_tools(spec)?,
-        spec.cwd.as_deref(),
+        cwd.as_deref(),
     ))
 }
 
@@ -8186,6 +8205,77 @@ export default workflow({
             .expect_err("blank child cwd must be refused")
             .to_string();
         assert!(err.contains("cwd"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn structured_plan_child_cwd_rejected_before_start() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
+        let runtime = SubAgentRuntime::new(
+            stub_client(),
+            "deepseek-v4-flash".to_string(),
+            ctx.clone(),
+            true,
+            None,
+            manager.clone(),
+        );
+        let tool = WorkflowTool::new(manager, runtime);
+        for cwd in [
+            "/absolute/repo",
+            "../sibling",
+            "repo/../sibling",
+            "//server/share",
+            r"C:\repo",
+            "repo\nchild",
+        ] {
+            let error = tool
+                .execute(
+                    json!({
+                        "action": "start",
+                        "plan": {
+                            "goal": "inspect a repo",
+                            "children": [{
+                                "id": "inspect",
+                                "prompt": "Read the README",
+                                "type": "explore",
+                                "cwd": cwd
+                            }]
+                        }
+                    }),
+                    &ctx,
+                )
+                .await
+                .expect_err("invalid cwd must fail the call, not create a background run");
+            let error = error.to_string();
+            assert!(
+                error.contains("inspect") && error.contains("cwd"),
+                "{cwd:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn structured_plan_child_cwd_uses_dispatch_normalization() {
+        let source = workflow_source(
+            &json!({
+                "plan": {
+                    "goal": "inspect a repo",
+                    "children": [{
+                        "prompt": "Read the README",
+                        "type": "explore",
+                        "cwd": r" ./repos\a// "
+                    }]
+                }
+            }),
+            &ToolContext::new("."),
+        )
+        .expect("bounded cwd should normalize before launch");
+        assert!(
+            source.source.contains(r#"cwd: "repos/a""#),
+            "{}",
+            source.source
+        );
     }
 
     #[test]

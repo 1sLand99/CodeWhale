@@ -162,27 +162,19 @@ pub(crate) struct ComputerState {
 /// Engine out of the directory it names, and the socket-type check at use
 /// (`display_socket_present`) refuses anything that is not a Unix socket.
 fn validated_socket_path(raw: &str) -> Option<PathBuf> {
-    use std::path::Component;
     let raw = raw.trim();
-    if raw.is_empty() || raw.contains('\0') {
+    // This is a Unix socket setting even on hosts without Unix transport.
+    // Host-native Path parsing would reject /run/... on Windows, or normalize
+    // away the dot/repeated-separator components this contract must refuse.
+    let relative = raw.strip_prefix('/')?;
+    if raw.contains(['\0', '\\'])
+        || relative
+            .split('/')
+            .any(|part| part.is_empty() || matches!(part, "." | ".."))
+    {
         return None;
     }
-    let path = std::path::Path::new(raw);
-    if !path.is_absolute() {
-        return None;
-    }
-    let mut clean = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::RootDir => clean.push(Component::RootDir.as_os_str()),
-            Component::Normal(part) => clean.push(part),
-            Component::Prefix(_) | Component::CurDir | Component::ParentDir => return None,
-        }
-    }
-    // `components()` silently drops interior `.` and repeated `/`; insist the
-    // value was already in that normal form so what we connect to is what
-    // the operator wrote.
-    (clean.as_os_str() == path.as_os_str() && clean.file_name().is_some()).then_some(clean)
+    Some(PathBuf::from(raw))
 }
 
 impl ComputerState {
@@ -696,7 +688,7 @@ impl ClientParser {
 // Handshakes
 // ---------------------------------------------------------------------------
 
-#[cfg_attr(not(unix), allow(dead_code))]
+#[cfg(unix)]
 async fn read_reason<S: AsyncRead + Unpin>(s: &mut S) -> String {
     let Ok(len) = s.read_u32().await else {
         return String::new();
@@ -710,7 +702,7 @@ async fn read_reason<S: AsyncRead + Unpin>(s: &mut S) -> String {
 /// send a shared `ClientInit`, so each viewer gets its own connection without
 /// disconnecting the others. After this returns, the next upstream bytes are
 /// `ServerInit`.
-#[cfg_attr(not(unix), allow(dead_code))]
+#[cfg(unix)]
 pub(crate) async fn upstream_handshake<S: AsyncRead + AsyncWrite + Unpin>(
     s: &mut S,
 ) -> Result<(), String> {
@@ -1141,7 +1133,7 @@ async fn computer_status(State(state): State<RouteState>, headers: HeaderMap) ->
     let (_, seq) = state.computer.events_since(u64::MAX);
     Json(json!({
         "display": {
-            "available": display_socket_present(&state.computer),
+            "available": display_socket_present(&state.computer).await,
             "attached": state.computer.inner.attached.load(Ordering::Relaxed),
             "idle_close_seconds": state.computer.inner.idle_close.as_secs(),
         },
@@ -1156,11 +1148,12 @@ async fn computer_status(State(state): State<RouteState>, headers: HeaderMap) ->
     .into_response()
 }
 
-fn display_socket_present(computer: &ComputerState) -> bool {
+async fn display_socket_present(computer: &ComputerState) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::FileTypeExt;
-        std::fs::metadata(&computer.inner.socket_path)
+        tokio::fs::metadata(&computer.inner.socket_path)
+            .await
             .map(|m| m.file_type().is_socket())
             .unwrap_or(false)
     }

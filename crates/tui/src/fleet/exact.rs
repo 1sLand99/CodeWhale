@@ -106,6 +106,8 @@ pub(crate) fn fleet_search_roots(workspace: &std::path::Path) -> Vec<FleetSearch
 /// `config` is the session config the caller preflights with: inheriting
 /// members resolve against it at this point, immediately before the same
 /// config preflights the frozen routes, so a receipt names the route that ran.
+///
+/// Synchronous file loading: async callers must run this on the blocking pool.
 pub(crate) fn load_fleet_document(
     name: &str,
     workspace: &std::path::Path,

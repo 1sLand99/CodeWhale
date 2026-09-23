@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:83d705f2dca6 -->
+<!-- source: README.md sha256:bbb8bfb61e57 -->
 # Codewhale
 
 Codewhale é um agente de código aberto que lê seu projeto, edita arquivos, executa comandos e verifica o próprio trabalho usando um modelo hospedado ou local à sua escolha. Comece com uma tarefa no terminal. Para um trabalho maior, distribua partes do trabalho entre agentes com diferentes modelos e funções.
@@ -27,7 +27,7 @@ O instalador seleciona a versão publicada mais recente. O [histórico de altera
 
 No Windows, baixe o instalador ou arquivo correspondente em [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases/latest). Para atualizar uma instalação direta existente, execute `codewhale update`, ou `codewhale update --check` apenas para verificar. O atualizador mostra o caminho do executável e preserva builds mais recentes. npm e Cargo são opções secundárias; consulte o [guia de instalação](docs/INSTALL.md) para migrar de um gerenciador de pacotes e configurar PATH.
 
-Na primeira execução, o Codewhale ajuda você a conectar um provedor ou a configurar o Codewhale offline. As respostas exigem um modelo hospedado ou local conectado. O Codewhale também oferece suporte a npm e Cargo como opções secundárias de distribuição, além de Docker, Nix, Scoop, Android/Termux e um espelho CNB opcional. Instalações existentes feitas por gerenciadores de pacotes recebem instruções de migração. Consulte a [ajuda de instalação e PATH](docs/INSTALL.md).
+A primeira execução abre direto no compositor; não há um assistente de configuração. As respostas do modelo exigem um modelo hospedado ou local conectado: até que haja um, a tela inicial mostra "no model connected". Execute `/provider` (ou pressione F3) para adicionar uma chave hospedada ou escolher um runtime local. Se o Ollama já estiver em execução com um modelo de chat, o Codewhale muda para ele sozinho. O Codewhale também oferece suporte a npm e Cargo como opções secundárias de distribuição, além de Docker, Nix, Scoop, Android/Termux e um espelho CNB opcional. Instalações existentes feitas por gerenciadores de pacotes recebem instruções de migração. Consulte a [ajuda de instalação e PATH](docs/INSTALL.md).
 
 O preenchimento automático com Tab é ativado com um comando por shell — `codewhale completion bash|zsh|fish|powershell|elvish`. Consulte o [preenchimento automático do shell](docs/INSTALL.md#8-shell-completions).
 
