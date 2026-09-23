@@ -8622,9 +8622,16 @@ mod tests {
 
         widget.render(area, &mut buf);
         let rendered = buffer_text(&buf, area);
-        assert!(rendered.contains("REPO LAW"), "{rendered}");
+        assert!(rendered.contains("Repo rule"), "{rendered}");
         assert!(rendered.contains("Repository constitution"), "{rendered}");
-        assert!(rendered.contains("approval-gated postures"), "{rendered}");
+        assert!(
+            rendered.contains("This repo's constitution asks you to confirm this change."),
+            "{rendered}"
+        );
+        // §19: the card says constitution and permissions, never law/posture.
+        for retired in ["REPO LAW", "Repository law", "posture"] {
+            assert!(!rendered.contains(retired), "{retired}: {rendered}");
+        }
         assert!(rendered.contains("Cargo.toml"), "{rendered}");
         assert!((0..area.height).any(|y| {
             let cell = &buf[(1, y)];

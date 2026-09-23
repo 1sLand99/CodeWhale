@@ -50,7 +50,7 @@ RULES: list[tuple[str, str, re.Pattern[str]]] = [
     ("Fleet mode", "Operate", re.compile(r"\bfleet mode\b", re.I)),
     ("operator", "Coordinator (or Operate for the mode)", re.compile(r"\boperator\b", re.I)),
     # §19 permissions
-    ("posture", "Permissions", re.compile(r"\bposture\b", re.I)),
+    ("posture", "Permissions", re.compile(r"\bpostures?\b", re.I)),
     ("approval policy", "Permissions", re.compile(r"\b(approval|permission) policy\b", re.I)),
     # §16 / §19 Fleet and agents
     ("roster", "Fleet", re.compile(r"\broster\b", re.I)),
