@@ -24,9 +24,13 @@ quieter, and Fleet runs can be checked before they spend anything.
 - A provider response that ends cleanly with no text and no tool call is
   retried before the turn fails, and the failure names how many retries ran
   ([#6310](https://github.com/Hmbown/Codewhale/issues/6310)).
-- The context meter, the compaction gate, preflight, `/context` and turn
-  receipts show one pressure number instead of disagreeing
+- The context meter, the point where Codewhale makes room, preflight,
+  `/context` and turn receipts show one pressure number instead of disagreeing
   ([#6407](https://github.com/Hmbown/Codewhale/pull/6407)).
+- Continuing a conversation that is already open no longer adds a second
+  thread, and a fork keeps its own session file, so autosave on one side no
+  longer leaves the other unloadable
+  ([#6406](https://github.com/Hmbown/Codewhale/pull/6406), thanks @gaord).
 - Upgrading Codewhale no longer turns off the built-in Computer Use. Each build
   writes the built-in bundle to its own directory, so an upgrade used to present
   it as never reviewed and disabled. Now the review and enablement carry to the
@@ -46,7 +50,7 @@ quieter, and Fleet runs can be checked before they spend anything.
 - Hooks treat `bash`, `Bash` and `exec_shell` as one tool in `tool_name`
   conditions, so the documented example fires.
 - macOS no longer reports Codewhale's ordinary heap as GPU (IOAccelerator)
-  memory ([#6033](https://github.com/Hmbown/Codewhale/issues/6033)).
+  memory.
 - Code highlighting uses less memory, and long transcripts, the pager and the
   session picker do less work on the event loop; session previews load in the
   background ([#6014](https://github.com/Hmbown/Codewhale/issues/6014)).
@@ -124,7 +128,7 @@ quieter, and Fleet runs can be checked before they spend anything.
 ### CI
 
 - Fork pull requests stay under the macOS runner limit and the Actions cache
-  stays under its cap ([#6406](https://github.com/Hmbown/Codewhale/pull/6406)).
+  stays under its cap.
 - Release candidates and releases share one parity gate, and a release tag
   without a release-candidate receipt is refused.
 - Budget ratchets block same-repository pull requests unless the pull request
