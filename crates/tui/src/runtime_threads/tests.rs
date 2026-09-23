@@ -17083,3 +17083,130 @@ async fn flush_recovery_receipts_drains_every_listed_thread() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn engine_plumbing_items_are_tagged_internal_and_retry_hints_are_dropped() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let mut harness = install_mock_engine(&manager, &thread.id).await;
+    let turn = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "plumbing visibility fixture".to_string(),
+                ..StartTurnRequest::default()
+            },
+        )
+        .await?;
+    assert!(matches!(
+        harness.rx_op.recv().await,
+        Some(Op::SendMessage(TurnSpec { .. }))
+    ));
+    harness
+        .tx_event
+        .send(EngineEvent::TurnStarted {
+            turn_id: "engine_plumbing_visibility".to_string(),
+            created_at: Utc::now(),
+            route: None,
+        })
+        .await?;
+    for status in [
+        "Executing tools sequentially (writes, approvals, or non-parallel tools detected)",
+        "Loaded deferred tool 'load_skill'. Retry the call with its visible schema.",
+        "Reconnecting…",
+    ] {
+        harness.tx_event.send(EngineEvent::status(status)).await?;
+    }
+    harness
+        .tx_event
+        .send(EngineEvent::ToolCallStarted {
+            id: "tool-search-1".to_string(),
+            name: "tool_search".to_string(),
+            input: json!({"query": "skill"}),
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::ToolCallComplete {
+            id: "tool-search-1".to_string(),
+            name: "tool_search".to_string(),
+            result: Ok(crate::tools::spec::ToolResult::success("found load_skill")),
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::ToolCallStarted {
+            id: "hydrate-1".to_string(),
+            name: "load_skill".to_string(),
+            input: json!({}),
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::ToolCallComplete {
+            id: "hydrate-1".to_string(),
+            name: "load_skill".to_string(),
+            result: Ok(
+                crate::tools::spec::ToolResult::success("schema loaded").with_metadata(json!({
+                    "deferred_tool_loaded": true,
+                    "executed": false,
+                })),
+            ),
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::TurnComplete {
+            usage: Usage::default(),
+            parent_route_usage: Usage::default(),
+            routed_usage_dropped_records: 0,
+            status: TurnOutcomeStatus::Completed,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        })
+        .await?;
+    wait_for_terminal_turn(&manager, &turn.id).await?;
+
+    let items = manager.store.list_items_for_turn(&turn.id)?;
+    let visibility = |item: &TurnItemRecord| {
+        item.metadata
+            .as_ref()
+            .and_then(|meta| meta.get("visibility"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    let statuses = items
+        .iter()
+        .filter(|item| item.kind == TurnItemKind::Status)
+        .map(|item| (item.summary.clone(), visibility(item)))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        statuses,
+        vec![
+            (
+                "Executing tools sequentially (writes, approvals, or non-parallel tools detected)"
+                    .to_string(),
+                Some("internal".to_string()),
+            ),
+            ("Reconnecting…".to_string(), None),
+        ],
+        "the model-facing retry hint must not become a user item"
+    );
+    for tool in ["tool_search", "load_skill"] {
+        let item = items
+            .iter()
+            .find(|item| {
+                item.metadata
+                    .as_ref()
+                    .and_then(|meta| meta.get("tool_name"))
+                    .and_then(Value::as_str)
+                    == Some(tool)
+            })
+            .unwrap_or_else(|| panic!("{tool} item persisted"));
+        assert_eq!(visibility(item).as_deref(), Some("internal"), "{tool}");
+    }
+    Ok(())
+}

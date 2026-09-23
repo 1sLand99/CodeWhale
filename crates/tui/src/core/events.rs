@@ -771,6 +771,60 @@ impl Event {
     }
 }
 
+/// Who a [`Event::Status`] line is for once it leaves the engine.
+///
+/// The TUI shows every status in its transient footer, so it needs no
+/// classification. Durable clients (the runtime thread store and anything
+/// that renders its items) do: scheduler, continuation and schema-hydration
+/// lines are engine plumbing, and rendering them as transcript rows buries
+/// the user's actual conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusVisibility {
+    /// Worth a transcript row.
+    User,
+    /// Engine plumbing: keep the receipt, but clients collapse it by default.
+    Internal,
+    /// Addressed to the model, which already receives it in a tool result.
+    /// Never persist it as a user-facing item.
+    ModelOnly,
+}
+
+impl StatusVisibility {
+    /// Wire value carried in runtime item metadata (`metadata.visibility`).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Internal => "internal",
+            Self::ModelOnly => "model_only",
+        }
+    }
+}
+
+/// Classify an engine status line for durable clients.
+///
+/// Matches the engine's own fixed status wording (turn scheduler, step
+/// continuation, deferred-tool hydration). Unknown lines stay user-visible,
+/// so a new status is never silently hidden.
+#[must_use]
+pub fn status_visibility(message: &str) -> StatusVisibility {
+    let message = message.trim();
+    if message.starts_with("Loaded deferred tool '")
+        && message.contains("Retry the call with its visible schema")
+    {
+        return StatusVisibility::ModelOnly;
+    }
+    let scheduler_row = message.starts_with("Executing tools sequentially")
+        || (message.starts_with("Executing ") && message.ends_with(" parallel chunk(s)"));
+    let continuation_row = message.starts_with("Continuing — ")
+        || message.starts_with("Continuing active goal (pass ");
+    if scheduler_row || continuation_row {
+        StatusVisibility::Internal
+    } else {
+        StatusVisibility::User
+    }
+}
+
 /// Which permission gate produced a [`Event::ToolGateDecision`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolGate {
@@ -860,5 +914,46 @@ mod tool_projection_warning_tests {
         );
         assert!(bounded.iter().all(|name| !name.contains('\n')));
         assert!(tool_projection_warning_tool_list(&bounded, names.len()).ends_with(", …"));
+    }
+}
+
+#[cfg(test)]
+mod status_visibility_tests {
+    use super::{StatusVisibility, status_visibility};
+
+    #[test]
+    fn engine_plumbing_statuses_are_not_user_rows() {
+        for internal in [
+            "Executing tools sequentially (writes, approvals, or non-parallel tools detected)",
+            "Executing 3 read-only tools in 2 parallel chunk(s)",
+            "Continuing — tool results",
+            "Continuing — queued steer input",
+            "Continuing active goal (pass 2 this turn, 5 total)",
+        ] {
+            assert_eq!(
+                status_visibility(internal),
+                StatusVisibility::Internal,
+                "{internal}"
+            );
+        }
+        for model_only in [
+            "Loaded deferred tool 'load_skill'. Retry the call with its visible schema.",
+            "Loaded deferred tool 'load_skill' after resolving 'skill'. Retry the call with its visible schema.",
+        ] {
+            assert_eq!(
+                status_visibility(model_only),
+                StatusVisibility::ModelOnly,
+                "{model_only}"
+            );
+        }
+        for user in [
+            "Request cancelled",
+            "Reconnecting…",
+            "Goal set; starting goal work.",
+            "Turn ending with 1 detached sub-agent(s) still running in the background; they'll report when done.",
+        ] {
+            assert_eq!(status_visibility(user), StatusVisibility::User, "{user}");
+        }
+        assert_eq!(StatusVisibility::Internal.as_str(), "internal");
     }
 }

@@ -11840,11 +11840,19 @@ impl RuntimeThreadManager {
                         // re-emit provider tool_calls. Without it a restart
                         // replays empty id/name/arguments shells that strict
                         // OpenAI-compatible endpoints reject (#5823).
-                        metadata: Some(json!({
-                            "tool_use_id": id.clone(),
-                            "tool_name": name.clone(),
-                            "tool_input": input_str,
-                        })),
+                        metadata: Some({
+                            let mut meta = json!({
+                                "tool_use_id": id.clone(),
+                                "tool_name": name.clone(),
+                                "tool_input": input_str,
+                            });
+                            // Tool discovery is engine plumbing, not work the
+                            // user asked for: clients collapse it by default.
+                            if crate::core::engine::tool_catalog::is_tool_search_tool(&name) {
+                                meta["visibility"] = json!(INTERNAL_ITEM_VISIBILITY);
+                            }
+                            meta
+                        }),
                         artifact_refs: Vec::new(),
                         started_at: Some(Utc::now()),
                         ended_at: None,
@@ -11961,11 +11969,27 @@ impl RuntimeThreadManager {
                                         if let Some(started) =
                                             item.metadata.as_ref().and_then(Value::as_object)
                                         {
-                                            for key in ["tool_use_id", "tool_name", "tool_input"] {
+                                            for key in [
+                                                "tool_use_id",
+                                                "tool_name",
+                                                "tool_input",
+                                                "visibility",
+                                            ] {
                                                 if let Some(value) = started.get(key) {
                                                     obj.insert(key.to_string(), value.clone());
                                                 }
                                             }
+                                        }
+                                        // A first call to a deferred tool only
+                                        // loads its schema; the model retries.
+                                        // That hand-off is not a user-facing step.
+                                        if obj.get("deferred_tool_loaded").and_then(Value::as_bool)
+                                            == Some(true)
+                                        {
+                                            obj.insert(
+                                                "visibility".to_string(),
+                                                json!(INTERNAL_ITEM_VISIBILITY),
+                                            );
                                         }
                                         obj.insert("tool_result_for".to_string(), json!(id));
                                         obj.insert("is_error".to_string(), json!(!output.success));
@@ -12680,6 +12704,14 @@ impl RuntimeThreadManager {
                     drop(projection);
                 }
                 EngineEvent::Status { message } => {
+                    // Model-facing hints (deferred-tool retry) already reach
+                    // the model in the tool result; they are not user items.
+                    // Scheduler/continuation rows keep a receipt tagged so
+                    // clients collapse them by default.
+                    let visibility = crate::core::events::status_visibility(&message);
+                    if visibility == crate::core::events::StatusVisibility::ModelOnly {
+                        continue;
+                    }
                     let item = TurnItemRecord {
                         schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
                         id: format!("item_{}", &Uuid::new_v4().to_string()[..8]),
@@ -12688,7 +12720,8 @@ impl RuntimeThreadManager {
                         status: TurnItemLifecycleStatus::Completed,
                         summary: summarize_text(&message, SUMMARY_LIMIT),
                         detail: Some(message.clone()),
-                        metadata: None,
+                        metadata: (visibility == crate::core::events::StatusVisibility::Internal)
+                            .then(|| json!({ "visibility": visibility.as_str() })),
                         artifact_refs: Vec::new(),
                         started_at: Some(Utc::now()),
                         ended_at: Some(Utc::now()),
@@ -13635,6 +13668,11 @@ fn parse_mode_opt(mode: &str) -> Option<AppMode> {
 fn parse_mode(mode: &str) -> AppMode {
     parse_mode_opt(mode).unwrap_or(AppMode::Agent)
 }
+
+/// `metadata.visibility` value for runtime items that are engine plumbing
+/// (scheduler rows, tool discovery, deferred-schema hand-offs). Clients
+/// collapse these by default; the durable receipt is kept.
+pub const INTERNAL_ITEM_VISIBILITY: &str = "internal";
 
 fn tool_kind_for_name(name: &str) -> TurnItemKind {
     let lower = name.to_ascii_lowercase();
