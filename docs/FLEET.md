@@ -44,6 +44,7 @@ Workflow authoring, see [fleet + Workflow Tutorial](FLEET_WORKFLOW_TUTORIAL.md).
 
 ```sh
 codewhale fleet init
+codewhale fleet run tasks.json --check   # validate only; nothing is created or launched
 codewhale fleet run tasks.json --max-workers 4
 codewhale fleet status
 codewhale fleet inspect <worker-id>
@@ -480,7 +481,11 @@ next recursive ring rather than trying to show the whole tree at once.
 
 ## Task Spec
 
-`codewhale fleet run` accepts JSON or TOML. A minimal JSON spec:
+`codewhale fleet run` accepts JSON or TOML. `codewhale fleet run <spec> --check`
+runs every validation a real run performs (spec shape, roster members, agent
+profiles, model routes) and prints the same warnings, then stops: no ledger is
+created, no run is written, no worker starts, and nothing is spent. A minimal
+JSON spec:
 
 ```json
 {

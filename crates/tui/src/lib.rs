@@ -683,6 +683,10 @@ struct FleetRunArgs {
     /// Schedule once and return instead of staying in the manager loop
     #[arg(long, hide = true, default_value_t = false)]
     once: bool,
+    /// Validate the spec (shape, roster members, profiles, model routes)
+    /// without creating a run or starting any worker
+    #[arg(long, default_value_t = false)]
+    check: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -3347,6 +3351,31 @@ async fn run_fleet_command(workspace: &Path, config: &Config, args: FleetArgs) -
                 availability,
             ));
         }
+    }
+
+    // `fleet run --check` must not conjure the ledger it would write to, so
+    // it validates against a ledger-free manager view before `open` below.
+    if let FleetCommand::Run(run_args) = &args.command
+        && run_args.check
+    {
+        initialize_cloud_facts(config);
+        let check = FleetManager::check_task_spec_path_in(
+            workspace,
+            fleet_config,
+            config.default_model(),
+            config.clone(),
+            &run_args.task_spec,
+        )?;
+        println!(
+            "Fleet spec ok: {} ({} task{}). Nothing was created or launched.",
+            run_args.task_spec.display(),
+            check.task_count,
+            if check.task_count == 1 { "" } else { "s" }
+        );
+        for warning in &check.warnings {
+            println!("warning: {warning}");
+        }
+        return Ok(());
     }
 
     // The configured route is the operator: fleet workers without a
