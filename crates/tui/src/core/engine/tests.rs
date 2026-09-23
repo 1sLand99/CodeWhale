@@ -2599,6 +2599,92 @@ async fn initial_goal_failure_projects_blocked_state() {
     run_task.await.expect("engine task");
 }
 
+/// A goal the runtime stopped (its turn failed) resumes when the person
+/// writes again; the host still reports Blocked because it only learns of
+/// the resume from this turn's GoalUpdated.
+#[tokio::test]
+async fn user_message_resumes_a_goal_only_the_runtime_blocked() {
+    let objective = "resume after a runtime stop";
+    let model = std::sync::Arc::new(FailingGoalModelClient {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        message: "turn deadline elapsed".to_string(),
+    });
+    let config = goal_custom_route_config();
+    let client: crate::core::model_client::SharedModelClient = model.clone();
+    let (engine, handle) = Engine::new_with_model_client(
+        EngineConfig {
+            model: "local-model".to_string(),
+            snapshots_enabled: false,
+            terminal_chrome_enabled: false,
+            ..EngineConfig::default()
+        },
+        &config,
+        client,
+    );
+    let goal_state = engine.config.goal_state.clone();
+    let run_task = tokio::spawn(engine.run());
+    let settle = || async {
+        tokio::time::timeout(model_turn_event_timeout(), handle.get_session_snapshot())
+            .await
+            .expect("turn did not settle")
+            .expect("session snapshot")
+    };
+
+    handle
+        .send(active_goal_message_op(&config, "start", objective, None))
+        .await
+        .expect("send goal turn");
+    settle().await;
+    let blocked = goal_state.lock().expect("goal lock").snapshot();
+    assert_eq!(blocked.status, "blocked");
+
+    let Op::SendMessage(mut spec) = active_goal_message_op(&config, "continue", objective, None)
+    else {
+        unreachable!()
+    };
+    spec.goal_status = crate::tools::goal::GoalStatus::Blocked;
+    handle
+        .send(Op::SendMessage(spec))
+        .await
+        .expect("send continue");
+    settle().await;
+    assert_eq!(model.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let resumed = goal_state.lock().expect("goal lock").snapshot();
+    assert_ne!(
+        resumed.goal_id, blocked.goal_id,
+        "the continue turn ran as a resumed goal revision"
+    );
+
+    // A blocker the model reported is a judgement: the next message is an
+    // ordinary turn and the goal stays blocked on that report.
+    goal_state
+        .lock()
+        .expect("goal lock")
+        .mark_blocked("needs the staging credentials".to_string())
+        .unwrap();
+    let reported = goal_state.lock().expect("goal lock").snapshot();
+    let Op::SendMessage(mut spec) = active_goal_message_op(&config, "continue", objective, None)
+    else {
+        unreachable!()
+    };
+    spec.goal_status = crate::tools::goal::GoalStatus::Blocked;
+    handle
+        .send(Op::SendMessage(spec))
+        .await
+        .expect("send ordinary turn");
+    settle().await;
+    let after = goal_state.lock().expect("goal lock").snapshot();
+    assert_eq!(after.status, "blocked");
+    assert_eq!(after.goal_id, reported.goal_id);
+    assert_eq!(
+        after.blocker.as_deref(),
+        Some("needs the staging credentials")
+    );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
+}
+
 #[tokio::test]
 async fn initial_goal_interruption_keeps_goal_active() {
     let objective = "keep goal active after interrupted turn";

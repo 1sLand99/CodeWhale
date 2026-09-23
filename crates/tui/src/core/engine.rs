@@ -4403,7 +4403,7 @@ impl Engine {
         let snapshot = match self.config.goal_state.lock() {
             Ok(mut state) => {
                 if state.is_active()
-                    && let Err(err) = state.mark_blocked(message.clone())
+                    && let Err(err) = state.mark_runtime_blocked(message.clone())
                 {
                     tracing::warn!("failed to mark goal continuation blocked: {err}");
                     return;
@@ -4431,6 +4431,37 @@ impl Engine {
         self.emit_session_updated().await;
         let _ = self.tx_event.send(Event::GoalUpdated { snapshot }).await;
         let _ = self.tx_event.send(Event::status(message)).await;
+    }
+
+    /// Resume the shared goal when its only blocker was a runtime stop and it
+    /// is the objective this turn names; publish the change like any other
+    /// goal transition.
+    async fn resume_runtime_blocked_goal(&mut self, objective: Option<&str>) -> bool {
+        let snapshot = match self.config.goal_state.lock() {
+            Ok(mut state) => {
+                if normalized_goal_objective(state.objective())
+                    != normalized_goal_objective(objective)
+                    || !state.resume_after_runtime_block()
+                {
+                    return false;
+                }
+                state.snapshot()
+            }
+            Err(err) => {
+                tracing::warn!("goal state lock poisoned while resuming a goal: {err}");
+                return false;
+            }
+        };
+        self.config.goal_status = GoalStatus::Active;
+        self.emit_session_updated().await;
+        let _ = self.tx_event.send(Event::GoalUpdated { snapshot }).await;
+        let _ = self
+            .tx_event
+            .send(Event::status(
+                "Goal resumed: your message continues the work the earlier turn stopped",
+            ))
+            .await;
+        true
     }
 
     /// Pause a still-active goal with an inspectable reason and publish every
@@ -5089,6 +5120,21 @@ impl Engine {
             }
         }
 
+        // A person writing to a goal that only the runtime stopped (a failed
+        // or timed-out continuation) is continuing the work: resume it as a
+        // new revision instead of running a goalless turn against a stale
+        // blocker. Blockers the model or user reported stay until an explicit
+        // resume, and automated inputs never resume anything.
+        let goal_status = if provenance == UserInputProvenance::ExternalUser
+            && goal_status == GoalStatus::Blocked
+            && self
+                .resume_runtime_blocked_goal(goal_objective.as_deref())
+                .await
+        {
+            GoalStatus::Active
+        } else {
+            goal_status
+        };
         let input_policy = effective_input_policy(
             provenance,
             mode,
