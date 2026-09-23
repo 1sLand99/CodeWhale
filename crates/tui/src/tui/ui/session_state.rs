@@ -916,6 +916,16 @@ pub(crate) fn keep_failed_immediate_submit_echo(
     );
     // Composer stays empty — HistoryCell::User already holds the turn.
     let _ = message;
+    // U1: a keyless first message must leave a visible, durable recovery,
+    // not only a footer status the next config acknowledgement can replace.
+    // Say what happened once in the transcript and open the provider picker,
+    // as a rejected environment key already does.
+    app.add_message(HistoryCell::System {
+        content: "No model connected, so this message was not sent. Choose a provider, then send it again."
+            .to_string(),
+    });
+    app.onboarding_needs_api_key = true;
+    app.onboarding = OnboardingState::Provider;
     let status = format!("Message not sent ({error})");
     app.status_message = Some(status.clone());
     app.set_sticky_status(
@@ -1441,6 +1451,38 @@ mod launch_resume_tests {
             status.contains("Resume failed"),
             "the status says why: {status}"
         );
+    }
+
+    /// U1: a keyless first message leaves one durable transcript line, opens
+    /// the provider picker, and a later routine acknowledgement ("Auto-
+    /// compaction enabled") does not wipe the error from the footer.
+    #[test]
+    fn keyless_submit_leaves_a_durable_recovery_that_config_acks_cannot_erase() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            crate::test_support::test_tui_options(dir.path()),
+            &Config::default(),
+        );
+        let cells_before = app.history.len();
+        keep_failed_immediate_submit_echo(
+            &mut app,
+            crate::tui::app::QueuedMessage::new("hello".to_string(), None),
+            "DeepSeek API key not found",
+        );
+        assert_eq!(app.history.len(), cells_before + 1);
+        assert!(matches!(
+            app.history.last(),
+            Some(HistoryCell::System { content }) if content.starts_with("No model connected")
+        ));
+        assert_eq!(app.onboarding, OnboardingState::Provider);
+        assert!(app.onboarding_needs_api_key);
+
+        app.status_message = Some("Auto-compaction enabled".to_string());
+        let shown = app
+            .active_status_toast(crate::tui::underwater::ShellPhase::Idle)
+            .expect("footer notice");
+        assert_eq!(shown.level, StatusToastLevel::Error);
+        assert!(shown.text.contains("Message not sent"), "{}", shown.text);
     }
 
     /// The prominent new-session entry begins a fresh session in place.

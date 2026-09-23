@@ -3137,15 +3137,21 @@ impl Engine {
                             .await;
                     }
                     Op::SetCompaction { config } => {
-                        let enabled = config.enabled;
-                        self.config.compaction = config;
-                        let _ = self
-                            .tx_event
-                            .send(Event::status(format!(
-                                "Auto-compaction {}",
-                                if enabled { "enabled" } else { "disabled" }
-                            )))
-                            .await;
+                        // Hosts resend the compaction config on every route
+                        // or model sync. An unchanged config is not news; its
+                        // acknowledgement used to overwrite a real error in
+                        // the footer (U1).
+                        if self.config.compaction != config {
+                            let enabled = config.enabled;
+                            self.config.compaction = config;
+                            let _ = self
+                                .tx_event
+                                .send(Event::status(format!(
+                                    "Auto-compaction {}",
+                                    if enabled { "enabled" } else { "disabled" }
+                                )))
+                                .await;
+                        }
                     }
                     Op::SetStreamChunkTimeout { timeout_secs } => {
                         self.config.stream_chunk_timeout = Duration::from_secs(timeout_secs);

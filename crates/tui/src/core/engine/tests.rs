@@ -16360,6 +16360,57 @@ async fn same_turn_fork_carries_the_updated_todo() {
     );
 }
 
+/// U1: hosts resend the compaction config on every model or route sync. An
+/// unchanged config must not produce a status line, which used to overwrite
+/// a real error (the missing-key notice) in the footer.
+#[tokio::test]
+async fn unchanged_compaction_config_is_acknowledged_silently() {
+    let tmp = tempdir().expect("tempdir");
+    let (engine, handle) = Engine::new(
+        EngineConfig {
+            workspace: tmp.path().to_path_buf(),
+            ..Default::default()
+        },
+        &Config::default(),
+    );
+    let current = engine.config.compaction.clone();
+    let run = tokio::spawn(engine.run());
+    handle
+        .send(Op::SetCompaction {
+            config: current.clone(),
+        })
+        .await
+        .expect("send unchanged config");
+    let mut changed = current;
+    changed.enabled = !changed.enabled;
+    let expected = if changed.enabled {
+        "Auto-compaction enabled"
+    } else {
+        "Auto-compaction disabled"
+    };
+    handle
+        .send(Op::SetCompaction { config: changed })
+        .await
+        .expect("send changed config");
+
+    let mut rx = handle.rx_event.write().await;
+    let first_status = loop {
+        let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("status after a real change")
+            .expect("event");
+        if let Event::Status { message } = event {
+            break message;
+        }
+    };
+    assert_eq!(
+        first_status, expected,
+        "the unchanged config produced no status; only the real change did"
+    );
+    drop(rx);
+    run.abort();
+}
+
 #[tokio::test]
 async fn change_mode_op_updates_current_mode_and_emits_status() {
     let tmp = tempdir().expect("tempdir");
