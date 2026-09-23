@@ -2629,6 +2629,12 @@ pub struct SubAgentRuntime {
     pub reasoning_effort: Option<String>,
     pub reasoning_effort_auto: bool,
     pub role_models: HashMap<String, SubagentModelOverride>,
+    /// Operator-approved `provider/model` routes this child may move to when
+    /// its role pin's first request is refused before any work. Set only by
+    /// a role pin that declares them (`[subagents.roles.<role>]
+    /// replacements`); every other route source, including exact Fleet
+    /// bindings and task-level models, keeps it empty and stays exact.
+    pub route_replacements: Vec<SubagentModelOverride>,
     pub context: ToolContext,
     pub allow_shell: bool,
     /// When true, Suggest-level file writes auto-accept for write-capable roles
@@ -2788,6 +2794,7 @@ impl SubAgentRuntime {
             reasoning_effort: None,
             reasoning_effort_auto: false,
             role_models: HashMap::new(),
+            route_replacements: Vec::new(),
             context,
             allow_shell,
             accept_edits: false,
@@ -3101,6 +3108,8 @@ impl SubAgentRuntime {
             reasoning_effort: self.reasoning_effort.clone(),
             reasoning_effort_auto: self.reasoning_effort_auto,
             role_models: self.role_models.clone(),
+            // A descendant earns replacement authority only from its own pin.
+            route_replacements: Vec::new(),
             context: child_context,
             allow_shell: self.allow_shell,
             accept_edits: self.accept_edits,
@@ -5497,6 +5506,29 @@ impl SubAgentManager {
         }
         refresh_usage_note(&mut record.usage);
         self.persist_state_debounced();
+    }
+
+    /// Persist a pre-work route replacement in the worker's existing route
+    /// receipt: the effective provider/model, `role.replacement` as the
+    /// source, and a note naming the original route, reason and attempts.
+    fn record_route_replacement(
+        &mut self,
+        worker_id: &str,
+        provider_id: String,
+        model_id: String,
+        note: String,
+    ) {
+        if let Some(record) = self.worker_records.get_mut(worker_id) {
+            record.spec.model.clone_from(&model_id);
+            if let Some(route) = record.spec.child_route.as_mut() {
+                route.provider_id = provider_id;
+                route.model_id = model_id;
+                route.route_source = SpawnRouteSource::RoleReplacement.as_str().to_string();
+                route.fallback_note = Some(note);
+            }
+            record.updated_at_ms = epoch_millis_now();
+            self.persist_state_debounced();
+        }
     }
 
     fn mark_worker_unreported_usage(&mut self, worker_id: &str) {
@@ -13276,7 +13308,18 @@ async fn run_subagent(
     )
     .await;
 
-    loop {
+    // Route replacement (operator-approved, pre-work only). `runtime` keeps
+    // owning role, grants, tools, scope and budgets; only requests read the
+    // replacement route. It is staged, then installed at the loop head.
+    let mut route_override: Option<SubAgentRuntime> = None;
+    let mut staged_route_override: Option<SubAgentRuntime> = None;
+    let mut replacements_tried = 0usize;
+    let mut skipped_replacements: Vec<String> = Vec::new();
+
+    'subagent: loop {
+        if let Some(next) = staged_route_override.take() {
+            route_override = Some(next);
+        }
         match subagent_loop_boundary(work_max_steps, steps, runtime.cancel_token.is_cancelled()) {
             // Cancellation must win even after the final allowed tool step.
             // Otherwise a turn-end park at that seam is mislabeled as step
@@ -13397,9 +13440,10 @@ async fn run_subagent(
         // its own `work_update` calls returned, which are already in
         // `messages`. Nothing synthetic is appended per step.
         let mut request_messages = messages.clone();
-        let request_route = runtime
+        let route_runtime = route_override.as_ref().unwrap_or(runtime);
+        let request_route = route_runtime
             .client
-            .effective_route_envelope(&runtime.model, chrono::Utc::now());
+            .effective_route_envelope(&route_runtime.model, chrono::Utc::now());
         let image_input = runtime
             .api_config
             .as_deref()
@@ -13420,9 +13464,9 @@ async fn run_subagent(
             &request_route.model,
         );
         let request = MessageRequest {
-            model: runtime.model.clone(),
+            model: route_runtime.model.clone(),
             messages: request_messages,
-            max_tokens: runtime
+            max_tokens: route_runtime
                 .client
                 .effective_max_output_tokens(&request_route.model),
             system: Some(request_system.clone()),
@@ -13434,7 +13478,7 @@ async fn run_subagent(
             },
             metadata: None,
             thinking: None,
-            reasoning_effort: runtime.reasoning_effort.clone(),
+            reasoning_effort: route_runtime.reasoning_effort.clone(),
             stream: Some(false),
             temperature: None,
             top_p: None,
@@ -13508,7 +13552,7 @@ async fn run_subagent(
                 break;
             }
             api = request_subagent_model_response_with_retries(
-                runtime,
+                route_runtime,
                 &agent_id,
                 steps,
                 max_steps,
@@ -13535,6 +13579,83 @@ async fn run_subagent(
                                 // request died with zero completed work —
                                 // fail plainly, exactly as before.
                                 if steps <= 1 {
+                                    // Nothing of this run has executed yet,
+                                    // so an operator-approved route may take
+                                    // the same request; never after work.
+                                    if let Some(why) = route_replacement_reason(&err) {
+                                        while let Some(route) =
+                                            runtime.route_replacements.get(replacements_tried)
+                                        {
+                                            replacements_tried += 1;
+                                            let to = format!(
+                                                "{}/{}",
+                                                route.provider.as_deref().unwrap_or_default(),
+                                                route.model
+                                            );
+                                            match replacement_route_runtime(runtime, route) {
+                                                Ok(next) => {
+                                                    let from = format!(
+                                                        "{}/{}",
+                                                        route_runtime.client.api_provider().as_str(),
+                                                        route_runtime.model
+                                                    );
+                                                    let detail: String = route_runtime
+                                                        .client
+                                                        .redact_model_bound_text(&format!("{err}"))
+                                                        .chars()
+                                                        .take(160)
+                                                        .collect();
+                                                    let mut note = format!(
+                                                        "{from} refused the first request before any work ({why}: {detail}); moved to approved replacement {to} (attempt {replacements_tried} of {})",
+                                                        runtime.route_replacements.len()
+                                                    );
+                                                    if !skipped_replacements.is_empty() {
+                                                        note.push_str("; skipped ");
+                                                        note.push_str(&skipped_replacements.join("; "));
+                                                    }
+                                                    let note: String = note.chars().take(480).collect();
+                                                    let provider_id = next
+                                                        .api_config
+                                                        .as_ref()
+                                                        .map(|config| {
+                                                            config.provider_identity_for(
+                                                                next.client.api_provider(),
+                                                            )
+                                                        })
+                                                        .unwrap_or_else(|| {
+                                                            next.client.api_provider().as_str().to_string()
+                                                        });
+                                                    runtime.manager.write().await.record_route_replacement(
+                                                        &agent_id,
+                                                        provider_id,
+                                                        next.model.clone(),
+                                                        note.clone(),
+                                                    );
+                                                    record_agent_progress(
+                                                        runtime,
+                                                        &agent_id,
+                                                        AgentProgressEventMeta::new(
+                                                            AgentWorkerStatus::Running,
+                                                        )
+                                                        .with_step(0),
+                                                        format!("Route replaced: {note}"),
+                                                    );
+                                                    staged_route_override = Some(next);
+                                                    steps = 0;
+                                                    continue 'subagent;
+                                                }
+                                                Err(unavailable) => skipped_replacements.push(
+                                                    format!("{to} ({})", unavailable.chars().take(120).collect::<String>()),
+                                                ),
+                                            }
+                                        }
+                                        if !skipped_replacements.is_empty() {
+                                            return Err(err.context(format!(
+                                                "no approved replacement route could take the task: {}",
+                                                skipped_replacements.join("; ")
+                                            )));
+                                        }
+                                    }
                                     return Err(err);
                                 }
                                 (
@@ -15381,6 +15502,9 @@ enum SpawnRouteSource {
     /// back to the session route loudly (receipt note names the pin and
     /// the reason) instead of failing (#5529 mode 2).
     SessionFallback,
+    /// The role pin's first request was refused before any work and the
+    /// child moved to an operator-approved replacement route.
+    RoleReplacement,
 }
 
 impl SpawnRouteSource {
@@ -15393,6 +15517,7 @@ impl SpawnRouteSource {
             Self::RoleDefault => "role.default",
             Self::RunModel => "run.model",
             Self::SessionFallback => "session.fallback",
+            Self::RoleReplacement => "role.replacement",
         }
     }
 }
@@ -15579,6 +15704,9 @@ async fn bind_spawn_model_route(
     // task-level pins stay exact — only saved-profile rot falls back.
     let mut member = member;
     let mut fallback_note = None;
+    // Replacement authority belongs to one role pin, never to a descendant
+    // that inherited this runtime or chose its route another way.
+    runtime.route_replacements.clear();
     match bind_profile_provider(runtime, member)? {
         MemberProviderBind::Bound => {}
         MemberProviderBind::Unavailable {
@@ -15630,6 +15758,7 @@ async fn bind_spawn_model_route(
             )?),
             source: SpawnRouteSource::RolePin,
         };
+        runtime.route_replacements = configured_route_replacements(runtime, request)?;
         manual_pin = Some(pin);
         selection
     } else if let Some(model) = bind_shortlisted_task_model(runtime, request)? {
@@ -16256,6 +16385,102 @@ fn configured_manual_spawn_model(
         return Ok(None);
     }
     Ok(Some(pin.clone()))
+}
+
+/// Upper bound on declared replacement routes: each is tried at most once, so
+/// this also bounds the extra first requests one refused pin can cost.
+const MAX_ROUTE_REPLACEMENTS: usize = 3;
+
+/// The replacement routes declared beside the role pin this spawn resolved.
+/// Misconfiguration fails loud at spawn, not at the failure it would cover.
+fn configured_route_replacements(
+    runtime: &SubAgentRuntime,
+    request: &SpawnRequest,
+) -> Result<Vec<SubagentModelOverride>, ToolError> {
+    let Some(config) = runtime.api_config.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let overrides = config.subagent_model_overrides();
+    let Some((key, _)) = configured_role_model_override(
+        &overrides,
+        request.assignment.role.as_deref(),
+        &request.agent_type,
+    ) else {
+        return Ok(Vec::new());
+    };
+    let replacements = config.subagent_route_replacements(&key);
+    if replacements.len() > MAX_ROUTE_REPLACEMENTS {
+        return Err(ToolError::invalid_input(format!(
+            "subagents.roles.{key}.replacements lists {} routes; at most {MAX_ROUTE_REPLACEMENTS} are allowed",
+            replacements.len()
+        )));
+    }
+    for route in &replacements {
+        let Some(provider) = route.provider.as_deref().filter(|p| !p.trim().is_empty()) else {
+            return Err(ToolError::invalid_input(format!(
+                "subagents.roles.{key}.replacements entries must name `provider/model`, so the provider that may receive the task is explicit; got {:?}",
+                route.model
+            )));
+        };
+        if route.model.trim().is_empty()
+            || route.model.trim().eq_ignore_ascii_case("auto")
+            || route.model.chars().any(char::is_control)
+        {
+            return Err(ToolError::invalid_input(format!(
+                "subagents.roles.{key}.replacements entry for {provider:?} must name one exact model"
+            )));
+        }
+        config
+            .resolve_provider_pin_identity(provider)
+            .map_err(ToolError::invalid_input)?;
+    }
+    Ok(replacements)
+}
+
+/// Why a first-request refusal may move a child to an approved replacement
+/// route, or `None` when it must not. Typed only: an arbitrary message that
+/// mentions credits is not quota evidence. Content-policy, context-length and
+/// invalid-request refusals would recur on any route (or would shop content
+/// to another provider), and Codewhale's own permission denials never reach
+/// this seam as provider errors.
+fn route_replacement_reason(error: &anyhow::Error) -> Option<&'static str> {
+    match error.downcast_ref::<LlmError>()? {
+        LlmError::QuotaExhausted(_) => Some("quota exhausted"),
+        LlmError::AuthenticationError(_) => Some("credentials rejected"),
+        LlmError::AuthorizationError(_) => Some("provider refused authorization"),
+        LlmError::ModelError(_) => Some("model unavailable"),
+        _ => None,
+    }
+}
+
+/// Bind `base` to one approved replacement route. Only the request route
+/// changes: role, grants, tool scope, budgets and workspace stay `base`'s.
+fn replacement_route_runtime(
+    base: &SubAgentRuntime,
+    route: &SubagentModelOverride,
+) -> Result<SubAgentRuntime, String> {
+    let mut next = base.clone();
+    let provider = route.provider.as_deref().unwrap_or_default();
+    match try_bind_spawn_provider(&mut next, provider).map_err(|error| error.to_string())? {
+        MemberProviderBind::Bound => {}
+        MemberProviderBind::Unavailable {
+            provider_id,
+            reason,
+        } => return Err(format!("{provider_id} unavailable: {reason}")),
+    }
+    let model = normalize_bound_subagent_model(&route.model, "replacement", &next.client)
+        .map_err(|error| error.to_string())?;
+    let model = ensure_subagent_model_for_provider(&next, &ModelRoute::Fixed(model.clone()), model)
+        .map_err(|error| error.to_string())?;
+    if let Some(rebound) = next
+        .client
+        .rebound_for_model_protocol(next.api_config.as_deref(), &model)
+        .map_err(|error| format!("{error:#}"))?
+    {
+        next.client = rebound;
+    }
+    next.model = model;
+    Ok(next)
 }
 
 /// One alias/default precedence for manual Config pins and legacy role defaults.
