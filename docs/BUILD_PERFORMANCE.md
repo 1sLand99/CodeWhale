@@ -349,6 +349,17 @@ TUI-DOG-017) — left as they are.
 6. Then `fleet/`, `tools/`, `core/engine` — each behind the crate boundary
    its tests already respect, measured with the A0 table.
 
+## One build per machine
+
+`scripts/dev-cargo.sh` and `scripts/dev-test.sh` hold an exclusive machine-wide
+build lock (`<cache root>/build.lock`, via `scripts/build-lock.py`) for the
+whole Cargo invocation. Cargo's own lock is per target directory, so two
+agents building into different target dirs still ran concurrently and exhausted
+memory. A second build waits and prints who holds the lock. Set
+`CODEWHALE_BUILD_LOCK=0` to skip it. The lock is advisory: Cargo started
+directly, outside these scripts, does not take it, and on platforms without
+`fcntl` (Windows) the build runs unlocked after a warning.
+
 ## What changed (this lane)
 
 1. **`scripts/dev-cache.sh` / `scripts/dev-cargo.sh` activate the measured
