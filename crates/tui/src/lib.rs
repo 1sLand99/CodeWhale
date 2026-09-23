@@ -4499,6 +4499,10 @@ async fn run_doctor(
             .bold()
     );
     println!("{}", "==================".truecolor(sky_r, sky_g, sky_b));
+    // Verdict first (U7): the answer and the next step, before the detail.
+    let (verdict_state, _) = doctor_setup_state(config, workspace);
+    let verdict = doctor_verdict(&verdict_state);
+    println!("{}", verdict.truecolor(aqua_r, aqua_g, aqua_b).bold());
     println!();
 
     // Version info
@@ -5444,12 +5448,35 @@ async fn run_doctor(
     }
 
     println!();
-    println!(
-        "{}",
-        "All checks complete!"
-            .truecolor(aqua_r, aqua_g, aqua_b)
-            .bold()
+    println!("{}", verdict.truecolor(aqua_r, aqua_g, aqua_b).bold());
+}
+
+/// Doctor's one-line answer: ready, or the single next step (U7). Readiness
+/// is the setup lane's own verdict; doctor never probes credential values to
+/// decide it.
+fn doctor_verdict(state: &codewhale_config::SetupState) -> &'static str {
+    if state.first_run_ready() {
+        return "Ready: setup is complete.";
+    }
+    let provider_ready = matches!(
+        state.status(codewhale_config::SetupStep::ProviderModel),
+        codewhale_config::StepStatus::Verified | codewhale_config::StepStatus::NeedsAction
     );
+    if provider_ready {
+        "Not ready: first-run setup is unfinished → run `codewhale setup`."
+    } else {
+        "Not ready: no model provider connected → run /provider in Codewhale, or `codewhale setup`."
+    }
+}
+
+#[cfg(test)]
+mod doctor_verdict_tests {
+    #[test]
+    fn a_fresh_home_is_not_ready_and_names_the_provider_step() {
+        let verdict = super::doctor_verdict(&codewhale_config::SetupState::default());
+        assert!(verdict.starts_with("Not ready"), "{verdict}");
+        assert!(verdict.contains("/provider"), "{verdict}");
+    }
 }
 
 const DOCTOR_LEGACY_STATE_ITEMS: &[&str] = &[
@@ -6159,11 +6186,15 @@ fn print_doctor_setup_report(
         "  {first_run_icon} first-run: {}",
         doctor_ready_label(first_run_ready)
     );
-    println!(
-        "  {update_icon} update checkpoint {}: {}",
-        crate::tui::setup::CONSTITUTION_CHECKPOINT_VERSION,
-        doctor_ready_label(update_ready)
-    );
+    // An update checkpoint only means something once a prior setup exists;
+    // on a fresh home it is a stale version number with nothing to update.
+    if first_run_ready {
+        println!(
+            "  {update_icon} update checkpoint {}: {}",
+            crate::tui::setup::CONSTITUTION_CHECKPOINT_VERSION,
+            doctor_ready_label(update_ready)
+        );
+    }
     println!(
         "  {operate_icon} operate/fleet: {}",
         doctor_ready_label(operate_ready)
