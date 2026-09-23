@@ -763,6 +763,30 @@ export interface DocsWebDict {
   sourceNote: string;
 }
 
+export interface DocsWorkDict {
+  metaTitle: string;
+  metaDescription: string;
+  /** Body-copy typography for this locale (CJK needs looser leading). */
+  bodyClassName: string;
+  overviewTitle: string;
+  overviewLead: string;
+  checklistTitle: string;
+  /** Carries the {todoWrite}, {checklistAlias} and {todoAlias} code spans. */
+  checklistBody: string;
+  strategyTitle: string;
+  strategyLead: string;
+  continuityTitle: string;
+  continuityLead: string;
+  captureTitle: string;
+  captureLead: string;
+  /** Carries the four status prefixes as {pending}/{inProgress}/{completed}/{cancelled}. */
+  captureLegend: string;
+  modelFacingTitle: string;
+  modelFacingLead: string;
+  modelFacingBoundaries: string;
+  sourceNote: string;
+}
+
 /** Copy for `app/[locale]/computer-use/page.tsx` and the install page's Computer Use section. */
 export interface ComputerUseDict {
   metaTitle: string;

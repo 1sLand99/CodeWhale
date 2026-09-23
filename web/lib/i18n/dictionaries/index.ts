@@ -32,6 +32,7 @@ import type {
   DocsTroubleshootingDict,
   DocsTrustDict,
   DocsWebDict,
+  DocsWorkDict,
   HomeDict,
   StatesDict,
 } from "./types";
@@ -63,6 +64,8 @@ import { docsSubagents as enDocsSubagents } from "./en/docs-subagents";
 import { docsSubagents as zhDocsSubagents } from "./zh/docs-subagents";
 import { docsWeb as enDocsWeb } from "./en/docs-web";
 import { docsWeb as zhDocsWeb } from "./zh/docs-web";
+import { docsWork as enDocsWork } from "./en/docs-work";
+import { docsWork as zhDocsWork } from "./zh/docs-work";
 import { docsComputers as enDocsComputers } from "./en/docs-computers";
 import { docsComputers as zhDocsComputers } from "./zh/docs-computers";
 import { docsAuth as enDocsAuth } from "./en/docs-auth";
@@ -244,6 +247,10 @@ const DOCS_WEB: Record<string, DocsWebDict> = {
   zh: zhDocsWeb,
 };
 
+const DOCS_WORK: Record<string, DocsWorkDict> = {
+  zh: zhDocsWork,
+};
+
 const DOCS_COMPUTERS: Record<string, DocsComputersDict> = {
   zh: zhDocsComputers,
 };
@@ -349,6 +356,10 @@ export function getDocsWeb(locale: string): DocsWebDict {
   return DOCS_WEB[locale] ?? enDocsWeb;
 }
 
+export function getDocsWork(locale: string): DocsWorkDict {
+  return DOCS_WORK[locale] ?? enDocsWork;
+}
+
 export function getDocsComputers(locale: string): DocsComputersDict {
   return DOCS_COMPUTERS[locale] ?? enDocsComputers;
 }
@@ -400,6 +411,7 @@ export const EN_DOCS_RUNTIME_API = enDocsRuntimeApi;
 export const EN_DOCS_SANDBOX = enDocsSandbox;
 export const EN_DOCS_SUBAGENTS = enDocsSubagents;
 export const EN_DOCS_WEB = enDocsWeb;
+export const EN_DOCS_WORK = enDocsWork;
 export const EN_DOCS_COMPUTERS = enDocsComputers;
 export const EN_DOCS_AUTH = enDocsAuth;
 export const EN_DOCS_TRUST = enDocsTrust;
