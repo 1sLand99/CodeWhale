@@ -6644,7 +6644,7 @@ mod tests {
         empty.render(area, &mut empty_buf);
         let empty_text = buffer_text(&empty_buf, area);
         assert!(
-            empty_text.contains("No current-session fleet workers."),
+            empty_text.contains("No agents in this session."),
             "{empty_text}"
         );
         assert!(
@@ -6660,11 +6660,11 @@ mod tests {
         english.render(area, &mut english_buf);
         let english_text = buffer_text(&english_buf, area);
         assert!(
-            english_text.contains("Current-session fleet workers"),
+            english_text.contains("Agents in this session"),
             "{english_text}"
         );
         assert!(
-            english_text.contains("Sub-agent roles are current-session fleet worker roles."),
+            english_text.contains("Roles shown are this session's agent roles."),
             "{english_text}"
         );
 
@@ -6699,7 +6699,7 @@ mod tests {
             "{zh_hans_text}"
         );
         assert!(
-            !zh_hans_text.contains("Current-session fleet workers"),
+            !zh_hans_text.contains("Agents in this session"),
             "{zh_hans_text}"
         );
     }
@@ -6738,7 +6738,7 @@ mod tests {
         english.render(area, &mut english_buf);
         let english_text = buffer_text(&english_buf, area);
         for expected in [
-            "Current-session fleet workers",
+            "Agents in this session",
             "Running: 1",
             "Completed: 0",
             "Interrupted: 1",
@@ -6749,17 +6749,17 @@ mod tests {
             "running",
             "reason: manual review",
             "role: release",
-            "posture: network=on · shell=read-only · write=on",
+            "access: network=on · shell=read-only · write=on",
             "git: branch feature/localize @ fleet-workers",
             "objective: verify localized row",
             "result: all checks passed",
-            "live worker status · role · objective · model · elapsed",
+            "live agent status · role · objective · model · elapsed",
             "close",
             "select",
             "focus",
             "stop",
             "refresh",
-            "roster/setup",
+            "fleet/setup",
         ] {
             assert!(
                 english_text.contains(expected),
@@ -8031,7 +8031,7 @@ api_key_env = "ACME_API_KEY"
             .expect("sub-agent depth row");
         assert_eq!(depth.scope, ConfigScope::Saved);
         assert!(!depth.editable);
-        assert_eq!(config_label_for_key(&depth.key), "sub-agent depth");
+        assert_eq!(config_label_for_key(&depth.key), "agent depth");
 
         // Workflow keeps its own name and its `/workflow` wording.
         let workflow = view

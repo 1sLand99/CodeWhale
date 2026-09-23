@@ -589,7 +589,7 @@ fn clock_distinguishes_working_from_waiting_on_something() {
     let subagents = tideline_footer_from_app(&mut app, 160)
         .turn_clock
         .expect("sub-agent clock");
-    assert_eq!(subagents.0, "sub-agents underway 1m 15s");
+    assert_eq!(subagents.0, "agents underway 1m 15s");
     app.agent_progress.clear();
 
     // Waiting on the user parks the clock in the waiting ink.
@@ -602,7 +602,7 @@ fn clock_distinguishes_working_from_waiting_on_something() {
     let waiting = tideline_footer_from_app(&mut app, 160)
         .turn_clock
         .expect("waiting clock");
-    assert_eq!(waiting.0, "waiting on you 1m 15s");
+    assert_eq!(waiting.0, "needs you 1m 15s");
     assert_eq!(waiting.1, ChromeInk::Waiting);
     assert_ne!(waiting.1, working.1, "waiting must not read as working");
 }

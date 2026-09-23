@@ -11824,7 +11824,7 @@ fn manual_compaction_queues_once_after_active_turn_without_blocking() {
     );
     assert_eq!(
         app.status_message.as_deref(),
-        Some("Compaction queued — runs after this turn.")
+        Some("Making room is queued — it runs after this turn.")
     );
     match engine.rx_op.try_recv().expect("one queued compact op") {
         crate::core::ops::Op::CompactContext { compaction, .. } => {
@@ -11843,7 +11843,7 @@ fn manual_compaction_queues_once_after_active_turn_without_blocking() {
     );
     assert_eq!(
         app.status_message.as_deref(),
-        Some("Compaction is already running.")
+        Some("Already making room.")
     );
 }
 
@@ -11870,14 +11870,14 @@ fn full_engine_mailbox_defers_manual_compaction_and_flushes_once_drained() {
     assert!(app.deferred_manual_compaction.is_some());
     assert_eq!(
         app.status_message.as_deref(),
-        Some("Compaction queued — runs after this turn.")
+        Some("Making room is queued — it runs after this turn.")
     );
 
     // A repeat during deferral is the single queued pass, not a second one.
     try_queue_manual_compaction(&mut app, &config, &engine.handle, None);
     assert_eq!(
         app.status_message.as_deref(),
-        Some("Compaction is already running.")
+        Some("Already making room.")
     );
 
     // The mailbox is still full: the flush waits without dropping the request.
@@ -13134,7 +13134,7 @@ fn subagent_event_handlers_preserve_dispatch_failures_as_separate_toasts() {
     );
     assert!(app.status_toasts.iter().any(|toast| {
         toast.level == StatusToastLevel::Success
-            && toast.text == "Sub-agent complete · Agent 1 · finished cleanly"
+            && toast.text == "Agent complete · Agent 1 · finished cleanly"
     }));
     assert!(app.status_toasts.back().is_some_and(|toast| {
         toast
@@ -26352,7 +26352,7 @@ fn subagent_completion_notification_uses_summary_line_not_sentinel() {
         Duration::from_secs(42),
     );
 
-    assert_eq!(payload.headline(), "Sub-agent complete");
+    assert_eq!(payload.headline(), "Agent complete");
     assert_eq!(payload.detail(), Some("agent_live"));
     assert_eq!(payload.preview(), Some("Finished the docs audit."));
     assert!(!payload.render_inline().contains("codewhale:subagent.done"));
@@ -26369,7 +26369,7 @@ fn subagent_completion_notification_can_include_elapsed_summary() {
         Duration::from_secs(65),
     );
 
-    assert_eq!(payload.headline(), "Sub-agent complete (1m 05s)");
+    assert_eq!(payload.headline(), "Agent complete (1m 05s)");
     assert_eq!(payload.detail(), Some("agent_live"));
     assert_eq!(payload.preview(), None);
 }
@@ -26385,10 +26385,10 @@ fn subagent_cancelled_notification_never_claims_completion() {
         Duration::from_secs(2),
     );
 
-    assert_eq!(payload.headline(), "Sub-agent cancelled");
+    assert_eq!(payload.headline(), "Agent cancelled");
     assert_eq!(payload.detail(), Some("agent_stopped"));
     assert_eq!(payload.preview(), Some("Cancelled"));
-    assert!(!payload.render_inline().contains("Sub-agent complete"));
+    assert!(!payload.render_inline().contains("Agent complete"));
 }
 
 #[test]

@@ -226,7 +226,7 @@ fn composed_frame_paints_each_fact_in_exactly_one_row() {
         // still just over a 120-column budget, so the hint wins here and
         // the turn half needs ~160. The shed-order contract itself lives
         // in tideline_tests.
-        let turn_needle = "sub-agents underway 1m 15s";
+        let turn_needle = "agents underway 1m 15s";
         if width >= 160 {
             assert!(rows[posture].contains(turn_needle), "{}", rows[posture]);
             assert_eq!(

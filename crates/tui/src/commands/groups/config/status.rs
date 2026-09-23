@@ -694,7 +694,7 @@ mod tests {
         let mut app = create_test_app(workspace);
         app.auto_model = false;
         app.model = "deepseek-v4-flash".to_string();
-        let notice = "is not in deepseek's current roster";
+        let notice = "is not in deepseek's current model list";
         assert!(
             !status(&mut app).message.unwrap().contains(notice),
             "no fresh roster, no claim"

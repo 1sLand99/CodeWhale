@@ -1,5 +1,5 @@
                                                                                 
-   Config  ──────────────────────────────────────────────────────────────────── 
+   Settings  ────────────────────────────────────────────────────────────────── 
                                                                                 
    Appearance   Models & providers   Work   Tools & MCP   Trust   Motion     ›  
    Search: type to filter  (17/71)                                              
@@ -11,7 +11,7 @@
    Model reasoning in chat            Off                       [ ]  SAVED   █  
    Thinking Default Expanded          Off                       [ ]  SAVED   █  
    Thinking Preview Lines             2                         ✎    SAVED   █  
-   Reasoning background highlight     On                        [x]  SAVED   │  
+   Thinking background highlight      On                        [x]  SAVED   │  
    Help Expand Groups                 Off                       [ ]  SAVED   │  
    Contextual tips                    On                        [x]  SAVED   │  
    Pin Last Prompt                    On                        [x]  SAVED   │  
