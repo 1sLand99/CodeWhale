@@ -1,5 +1,6 @@
 import { readFileSync, statSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { resolveWhale } from "./whale-tokens";
 import { siteCss } from "./site-css";
 
 // The site's type follows GPUI set_theme: Shannon Sans for every role, the
@@ -29,7 +30,7 @@ describe("typography contract", () => {
     expect(rootVar("font-display")).toBe("var(--font-body)");
     expect(rootVar("font-mono")).toMatch(/^ui-monospace,/);
     expect(rootVar("font-cjk")).not.toMatch(/Serif|(?<!sans-)serif/);
-    expect(rootVar("text-mono")).toBe("0.8125rem");
+    expect(resolveWhale(rootVar("text-mono"))).toBe("0.8125rem");
     expect(rootVar("text-prose")).toBe("0.9375rem");
   });
 

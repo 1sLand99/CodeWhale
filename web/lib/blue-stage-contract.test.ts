@@ -34,8 +34,8 @@ const BELOW_WATERLINE = selectorBlock(
 describe("GPUI public-surface contract", () => {
   it("grounds the paper sheet in the GPUI light theme's warm paper and inks", () => {
     // Above the waterline the field is the GPUI light background — warm
-    // paper — and the ink is its foreground. The literals are the GPUI_LIGHT_*
-    // consts in crates/palette/src/tokens.rs (mirrored from set_theme),
+    // paper — and the ink is its foreground. Values come from the versioned
+    // vendor/codewhale-design/tokens.json artifact,
     // reached through the generated tokens in app/tokens.css.
     expect(cssHexIn(ROOT, "paper")).toBe("#faf8f5");
     expect(cssHexIn(ROOT, "paper-deep")).toBe("#f0ede8");
@@ -47,7 +47,7 @@ describe("GPUI public-surface contract", () => {
     // Action on paper is the GPUI light primary; hover is the same hue at
     // 0.9 opacity (`button_primary_hover`), not a second blue.
     expect(cssHexIn(ROOT, "indigo")).toBe("#245bc7");
-    expect(resolveWhale("var(--gpui-primary-hover)")).toBe("rgb(var(--gpui-light-primary-rgb) / 0.9)");
+    expect(resolveWhale("var(--gpui-primary-hover)")).toBe("rgb(var(--gpui-light-primary-rgb) / var(--gpui-primary-hover-opacity))");
     expect(ROOT).toMatch(/--indigo-deep:\s*var\(--gpui-primary-hover\);/);
     expect(cssHexIn(ROOT, "mark-ink")).toBe("#28292b");
     // The deep field is always the stage's darkest, and code plates keep the
