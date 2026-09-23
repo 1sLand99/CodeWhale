@@ -243,6 +243,23 @@ fn freeze_saved_fleet(
         message,
     };
     let operator = fleet.operator.as_ref();
+    // A saved Fleet stores reasoning in the session vocabulary (`xhigh`,
+    // `ultra`, `minimal`, ... — what an imported agent profile carries); the
+    // exact schema names tiers. Map through the same effort-to-tier table the
+    // preflight uses, keep an explicit `auto` as a Router request, and treat a
+    // blank value as absent (inherit), as the selected-Fleet path does.
+    let frozen_reasoning = |raw: Option<&str>| -> Result<Option<String>, String> {
+        let Some(value) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+            return Ok(None);
+        };
+        let effort =
+            ReasoningEffort::parse_strict(value).map_err(|error| format!("reasoning: {error}"))?;
+        Ok(Some(
+            tier_of(effort)
+                .map_or("auto", ReasoningTier::as_str)
+                .to_string(),
+        ))
+    };
     let session_route = config.map(|config| {
         (
             config.provider_identity_for(config.api_provider()),
@@ -292,11 +309,14 @@ fn freeze_saved_fleet(
                 )));
             }
         };
-        let reasoning = member
-            .reasoning
-            .clone()
-            .or_else(|| operator.and_then(|operator| operator.reasoning.clone()))
-            .unwrap_or_else(session_reasoning);
+        let reasoning = match frozen_reasoning(member.reasoning.as_deref())
+            .map_err(|error| fail(format!("member `{id}` {error}")))?
+        {
+            Some(tier) => tier,
+            None => frozen_reasoning(operator.and_then(|operator| operator.reasoning.as_deref()))
+                .map_err(|error| fail(format!("operator {error}")))?
+                .unwrap_or_else(session_reasoning),
+        };
         members.push(FrozenMember {
             role: member.role_label().to_string(),
             id,
@@ -3299,6 +3319,54 @@ mod saved_fleet_tests {
         let (document, _) =
             load_fleet_document("user/glm-pair", ws.path(), Some(&zai_session())).expect("v2");
         assert_eq!(document.source_path(), Some(saved_path.as_path()));
+    }
+
+    /// Saved Fleets carry session-vocabulary reasoning (an imported agent
+    /// profile stores `ultra`, `xhigh`, `minimal`); freezing maps it onto an
+    /// exact tier instead of failing the exact parser, a blank value inherits,
+    /// and an unknown value is refused with the member named.
+    #[test]
+    fn saved_fleet_reasoning_in_session_vocabulary_freezes_to_exact_tiers() {
+        let _lock = lock_test_env();
+        let home = tempfile::tempdir().expect("home");
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let ws = tempfile::tempdir().expect("workspace");
+        let pin = Some(("zai", crate::config::ZAI_GLM_5_2_MODEL));
+        let mut ultra = member("ultra", pin);
+        ultra.reasoning = Some("ultra".to_string());
+        let mut minimal = member("minimal", pin);
+        minimal.reasoning = Some("minimal".to_string());
+        let mut blank = member("blank", pin);
+        blank.reasoning = Some("  ".to_string());
+        let mut saved = fleet("tiers", vec![ultra, minimal, blank]);
+        saved.operator = Some(FleetOperator {
+            provider: "zai".to_string(),
+            model: crate::config::ZAI_GLM_5_2_MODEL.to_string(),
+            reasoning: Some("xhigh".to_string()),
+        });
+        save_fleet(&saved, FleetScope::Workspace, ws.path()).expect("save");
+
+        let (document, _) = load_fleet_document("tiers", ws.path(), None).expect("freezes");
+        let exact = document.exact().expect("exact");
+        let tier = |id: &str| exact.member(id).expect(id).reasoning.as_str();
+        assert_eq!(tier("ultra"), "max");
+        assert_eq!(tier("minimal"), "low");
+        // Blank inherits the operator's `xhigh`, which is the `max` tier.
+        assert_eq!(tier("blank"), "max");
+
+        let mut bad = member("bad", pin);
+        bad.reasoning = Some("turbo".to_string());
+        save_fleet(
+            &fleet("bad-tier", vec![bad]),
+            FleetScope::Workspace,
+            ws.path(),
+        )
+        .expect("save");
+        let error = load_fleet_document("bad-tier", ws.path(), None).expect_err("refused");
+        assert!(
+            error.to_string().contains("member `bad` reasoning"),
+            "{error}"
+        );
     }
 
     #[test]
