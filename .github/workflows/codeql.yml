@@ -1,0 +1,65 @@
+# CodeQL advanced setup.
+#
+# Scans the same languages the repository's default setup scanned (Actions,
+# JavaScript/TypeScript, Python, Rust) with the same default query suite, but
+# reads .github/codeql/codeql-config.yml so test paths stay out of alerts.
+#
+# This workflow does nothing useful until the repository is switched from
+# CodeQL "Default" to "Advanced" setup (Settings -> Code security -> Code
+# scanning). While default setup is on, GitHub rejects SARIF uploads from
+# this workflow.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, Tuesday 04:17 UTC.
+    - cron: '17 4 * * 2'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: actions
+            build-mode: none
+          - language: javascript-typescript
+            build-mode: none
+          - language: python
+            build-mode: none
+          - language: rust
+            build-mode: none
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:${{ matrix.language }}

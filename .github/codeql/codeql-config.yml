@@ -8,10 +8,10 @@
 # Inline `#[cfg(test)] mod tests` blocks inside product files cannot be
 # excluded by path; alerts there are dismissed as "used in tests".
 #
-# This file takes effect only with CodeQL advanced setup: the analyze step's
-# `github/codeql-action/init` must pass
-#   config-file: ./.github/codeql/codeql-config.yml
-# Default setup ignores it.
+# This file takes effect only with CodeQL advanced setup:
+# .github/workflows/codeql.yml passes it to `github/codeql-action/init`.
+# Default setup ignores it, so the repository's code scanning setting must be
+# switched from Default to Advanced for either to apply.
 name: codewhale-codeql
 
 paths-ignore:
