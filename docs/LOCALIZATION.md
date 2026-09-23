@@ -188,13 +188,22 @@ carry an explicit `planned`/`partial`/`deferred` row in this matrix.
    `parse_locale`/`shipped`/`shipped_complete` arms in
    `crates/localization/src/lib.rs`, and the `include_str!` arm in the
    test module.
-3. Wire the typed settings schema (`UiLocale` in
-   `crates/tui/src/config_ui.rs`) plus the pickers and displays that enumerate
-   locales: onboarding language picker
-   (`crates/tui/src/tui/onboarding/language.rs` — a test forces every shipped
-   locale to be offered), setup-wizard match arms, and the locale display arms
-   in the `/config` and changelog commands. Keep the schema/round-trip invariant
-   tied to `Locale::shipped()` so these surfaces cannot silently drift.
+3. Wire the surfaces that still enumerate locales by hand. The `locale`
+   setting is a plain string row in `crates/config/src/settings_schema.rs`,
+   validated by `normalize_configured_locale` (which reuses `parse_locale`
+   from step 2), and the `/config` value list (`config_choice_values` in
+   `crates/tui/src/tui/views/mod.rs`) and hint text
+   (`configured_locale_values`) derive from `Locale::shipped()`, so those need
+   no edit. The exhaustive `match` arms the compiler will point at are the
+   setup wizard (`crates/tui/src/tui/setup/mod.rs`), `locale_display` in
+   `crates/tui/src/commands/groups/config/config.rs`, and
+   `public_site_locale_segment` (the `/links` site path) in
+   `crates/tui/src/commands/groups/core/core.rs`. Add a `LANGUAGE_OPTIONS`
+   entry to the onboarding language picker
+   (`crates/tui/src/tui/onboarding/language.rs`); its
+   `picker_offers_every_shipped_locale` test fails until you do. Several no-English-leak tests
+   (for example in `status_picker.rs` and `tool_card.rs`) list locales
+   explicitly; add the new tag there when the pack is complete.
 4. Run `python3 scripts/check-tui-locale-parity.py` and
    `cargo test -p codewhale-tui localization`.
 5. If the pack must ship incomplete, declare it partial: keep it out of
