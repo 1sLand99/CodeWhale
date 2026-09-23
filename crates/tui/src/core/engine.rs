@@ -2965,12 +2965,24 @@ impl Engine {
                     }
                     Op::CancelSubAgent { agent_id } => {
                         let active_session_id = self.session.id.clone();
-                        let result = {
-                            let mut manager = self.subagent_manager.write().await;
-                            match manager.cancel_agent_for_session(&active_session_id, &agent_id) {
-                                Ok(_) => Ok(agent_list_event(&manager, &active_session_id)),
-                                Err(err) => Err(err),
+                        let cancelled = self
+                            .subagent_manager
+                            .write()
+                            .await
+                            .cancel_agent_for_session(&active_session_id, &agent_id);
+                        let result = match cancelled {
+                            Ok(snapshot) => {
+                                // F4: cancelling keeps the work — inventory and
+                                // checkpoint what the child left, off the lock.
+                                crate::tools::subagent::preserve_cancelled_work(
+                                    &self.subagent_manager,
+                                    snapshot,
+                                )
+                                .await;
+                                let manager = self.subagent_manager.read().await;
+                                Ok(agent_list_event(&manager, &active_session_id))
                             }
+                            Err(err) => Err(err),
                         };
                         match result {
                             Ok(event) => {

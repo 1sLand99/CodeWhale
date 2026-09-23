@@ -515,6 +515,8 @@ const SUBAGENT_SESSION_CLOSED_REASON: &str = "Interrupted: parent session closed
 #[cfg(test)]
 const SUBAGENT_MODEL_WAIT_REASON: &str = "waiting for model response";
 const SUBAGENT_QUEUED_LAUNCH_REASON: &str = "queued: waiting for a sub-agent launch slot";
+/// Result text of a parent/operator Stop, before any preservation receipt.
+const CANCELLED_BY_PARENT_RESULT: &str = "Cancelled by parent request.";
 /// Queued-reason variant used while the rate-limit governor has paused new
 /// sub-agent launches after sustained provider 429s.
 const SUBAGENT_QUEUED_RATE_LIMIT_REASON: &str = "queued: waiting for provider rate-limit recovery";
@@ -5716,12 +5718,33 @@ impl SubAgentManager {
             self.snapshot_for_listing(agent)
         };
         terminal.status = SubAgentStatus::Cancelled;
-        terminal.result = Some("Cancelled by parent request.".to_string());
+        terminal.result = Some(CANCELLED_BY_PARENT_RESULT.to_string());
         terminal.needs_input = None;
         if !self.finish_terminal_result(&agent_id, terminal, true, true) {
             return self.get_result(&agent_id);
         }
         self.get_result(&agent_id)
+    }
+
+    /// Append the work-preservation receipt to a child this process just
+    /// cancelled (addendum F4). Returns the refreshed snapshot, or `None` when
+    /// the child is no longer a fresh Stop (already noted, or re-terminalized).
+    pub(crate) fn append_cancel_preservation_note(
+        &mut self,
+        agent_id: &str,
+        note: &str,
+    ) -> Option<SubAgentResult> {
+        let agent = self.agents.get_mut(agent_id)?;
+        if agent.status != SubAgentStatus::Cancelled
+            || agent.result.as_deref() != Some(CANCELLED_BY_PARENT_RESULT)
+        {
+            return None;
+        }
+        agent.result = Some(format!("{CANCELLED_BY_PARENT_RESULT} {note}"));
+        self.persist_state_best_effort();
+        self.agents
+            .get(agent_id)
+            .map(|agent| self.snapshot_for_listing(agent))
     }
 
     /// Terminalize a child that already left `Running` but whose worker record
@@ -10203,6 +10226,7 @@ async fn cancel_agent_from_input(
             manager.get_worker_record_for_session(&context.state_namespace, &snapshot.agent_id);
         (snapshot, worker_record)
     };
+    let snapshot = preserve_cancelled_work(&manager, snapshot).await;
     let projection =
         subagent_session_projection(&manager, snapshot, false, context, worker_record).await;
     let mut tool_result = ToolResult::json(&projection)
@@ -11399,6 +11423,34 @@ fn budget_partial_result(
     budget_partial_result_with_note(result, cause, &note)
 }
 
+/// Cancelling keeps the work (addendum F4, fleet-5). A Stop used to end a
+/// write-scoped child with only "Cancelled by parent request.", leaving the
+/// files it had changed unnamed and uncheckpointed. After a fresh
+/// Running -> Cancelled transition this runs the same inventory and
+/// isolated-worktree checkpoint a budget death gets, off the manager lock,
+/// and appends it to the child's result. Read-only children have no
+/// delivery baseline and are returned unchanged.
+pub(crate) async fn preserve_cancelled_work(
+    manager: &SharedSubAgentManager,
+    snapshot: SubAgentResult,
+) -> SubAgentResult {
+    if snapshot.status != SubAgentStatus::Cancelled
+        || snapshot.result.as_deref() != Some(CANCELLED_BY_PARENT_RESULT)
+    {
+        return snapshot;
+    }
+    let Some(note) =
+        budget_work_preservation_note(manager, &snapshot.agent_id, "cancelled by parent").await
+    else {
+        return snapshot;
+    };
+    manager
+        .write()
+        .await
+        .append_cancel_preservation_note(&snapshot.agent_id, &note)
+        .unwrap_or(snapshot)
+}
+
 /// Inventory the workspace changes a budget-killed worker left behind, for
 /// the preservation receipt in its terminal result (#5529). The spawn-time
 /// delivery baseline makes `changed_paths` name exactly what this worker
@@ -11406,12 +11458,11 @@ fn budget_partial_result(
 /// silent loss. Returns `None` when no write-scoped baseline exists (a
 /// read-only worker cannot have left file work) or git cannot answer.
 async fn budget_work_preservation_note(
-    runtime: &SubAgentRuntime,
+    manager: &SharedSubAgentManager,
     agent_id: &str,
     cause: &str,
 ) -> Option<String> {
-    let (evidence, workspace, isolated_worktree) = runtime
-        .manager
+    let (evidence, workspace, isolated_worktree) = manager
         .read()
         .await
         .worker_records
@@ -11686,7 +11737,7 @@ async fn run_subagent_task_inner(mut task: SubAgentTask) {
         .is_some_and(|error| error.contains("wall-time budget exhausted"))
     {
         budget_work_preservation_note(
-            &task.runtime,
+            &task.runtime.manager,
             &agent_id,
             failure_error
                 .as_deref()
@@ -14012,7 +14063,9 @@ async fn run_subagent(
         // describes what the model remembered; this names the on-disk changes
         // the worker actually left, so the parent can salvage them without
         // trusting the partial report.
-        if let Some(preservation) = budget_work_preservation_note(runtime, &agent_id, cause).await {
+        if let Some(preservation) =
+            budget_work_preservation_note(&runtime.manager, &agent_id, cause).await
+        {
             let note = handback_note.get_or_insert_with(String::new);
             if !note.is_empty() {
                 note.push(' ');
