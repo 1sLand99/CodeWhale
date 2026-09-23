@@ -813,11 +813,12 @@ pub async fn run_tui(
         match load_result {
             Ok(Some(saved)) => match manager.load_session_goal(&saved.metadata.id) {
                 Ok(goal) => {
-                    match apply_loaded_session_with_goal(&mut app, config, &saved, goal.as_ref()) {
+                    let saved_id = saved.metadata.id.clone();
+                    match apply_loaded_session_with_goal(&mut app, config, saved, goal.as_ref()) {
                         Ok(()) => {
                             app.status_message = Some(format!(
                                 "Resumed session: {}",
-                                crate::session_manager::truncate_id(&saved.metadata.id)
+                                crate::session_manager::truncate_id(&saved_id)
                             ));
                         }
                         Err(err) => {
