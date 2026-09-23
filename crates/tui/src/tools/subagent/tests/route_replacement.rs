@@ -37,8 +37,13 @@ async fn refusing_chat_server() -> (String, Arc<AtomicUsize>) {
     (format!("http://{addr}/v1"), calls)
 }
 
-fn write_replacement_config(path: &std::path::Path, pin_url: &str, backup_url: &str, pin: &str) {
-    std::fs::write(
+async fn write_replacement_config(
+    path: &std::path::Path,
+    pin_url: &str,
+    backup_url: &str,
+    pin: &str,
+) {
+    tokio::fs::write(
         path,
         format!(
             r#"
@@ -67,6 +72,7 @@ model = "fixture-backup-model"
 "#
         ),
     )
+    .await
     .unwrap();
 }
 
@@ -83,7 +89,7 @@ async fn reviewer_tool(
     let (backup, backup_calls, _) = delayed_chat_client(Duration::ZERO, "review done").await;
     let (pin_url, pin_calls) = refusing_chat_server().await;
     let config_path = root.join("config.toml");
-    write_replacement_config(&config_path, &pin_url, backup.base_url(), pin);
+    write_replacement_config(&config_path, &pin_url, backup.base_url(), pin).await;
     let config = crate::config::Config::load(Some(config_path), None).unwrap();
     let client = CodewhaleClient::new(&config).unwrap();
     let manager = new_shared_subagent_manager(root.to_path_buf(), 2);
