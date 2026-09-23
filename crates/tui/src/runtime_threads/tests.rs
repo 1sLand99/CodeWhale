@@ -13732,7 +13732,8 @@ async fn archiving_or_deleting_a_thread_ends_its_session_grants() -> Result<()> 
             "web:web.run:search_query",
             "Search the web for 'espresso'",
         )
-        .await;
+        .await
+        .expect("a live thread records the grant");
     manager
         .add_session_grant(
             &kept.id,
@@ -13741,7 +13742,8 @@ async fn archiving_or_deleting_a_thread_ends_its_session_grants() -> Result<()> 
             "web:web.run:search_query",
             "s",
         )
-        .await;
+        .await
+        .expect("a live thread records the grant");
 
     // A title edit leaves grants alone.
     manager
@@ -13776,6 +13778,23 @@ async fn archiving_or_deleting_a_thread_ends_its_session_grants() -> Result<()> 
         event.event == "approval.grant_revoked"
             && event.payload["grant"]["grant_id"] == grant.grant_id
     }));
+    // Archiving has no quiescence gate: a prompt raised before the archive
+    // can be answered "allow for this conversation" after it. That answer
+    // must not plant a grant that survives the archive.
+    assert!(
+        manager
+            .add_session_grant(
+                &archived.id,
+                "turn_1",
+                "web.run",
+                "web:web.run:search_query",
+                "late remember",
+            )
+            .await
+            .is_none(),
+        "an archived thread records no new grant"
+    );
+    assert!(manager.approval_grants.lock().get(&archived.id).is_none());
     // Unarchiving does not bring the grant back.
     manager
         .update_thread(

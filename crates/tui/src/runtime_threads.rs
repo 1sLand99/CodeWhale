@@ -5988,6 +5988,11 @@ impl RuntimeThreadManager {
     /// Record "allow for this conversation" as a grant scoped to the tool and
     /// its argument class (E1). The thread's permission posture is untouched:
     /// promoting a one-call approval to Full Access is what this replaced.
+    ///
+    /// Returns `None` (nothing recorded) when the thread is archived or gone.
+    /// Archiving has no quiescence gate, so a prompt raised before archive can
+    /// be answered after it; recording that grant would outlive the archive
+    /// that was meant to end it. The approved call itself still runs.
     async fn add_session_grant(
         &self,
         thread_id: &str,
@@ -5995,12 +6000,22 @@ impl RuntimeThreadManager {
         tool_name: &str,
         scope: &str,
         summary: &str,
-    ) -> RuntimeApprovalGrant {
+    ) -> Option<RuntimeApprovalGrant> {
         let grant = {
+            // Same order as update_thread's archive path (thread_mutation,
+            // then approval_grants), so archive and record cannot interleave.
+            let _thread_mutation = self.store.thread_mutation.lock();
+            let live = self
+                .store
+                .load_thread(thread_id)
+                .is_ok_and(|thread| !thread.archived);
+            if !live {
+                return None;
+            }
             let mut grants = self.approval_grants.lock();
             let thread_grants = grants.entry(thread_id.to_string()).or_default();
             if let Some(existing) = thread_grants.iter().find(|grant| grant.scope == scope) {
-                return existing.clone();
+                return Some(existing.clone());
             }
             let grant = RuntimeApprovalGrant {
                 grant_id: format!("grant_{}", Uuid::new_v4().simple()),
@@ -6021,7 +6036,7 @@ impl RuntimeThreadManager {
         )
         .await
         .ok();
-        grant
+        Some(grant)
     }
 
     /// Remove every session grant on `thread_id` and return them. Archiving or
@@ -12738,16 +12753,14 @@ impl RuntimeThreadManager {
                             // change posture: a posture change mid-turn used
                             // to fail the very call it approved (E1/E2).
                             let grant = if remember {
-                                Some(
-                                    self.add_session_grant(
-                                        &thread_id,
-                                        &turn_id,
-                                        &tool_name,
-                                        &approval_grouping_key,
-                                        &summary,
-                                    )
-                                    .await,
+                                self.add_session_grant(
+                                    &thread_id,
+                                    &turn_id,
+                                    &tool_name,
+                                    &approval_grouping_key,
+                                    &summary,
                                 )
+                                .await
                             } else {
                                 None
                             };
