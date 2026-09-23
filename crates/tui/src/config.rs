@@ -12040,13 +12040,8 @@ fn save_root_api_key_metadata_without_plaintext(
     ensure_parent_dir(config_path)?;
     crate::config_persistence::mutate_config_document(config_path, |doc| {
         crate::config_persistence::set_document_value(doc, &["auth_mode"], "api_key")?;
-        if !doc.contains_key("default_text_model") {
-            crate::config_persistence::set_document_value(
-                doc,
-                &["default_text_model"],
-                DEFAULT_TEXT_MODEL,
-            )?;
-        }
+        // Saving a key never pins a model (see
+        // `codewhale_config::credentials::prepare_provider_api_key_metadata`).
         if !doc.contains_key("reasoning_effort") {
             crate::config_persistence::set_document_value(doc, &["reasoning_effort"], "max")?;
         }
@@ -12097,8 +12092,8 @@ auth_mode = "api_key"
 # Set https://api.deepseek.com to opt out of beta features.
 # base_url = "https://api.deepseek.com/beta"
 
-# Default model
-default_text_model = "{DEFAULT_TEXT_MODEL}"
+# Default model (unset follows the provider default)
+# default_text_model = "{DEFAULT_TEXT_MODEL}"
 
 # Thinking mode (DeepSeek V4 reasoning effort):
 # "off" | "low" | "medium" | "high" | "max"
