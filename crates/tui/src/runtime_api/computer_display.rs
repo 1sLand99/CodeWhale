@@ -136,6 +136,8 @@ pub(super) struct ComputerEvent {
 }
 
 struct Inner {
+    // Only the Unix display socket is dialed; other platforms report it absent.
+    #[cfg_attr(not(unix), allow(dead_code))]
     socket_path: PathBuf,
     idle_close: Duration,
     lease_ttl: Duration,
@@ -694,6 +696,7 @@ impl ClientParser {
 // Handshakes
 // ---------------------------------------------------------------------------
 
+#[cfg_attr(not(unix), allow(dead_code))]
 async fn read_reason<S: AsyncRead + Unpin>(s: &mut S) -> String {
     let Ok(len) = s.read_u32().await else {
         return String::new();
@@ -707,6 +710,7 @@ async fn read_reason<S: AsyncRead + Unpin>(s: &mut S) -> String {
 /// send a shared `ClientInit`, so each viewer gets its own connection without
 /// disconnecting the others. After this returns, the next upstream bytes are
 /// `ServerInit`.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) async fn upstream_handshake<S: AsyncRead + AsyncWrite + Unpin>(
     s: &mut S,
 ) -> Result<(), String> {

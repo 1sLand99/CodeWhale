@@ -11846,10 +11846,7 @@ fn manual_compaction_queues_once_after_active_turn_without_blocking() {
         engine.rx_op.try_recv().is_err(),
         "duplicate op must not queue"
     );
-    assert_eq!(
-        app.status_message.as_deref(),
-        Some("Already making room.")
-    );
+    assert_eq!(app.status_message.as_deref(), Some("Already making room."));
 }
 
 #[test]
@@ -11880,10 +11877,7 @@ fn full_engine_mailbox_defers_manual_compaction_and_flushes_once_drained() {
 
     // A repeat during deferral is the single queued pass, not a second one.
     try_queue_manual_compaction(&mut app, &config, &engine.handle, None);
-    assert_eq!(
-        app.status_message.as_deref(),
-        Some("Already making room.")
-    );
+    assert_eq!(app.status_message.as_deref(), Some("Already making room."));
 
     // The mailbox is still full: the flush waits without dropping the request.
     flush_deferred_manual_compaction(&mut app, &config, &engine.handle);

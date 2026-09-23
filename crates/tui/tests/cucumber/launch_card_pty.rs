@@ -176,7 +176,7 @@ fn local_slash_navigation_does_not_create_rewindable_user_turns() {
     let (_workspace, mut tui) = start_with_titles(24, 80, false, &[]);
     // The first command leaves home; the others use the active-session path.
     for (command, title) in [
-        ("/settings", "Config"),
+        ("/settings", "Settings"),
         ("/skills", "Extensions"),
         ("/mcp", "Extensions"),
     ] {
@@ -328,7 +328,7 @@ fn workbench_settings_visual_evidence() {
         ("/provider", "Provider", "providers"),
         ("/fleet", "Coordinator", "fleet"),
         ("/plugin", "Extensions", "plugins"),
-        ("/config", "Config", "settings"),
+        ("/config", "Settings", "settings"),
         ("/statusline", "Status", "statusline"),
     ] {
         for (rows, cols) in SIZES {

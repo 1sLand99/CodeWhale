@@ -396,6 +396,7 @@ pub(super) async fn process_info(State(_state): State<RuntimeApiState>) -> Json<
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use axum::http::StatusCode;
 
     fn whole_file() -> FileReadQuery {
