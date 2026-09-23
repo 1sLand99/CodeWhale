@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The website's not-found page now uses the Codwhale poster and typo joke,
+with English/Chinese recovery links to home and docs
+([#6419](https://github.com/Hmbown/Codewhale/issues/6419),
+[#6420](https://github.com/Hmbown/Codewhale/pull/6420)).
+
 Planned for Codewhale v0.10.1: a reliability and first-run release. Turns that
 stall now say so, approvals keep what you approved, plugin suggestions are
 quieter, and Fleet runs can be checked before they spend anything.
