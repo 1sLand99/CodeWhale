@@ -180,7 +180,8 @@ fn posture_bar_pins_notice_or_remote_control_right() {
 }
 
 /// Shed ladder, most expendable first: the turn clock, the session clock,
-/// the hint, the counts, mode key, mode, permission key. The permission chip
+/// the permission key (a binding reminder, and the widest optional item),
+/// the hint, the counts, mode key, mode. The permission chip
 /// never sheds (#5796); the clock is what a glance wants and the hint and
 /// counts are what a keystroke wants, so on a row too narrow for both the
 /// clock goes (#5914).
@@ -204,11 +205,11 @@ fn posture_bar_sheds_the_clocks_then_the_hint_counts_and_posture_chips() {
     let permission_key = narrowest_showing("Shift+Tab to change");
     assert!(
         turn_clock > session_clock
-            && session_clock > hint
+            && session_clock > permission_key
+            && permission_key > hint
             && hint > counts
             && counts > mode_key
-            && mode_key > mode
-            && mode > permission_key,
+            && mode_key > mode,
         "turn_clock@{turn_clock} session_clock@{session_clock} hint@{hint} counts@{counts} mode_key@{mode_key} mode@{mode} permission_key@{permission_key}"
     );
     for w in 8..=160u16 {
@@ -235,16 +236,13 @@ fn compact_posture_bar_states_posture_and_nothing_live() {
     let mut fixture = working();
     fixture.right = Some(("/rc connected", ChromeInk::Info));
     let wide = draw(160, 3, &fixture.widget(&UI_THEME).compact(true));
-    for kept in [
-        " ● ask  Shift+Tab to change",
-        "   work (Tab)",
-        "/rc connected",
-    ] {
+    for kept in [" ● ask", "   work (Tab)", "/rc connected"] {
         assert!(wide.contains(kept), "compact keeps {kept}: {wide}");
     }
     for gone in [
         "working 1m 15s",
         "worked 41m 12s",
+        "Shift+Tab to change",
         "2 agents",
         "Esc to interrupt",
     ] {

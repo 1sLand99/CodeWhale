@@ -827,16 +827,22 @@ struct PostureItem {
 /// The hint and counts still outrank it (#5914). Above them the
 /// context-cap warning, which is not a hint but the reason the next turn
 /// will not start at all.
+///
+/// The permission key ("Shift+Tab to change", mark 8) is a reminder of a
+/// binding, not live state, and is the widest optional item on the row, so
+/// it sheds right after the clocks: a live hint ("Enter again to send
+/// now") or the agent count must never be dropped to keep it. The
+/// permission chip itself, marked `●`, never sheds.
 const SHED_TURN_CLOCK: u8 = 1;
 const SHED_SESSION_CLOCK: u8 = 2;
-const SHED_HINT: u8 = 3;
-const SHED_COUNTS: u8 = 4;
-const SHED_CAP_WARNING: u8 = 5;
-const SHED_MODE_KEY: u8 = 6;
-const SHED_MODE: u8 = 7;
-const SHED_PERMISSION_KEY: u8 = 8;
+const SHED_PERMISSION_KEY: u8 = 3;
+const SHED_HINT: u8 = 4;
+const SHED_COUNTS: u8 = 5;
+const SHED_CAP_WARNING: u8 = 6;
+const SHED_MODE_KEY: u8 = 7;
+const SHED_MODE: u8 = 8;
 /// The most-shed rung: everything gone but the permission chip.
-const MAX_SHED: u8 = SHED_PERMISSION_KEY;
+const MAX_SHED: u8 = SHED_MODE;
 /// Where a compact posture bar (`tui.posture_bar = "compact"`, #5950)
 /// starts on the ladder: the clocks, the hint and the counts are gone
 /// before width is consulted; the cap warning, the mode chip and the
