@@ -13716,6 +13716,87 @@ async fn approval_remember_grants_tool_class_without_changing_posture() -> Resul
 }
 
 #[tokio::test]
+async fn archiving_or_deleting_a_thread_ends_its_session_grants() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let archived = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let kept = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let grant = manager
+        .add_session_grant(
+            &archived.id,
+            "turn_1",
+            "web.run",
+            "web:web.run:search_query",
+            "Search the web for 'espresso'",
+        )
+        .await;
+    manager
+        .add_session_grant(
+            &kept.id,
+            "turn_1",
+            "web.run",
+            "web:web.run:search_query",
+            "s",
+        )
+        .await;
+
+    // A title edit leaves grants alone.
+    manager
+        .update_thread(
+            &archived.id,
+            UpdateThreadRequest {
+                title: Some("renamed".to_string()),
+                ..UpdateThreadRequest::default()
+            },
+        )
+        .await?;
+    assert_eq!(manager.approval_grants_for_thread(&archived.id).len(), 1);
+
+    manager
+        .update_thread(
+            &archived.id,
+            UpdateThreadRequest {
+                archived: Some(true),
+                ..UpdateThreadRequest::default()
+            },
+        )
+        .await?;
+    assert!(manager.approval_grants_for_thread(&archived.id).is_empty());
+    assert!(
+        manager
+            .session_grant_for(&archived.id, "web:web.run:search_query")
+            .is_none(),
+        "the next matching call on an archived thread prompts again"
+    );
+    let events = manager.events_since(&archived.id, None)?;
+    assert!(events.iter().any(|event| {
+        event.event == "approval.grant_revoked"
+            && event.payload["grant"]["grant_id"] == grant.grant_id
+    }));
+    // Unarchiving does not bring the grant back.
+    manager
+        .update_thread(
+            &archived.id,
+            UpdateThreadRequest {
+                archived: Some(false),
+                ..UpdateThreadRequest::default()
+            },
+        )
+        .await?;
+    assert!(manager.approval_grants_for_thread(&archived.id).is_empty());
+    // Another thread's grants are untouched.
+    assert_eq!(manager.approval_grants_for_thread(&kept.id).len(), 1);
+
+    // Deleting a thread drops its grants with it.
+    manager.discard_empty_thread(&kept.id).await?;
+    assert!(manager.approval_grants.lock().get(&kept.id).is_none());
+    Ok(())
+}
+
+#[tokio::test]
 async fn elevation_required_with_stale_active_turn_is_denied() -> Result<()> {
     let manager = test_manager(test_runtime_dir())?;
     let thread = manager

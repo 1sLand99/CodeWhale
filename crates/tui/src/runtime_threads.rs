@@ -3711,9 +3711,10 @@ pub struct PendingApprovalRequest {
 ///
 /// The grant covers later calls of the same tool and argument class (the
 /// approval grouping key) on this thread, for the life of this Runtime
-/// process. It never changes the thread's permission posture, and it can be
-/// revoked. Known limit: grants are in memory only, so a Runtime restart
-/// forgets them and the next matching call prompts again (fail closed).
+/// process or until the thread is archived or deleted. It never changes the
+/// thread's permission posture, and it can be revoked. Known limit: grants
+/// are in memory only, so a Runtime restart forgets them and the next
+/// matching call prompts again (fail closed).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeApprovalGrant {
     /// Runtime-minted `grant_<32 hex>`; the revoke endpoint accepts only this.
@@ -6023,6 +6024,16 @@ impl RuntimeThreadManager {
         grant
     }
 
+    /// Remove every session grant on `thread_id` and return them. Archiving or
+    /// deleting a thread calls this, so a grant never outlives the
+    /// conversation it was given in.
+    fn take_approval_grants(&self, thread_id: &str) -> Vec<RuntimeApprovalGrant> {
+        self.approval_grants
+            .lock()
+            .remove(thread_id)
+            .unwrap_or_default()
+    }
+
     /// Revoke one session grant. Returns `false` when the thread holds no
     /// grant with that id. The next matching call prompts again.
     pub async fn revoke_approval_grant(&self, thread_id: &str, grant_id: &str) -> Result<bool> {
@@ -7482,7 +7493,10 @@ impl RuntimeThreadManager {
         // API-created jobs, and dropping the last handle kills them.
         active.shell_managers.remove(thread_id);
         drop(active);
-        self.store.remove_thread(thread_id)
+        self.store.remove_thread(thread_id)?;
+        // A deleted conversation keeps no session grants behind it.
+        self.take_approval_grants(thread_id);
+        Ok(())
     }
 
     pub async fn list_threads(
@@ -7995,7 +8009,7 @@ impl RuntimeThreadManager {
             None
         };
         let configured_sandbox_mode = self.read_config().sandbox_mode.clone();
-        let (thread, changes, evicted_engine, posture_engine) = {
+        let (thread, changes, evicted_engine, posture_engine, ended_grants) = {
             // Take the active guard first so a workspace mutation can check
             // and evict the cached engine atomically with the durable update.
             // Using the same order as start/compact avoids lock inversion.
@@ -8152,8 +8166,32 @@ impl RuntimeThreadManager {
             } else {
                 None
             };
-            (thread, changes, evicted_engine, posture_engine)
+            // Archiving ends the conversation's session grants: unarchiving
+            // later starts from a clean slate and the next call prompts.
+            let ended_grants = if changes.get("archived") == Some(&json!(true)) {
+                self.take_approval_grants(id)
+            } else {
+                Vec::new()
+            };
+            (
+                thread,
+                changes,
+                evicted_engine,
+                posture_engine,
+                ended_grants,
+            )
         };
+
+        for grant in ended_grants {
+            self.emit_event(
+                &thread.id,
+                None,
+                None,
+                "approval.grant_revoked",
+                json!({ "grant": grant }),
+            )
+            .await?;
+        }
 
         if let Some(engine) = evicted_engine {
             let _ = engine.send(Op::Shutdown).await;

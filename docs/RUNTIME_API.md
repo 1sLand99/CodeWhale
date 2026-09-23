@@ -934,7 +934,9 @@ Clients show it first and keep the raw arguments behind it.
 
 `"remember": true` on an `allow` records a **session grant** for that tool and
 argument class (the approval grouping key: a shell command family, a patch's
-file set, a URL host, an MCP tool, a `web.run` action kind). A grant never
+file set, a `fetch_url` host, an MCP tool, a `web.run` action kind — for
+`open`, the hosts it opened). Computer Use consent and `app_script` calls, and
+any tool without a class, are granted for the exact call only. A grant never
 changes the thread's permission posture. Later matching calls on the thread are
 approved without a prompt: they still emit `approval.required`, then
 `approval.decided` with `"auto": true` and the `grant_id`. Creating a grant
@@ -942,7 +944,9 @@ emits `approval.grant_added` with `{ "grant": { "grant_id", "tool_name",
 "scope", "summary", "granted_at" } }`; thread detail lists live grants in
 `approval_grants[]`. `DELETE /v1/threads/{id}/approval-grants/{grant_id}`
 revokes one (emitting `approval.grant_revoked`); the next matching call
-prompts again. Grants live in memory for the Runtime process: a restart
+prompts again. Archiving or deleting the thread ends all of its grants
+(archiving emits `approval.grant_revoked` for each; unarchiving does not
+restore them). Grants live in memory for the Runtime process: a restart
 forgets them, and a forced (non-bypassable) prompt is never answered by one.
 
 **User input**
