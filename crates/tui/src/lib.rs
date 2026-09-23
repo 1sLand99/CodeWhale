@@ -5458,14 +5458,14 @@ fn doctor_verdict(state: &codewhale_config::SetupState) -> &'static str {
     if state.first_run_ready() {
         return "Ready: setup is complete.";
     }
-    let provider_ready = matches!(
-        state.status(codewhale_config::SetupStep::ProviderModel),
-        codewhale_config::StepStatus::Verified | codewhale_config::StepStatus::NeedsAction
-    );
-    if provider_ready {
+    // NeedsAction means a route is named but no credential is confirmed for
+    // it, which is still "no provider set up" from where the user sits.
+    let provider_verified = state.status(codewhale_config::SetupStep::ProviderModel)
+        == codewhale_config::StepStatus::Verified;
+    if provider_verified {
         "Not ready: first-run setup is unfinished → run `codewhale setup`."
     } else {
-        "Not ready: no model provider connected → run /provider in Codewhale, or `codewhale setup`."
+        "Not ready: no model provider set up → run /provider in Codewhale, or `codewhale setup`."
     }
 }
 
