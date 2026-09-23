@@ -4,10 +4,12 @@
 # JavaScript/TypeScript, Python, Rust) with the same default query suite, but
 # reads .github/codeql/codeql-config.yml so test paths stay out of alerts.
 #
-# This workflow does nothing useful until the repository is switched from
-# CodeQL "Default" to "Advanced" setup (Settings -> Code security -> Code
-# scanning). While default setup is on, GitHub rejects SARIF uploads from
-# this workflow.
+# Gated off by default. While the repository uses CodeQL "Default" setup,
+# GitHub rejects SARIF uploads from this workflow ("Code Scanning could not
+# process the submitted SARIF"), so the analyze job runs only when the
+# repository variable CODEQL_ADVANCED_SETUP is 'true'. The founder flips it
+# after switching the repository to "Advanced" setup (Settings -> Code
+# security -> Code scanning); until then every run skips the job.
 name: CodeQL
 
 on:
@@ -29,6 +31,7 @@ concurrency:
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
+    if: vars.CODEQL_ADVANCED_SETUP == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
