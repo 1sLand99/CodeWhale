@@ -4889,7 +4889,7 @@ approval_required = true
 
         let policy = FleetSetupView::from_snapshot(snapshot()).review_policy_summary();
         for truth in [
-            "current interactive session",
+            "agents in this session",
             "codewhale fleet status",
             ".codewhale/fleet.jsonl",
         ] {
