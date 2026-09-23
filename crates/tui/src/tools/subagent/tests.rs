@@ -6591,6 +6591,61 @@ async fn agent_tool_cancel_stops_running_child() {
     );
 }
 
+/// #6184 H2: a full host event channel used to drop `AgentComplete`, leaving
+/// a ghost Running row. Fill the channel, finish a child, and the terminal
+/// event must still arrive once the host drains.
+#[tokio::test]
+async fn full_event_channel_still_delivers_agent_complete() {
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = SubAgentManager::new(tmp.path().to_path_buf(), 2);
+    let agent_id = "agent_full_channel".to_string();
+    let (input_tx, _input_rx) = mpsc::unbounded_channel();
+    let mut agent = SubAgent::new(
+        agent_id.clone(),
+        FleetRole::Worker,
+        "finish while the host is backed up".to_string(),
+        make_assignment(),
+        "deepseek-v4-flash".to_string(),
+        None,
+        None,
+        input_tx,
+        tmp.path().to_path_buf(),
+        manager.current_session_boot_id.clone(),
+    );
+    agent.task_handle = Some(tokio::spawn(async {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+    }));
+
+    let (event_tx, mut event_rx) = mpsc::channel(1);
+    event_tx
+        .try_send(Event::status("host is busy"))
+        .expect("fill the only slot");
+    let mut runtime = runtime_with_depth(1, None);
+    runtime.event_tx = Some(event_tx);
+    agent.terminal_delivery = Some(SubAgentTerminalDeliveryContext::from_runtime(&runtime));
+    manager.agents.insert(agent_id.clone(), agent);
+    manager.register_worker(make_worker_spec(&agent_id, tmp.path().to_path_buf()));
+
+    let result = manager.cancel_agent(&agent_id).expect("stop");
+    assert_eq!(result.status, SubAgentStatus::Cancelled);
+    assert_ne!(
+        manager.get_result(&agent_id).expect("roster row").status,
+        SubAgentStatus::Running,
+        "the roster leaves Running"
+    );
+
+    let filler = event_rx.recv().await.expect("filler event");
+    assert!(matches!(filler, Event::Status { .. }));
+    let delivered = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+        .await
+        .expect("terminal event is not dropped")
+        .expect("channel open");
+    assert!(matches!(
+        &delivered,
+        Event::AgentComplete { id, outcome: Some(SubAgentStatus::Cancelled), .. } if id == &agent_id
+    ));
+}
+
 #[tokio::test]
 async fn model_wait_cancel_fans_in_once_and_preserves_checkpoint() {
     use tokio_util::sync::CancellationToken;

@@ -2276,15 +2276,47 @@ impl SubAgentTerminalDeliveryContext {
         }
 
         if let Some(event_tx) = self.event_tx.as_ref() {
-            let _ = event_tx.try_send(Event::AgentComplete {
-                owner_session_id: self.session_id.clone(),
-                id: result.agent_id.clone(),
-                result: completion.payload,
-                outcome: Some(result.status.clone()),
-                parent_run_id: result.parent_run_id.clone(),
-                spawn_depth: Some(result.spawn_depth),
-                continuable: Some(subagent_checkpoint_is_continuable(result)),
-                usage: result.usage.clone(),
+            send_terminal_event(
+                event_tx,
+                Event::AgentComplete {
+                    owner_session_id: self.session_id.clone(),
+                    id: result.agent_id.clone(),
+                    result: completion.payload,
+                    outcome: Some(result.status.clone()),
+                    parent_run_id: result.parent_run_id.clone(),
+                    spawn_depth: Some(result.spawn_depth),
+                    continuable: Some(subagent_checkpoint_is_continuable(result)),
+                    usage: result.usage.clone(),
+                },
+            );
+        }
+    }
+}
+
+/// Deliver a terminal sub-agent event the host must not lose (#6184 H2).
+///
+/// `try_send` dropped `AgentComplete` whenever the event channel was full,
+/// leaving a ghost Running row that silenced every stall watchdog. The
+/// terminal claim forbids awaiting here, so a full channel hands the event to
+/// a task that waits for capacity; only a closed channel (no host left)
+/// drops it. Progress events stay lossy by design. `AgentSpawned` also stays
+/// lossy: delivered late it could land after the completion and resurrect a
+/// Running row, while a lost one is recovered by the completion itself.
+pub(crate) fn send_terminal_event(event_tx: &mpsc::Sender<Event>, event: Event) {
+    let event = match event_tx.try_send(event) {
+        Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => return,
+        Err(mpsc::error::TrySendError::Full(event)) => event,
+    };
+    let tx = event_tx.clone();
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn(async move {
+                let _ = tx.send(event).await;
+            });
+        }
+        Err(_) => {
+            std::thread::spawn(move || {
+                let _ = tx.blocking_send(event);
             });
         }
     }
