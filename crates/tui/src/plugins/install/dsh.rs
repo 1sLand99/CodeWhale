@@ -448,6 +448,9 @@ use crate::skills::install::sha256_hex;
 /// Relative path spellings a package may use for its own files.
 fn plain_relative(text: &str) -> bool {
     !text.is_empty()
+        // A rooted path without a drive (`/tmp/a.yml`) is not `is_absolute` on
+        // Windows, but it is not relative to the bundle either.
+        && !text.starts_with('/')
         && !Path::new(text).is_absolute()
         && !Path::new(text)
             .components()
