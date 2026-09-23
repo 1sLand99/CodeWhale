@@ -605,7 +605,7 @@
   "CmdWorkflowDescription": "Run a repeatable, ordered workflow",
   "CmdWorkflowsDescription": "List or cancel workflow runs here",
   "CmdHotbarDescription": "Set up the Hotbar",
-  "CmdSetupDescription": "Open constitution-first setup",
+  "CmdSetupDescription": "Set up providers and preferences",
   "CmdSubagentsDescription": "Shortcut for /fleet workers: this session's agents",
   "CmdAdvisorDescription": "Toggle the background advisor for this session",
   "CmdSystemDescription": "Show the system prompt",
