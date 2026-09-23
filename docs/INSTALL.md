@@ -11,9 +11,13 @@ The command is `codewhale`. `codew` is a shorter alias for the same program.
 
 This guide was written by installing **v0.10.0** (released 2026-09-22) on a
 fresh **Ubuntu 24.04 x86_64** machine, on every path described here. Every
-command shown was run and its output checked (see [`RECEIPTS.md`](install-report/v0.10.0-2026-09-23/RECEIPTS.md)). Steps that
+command shown was run and its output checked (see the [install receipts](https://github.com/Hmbown/Codewhale/blob/37ecdfcc49bc68a9b0d058b97c3946e62c34bd31/docs/install-report/v0.10.0-2026-09-23/RECEIPTS.md)). Steps that
 could not be run on that machine are marked **(untested on this VM: reason)**.
-macOS, Windows and Android are out of scope, apart from a few notes.
+macOS, Windows and Android are out of scope, apart from a few notes. A second
+pass re-ran the installer, manual-download, archive and npm paths, the no-key
+checks and zsh completion on **macOS 26.1 (Apple silicon)**; see
+[macOS notes](#macos-notes). Steps that need a model call were not re-run
+there.
 
 Install commands that use `latest` resolve to the latest **published** GitHub
 Release or package. Between releases, `main` may already describe the next
@@ -116,8 +120,8 @@ which always wins. The TUI also checks GitHub for updates at startup
 
 ## 2. Recommended installer (`curl | sh`)
 
-**Prerequisites:** curl, sha256sum, a writable home directory. No sudo, no Node,
-no Rust.
+**Prerequisites:** curl, `sha256sum` (Linux) or the built-in `shasum` (macOS),
+a writable home directory. No sudo, no Node, no Rust.
 
 ```bash
 curl -fsSL https://codewhale.net/install.sh | sh
@@ -151,6 +155,20 @@ Installed checksummed release commands:
 …
 PATH selects no codewhale command; this install is /home/you/.local/bin/codewhale
 ```
+
+#### macOS notes
+
+Re-checked on macOS 26.1, Apple silicon (`macos-arm64`), with a fresh `HOME`:
+
+* The installer printed `Installing Codewhale for macos-arm64`, verified
+  checksums with the system tools, and installed `codewhale` and `codew`
+  (64 MiB each, Mach-O arm64) in 4.3 s. Both report
+  `codewhale 0.10.0 (1be1a703b975)`. They ran without a Gatekeeper prompt.
+* When Node isn't on `PATH`, it also prints `Computer Use is included and needs
+  Node.js 20 or newer on PATH.` Everything else works without Node.
+* `codewhale doctor` behaves as on Linux (exit 0, `All checks complete!` with no
+  key, file-based secret store under `~/.codewhale/secrets/`), except that it
+  reports `✓ sandbox available: macos-seatbelt`.
 
 ### Put it on your PATH
 
@@ -234,8 +252,19 @@ install -m 755 codew-linux-x64     ~/.local/bin/codew
 ```
 
 Then [put `~/.local/bin` on PATH](#put-it-on-your-path) and run
-`codewhale --version`. On macOS, use `shasum -a 256 -c … --ignore-missing`
-**(untested on this VM: Linux only)**.
+`codewhale --version`. On macOS the assets are `codewhale-macos-arm64` and
+`codew-macos-arm64` (`-macos-x64` on Intel), and the built-in `shasum` verifies
+them (tested on macOS 26.1, Apple silicon):
+
+```bash
+/usr/bin/shasum -a 256 -c codewhale-artifacts-sha256.txt --ignore-missing
+#   codew-macos-arm64: OK
+#   codewhale-macos-arm64: OK
+```
+
+The `codewhale-macos-arm64.tar.gz` archive verifies the same way against
+`codewhale-bundles-sha256.txt`, and its `./install.sh` installs into
+`~/.local/bin` (tested).
 
 To pin a release, replace `latest/download` with `download/vX.Y.Z`, and take
 the manifest from the same tag.
@@ -305,6 +334,9 @@ command -v codewhale codew     # ~/.npm-global/bin/codewhale, ~/.npm-global/bin/
   source is also written to
   `$(npm prefix -g)/lib/node_modules/codewhale/bin/downloads/codewhale.source`.
 * The package uses 157 MB on disk.
+* On macOS 26.1 (Apple silicon, Homebrew Node 25) an install into a user-owned
+  prefix (`npm install -g --prefix <dir> codewhale`) took 3 s and linked
+  `codewhale` and `codew`, both `codewhale 0.10.0 (1be1a703b975)`.
 * **Upgrade:** `npm install -g codewhale@latest`. `codewhale update` refuses
   on npm installs. It prints migration instructions and exits 1 with
   `error: The package-managed executable was not changed.`
@@ -628,7 +660,8 @@ How well they work in v0.10.0 (tested interactively):
 * **fish:** sub-commands complete with descriptions, but
   `codewhale completion <Tab>` offers files instead of shell names.
 * **zsh:** only the first word completes. After a sub-command
-  (`codewhale auth <Tab>`), zsh wrongly lists the top-level commands again.
+  (`codewhale auth <Tab>`), zsh wrongly lists the top-level commands again
+  (same on macOS zsh 5.9, where it offers all 126 top-level entries).
 
 PowerShell and Elvish scripts are generated too **(untested on this VM: shells
 not installed)**.
@@ -693,8 +726,8 @@ following `exec --continue` fails with `No saved sessions found for workspace`.
 ### Ghostty (tested: Ghostty 1.3.1 on Linux/X11)
 
 Everything I checked worked in Ghostty with its default config
-(`TERM=xterm-ghostty`, `COLORTERM=truecolor`). Screenshots are in
-[`install-report/v0.10.0-2026-09-23/screenshots/`](install-report/v0.10.0-2026-09-23/screenshots/).
+(`TERM=xterm-ghostty`, `COLORTERM=truecolor`). Screenshots are kept with the
+[install receipts](https://github.com/Hmbown/Codewhale/tree/37ecdfcc49bc68a9b0d058b97c3946e62c34bd31/docs/install-report/v0.10.0-2026-09-23/screenshots).
 
 | Check | Result |
 |---|---|
@@ -827,8 +860,15 @@ without secrets.
 The sections below are carried over unchanged from the previous revision of
 this page. They were **not re-run** for the v0.10.0 install test above
 (out of scope: Windows, macOS, Android/Termux, FreeBSD, mainland-China
-mirrors). Known contradictions with the published v0.10.0 assets are listed
-in [`DOC_DEFECTS.md`](install-report/v0.10.0-2026-09-23/DOC_DEFECTS.md) (D15, D16).
+mirrors), apart from the macOS paths noted in [macOS notes](#macos-notes).
+Known contradictions with the published v0.10.0 assets, found by inspecting
+them ([details](https://github.com/Hmbown/Codewhale/blob/37ecdfcc49bc68a9b0d058b97c3946e62c34bd31/docs/install-report/v0.10.0-2026-09-23/DOC_DEFECTS.md), D15 and D16):
+
+* The winget manifest in `packaging/winget/` is still at 0.9.6.
+* v0.10.0 publishes both `codewhale-windows-x64.zip` (with an `install.bat`
+  that copies to `%USERPROFILE%\bin`) and `codewhale-windows-x64-portable.zip`;
+  the sections below mention only the first.
+* The standalone `codewhale.bat` launcher works only next to the x64 exe.
 
 ### Supported platforms and assets
 
