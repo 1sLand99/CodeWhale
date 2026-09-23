@@ -17582,9 +17582,13 @@ async fn diagnostics_list_and_read_bounded_windows() -> Result<()> {
     // An explicit profile owns both logs and crashes, even when ambient
     // legacy crash files exist outside it.
     let _user_home = crate::test_support::EnvVarGuard::set("HOME", tmp.path().join("userhome"));
-    let logs = tmp.path().join("cwhome/logs");
-    let crashes = tmp.path().join("cwhome/crashes");
-    let ambient_crashes = tmp.path().join("userhome/.deepseek/crashes");
+    let logs = tmp.path().join("cwhome").join("logs");
+    let crashes = tmp.path().join("cwhome").join("crashes");
+    let ambient_crashes = tmp
+        .path()
+        .join("userhome")
+        .join(".deepseek")
+        .join("crashes");
     fs::create_dir_all(&ambient_crashes)?;
     fs::write(
         ambient_crashes.join("ambient-only.log"),
