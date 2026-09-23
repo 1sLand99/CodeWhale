@@ -818,7 +818,10 @@ pub fn status_visibility(message: &str) -> StatusVisibility {
         || (message.starts_with("Executing ") && message.ends_with(" parallel chunk(s)"));
     let continuation_row = message.starts_with("Continuing — ")
         || message.starts_with("Continuing active goal (pass ");
-    if scheduler_row || continuation_row {
+    let approval_wait_row = (message.starts_with("Still waiting for tool approval on `")
+        || message.starts_with("Still waiting for user input on `"))
+        && message.ends_with("s — the turn is parked here until it is answered");
+    if scheduler_row || continuation_row || approval_wait_row {
         StatusVisibility::Internal
     } else {
         StatusVisibility::User
@@ -929,6 +932,8 @@ mod status_visibility_tests {
             "Continuing — tool results",
             "Continuing — queued steer input",
             "Continuing active goal (pass 2 this turn, 5 total)",
+            "Still waiting for tool approval on `call-1` after 60s — the turn is parked here until it is answered",
+            "Still waiting for user input on `call-2` after 120s — the turn is parked here until it is answered",
         ] {
             assert_eq!(
                 status_visibility(internal),
@@ -950,6 +955,8 @@ mod status_visibility_tests {
             "Request cancelled",
             "Reconnecting…",
             "Goal set; starting goal work.",
+            "Still waiting for the service to reconnect; retry in a moment.",
+            "Still waiting for tool approval on `call-1` after an unexpected failure",
             "Turn ending with 1 detached sub-agent(s) still running in the background; they'll report when done.",
         ] {
             assert_eq!(status_visibility(user), StatusVisibility::User, "{user}");

@@ -136,7 +136,7 @@ pub(crate) fn set_test_stall_record_dir(dir: Option<PathBuf>) {
     TEST_STALL_RECORD_DIR.with(|slot| *slot.borrow_mut() = dir);
 }
 
-/// `~/.codewhale/crashes`, the directory panic dumps and `/v1/logs` already use.
+/// The selected profile's crash directory, shared with panic dumps.
 fn stall_record_dir() -> Option<PathBuf> {
     #[cfg(test)]
     {
@@ -144,7 +144,9 @@ fn stall_record_dir() -> Option<PathBuf> {
     }
     #[cfg(not(test))]
     {
-        crate::config::effective_home_dir().map(|home| home.join(".codewhale").join("crashes"))
+        codewhale_config::codewhale_home()
+            .ok()
+            .map(|home| home.join("crashes"))
     }
 }
 

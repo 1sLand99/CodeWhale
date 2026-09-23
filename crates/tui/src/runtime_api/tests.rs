@@ -17579,11 +17579,17 @@ async fn diagnostics_list_and_read_bounded_windows() -> Result<()> {
     let _env_lock = crate::test_support::lock_test_env();
     let tmp = tempfile::tempdir()?;
     let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", tmp.path().join("cwhome"));
-    // Crash dumps resolve under the user home (`<home>/.codewhale/crashes`),
-    // independent of the codewhale-home override that governs logs.
+    // An explicit profile owns both logs and crashes, even when ambient
+    // legacy crash files exist outside it.
     let _user_home = crate::test_support::EnvVarGuard::set("HOME", tmp.path().join("userhome"));
     let logs = tmp.path().join("cwhome/logs");
-    let crashes = tmp.path().join("userhome/.codewhale/crashes");
+    let crashes = tmp.path().join("cwhome/crashes");
+    let ambient_crashes = tmp.path().join("userhome/.deepseek/crashes");
+    fs::create_dir_all(&ambient_crashes)?;
+    fs::write(
+        ambient_crashes.join("ambient-only.log"),
+        "not in this profile",
+    )?;
     fs::create_dir_all(&logs)?;
     fs::create_dir_all(&crashes)?;
     fs::write(logs.join("tui-20990101-1.log"), "line one\nline two\n")?;
@@ -17647,6 +17653,8 @@ async fn diagnostics_list_and_read_bounded_windows() -> Result<()> {
         .error_for_status()?
         .json()
         .await?;
+    assert_eq!(crashes_list["sources"].as_array().unwrap().len(), 1);
+    assert_eq!(crashes_list["sources"][0]["dir"], json!(crashes));
     assert!(
         crashes_list["sources"][0]["files"]
             .as_array()
@@ -17663,6 +17671,14 @@ async fn diagnostics_list_and_read_bounded_windows() -> Result<()> {
         .json()
         .await?;
     assert_eq!(crash["content"], "Panic: boom\n");
+
+    let status = client
+        .get(format!("{base}/v1/crashes/ambient-only.log"))
+        .bearer_auth("diag-token")
+        .send()
+        .await?
+        .status();
+    assert_eq!(status, StatusCode::NOT_FOUND);
 
     // Traversal and missing files fail closed.
     let status = client

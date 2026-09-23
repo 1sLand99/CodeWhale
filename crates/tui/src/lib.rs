@@ -1762,7 +1762,7 @@ fn run_with_args(args: Vec<String>) -> Result<()> {
     crate::tui::ui::fatal_signal_guard::install_fatal_signal_guard();
 
     // Set up process panic hook before anything else — writes crash dumps
-    // to ~/.deepseek/crashes/ even if the panic happens before tokio is up,
+    // to the selected profile's crashes/ even before tokio is up,
     // and restores the terminal so a panicked TUI doesn't leave the user's
     // shell stuck in alt-screen mode.
     let orig_hook = std::panic::take_hook();
@@ -1805,8 +1805,8 @@ fn run_with_args(args: Vec<String>) -> Result<()> {
             codewhale_telemetry::record_blocking(codewhale_telemetry::Event::Panic { site });
         }
         // Write crash dump best-effort
-        if let Some(home) = crate::config::effective_home_dir() {
-            let crash_dir = home.join(".deepseek").join("crashes");
+        if let Ok(home) = codewhale_config::codewhale_home() {
+            let crash_dir = home.join("crashes");
             let _ = std::fs::create_dir_all(&crash_dir);
             use chrono::Utc;
             let ts = Utc::now().format("%Y%m%dT%H%M%S%.3fZ");

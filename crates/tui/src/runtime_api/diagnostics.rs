@@ -228,17 +228,22 @@ fn log_sources() -> Vec<(PathBuf, Vec<PathBuf>)> {
     sources
 }
 
-/// Panic dumps prefer `<home>/.codewhale/crashes` and fall back to the legacy
-/// `.deepseek` directory — mirror the writer's preference order and merge
-/// every directory that exists.
+/// Read the selected profile's crash store. Default profiles also retain
+/// access to legacy dumps; explicit profiles never expose ambient diagnostics.
 fn crash_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Some(home) = crate::config::effective_home_dir() {
-        for base in [".codewhale", ".deepseek"] {
-            let dir = home.join(base).join("crashes");
-            if dir.is_dir() && !dirs.contains(&dir) {
-                dirs.push(dir);
-            }
+    if let Ok(home) = codewhale_config::codewhale_home() {
+        let dir = home.join("crashes");
+        if dir.is_dir() {
+            dirs.push(dir);
+        }
+    }
+    if !codewhale_config::codewhale_home_is_explicit()
+        && let Ok(home) = codewhale_config::legacy_deepseek_home()
+    {
+        let dir = home.join("crashes");
+        if dir.is_dir() && !dirs.contains(&dir) {
+            dirs.push(dir);
         }
     }
     dirs
@@ -398,6 +403,31 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use axum::http::StatusCode;
+
+    #[test]
+    fn explicit_profile_never_lists_ambient_crashes() {
+        use crate::test_support::{EnvVarGuard, lock_test_env};
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().expect("temp");
+        let _home = EnvVarGuard::set("HOME", tmp.path());
+        for base in [".codewhale", ".deepseek"] {
+            std::fs::create_dir_all(tmp.path().join(base).join("crashes"))
+                .expect("ambient fixture");
+        }
+        let profile = tmp.path().join("selected");
+        let _profile = EnvVarGuard::set("CODEWHALE_HOME", &profile);
+        assert!(crash_dirs().is_empty(), "no fallback for a fresh profile");
+        let selected = profile.join("crashes");
+        std::fs::create_dir_all(&selected).expect("selected fixture");
+        assert_eq!(crash_dirs(), vec![selected]);
+    }
+
+    #[test]
+    fn invalid_profile_does_not_fall_back_to_ambient_crashes() {
+        let _lock = crate::test_support::lock_test_env();
+        let _profile = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", "relative-profile");
+        assert!(crash_dirs().is_empty());
+    }
 
     fn whole_file() -> FileReadQuery {
         FileReadQuery {
