@@ -1307,6 +1307,31 @@ async fn dispatch_launch_composer_submit(
 /// from slash-menu selection onward is the shared `submit_decided_composer_input`
 /// tail the keyboard Enter arm also uses, so the two surfaces cannot drift.
 #[allow(clippy::too_many_arguments)]
+/// Show why a turn ended without success. The composer status line always
+/// names it; a turn the Engine stopped itself (wall-clock or step budget, no
+/// progress, an incomplete response) posts no error event, so its reason also
+/// goes into the transcript — a footer line alone is replaced by the next
+/// notice, and the session then reads as hung. When an error event already
+/// put the message in the transcript, nothing is repeated.
+pub(super) fn present_turn_failure(
+    app: &mut App,
+    status: crate::core::events::TurnOutcomeStatus,
+    error: Option<&str>,
+) {
+    let Some(error) = error else { return };
+    if app.turn_error_posted {
+        return;
+    }
+    let notice = format!("{}: {error}", app.tr(MessageId::NotificationTurnFailed));
+    if matches!(status, crate::core::events::TurnOutcomeStatus::Failed) {
+        app.add_message(HistoryCell::Error {
+            message: notice.clone(),
+            severity: crate::error_taxonomy::ErrorSeverity::Warning,
+        });
+    }
+    app.set_sticky_status(notice, StatusToastLevel::Error, None);
+}
+
 async fn dispatch_session_composer_submit(
     terminal: &mut AppTerminal,
     app: &mut App,
@@ -2754,23 +2779,7 @@ pub(crate) async fn run_event_loop(
                             recorded_at: Instant::now(),
                         });
                         app.retire_action_notices(None);
-                        if let Some(error) = error.as_deref() {
-                            // Only show "Turn failed:" in the composer status
-                            // area when an EngineEvent::Error has NOT already
-                            // posted the same message into the transcript.
-                            // Otherwise the error appears twice: once in a
-                            // HistoryCell and again as a redundant status line.
-                            if !app.turn_error_posted {
-                                app.set_sticky_status(
-                                    format!(
-                                        "{}: {error}",
-                                        app.tr(MessageId::NotificationTurnFailed)
-                                    ),
-                                    StatusToastLevel::Error,
-                                    None,
-                                );
-                            }
-                        }
+                        present_turn_failure(app, status, error.as_deref());
 
                         // Update session cost, and record what the total does
                         // *not* cover so `/cost` can stay honest about it.
