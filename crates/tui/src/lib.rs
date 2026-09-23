@@ -3311,6 +3311,31 @@ async fn run_fleet_command(workspace: &Path, config: &Config, args: FleetArgs) -
     }
 
     let fleet_config = config.fleet_config();
+    // `fleet run --check` must not conjure the ledger or the sub-agent state it
+    // would write to, so it validates before either is opened below.
+    if let FleetCommand::Run(run_args) = &args.command
+        && run_args.check
+    {
+        initialize_cloud_facts(config);
+        let check = FleetManager::check_task_spec_path_in(
+            workspace,
+            fleet_config,
+            config.default_model(),
+            config.clone(),
+            &run_args.task_spec,
+        )?;
+        println!(
+            "Fleet spec ok: {} ({} task{}). Nothing was created or launched.",
+            run_args.task_spec.display(),
+            check.task_count,
+            if check.task_count == 1 { "" } else { "s" }
+        );
+        for warning in &check.warnings {
+            println!("warning: {warning}");
+        }
+        return Ok(());
+    }
+
     let provider = config.api_provider();
     let max_subagents = config.max_subagents_for_provider(provider);
     let coordination_manager = crate::tools::subagent::new_shared_subagent_manager_with_timeout(
@@ -3351,31 +3376,6 @@ async fn run_fleet_command(workspace: &Path, config: &Config, args: FleetArgs) -
                 availability,
             ));
         }
-    }
-
-    // `fleet run --check` must not conjure the ledger it would write to, so
-    // it validates against a ledger-free manager view before `open` below.
-    if let FleetCommand::Run(run_args) = &args.command
-        && run_args.check
-    {
-        initialize_cloud_facts(config);
-        let check = FleetManager::check_task_spec_path_in(
-            workspace,
-            fleet_config,
-            config.default_model(),
-            config.clone(),
-            &run_args.task_spec,
-        )?;
-        println!(
-            "Fleet spec ok: {} ({} task{}). Nothing was created or launched.",
-            run_args.task_spec.display(),
-            check.task_count,
-            if check.task_count == 1 { "" } else { "s" }
-        );
-        for warning in &check.warnings {
-            println!("warning: {warning}");
-        }
-        return Ok(());
     }
 
     // The configured route is the operator: fleet workers without a
