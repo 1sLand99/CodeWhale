@@ -135,9 +135,34 @@ pub fn build_approval_grouping_key(tool_name: &str, input: &serde_json::Value) -
             format!("cu:{name}:{}", hash_json_value(input))
         }
         name if crate::mcp::McpPool::is_mcp_tool(name) => format!("mcp:{name}"),
+        // E1: a session grant for web browsing covers the argument class the
+        // person approved (search, open, …), not the one exact query.
+        "web.run" => format!("web:{tool_name}:{}", web_run_action_class(input)),
+        "web_search" => format!("web:{tool_name}"),
         _ => format!("tool:{tool_name}:{}", hash_json_value(input)),
     };
     ApprovalKey(fingerprint)
+}
+
+/// The sorted `web.run` action kinds present in `input`, e.g. `open+search_query`.
+fn web_run_action_class(input: &Value) -> String {
+    const ACTIONS: [&str; 6] = [
+        "click",
+        "find",
+        "image_query",
+        "open",
+        "screenshot",
+        "search_query",
+    ];
+    let present: Vec<&str> = ACTIONS
+        .into_iter()
+        .filter(|action| input.get(*action).is_some_and(|value| !value.is_null()))
+        .collect();
+    if present.is_empty() {
+        "none".to_string()
+    } else {
+        present.join("+")
+    }
 }
 
 /// A Computer Use call whose approval must come from a person (K1 / K2).
@@ -800,5 +825,28 @@ mod tests {
         );
         assert!(!canonical.contains(",]"));
         assert!(!canonical.contains(",}"));
+    }
+
+    #[test]
+    fn web_run_session_grant_covers_its_argument_class_only() {
+        let search = |q: &str| json!({"search_query": [{"q": q}]});
+        assert_eq!(
+            build_approval_grouping_key("web.run", &search("espresso")),
+            build_approval_grouping_key("web.run", &search("grinders")),
+            "approving one search covers later searches"
+        );
+        assert_ne!(
+            build_approval_grouping_key("web.run", &search("espresso")),
+            build_approval_grouping_key(
+                "web.run",
+                &json!({"open": [{"ref_id": "https://x.test"}]})
+            ),
+            "a search grant never covers opening a page"
+        );
+        assert_ne!(
+            build_approval_key("web.run", &search("espresso")),
+            build_approval_key("web.run", &search("grinders")),
+            "denials stay exact-call scoped"
+        );
     }
 }

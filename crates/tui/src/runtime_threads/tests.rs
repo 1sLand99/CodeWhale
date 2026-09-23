@@ -13543,23 +13543,19 @@ async fn deliver_external_approval_for_unknown_id_returns_false() {
     assert_eq!(manager.pending_approvals_count(), 0);
 }
 
+/// E1/E2 regression: "allow for this conversation" on one call is a grant for
+/// that tool and argument class. It never changes the thread's posture (which
+/// used to flip to Full Access and publish a mid-turn posture change that
+/// failed the approved call), it answers the queued same-class call without a
+/// prompt, it cancels nothing, a different class still prompts, and it can be
+/// revoked.
 #[tokio::test]
-async fn approval_required_remember_flips_thread_auto_approve() -> Result<()> {
+async fn approval_remember_grants_tool_class_without_changing_posture() -> Result<()> {
     let manager = test_manager(test_runtime_dir())?;
     let thread = manager
-        .create_thread(CreateThreadRequest {
-            model: None,
-            workspace: None,
-            mode: None,
-            allow_shell: None,
-            trust_mode: None,
-            auto_approve: None,
-            archived: false,
-            system_prompt: None,
-            task_id: None,
-            ..Default::default()
-        })
+        .create_thread(CreateThreadRequest::default())
         .await?;
+    let posture_before = manager.store.load_thread(&thread.id)?.permission_posture;
     assert!(!manager.store.load_thread(&thread.id)?.auto_approve);
 
     let mut harness = install_mock_engine(&manager, &thread.id).await;
@@ -13567,13 +13563,7 @@ async fn approval_required_remember_flips_thread_auto_approve() -> Result<()> {
         .start_turn(
             &thread.id,
             StartTurnRequest {
-                prompt: "needs approval".to_string(),
-                input_summary: None,
-                model: None,
-                mode: None,
-                allow_shell: None,
-                trust_mode: None,
-                auto_approve: None,
+                prompt: "compare espresso machines".to_string(),
                 ..Default::default()
             },
         )
@@ -13583,53 +13573,145 @@ async fn approval_required_remember_flips_thread_auto_approve() -> Result<()> {
         Some(Op::SendMessage(TurnSpec { .. }))
     ));
 
+    let search = |id: &str, q: &str| {
+        let input = json!({ "search_query": [{ "q": q }] });
+        EngineEvent::ApprovalRequired {
+            approval_key: crate::tools::approval_cache::build_approval_key("web.run", &input).0,
+            approval_grouping_key: crate::tools::approval_cache::build_approval_grouping_key(
+                "web.run", &input,
+            )
+            .0,
+            id: id.to_string(),
+            tool_name: "web.run".to_string(),
+            description: "Browse the web".to_string(),
+            input,
+            intent_summary: None,
+            approval_force_prompt: false,
+        }
+    };
+    // Three gated calls queued behind one prompt: two searches, one write.
+    harness
+        .tx_event
+        .send(search("call_search_1", "espresso"))
+        .await?;
+    harness
+        .tx_event
+        .send(search("call_search_2", "grinders"))
+        .await?;
     harness
         .tx_event
         .send(EngineEvent::ApprovalRequired {
-            approval_key: "key3".to_string(),
-            approval_grouping_key: "key3".to_string(),
-            id: "tool_remember".to_string(),
-            tool_name: "exec_command".to_string(),
-            description: "remember=true".to_string(),
-            input: serde_json::json!({}),
+            approval_key: "write-key".to_string(),
+            approval_grouping_key: "write-group".to_string(),
+            id: "call_write".to_string(),
+            tool_name: "write_file".to_string(),
+            description: "write".to_string(),
+            input: json!({ "path": thread.workspace.join("espresso.md") }),
             intent_summary: None,
             approval_force_prompt: false,
         })
         .await?;
 
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while Instant::now() < deadline && manager.pending_approvals_count() == 0 {
-        sleep(Duration::from_millis(20)).await;
-    }
-    let approval_id = await_approval_identity(&manager, &thread.id, "tool_remember").await?;
+    let approval_id = await_approval_identity(&manager, &thread.id, "call_search_1").await?;
+    let pending = manager
+        .get_thread_detail(&thread.id)
+        .await?
+        .pending_approvals;
+    assert_eq!(
+        pending[0].summary.as_deref(),
+        Some("Search the web for 'espresso'"),
+        "the approval carries a model-independent summary (E6)"
+    );
     assert!(manager.deliver_external_approval(
         &approval_id,
         ExternalApprovalDecision::Allow { remember: true },
     ));
-    let _ = harness.recv_approval_event().await;
-
-    assert!(
-        manager.store.load_thread(&thread.id)?.auto_approve,
-        "remember=true should flip thread auto_approve"
+    assert_eq!(
+        harness.recv_approval_event().await,
+        Some(MockApprovalEvent::Approved {
+            id: "call_search_1".to_string()
+        })
     );
+    // The queued same-class search is answered by the grant, not cancelled.
+    assert_eq!(
+        harness.recv_approval_event().await,
+        Some(MockApprovalEvent::Approved {
+            id: "call_search_2".to_string()
+        })
+    );
+    // A different tool still asks.
+    let write_approval = await_approval_identity(&manager, &thread.id, "call_write").await?;
+    let detail = manager.get_thread_detail(&thread.id).await?;
+    assert_eq!(detail.pending_approvals.len(), 1);
+    assert_eq!(
+        detail.pending_approvals[0].summary.as_deref(),
+        Some("Write espresso.md"),
+        "paths are workspace-relative"
+    );
+
+    // Posture is untouched everywhere: record, live engine, mailbox.
+    let record = manager.store.load_thread(&thread.id)?;
+    assert!(
+        !record.auto_approve,
+        "a session grant must not enable auto-approve"
+    );
+    assert_eq!(record.permission_posture, posture_before);
     assert_eq!(
         manager.active_turn_flags(&thread.id, &turn.id).await,
-        Some((true, false)),
-        "remember=true should update the active turn used by subsequent approvals"
+        Some((false, false))
+    );
+    assert!(
+        harness.rx_op.try_recv().is_err(),
+        "approving must not queue a posture change"
     );
 
+    // The grant is named on the event stream and in the snapshot.
+    assert_eq!(detail.approval_grants.len(), 1);
+    let grant = detail.approval_grants[0].clone();
+    assert_eq!(grant.tool_name, "web.run");
+    assert_eq!(grant.summary, "Search the web for 'espresso'");
+    let events = manager.events_since(&thread.id, None)?;
+    assert!(events.iter().any(|event| {
+        event.event == "approval.grant_added"
+            && event.payload["grant"]["grant_id"] == grant.grant_id
+    }));
+    assert!(events.iter().any(|event| {
+        event.event == "approval.decided"
+            && event.payload["tool_call_id"] == "call_search_2"
+            && event.payload["grant_id"] == grant.grant_id
+    }));
+
+    assert!(manager.deliver_external_approval(
+        &write_approval,
+        ExternalApprovalDecision::Deny { remember: false },
+    ));
+    let _ = harness.recv_approval_event().await;
+
+    // Revoked, the next search prompts again.
+    assert!(
+        manager
+            .revoke_approval_grant(&thread.id, &grant.grant_id)
+            .await?
+    );
+    assert!(
+        !manager
+            .revoke_approval_grant(&thread.id, &grant.grant_id)
+            .await?
+    );
     harness
         .tx_event
-        .send(EngineEvent::TurnComplete {
-            usage: Usage::default(),
-            parent_route_usage: Usage::default(),
-            routed_usage_dropped_records: 0,
-            status: TurnOutcomeStatus::Completed,
-            error: None,
-            tool_catalog: None,
-            base_url: None,
-        })
+        .send(search("call_search_3", "tampers"))
         .await?;
+    await_approval_identity(&manager, &thread.id, "call_search_3").await?;
+    assert!(
+        manager
+            .get_thread_detail(&thread.id)
+            .await?
+            .approval_grants
+            .is_empty()
+    );
+
+    manager.interrupt_turn(&thread.id, &turn.id).await?;
     Ok(())
 }
 

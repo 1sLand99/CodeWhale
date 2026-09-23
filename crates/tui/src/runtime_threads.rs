@@ -3678,6 +3678,10 @@ pub struct ThreadDetail {
     /// `tool_call.requested` event is already behind that cursor.
     #[serde(default)]
     pub pending_dynamic_tool_calls: Vec<DynamicToolCallParams>,
+    /// Live session approval grants on this thread (see
+    /// [`RuntimeApprovalGrant`]); each can be revoked by `grant_id`.
+    #[serde(default)]
+    pub approval_grants: Vec<RuntimeApprovalGrant>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3697,6 +3701,29 @@ pub struct PendingApprovalRequest {
     /// matches `id` only, so this value settles nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Model-independent one-line summary of the gated call ("Search the web
+    /// for '…'"), with workspace-relative paths. Clients show it first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
+/// A session approval grant: "allow for this conversation" on one call.
+///
+/// The grant covers later calls of the same tool and argument class (the
+/// approval grouping key) on this thread, for the life of this Runtime
+/// process. It never changes the thread's permission posture, and it can be
+/// revoked. Known limit: grants are in memory only, so a Runtime restart
+/// forgets them and the next matching call prompts again (fail closed).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeApprovalGrant {
+    /// Runtime-minted `grant_<32 hex>`; the revoke endpoint accepts only this.
+    pub grant_id: String,
+    pub tool_name: String,
+    /// The approval grouping key the grant matches (tool + argument class).
+    pub scope: String,
+    /// The summary of the call the person approved.
+    pub summary: String,
+    pub granted_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4536,6 +4563,8 @@ pub struct RuntimeThreadManager {
     automations:
         Arc<parking_lot::Mutex<Option<crate::automation_manager::SharedAutomationManager>>>,
     pending_approvals: Arc<parking_lot::Mutex<HashMap<String, PendingApprovalEntry>>>,
+    /// Session approval grants per thread id.
+    approval_grants: Arc<parking_lot::Mutex<HashMap<String, Vec<RuntimeApprovalGrant>>>>,
     pending_user_inputs: Arc<parking_lot::Mutex<HashMap<(String, String), PendingUserInputEntry>>>,
     pending_dynamic_tools: Arc<parking_lot::Mutex<HashMap<String, PendingDynamicToolEntry>>>,
     recovery_receipts: Arc<parking_lot::Mutex<HashMap<String, Vec<RecoveredTurnReceipt>>>>,
@@ -5116,6 +5145,7 @@ impl RuntimeThreadManager {
             task_execution_lease: Arc::new(parking_lot::Mutex::new(None)),
             automations: Arc::new(parking_lot::Mutex::new(None)),
             pending_approvals: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            approval_grants: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             pending_user_inputs: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             pending_dynamic_tools: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             recovery_receipts: Arc::new(parking_lot::Mutex::new(HashMap::new())),
@@ -5895,6 +5925,7 @@ impl RuntimeThreadManager {
                 // Stands in for the provider's raw call ID so tests can prove
                 // the correlator is visible and still not deliverable.
                 tool_call_id: Some(label.to_string()),
+                summary: None,
             },
         )
     }
@@ -5934,42 +5965,93 @@ impl RuntimeThreadManager {
         })
     }
 
-    fn remember_thread_auto_approve(&self, thread_id: &str, engine: &EngineHandle) {
-        let thread = {
-            let _thread_mutation = self.store.thread_mutation.lock();
-            let Ok(mut thread) = self.store.load_thread(thread_id) else {
-                return;
-            };
-            if !thread.auto_approve || thread.permission_posture.as_deref() != Some("full_access") {
-                thread.auto_approve = true;
-                thread.permission_posture = Some("full_access".to_string());
-                thread.updated_at = Utc::now();
-                if let Err(err) = self.store.save_thread(&thread) {
-                    tracing::warn!(
-                        "Failed to persist full-access posture for thread {}: {}",
-                        thread_id,
-                        err
-                    );
-                    return;
-                }
-            }
-            thread
-        };
+    /// Live session approval grants on `thread_id`, oldest first.
+    #[must_use]
+    pub fn approval_grants_for_thread(&self, thread_id: &str) -> Vec<RuntimeApprovalGrant> {
+        self.approval_grants
+            .lock()
+            .get(thread_id)
+            .cloned()
+            .unwrap_or_default()
+    }
 
-        let configured_sandbox_mode = self.read_config().sandbox_mode.clone();
-        let policy = RuntimePolicyProjection::from_persisted(
-            &thread.mode,
-            thread.permission_posture.as_deref(),
-            thread.auto_approve,
-        );
-        let _ = engine.try_send(Op::ChangeMode {
-            mode: policy.mode,
-            allow_shell: thread.allow_shell,
-            trust_mode: thread.trust_mode,
-            auto_approve: policy.auto_approve(),
-            approval_mode: policy.permission,
-            configured_sandbox_mode,
-        });
+    fn session_grant_for(&self, thread_id: &str, scope: &str) -> Option<RuntimeApprovalGrant> {
+        self.approval_grants
+            .lock()
+            .get(thread_id)?
+            .iter()
+            .find(|grant| grant.scope == scope)
+            .cloned()
+    }
+
+    /// Record "allow for this conversation" as a grant scoped to the tool and
+    /// its argument class (E1). The thread's permission posture is untouched:
+    /// promoting a one-call approval to Full Access is what this replaced.
+    async fn add_session_grant(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        tool_name: &str,
+        scope: &str,
+        summary: &str,
+    ) -> RuntimeApprovalGrant {
+        let grant = {
+            let mut grants = self.approval_grants.lock();
+            let thread_grants = grants.entry(thread_id.to_string()).or_default();
+            if let Some(existing) = thread_grants.iter().find(|grant| grant.scope == scope) {
+                return existing.clone();
+            }
+            let grant = RuntimeApprovalGrant {
+                grant_id: format!("grant_{}", Uuid::new_v4().simple()),
+                tool_name: tool_name.to_string(),
+                scope: scope.to_string(),
+                summary: summary.to_string(),
+                granted_at: Utc::now(),
+            };
+            thread_grants.push(grant.clone());
+            grant
+        };
+        self.emit_event(
+            thread_id,
+            Some(turn_id),
+            None,
+            "approval.grant_added",
+            json!({ "grant": grant.clone() }),
+        )
+        .await
+        .ok();
+        grant
+    }
+
+    /// Revoke one session grant. Returns `false` when the thread holds no
+    /// grant with that id. The next matching call prompts again.
+    pub async fn revoke_approval_grant(&self, thread_id: &str, grant_id: &str) -> Result<bool> {
+        let revoked = {
+            let mut grants = self.approval_grants.lock();
+            let Some(thread_grants) = grants.get_mut(thread_id) else {
+                return Ok(false);
+            };
+            let Some(index) = thread_grants
+                .iter()
+                .position(|grant| grant.grant_id == grant_id)
+            else {
+                return Ok(false);
+            };
+            let revoked = thread_grants.remove(index);
+            if thread_grants.is_empty() {
+                grants.remove(thread_id);
+            }
+            revoked
+        };
+        self.emit_event(
+            thread_id,
+            None,
+            None,
+            "approval.grant_revoked",
+            json!({ "grant": revoked }),
+        )
+        .await?;
+        Ok(true)
     }
 
     #[must_use]
@@ -8292,6 +8374,7 @@ impl RuntimeThreadManager {
             pending_approvals,
             pending_user_inputs,
             pending_dynamic_tool_calls,
+            approval_grants: self.approval_grants_for_thread(id),
         })
     }
 
@@ -12345,7 +12428,10 @@ impl RuntimeThreadManager {
                     id,
                     tool_name,
                     description,
+                    input,
+                    approval_grouping_key,
                     intent_summary,
+                    approval_force_prompt,
                     ..
                 } => {
                     let Some(authority) = self
@@ -12358,6 +12444,16 @@ impl RuntimeThreadManager {
                     let auto_approve = authority.auto_approve;
                     let trust_mode = authority.trust_mode;
                     let approval_mode = authority.approval_mode;
+                    let summary_workspace = self
+                        .store
+                        .load_thread(&thread_id)
+                        .ok()
+                        .map(|thread| thread.workspace);
+                    let summary = crate::tools::approval_summary::approval_summary(
+                        &tool_name,
+                        &input,
+                        summary_workspace.as_deref(),
+                    );
 
                     let pending_request = PendingApprovalRequest {
                         // Replaced by the minted ID at registration. The raw
@@ -12370,6 +12466,7 @@ impl RuntimeThreadManager {
                         description: description.clone(),
                         intent_summary: intent_summary.clone(),
                         tool_call_id: Some(id.clone()),
+                        summary: Some(summary.clone()),
                     };
 
                     if auto_approve {
@@ -12389,6 +12486,7 @@ impl RuntimeThreadManager {
                                 "approval_id": approval_id,
                                 "tool_call_id": id,
                                 "tool_name": tool_name,
+                                "summary": summary,
                                 "description": description,
                                 "intent_summary": intent_summary,
                             }),
@@ -12455,6 +12553,50 @@ impl RuntimeThreadManager {
                         continue;
                     }
 
+                    // A session grant for this tool and argument class
+                    // answers the prompt without a modal and without touching
+                    // posture (E1). A forced prompt is never pre-answered.
+                    if !approval_force_prompt
+                        && let Some(grant) =
+                            self.session_grant_for(&thread_id, &approval_grouping_key)
+                    {
+                        let approval_id = Self::mint_approval_id();
+                        self.emit_event(
+                            &thread_id,
+                            Some(&turn_id),
+                            None,
+                            "approval.required",
+                            json!({
+                                "id": approval_id,
+                                "approval_id": approval_id,
+                                "tool_call_id": id,
+                                "tool_name": tool_name,
+                                "summary": summary,
+                                "description": description,
+                                "intent_summary": intent_summary,
+                            }),
+                        )
+                        .await?;
+                        self.emit_event(
+                            &thread_id,
+                            Some(&turn_id),
+                            None,
+                            "approval.decided",
+                            json!({
+                                "approval_id": approval_id,
+                                "tool_call_id": id,
+                                "decision": "allow",
+                                "remember": false,
+                                "auto": true,
+                                "grant_id": grant.grant_id,
+                            }),
+                        )
+                        .await
+                        .ok();
+                        let _ = engine.approve_tool_call(id).await;
+                        continue;
+                    }
+
                     // Register before sequencing the event. A snapshot racing
                     // this branch therefore either contains the request or
                     // subscribes from an older cursor that will replay it.
@@ -12488,6 +12630,7 @@ impl RuntimeThreadManager {
                                 "approval_id": approval_id,
                                 "tool_call_id": id,
                                 "tool_name": tool_name,
+                                "summary": summary,
                                 "description": description,
                                 "intent_summary": intent_summary,
                             }),
@@ -12516,16 +12659,6 @@ impl RuntimeThreadManager {
                             .is_some_and(|turn| {
                                 turn.turn_id == turn_id && !turn.interrupt_requested
                             });
-                        if accepting
-                            && matches!(
-                                decision,
-                                Ok(Ok(ExternalApprovalDecision::Allow { remember: true }))
-                            )
-                        {
-                            // Keep Stop excluded until its competing permission
-                            // change has committed to the same active turn.
-                            self.remember_thread_auto_approve(&thread_id, &engine);
-                        }
                         !accepting
                     };
                     if cancelled {
@@ -12550,6 +12683,24 @@ impl RuntimeThreadManager {
                     }
                     match decision {
                         Ok(Ok(ExternalApprovalDecision::Allow { remember })) => {
+                            // "Allow for this conversation" records a grant
+                            // for this tool and argument class. It must not
+                            // change posture: a posture change mid-turn used
+                            // to fail the very call it approved (E1/E2).
+                            let grant = if remember {
+                                Some(
+                                    self.add_session_grant(
+                                        &thread_id,
+                                        &turn_id,
+                                        &tool_name,
+                                        &approval_grouping_key,
+                                        &summary,
+                                    )
+                                    .await,
+                                )
+                            } else {
+                                None
+                            };
                             self.emit_event(
                                 &thread_id,
                                 Some(&turn_id),
@@ -12560,6 +12711,7 @@ impl RuntimeThreadManager {
                                     "tool_call_id": id,
                                     "decision": "allow",
                                     "remember": remember,
+                                    "grant_id": grant.map(|grant| grant.grant_id),
                                 }),
                             )
                             .await

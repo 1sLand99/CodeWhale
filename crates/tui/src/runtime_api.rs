@@ -1389,6 +1389,10 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .route("/v1/approvals", get(list_approvals))
         .route("/v1/approvals/{approval_id}", post(decide_approval))
         .route(
+            "/v1/threads/{id}/approval-grants/{grant_id}",
+            delete(revoke_approval_grant),
+        )
+        .route(
             "/v1/user-input/{thread_id}/{input_id}",
             post(submit_user_input),
         )
@@ -3950,6 +3954,27 @@ async fn decide_approval(
         decision: req.decision,
         delivered,
     }))
+}
+
+/// `DELETE /v1/threads/{id}/approval-grants/{grant_id}` — revoke one
+/// "allow for this conversation" grant. The next matching call prompts again.
+async fn revoke_approval_grant(
+    State(state): State<RuntimeApiState>,
+    Path((thread_id, grant_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let revoked = state
+        .runtime_threads
+        .revoke_approval_grant(&thread_id, &grant_id)
+        .await
+        .map_err(map_thread_err)?;
+    if !revoked {
+        return Err(ApiError::not_found(format!(
+            "no approval grant with id '{grant_id}' on thread '{thread_id}'"
+        )));
+    }
+    Ok(Json(
+        json!({ "ok": true, "grant_id": grant_id, "revoked": true }),
+    ))
 }
 
 async fn submit_user_input(

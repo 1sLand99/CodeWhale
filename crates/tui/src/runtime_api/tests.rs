@@ -564,6 +564,7 @@ fn messages_from_thread_detail_batches_tool_results() {
         pending_approvals: Vec::new(),
         pending_user_inputs: Vec::new(),
         pending_dynamic_tool_calls: Vec::new(),
+        approval_grants: Vec::new(),
     };
 
     let messages = messages_from_thread_detail(&detail);
@@ -644,6 +645,7 @@ fn legacy_exact_thread_export_normalizes_provider_kind_and_id() {
         pending_approvals: Vec::new(),
         pending_user_inputs: Vec::new(),
         pending_dynamic_tool_calls: Vec::new(),
+        approval_grants: Vec::new(),
     };
     let config = Config {
         provider: Some("lm-studio".to_string()),

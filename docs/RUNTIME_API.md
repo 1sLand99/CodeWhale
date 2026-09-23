@@ -925,8 +925,25 @@ The raw provider call ID travels separately as `tool_call_id` on
 `pending_approvals[]` and on the approval events. It is a correlator for
 attaching a prompt to the tool row it gates, and never accepted as a decision.
 Each thread-detail `pending_approvals[]` entry is
-`{ "id", "turn_id", "tool_name", "description", "intent_summary"?, "tool_call_id"? }`,
-where `id` is the capability above.
+`{ "id", "turn_id", "tool_name", "description", "intent_summary"?, "tool_call_id"?, "summary"? }`,
+where `id` is the capability above. `summary` (also on `approval.required`) is
+a one-line description of the gated call built from the tool name and its
+arguments only, never from model text ("Search the web for 'espresso'",
+"Write notes/espresso.md"); paths inside the workspace are workspace-relative.
+Clients show it first and keep the raw arguments behind it.
+
+`"remember": true` on an `allow` records a **session grant** for that tool and
+argument class (the approval grouping key: a shell command family, a patch's
+file set, a URL host, an MCP tool, a `web.run` action kind). A grant never
+changes the thread's permission posture. Later matching calls on the thread are
+approved without a prompt: they still emit `approval.required`, then
+`approval.decided` with `"auto": true` and the `grant_id`. Creating a grant
+emits `approval.grant_added` with `{ "grant": { "grant_id", "tool_name",
+"scope", "summary", "granted_at" } }`; thread detail lists live grants in
+`approval_grants[]`. `DELETE /v1/threads/{id}/approval-grants/{grant_id}`
+revokes one (emitting `approval.grant_revoked`); the next matching call
+prompts again. Grants live in memory for the Runtime process: a restart
+forgets them, and a forced (non-bypassable) prompt is never answered by one.
 
 **User input**
 - `POST /v1/user-input/{thread_id}/{input_id}` with body
