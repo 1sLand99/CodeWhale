@@ -16,6 +16,7 @@
 #   - crates/tui/CHANGELOG.md slice    scripts/sync-changelog.sh (written here)
 #   - README locale stamps and links    retranslate; check-readme-translations.py
 #                                       prints the new sha256 stamp to use
+#   - product lexicon (warn-only)      python3 scripts/check-lexicon.py lists each hit
 #   - dead-code / blocking-calls         each ratchet's --update, committed in the
 #     (and with --full runtime-contract, same PR with the reason in the PR body
 #     persistence-backlog)
@@ -65,6 +66,10 @@ step "README translations in sync" \
   python3 scripts/check-readme-translations.py
 step "README locale link symmetry" "link every README.<locale>.md from README.md" \
   bash scripts/check-readme-locales.sh
+# Warn-only: lists retired product words and engineering notes in English
+# copy; never fails the preflight.
+step "product lexicon (warn-only)" "python3 scripts/check-lexicon.py" \
+  python3 scripts/check-lexicon.py --summary
 step "dead-code budget" "python3 scripts/check-dead-code-budget.py --update" \
   python3 scripts/check-dead-code-budget.py
 step "blocking-calls budget" "python3 scripts/check-blocking-calls-budget.py --update" \
