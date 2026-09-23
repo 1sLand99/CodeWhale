@@ -26,7 +26,9 @@ existing workspaces, receipts, or scripts:
 
 - the durable ledger `.codewhale/fleet.jsonl` and the log directories
   `.codewhale/fleet/` and `.codewhale/fleet-host/`;
-- saved rosters `fleets/<name>.toml` and their `schema = "fleet"` header;
+- saved rosters `fleets/<name>.toml` and their `schema = "fleet"` header, under
+  `$CODEWHALE_HOME/` or the workspace's `.codewhale/` (checked-in rosters at the
+  workspace root's `fleets/` are still read);
 - the `[fleet]` config table (inline `[fleets.*]` tables were removed in 0.9.14; named fleets live in `fleets/<name>.toml` files);
 - the `codewhale workflow run --fleet <name>` flag;
 - wire, receipt, and control-plane operation ids such as `fleet.status`.
@@ -314,7 +316,9 @@ header/status signal; avoid repeating emoji-heavy rows for every worker.
 
 A selected v2 fleet freezes each selected member's id, semantic role, provider,
 and model identity into the durable run before a Workflow starts. Save the
-fleet as `fleets/<name>.toml` in the workspace or under `$CODEWHALE_HOME`.
+fleet as `fleets/<name>.toml` under the workspace's `.codewhale/` (where the
+fleet editor saves folder fleets) or under `$CODEWHALE_HOME`; a checked-in
+`fleets/<name>.toml` at the workspace root is also read.
 Models cannot replace those identity or route assignments at runtime:
 
 ```toml
@@ -364,8 +368,9 @@ Router call itself is capped at `off` or `low`; more expensive values are
 rejected. A manually selected worker reasoning tier makes no Router call. Route
 and reasoning receipts name the worker model and, when used, the Router's exact
 provider/model so the operator can see which model did which job. If the same
-bare Router or fleet name exists in both roots, qualify it as
-`workspace/<name>` or `codewhale_home/<name>` instead of relying on shadowing.
+bare Router or fleet name exists in more than one root, qualify it as
+`codewhale_home/<name>`, `workspace/<name>` (the workspace's `.codewhale/`), or
+`workspace_root/<name>` (the workspace root) instead of relying on shadowing.
 
 Compatibility schemas may serialize `reasoning`, `permissions`, tool hints, or
 other execution settings beside a member. Those values are not fleet identity,

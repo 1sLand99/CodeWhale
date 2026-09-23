@@ -1106,7 +1106,7 @@ impl ToolSpec for WorkflowTool {
                 },
                 "fleet": {
                     "type": "string",
-                    "description": "Named Fleet from $CODEWHALE_HOME/fleets/ or workspace fleets/; qualified origin/name accepted. Exact Fleets freeze member identity, route, and reasoning. Runtime derives authority from role and live parent; per-task route/authority overrides are rejected."
+                    "description": "Named Fleet from $CODEWHALE_HOME/fleets/, <workspace>/.codewhale/fleets/, or checked-in <workspace>/fleets/; qualified origin/name accepted (codewhale_home, workspace, workspace_root). Exact Fleets freeze member identity, route, and reasoning. Runtime derives authority from role and live parent; per-task route/authority overrides are rejected."
                 },
                 "plan": plan_schema::structured_plan_schema(),
                 "args": {

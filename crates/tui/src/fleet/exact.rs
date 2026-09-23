@@ -68,13 +68,25 @@ pub(crate) fn personal_fleet_definitions_dir() -> anyhow::Result<std::path::Path
     Ok(personal_fleet_root()?.join("fleets"))
 }
 
+/// The workspace has two origins. `workspace` is `<workspace>/.codewhale`, the
+/// directory the Fleet store saves workspace-scoped Fleets to, so a Fleet
+/// saved from the Fleet UI is found by name. `workspace_root` is the workspace
+/// directory itself, which keeps checked-in `fleets/<name>.toml` rosters
+/// loading as they always have.
 #[must_use]
 pub(crate) fn fleet_search_roots(workspace: &std::path::Path) -> Vec<FleetSearchRoot> {
     let mut roots = Vec::new();
     if let Ok(home) = personal_fleet_root() {
         roots.push(FleetSearchRoot::new("codewhale_home", home));
     }
-    roots.push(FleetSearchRoot::new("workspace", workspace.to_path_buf()));
+    roots.push(FleetSearchRoot::new(
+        "workspace",
+        workspace.join(".codewhale"),
+    ));
+    roots.push(FleetSearchRoot::new(
+        "workspace_root",
+        workspace.to_path_buf(),
+    ));
     roots
 }
 
@@ -2811,5 +2823,83 @@ permissions = "read_only"
         let line = receipt.line();
         assert!(line.contains("(role auditor)"), "{line}");
         assert!(line.contains("posture=explore"), "{line}");
+    }
+
+    // ── Search roots: where a workspace Fleet lives ────────────────────────
+
+    /// The Fleet store saves workspace Fleets under `<workspace>/.codewhale`,
+    /// so that is the primary `workspace` origin; the workspace root stays a
+    /// second origin for checked-in `fleets/<name>.toml` rosters.
+    #[test]
+    fn workspace_fleets_load_from_dot_codewhale_and_the_legacy_root() {
+        let _lock = crate::test_support::lock_test_env();
+        let home = tempfile::tempdir().expect("home");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let ws = tempfile::tempdir().expect("workspace");
+
+        let saved = ws.path().join(".codewhale").join("fleets");
+        std::fs::create_dir_all(&saved).expect("saved fleets dir");
+        std::fs::write(saved.join("glm-pair.toml"), GLM_FLEET).expect("write saved");
+        let (document, id) = load_fleet_document("glm-pair", ws.path()).expect("saved fleet loads");
+        assert_eq!(document.name(), "glm-pair");
+        assert_eq!(id.origin, "workspace");
+
+        let checked_in = ws.path().join("fleets");
+        std::fs::create_dir_all(&checked_in).expect("checked-in fleets dir");
+        std::fs::write(
+            checked_in.join("stopship.toml"),
+            "name = \"stopship\"\n\n[roles]\nscout = \"scout\"\n",
+        )
+        .expect("write checked-in");
+        let (document, id) =
+            load_fleet_document("stopship", ws.path()).expect("checked-in fleet still loads");
+        assert_eq!(document.name(), "stopship");
+        assert_eq!(id.origin, "workspace_root");
+
+        // An exact Fleet in both workspace origins is ambiguous, and each
+        // origin can be named explicitly.
+        std::fs::write(checked_in.join("glm-pair.toml"), GLM_FLEET).expect("write twin");
+        assert!(matches!(
+            load_fleet_document("glm-pair", ws.path()),
+            Err(NamedFleetError::AmbiguousFleet { .. })
+        ));
+        let (_, id) = load_fleet_document("workspace_root/glm-pair", ws.path()).expect("qualified");
+        assert_eq!(id.origin, "workspace_root");
+    }
+
+    /// A Fleet saved through the store at workspace scope is found by the
+    /// Workflow loader instead of being reported missing. Today the store's
+    /// `schema = "fleet"` revision-2 document is not a schema the Workflow
+    /// loader parses, so the load names that exact file and its schema; if a
+    /// v2 bridge lands, the same call succeeds from the `workspace` origin.
+    #[test]
+    fn a_store_saved_workspace_fleet_is_found_by_load_fleet_document() {
+        use crate::fleet::store::{FleetFile, FleetScope, save_fleet};
+
+        let _lock = crate::test_support::lock_test_env();
+        let home = tempfile::tempdir().expect("home");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let ws = tempfile::tempdir().expect("workspace");
+
+        let fleet = FleetFile::new("Folder Pair".to_string(), None).expect("fleet");
+        let path = save_fleet(&fleet, FleetScope::Workspace, ws.path()).expect("save");
+
+        match load_fleet_document(&fleet.file_slug(), ws.path()) {
+            // A v2 bridge may label the store scope `folder` rather than the
+            // `workspace` search-root origin; either names this workspace.
+            Ok((_, id)) => assert!(
+                matches!(id.origin.as_str(), "workspace" | "folder"),
+                "{}",
+                id.origin
+            ),
+            Err(err) => {
+                assert!(
+                    !matches!(err, NamedFleetError::NotFound(_)),
+                    "the saved Fleet must be found, got {err}"
+                );
+                let message = err.to_string();
+                assert!(message.contains(&path.display().to_string()), "{message}");
+            }
+        }
     }
 }
