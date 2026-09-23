@@ -2822,6 +2822,14 @@ async fn agent_runs_runtime_api_exposes_persisted_worker_receipts() -> Result<()
         .json()
         .await?;
     assert_eq!(runs["runs"][0]["spec"]["run_id"], "run_receipt");
+    // F5: the payload carries the launch governor; a calm fleet has no line.
+    assert_eq!(runs["governor"]["paused"], false);
+    assert_eq!(runs["governor"]["recent_rate_limits"], 0);
+    assert_eq!(
+        runs["governor"]["launch_slots"],
+        runs["governor"]["max_launch_slots"]
+    );
+    assert!(runs["governor"].get("status").is_none());
     assert_eq!(runs["runs"][0]["follow_up"]["tool"], "handle_read");
     assert_eq!(
         runs["runs"][0]["verification"]["status"],
