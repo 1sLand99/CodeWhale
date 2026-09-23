@@ -807,6 +807,8 @@ jobs:
         with:
           cache-bin: false
           save-if: false
+      - name: Fetch dependencies before offline measurement
+        run: cargo fetch --locked
       - name: Check persistence-backlog RSS budget
         run: python3 scripts/check-persistence-backlog-budget.py
       - name: Run Offline Eval Harness
