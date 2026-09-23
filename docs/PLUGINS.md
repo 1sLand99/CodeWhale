@@ -44,7 +44,8 @@ Codewhale is helpful about plugins, not pushy. The rules:
   it opens `/plugin show <name>`; it never installs, trusts, or enables.
 - **Reversible dismissal.** Esc clears a non-empty draft first, then hides the
   row for this session only. "Don't suggest again" is the explicit,
-  persisted choice.
+  persisted choice. `/plugin dismissals` lists both kinds, and
+  `/plugin dismissals reset [<name>]` lets suggestions offer a plugin again.
 - **Discovery is passive.** Find new plugins in these docs,
   `/plugin marketplace list`, Extensions, and the browser guide below.
 

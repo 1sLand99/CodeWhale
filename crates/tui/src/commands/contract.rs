@@ -4198,6 +4198,55 @@ impl CommandPluginContext for PluginAdapter<'_> {
         drop(app);
         self.install(&spec, None)
     }
+
+    fn suggestion_dismissals(
+        &self,
+    ) -> Result<codewhale_command_contract::facets::PluginSuggestionDismissals, String> {
+        let persisted = crate::settings::Settings::load()
+            .map_err(|err| format!("could not read saved plugin dismissals: {err}"))?
+            .dismissed_plugin_suggestions;
+        let app = self.host.app.borrow();
+        let session = app
+            .plugin_cta
+            .dismissed
+            .iter()
+            .filter(|name| !persisted.contains(*name))
+            .cloned()
+            .collect();
+        Ok(
+            codewhale_command_contract::facets::PluginSuggestionDismissals {
+                persisted: persisted.into_iter().collect(),
+                session,
+            },
+        )
+    }
+
+    fn reset_suggestion_dismissals(&mut self, name: Option<&str>) -> Result<Vec<String>, String> {
+        let target = name.map(str::to_ascii_lowercase);
+        let matches = |candidate: &String| target.as_ref().is_none_or(|target| candidate == target);
+        let mut cleared = std::collections::BTreeSet::new();
+        crate::settings::Settings::transact_opt(|settings| {
+            let before = settings.dismissed_plugin_suggestions.len();
+            settings.dismissed_plugin_suggestions.retain(|candidate| {
+                let reset = matches(candidate);
+                if reset {
+                    cleared.insert(candidate.clone());
+                }
+                !reset
+            });
+            Ok((settings.dismissed_plugin_suggestions.len() != before).then_some(()))
+        })
+        .map_err(|err| format!("could not save plugin dismissals: {err}"))?;
+        let mut app = self.host.app.borrow_mut();
+        app.plugin_cta.dismissed.retain(|candidate| {
+            let reset = matches(candidate);
+            if reset {
+                cleared.insert(candidate.clone());
+            }
+            !reset
+        });
+        Ok(cleared.into_iter().collect())
+    }
 }
 
 /// Resolve the default Codewhale tools directory (mirrors the legacy handler).
