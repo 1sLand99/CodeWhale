@@ -740,6 +740,8 @@ jobs:
           log="$RUNNER_TEMP/cw-build-lock.log"
           touch "$hold"
           rm -f "$ready"
+          # The single quotes are deliberate: the inner sh expands $1/$2.
+          # shellcheck disable=SC2016
           nohup python3 scripts/build-lock.py "$CODEWHALE_BUILD_LOCK_FILE" -- \
             sh -c 'touch "$1"; while [ -e "$2" ]; do sleep 2; done' _ "$ready" "$hold" \
             >"$log" 2>&1 &
