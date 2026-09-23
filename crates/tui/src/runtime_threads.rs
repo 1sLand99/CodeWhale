@@ -4384,6 +4384,7 @@ fn runtime_compaction_config(
 struct ActiveTurnState {
     turn_id: String,
     goal_id: Option<String>,
+    goal_progress: Option<crate::tools::goal::GoalSnapshot>,
     interrupt_requested: bool,
     compaction_id: Option<String>,
 }
@@ -6123,11 +6124,38 @@ impl RuntimeThreadManager {
         &self,
         thread_id: &str,
     ) -> Result<Option<codewhale_protocol::ThreadGoal>> {
-        let thread_id = thread_id.to_string();
+        let requested_id = thread_id.to_string();
         let store = self.store.clone();
-        tokio::task::spawn_blocking(move || store.load_goal(&thread_id))
+        let mut goal = tokio::task::spawn_blocking(move || store.load_goal(&requested_id))
             .await
-            .context("goal load task panicked")?
+            .context("goal load task panicked")??;
+        // Live usage is a projection only. Terminal settlement remains the
+        // single durable accrual, so polling cannot double-count spend.
+        let active = self.active.lock().await;
+        if let Some(goal) = goal.as_mut()
+            && let Some(turn) = active
+                .engines
+                .get(thread_id)
+                .and_then(|state| state.active_turn.as_ref())
+            && turn.goal_id.as_deref() == Some(goal.goal_id.as_str())
+            && let Some(progress) = turn.goal_progress.as_ref()
+            && progress.objective.as_deref() == Some(goal.objective.as_str())
+            && progress
+                .goal_id
+                .as_deref()
+                .is_none_or(|id| id == goal.goal_id)
+        {
+            goal.tokens_used = goal
+                .tokens_used
+                .max(i64::try_from(progress.tokens_used).unwrap_or(i64::MAX));
+            goal.time_used_seconds = goal
+                .time_used_seconds
+                .max(i64::try_from(progress.time_used_seconds).unwrap_or(i64::MAX));
+            goal.continuation_count = goal
+                .continuation_count
+                .max(i64::from(progress.continuation_count));
+        }
+        Ok(goal)
     }
 
     /// Persist (create or replace) the goal for a thread.
@@ -6187,6 +6215,10 @@ impl RuntimeThreadManager {
             if let Some(state) = active.engines.get(thread_id)
                 && state.active_turn.is_some()
             {
+                // A PUT during a running goal replaces its revision. Park the
+                // obsolete within-turn loop; settlement admits the new goal.
+                let current = self.store.load_goal(thread_id)?;
+                state.engine.sync_runtime_goal_control(current.as_ref())?;
                 return Ok(());
             }
         }
@@ -6201,26 +6233,15 @@ impl RuntimeThreadManager {
     /// Push a durable goal lifecycle transition into a cached engine so its
     /// prompt surface and tool gates follow the store. Engines are not
     /// loaded for this; a later load re-derives the state from the record.
-    pub async fn sync_engine_goal_status(
-        &self,
-        thread_id: &str,
-        status: crate::tools::goal::GoalStatus,
-        clear: bool,
-    ) {
-        let engine = {
-            let active = self.active.lock().await;
-            active
-                .engines
-                .get(thread_id)
-                .map(|state| state.engine.clone())
-        };
-        if let Some(engine) = engine {
-            let _ = engine.try_send(Op::SetGoalStatus {
-                status,
-                clear,
-                goal_id: None,
-            });
+    pub async fn sync_engine_goal_status(&self, thread_id: &str) -> Result<()> {
+        let active = self.active.lock().await;
+        if let Some(state) = active.engines.get(thread_id) {
+            // Read the latest store revision while admission is excluded. A
+            // delayed DELETE/complete response must never stop a newer goal.
+            let goal = self.store.load_goal(thread_id)?;
+            state.engine.sync_runtime_goal_control(goal.as_ref())?;
         }
+        Ok(())
     }
 
     /// Claim one host-driven goal turn with the standard durable machinery.
@@ -8334,6 +8355,7 @@ impl RuntimeThreadManager {
         state.active_turn = turn_id.map(|turn_id| ActiveTurnState {
             turn_id: turn_id.to_string(),
             goal_id: None,
+            goal_progress: None,
             interrupt_requested: false,
             compaction_id: None,
         });
@@ -10592,6 +10614,7 @@ impl RuntimeThreadManager {
             state.active_turn = Some(ActiveTurnState {
                 goal_id: turn_goal.as_ref().map(|goal| goal.goal_id.clone()),
                 turn_id: turn_id.clone(),
+                goal_progress: None,
                 interrupt_requested: false,
                 compaction_id: None,
             });
@@ -10966,6 +10989,7 @@ impl RuntimeThreadManager {
             state.active_turn = Some(ActiveTurnState {
                 goal_id: None,
                 turn_id: turn_id.clone(),
+                goal_progress: None,
                 interrupt_requested: false,
                 compaction_id: Some(compaction_id),
             });
@@ -13329,6 +13353,21 @@ impl RuntimeThreadManager {
                         {
                             admitted_goal_id = Some(goal_id);
                         }
+                    }
+                    {
+                        let mut active = self.active.lock().await;
+                        if let Some(turn) = active
+                            .engines
+                            .get_mut(&thread_id)
+                            .and_then(|state| state.active_turn.as_mut())
+                            && turn.turn_id == turn_id
+                        {
+                            turn.goal_id.clone_from(&admitted_goal_id);
+                            turn.goal_progress = Some(snapshot.clone());
+                        }
+                    }
+                    if let Some(goal) = self.get_goal(&thread_id).await? {
+                        self.emit_goal_updated_event(&thread_id, goal).await?;
                     }
                     latest_goal_snapshot = Some(snapshot);
                 }

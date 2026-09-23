@@ -6294,8 +6294,9 @@ async fn delete_thread_goal(
     let _ = state.runtime_threads.emit_goal_cleared_event(&id).await;
     state
         .runtime_threads
-        .sync_engine_goal_status(&id, crate::tools::goal::GoalStatus::Active, true)
-        .await;
+        .sync_engine_goal_status(&id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -6342,8 +6343,9 @@ async fn complete_thread_goal(
         .await;
     state
         .runtime_threads
-        .sync_engine_goal_status(&id, crate::tools::goal::GoalStatus::Complete, false)
-        .await;
+        .sync_engine_goal_status(&id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
     Ok(Json(updated))
 }
 
@@ -6391,8 +6393,9 @@ async fn block_thread_goal(
         .await;
     state
         .runtime_threads
-        .sync_engine_goal_status(&id, crate::tools::goal::GoalStatus::Blocked, false)
-        .await;
+        .sync_engine_goal_status(&id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
     Ok(Json(updated))
 }
 

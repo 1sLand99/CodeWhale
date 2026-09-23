@@ -5682,6 +5682,11 @@ impl Engine {
         *continuations_this_turn = (*continuations_this_turn).saturating_add(1);
         match self.config.goal_state.lock() {
             Ok(mut state) => {
+                // Stop/replacement can arrive after the delayed check but
+                // before this lock. Never count or dispatch the stale pass.
+                if !state.is_active() || state.snapshot().goal_id != snapshot.goal_id {
+                    return None;
+                }
                 state.record_continuation();
                 snapshot = state.snapshot();
                 snapshot.tokens_used = snapshot.tokens_used.saturating_add(current_turn_tokens);
@@ -5690,6 +5695,12 @@ impl Engine {
                 tracing::warn!("goal state lock poisoned while recording continuation: {err}")
             }
         }
+        let _ = self
+            .tx_event
+            .send(Event::GoalUpdated {
+                snapshot: snapshot.clone(),
+            })
+            .await;
         let _ = self
             .tx_event
             .send(Event::status(format!(
@@ -8024,6 +8035,112 @@ mod tests {
             "fixture must be host-managed"
         );
         assert_positive_delay_continuation_waits(engine, handle, 1).await;
+    }
+
+    #[tokio::test]
+    async fn runtime_goal_controls_stop_within_turn_even_with_a_full_mailbox() {
+        use codewhale_protocol::{ThreadGoal, ThreadGoalStatus};
+        for action in ["clear", "complete", "block", "replace"] {
+            let tmp = tempdir().expect("tempdir");
+            let (engine, handle) = goal_continuation_cadence_engine(&tmp, 1, true);
+            let current = engine.config.goal_state.lock().unwrap().snapshot();
+            let mut goal = ThreadGoal {
+                thread_id: "host-managed-thread".into(),
+                goal_id: current.goal_id.unwrap(),
+                objective: "keep going".into(),
+                status: ThreadGoalStatus::Active,
+                token_budget: None,
+                tokens_used: 0,
+                time_used_seconds: 0,
+                continuation_count: 0,
+                last_gap_fingerprint: None,
+                repeated_gap_count: 0,
+                last_gap_pass: None,
+                pause_reason: None,
+                created_at: 0,
+                updated_at: 0,
+            };
+            while handle
+                .tx_op
+                .try_send(Op::SetGoalStatus {
+                    status: crate::tools::goal::GoalStatus::Active,
+                    clear: false,
+                    goal_id: None,
+                })
+                .is_ok()
+            {}
+            assert_eq!(handle.tx_op.capacity(), 0);
+            let registry = goal_continuation_registry(&engine);
+            let task = tokio::spawn(async move {
+                let mut count = 0;
+                let prompt = engine
+                    .goal_continuation_message_if_needed(
+                        Some(&registry),
+                        &mut count,
+                        &Usage::default(),
+                    )
+                    .await;
+                (prompt, count)
+            });
+            while !matches!(
+                handle.rx_event.write().await.recv().await,
+                Some(Event::GoalContinuationWaiting { .. })
+            ) {}
+            match action {
+                "complete" => goal.status = ThreadGoalStatus::Complete,
+                "block" => goal.status = ThreadGoalStatus::Blocked,
+                "replace" => goal.goal_id = "new-revision".into(),
+                _ => {}
+            }
+            handle
+                .sync_runtime_goal_control((action != "clear").then_some(&goal))
+                .unwrap();
+            let (prompt, count) = tokio::time::timeout(Duration::from_secs(3), task)
+                .await
+                .expect("goal control did not stop continuation")
+                .unwrap();
+            assert!(
+                prompt.is_none(),
+                "{action} dispatched an obsolete goal pass"
+            );
+            assert_eq!(count, 0, "{action} counted a stopped pass");
+        }
+    }
+
+    #[tokio::test]
+    async fn goal_continuation_publishes_current_usage_without_accruing_twice() {
+        let tmp = tempdir().expect("tempdir");
+        let (engine, handle) = goal_continuation_cadence_engine(&tmp, 0, true);
+        engine.config.goal_state.lock().unwrap().record_usage(5, 0);
+        let registry = goal_continuation_registry(&engine);
+        let mut count = 0;
+        let usage = Usage {
+            input_tokens: 7,
+            output_tokens: 3,
+            ..Usage::default()
+        };
+        assert!(
+            engine
+                .goal_continuation_message_if_needed(Some(&registry), &mut count, &usage)
+                .await
+                .is_some()
+        );
+        let event = handle.rx_event.write().await.recv().await.unwrap();
+        let Event::GoalUpdated { snapshot } = event else {
+            panic!("missing live goal receipt: {event:?}")
+        };
+        assert_eq!(snapshot.tokens_used, 15);
+        assert_eq!(snapshot.continuation_count, 1);
+        assert_eq!(
+            engine
+                .config
+                .goal_state
+                .lock()
+                .unwrap()
+                .snapshot()
+                .tokens_used,
+            5
+        );
     }
 
     /// A zero delay must continue immediately: no wait receipt is emitted and

@@ -6550,6 +6550,7 @@ fn enforce_lru_capacity_does_not_loop_when_all_threads_are_active() {
         ActiveThreadState {
             engine: harness_a.handle,
             active_turn: Some(ActiveTurnState {
+                goal_progress: None,
                 goal_id: None,
                 turn_id: "turn_a".to_string(),
                 interrupt_requested: false,
@@ -6570,6 +6571,7 @@ fn enforce_lru_capacity_does_not_loop_when_all_threads_are_active() {
         ActiveThreadState {
             engine: harness_b.handle,
             active_turn: Some(ActiveTurnState {
+                goal_progress: None,
                 goal_id: None,
                 turn_id: "turn_b".to_string(),
                 interrupt_requested: false,
@@ -8678,6 +8680,7 @@ async fn workspace_restore_guard_rejects_overlapping_active_turns() -> Result<()
         let mut active = manager.active.lock().await;
         let state = active.engines.get_mut(&thread.id).expect("mock engine");
         state.active_turn = Some(ActiveTurnState {
+            goal_progress: None,
             goal_id: None,
             turn_id: "turn_live".to_string(),
             interrupt_requested: false,
@@ -8747,6 +8750,7 @@ async fn update_thread_workspace_rejects_active_turn() -> Result<()> {
         let mut active = manager.active.lock().await;
         let state = active.engines.get_mut(&thread.id).expect("mock engine");
         state.active_turn = Some(ActiveTurnState {
+            goal_progress: None,
             goal_id: None,
             turn_id: "turn_live".to_string(),
             interrupt_requested: false,
@@ -10095,6 +10099,103 @@ async fn model_created_goal_never_overwrites_concurrent_explicit_goal() -> Resul
         goal.tokens_used, 0,
         "settlement must not accrue the no-goal turn onto the explicit revision"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn live_goal_progress_is_revision_fenced_and_settled_once() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let mut goal = active_test_goal(&thread.id, "goal_live");
+    goal.tokens_used = 100;
+    manager.store.save_goal(&goal)?;
+    let mut harness = install_mock_engine(&manager, &thread.id).await;
+    manager.activate_thread_goal(&thread.id).await?;
+    assert!(matches!(
+        harness.rx_op.recv().await,
+        Some(Op::SendMessage(_))
+    ));
+    let mut progress = crate::tools::goal::GoalSnapshot::from_thread_goal(&goal);
+    progress.tokens_used = 120;
+    progress.continuation_count = 1;
+    harness
+        .tx_event
+        .send(EngineEvent::GoalUpdated { snapshot: progress })
+        .await?;
+    tokio::time::timeout(TURN_SETTLEMENT_DEADLOCK_TIMEOUT, async {
+        loop {
+            if manager
+                .get_goal(&thread.id)
+                .await?
+                .is_some_and(|goal| goal.tokens_used == 120)
+                && manager.events_since(&thread.id, None)?.iter().any(|event| {
+                    event.event == "thread_goal_updated"
+                        && event.payload["goal"]["tokens_used"] == 120
+                })
+            {
+                break Ok::<_, anyhow::Error>(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await??;
+    assert_eq!(
+        manager.store.load_goal(&thread.id)?.unwrap().tokens_used,
+        100
+    );
+    assert!(
+        manager
+            .events_since(&thread.id, None)?
+            .iter()
+            .any(|event| event.event == "thread_goal_updated"
+                && event.payload["goal"]["tokens_used"] == 120)
+    );
+    let replacement = active_test_goal(&thread.id, "goal_new");
+    manager.store.save_goal(&replacement)?;
+    assert_eq!(manager.get_goal(&thread.id).await?.unwrap().tokens_used, 0);
+    manager.remove_goal(&thread.id).await?;
+    assert!(manager.get_goal(&thread.id).await?.is_none());
+    manager.store.save_goal(&goal)?;
+    harness
+        .tx_event
+        .send(EngineEvent::TurnComplete {
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 10,
+                ..Usage::default()
+            },
+            parent_route_usage: Usage::default(),
+            routed_usage_dropped_records: 0,
+            status: TurnOutcomeStatus::Completed,
+            error: None,
+            tool_catalog: Some(vec![]),
+            base_url: None,
+        })
+        .await?;
+    wait_for_terminal_turn_count(&manager, &thread.id, 1, TURN_SETTLEMENT_DEADLOCK_TIMEOUT).await?;
+    tokio::time::timeout(TURN_SETTLEMENT_DEADLOCK_TIMEOUT, async {
+        loop {
+            if manager.store.load_goal(&thread.id)?.unwrap().tokens_used == 120 {
+                break Ok::<_, anyhow::Error>(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await??;
+    assert_eq!(
+        manager.get_goal(&thread.id).await?.unwrap().tokens_used,
+        120
+    );
+
+    // A previous turn's projection must never leak onto a replacement with
+    // the same objective or recreate a deleted goal.
+    let replacement = active_test_goal(&thread.id, "goal_new");
+    manager.store.save_goal(&replacement)?;
+    assert_eq!(manager.get_goal(&thread.id).await?.unwrap().tokens_used, 0);
+    manager.remove_goal(&thread.id).await?;
+    assert!(manager.get_goal(&thread.id).await?.is_none());
     Ok(())
 }
 
@@ -17160,6 +17261,7 @@ async fn shell_opt_in_is_idle_only_and_preserves_ask() -> Result<()> {
         .get_mut(&thread.id)
         .unwrap()
         .active_turn = Some(ActiveTurnState {
+        goal_progress: None,
         goal_id: None,
         turn_id: "turn_shell_guard".into(),
         interrupt_requested: false,
@@ -17223,6 +17325,7 @@ async fn shell_opt_in_is_idle_only_and_preserves_ask() -> Result<()> {
         .get_mut(&thread.id)
         .unwrap()
         .active_turn = Some(ActiveTurnState {
+        goal_progress: None,
         goal_id: None,
         turn_id: "turn_revoke".into(),
         interrupt_requested: false,
