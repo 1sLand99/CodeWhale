@@ -12000,15 +12000,23 @@ fn automatic_compaction_stays_quiet_until_a_real_failure() {
             .as_ref()
             .is_some_and(|receipt| receipt.auto)
     );
+    let cells_before = app.history.len();
     apply_compaction_failed(
         &mut app,
         "compact-failure",
         true,
         "Summary failed; conversation preserved".into(),
     );
-    assert!(app.sticky_status.as_ref().is_some_and(|toast| {
-        toast.level == StatusToastLevel::Error && toast.text.contains("conversation preserved")
-    }));
+    // An automatic pass's failure is recorded once, in the transcript; the
+    // footer does not echo it (experience mark 2).
+    assert_eq!(app.history.len(), cells_before + 1);
+    assert!(matches!(
+        app.history.last(),
+        Some(HistoryCell::System { content }) if content.contains("conversation preserved")
+    ));
+    assert!(app.sticky_status.is_none());
+    assert!(app.status_toasts.is_empty());
+    assert!(app.status_message.is_none());
 }
 
 #[test]

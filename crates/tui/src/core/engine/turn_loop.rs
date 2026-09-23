@@ -1283,7 +1283,40 @@ impl Engine {
                     if self.cancel_token.is_cancelled() {
                         return (TurnOutcomeStatus::Interrupted, None);
                     }
-                    let message = "The request still exceeds this model's context budget and automatic recovery did not complete. The conversation is saved; retry or choose a larger context route.".to_string();
+                    // One failure, one true sentence (experience mark 2): a
+                    // provider that refused the recovery request is the
+                    // cause, and a history with nothing to summarize is a
+                    // window problem, not a failed compaction.
+                    if let Some(rejection) = turn.context_recovery_rejection.take() {
+                        let display_message = self.decorate_auth_error_message(
+                            initial_stream_error_user_message(&self.config.locale_tag, &rejection),
+                        );
+                        let mut envelope = crate::error_taxonomy::envelope_for_llm_error(
+                            rejection,
+                            display_message.clone(),
+                        );
+                        envelope.message = display_message.clone();
+                        let _ = self.tx_event.send(Event::error(envelope)).await;
+                        return (TurnOutcomeStatus::Failed, Some(display_message));
+                    }
+                    let message = if crate::compaction::has_compactable_history(
+                        &self.session.messages,
+                    ) {
+                        "The request still exceeds this model's context budget and automatic recovery did not complete. The conversation is saved; retry or choose a larger context route.".to_string()
+                    } else {
+                        let prefix_tokens = crate::compaction::estimate_input_tokens_for_pressure(
+                            &[],
+                            self.session.system_prompt.as_ref(),
+                        );
+                        super::context::context_does_not_fit_message(
+                            self.config.terminal_chrome_enabled,
+                            self.api_provider == crate::config::ApiProvider::Ollama,
+                            &self.session.model,
+                            estimated_input,
+                            input_budget,
+                            prefix_tokens,
+                        )
+                    };
                     let _ = self
                         .tx_event
                         .send(Event::error(ErrorEnvelope::context_overflow(
