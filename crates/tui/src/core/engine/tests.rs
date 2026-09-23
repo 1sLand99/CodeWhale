@@ -12008,7 +12008,7 @@ fn print_skill_discovery_turn_metrics() {
 }
 
 #[test]
-fn deferred_apply_patch_first_use_hydrates_schema_without_execution() {
+fn deferred_first_use_executes_well_formed_calls_and_hydrates_malformed_ones() {
     let mut apply_patch = api_tool("apply_patch");
     apply_patch.defer_loading = Some(true);
     apply_patch.input_schema = json!({
@@ -12022,40 +12022,48 @@ fn deferred_apply_patch_first_use_hydrates_schema_without_execution() {
     let catalog = vec![apply_patch];
     let active_at_batch_start = HashSet::new();
     let mut hydrated_this_batch = HashSet::new();
-    let result = maybe_hydrate_requested_deferred_tool(
-        "apply_patch",
-        &json!({"patch": "*** Begin Patch\n*** End Patch"}),
-        &catalog,
-        &active_at_batch_start,
-        &mut hydrated_this_batch,
-    )
-    .expect("first deferred use should hydrate");
-
-    assert!(!active_at_batch_start.contains("apply_patch"));
-    assert!(hydrated_this_batch.contains("apply_patch"));
-    assert!(result.success);
-    assert!(result.content.contains("Tool `apply_patch` was deferred"));
-    assert!(result.content.contains("patch: string"));
-    assert!(result.content.contains("The tool was not executed"));
-
-    let metadata = result.metadata.expect("metadata");
-    assert_eq!(metadata["event"], "tool.schema_hydrated");
-    assert_eq!(metadata["executed"], false);
-    assert_eq!(metadata["retry_required"], true);
-
-    let second_result = maybe_hydrate_requested_deferred_tool(
-        "apply_patch",
-        &json!({"patch": "*** Begin Patch\n*** End Patch"}),
-        &catalog,
-        &active_at_batch_start,
-        &mut hydrated_this_batch,
-    )
-    .expect("later calls in the same batch should hydrate instead of executing");
-    assert_eq!(second_result.metadata.unwrap()["executed"], false);
-    assert_eq!(
-        hydrated_this_batch,
-        HashSet::from(["apply_patch".to_string()])
+    // A call already shaped like the unseen schema must not lose its turn.
+    assert!(
+        maybe_hydrate_requested_deferred_tool(
+            "apply_patch",
+            &json!({"patch": "*** Begin Patch\n*** End Patch"}),
+            &catalog,
+            &active_at_batch_start,
+            &mut hydrated_this_batch,
+        )
+        .is_none(),
+        "a well-formed first call executes"
     );
+    assert!(
+        hydrated_this_batch.contains("apply_patch"),
+        "the executed tool still activates for later requests"
+    );
+
+    for malformed in [
+        json!({}),
+        json!({"diff": "*** Begin Patch\n*** End Patch"}),
+        json!({"patch": "x", "path": "src/lib.rs"}),
+        json!("*** Begin Patch"),
+    ] {
+        let mut hydrated = HashSet::new();
+        let result = maybe_hydrate_requested_deferred_tool(
+            "apply_patch",
+            &malformed,
+            &catalog,
+            &active_at_batch_start,
+            &mut hydrated,
+        )
+        .unwrap_or_else(|| panic!("{malformed} must return the schema instead of executing"));
+        assert!(hydrated.contains("apply_patch"));
+        assert!(result.success);
+        assert!(result.content.contains("Tool `apply_patch` was deferred"));
+        assert!(result.content.contains("patch: string"));
+        assert!(result.content.contains("The tool was not executed"));
+        let metadata = result.metadata.expect("metadata");
+        assert_eq!(metadata["event"], "tool.schema_hydrated");
+        assert_eq!(metadata["executed"], false);
+        assert_eq!(metadata["retry_required"], true);
+    }
 
     let mut active_next_batch = active_at_batch_start.clone();
     active_next_batch.extend(hydrated_this_batch);
@@ -12063,13 +12071,13 @@ fn deferred_apply_patch_first_use_hydrates_schema_without_execution() {
     assert!(
         maybe_hydrate_requested_deferred_tool(
             "apply_patch",
-            &json!({"patch": "*** Begin Patch\n*** End Patch"}),
+            &json!({}),
             &catalog,
             &active_next_batch,
             &mut hydrated_next_batch,
         )
         .is_none(),
-        "tools hydrated in a previous batch should execute normally"
+        "tools hydrated in a previous batch execute normally, even malformed"
     );
 }
 
@@ -12088,7 +12096,9 @@ async fn deferred_tool_first_use_does_not_emit_a_retry_status() {
     let tool_call_sse = concat!(
         "data: {\"id\":\"chatcmpl-e3\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[",
         "{\"index\":0,\"id\":\"call_e3_map\",\"type\":\"function\",\"function\":{\"name\":\"project_map\",",
-        "\"arguments\":\"{}\"}}",
+        // Malformed on purpose: a well-formed first call now executes, and
+        // this test covers the schema hint returned for a malformed one.
+        "\"arguments\":\"{\\\"not_a_project_map_field\\\":true}\"}}",
         "]},\"finish_reason\":null}]}\n\n",
         "data: {\"id\":\"chatcmpl-e3\",\"choices\":[{\"index\":0,\"delta\":{},",
         "\"finish_reason\":\"tool_calls\"}]}\n\n",
