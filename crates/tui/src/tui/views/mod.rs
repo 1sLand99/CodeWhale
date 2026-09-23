@@ -1126,6 +1126,9 @@ pub enum ViewEvent {
 #[derive(Debug, Clone)]
 pub enum ViewAction {
     None,
+    /// The view's own state changed with no event to report (a background
+    /// load landed): the host must repaint, nothing else.
+    Redraw,
     Close,
     Emit(ViewEvent),
     EmitAndClose(ViewEvent),
@@ -1187,6 +1190,14 @@ pub struct ViewStack {
     /// Theme snapshot for the texture pass, set alongside the mode each
     /// frame. `None` (e.g. tests that never opt in) disables the texture.
     focus_texture_theme: Option<codewhale_palette::UiTheme>,
+}
+
+/// What one [`ViewStack::tick`] produced: events to handle, and whether the
+/// frame must be repainted.
+#[derive(Debug, Default)]
+pub struct ViewTick {
+    pub events: Vec<ViewEvent>,
+    pub redraw: bool,
 }
 
 impl ViewStack {
@@ -1331,19 +1342,31 @@ impl ViewStack {
         self.apply_action(action)
     }
 
-    pub fn tick(&mut self) -> Vec<ViewEvent> {
+    /// Advance the top view's timers. The host repaints when `redraw` is
+    /// set — a view whose state changed on its own (a background preview
+    /// landing) returns [`ViewAction::Redraw`], and any emitted event also
+    /// implies a repaint. Without this, tick-driven changes stay invisible
+    /// until the next key press.
+    pub fn tick(&mut self) -> ViewTick {
         let action = self
             .views
             .last_mut()
             .map(|view| view.tick())
             .unwrap_or(ViewAction::None);
-        self.apply_action(action)
+        let view_redraw = matches!(action, ViewAction::Redraw);
+        let events = self.apply_action(action);
+        ViewTick {
+            redraw: view_redraw || !events.is_empty(),
+            events,
+        }
     }
 
     fn apply_action(&mut self, action: ViewAction) -> Vec<ViewEvent> {
         let mut events = Vec::new();
         match action {
-            ViewAction::None => {}
+            // Key and mouse paths already repaint after dispatch; `tick`
+            // reads `Redraw` before calling here.
+            ViewAction::None | ViewAction::Redraw => {}
             ViewAction::Close => {
                 if let Some(view) = self.views.pop() {
                     tracing::debug!(target: "codewhale_tui::view_stack", action = "close", kind = ?view.kind(), depth = self.views.len(), "view closed via action");

@@ -700,17 +700,18 @@ impl SessionPickerView {
     }
 
     /// Apply a background preview load if it has landed and still belongs to
-    /// the current selection. Called from `tick`.
-    fn poll_preview(&mut self) {
+    /// the current selection. Called from `tick`; returns whether the visible
+    /// preview changed, so the host knows to repaint.
+    fn poll_preview(&mut self) -> bool {
         let Some(pending) = self.pending_preview.as_ref() else {
-            return;
+            return false;
         };
         let landed = pending.cell.lock().ok().and_then(|mut guard| guard.take());
         let Some(load) = landed else {
-            return;
+            return false;
         };
         let Some(pending) = self.pending_preview.take() else {
-            return;
+            return false;
         };
         let still_selected = self
             .selected_session()
@@ -720,9 +721,10 @@ impl SessionPickerView {
             if load.cacheable {
                 self.preview_cache.insert(pending.session_id, load.lines);
             }
-            return;
+            return false;
         }
         self.apply_preview_load(pending.session_id, load);
+        true
     }
 
     fn apply_preview_load(&mut self, session_id: String, load: PreviewLoad) {
@@ -776,8 +778,11 @@ impl ModalView for SessionPickerView {
     }
 
     fn tick(&mut self) -> ViewAction {
-        self.poll_preview();
-        ViewAction::None
+        if self.poll_preview() {
+            ViewAction::Redraw
+        } else {
+            ViewAction::None
+        }
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
@@ -2733,5 +2738,48 @@ mod tests {
             "a cached preview is shown without another load"
         );
         assert!(view.current_preview.join("\n").contains("beta body"));
+    }
+
+    /// A preview that lands in the background must repaint the frame on its
+    /// own; otherwise the placeholder stays up until the next key press.
+    #[tokio::test]
+    async fn landed_preview_requests_a_redraw_through_the_view_stack() {
+        let _lock = crate::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", tmp.path());
+        let manager = SessionManager::default_location().expect("session manager");
+        let mut saved = saved_session_with_messages(vec![text_message("user", "gamma body")]);
+        saved.metadata.id = "session-gamma".to_string();
+        manager.save_session(&saved).expect("save session");
+        let mut view = picker_with(vec![saved.metadata.clone()], None);
+        select_id(&mut view, "session-gamma");
+        view.refresh_preview();
+        assert!(
+            view.pending_preview.is_some(),
+            "load runs in the background"
+        );
+
+        let mut stack = crate::tui::views::ViewStack::new();
+        stack.push(view);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut redraws = 0;
+        loop {
+            let tick = stack.tick();
+            assert!(tick.events.is_empty(), "a preview load emits no event");
+            if tick.redraw {
+                redraws += 1;
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "preview load never requested a redraw"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(redraws, 1);
+        assert!(
+            !stack.tick().redraw,
+            "an idle tick after the preview landed must not keep repainting"
+        );
     }
 }

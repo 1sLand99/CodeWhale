@@ -578,13 +578,16 @@ fn resolve_asr_choice(_config: &Config) -> (String, String) {
     }
 }
 
-/// Status line while recording: the localized recording label, followed by
-/// the latest interim transcript once one exists.
+/// Status line while recording: the localized recording label, the latest
+/// interim transcript once one exists, and how to stop. The capture is awaited
+/// on the UI loop, so no key can end it — `record_audio` stops after a second
+/// of silence (or `MAX_RECORD_SECS`), and the cue says exactly that.
 fn recording_status(locale: codewhale_localization::Locale, interim: Option<&str>) -> String {
     let label = tr(locale, MessageId::VoiceRecording);
+    let stop = tr(locale, MessageId::VoiceRecordingStopHint);
     match interim.map(str::trim).filter(|text| !text.is_empty()) {
-        Some(text) => format!("{label} \u{2014} \u{201c}{text}\u{201d}"),
-        None => label.to_string(),
+        Some(text) => format!("{label} \u{2014} \u{201c}{text}\u{201d} \u{00b7} {stop}"),
+        None => format!("{label} \u{00b7} {stop}"),
     }
 }
 
@@ -990,14 +993,22 @@ mod tests {
 
         for locale in [Locale::En, Locale::De, Locale::Ja] {
             let label = tr(locale, MessageId::VoiceRecording).to_string();
-            assert_eq!(recording_status(locale, None), label);
-            assert_eq!(recording_status(locale, Some("   ")), label);
+            let stop = tr(locale, MessageId::VoiceRecordingStopHint).to_string();
+            let idle = format!("{label} \u{00b7} {stop}");
+            assert_eq!(recording_status(locale, None), idle);
+            assert_eq!(recording_status(locale, Some("   ")), idle);
 
             let with_interim = recording_status(locale, Some(" hello there "));
             assert!(with_interim.starts_with(&label), "{with_interim}");
             assert!(with_interim.contains("\u{201c}hello there\u{201d}"));
+            assert!(
+                with_interim.ends_with(&stop),
+                "the stop cue survives the interim: {with_interim}"
+            );
             assert!(!with_interim.contains("\u{2325}V"), "no hardcoded key hint");
-            assert!(!with_interim.contains("to finish"), "no English hint");
+            if locale != Locale::En {
+                assert!(!with_interim.contains("to finish"), "no English hint");
+            }
         }
         assert_ne!(
             recording_status(Locale::En, None),

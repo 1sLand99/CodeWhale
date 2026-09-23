@@ -1768,6 +1768,7 @@
   "VoiceErrTooShort": "語音：未偵測到有效語音，錄製時間過短",
   "VoiceProcessing": "🎙 正在轉錄...",
   "VoiceRecording": "🎙 正在錄音...請說話",
+  "VoiceRecordingStopHint": "停頓即可結束",
   "VoiceSendDisabled": "語音自動傳送已關閉",
   "VoiceSendEnabled": "語音自動傳送已開啟",
   "VoiceTranscribed": "🎙 轉錄完成",

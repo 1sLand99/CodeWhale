@@ -1226,6 +1226,7 @@
   "VoiceErrEmptySend": "Voice: nothing to send",
   "VoiceErrTooShort": "Voice: no speech detected, recording too short",
   "VoiceRecording": "🎙 Recording... speak now",
+  "VoiceRecordingStopHint": "pause to finish",
   "VoiceProcessing": "🎙 Transcribing...",
   "VoiceTranscribed": "🎙 Transcribed",
   "NotificationTurnComplete": "Turn complete",

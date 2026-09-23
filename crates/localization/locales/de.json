@@ -1203,6 +1203,7 @@
   "VoiceErrEmptySend": "Sprache: nichts zu senden",
   "VoiceErrTooShort": "Sprache: keine Sprache erkannt, Aufnahme zu kurz",
   "VoiceRecording": "🎙 Aufnahme... jetzt sprechen",
+  "VoiceRecordingStopHint": "zum Beenden kurz pausieren",
   "VoiceProcessing": "🎙 Transkribiere...",
   "VoiceTranscribed": "🎙 Transkribiert",
   "NotificationTurnComplete": "Turn abgeschlossen",

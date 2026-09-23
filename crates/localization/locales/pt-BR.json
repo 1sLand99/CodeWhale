@@ -1224,6 +1224,7 @@
   "VoiceErrEmptySend": "Voz: nada para enviar",
   "VoiceErrTooShort": "Voz: nenhuma fala detectada, gravação muito curta",
   "VoiceRecording": "🎙 Gravando... fale agora",
+  "VoiceRecordingStopHint": "faça uma pausa para terminar",
   "VoiceProcessing": "🎙 Transcrevendo...",
   "VoiceTranscribed": "🎙 Transcrito",
   "NotificationTurnComplete": "Turno concluído",

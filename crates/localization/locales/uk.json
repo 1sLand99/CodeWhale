@@ -1203,6 +1203,7 @@
   "VoiceErrEmptySend": "Голос: немає чого надсилати",
   "VoiceErrTooShort": "Голос: мовлення не виявлено, запис надто короткий",
   "VoiceRecording": "🎙 Запис... говоріть",
+  "VoiceRecordingStopHint": "зробіть паузу, щоб завершити",
   "VoiceProcessing": "🎙 Транскрибування...",
   "VoiceTranscribed": "🎙 Транскрибовано",
   "NotificationTurnComplete": "Хід завершено",

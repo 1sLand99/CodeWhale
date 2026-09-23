@@ -1203,6 +1203,7 @@
   "VoiceErrEmptySend": "Голос: нечего отправлять",
   "VoiceErrTooShort": "Голос: речь не обнаружена, запись слишком короткая",
   "VoiceRecording": "🎙 Запись... говорите",
+  "VoiceRecordingStopHint": "сделайте паузу, чтобы закончить",
   "VoiceProcessing": "🎙 Транскрибация...",
   "VoiceTranscribed": "🎙 Транскрибировано",
   "NotificationTurnComplete": "Ход завершён",

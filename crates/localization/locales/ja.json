@@ -1224,6 +1224,7 @@
   "VoiceErrEmptySend": "音声：送信する内容がありません",
   "VoiceErrTooShort": "音声：音声が検出されませんでした。録音が短すぎます",
   "VoiceRecording": "🎙 録音中...お話しください",
+  "VoiceRecordingStopHint": "話し終えたら少し間を置いてください",
   "VoiceProcessing": "🎙 文字起こし中...",
   "VoiceTranscribed": "🎙 文字起こし完了",
   "NotificationTurnComplete": "ターン完了",

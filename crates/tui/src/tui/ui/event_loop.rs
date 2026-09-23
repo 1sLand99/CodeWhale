@@ -4283,21 +4283,22 @@ pub(crate) async fn run_event_loop(
         }
 
         if !app.view_stack.is_empty() {
-            let events = app.view_stack.tick();
-            if !events.is_empty() {
+            let tick = app.view_stack.tick();
+            if tick.redraw {
                 app.needs_redraw = true;
-                if handle_view_events_boxed(
+            }
+            if !tick.events.is_empty()
+                && handle_view_events_boxed(
                     terminal,
                     app,
                     config,
                     &task_manager,
                     &mut engine_handle,
-                    events,
+                    tick.events,
                 )
                 .await?
-                {
-                    return Ok(());
-                }
+            {
+                return Ok(());
             }
         }
 

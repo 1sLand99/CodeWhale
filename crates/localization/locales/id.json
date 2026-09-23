@@ -1203,6 +1203,7 @@
   "VoiceErrEmptySend": "Suara: tidak ada yang dikirim",
   "VoiceErrTooShort": "Suara: tidak ada ucapan terdeteksi, rekaman terlalu pendek",
   "VoiceRecording": "🎙 Merekam... bicaralah sekarang",
+  "VoiceRecordingStopHint": "jeda untuk selesai",
   "VoiceProcessing": "🎙 Mentranskripsikan...",
   "VoiceTranscribed": "🎙 Tertranskripsi",
   "NotificationTurnComplete": "Giliran selesai",

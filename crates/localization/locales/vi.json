@@ -1224,6 +1224,7 @@
   "VoiceErrEmptySend": "Giọng nói: không có nội dung để gửi",
   "VoiceErrTooShort": "Giọng nói: không phát hiện giọng nói, bản ghi quá ngắn",
   "VoiceRecording": "🎙 Đang ghi âm... hãy nói",
+  "VoiceRecordingStopHint": "tạm dừng để kết thúc",
   "VoiceProcessing": "🎙 Đang chuyển thành văn bản...",
   "VoiceTranscribed": "🎙 Đã chuyển xong",
   "NotificationTurnComplete": "Lượt hoàn tất",

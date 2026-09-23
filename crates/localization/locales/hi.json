@@ -1203,6 +1203,7 @@
   "VoiceErrEmptySend": "वॉइस: भेजने के लिए कुछ नहीं",
   "VoiceErrTooShort": "वॉइस: कोई बोली नहीं मिली, रिकॉर्डिंग बहुत छोटी",
   "VoiceRecording": "🎙 रिकॉर्डिंग... अब बोलें",
+  "VoiceRecordingStopHint": "समाप्त करने के लिए रुकें",
   "VoiceProcessing": "🎙 ट्रांसक्राइब हो रहा है...",
   "VoiceTranscribed": "🎙 ट्रांसक्राइब हुआ",
   "NotificationTurnComplete": "टर्न पूर्ण",

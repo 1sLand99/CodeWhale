@@ -1474,6 +1474,9 @@ pub enum MessageId {
     VoiceErrEmptySend,
     VoiceErrTooShort,
     VoiceRecording,
+    /// Recording ends on its own after a short silence; nothing reads keys
+    /// while the capture runs, so the cue names the pause, not a key.
+    VoiceRecordingStopHint,
     VoiceProcessing,
     VoiceTranscribed,
     // Notifications (turn/agent completion).
@@ -3798,6 +3801,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::VoiceErrEmptySend,
     MessageId::VoiceErrTooShort,
     MessageId::VoiceRecording,
+    MessageId::VoiceRecordingStopHint,
     MessageId::VoiceProcessing,
     MessageId::VoiceTranscribed,
     MessageId::NotificationApprovalNeeded,

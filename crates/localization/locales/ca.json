@@ -1203,6 +1203,7 @@
   "VoiceErrEmptySend": "Veu: no hi ha res a enviar",
   "VoiceErrTooShort": "Veu: no s'ha detectat veu, gravació massa curta",
   "VoiceRecording": "🎙 Gravant... parla ara",
+  "VoiceRecordingStopHint": "fes una pausa per acabar",
   "VoiceProcessing": "🎙 Transcrivint...",
   "VoiceTranscribed": "🎙 Transcrit",
   "NotificationTurnComplete": "Torn completat",

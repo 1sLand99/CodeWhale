@@ -1226,6 +1226,7 @@
   "VoiceErrEmptySend": "음성: 전송할 내용이 없습니다",
   "VoiceErrTooShort": "음성: 음성이 감지되지 않았습니다. 녹음이 너무 짧습니다",
   "VoiceRecording": "🎙 녹음 중... 지금 말하세요",
+  "VoiceRecordingStopHint": "잠시 멈추면 종료됩니다",
   "VoiceProcessing": "🎙 받아쓰는 중...",
   "VoiceTranscribed": "🎙 받아쓰기 완료",
   "NotificationTurnComplete": "턴 완료",

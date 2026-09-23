@@ -1224,6 +1224,7 @@
   "VoiceErrEmptySend": "语音：没有可发送的内容",
   "VoiceErrTooShort": "语音：未检测到有效语音，录制时间过短",
   "VoiceRecording": "🎙 正在录音...请说话",
+  "VoiceRecordingStopHint": "停顿即可结束",
   "VoiceProcessing": "🎙 正在转录...",
   "VoiceTranscribed": "🎙 转录完成",
   "NotificationTurnComplete": "本轮已完成",
