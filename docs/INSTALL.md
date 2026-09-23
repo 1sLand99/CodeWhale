@@ -4,7 +4,9 @@
 
 Codewhale is an open-source coding agent that runs in your terminal. You give
 it a task ("fix the failing test", "add a CLI flag"). It reads your repository,
-edits files and runs commands, asking your permission first by default. It
+edits files and runs commands. In the default **Ask** posture it applies file
+edits inside the workspace immediately (and shows you the diff), but asks before
+running shell commands, so commit or stash anything you care about first. It
 works with many model providers. **DeepSeek** is the default.
 
 The command is `codewhale`. `codew` is a shorter alias for the same program.
@@ -165,7 +167,9 @@ Re-checked on macOS 26.1, Apple silicon (`macos-arm64`), with a fresh `HOME`:
   (64 MiB each, Mach-O arm64) in 4.3 s. Both report
   `codewhale 0.10.0 (1be1a703b975)`. They ran without a Gatekeeper prompt.
 * When Node isn't on `PATH`, it also prints `Computer Use is included and needs
-  Node.js 20 or newer on PATH.` Everything else works without Node.
+  Node.js 20 or newer on PATH.` The core TUI works without Node, but Computer Use
+  and the JavaScript execution tool (`js_execution`) stay unavailable until Node
+  is on `PATH`.
 * `codewhale doctor` behaves as on Linux (exit 0, `All checks complete!` with no
   key, file-based secret store under `~/.codewhale/secrets/`), except that it
   reports `✓ sandbox available: macos-seatbelt`.
@@ -477,7 +481,11 @@ in 31 bottles (~560 MB) on Linux.
 ### Nix: partially tested
 
 ```bash
+# flakes are still experimental; the tested setup enabled them once:
+mkdir -p ~/.config/nix
+echo 'experimental-features = nix-command flakes' >> ~/.config/nix/nix.conf
 nix run github:Hmbown/CodeWhale -- --version
+# one-off alternative (untested on this VM): nix --extra-experimental-features 'nix-command flakes' run github:Hmbown/CodeWhale -- --version
 ```
 
 Nix 2.35 installed fine; single-user mode needs `/nix` created by root once.
@@ -532,10 +540,15 @@ again and you get `Already up to date; no download needed.` Other options:
 update` just says "Already up to date". To roll back, replace the files:
 
 ```bash
-rm ~/.local/bin/codewhale ~/.local/bin/codew
-curl -fsSL https://codewhale.net/install.sh | CODEWHALE_VERSION=v0.9.13 sh
-codewhale --version      # codewhale 0.9.13 (a0b81f619b66)
+dir="$(dirname "$(command -v codewhale)")"     # the install PATH actually selects
+rm "$dir/codewhale" "$dir/codew"
+curl -fsSL https://codewhale.net/install.sh | CODEWHALE_VERSION=v0.9.13 CODEWHALE_INSTALL_DIR="$dir" sh
+hash -r; codewhale --version      # codewhale 0.9.13 (a0b81f619b66)
 ```
+
+Tested with both the default `~/.local/bin` and a custom
+`CODEWHALE_INSTALL_DIR`. Use it only for installer, manual or archive
+installs. Never point it at an npm, Cargo or Homebrew directory.
 
 Or keep both versions side by side, and put the old one first on PATH:
 
@@ -690,8 +703,14 @@ codewhale
   with an empty input. Full list: [KEYBINDINGS.md](KEYBINDINGS.md).
 * On exit it prints `To resume this session, run codewhale resume <id>`.
 
-Codewhale creates a `.codewhale/` directory in your repo. Add it to
-`.gitignore` (or your global gitignore).
+Codewhale creates a `.codewhale/` directory in your repo. Ignore its contents
+but keep the committable `constitution.json` (these are the same patterns
+`/init` writes):
+
+```gitignore
+**/.codewhale/*
+!**/.codewhale/constitution.json
+```
 
 ### Headless (scripts, CI)
 
@@ -783,15 +802,17 @@ codewhale auth clear --provider deepseek
 | PATH lines you added | `~/.bashrc`, `~/.zshrc`, `~/.profile` | – |
 
 ```bash
-rm -rf ~/.codewhale ~/.deepseek
+rm -rf ~/.codewhale ~/.deepseek/snapshots
+rmdir ~/.deepseek 2>/dev/null   # removes the parent only if it is now empty
 # per-repo dirs, e.g.:
 find ~ -type d -name .codewhale -prune -print     # review, then delete the ones you want
 ```
 
 Codewhale wrote nothing outside `$HOME` and the repos it was used in: no
 system files, services or cron jobs. (I checked every file owned by the test
-users outside their home directories.) If you already had a `~/.deepseek` from
-the older DeepSeek-TUI, look before you delete it.
+users outside their home directories.) The commands above delete only
+`~/.deepseek/snapshots`. If you still use the older DeepSeek-TUI, the rest of
+`~/.deepseek` (its config and sessions) is left alone.
 
 ---
 
