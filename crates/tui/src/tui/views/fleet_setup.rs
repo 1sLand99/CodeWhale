@@ -110,7 +110,7 @@ const ROLES: [Choice; 9] = [
         label: Cow::Borrowed("manager"),
         summary: Cow::Borrowed("Plan & split queued work"),
         description: Cow::Borrowed(
-            "Coordinates the Fleet run: plans the work, splits it into bounded tasks, and dispatches workers.",
+            "Coordinates the Fleet run: plans the work, splits it into bounded tasks, and dispatches agents.",
         ),
     },
     Choice {
@@ -152,21 +152,21 @@ const ROLES: [Choice; 9] = [
         label: Cow::Borrowed("synthesizer"),
         summary: Cow::Borrowed("Reduce receipts to handoff"),
         description: Cow::Borrowed(
-            "Turns worker receipts into bounded handoff state instead of raw transcript replay.",
+            "Turns agent receipts into bounded handoff state instead of raw transcript replay.",
         ),
     },
     Choice {
         label: Cow::Borrowed("general"),
-        summary: Cow::Borrowed("General-purpose worker"),
+        summary: Cow::Borrowed("General-purpose agent"),
         description: Cow::Borrowed(
-            "A flexible worker with no specialized posture — use it when the task doesn't fit a named role.",
+            "A flexible agent with no specialized focus — use it when the task doesn't fit a named role.",
         ),
     },
     Choice {
         label: Cow::Borrowed("custom"),
         summary: Cow::Borrowed("Author a profile by hand"),
         description: Cow::Borrowed(
-            "Define the posture yourself in a workspace agent TOML profile under .codewhale/agents/.",
+            "Define the role yourself in a workspace agent TOML profile under .codewhale/agents/.",
         ),
     },
 ];
@@ -188,7 +188,7 @@ const THINKING_CHOICES: &[Choice] = &[
         label: Cow::Borrowed("inherit"),
         summary: Cow::Borrowed("Same thinking as now"),
         description: Cow::Borrowed(
-            "Reuse the operator's current reasoning setting for this worker. Recommended default.",
+            "Reuse the Coordinator's current Thinking setting for this agent. Recommended default.",
         ),
     },
     Choice {
@@ -223,7 +223,7 @@ const THINKING_CHOICES: &[Choice] = &[
     Choice {
         label: Cow::Borrowed("auto"),
         summary: Cow::Borrowed("Let Codewhale choose"),
-        description: Cow::Borrowed("Choose a thinking tier from the worker prompt at runtime."),
+        description: Cow::Borrowed("Choose a Thinking level from the agent prompt at runtime."),
     },
 ];
 
@@ -1180,7 +1180,7 @@ impl FleetSetupView {
                     "Pin this model ({provider_label}) · {readiness_summary}"
                 )),
                 description: Cow::Owned(format!(
-                    "Route this worker to {model} on {provider_label} instead of inheriting the session route.{capability_note}"
+                    "Route this agent to {model} on {provider_label} instead of inheriting the session route.{capability_note}"
                 )),
             });
             // Canonical provider id (not the display label above) — this is
@@ -2197,7 +2197,7 @@ impl ModalView for FleetSetupView {
         match self.step {
             Step::Role => {
                 let mut context = vec![
-                    "Fleet runs sub-agents that delegate work. Pick the role this team member should play; the saved profile carries it as its role_hint.".to_string(),
+                    "Fleet runs agents that delegate work. Pick the role this agent should play; the saved profile carries it as its role_hint.".to_string(),
                 ];
                 if let Some(note) = self.roster_override_note() {
                     context.push(note);
@@ -2294,7 +2294,7 @@ impl FleetSetupView {
             ),
             Step::Model => (
                 Cow::Borrowed("Choose a model"),
-                Cow::Borrowed("Pick this worker's model, or inherit your current route."),
+                Cow::Borrowed("Pick this agent's model, or inherit your current route."),
             ),
             Step::Destination => (
                 Cow::Owned(tr(self.snapshot.locale, MessageId::FleetDestStepTitle).into_owned()),
@@ -4662,7 +4662,7 @@ approval_required = true
             assert!(
                 !row.contains("Plan & split queued work")
                     && !row.contains("Coordinates the Fleet run")
-                    && !row.contains("Fleet runs sub-agents"),
+                    && !row.contains("Fleet runs agents"),
                 "role list row contains detail copy at 80 columns: {row:?}\n{text}"
             );
         }
