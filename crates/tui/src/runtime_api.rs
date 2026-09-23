@@ -3342,6 +3342,18 @@ struct CommandCatalogEntry {
     /// Literal verbs declared by the usage line (`/goal <block|complete|…>`).
     subcommands: Vec<String>,
     takes_arguments: bool,
+    /// Composer argument shape, computed the way the TUI composer computes
+    /// it so clients do not re-derive it from the usage string.
+    /// Usage mentions any argument, required or optional.
+    requires_argument: bool,
+    /// Usage has a `<required>` argument outside every `[optional]` group.
+    requires_required_argument: bool,
+    /// Accepting the command leaves a trailing space for its arguments.
+    composer_wants_trailing_space: bool,
+    /// The palette runs the command on selection instead of pasting it.
+    palette_runs_directly: bool,
+    /// Listed when the slash menu opens with no filter text.
+    show_in_empty_discovery: bool,
     /// `builtin` is registered code; `user` expands a stored template.
     kind: &'static str,
     /// `host` runs locally and never reaches the model; `prompt` expands into
@@ -3398,6 +3410,11 @@ fn command_catalog(
             takes_arguments: crate::commands::user_registry::usage_describes_arguments(
                 info.name, info.usage,
             ),
+            requires_argument: info.requires_argument(),
+            requires_required_argument: info.requires_required_argument(),
+            composer_wants_trailing_space: info.composer_wants_trailing_space(),
+            palette_runs_directly: info.palette_runs_directly(),
+            show_in_empty_discovery: info.show_in_empty_discovery(),
             kind: "builtin",
             binding: "host",
             discovery: Some(match info.discovery() {
@@ -3411,13 +3428,20 @@ fn command_catalog(
         });
     }
     for command in user_commands.iter() {
+        let takes_arguments = command.takes_arguments();
         commands.push(CommandCatalogEntry {
             name: command.name.clone(),
             aliases: command.aliases.clone(),
             summary: command.description.clone(),
             usage: command.display_usage().map(str::to_string),
             subcommands: Vec::new(),
-            takes_arguments: command.takes_arguments(),
+            takes_arguments,
+            // A template may run bare, so its arguments are never required.
+            requires_argument: takes_arguments,
+            requires_required_argument: false,
+            composer_wants_trailing_space: takes_arguments,
+            palette_runs_directly: !takes_arguments,
+            show_in_empty_discovery: !command.hidden,
             kind: "user",
             binding: "prompt",
             discovery: None,
