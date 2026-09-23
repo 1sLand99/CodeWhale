@@ -279,7 +279,10 @@ fn idle_frame_keeps_two_chrome_rows_and_last_turn_metrics() {
     app.is_loading = false;
     app.turn_started_at = None;
     app.subagent_cache.clear();
-    let rows = draw(&mut app, 100, 32);
+    // 120 columns: the labeled readings ("thinking: max", "context 0%",
+    // mark 8) are wider than the bare ones, so at 100 columns the output
+    // count (shed priority 7, ahead of the help hint) is shed by design.
+    let rows = draw(&mut app, 120, 32);
     let composer = app.viewport.last_composer_area.unwrap().bottom() as usize;
     assert!(rows[composer].contains("(Shift+Tab)"), "{}", rows[composer]);
     // The idle fixture sits at 0% context and says so: the reading is on

@@ -6931,8 +6931,10 @@ mod tests {
                     .collect();
                 let text = rows.join("\n");
 
+                // The card heading is the plain summary of the call (E6,
+                // mark 4), not the raw tool name.
                 assert!(
-                    text.contains("Do you want to proceed?") && text.contains("read_file"),
+                    text.contains("Do you want to proceed?") && text.contains("Read src/main.rs"),
                     "{mode:?} {w}x{h}: approval prompt must survive the texture"
                 );
                 // Zero sentinel bleed INSIDE the focused band: the backdrop
