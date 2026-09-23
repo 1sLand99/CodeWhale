@@ -302,7 +302,7 @@ mod live {
             Some(401)
         );
 
-        let http = reqwest::Client::new();
+        let http = codewhale_release::tls::reqwest_client();
         let resp = http
             .post(format!("{}/v1/computer/display/tickets", h.base))
             .bearer_auth(MASTER)
@@ -343,7 +343,7 @@ mod live {
         assert_eq!(h.received.lock().len(), FUR.len());
 
         // Driving: after acquiring the lease the same input is forwarded.
-        let resp = reqwest::Client::new()
+        let resp = codewhale_release::tls::reqwest_client()
             .post(format!("{}/v1/computer/control/acquire", h.base))
             .bearer_auth(MASTER)
             .send()
@@ -354,7 +354,7 @@ mod live {
         let got = wait_for_received(&h, FUR.len() + KEY.len()).await;
         assert_eq!(&got[FUR.len()..], KEY);
 
-        let released = reqwest::Client::new()
+        let released = codewhale_release::tls::reqwest_client()
             .post(format!("{}/v1/computer/control/release", h.base))
             .bearer_auth(MASTER)
             .send()
@@ -417,7 +417,7 @@ mod live {
     #[tokio::test]
     async fn client_tokens_are_owner_minted_scoped_and_revocable() {
         let h = harness().await;
-        let http = reqwest::Client::new();
+        let http = codewhale_release::tls::reqwest_client();
         let resp = http
             .post(format!("{}/v1/auth/client-tokens", h.base))
             .bearer_auth(MASTER)

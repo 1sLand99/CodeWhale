@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:83d705f2dca6 -->
+<!-- source: README.md sha256:bbb8bfb61e57 -->
 # Codewhale
 
 Codewhale 是一款开源智能体，可使用你选择的托管模型或本地模型读取项目、编辑文件、运行命令并检查自己的工作。从终端中的一项任务开始。对于较大的工作，可以将其中的部分任务交给使用不同模型、承担不同角色的智能体。
@@ -30,7 +30,7 @@ Windows 请使用 [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases
 并保留比已发布版本更新的构建。npm 和 Cargo 是次要打包选项。
 迁移与 PATH 排查见[安装指南](docs/zh_hans/INSTALL.md)。
 
-首次运行会帮助你连接提供商，也可以离线配置 Codewhale。要获得模型回复，必须连接托管模型或本地模型。Codewhale 还支持 npm 和 Cargo 作为次要打包方式，以及 Docker、Nix、Scoop、Android/Termux 和可选的 CNB 镜像。对于现有的软件包管理器安装，系统会提供迁移说明。请参阅[安装与 PATH 帮助](docs/INSTALL.md)。
+首次运行会直接打开输入框，不会引导你完成设置流程。要获得模型回复，必须连接托管模型或本地模型：在连接之前，启动界面会显示 "no model connected"。运行 `/provider`（或按 F3）即可添加托管服务密钥或选择本地运行时。如果 Ollama 已在运行且带有聊天模型，Codewhale 会自动切换到它。Codewhale 还支持 npm 和 Cargo 作为次要打包方式，以及 Docker、Nix、Scoop、Android/Termux 和可选的 CNB 镜像。对于现有的软件包管理器安装，系统会提供迁移说明。请参阅[安装与 PATH 帮助](docs/INSTALL.md)。
 
 每种 shell 只需一条命令即可启用 Tab 补全——`codewhale completion bash|zsh|fish|powershell|elvish`。请参阅 [shell 补全](docs/INSTALL.md#8-shell-completions)。
 

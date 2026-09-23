@@ -148,7 +148,7 @@ fn mcp_summary(name: &str) -> String {
 fn relative_path(raw: &str, workspace: Option<&Path>) -> String {
     let candidate = Path::new(raw);
     if let Some(workspace) = workspace
-        && candidate.is_absolute()
+        && candidate.has_root()
         && let Ok(relative) = candidate.strip_prefix(workspace)
     {
         let shown = relative.display().to_string();

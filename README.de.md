@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:83d705f2dca6 -->
+<!-- source: README.md sha256:bbb8bfb61e57 -->
 # Codewhale
 
 Codewhale ist ein Open-Source-Agent, der dein Projekt liest, Dateien bearbeitet, Befehle ausführt und seine Arbeit mit einem gehosteten oder lokalen Modell deiner Wahl prüft. Starte mit einer Aufgabe im Terminal. Teile eine größere Aufgabe auf Agenten mit verschiedenen Modellen und Rollen auf.
@@ -27,7 +27,7 @@ Das Installationsprogramm wählt die neueste veröffentlichte Version aus. Das [
 
 Unter Windows lade das passende Installationsprogramm oder Archiv von [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases/latest) herunter. Bestehende direkte Installationen aktualisierst du mit `codewhale update`; `codewhale update --check` prüft nur. Der Updater zeigt den Pfad der ausführbaren Datei und behält neuere Builds bei. npm und Cargo sind nachrangige Paketoptionen. Hinweise zur Migration aus einer Paketverwaltung und zu PATH stehen in der [Installationsanleitung](docs/INSTALL.md).
 
-Beim ersten Start hilft dir Codewhale, einen Anbieter zu verbinden oder Codewhale offline einzurichten. Antworten erfordern ein verbundenes gehostetes oder lokales Modell. Codewhale unterstützt außerdem npm und Cargo als nachrangige Paketoptionen sowie Docker, Nix, Scoop, Android/Termux und einen optionalen CNB-Spiegel. Bestehende Installationen über Paketverwaltungen erhalten Migrationshinweise. Siehe die [Hilfe zu Installation und PATH](docs/INSTALL.md).
+Der erste Start öffnet direkt den Editor für Nachrichten; es gibt keinen Einrichtungsassistenten. Antworten erfordern ein verbundenes gehostetes oder lokales Modell: Solange keines verbunden ist, zeigt der Startbildschirm "no model connected". Führe `/provider` aus (oder drücke F3), um einen Schlüssel für einen gehosteten Anbieter hinzuzufügen oder eine lokale Laufzeit zu wählen. Läuft Ollama bereits mit einem Chat-Modell, wechselt Codewhale von selbst dorthin. Codewhale unterstützt außerdem npm und Cargo als nachrangige Paketoptionen sowie Docker, Nix, Scoop, Android/Termux und einen optionalen CNB-Spiegel. Bestehende Installationen über Paketverwaltungen erhalten Migrationshinweise. Siehe die [Hilfe zu Installation und PATH](docs/INSTALL.md).
 
 Die Tab-Vervollständigung lässt sich für jede Shell mit einem einzigen Befehl aktivieren — `codewhale completion bash|zsh|fish|powershell|elvish`. Siehe [Shell-Vervollständigung](docs/INSTALL.md#8-shell-completions).
 

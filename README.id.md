@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:83d705f2dca6 -->
+<!-- source: README.md sha256:bbb8bfb61e57 -->
 # Codewhale
 
 Codewhale adalah agen sumber terbuka yang membaca proyek, mengedit berkas, menjalankan perintah, dan memeriksa hasil kerjanya dengan model yang dihosting atau model lokal pilihan Anda. Mulailah dengan satu tugas di terminal. Untuk pekerjaan yang lebih besar, bagikan sebagian pekerjaan kepada agen dengan model dan peran yang berbeda.
@@ -27,7 +27,7 @@ Installer memilih rilis terbaru yang sudah dipublikasikan. [Catatan perubahan](C
 
 Di Windows, unduh installer atau arsip yang sesuai dari [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases/latest). Untuk instalasi biner langsung yang sudah ada, jalankan `codewhale update`, atau `codewhale update --check` untuk memeriksa tanpa memasang. Updater menampilkan jalur executable dan mempertahankan build yang lebih baru. npm dan Cargo adalah pilihan sekunder; lihat [panduan instalasi](docs/INSTALL.md) untuk migrasi dari pengelola paket dan pengaturan PATH.
 
-Saat pertama dijalankan, Codewhale membantu Anda menghubungkan penyedia atau mengonfigurasi Codewhale secara luring. Respons model memerlukan koneksi ke model yang dihosting atau model lokal. Codewhale juga mendukung npm dan Cargo sebagai jalur pengemasan sekunder, serta Docker, Nix, Scoop, Android/Termux, dan mirror CNB opsional. Instalasi yang sudah ada melalui pengelola paket akan menerima petunjuk migrasi. Lihat [bantuan instalasi dan PATH](docs/INSTALL.md).
+Saat pertama dijalankan, Codewhale langsung membuka composer; tidak ada panduan penyiapan. Respons model memerlukan koneksi ke model yang dihosting atau model lokal: sampai ada yang terhubung, layar awal menampilkan "no model connected". Jalankan `/provider` (atau tekan F3) untuk menambahkan kunci layanan yang dihosting atau memilih runtime lokal. Jika Ollama sudah berjalan dengan model chat, Codewhale beralih ke sana dengan sendirinya. Codewhale juga mendukung npm dan Cargo sebagai jalur pengemasan sekunder, serta Docker, Nix, Scoop, Android/Termux, dan mirror CNB opsional. Instalasi yang sudah ada melalui pengelola paket akan menerima petunjuk migrasi. Lihat [bantuan instalasi dan PATH](docs/INSTALL.md).
 
 Penyelesaian Tab cukup diaktifkan dengan satu perintah per shell — `codewhale completion bash|zsh|fish|powershell|elvish`. Lihat [penyelesaian shell](docs/INSTALL.md#8-shell-completions).
 

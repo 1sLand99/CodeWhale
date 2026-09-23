@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:83d705f2dca6 -->
+<!-- source: README.md sha256:bbb8bfb61e57 -->
 # Codewhale
 
 Codewhale は、選んだホスト型またはローカルのモデルを使ってプロジェクトを読み、ファイルを編集し、コマンドを実行して、自分の作業結果を確認するオープンソースのエージェントです。まずはターミナルで一つのタスクから始めましょう。大きな仕事では、異なるモデルや役割を持つエージェントに作業の一部を分担させられます。
@@ -27,7 +27,7 @@ curl -fsSL https://codewhale.net/install.sh | sh
 
 Windows では [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases/latest) から対応するインストーラーまたはアーカイブを入手してください。既存の直接インストールは `codewhale update` で更新できます。確認だけなら `codewhale update --check` を使います。更新対象の実行ファイルのパスが表示され、より新しいビルドは保持されます。npm と Cargo は補助的なパッケージ導入方法です。パッケージ管理からの移行や PATH の設定は[インストールガイド](docs/INSTALL.md)を参照してください。
 
-初回起動時にプロバイダーへの接続を案内します。Codewhale の設定はオフラインでも行えます。モデルからの応答には、ホスト型またはローカルのモデルへの接続が必要です。Codewhale は補助的なパッケージ配布方法として npm と Cargo に対応し、Docker、Nix、Scoop、Android/Termux、必要に応じて利用できる CNB ミラーにも対応しています。パッケージマネージャーでインストール済みの場合は、移行手順が案内されます。[インストールと PATH のヘルプ](docs/INSTALL.md)を参照してください。
+初回起動ではそのまま入力欄（コンポーザー）が開き、セットアップの案内はありません。モデルからの応答には、ホスト型またはローカルのモデルへの接続が必要です。接続されるまで、起動画面には "no model connected" と表示されます。`/provider` を実行する（または F3 を押す）と、ホスト型サービスのキーを追加したり、ローカルランタイムを選んだりできます。Ollama がチャットモデルとともにすでに動作している場合、Codewhale は自動的にそれに切り替わります。Codewhale は補助的なパッケージ配布方法として npm と Cargo に対応し、Docker、Nix、Scoop、Android/Termux、必要に応じて利用できる CNB ミラーにも対応しています。パッケージマネージャーでインストール済みの場合は、移行手順が案内されます。[インストールと PATH のヘルプ](docs/INSTALL.md)を参照してください。
 
 各シェルの Tab 補完はコマンド一つで設定できます — `codewhale completion bash|zsh|fish|powershell|elvish`。詳しくは[シェル補完](docs/INSTALL.md#8-shell-completions)をご覧ください。
 

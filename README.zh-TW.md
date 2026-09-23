@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:83d705f2dca6 -->
+<!-- source: README.md sha256:bbb8bfb61e57 -->
 # Codewhale
 
 Codewhale 是一款開源代理，可使用你選擇的託管模型或本機模型讀取專案、編輯檔案、執行指令，並檢查自己的工作。從終端機中的一項任務開始。對於較大的工作，可以將部分任務交給使用不同模型、擔任不同角色的代理。
@@ -27,7 +27,7 @@ curl -fsSL https://codewhale.net/install.sh | sh
 
 Windows 請從 [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases/latest) 下載對應的安裝程式或封存檔。已有的直接安裝使用 `codewhale update`；若只想檢查，使用 `codewhale update --check`。更新器會顯示執行檔路徑，並保留較新的建置版本。npm 和 Cargo 是次要套件安裝方式；套件管理器安裝的遷移與 PATH 設定請參閱[安裝指南](docs/INSTALL.md)。
 
-第一次執行時，系統會協助你連線至供應商，也可以離線設定 Codewhale。要取得模型回覆，必須連線至託管模型或本機模型。Codewhale 也支援 npm 和 Cargo 作為次要套件安裝方式，以及 Docker、Nix、Scoop、Android/Termux 與選用的 CNB 鏡像。對於既有的套件管理器安裝，系統會提供遷移說明。請參閱[安裝與 PATH 說明](docs/INSTALL.md)。
+第一次執行會直接開啟輸入框，不會引導你完成設定流程。要取得模型回覆，必須連線至託管模型或本機模型：在連線之前，啟動畫面會顯示 "no model connected"。執行 `/provider`（或按 F3）即可新增託管服務金鑰或選擇本機執行環境。如果 Ollama 已在執行且帶有聊天模型，Codewhale 會自動切換到它。Codewhale 也支援 npm 和 Cargo 作為次要套件安裝方式，以及 Docker、Nix、Scoop、Android/Termux 與選用的 CNB 鏡像。對於既有的套件管理器安裝，系統會提供遷移說明。請參閱[安裝與 PATH 說明](docs/INSTALL.md)。
 
 每種 shell 只需一個指令即可啟用 Tab 自動完成——`codewhale completion bash|zsh|fish|powershell|elvish`。請參閱 [shell 自動完成](docs/INSTALL.md#8-shell-completions)。
 

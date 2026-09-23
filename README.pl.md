@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:83d705f2dca6 -->
+<!-- source: README.md sha256:bbb8bfb61e57 -->
 # Codewhale
 
 Codewhale to agent o otwartym kodzie źródłowym, który czyta Twój projekt, edytuje pliki, wykonuje polecenia i sprawdza swoją pracę przy użyciu wybranego przez Ciebie modelu hostowanego lub lokalnego. Zacznij od jednego zadania w terminalu. Przy większej pracy powierz jej części agentom korzystającym z różnych modeli i pełniącym różne role.
@@ -27,7 +27,7 @@ Instalator wybiera najnowsze opublikowane wydanie. [Dziennik zmian](CHANGELOG.md
 
 Na Windows pobierz odpowiedni instalator lub archiwum z [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases/latest). Istniejącą instalację bezpośrednią zaktualizujesz poleceniem `codewhale update`; `codewhale update --check` służy tylko do sprawdzenia. Aktualizator pokazuje ścieżkę pliku wykonywalnego i zachowuje nowsze kompilacje. npm i Cargo to opcje dodatkowe. Migrację z menedżera pakietów i konfigurację PATH opisuje [instrukcja instalacji](docs/INSTALL.md).
 
-Przy pierwszym uruchomieniu Codewhale pomaga połączyć się z dostawcą lub skonfigurować Codewhale w trybie offline. Odpowiedzi modelu wymagają połączenia z modelem hostowanym lub lokalnym. Codewhale obsługuje również npm i Cargo jako dodatkowe sposoby instalacji, a także Docker, Nix, Scoop, Android/Termux oraz opcjonalny serwer lustrzany CNB. Dla istniejących instalacji zarządzanych przez menedżera pakietów dostępne są instrukcje migracji. Zobacz [pomoc dotyczącą instalacji i PATH](docs/INSTALL.md).
+Pierwsze uruchomienie otwiera od razu edytor wiadomości; nie prowadzi przez żadną konfigurację. Odpowiedzi modelu wymagają połączenia z modelem hostowanym lub lokalnym: dopóki żaden nie jest połączony, ekran startowy pokazuje "no model connected". Uruchom `/provider` (lub naciśnij F3), aby dodać klucz usługi hostowanej albo wybrać lokalne środowisko uruchomieniowe. Jeśli Ollama działa już z modelem czatu, Codewhale sam się na niego przełącza. Codewhale obsługuje również npm i Cargo jako dodatkowe sposoby instalacji, a także Docker, Nix, Scoop, Android/Termux oraz opcjonalny serwer lustrzany CNB. Dla istniejących instalacji zarządzanych przez menedżera pakietów dostępne są instrukcje migracji. Zobacz [pomoc dotyczącą instalacji i PATH](docs/INSTALL.md).
 
 Uzupełnianie klawiszem Tab można włączyć jednym poleceniem dla każdej powłoki — `codewhale completion bash|zsh|fish|powershell|elvish`. Zobacz [uzupełnianie powłoki](docs/INSTALL.md#8-shell-completions).
 
