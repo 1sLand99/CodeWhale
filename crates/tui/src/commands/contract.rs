@@ -4202,9 +4202,14 @@ impl CommandPluginContext for PluginAdapter<'_> {
     fn suggestion_dismissals(
         &self,
     ) -> Result<codewhale_command_contract::facets::PluginSuggestionDismissals, String> {
-        let persisted = crate::settings::Settings::load()
+        // Stored lowercase by the CTA, but a hand-edited settings file may not
+        // be; fold here so the list matches what suggestions actually skip.
+        let persisted: std::collections::BTreeSet<String> = crate::settings::Settings::load()
             .map_err(|err| format!("could not read saved plugin dismissals: {err}"))?
-            .dismissed_plugin_suggestions;
+            .dismissed_plugin_suggestions
+            .iter()
+            .map(|name| name.to_ascii_lowercase())
+            .collect();
         let app = self.host.app.borrow();
         let session = app
             .plugin_cta
@@ -4222,15 +4227,15 @@ impl CommandPluginContext for PluginAdapter<'_> {
     }
 
     fn reset_suggestion_dismissals(&mut self, name: Option<&str>) -> Result<Vec<String>, String> {
-        let target = name.map(str::to_ascii_lowercase);
-        let matches = |candidate: &String| target.as_ref().is_none_or(|target| candidate == target);
+        let matches =
+            |candidate: &String| name.is_none_or(|target| candidate.eq_ignore_ascii_case(target));
         let mut cleared = std::collections::BTreeSet::new();
         crate::settings::Settings::transact_opt(|settings| {
             let before = settings.dismissed_plugin_suggestions.len();
             settings.dismissed_plugin_suggestions.retain(|candidate| {
                 let reset = matches(candidate);
                 if reset {
-                    cleared.insert(candidate.clone());
+                    cleared.insert(candidate.to_ascii_lowercase());
                 }
                 !reset
             });

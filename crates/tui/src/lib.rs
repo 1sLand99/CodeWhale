@@ -5455,17 +5455,19 @@ async fn run_doctor(
 /// is the setup lane's own verdict; doctor never probes credential values to
 /// decide it.
 fn doctor_verdict(state: &codewhale_config::SetupState) -> &'static str {
-    if state.first_run_ready() {
-        return "Ready: setup is complete.";
-    }
     // NeedsAction means a route is named but no credential is confirmed for
     // it, which is still "no provider set up" from where the user sits.
+    // `first_run_ready` accepts NeedsAction (a failed key still reaches the
+    // wizard's ready screen), so check the provider first: finished setup
+    // with an unconfirmed key is not "Ready".
     let provider_verified = state.status(codewhale_config::SetupStep::ProviderModel)
         == codewhale_config::StepStatus::Verified;
-    if provider_verified {
-        "Not ready: first-run setup is unfinished → run `codewhale setup`."
-    } else {
+    if !provider_verified {
         "Not ready: no model provider set up → run /provider in Codewhale, or `codewhale setup`."
+    } else if state.first_run_ready() {
+        "Ready: setup is complete."
+    } else {
+        "Not ready: first-run setup is unfinished → run `codewhale setup`."
     }
 }
 
@@ -5476,6 +5478,34 @@ mod doctor_verdict_tests {
         let verdict = super::doctor_verdict(&codewhale_config::SetupState::default());
         assert!(verdict.starts_with("Not ready"), "{verdict}");
         assert!(verdict.contains("/provider"), "{verdict}");
+    }
+
+    #[test]
+    fn finished_setup_with_an_unconfirmed_key_is_not_ready() {
+        use codewhale_config::{
+            ConstitutionChoice, RuntimePostureSource, SetupState, SetupStep, StepEntry, StepStatus,
+        };
+        let mut state = SetupState::default();
+        state.set_step(
+            SetupStep::Language,
+            StepEntry::new(StepStatus::Verified, true, "0.10.1"),
+        );
+        state.set_step(
+            SetupStep::ProviderModel,
+            StepEntry::new(StepStatus::NeedsAction, true, "0.10.1"),
+        );
+        state.runtime_posture_source = RuntimePostureSource::Confirmed;
+        state.constitution_choice = ConstitutionChoice::Bundled;
+        assert!(state.first_run_ready(), "fixture must be wizard-ready");
+        let verdict = super::doctor_verdict(&state);
+        assert!(verdict.starts_with("Not ready"), "{verdict}");
+        assert!(verdict.contains("/provider"), "{verdict}");
+
+        state.set_step(
+            SetupStep::ProviderModel,
+            StepEntry::new(StepStatus::Verified, true, "0.10.1"),
+        );
+        assert_eq!(super::doctor_verdict(&state), "Ready: setup is complete.");
     }
 }
 

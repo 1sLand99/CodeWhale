@@ -38,13 +38,18 @@ pub(super) fn prepare_tool_call(
 ) -> Result<PreparedToolPolicy, ToolError> {
     if McpPool::is_mcp_tool(name) {
         // CW-11: a reviewed plugin's `readOnlyHint` makes its tool run like
-        // the built-in resource reads; a declared `destructiveHint` keeps the
-        // prompt even when the session auto-approves tools.
-        let hint = crate::mcp::mcp_tool_approval_hint(name);
+        // the built-in resource reads. A declared `destructiveHint` only
+        // withholds that relaxation and labels the card: Full Access still
+        // covers it (#3866), because a host that answers approvals from its
+        // own flag (`exec` with a Full Access `approval_policy`) would
+        // otherwise deny a call its posture already allows.
         let read_only = mcp_tool_is_read_only(name)
-            || hint == Some(crate::mcp::McpToolApprovalHint::TrustedReadOnly);
-        let destructive = hint == Some(crate::mcp::McpToolApprovalHint::Destructive);
-        if !read_only
+            || crate::mcp::mcp_tool_approval_hint(name)
+                == Some(crate::mcp::McpToolApprovalHint::TrustedReadOnly);
+        // A bounded worker keeps the execution gate's rule (built-in resource
+        // reads only), so preparation never admits a call that
+        // `tool_execution` then refuses.
+        if !mcp_tool_is_read_only(name)
             && let Some(authority) =
                 registry.and_then(|registry| registry.context().tool_authority.as_ref())
         {
@@ -113,7 +118,7 @@ pub(super) fn prepare_tool_call(
                 },
                 resources: vec![ResourceClaim::GlobalExclusive],
             },
-            auto_approve: session_auto_approve && !destructive,
+            auto_approve: session_auto_approve,
         });
     }
 
@@ -535,15 +540,44 @@ mod tests {
         assert_eq!(prepared.call.approval, ApprovalRequirement::Auto);
         assert!(prepared.call.read_only);
 
+        // A bounded worker keeps the execution gate's rule: only the built-in
+        // resource reads, so preparation never admits a call execution refuses.
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let context = crate::tools::ToolContext::new(workspace.path().to_path_buf())
+            .with_tool_authority(crate::tools::spec::ToolAuthorityEnvelope {
+                schema_version: 1,
+                owner: "cw11-worker".to_string(),
+                authority: crate::tools::spec::ToolMutationAuthority::ScopedWrite,
+                network_access: None,
+                shell: crate::tools::spec::ToolShellAuthority::None,
+                verification: crate::tools::spec::ToolVerificationAuthority::None,
+                writable_roots: Vec::new(),
+                writable_files: vec!["src/named.rs".to_string()],
+                coordination_contracts: Vec::new(),
+            })
+            .expect("valid envelope");
+        let registry = crate::tools::ToolRegistry::new(context);
+        let refused = prepare_tool_call(read_only, json!({}), Some(&registry), false)
+            .expect_err("a bounded worker cannot run a plugin-declared read");
+        assert!(refused.to_string().contains("cw11-worker"), "{refused}");
+
         let destructive = "mcp_cw11test_drop_table";
         set_mcp_tool_approval_hint_for_test(destructive, Some(McpToolApprovalHint::Destructive));
-        let prepared = prepare_tool_call(destructive, json!({}), None, true)
+        let prepared = prepare_tool_call(destructive, json!({}), None, false)
             .expect("prepare destructive MCP tool");
         assert_eq!(prepared.call.approval, ApprovalRequirement::Suggest);
+        assert!(!prepared.call.read_only);
         assert!(
-            !prepared.auto_approve,
-            "session auto-approve must not cover a destructive tool"
+            prepared.call.description.contains("destructive"),
+            "{}",
+            prepared.call.description
         );
+        // Full Access covers it like any other promptable tool (#3866): a
+        // host answering from its own flag must not deny what the posture
+        // allows.
+        let prepared = prepare_tool_call(destructive, json!({}), None, true)
+            .expect("prepare destructive MCP tool under Full Access");
+        assert!(prepared.auto_approve);
 
         set_mcp_tool_approval_hint_for_test(read_only, None);
         set_mcp_tool_approval_hint_for_test(destructive, None);
