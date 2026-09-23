@@ -58,7 +58,14 @@ pub(crate) fn route_identity_fields(
     // rather than `high→effective unavailable` (#5950): a placeholder that
     // can never resolve is noise, not a reading. First-party routes keep
     // their tier, `auto: tier` and `req→eff` labels.
-    let effort = app.provable_reasoning_effort_label().unwrap_or_default();
+    // Labeled, so a bare "max" never sits on the row unexplained (mark 8).
+    let effort = app
+        .provable_reasoning_effort_label()
+        .map(|level| {
+            app.tr(MessageId::InfoLineThinking)
+                .replace("{level}", &level)
+        })
+        .unwrap_or_default();
     if model.is_empty() {
         return None;
     }

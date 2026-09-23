@@ -2045,7 +2045,8 @@ impl<'a> ApprovalWidget<'a> {
         let critical = matches!(stakes, crate::tui::approval::ApprovalStakes::Critical);
 
         let mut body: Vec<Line<'static>> = Vec::with_capacity(16);
-        // Header: stakes badge + tool identifier.
+        // Header: effect badge + the plain summary of the call (E6). The raw
+        // tool name stays one details chord away in the pager.
         body.push(Line::from(vec![
             Span::raw("  "),
             Span::styled(
@@ -2054,7 +2055,7 @@ impl<'a> ApprovalWidget<'a> {
                     if repo_law {
                         tr(locale, MessageId::ApprovalRepoLawBadge)
                     } else {
-                        stakes_badge_text(stakes, locale)
+                        effect_badge_text(self.request, stakes, locale)
                     }
                 ),
                 Style::default()
@@ -2068,10 +2069,10 @@ impl<'a> ApprovalWidget<'a> {
                     format!(
                         "{} · {}",
                         tr(locale, MessageId::ApprovalRepoLawTitle),
-                        self.request.tool_name
+                        approval_heading(self.request, locale)
                     )
                 } else {
-                    self.request.tool_name.clone()
+                    approval_heading(self.request, locale)
                 },
                 Style::default()
                     .fg(palette::WHALE_ACTION)
@@ -2232,7 +2233,7 @@ impl<'a> ApprovalWidget<'a> {
                 ]));
             }
             // Category line — localized risk category.
-            let (cat_label, cat_color) = category_label_for(self.request.category, locale);
+            let (cat_label, cat_color) = category_label_for(self.request, locale);
             body.push(Line::from(vec![
                 Span::raw("  "),
                 Span::styled(label_type(locale), Style::default().fg(palette::TEXT_HINT)),
@@ -2325,12 +2326,12 @@ impl Renderable for ApprovalWidget<'_> {
                 if repo_law {
                     tr(self.view.locale(), MessageId::ApprovalRepoLawTitle)
                 } else {
-                    Cow::Borrowed(self.request.tool_name.as_str())
+                    Cow::Owned(approval_heading(self.request, self.view.locale()))
                 },
                 if repo_law {
                     tr(self.view.locale(), MessageId::ApprovalRepoLawBadge)
                 } else {
-                    stakes_badge_text(stakes, self.view.locale())
+                    effect_badge_text(self.request, stakes, self.view.locale())
                 },
             );
             let line = Line::from(Span::styled(
@@ -2644,19 +2645,42 @@ fn approval_option_style(is_selected: bool, color: Color) -> Style {
     }
 }
 
-fn stakes_badge_text(
-    stakes: crate::tui::approval::ApprovalStakes,
-    locale: Locale,
-) -> Cow<'static, str> {
-    use crate::tui::approval::ApprovalStakes;
-    match stakes {
-        ApprovalStakes::Routine => tr(locale, MessageId::ApprovalRiskReview),
-        ApprovalStakes::Elevated => tr(locale, MessageId::ApprovalRiskElevated),
-        ApprovalStakes::Critical => tr(locale, MessageId::ApprovalRiskDestructive),
+/// The approval card's heading. English leads with the plain summary of the
+/// call (E6); the summary is not localized yet, so other packs keep the tool
+/// name rather than mixing an English sentence into translated chrome.
+fn approval_heading(request: &ApprovalRequest, locale: Locale) -> String {
+    if matches!(locale, Locale::En) && !request.summary.trim().is_empty() {
+        request.summary.clone()
+    } else {
+        request.tool_name.clone()
     }
 }
 
-fn category_label_for(category: ToolCategory, locale: Locale) -> (Cow<'static, str>, Color) {
+/// Badge naming what the call does, not a risk tier: "Reads only", "Changes
+/// files", "Runs a command", "Uses the network". Anything the stakes
+/// classifier calls destructive or publishing reads "Can't be undone".
+fn effect_badge_text(
+    request: &ApprovalRequest,
+    stakes: crate::tui::approval::ApprovalStakes,
+    locale: Locale,
+) -> Cow<'static, str> {
+    if stakes == crate::tui::approval::ApprovalStakes::Critical {
+        return tr(locale, MessageId::ApprovalRiskDestructive);
+    }
+    let id = match request.category {
+        ToolCategory::Safe | ToolCategory::McpRead => MessageId::ApprovalEffectReadsOnly,
+        ToolCategory::FileWrite => MessageId::ApprovalEffectChangesFiles,
+        ToolCategory::Shell => MessageId::ApprovalEffectRunsCommand,
+        ToolCategory::Network => MessageId::ApprovalEffectUsesNetwork,
+        ToolCategory::McpAction => MessageId::ApprovalEffectConnectedApp,
+        ToolCategory::Agent => MessageId::ApprovalEffectStartsAgent,
+        ToolCategory::Unknown => MessageId::ApprovalEffectUnclassified,
+    };
+    tr(locale, id)
+}
+
+fn category_label_for(request: &ApprovalRequest, locale: Locale) -> (Cow<'static, str>, Color) {
+    let category = request.category;
     let label = match category {
         ToolCategory::Safe => tr(locale, MessageId::ApprovalCategorySafe),
         ToolCategory::FileWrite => tr(locale, MessageId::ApprovalCategoryFileWrite),
@@ -2666,6 +2690,16 @@ fn category_label_for(category: ToolCategory, locale: Locale) -> (Cow<'static, s
         ToolCategory::McpAction => tr(locale, MessageId::ApprovalCategoryMcpAction),
         ToolCategory::Agent => tr(locale, MessageId::ApprovalCategoryAgent),
         ToolCategory::Unknown => tr(locale, MessageId::ApprovalCategoryUnknown),
+    };
+    // "Connected app (github)": name the server the tool comes from.
+    let label = match (
+        category,
+        crate::tui::approval::connected_app_server(&request.tool_name),
+    ) {
+        (ToolCategory::McpRead | ToolCategory::McpAction, Some(server)) => {
+            Cow::Owned(format!("{label} ({server})"))
+        }
+        _ => label,
     };
     let color = match category {
         ToolCategory::Safe => palette::STATUS_SUCCESS,
@@ -2947,8 +2981,8 @@ fn destructive_approval_compact_semantics(locale: Locale) -> (&'static str, &'st
     match locale {
         Locale::ZhHans => ("规则: ", "批准策略要求确认；拒绝跳过本次，Esc 中止整轮。"),
         _ => (
-            "Policy: ",
-            "Approval policy requires review; d denies, Esc aborts.",
+            "Why: ",
+            "Your permissions ask before this; d doesn't allow it, Esc stops the turn.",
         ),
     }
 }
@@ -2964,12 +2998,12 @@ fn destructive_approval_semantics(locale: Locale) -> [(&'static str, &'static st
         ],
         _ => [
             (
-                "Policy: ",
-                "The active approval policy, a review rule, or an explicit ask-rule requires confirmation.",
+                "Why: ",
+                "Your permissions, a review rule, or an ask rule requires confirmation.",
             ),
             (
-                "Cancel: ",
-                "Deny rejects only this tool call; Esc aborts the whole turn.",
+                "Stop: ",
+                "Don't allow skips only this step; Esc stops the whole turn.",
             ),
         ],
     }
@@ -8738,7 +8772,9 @@ mod tests {
             .find(|line| line.contains("[2 / a]"))
             .expect("full approval card should render the session option");
         assert!(
-            full_session_option.to_lowercase().contains("this session")
+            full_session_option
+                .to_lowercase()
+                .contains("this conversation")
                 && !full_session_option.to_lowercase().contains("always"),
             "full approval option must state session scope without saying always:\n{full}"
         );
@@ -8751,7 +8787,9 @@ mod tests {
             .find(|line| line.contains("[2 / a]"))
             .expect("short approval card should render the session option");
         assert!(
-            compact_session_option.to_lowercase().contains("session")
+            compact_session_option
+                .to_lowercase()
+                .contains("conversation")
                 && !compact_session_option.to_lowercase().contains("always"),
             "short-terminal controls must label [2 / a] as session-scoped:\n{compact}"
         );
@@ -8804,10 +8842,7 @@ mod tests {
             rendered.contains("s allow once + always ask exact rule"),
             "{rendered}"
         );
-        assert!(
-            rendered.contains("Always allow this exact rule in this repo"),
-            "{rendered}"
-        );
+        assert!(rendered.contains("Always allow in this repo"), "{rendered}");
         assert!(rendered.contains("Save:"), "{rendered}");
         assert!(rendered.contains("1 ask rule"), "{rendered}");
         assert!(rendered.contains("1 allow rule"), "{rendered}");

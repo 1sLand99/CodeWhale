@@ -240,6 +240,9 @@ fn composer_rows_stay_pinned_across_turn_state_transitions() {
         app.onboarding = crate::tui::app::OnboardingState::None;
         app.launch.visible = false;
         app.ui_locale = codewhale_localization::Locale::En;
+        // A keyless fixture paints "model not connected" (U3); this one is
+        // about a connected route.
+        app.onboarding_needs_api_key = false;
         // The empty launch shell intentionally hides session metrics. This
         // fixture covers stable geometry once a conversation exists.
         app.history.push(HistoryCell::User {
@@ -6770,13 +6773,15 @@ fn empty_shell_keeps_model_identity_without_session_metrics() {
     for (width, height) in [(40, 12), (60, 16), (100, 32), (140, 40)] {
         let mut app = create_test_app();
         app.model = "gpt-4.1".into();
+        // A connected route: keyless, the chip says "model not connected" (U3).
+        app.onboarding_needs_api_key = false;
         app.history.clear();
         app.resync_history_revisions();
         assert!(crate::tui::widgets::should_render_empty_state(&app));
         let body = render_underwater_test_app(&mut app, width, height);
         assert!(body.contains("gpt-4.1"), "{width}x{height}: {body}");
         assert!(
-            !body.contains("ctx 0%"),
+            !body.contains("context 0%"),
             "empty metrics must stay quiet: {body}"
         );
         assert!(
