@@ -735,6 +735,9 @@ pub(crate) fn pin_missing_from_fresh_roster(
         _ => kind.as_str().to_string(),
     };
     let base_url = config.base_url_for_route_identity(kind, &identity);
+    // `status_for_route` reads memory only. A fresh process (doctor, a
+    // just-started TUI) must see the roster an earlier process persisted.
+    ensure_cache_loaded().ok()?;
     if status_for_route(kind, &identity, &base_url) != CatalogStatus::Fresh {
         return None;
     }
@@ -2761,5 +2764,34 @@ mod tests {
             fs::write(&path, serde_json::to_vec(&forged).unwrap()).unwrap();
             assert!(load_from_disk_unlocked(&path).is_none());
         }
+    }
+
+    #[test]
+    fn pin_drift_reads_a_fresh_roster_persisted_by_an_earlier_process() {
+        // #6035: `codewhale doctor` and a just-started TUI have not touched
+        // the in-process cache yet; the durable fresh roster must still count.
+        let _env = lock_test_env();
+        let _live = crate::provider_lake::lock_live_snapshot();
+        let home = tempfile::tempdir().expect("home");
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        reset_cache_for_test();
+        let config = Config::default();
+        let base_url = config.base_url_for_route_identity(ApiProvider::Deepseek, "deepseek");
+        let fingerprint = base_url_fingerprint(&base_url);
+        assert_eq!(
+            record_success(delta("deepseek", &fingerprint, &["deepseek-flash"])),
+            CatalogStatus::Fresh
+        );
+        // A new process: nothing loaded in memory, the roster only on disk.
+        reset_cache_for_test();
+        assert_eq!(
+            pin_missing_from_fresh_roster(&config, "deepseek", "deepseek-retired"),
+            Some(true)
+        );
+        assert_eq!(
+            pin_missing_from_fresh_roster(&config, "deepseek", "deepseek-flash"),
+            Some(false)
+        );
+        reset_cache_for_test();
     }
 }
