@@ -4269,9 +4269,6 @@ fn run_auth_command_with_secrets_and_runtime(
                 (None, true) => read_api_key_from_stdin()?,
                 (None, false) => prompt_api_key(slot)?,
             };
-            // Resolved on the ambient store before the credential write, which
-            // never changes the model: this is what a run will actually use.
-            let model_line = auth_set_model_line(store, provider, runtime_overrides);
             let mut credential_store =
                 codewhale_config::credentials::credential_metadata_store(store)?;
             if let Some(redirected) = credential_store.as_ref() {
@@ -4292,7 +4289,7 @@ fn run_auth_command_with_secrets_and_runtime(
             } else {
                 println!("saved API key for {slot} to {}", store.path().display());
             }
-            println!("{model_line}");
+            println!("model unchanged; run `codewhale model resolve` to see the active model");
             Ok(())
         }
         AuthCommand::Get { provider } => {
@@ -4325,24 +4322,6 @@ fn run_auth_command_with_secrets_and_runtime(
         }
         AuthCommand::Migrate { dry_run } => run_auth_migrate(store, secrets, dry_run),
     }
-}
-
-/// The model a run on `provider` resolves to, printed after `auth set` so the
-/// user sees that saving a key did not pick a model for them.
-fn auth_set_model_line(
-    store: &ConfigStore,
-    provider: ProviderKind,
-    runtime_overrides: &CliRuntimeOverrides,
-) -> String {
-    let resolved = store
-        .config
-        .resolve_runtime_options(&runtime_overrides_for_provider(runtime_overrides, provider));
-    format!(
-        "model for {}: {} ({}; unchanged by auth set)",
-        provider.as_str(),
-        resolved.model,
-        resolved.model_source.as_str(),
-    )
 }
 
 fn external_consent_preview_lines(
@@ -7788,16 +7767,6 @@ verbosity = "project-imported"
             secrets.get("deepseek").expect("read secret").as_deref(),
             Some("sk-test")
         );
-        let _model_env = ScopedEnvVar::remove("CODEWHALE_MODEL");
-        let _deepseek_model_env = ScopedEnvVar::remove("DEEPSEEK_MODEL");
-        let _deepseek_default_env = ScopedEnvVar::remove("DEEPSEEK_DEFAULT_TEXT_MODEL");
-        let line = auth_set_model_line(
-            &store,
-            ProviderKind::Deepseek,
-            &CliRuntimeOverrides::default(),
-        );
-        assert!(line.contains("provider default"), "{line}");
-        assert!(!line.contains("deepseek-v4-pro"), "{line}");
     }
 
     /// `codewhale login` now means the Codewhale account device flow: the
