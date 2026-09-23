@@ -19,6 +19,7 @@ export function buildInstallGuide(source) {
   const slugger = new GithubSlugger();
   const anchors = [];
   const fragments = [];
+  let tableNumber = 0;
   const marked = new Marked({
     gfm: true,
     renderer: {
@@ -39,7 +40,9 @@ export function buildInstallGuide(source) {
         throw new Error(`Unsupported raw HTML in install guide: ${text.slice(0, 80)}`);
       },
       table(token) {
-        return `<div class="install-guide-table" role="region" aria-label="Installation reference table" tabindex="0">${Renderer.prototype.table.call(this, token)}</div>\n`;
+        const label = `Installation table ${++tableNumber}: ${token.header.map((cell) => cell.text).join(" / ")}`
+          .replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+        return `<div class="install-guide-table" role="region" aria-label="${label}" tabindex="0">${Renderer.prototype.table.call(this, token)}</div>\n`;
       },
     },
     walkTokens(token) {

@@ -31,6 +31,17 @@ describe("canonical installation guide", () => {
       .toThrow("Missing INSTALL.md anchors: gone");
   });
 
+  it("gives scrollable tables distinct, escaped names from their headers", () => {
+    const table = '| "Need" | Reason |\n| --- | --- |\n| curl | Download |\n';
+    const guide = buildInstallGuide(`# Setup\n\n${table}\n${table}`);
+    const html = guide.chunks.map((chunk) => chunk.text).join("\n");
+    const names = [...html.matchAll(/role="region" aria-label="([^"]+)"/g)].map((match) => match[1]);
+    expect(names).toEqual([
+      "Installation table 1: &quot;Need&quot; / Reason",
+      "Installation table 2: &quot;Need&quot; / Reason",
+    ]);
+  });
+
   it.each(["javascript:alert(1)", "data:text/html,hello", "file:///tmp/private"])("rejects unsafe URL %s", (href) => {
     expect(() => buildInstallGuide(`# Setup\n\n[link](${href})`)).toThrow("Unsupported install-guide link protocol");
   });
