@@ -10,7 +10,9 @@ use codewhale_models::MessageRequest;
 
 /// Show per-turn DeepSeek prefix-cache telemetry for the last N turns (#263).
 ///
-/// `arg` is parsed as a count override (default 10, capped at the ring size).
+/// `arg` is a subcommand (`inspect [--verbose|--json]`, `stats`, `zones`,
+/// `warmup`) or a count override (default 10, capped at the ring size);
+/// anything else is a usage error.
 /// Renders a fixed-width table the user can paste into a bug report.
 pub fn cache(app: &mut App, arg: Option<&str>) -> CommandResult {
     let arg = arg.map(str::trim).filter(|s| !s.is_empty());

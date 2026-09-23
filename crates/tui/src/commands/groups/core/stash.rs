@@ -101,9 +101,6 @@ fn pop(app: &mut App) -> CommandResult {
     }
 }
 
-/// Take a one-line preview of `text`, capped at `max_chars`.
-/// Multi-line drafts get a single-line summary so the listing
-/// stays scannable.
 /// One `/stash list` row. `idx` is the 0-based position; users see 1-based.
 fn format_stash_line(idx: usize, ts: &str, text: &str) -> String {
     let ts = if ts.is_empty() { "(no ts)" } else { ts };
@@ -111,6 +108,9 @@ fn format_stash_line(idx: usize, ts: &str, text: &str) -> String {
     format!("  {}. [{ts}] {preview}\n", idx + 1)
 }
 
+/// Take a one-line preview of `text`, capped at `max_chars`.
+/// Multi-line drafts get a single-line summary so the listing
+/// stays scannable.
 fn preview_first_line(text: &str, max_chars: usize) -> String {
     let head = text.lines().next().unwrap_or("").trim();
     if head.chars().count() <= max_chars {
