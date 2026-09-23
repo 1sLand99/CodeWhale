@@ -25240,23 +25240,26 @@ async fn keyless_engine_error_stays_visible_after_a_config_ack() {
 
     let _home = SettingsHomeGuard::new();
     let _key = crate::test_support::EnvVarGuard::remove("DEEPSEEK_API_KEY");
+    let _cli_key = crate::test_support::EnvVarGuard::remove(codewhale_config::CLI_API_KEY_ENV);
+    let _secret_backend = crate::test_support::EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
     let workspace = TempDir::new().expect("workspace");
-    // Even an accidental credential fallback can only reach this local
-    // server. Requiring zero requests proves rejection before provider I/O.
-    let server = wiremock::MockServer::start().await;
+    // Keep the official route: a loopback override exercises the custom
+    // endpoint's credential-binding error, not DeepSeek's missing-key help.
+    // The isolated home and cleared key sources must reject credentials
+    // before constructing the Engine or sending a turn.
     let config = Config {
         provider: Some("deepseek".to_string()),
         api_key: Some(String::new()),
-        providers: Some(ProvidersConfig {
-            deepseek: ProviderConfig {
-                base_url: Some(format!("{}/v1", server.uri())),
-                auth_mode: Some("api_key".to_string()),
-                ..ProviderConfig::default()
-            },
-            ..ProvidersConfig::default()
-        }),
         ..Config::default()
     };
+    let missing_key = config
+        .active_route_api_key()
+        .expect_err("fixture must reject credentials before provider I/O");
+    assert!(
+        missing_key
+            .to_string()
+            .contains("DeepSeek API key not found")
+    );
     let mut app = create_test_app();
     app.workspace = workspace.path().to_path_buf();
     app.onboarding = OnboardingState::None;
@@ -25319,7 +25322,11 @@ async fn keyless_engine_error_stays_visible_after_a_config_ack() {
         if let EngineEvent::Error { envelope, .. } = event {
             assert_eq!(envelope.category, ErrorCategory::Authentication);
             assert!(!envelope.recoverable);
-            assert!(envelope.message.contains("API key not found"));
+            assert!(
+                envelope.message.contains("DeepSeek API key not found"),
+                "unexpected Engine authentication error: {}",
+                envelope.message
+            );
             apply_engine_error_to_app(&mut app, envelope);
             break;
         }
@@ -25336,6 +25343,7 @@ async fn keyless_engine_error_stays_visible_after_a_config_ack() {
             .expect("config acknowledgement")
             .expect("Engine event");
         if let EngineEvent::Status { message } = event {
+            assert_eq!(message, "Auto-compaction disabled");
             // Same projection as the event loop's Status arm.
             app.status_message = Some(message);
             break;
@@ -25356,13 +25364,6 @@ async fn keyless_engine_error_stays_visible_after_a_config_ack() {
             "{width}x{height}: {text}"
         );
     }
-    assert!(
-        server
-            .received_requests()
-            .await
-            .expect("requests")
-            .is_empty()
-    );
     handle.send(Op::Shutdown).await.expect("shutdown");
     tokio::time::timeout(Duration::from_secs(10), run)
         .await
