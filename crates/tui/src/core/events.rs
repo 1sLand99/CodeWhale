@@ -818,10 +818,22 @@ pub fn status_visibility(message: &str) -> StatusVisibility {
         || (message.starts_with("Executing ") && message.ends_with(" parallel chunk(s)"));
     let continuation_row = message.starts_with("Continuing — ")
         || message.starts_with("Continuing active goal (pass ");
+    // Successful agent completions already have their own durable receipts.
+    // Keep failure-bearing or unknown resumption notices visible.
+    let agent_resume_row = message
+        .strip_prefix("Resuming turn with ")
+        .and_then(|rest| rest.strip_suffix(" sub-agent completion(s)"))
+        .is_some_and(|count| {
+            let count = [" idle", " queued", " late"]
+                .iter()
+                .find_map(|suffix| count.strip_suffix(suffix))
+                .unwrap_or(count);
+            count.parse::<usize>().is_ok_and(|count| count > 0)
+        });
     let approval_wait_row = (message.starts_with("Still waiting for tool approval on `")
         || message.starts_with("Still waiting for user input on `"))
         && message.ends_with("s — the turn is parked here until it is answered");
-    if scheduler_row || continuation_row || approval_wait_row {
+    if scheduler_row || continuation_row || agent_resume_row || approval_wait_row {
         StatusVisibility::Internal
     } else {
         StatusVisibility::User
@@ -932,6 +944,10 @@ mod status_visibility_tests {
             "Continuing — tool results",
             "Continuing — queued steer input",
             "Continuing active goal (pass 2 this turn, 5 total)",
+            "Resuming turn with 1 sub-agent completion(s)",
+            "Resuming turn with 2 idle sub-agent completion(s)",
+            "Resuming turn with 3 queued sub-agent completion(s)",
+            "Resuming turn with 4 late sub-agent completion(s)",
             "Still waiting for tool approval on `call-1` after 60s — the turn is parked here until it is answered",
             "Still waiting for user input on `call-2` after 120s — the turn is parked here until it is answered",
         ] {
@@ -957,6 +973,10 @@ mod status_visibility_tests {
             "Goal set; starting goal work.",
             "Still waiting for the service to reconnect; retry in a moment.",
             "Still waiting for tool approval on `call-1` after an unexpected failure",
+            "Resuming turn with 1 sub-agent completion(s) (1 failed)",
+            "Resuming turn with 2 idle sub-agent completion(s) (1 failed)",
+            "Resuming turn with unexpected sub-agent completion(s)",
+            "Resuming turn with 1 unknown sub-agent completion(s)",
             "Turn ending with 1 detached sub-agent(s) still running in the background; they'll report when done.",
         ] {
             assert_eq!(status_visibility(user), StatusVisibility::User, "{user}");
