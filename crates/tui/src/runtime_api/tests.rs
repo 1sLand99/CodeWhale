@@ -4176,15 +4176,32 @@ async fn turn_operation_lookup_is_authenticated_read_only_and_survives_restart()
     .await
     .context("old Runtime did not release its store before restart")?;
 
-    let (addr, _manager, server) = spawn_test_server_with_root_token_mobile_workspace(
-        root,
-        sessions,
-        Some(token.into()),
-        false,
-        workspace,
-    )
-    .await?
-    .context("loopback listener required for restarted lookup proof")?;
+    // The old server tears its runtime down on its own thread after the
+    // abort, so its mock TaskManager can hold the execution-scope owner lock
+    // a moment longer than the thread manager above. A second owner is
+    // correctly refused; wait for the release instead of racing it.
+    let deadline = tokio::time::Instant::now() + ci_scaled(Duration::from_secs(10));
+    let (addr, _manager, server) = loop {
+        match spawn_test_server_with_root_token_mobile_workspace(
+            root.clone(),
+            sessions.clone(),
+            Some(token.into()),
+            false,
+            workspace.clone(),
+        )
+        .await
+        {
+            Err(error)
+                if format!("{error:#}").contains("execution scope is already owned")
+                    && tokio::time::Instant::now() < deadline =>
+            {
+                sleep(Duration::from_millis(20)).await;
+            }
+            started => {
+                break started?.context("loopback listener required for restarted lookup proof")?;
+            }
+        }
+    };
     // Startup recovery is complete. No Engine is installed in this Runtime.
     let before = file_bytes(&store_root)?;
     let response = client
