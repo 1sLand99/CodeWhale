@@ -14,7 +14,15 @@ use codewhale_models::MessageRequest;
 /// Renders a fixed-width table the user can paste into a bug report.
 pub fn cache(app: &mut App, arg: Option<&str>) -> CommandResult {
     let arg = arg.map(str::trim).filter(|s| !s.is_empty());
-    if let Some(flags) = arg.and_then(|a| a.strip_prefix("inspect")) {
+    let inspect_flags = arg.and_then(|a| {
+        if a == "inspect" {
+            Some("")
+        } else {
+            a.strip_prefix("inspect")
+                .filter(|rest| rest.starts_with(char::is_whitespace))
+        }
+    });
+    if let Some(flags) = inspect_flags {
         let flags = flags.trim();
         let verbose = flags.split_whitespace().any(|flag| flag == "--verbose");
         let json_mode = flags.split_whitespace().any(|flag| flag == "--json");
@@ -30,7 +38,17 @@ pub fn cache(app: &mut App, arg: Option<&str>) -> CommandResult {
         return CommandResult::message(format_cache_zones(app));
     }
 
-    let want = arg.and_then(|s| s.parse::<usize>().ok()).unwrap_or(10);
+    let want = match arg {
+        None => 10,
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(n) => n,
+            Err(_) => {
+                return CommandResult::error(format!(
+                    "Unknown /cache argument `{raw}`. Usage: /cache [count|inspect [--verbose|--json]|stats|zones|warmup]"
+                ));
+            }
+        },
+    };
     let cap = app.session.turn_cache_history.len();
     let count = want
         .min(cap)
@@ -899,5 +917,54 @@ Cache Zones (#2264 three-zone contract)
   TurnScratch:  not wired
 ";
         assert_eq!(format_cache_zones(&app), expected);
+    }
+}
+
+#[cfg(test)]
+mod arg_tests {
+    use super::*;
+    use crate::config::Config;
+    use std::path::PathBuf;
+
+    fn app() -> App {
+        App::new(
+            crate::test_support::test_tui_options(PathBuf::from(".")),
+            &Config::default(),
+        )
+    }
+
+    #[test]
+    fn cache_rejects_unknown_word_args() {
+        let mut app = app();
+        for arg in ["stat", "inspector", "inspect--json"] {
+            let result = cache(&mut app, Some(arg));
+            assert!(result.is_error, "/cache {arg} must be a usage error");
+            let text = result.message.as_deref().unwrap_or_default();
+            assert!(
+                text.contains(arg) && text.contains("Usage: /cache"),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn cache_inspect_matches_whole_word_with_optional_flags() {
+        let mut app = app();
+        for arg in ["inspect", "inspect --json", "inspect  --verbose"] {
+            let result = cache(&mut app, Some(arg));
+            let text = result.message.as_deref().unwrap_or_default();
+            assert!(!result.is_error, "/cache {arg}: {text}");
+            assert!(
+                !text.contains("Unknown /cache argument"),
+                "/cache {arg}: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn cache_numeric_arg_still_selects_count() {
+        let mut app = app();
+        let result = cache(&mut app, Some("5"));
+        assert!(!result.is_error);
     }
 }
