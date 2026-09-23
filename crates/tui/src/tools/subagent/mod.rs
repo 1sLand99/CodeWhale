@@ -11663,7 +11663,7 @@ async fn run_subagent_task_inner(mut task: SubAgentTask) {
             None => {
                 match tokio::time::timeout_at(
                     deadline.into(),
-                    acquire_queued_launch_permit(&task, Arc::clone(gate)),
+                    acquire_queued_launch_permit(&task, Arc::clone(gate), deadline),
                 )
                 .await
                 {
@@ -11801,24 +11801,53 @@ async fn run_subagent_task_inner(mut task: SubAgentTask) {
     }
 }
 
+/// Queued-row reason (addendum F5): why the child waits — a free slot, or the
+/// rate-limit governor's pause/throttle — and how much of its wall budget is
+/// left. The wall clock starts at spawn and keeps running while queued (it is
+/// shared with the permit wait so saturation cannot stretch a child past its
+/// budget, #6277); the row says so instead of hiding it.
+fn queued_launch_reason(task: &SubAgentTask, deadline: Instant) -> String {
+    let now = Instant::now();
+    let governor_line = task
+        .runtime
+        .governor
+        .as_ref()
+        .and_then(|governor| governor.snapshot(now).status_line());
+    let base = match governor_line {
+        Some(line)
+            if task
+                .runtime
+                .governor
+                .as_ref()
+                .is_some_and(|governor| governor.is_paused(now)) =>
+        {
+            format!("{SUBAGENT_QUEUED_RATE_LIMIT_REASON} — {line}")
+        }
+        Some(line) => format!("{SUBAGENT_QUEUED_LAUNCH_REASON} — {line}"),
+        None => SUBAGENT_QUEUED_LAUNCH_REASON.to_string(),
+    };
+    let remaining = deadline.saturating_duration_since(now);
+    format!(
+        "{base} ({} of wall budget left; it keeps running while queued)",
+        crate::elapsed::format_elapsed_secs(remaining.as_secs())
+    )
+}
+
+/// The part of a queued reason that changes with governor state, not time.
+fn queued_reason_cause(reason: &str) -> &str {
+    reason.split(" (").next().unwrap_or(reason)
+}
+
 async fn acquire_queued_launch_permit(
     task: &SubAgentTask,
     gate: Arc<governor::DynamicGate>,
+    deadline: Instant,
 ) -> Option<governor::DynamicGatePermit> {
     // When the governor has paused launches over sustained provider 429s,
     // surface the reason in the queued status instead of the generic
     // "waiting for a launch slot" message.
-    let paused_for_rate_limit = task
-        .runtime
-        .governor
-        .as_ref()
-        .is_some_and(|governor| governor.is_paused(Instant::now()));
-    let queued_reason = if paused_for_rate_limit {
-        SUBAGENT_QUEUED_RATE_LIMIT_REASON
-    } else {
-        SUBAGENT_QUEUED_LAUNCH_REASON
-    };
-    record_queued_launch_progress(task, queued_reason).await;
+    let mut queued_reason = queued_launch_reason(task, deadline);
+    record_queued_launch_progress(task, &queued_reason).await;
     // While queued, periodically probe the governor: if a rate-limit pause
     // outlives its window (the in-flight fleet finished before any success
     // could lift the pause), the probe resumes launches instead of leaving
@@ -11847,6 +11876,13 @@ async fn acquire_queued_launch_permit(
                 if let Some(governor) = task.runtime.governor.as_ref() {
                     governor.recover_if_window_drained(Instant::now());
                 }
+                // F5: re-publish when the governor state behind the queue
+                // changed (paused, throttled, recovered).
+                let reason = queued_launch_reason(task, deadline);
+                if queued_reason_cause(&reason) != queued_reason_cause(&queued_reason) {
+                    record_queued_launch_progress(task, &reason).await;
+                    queued_reason = reason;
+                }
                 // If the probe lifted a pause it raised the gate capacity,
                 // which grants queued waiters; the pinned `acquire_permit`
                 // below observes the grant on the next poll.
@@ -11858,7 +11894,7 @@ async fn acquire_queued_launch_permit(
     }
 }
 
-async fn record_queued_launch_progress(task: &SubAgentTask, queued_reason: &'static str) {
+async fn record_queued_launch_progress(task: &SubAgentTask, queued_reason: &str) {
     {
         let mut manager = task.runtime.manager.write().await;
         manager.touch(&task.agent_id);
