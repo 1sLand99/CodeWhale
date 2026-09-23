@@ -3259,8 +3259,11 @@ impl Engine {
                         }
                         let compaction_checkpoint =
                             extract_compaction_summary_prompt(system_prompt.clone());
+                        // The op owns the synced history: move each message
+                        // through the projection instead of cloning the whole
+                        // conversation and dropping the original (M3).
                         let restored_messages =
-                            crate::runtime_handoff::project_messages_for_restore(&messages);
+                            crate::runtime_handoff::project_owned_messages_for_restore(messages);
                         // Replace the checkpoint in place so turns after the
                         // compaction boundary keep their chronology.
                         let restored_messages = crate::compaction::restore_compaction_checkpoint(
