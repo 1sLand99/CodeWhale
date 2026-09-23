@@ -440,7 +440,16 @@ pub fn tick(app: &mut App, now: Instant) {
                     .replace("{path}", &path.display().to_string()),
                 StatusToastLevel::Info,
             ),
-            Notice::Message(message) => {
+            // A refused action (select, export, open) leaves a reachable
+            // companion and the habitat as they are.
+            Notice::Message(message) => (
+                format!(
+                    "{} · {message}",
+                    tr(app.ui_locale, MessageId::PetWatchUnavailable)
+                ),
+                StatusToastLevel::Warning,
+            ),
+            Notice::Unreachable(message) => {
                 app.pet_watch.unavailable = true;
                 if app.is_loading && is_open(app) {
                     app.view_stack.pop();
@@ -776,6 +785,48 @@ mod tests {
         assert!(
             app.view_stack.is_empty(),
             "pet mode must not cover a turn while the companion is unavailable"
+        );
+    }
+
+    #[test]
+    fn a_refused_pet_action_keeps_the_habitat_and_only_unreachable_marks_offline() {
+        let mut app =
+            crate::test_support::test_app_with_options(crate::test_support::test_tui_options("."));
+        app.onboarding = crate::tui::app::OnboardingState::None;
+        app.redaction_gate = false;
+        app.pet_watch.session = app.current_session_id.clone();
+        app.pet_watch.detach_for_test();
+        let (tx, _commands) = std::sync::mpsc::sync_channel(4);
+        let (notices_tx, notices) = std::sync::mpsc::sync_channel(4);
+        app.pet_watch.worker = Some(Worker {
+            tx,
+            latest: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            view: std::sync::Arc::new(std::sync::Mutex::new(live::View::default())),
+            notices,
+        });
+        open_habitat(&mut app);
+        app.is_loading = true;
+
+        notices_tx
+            .send(Notice::Message(
+                "Save the terminal session before exporting".into(),
+            ))
+            .unwrap();
+        tick(&mut app, Instant::now());
+        assert!(is_open(&app), "a refused export must not close pet mode");
+        assert!(
+            !app.pet_watch.unavailable,
+            "a refused export is not offline"
+        );
+
+        notices_tx
+            .send(Notice::Unreachable("Shared pet reconnecting".into()))
+            .unwrap();
+        tick(&mut app, Instant::now());
+        assert!(app.pet_watch.unavailable);
+        assert!(
+            !is_open(&app),
+            "an unreachable companion hands the running turn back"
         );
     }
 
