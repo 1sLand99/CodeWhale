@@ -11803,7 +11803,7 @@ async fn run_subagent_task_inner(mut task: SubAgentTask) {
 
 /// Queued-row reason (addendum F5): why the child waits — a free slot, or the
 /// rate-limit governor's pause/throttle — and how much of its wall budget is
-/// left. The wall clock starts at spawn and keeps running while queued (it is
+/// left (as its end time). The wall clock starts at spawn and keeps running while queued (it is
 /// shared with the permit wait so saturation cannot stretch a child past its
 /// budget, #6277); the row says so instead of hiding it.
 fn queued_launch_reason(task: &SubAgentTask, deadline: Instant) -> String {
@@ -11826,10 +11826,26 @@ fn queued_launch_reason(task: &SubAgentTask, deadline: Instant) -> String {
         Some(line) => format!("{SUBAGENT_QUEUED_LAUNCH_REASON} — {line}"),
         None => SUBAGENT_QUEUED_LAUNCH_REASON.to_string(),
     };
-    let remaining = deadline.saturating_duration_since(now);
     format!(
-        "{base} ({} of wall budget left; it keeps running while queued)",
-        crate::elapsed::format_elapsed_secs(remaining.as_secs())
+        "{base} {}",
+        queued_budget_note(
+            deadline.saturating_duration_since(now),
+            chrono::Local::now()
+        )
+    )
+}
+
+/// The wall-budget half of a queued reason. The row is republished only when
+/// the governor state changes, so a "N minutes left" count would freeze at its
+/// first value while the budget drained; the absolute end time stays true.
+fn queued_budget_note(remaining: Duration, now: chrono::DateTime<chrono::Local>) -> String {
+    let ends_at = chrono::Duration::from_std(remaining)
+        .ok()
+        .and_then(|remaining| now.checked_add_signed(remaining))
+        .unwrap_or(now);
+    format!(
+        "(wall budget ends at {}; it keeps running while queued)",
+        ends_at.format("%H:%M")
     )
 }
 

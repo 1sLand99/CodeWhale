@@ -23547,3 +23547,26 @@ fn missing_precomputed_evidence_falls_back_to_inline_capture() {
         .expect("worker record");
     assert!(record.delivery_evidence.changed_paths(tmp.path()).is_some());
 }
+
+/// F5: a queued row is republished only when the governor state changes, so
+/// its budget half must name the end time, not a countdown that freezes.
+#[test]
+fn queued_budget_note_names_the_end_time_and_keeps_the_cause_stable() {
+    use chrono::TimeZone as _;
+    let now = chrono::Local
+        .with_ymd_and_hms(2026, 9, 22, 14, 2, 0)
+        .single()
+        .expect("local time");
+    let note = queued_budget_note(Duration::from_secs(30 * 60), now);
+    assert_eq!(
+        note,
+        "(wall budget ends at 14:32; it keeps running while queued)"
+    );
+    let later = queued_budget_note(
+        Duration::from_secs(10 * 60),
+        now + chrono::Duration::minutes(20),
+    );
+    assert_eq!(note, later, "same deadline, same text: no stale countdown");
+    let reason = format!("{SUBAGENT_QUEUED_LAUNCH_REASON} {note}");
+    assert_eq!(queued_reason_cause(&reason), SUBAGENT_QUEUED_LAUNCH_REASON);
+}
