@@ -4442,6 +4442,11 @@ pub(crate) struct PreparedThreadFork {
     original_user_text: Option<String>,
     original_images: Vec<codewhale_protocol::runtime::RuntimeImageInput>,
     max_output_tokens: Option<std::num::NonZeroU32>,
+    /// The session document this fork will own, written only at publish time:
+    /// `(source session id, retained prefix, covered cloned turn id)`. Writing
+    /// it while preparing would leave an unreferenced document behind whenever
+    /// the caller abandons the fork (a refused or failed file undo).
+    own_session: Option<(String, Vec<Message>, Option<String>)>,
 }
 
 /// Shared ownership of an existing task's join. A canceled drain drops only
@@ -8301,6 +8306,138 @@ impl RuntimeThreadManager {
         Ok(thread)
     }
 
+    /// The active thread that already holds this saved session, when hydrating
+    /// it would work.
+    ///
+    /// `POST /v1/sessions/{id}/resume-thread` mints a thread, so resuming a
+    /// conversation that is *already open* added a second rail row for it, once
+    /// per visit. The binding that answers this is already durable on the
+    /// thread record (`session_id`), so the runtime can say "this conversation
+    /// is already open" itself instead of leaving every client to remember it.
+    ///
+    /// Archived threads do not count: the rail hides them, so handing one back
+    /// would move the conversation where the user cannot see it. A thread whose
+    /// checkpoint no longer describes the bytes in the session file is skipped
+    /// too — [`Self::saved_session_prefix`] refuses to hydrate those, so
+    /// offering it back would trade a duplicate row for a load failure.
+    ///
+    /// A thread with a turn in flight *does* count. It is the conversation the
+    /// user asked to continue, and the alternative — minting a second thread
+    /// exactly when the first one is busy — is where the duplicates came from.
+    /// A client that lands on one has to treat its composer as steering rather
+    /// than as a new turn (`start_turn` refuses a busy thread by design).
+    pub(crate) fn thread_holding_session(
+        &self,
+        session_id: &str,
+        session: &crate::session_manager::SavedSession,
+    ) -> Option<ThreadRecord> {
+        let expected = session_messages_sha256(&session.messages).ok()?;
+        // Store order is newest-first, so the first match is the newest binding
+        // and the one a client most likely means.
+        for thread in self.store.list_threads().ok()? {
+            if thread.archived || thread.session_id.as_deref() != Some(session_id) {
+                continue;
+            }
+            if let Some(checkpoint) = thread.saved_session_checkpoint.as_ref()
+                && checkpoint.messages_sha256 != expected
+            {
+                continue;
+            }
+            // An unreadable turn list proves nothing about whether this thread
+            // can be hydrated, so it skips the candidate — it must not end the
+            // search for every remaining one.
+            let Ok(turns) = self.store.list_turns_for_thread(&thread.id) else {
+                continue;
+            };
+            if matches!(self.saved_session_prefix(&thread, &turns), Ok(Some(_))) {
+                return Some(thread);
+            }
+        }
+        None
+    }
+
+    /// Give a fork a session document of its own, holding exactly the prefix it
+    /// retains.
+    ///
+    /// A fork used to inherit the source's `session_id`, which pointed two
+    /// threads at one file. Both sides auto-save into it — `PUT /v1/sessions`
+    /// rewrites the whole document from the saving thread's own transcript and
+    /// then rebinds that thread through [`Self::set_thread_session_checkpoint`]
+    /// — so whichever thread saved last left the other's checkpoint describing
+    /// bytes that no longer existed. `saved_session_prefix` refuses to hydrate a
+    /// thread in that state, which is what turned a second visit to an undone
+    /// conversation into a load failure.
+    ///
+    /// Dropping the id instead is not an option: it also names the workspace
+    /// snapshots (`tool:` / `pre-turn:`) that `patch_undo_workspace_files`
+    /// selects, and the checkpoint beside it is only ever read through a
+    /// session id. A fork without one loses file rollback *and* its
+    /// full-fidelity prefix.
+    ///
+    /// So the fork gets a private copy of the prefix plus a checkpoint that
+    /// describes that copy exactly, and the source keeps its own document.
+    /// Lineage is recorded with
+    /// [`crate::session_manager::SessionMetadata::mark_forked_from`], the same
+    /// way the TUI's conversation fork does it (`commands/contract.rs`).
+    ///
+    /// `covered_turn_id` is the *cloned* turn the prefix ends on. The caller
+    /// resolves it from the prefix boundary it just computed, because a legacy
+    /// link (`session_id` with no checkpoint) has none to inherit — passing
+    /// `None` here would claim the prefix covers no turns, and hydration
+    /// answers that by appending every cloned turn to it.
+    ///
+    /// Callers must not hold [`Self::session_checkpoint_guard`]: the fork paths
+    /// already run under it, through `thread_restore_guard`. Nothing needs
+    /// serialising anyway — the document written here is new, so no other
+    /// writer can name it.
+    fn bind_fork_to_own_session(
+        &self,
+        forked: &mut ThreadRecord,
+        source_session_id: &str,
+        prefix: &[Message],
+        covered_turn_id: Option<String>,
+    ) -> Result<()> {
+        let manager = crate::session_manager::SessionManager::new(
+            crate::session_manager::default_sessions_dir()?,
+        )?;
+        let source = manager
+            .resume_session(source_session_id)
+            .map(|recovery| recovery.session)
+            .with_context(|| format!("Cannot read saved session {source_session_id}"))?;
+
+        let mut session = crate::session_manager::create_saved_session_with_id_and_mode(
+            Uuid::new_v4().to_string(),
+            prefix,
+            &source.metadata.model,
+            &source.metadata.workspace,
+            source.metadata.total_tokens,
+            source
+                .system_prompt
+                .as_ref()
+                .map(|prompt| SystemPrompt::Text(prompt.clone()))
+                .as_ref(),
+            source.metadata.mode.as_deref(),
+        );
+        session.metadata.set_model_provider_route(
+            source.metadata.model_provider.as_str(),
+            source.metadata.model_provider_id.as_deref(),
+        );
+        session.metadata.mark_forked_from(&source.metadata);
+        session.metadata.copy_cost_from(&source.metadata);
+
+        let session_id = session.metadata.id.clone();
+        let messages_sha256 = session_messages_sha256(prefix)?;
+        manager.save_session(&session)?;
+
+        forked.session_id = Some(session_id);
+        forked.saved_session_checkpoint = Some(SavedSessionCheckpoint {
+            covered_turn_id,
+            messages_sha256,
+            retained_messages: None,
+        });
+        Ok(())
+    }
+
     pub async fn fork_thread(&self, id: &str) -> Result<ThreadRecord> {
         let source = self.get_thread(id).await?;
         let mut forked = source.clone();
@@ -8312,6 +8449,22 @@ impl RuntimeThreadManager {
         forked.archived = false;
 
         let source_turns = self.store.list_turns_for_thread(&source.id)?;
+        // The fork's own document holds exactly the prefix its source
+        // checkpoint already covers — see `bind_fork_to_own_session`. A source
+        // whose checkpoint no longer matches its file has no prefix to copy;
+        // the fork then keeps the binding it inherited, which is what it did
+        // before this existed, rather than failing the fork outright.
+        let fork_prefix = match self.saved_session_prefix(&source, &source_turns) {
+            Ok(Some(prefix)) => Some(prefix),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(
+                    thread_id = %source.id,
+                    "fork source has no usable saved-session prefix: {error:#}"
+                );
+                None
+            }
+        };
         let mut cloned_records = Vec::with_capacity(source_turns.len());
         for source_turn in source_turns {
             let mut cloned_turn = source_turn.clone();
@@ -8338,6 +8491,29 @@ impl RuntimeThreadManager {
             }
             forked.updated_at = now;
             cloned_records.push((cloned_turn, cloned_items));
+        }
+        let fork_session = fork_prefix.as_ref().map(|(prefix, covered)| {
+            (
+                prefix.as_slice(),
+                covered
+                    .checked_sub(1)
+                    .map(|index| cloned_records[index].0.id.clone()),
+            )
+        });
+        if let Some((prefix, covered_turn_id)) = fork_session
+            && let Some(source_session_id) = source.session_id.as_deref()
+            && let Err(error) = self.bind_fork_to_own_session(
+                &mut forked,
+                source_session_id,
+                prefix,
+                covered_turn_id,
+            )
+        {
+            tracing::warn!(
+                thread_id = %forked.id,
+                session_id = %source_session_id,
+                "fork could not be given its own session; it keeps the shared one: {error:#}"
+            );
         }
         self.publish_fork(&forked, &cloned_records)?;
 
@@ -8461,6 +8637,9 @@ impl RuntimeThreadManager {
         forked.latest_turn_id = None;
         forked.archived = false;
 
+        // The fork keeps only the prefix it was cut at, in a document of its
+        // own — see `bind_fork_to_own_session`.
+        let mut fork_prefix: Option<(Vec<Message>, usize)> = None;
         if let Some((messages, covered)) = self.saved_session_prefix(&source, &source_turns)? {
             let kept_turns = covered.min(target_turn_idx);
             let retained_messages = if covered <= target_turn_idx {
@@ -8483,6 +8662,7 @@ impl RuntimeThreadManager {
                 },
                 retained_messages: Some(retained_messages),
             });
+            fork_prefix = Some((messages[..retained_messages].to_vec(), kept_turns));
         }
 
         let mut cloned_records = Vec::with_capacity(target_turn_idx);
@@ -8512,6 +8692,15 @@ impl RuntimeThreadManager {
             forked.updated_at = now;
             cloned_records.push((cloned_turn, cloned_items));
         }
+        // Bound at publish time — see `PreparedThreadFork::own_session`.
+        let own_session = fork_prefix.zip(source.session_id.clone()).map(
+            |((prefix, kept_turns), source_session_id)| {
+                let covered_turn_id = kept_turns
+                    .checked_sub(1)
+                    .map(|index| cloned_records[index].0.id.clone());
+                (source_session_id, prefix, covered_turn_id)
+            },
+        );
         Ok(PreparedThreadFork {
             source_id: source.id,
             target_turn_id,
@@ -8521,18 +8710,33 @@ impl RuntimeThreadManager {
             original_user_text,
             original_images,
             max_output_tokens: source_turns[target_turn_idx].max_output_tokens,
+            own_session,
         })
     }
 
     pub(crate) async fn publish_prepared_fork(
         &self,
-        prepared: PreparedThreadFork,
+        mut prepared: PreparedThreadFork,
     ) -> Result<(
         ThreadRecord,
         Option<String>,
         Vec<codewhale_protocol::runtime::RuntimeImageInput>,
         Option<std::num::NonZeroU32>,
     )> {
+        if let Some((source_session_id, prefix, covered_turn_id)) = prepared.own_session.take()
+            && let Err(error) = self.bind_fork_to_own_session(
+                &mut prepared.thread,
+                &source_session_id,
+                &prefix,
+                covered_turn_id,
+            )
+        {
+            tracing::warn!(
+                thread_id = %prepared.thread.id,
+                session_id = %source_session_id,
+                "fork could not be given its own session; it keeps the shared one: {error:#}"
+            );
+        }
         self.publish_fork(&prepared.thread, &prepared.records)?;
         // The fork is durable once publish_fork returns. A failed event
         // append must not report the fork as unsaved: the caller already

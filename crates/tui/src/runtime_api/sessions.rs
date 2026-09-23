@@ -285,6 +285,21 @@ pub(super) async fn get_session(
     ))))
 }
 
+/// `POST /v1/sessions/{id}/resume-thread` — open a saved session as a live
+/// thread.
+///
+/// Idempotent for a conversation that is already open: when an active thread
+/// already holds this session (and its checkpoint still describes the file),
+/// that thread is returned with `200 OK` instead of minting a second one with
+/// `201 Created`. Minting unconditionally is what made "continue this
+/// conversation" grow the rail by a row per visit.
+///
+/// `req.model` / `req.mode` apply only when a thread is created. An open thread
+/// keeps the route it was opened with — a caller that needs a different route
+/// is creating a conversation, not resuming one.
+///
+/// `message_count` reports the *saved session's* count. A reused thread may hold
+/// more than that: it keeps the turns it ran after the session's last save.
 pub(super) async fn resume_session_thread(
     State(state): State<RuntimeApiState>,
     Path(id): Path<String>,
@@ -309,6 +324,27 @@ pub(super) async fn resume_session_thread(
         crate::image_attach::runtime_images_from_blocks(&message.content).map_err(|error| {
             ApiError::bad_request(format!("Cannot restore session image: {error}"))
         })?;
+    }
+
+    // The conversation may already be open. Answer with the thread that holds
+    // it rather than adding a second row for the same history (see
+    // `RuntimeThreadManager::thread_holding_session`).
+    if let Some(existing) = state.runtime_threads.thread_holding_session(&id, &session) {
+        let thread_id = existing.id;
+        let message_count = session.messages.len();
+        let summary = format!(
+            "Session '{}' is already open in thread {thread_id} ({message_count} messages)",
+            session.metadata.title
+        );
+        return Ok((
+            StatusCode::OK,
+            Json(ResumeSessionResponse {
+                thread_id,
+                session_id: id.clone(),
+                message_count,
+                summary,
+            }),
+        ));
     }
 
     let model = req.model.unwrap_or_else(|| session.metadata.model.clone());
