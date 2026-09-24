@@ -1408,6 +1408,10 @@ impl TaskManager {
         session_id: &str,
         binding: Option<&crate::runtime_threads::RuntimeStoreBinding>,
     ) -> Result<SharedTaskManager> {
+        // Resolve the sessions root's canonical spelling off this runtime
+        // once, so the saved-store confinement checks here and in later
+        // `/resume` / `/load` switches are pure comparisons (#6522).
+        crate::runtime_threads::prepare_canonical_sessions_root().await;
         let runtime_threads = Arc::new(RuntimeThreadManager::open_for_session(
             api_config.clone(),
             cfg.default_workspace.clone(),
