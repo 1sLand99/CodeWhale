@@ -2620,6 +2620,9 @@ impl Engine {
             super::engine::approval::ApprovalDecision::TimedOut { id } => {
                 (id.clone(), ChildApprovalOutcome::Denied)
             }
+            super::engine::approval::ApprovalDecision::Unavailable { id } => {
+                (id.clone(), ChildApprovalOutcome::Unavailable)
+            }
             // A sandbox retry only exists for the parent's own tool call.
             super::engine::approval::ApprovalDecision::RetryWithPolicy { .. } => return false,
         };
@@ -3152,8 +3155,8 @@ impl Engine {
                             let _ = self
                                 .tx_event
                                 .send(Event::status(format!(
-                                    "Auto-compaction {}",
-                                    if enabled { "enabled" } else { "disabled" }
+                                    "Make room automatically: {}",
+                                    if enabled { "on" } else { "off" }
                                 )))
                                 .await;
                         }
@@ -4403,7 +4406,7 @@ impl Engine {
         let snapshot = match self.config.goal_state.lock() {
             Ok(mut state) => {
                 if state.is_active()
-                    && let Err(err) = state.mark_blocked(message.clone())
+                    && let Err(err) = state.mark_runtime_blocked(message.clone())
                 {
                     tracing::warn!("failed to mark goal continuation blocked: {err}");
                     return;
@@ -4431,6 +4434,37 @@ impl Engine {
         self.emit_session_updated().await;
         let _ = self.tx_event.send(Event::GoalUpdated { snapshot }).await;
         let _ = self.tx_event.send(Event::status(message)).await;
+    }
+
+    /// Resume the shared goal when its only blocker was a runtime stop and it
+    /// is the objective this turn names; publish the change like any other
+    /// goal transition.
+    async fn resume_runtime_blocked_goal(&mut self, objective: Option<&str>) -> bool {
+        let snapshot = match self.config.goal_state.lock() {
+            Ok(mut state) => {
+                if normalized_goal_objective(state.objective())
+                    != normalized_goal_objective(objective)
+                    || !state.resume_after_runtime_block()
+                {
+                    return false;
+                }
+                state.snapshot()
+            }
+            Err(err) => {
+                tracing::warn!("goal state lock poisoned while resuming a goal: {err}");
+                return false;
+            }
+        };
+        self.config.goal_status = GoalStatus::Active;
+        self.emit_session_updated().await;
+        let _ = self.tx_event.send(Event::GoalUpdated { snapshot }).await;
+        let _ = self
+            .tx_event
+            .send(Event::status(
+                "Goal resumed: your message continues the work the earlier turn stopped",
+            ))
+            .await;
+        true
     }
 
     /// Pause a still-active goal with an inspectable reason and publish every
@@ -4818,7 +4852,7 @@ impl Engine {
                 .with_mcp_pool(mcp_pool.clone())
                 .with_todos(self.config.todos.clone())
                 .with_parent_completion_tx(self.tx_subagent_completion.clone())
-                .with_runtime_cost_owner(self.config.compaction.runtime_cost_owner.as_deref())
+                .with_parent_compaction(&self.config.compaction)
                 .with_parent_mode(input_policy.mode)
                 .with_approval_receipt_store(self.approval_receipt_store.clone())
                 .with_permission_posture(
@@ -5089,6 +5123,21 @@ impl Engine {
             }
         }
 
+        // A person writing to a goal that only the runtime stopped (a failed
+        // or timed-out continuation) is continuing the work: resume it as a
+        // new revision instead of running a goalless turn against a stale
+        // blocker. Blockers the model or user reported stay until an explicit
+        // resume, and automated inputs never resume anything.
+        let goal_status = if provenance == UserInputProvenance::ExternalUser
+            && goal_status == GoalStatus::Blocked
+            && self
+                .resume_runtime_blocked_goal(goal_objective.as_deref())
+                .await
+        {
+            GoalStatus::Active
+        } else {
+            goal_status
+        };
         let input_policy = effective_input_policy(
             provenance,
             mode,
@@ -6008,7 +6057,7 @@ impl Engine {
         .with_mcp_pool(self.mcp_pool.clone())
         .with_todos(self.config.todos.clone())
         .with_parent_completion_tx(self.tx_subagent_completion.clone())
-        .with_runtime_cost_owner(self.config.compaction.runtime_cost_owner.as_deref())
+        .with_parent_compaction(&self.config.compaction)
         .with_parent_mode(mode)
         .with_approval_receipt_store(self.approval_receipt_store.clone())
         .with_permission_posture(
@@ -7738,6 +7787,9 @@ pub(crate) enum MockApprovalEvent {
     TimedOut {
         id: String,
     },
+    Unavailable {
+        id: String,
+    },
     RetryWithPolicy {
         id: String,
         policy: crate::sandbox::SandboxPolicy,
@@ -7751,6 +7803,7 @@ impl MockEngineHandle {
             ApprovalDecision::Approved { id } => Some(MockApprovalEvent::Approved { id }),
             ApprovalDecision::Denied { id } => Some(MockApprovalEvent::Denied { id }),
             ApprovalDecision::TimedOut { id } => Some(MockApprovalEvent::TimedOut { id }),
+            ApprovalDecision::Unavailable { id } => Some(MockApprovalEvent::Unavailable { id }),
             ApprovalDecision::RetryWithPolicy { id, policy } => {
                 Some(MockApprovalEvent::RetryWithPolicy { id, policy })
             }
