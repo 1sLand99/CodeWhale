@@ -1482,6 +1482,8 @@ pub(crate) async fn run_event_loop(
     // (GTK3 defers all VTE damage on occlusion and replays it on return).
     // Event ingestion continues; only `terminal.draw` emission is gated.
     let mut terminal_unfocused = false;
+    let defer_frames_on_focus_loss =
+        focus_loss_defers_frames(std::env::var("VTE_VERSION").ok().as_deref());
     // FocusGained debounce: some terminal emulators (e.g. Tabby) re-trigger
     // FocusGained when we re-arm focus-change reporting inside
     // recover_terminal_modes, creating a tight repaint loop. Skip
@@ -4698,7 +4700,9 @@ pub(crate) async fn run_event_loop(
                 );
             }
             app.needs_redraw = true;
-            terminal_unfocused = next_unfocused(terminal_unfocused, &evt);
+            if defer_frames_on_focus_loss {
+                terminal_unfocused = next_unfocused(terminal_unfocused, &evt);
+            }
 
             // Handle bracketed paste events
             if app.redaction_gate && app.onboarding == OnboardingState::None {

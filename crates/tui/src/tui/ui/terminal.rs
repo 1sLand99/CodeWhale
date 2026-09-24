@@ -740,6 +740,18 @@ pub(crate) fn next_unfocused(unfocused: bool, evt: &Event) -> bool {
     }
 }
 
+/// Whether focus loss may defer frame emission at all (#6311).
+///
+/// Only GTK/VTE terminals (MATE, GNOME Terminal, Tilix, Terminator, ...)
+/// queue damage while occluded and replay it on return; they all export
+/// `VTE_VERSION`. Everywhere else an unfocused window is usually still
+/// visible (side-by-side macOS/Windows windows, split panes), so freezing
+/// frames on `FocusLost` made streaming output look stuck until the user
+/// clicked, scrolled or typed back into the terminal.
+pub(crate) fn focus_loss_defers_frames(vte_version: Option<&str>) -> bool {
+    vte_version.is_some_and(|v| !v.trim().is_empty())
+}
+
 pub(crate) fn terminal_pause_has_live_owner(app: &App) -> bool {
     app.active_cell.as_ref().is_some_and(|active| {
         active.entries().iter().any(|cell| {

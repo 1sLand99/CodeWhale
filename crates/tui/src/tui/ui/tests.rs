@@ -3311,6 +3311,17 @@ fn focus_loss_defers_frames_until_focus_or_input_returns() {
     assert!(!next_unfocused(false, &key()));
 }
 
+/// Focus loss only defers frames on VTE terminals, where an occluded window
+/// replays queued damage. A visible-but-unfocused window elsewhere (macOS
+/// side-by-side, split panes) must keep painting streaming output.
+#[test]
+fn focus_loss_defers_frames_only_on_vte_terminals() {
+    assert!(focus_loss_defers_frames(Some("7600")));
+    assert!(!focus_loss_defers_frames(None));
+    assert!(!focus_loss_defers_frames(Some("")));
+    assert!(!focus_loss_defers_frames(Some("  ")));
+}
+
 // ANSI byte sequences are only written on platforms where crossterm uses the
 // ANSI execution path. On Windows the same logical commands route through the
 // WinAPI console backend and never reach the writer, so byte-level assertions
