@@ -2645,14 +2645,18 @@ fn approval_option_style(is_selected: bool, color: Color) -> Style {
     }
 }
 
-/// The approval card's heading. English leads with the plain summary of the
-/// call (E6); the summary is not localized yet, so other packs keep the tool
-/// name rather than mixing an English sentence into translated chrome.
+/// The approval card's heading: the plain summary of the call (E6), in the
+/// card's language, falling back to the tool name only when no summary was
+/// derived.
 fn approval_heading(request: &ApprovalRequest, locale: Locale) -> String {
-    if matches!(locale, Locale::En) && !request.summary.trim().is_empty() {
-        request.summary.clone()
-    } else {
+    if request.summary.trim().is_empty() {
+        return request.tool_name.clone();
+    }
+    let summary = request.summary_for_locale(locale);
+    if summary.trim().is_empty() {
         request.tool_name.clone()
+    } else {
+        summary
     }
 }
 
