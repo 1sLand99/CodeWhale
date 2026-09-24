@@ -673,7 +673,8 @@ jobs:
         #
         # A feed failure also makes `choco install` exit 0 without installing
         # anything ("Chocolatey installed 0/0 packages" after a V2 feed 504),
-        # so an attempt only counts when `makensis` is actually on PATH.
+        # so an attempt only counts when `makensis.exe` exists where the installer
+        # regression looks for it (Program Files; choco does not put it on PATH).
         # Without that check the retry reported success on an unprovisioned
         # runner and the regression below failed as an unattributable exit
         # code instead of this step naming the outage (2026-09-24).
@@ -686,7 +687,8 @@ jobs:
               Start-Sleep -Seconds $delays[$attempt]
             }
             choco install nsis -y --no-progress
-            if ($LASTEXITCODE -eq 0 -and (Get-Command makensis -ErrorAction SilentlyContinue)) {
+            $makensis = @("${env:ProgramFiles(x86)}\NSIS\makensis.exe", "$env:ProgramFiles\NSIS\makensis.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+            if ($LASTEXITCODE -eq 0 -and $makensis) {
               Write-Host "NSIS installed on attempt $($attempt + 1)"
               exit 0
             }
