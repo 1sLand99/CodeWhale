@@ -1,9 +1,9 @@
 //! Untouched-source parity samples for the diagnostics slice (FEAT-029).
 //!
 //! The checked-in fixture was captured on baseline 922679d6c. This test only
-//! reads it; it never updates expected bytes. Known limit: the first sample set
-//! covers stable branches; timestamped reports and seeded pricing/telemetry
-//! still require separate captured cases before diagnostics handlers are moved.
+//! reads it; it never updates expected bytes. Timestamped reports and seeded
+//! pricing/telemetry are captured separately in debug_diagnostics_baseline_tests;
+//! both suites must pass again after the handlers move.
 
 use super::{CommandResult, execute};
 use crate::config::Config;
