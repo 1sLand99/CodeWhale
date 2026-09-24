@@ -16,7 +16,7 @@ use tokio::time::timeout as tokio_timeout;
 
 use crate::config::{
     TOGETHER_INKLING_MODEL, is_exact_direct_moonshot_k3_route, is_exact_kimi_code_k3_route,
-    is_exact_xai_grok_4_6_route, is_exact_zai_chat_route, is_exact_zai_forced_thinking_route,
+    is_exact_zai_chat_route, is_exact_zai_forced_thinking_route,
     is_exact_zai_tiered_effort_route, is_kimi_code_membership_model,
     minimax_m3_route_uses_max_completion_tokens, moonshot_base_url_is_exact_kimi_code,
     wire_model_for_provider_route,
@@ -93,22 +93,25 @@ fn apply_openai_reasoning_effort(
     body["reasoning_effort"] = json!(effort);
 }
 
-fn apply_xai_grok_4_6_reasoning_effort(
+/// xAI's first-party `reasoning_effort` ladder, driven by the bundled
+/// catalog row for the exact model id: a row that documents an `effort`
+/// option gets the field (`xhigh` only where the row lists it — grok-4.7 and
+/// grok-4.6 do, grok-4.5 maps it to `high`); a row without one (grok-4.3,
+/// grok-build) or no row at all sends nothing. Grok reasoning cannot be
+/// disabled, so `off` is sent as the documented default `high`
+/// (<https://docs.x.ai/docs/guides/reasoning>).
+fn apply_xai_grok_reasoning_effort(
     body: &mut Value,
     provider: ApiProvider,
     base_url: &str,
     model: &str,
     effort: Option<&str>,
 ) {
-    if !(is_exact_xai_grok_4_6_route(provider, base_url, model)
-        || (provider == ApiProvider::Xai
-            && codewhale_config::provider::is_exact_xai_platform_route(
-                codewhale_config::ProviderKind::Xai,
-                base_url,
-            )
-            && model
-                .trim()
-                .eq_ignore_ascii_case(crate::config::XAI_GROK_4_5_MODEL)))
+    if provider != ApiProvider::Xai
+        || !codewhale_config::provider::is_exact_xai_platform_route(
+            codewhale_config::ProviderKind::Xai,
+            base_url,
+        )
     {
         return;
     }
@@ -116,11 +119,20 @@ fn apply_xai_grok_4_6_reasoning_effort(
         return;
     };
     let model = model.trim().to_ascii_lowercase();
-    let supports_xhigh = model == crate::config::XAI_GROK_4_6_MODEL;
-    let supports_effort = supports_xhigh || model == crate::config::XAI_GROK_4_5_MODEL;
-    if !supports_effort {
+    let Some(row) =
+        codewhale_config::catalog::bundled_models_dev_catalog().provider_model("xai", &model)
+    else {
         return;
-    }
+    };
+    let Some(documented) = row
+        .reasoning_options
+        .iter()
+        .find(|option| option["type"] == "effort")
+        .and_then(|option| option["values"].as_array())
+    else {
+        return;
+    };
+    let supports_xhigh = documented.iter().any(|value| value == "xhigh");
     let wire_effort = match effort.trim().to_ascii_lowercase().as_str() {
         "auto" | "automatic" | "" => return,
         "off" | "disabled" | "none" | "false" | "high" => "high",
@@ -579,7 +591,7 @@ pub(super) fn apply_route_reasoning_controls(
     apply_minimax_route_reasoning_controls(body, provider, base_url, model, effort);
     apply_inkling_reasoning_effort(body, provider, model, effort);
     apply_openai_reasoning_effort(body, provider, model, effort);
-    apply_xai_grok_4_6_reasoning_effort(body, provider, base_url, model, effort);
+    apply_xai_grok_reasoning_effort(body, provider, base_url, model, effort);
     apply_direct_moonshot_k3_reasoning_effort(body, provider, base_url, model, effort);
     apply_kimi_code_k3_reasoning_effort(body, provider, base_url, model, effort);
     apply_zai_route_reasoning_controls(body, provider, base_url, model, effort);
