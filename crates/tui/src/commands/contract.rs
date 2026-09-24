@@ -14,9 +14,10 @@
 //!
 //! ## Authoritative host-proxy design (D1)
 //!
-//! `CommandContexts` holds sixteen independently borrowed facet objects, while
-//! important behavior (mode transitions, model invalidation, cost accounting,
-//! skill refresh) is authoritative on `App`. The adapters therefore share a
+//! `CommandContexts` has seventeen independently optional facet slots; this
+//! host currently constructs sixteen of them. The diagnostics adapter is added
+//! in FEAT-029 Phase 3. Important behavior (mode transitions, model
+//! invalidation, cost accounting, skill refresh) is authoritative on `App`. The adapters therefore share a
 //! synchronous TUI-owned host proxy. Each trait call borrows `App` only for the
 //! duration of that call and delegates to the real operation; handlers still
 //! receive only portable facets and can never name concrete TUI state.
@@ -263,8 +264,8 @@ pub(crate) fn key_to_message_id(key: &'static str) -> Option<MessageId> {
 
 /// Shared TUI host hidden behind the portable command facets.
 ///
-/// The envelope needs sixteen independently borrowed facet objects, while the
-/// authoritative mutation methods live on `App`. Each adapter therefore owns
+/// The envelope has seventeen optional facet slots (sixteen are currently
+/// constructed here); authoritative mutation methods live on `App`. Each adapter therefore owns
 /// an `Rc` clone of this synchronous host proxy. Trait calls borrow `App` only
 /// for the duration of one method, delegate to the real TUI authority, and
 /// return owned values. Command handlers never receive or name `App`.
@@ -4305,7 +4306,8 @@ fn default_codewhale_tools_dir() -> Option<PathBuf> {
 // Envelope construction (D1)
 // ---------------------------------------------------------------------------
 
-/// Owns sixteen facet objects sharing one synchronous TUI host proxy.
+/// Owns sixteen currently wired facet objects sharing one synchronous TUI host
+/// proxy; the seventeenth diagnostics facet is wired in FEAT-029 Phase 3.
 ///
 /// Handlers borrow only these adapters. Every method delegates to the real App
 /// authority and releases its `RefCell` borrow before returning, so facets can
