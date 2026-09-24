@@ -23091,12 +23091,14 @@ mod child_permission_gate {
     async fn pending_approval_longer_than_tool_timeout_is_answered_and_runs() {
         let (registry, mut rx, manager) = worker_registry(ApprovalMode::Suggest, false, true, None);
         let (receipt_store, session_id) = receipt_context(&registry);
-        let tool_timeout = Duration::from_millis(200);
+        // Wide margins: after approval the call spawns a real shell, which
+        // can take well over 200ms on a loaded Windows runner.
+        let tool_timeout = Duration::from_secs(2);
         let manager_for_answer = Arc::clone(&manager);
         let answerer = tokio::spawn(async move {
             let id = next_child_approval_id(&mut rx).await;
             // The person takes several tool timeouts to decide.
-            tokio::time::sleep(Duration::from_millis(900)).await;
+            tokio::time::sleep(Duration::from_secs(3)).await;
             assert!(
                 manager_for_answer
                     .write()
@@ -23123,7 +23125,7 @@ mod child_permission_gate {
             tool_timeout,
             None,
             &clock,
-            tokio::time::sleep(Duration::from_millis(900)),
+            tokio::time::sleep(Duration::from_secs(3)),
         )
         .await;
         assert!(slow.is_none(), "ordinary tool work keeps its timeout");
