@@ -582,6 +582,31 @@ fn resolver_routes_deepseek_vision_exp_over_chat_with_image_input() {
 }
 
 #[test]
+fn resolver_keeps_deepseek_flash_image_input_on_the_official_route() {
+    // #6421: the curated DeepSeek rows win over the Models.dev asset, so the
+    // resolved route (what the engine strips images against) must carry the
+    // documented Flash vision fact itself — default selector included.
+    for selector in [None, Some("deepseek-flash"), Some("deepseek-v4-flash")] {
+        let route = RouteResolver::new()
+            .resolve(&req(Some(ProviderKind::Deepseek), selector))
+            .expect("official DeepSeek Flash route resolves");
+        assert_eq!(
+            route.capabilities().image_input,
+            CapabilityState::Supported,
+            "{selector:?} must keep image input on the official endpoint"
+        );
+    }
+    let pro = RouteResolver::new()
+        .resolve(&req(Some(ProviderKind::Deepseek), Some("deepseek-v4-pro")))
+        .expect("official DeepSeek Pro route resolves");
+    assert_eq!(
+        pro.capabilities().image_input,
+        CapabilityState::Unsupported,
+        "the Flash correction must not widen Pro"
+    );
+}
+
+#[test]
 fn resolver_keeps_custom_deepseek_same_name_capabilities_unverified() {
     let route = RouteResolver::new()
         .resolve(&RouteRequest {
