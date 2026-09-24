@@ -19,7 +19,7 @@ pub fn format_context_report(report: &DebugPromptSourceMap) -> String {
             let source = report
                 .context_window_source
                 .as_deref()
-                .unwrap_or_else(|| "fallback");
+                .unwrap_or("fallback");
             // An unverified rung is a guess about the window printed on this
             // same line; it must not claim a fixed 128K default the capability
             // matrix may not hold. A label from no known rung is no evidence

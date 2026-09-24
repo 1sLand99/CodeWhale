@@ -2104,6 +2104,7 @@ pub(crate) enum PromptLayerStability {
     Dynamic,
 }
 
+#[cfg(test)]
 impl PromptLayerStability {
     pub(crate) fn label(self) -> &'static str {
         match self {

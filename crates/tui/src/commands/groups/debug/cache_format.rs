@@ -635,7 +635,7 @@ pub(crate) fn format_turn_cache_route(rec: &DebugCacheTurn) -> String {
         .provider_identity
         .as_deref()
         .filter(|provider| !provider.trim().is_empty())
-        .or_else(|| rec.provider.as_deref())
+        .or(rec.provider.as_deref())
         .unwrap_or("?");
     let route = if rec.auto_model {
         format!("auto:{provider}/{model}")

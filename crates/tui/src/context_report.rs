@@ -860,12 +860,14 @@ fn pressure_label(percent: Option<f64>) -> &'static str {
     }
 }
 
+#[cfg(test)]
 pub fn format_context_report(report: &PromptSourceMap) -> String {
     crate::commands::portable_reports::format_context_report(
         &crate::commands::project_debug_context_source_map(report.clone()),
     )
 }
 
+#[cfg(test)]
 pub fn format_context_summary(report: &PromptSourceMap) -> String {
     crate::commands::portable_reports::format_context_summary(
         &crate::commands::project_debug_context_source_map(report.clone()),

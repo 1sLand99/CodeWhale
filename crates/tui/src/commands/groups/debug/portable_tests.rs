@@ -185,7 +185,7 @@ fn cache_inspection_rejections_and_argument_only_warmup_never_store() {
         fake.observation = Some(Err(failure));
         let result = cache_with(&mut fake, Some("inspect --json"));
         assert_eq!(result.message.as_deref(), Some(expected));
-        assert_eq!(&*fake.events.borrow().last().unwrap(), &"inspect");
+        assert_eq!(fake.events.borrow().last().unwrap(), &"inspect");
         assert!(
             fake.remembered.is_none(),
             "failure must preserve previous state"
