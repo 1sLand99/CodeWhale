@@ -224,6 +224,8 @@ impl CommandDebugDiagnosticsContext for DebugDiagnostics {
             context_window_tokens: None,
             context_window_source: None,
             budget_used_percent: None,
+            pressure_label: "unknown".into(),
+            context_window_verified: false,
             generated_at: "2026-01-01T00:00:00Z".into(),
             note: String::new(),
         }

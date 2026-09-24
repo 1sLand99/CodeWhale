@@ -203,7 +203,10 @@ pub(in crate::commands) fn dispatch(
             let mut bundle = app.command_contexts();
             tokens::system_prompt(bundle.contexts(CommandCapabilities::DEBUG_DIAGNOSTICS))
         }
-        "context" | "ctx" => tokens::context(app, arg),
+        "context" | "ctx" => {
+            let mut bundle = app.command_contexts();
+            tokens::context(bundle.contexts(CommandCapabilities::DEBUG_DIAGNOSTICS), arg)
+        }
         "edit" => undo::edit(app),
         "diff" => undo::diff(app),
         "undo" => {

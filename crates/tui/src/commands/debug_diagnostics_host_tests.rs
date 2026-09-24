@@ -5,7 +5,7 @@
 use super::groups::debug::cache::{cache, format_tokens, format_warmup_status};
 use super::groups::debug::dispatch;
 use super::groups::debug::tests::{create_test_app, test_tool};
-use super::groups::debug::tokens::{context, cost, tokens};
+use super::groups::debug::tokens::{cost, tokens};
 use crate::client::CacheWarmupKey;
 use crate::tui::app::{App, AppAction, TurnCacheRecord};
 use crate::tui::history::HistoryCell;
@@ -16,6 +16,10 @@ use std::time::Instant;
 // Keep the relocated host assertions on the actual diagnostics adapter path.
 fn system_prompt(app: &mut App) -> crate::commands::CommandResult {
     dispatch(app, "system", None).expect("registered system command")
+}
+
+fn context(app: &mut App, arg: Option<&str>) -> crate::commands::CommandResult {
+    dispatch(app, "context", arg).expect("registered context command")
 }
 
 #[test]

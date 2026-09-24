@@ -7,7 +7,7 @@
 //! fall-through behaviour.
 
 mod contract;
-pub(crate) use contract::project_debug_tool_snapshot;
+pub(crate) use contract::{project_debug_context_source_map, project_debug_tool_snapshot};
 pub mod discovery;
 mod groups;
 pub(crate) mod portable_reports;

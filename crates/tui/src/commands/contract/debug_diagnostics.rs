@@ -163,46 +163,9 @@ impl CommandDebugDiagnosticsContext for DebugDiagnosticsAdapter<'_> {
     }
 
     fn prompt_context(&self) -> DebugPromptContext {
-        let app = self.host.app.borrow();
-        let context = crate::context_report::build_prompt_context(&app);
-        DebugPromptContext {
-            schema_version: context.schema_version,
-            provider: context.provider,
-            model: context.model,
-            system_prompt_state: context.system_prompt_state.to_string(),
-            tool_catalog_state: context.tool_catalog_state.to_string(),
-            sections: context
-                .sections
-                .into_iter()
-                .map(|section| DebugPromptContextSection {
-                    index: section.index,
-                    block_type: section.block_type,
-                    cache_control: section.cache_control.map(|control| DebugCacheControl {
-                        cache_type: control.cache_type,
-                    }),
-                    estimated_tokens: section.estimated_tokens,
-                    text: section.text,
-                })
-                .collect(),
-            tools: context
-                .tools
-                .into_iter()
-                .map(|tool| DebugPromptTool {
-                    tool_type: tool.tool_type,
-                    name: tool.name,
-                    description: tool.description,
-                    input_schema: tool.input_schema,
-                    allowed_callers: tool.allowed_callers,
-                    defer_loading: tool.defer_loading,
-                    input_examples: tool.input_examples,
-                    strict: tool.strict,
-                    cache_control: tool.cache_control.map(|control| DebugCacheControl {
-                        cache_type: control.cache_type,
-                    }),
-                })
-                .collect(),
-            source_map: source_map(context.source_map),
-        }
+        prompt_context(crate::context_report::build_prompt_context(
+            &self.host.app.borrow(),
+        ))
     }
 
     fn tool_snapshot(&self) -> Option<DebugToolSnapshot> {
@@ -365,7 +328,7 @@ fn cost_projection(app: &App) -> DebugCostProjection {
         itemized_turns = itemized_turns.saturating_add(1);
     }
     DebugCostProjection {
-        currency: super::to_command_currency(app.cost_currency),
+        currency: super::to_command_currency(currency),
         total,
         parent_turns: components.parent_turns,
         subagents: components.subagents,
@@ -407,8 +370,62 @@ fn cost_projection(app: &App) -> DebugCostProjection {
     }
 }
 
-fn source_map(report: crate::context_report::PromptSourceMap) -> DebugPromptSourceMap {
+pub(crate) fn prompt_context(context: crate::context_report::PromptContext) -> DebugPromptContext {
+    DebugPromptContext {
+        schema_version: context.schema_version,
+        provider: context.provider,
+        model: context.model,
+        system_prompt_state: context.system_prompt_state.to_string(),
+        tool_catalog_state: context.tool_catalog_state.to_string(),
+        sections: context
+            .sections
+            .into_iter()
+            .map(|section| DebugPromptContextSection {
+                index: section.index,
+                block_type: section.block_type,
+                cache_control: section.cache_control.map(|control| DebugCacheControl {
+                    cache_type: control.cache_type,
+                }),
+                estimated_tokens: section.estimated_tokens,
+                text: section.text,
+            })
+            .collect(),
+        tools: context
+            .tools
+            .into_iter()
+            .map(|tool| DebugPromptTool {
+                tool_type: tool.tool_type,
+                name: tool.name,
+                description: tool.description,
+                input_schema: tool.input_schema,
+                allowed_callers: tool.allowed_callers,
+                defer_loading: tool.defer_loading,
+                input_examples: tool.input_examples,
+                strict: tool.strict,
+                cache_control: tool.cache_control.map(|control| DebugCacheControl {
+                    cache_type: control.cache_type,
+                }),
+            })
+            .collect(),
+        source_map: source_map(context.source_map),
+    }
+}
+
+pub(crate) fn source_map(report: crate::context_report::PromptSourceMap) -> DebugPromptSourceMap {
+    use crate::context_budget::PressureLevel;
     use crate::context_report::{ActivationReason as A, CountingConfidence as C, SourceKind as S};
+    use crate::route_runtime::ContextWindowSource;
+    let pressure_label = report
+        .budget_used_percent
+        .map(|percent| PressureLevel::from_usage_percent(percent).label())
+        .unwrap_or("unknown")
+        .to_string();
+    let source_label = report
+        .context_window_source
+        .as_deref()
+        .unwrap_or_else(|| ContextWindowSource::Fallback.label());
+    let context_window_verified =
+        ContextWindowSource::from_label(source_label).is_some_and(ContextWindowSource::is_verified);
     let kind = |kind| match kind {
         S::Constitution => DebugSourceKind::Constitution,
         S::UserConstitution => DebugSourceKind::UserConstitution,
@@ -462,6 +479,8 @@ fn source_map(report: crate::context_report::PromptSourceMap) -> DebugPromptSour
         context_window_tokens: report.context_window_tokens,
         context_window_source: report.context_window_source,
         budget_used_percent: report.budget_used_percent,
+        pressure_label,
+        context_window_verified,
         generated_at: report.generated_at,
         note: report.note,
     }

@@ -16,6 +16,12 @@ pub struct DebugPromptSourceMap {
     pub context_window_tokens: Option<u32>,
     pub context_window_source: Option<String>,
     pub budget_used_percent: Option<f64>,
+    /// Host-owned pressure policy result; intentionally absent from the public JSON.
+    #[serde(skip)]
+    pub pressure_label: String,
+    /// Verified provenance from the host route ladder; not a public JSON field.
+    #[serde(skip)]
+    pub context_window_verified: bool,
     pub generated_at: String,
     pub note: String,
 }

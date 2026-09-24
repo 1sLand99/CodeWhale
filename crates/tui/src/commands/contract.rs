@@ -32,10 +32,11 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 mod debug_diagnostics;
+mod diagnostics_messages;
 use debug_diagnostics::DebugDiagnosticsAdapter;
 pub(crate) use debug_diagnostics::{
     CostComponents as DebugCostComponents, observe_cache_for_app,
-    tool_snapshot as project_debug_tool_snapshot,
+    source_map as project_debug_context_source_map, tool_snapshot as project_debug_tool_snapshot,
 };
 
 use codewhale_command_contract::facets::{
@@ -2022,6 +2023,7 @@ impl CommandPresentationContext for PresentationAdapter<'_> {
             .or_else(|| key_to_project_message_id(key))
             .or_else(|| key_to_plugin_message_id(key))
             .or_else(|| key_to_session_message_id(key))
+            .or_else(|| diagnostics_messages::resolve(key))
         else {
             return Err("unknown translation key".to_string());
         };
