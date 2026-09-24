@@ -3094,7 +3094,21 @@ impl RuntimeStoreBinding {
         let Some(store_name) = self.data_dir.file_name().and_then(|name| name.to_str()) else {
             return Ok(false);
         };
-        if session_dir.parent() != Some(sessions.as_path())
+        // A host records its binding from the store's canonical root
+        // (`checked_runtime_store_root`), while the configured sessions root
+        // is lexical. The two differ whenever an ancestor is spelled another
+        // way — Windows `\\?\C:\` verbatim prefixes and 8.3 short names, or
+        // a symlinked home/TMPDIR on Unix — and every real binding then read
+        // as unconfined, so no switch could ever adopt it (#6418). Accept the
+        // configured spelling or its canonical form only; nothing in the
+        // binding's own path is resolved, so the symlink checks below still
+        // fail closed.
+        let parent = session_dir.parent();
+        let under_sessions = parent == Some(sessions.as_path())
+            || sessions
+                .canonicalize()
+                .is_ok_and(|canonical| parent == Some(canonical.as_path()));
+        if !under_sessions
             || !(store_name == "runtime" || store_name.starts_with("runtime-recovered-"))
             || !session_dir
                 .file_name()
