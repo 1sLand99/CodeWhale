@@ -7,8 +7,10 @@
 //! fall-through behaviour.
 
 mod contract;
+pub(crate) use contract::project_debug_tool_snapshot;
 pub mod discovery;
 mod groups;
+pub(crate) mod portable_reports;
 
 // FEAT-025 host services for the session-export slice: the shared recovery
 // writer and the protected export-destination resolver/writer. Declared at the

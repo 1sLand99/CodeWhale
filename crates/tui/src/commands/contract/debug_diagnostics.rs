@@ -581,7 +581,9 @@ fn bounded_list(value: &crate::tool_inspection::BoundedList) -> DebugBoundedList
     }
 }
 
-fn tool_snapshot(value: &crate::tool_inspection::ToolInspectionSnapshot) -> DebugToolSnapshot {
+pub(crate) fn tool_snapshot(
+    value: &crate::tool_inspection::ToolInspectionSnapshot,
+) -> DebugToolSnapshot {
     use crate::tool_inspection::{
         ProviderAvailability as P, ToolProvenance as R, ToolVisibility as V, TurnStopReason as S,
     };

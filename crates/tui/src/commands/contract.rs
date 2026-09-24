@@ -33,7 +33,10 @@ use std::rc::Rc;
 
 mod debug_diagnostics;
 use debug_diagnostics::DebugDiagnosticsAdapter;
-pub(crate) use debug_diagnostics::{CostComponents as DebugCostComponents, observe_cache_for_app};
+pub(crate) use debug_diagnostics::{
+    CostComponents as DebugCostComponents, observe_cache_for_app,
+    tool_snapshot as project_debug_tool_snapshot,
+};
 
 use codewhale_command_contract::facets::{
     CommandApprovalState, CommandCostContext, CommandMediaContext, CommandMemoryContext,

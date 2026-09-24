@@ -194,7 +194,10 @@ pub(in crate::commands) fn dispatch(
         }
         "cache" => cache::cache(app, arg),
         "preview-request" | "preview_request" | "dryrun" => preview_request::preview_request(arg),
-        "tools" | "tool-studio" => tool_inspection::tools(app, arg),
+        "tools" | "tool-studio" => {
+            let mut bundle = app.command_contexts();
+            tool_inspection::tools(bundle.contexts(CommandCapabilities::DEBUG_DIAGNOSTICS), arg)
+        }
         "change" => change::change(app, arg),
         "system" | "xitong" => {
             let mut bundle = app.command_contexts();
