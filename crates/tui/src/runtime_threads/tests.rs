@@ -16506,7 +16506,7 @@ mod runtime_image_inputs {
         let good = runtime_image_fixture(17);
         for (prompt, model, image) in [
             ("look", "auto", good.clone()),
-            ("look", "deepseek-v4-flash", good.clone()),
+            ("look", "deepseek-v4-pro", good.clone()),
             ("look", "unknown-image-fixture", good.clone()),
             ("", "deepseek-v4-flash-vision-exp", good.clone()),
             (
@@ -16960,7 +16960,7 @@ mod runtime_image_inputs {
             };
             assert!(manager.start_turn(&fork.id, request.clone()).await.is_err());
             let mut unsupported = request.clone();
-            unsupported.model = Some("deepseek-v4-flash".into());
+            unsupported.model = Some("deepseek-v4-pro".into());
             assert!(
                 manager
                     .start_turn_from_stored_images(&fork.id, unsupported)
