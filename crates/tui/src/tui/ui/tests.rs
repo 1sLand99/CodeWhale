@@ -57,6 +57,7 @@ use crate::tui::selection::{SelectionAutoscroll, TranscriptSelectionPoint};
 use codewhale_models::Role;
 use tempfile::TempDir;
 
+mod model_picker_actions;
 mod runtime_store_binding;
 
 #[test]
