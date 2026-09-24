@@ -840,6 +840,22 @@ pub fn status_visibility(message: &str) -> StatusVisibility {
     }
 }
 
+/// The tool call named by the engine's tool-approval wait heartbeat
+/// ("Still waiting for tool approval on `<id>` after Ns — ..."), if `message`
+/// is one. The runtime uses it to drop a heartbeat for an approval it has
+/// already settled.
+#[must_use]
+pub fn approval_wait_tool_call(message: &str) -> Option<&str> {
+    let message = message.trim();
+    if status_visibility(message) != StatusVisibility::Internal {
+        return None;
+    }
+    message
+        .strip_prefix("Still waiting for tool approval on `")?
+        .rsplit_once("` after ")
+        .map(|(call, _)| call)
+}
+
 /// Which permission gate produced a [`Event::ToolGateDecision`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolGate {
@@ -934,7 +950,7 @@ mod tool_projection_warning_tests {
 
 #[cfg(test)]
 mod status_visibility_tests {
-    use super::{StatusVisibility, status_visibility};
+    use super::{StatusVisibility, approval_wait_tool_call, status_visibility};
 
     #[test]
     fn engine_plumbing_statuses_are_not_user_rows() {
@@ -982,5 +998,26 @@ mod status_visibility_tests {
             assert_eq!(status_visibility(user), StatusVisibility::User, "{user}");
         }
         assert_eq!(StatusVisibility::Internal.as_str(), "internal");
+    }
+
+    #[test]
+    fn approval_wait_tool_call_names_the_raw_call_id() {
+        assert_eq!(
+            approval_wait_tool_call(
+                "Still waiting for tool approval on `call_00_x|99765c30-c427` after 60s — the turn is parked here until it is answered"
+            ),
+            Some("call_00_x|99765c30-c427")
+        );
+        for not_a_heartbeat in [
+            "Still waiting for user input on `call-2` after 120s — the turn is parked here until it is answered",
+            "Still waiting for tool approval on `call-1` after an unexpected failure",
+            "Continuing — tool results",
+        ] {
+            assert_eq!(
+                approval_wait_tool_call(not_a_heartbeat),
+                None,
+                "{not_a_heartbeat}"
+            );
+        }
     }
 }

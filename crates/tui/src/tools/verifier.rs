@@ -7,8 +7,8 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,20 @@ const MAX_GATE_OUTPUT_CHARS: usize = 16_000;
 const DEFAULT_MAX_PYTHON_FILES: usize = 200;
 const MAX_CUSTOM_GATES: usize = 12;
 const BACKGROUND_GATE_TIMEOUT_MS: u64 = 600_000;
+/// Wall-clock bound for a built-in (detected) foreground gate. Matches the
+/// background bound so a slow `cargo test` behaves the same either way.
+const DEFAULT_GATE_TIMEOUT_MS: u64 = BACKGROUND_GATE_TIMEOUT_MS;
+/// Wall-clock bound for a custom foreground gate when `timeout_ms` is absent.
+/// Custom gates run arbitrary programs (headless browsers, servers) that can
+/// finish their work and never exit, so the default is deliberately tighter.
+const DEFAULT_CUSTOM_GATE_TIMEOUT_MS: u64 = 180_000;
+const MAX_GATE_TIMEOUT_MS: u64 = 1_800_000;
+/// Bytes kept per stream while a gate runs; the rendered result is further
+/// truncated to `MAX_GATE_OUTPUT_CHARS`.
+const MAX_GATE_CAPTURE_BYTES: usize = 1 << 20;
+/// After a gate's own process exits, how long a helper it started may keep
+/// stdout/stderr open before the gate's process group is killed.
+const GATE_PIPE_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 /// Tool for running independent verifier gates concurrently.
 pub struct RunVerifiersTool;
@@ -121,6 +135,7 @@ struct CustomVerifierInput {
     program: String,
     args: Vec<String>,
     cwd: Option<String>,
+    timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -132,6 +147,7 @@ struct VerifierGate {
     args: Vec<String>,
     env: Vec<(String, String)>,
     skipped_reason: Option<String>,
+    timeout: Duration,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -279,6 +295,13 @@ impl ToolSpec for RunVerifiersTool {
                             "cwd": {
                                 "type": "string",
                                 "description": "Optional working directory relative to the workspace."
+                            },
+                            "timeout_ms": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": MAX_GATE_TIMEOUT_MS,
+                                "default": DEFAULT_CUSTOM_GATE_TIMEOUT_MS,
+                                "description": "Wall-clock limit for this gate. When it elapses the gate's whole process tree is killed and the gate fails as timed out. Raise it for long test suites."
                             }
                         },
                         "required": ["name", "program"],
@@ -375,31 +398,10 @@ impl ToolSpec for RunVerifiersTool {
             return start_background_gates(context, profile, level, gates);
         }
 
-        let mut handles = Vec::with_capacity(gates.len());
-        for gate in gates {
-            handles.push(tokio::task::spawn_blocking(move || run_gate(gate)));
-        }
-
-        let mut results = Vec::with_capacity(handles.len());
-        for handle in handles {
-            match handle.await {
-                Ok(result) => results.push(result),
-                Err(err) => results.push(GateResult {
-                    name: "internal-join".to_string(),
-                    ecosystem: "internal".to_string(),
-                    status: GateStatus::Failed,
-                    command: "tokio::task::spawn_blocking".to_string(),
-                    cwd: context.workspace.display().to_string(),
-                    exit_code: None,
-                    duration_ms: 0,
-                    stdout: String::new(),
-                    stderr: format!("Verifier task join failed: {err}"),
-                    stdout_truncated: false,
-                    stderr_truncated: false,
-                    skipped_reason: None,
-                }),
-            }
-        }
+        // Gates run as futures of this call, not detached blocking tasks: when
+        // Stop drops the tool future, every running gate's process group is
+        // killed with it instead of being orphaned.
+        let mut results = futures_util::future::join_all(gates.into_iter().map(run_gate)).await;
         results.sort_by(|a, b| a.name.cmp(&b.name));
 
         let passed = results
@@ -462,32 +464,7 @@ pub(crate) async fn run_workflow_completion_gates(
         }));
     }
 
-    let workspace = context.workspace.display().to_string();
-    let mut handles = Vec::with_capacity(gates.len());
-    for gate in gates {
-        handles.push(tokio::task::spawn_blocking(move || run_gate(gate)));
-    }
-
-    let mut results = Vec::with_capacity(handles.len());
-    for handle in handles {
-        match handle.await {
-            Ok(result) => results.push(result),
-            Err(err) => results.push(GateResult {
-                name: "internal-join".to_string(),
-                ecosystem: "internal".to_string(),
-                status: GateStatus::Failed,
-                command: "tokio::task::spawn_blocking".to_string(),
-                cwd: workspace.clone(),
-                exit_code: None,
-                duration_ms: 0,
-                stdout: String::new(),
-                stderr: format!("Verifier task join failed: {err}"),
-                stdout_truncated: false,
-                stderr_truncated: false,
-                skipped_reason: None,
-            }),
-        }
-    }
+    let mut results = futures_util::future::join_all(gates.into_iter().map(run_gate)).await;
     results.sort_by(|a, b| a.name.cmp(&b.name));
 
     let passed = results
@@ -845,6 +822,7 @@ where
             .collect(),
         env: Vec::new(),
         skipped_reason: None,
+        timeout: Duration::from_millis(DEFAULT_GATE_TIMEOUT_MS),
     }
 }
 
@@ -862,6 +840,7 @@ fn skipped_gate(
         args: Vec::new(),
         env: Vec::new(),
         skipped_reason: Some(reason.into()),
+        timeout: Duration::from_millis(DEFAULT_GATE_TIMEOUT_MS),
     }
 }
 
@@ -884,6 +863,13 @@ fn custom_gate(
         Some(raw) if !raw.trim().is_empty() => context.resolve_path(raw)?,
         _ => context.workspace.clone(),
     };
+    let timeout_ms = custom.timeout_ms.unwrap_or(DEFAULT_CUSTOM_GATE_TIMEOUT_MS);
+    if !(1..=MAX_GATE_TIMEOUT_MS).contains(&timeout_ms) {
+        return Err(ToolError::invalid_input(format!(
+            "Custom verifier '{}' timeout_ms must be between 1 and {MAX_GATE_TIMEOUT_MS}",
+            custom.name
+        )));
+    }
     Ok(VerifierGate {
         name: custom.name.clone(),
         ecosystem: "custom".to_string(),
@@ -892,6 +878,7 @@ fn custom_gate(
         args: custom.args.clone(),
         env: Vec::new(),
         skipped_reason: None,
+        timeout: Duration::from_millis(timeout_ms),
     })
 }
 
@@ -1114,7 +1101,7 @@ fn should_skip_dir_name(name: &str) -> bool {
     )
 }
 
-fn run_gate(gate: VerifierGate) -> GateResult {
+async fn run_gate(gate: VerifierGate) -> GateResult {
     let command = render_command(gate.program.as_deref(), &gate.args);
     if let Some(reason) = gate.skipped_reason {
         return GateResult {
@@ -1151,17 +1138,25 @@ fn run_gate(gate: VerifierGate) -> GateResult {
     };
 
     let started = Instant::now();
-    let mut cmd = Command::new(&program);
+    let mut cmd = tokio::process::Command::new(&program);
     cmd.args(&gate.args)
         .current_dir(&gate.cwd)
+        // A gate never reads input; an inherited stdin could block it on the
+        // Engine's own terminal or pipe.
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    // Its own process group, so a timeout or Stop reaches every helper the
+    // gate started (headless Chrome forks several), not just the leader.
+    #[cfg(unix)]
+    cmd.process_group(0);
     for (key, value) in &gate.env {
         cmd.env(key, value);
     }
 
-    let output = match cmd.output() {
-        Ok(output) => output,
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             return GateResult {
                 name: gate.name,
@@ -1195,32 +1190,167 @@ fn run_gate(gate: VerifierGate) -> GateResult {
             };
         }
     };
+    // Armed until the gate settles cleanly; dropping this future (Stop)
+    // kills the whole group.
+    let mut group = GateProcessGroup::new(child.id());
 
-    let (stdout, stdout_truncated) = truncate_with_note(
-        &String::from_utf8_lossy(&output.stdout),
-        MAX_GATE_OUTPUT_CHARS,
-    );
-    let (stderr, stderr_truncated) = truncate_with_note(
-        &String::from_utf8_lossy(&output.stderr),
-        MAX_GATE_OUTPUT_CHARS,
-    );
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut exit: Option<std::io::Result<std::process::ExitStatus>> = None;
+    let mut pipes_open = true;
+    let mut timed_out = false;
+    {
+        let read_stdout = read_capped(child.stdout.take(), &mut stdout);
+        let read_stderr = read_capped(child.stderr.take(), &mut stderr);
+        let mut read_pipes = std::pin::pin!(async move {
+            tokio::join!(read_stdout, read_stderr);
+        });
+        let deadline = tokio::time::sleep(gate.timeout);
+        let mut deadline = std::pin::pin!(deadline);
+        let mut drain_deadline: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
+        loop {
+            if exit.is_some() && !pipes_open {
+                break;
+            }
+            tokio::select! {
+                status = child.wait(), if exit.is_none() => {
+                    exit = Some(status);
+                    drain_deadline = Some(Box::pin(tokio::time::sleep(GATE_PIPE_DRAIN_GRACE)));
+                }
+                () = &mut read_pipes, if pipes_open => pipes_open = false,
+                () = async { drain_deadline.as_mut().expect("guarded").await },
+                    if drain_deadline.is_some() => break,
+                () = &mut deadline => {
+                    timed_out = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    let mut notes = Vec::new();
+    if timed_out || pipes_open {
+        group.kill();
+        if exit.is_none() {
+            // The group is SIGKILLed; reaping the leader is bounded anyway so
+            // an uninterruptible child cannot wedge the verifier again.
+            exit = tokio::time::timeout(GATE_PIPE_DRAIN_GRACE, child.wait())
+                .await
+                .ok();
+        }
+    } else {
+        group.disarm();
+    }
+    if timed_out {
+        notes.push(format!(
+            "[verifier gate timed out after {}s and its process group was killed; raise timeout_ms if it legitimately needs longer]",
+            gate.timeout.as_secs_f64()
+        ));
+    } else if pipes_open {
+        notes.push(
+            "[the gate exited but a process it started kept stdout/stderr open; its process group was killed]"
+                .to_string(),
+        );
+    }
+
+    let exit_status = match exit {
+        Some(Ok(status)) => Some(status),
+        Some(Err(err)) => {
+            notes.push(format!("[failed to wait for verifier: {err}]"));
+            None
+        }
+        None => None,
+    };
+    let mut stderr_text = String::from_utf8_lossy(&stderr).into_owned();
+    for note in notes {
+        if !stderr_text.is_empty() && !stderr_text.ends_with('\n') {
+            stderr_text.push('\n');
+        }
+        stderr_text.push_str(&note);
+    }
+    let (stdout, stdout_truncated) =
+        truncate_with_note(&String::from_utf8_lossy(&stdout), MAX_GATE_OUTPUT_CHARS);
+    let (stderr, stderr_truncated) = truncate_with_note(&stderr_text, MAX_GATE_OUTPUT_CHARS);
+    let passed = !timed_out && exit_status.is_some_and(|status| status.success());
     GateResult {
         name: gate.name,
         ecosystem: gate.ecosystem,
-        status: if output.status.success() {
+        status: if passed {
             GateStatus::Passed
         } else {
             GateStatus::Failed
         },
         command,
         cwd: gate.cwd.display().to_string(),
-        exit_code: output.status.code(),
+        exit_code: exit_status.and_then(|status| status.code()),
         duration_ms: started.elapsed().as_millis() as u64,
         stdout,
         stderr,
         stdout_truncated,
         stderr_truncated,
         skipped_reason: None,
+    }
+}
+
+/// Read a gate's pipe to EOF, keeping at most `MAX_GATE_CAPTURE_BYTES`.
+async fn read_capped<R>(pipe: Option<R>, buf: &mut Vec<u8>)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let Some(mut pipe) = pipe else {
+        return;
+    };
+    let mut chunk = [0u8; 8192];
+    loop {
+        match pipe.read(&mut chunk).await {
+            Ok(0) | Err(_) => return,
+            Ok(n) => {
+                let room = MAX_GATE_CAPTURE_BYTES.saturating_sub(buf.len());
+                buf.extend_from_slice(&chunk[..n.min(room)]);
+            }
+        }
+    }
+}
+
+/// The process group a foreground gate runs in. Killed on timeout, on
+/// held-open pipes, and on drop unless the gate settled cleanly first.
+struct GateProcessGroup {
+    pid: Option<u32>,
+}
+
+impl GateProcessGroup {
+    fn new(pid: Option<u32>) -> Self {
+        Self { pid }
+    }
+
+    fn disarm(&mut self) {
+        self.pid = None;
+    }
+
+    fn kill(&mut self) {
+        let Some(pid) = self.pid.take() else {
+            return;
+        };
+        #[cfg(unix)]
+        if let Ok(pgid) = libc::pid_t::try_from(pid)
+            && pgid > 0
+        {
+            // SAFETY: kill(2) dereferences no pointers; a negative pid targets
+            // the group this gate created with process_group(0).
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+        }
+        // Elsewhere `kill_on_drop` on the child covers the leader.
+        #[cfg(not(unix))]
+        let _ = pid;
+    }
+}
+
+impl Drop for GateProcessGroup {
+    fn drop(&mut self) {
+        self.kill();
     }
 }
 
@@ -1360,6 +1490,7 @@ mod tests {
             program: "bash".to_string(),
             args: vec!["-lc".to_string(), "echo ok".to_string()],
             cwd: None,
+            timeout_ms: None,
         };
 
         let gate = custom_gate(&ctx, &custom).expect("custom gate");
@@ -1609,5 +1740,139 @@ mod tests {
             "stdout should include the test listing: {:?}",
             output.stdout
         );
+    }
+
+    /// Headless Chrome (`--print-to-pdf` / `--dump-dom`) writes its output and
+    /// then never exits while a helper keeps stdout/stderr open. This script
+    /// reproduces that shape deterministically: a leader plus a background
+    /// child, both holding the gate's pipes, neither ever exiting.
+    #[cfg(unix)]
+    fn hung_gate_script(pidfile: &Path) -> String {
+        format!(
+            "sleep 600 & echo $! > '{p}'; echo $$ >> '{p}'; echo started; wait",
+            p = pidfile.display()
+        )
+    }
+
+    #[cfg(unix)]
+    async fn read_gate_pids(pidfile: &Path) -> Vec<libc::pid_t> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let pids: Vec<libc::pid_t> = fs::read_to_string(pidfile)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| line.trim().parse().ok())
+                .collect();
+            if pids.len() >= 2 {
+                return pids;
+            }
+            assert!(Instant::now() < deadline, "hung gate never started");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[cfg(unix)]
+    async fn assert_pids_gone(pids: &[libc::pid_t]) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            // SAFETY: signal 0 only probes for existence.
+            let alive: Vec<_> = pids
+                .iter()
+                .copied()
+                .filter(|pid| unsafe { libc::kill(*pid, 0) } == 0)
+                .collect();
+            if alive.is_empty() {
+                return;
+            }
+            if Instant::now() >= deadline {
+                for pid in &alive {
+                    // SAFETY: best-effort cleanup of the leaked test processes.
+                    unsafe {
+                        libc::kill(*pid, libc::SIGKILL);
+                    }
+                }
+                panic!("verifier gate processes still running: {alive:?}");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_verifiers_hung_gate_times_out_and_kills_its_process_group() {
+        let tmp = tempdir().expect("tempdir");
+        let pidfile = tmp.path().join("pids");
+        let ctx = ToolContext::new(tmp.path());
+        let started = Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(20),
+            RunVerifiersTool.execute(
+                json!({
+                    "profile": "auto",
+                    "commands": [{
+                        "name": "hung",
+                        "program": "/bin/sh",
+                        "args": ["-c", hung_gate_script(&pidfile)],
+                        "timeout_ms": 500
+                    }]
+                }),
+                &ctx,
+            ),
+        )
+        .await
+        .expect("a hung verifier gate must not hang run_verifiers")
+        .expect("execute");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "timed-out gate took {:?}",
+            started.elapsed()
+        );
+
+        let parsed: RunVerifiersOutput =
+            serde_json::from_str(&result.content).expect("verifier output json");
+        assert_eq!(parsed.failed, 1, "result: {}", result.content);
+        let gate = &parsed.gates[0];
+        assert_eq!(gate.status, GateStatus::Failed);
+        assert!(
+            gate.stderr.contains("timed out"),
+            "stderr: {:?}",
+            gate.stderr
+        );
+        assert!(
+            gate.stdout.contains("started"),
+            "partial stdout kept: {:?}",
+            gate.stdout
+        );
+        assert_pids_gone(&read_gate_pids(&pidfile).await).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_verifiers_dropped_on_stop_kills_running_gates() {
+        let tmp = tempdir().expect("tempdir");
+        let pidfile = tmp.path().join("pids");
+        let ctx = ToolContext::new(tmp.path());
+        let script = hung_gate_script(&pidfile);
+        // Stop drops the active tool future (turn_loop's biased select on the
+        // cancel token). That drop must take the gate's processes with it.
+        let task = tokio::spawn(async move {
+            RunVerifiersTool
+                .execute(
+                    json!({
+                        "profile": "auto",
+                        "commands": [{
+                            "name": "hung",
+                            "program": "/bin/sh",
+                            "args": ["-c", script]
+                        }]
+                    }),
+                    &ctx,
+                )
+                .await
+        });
+        let pids = read_gate_pids(&pidfile).await;
+        task.abort();
+        let _ = task.await;
+        assert_pids_gone(&pids).await;
     }
 }
