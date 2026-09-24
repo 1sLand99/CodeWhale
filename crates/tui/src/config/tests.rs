@@ -1673,7 +1673,10 @@ fn pinned_search_provider_wins_over_provider_native_search() {
             parse("[search]\nprovider = \"tavily\"\nnative = true\n").search_native(),
             Some(true)
         );
-        assert_eq!(parse("[search]\nnative = false\n").search_native(), Some(false));
+        assert_eq!(
+            parse("[search]\nnative = false\n").search_native(),
+            Some(false)
+        );
     });
     with_search_resolution_env(&[("CODEWHALE_SEARCH_PROVIDER", "searxng")], || {
         assert_eq!(Config::default().search_native(), Some(false));
