@@ -2088,10 +2088,10 @@ mod tests {
     }
 
     #[test]
-    fn feat015_all_production_entries_remain_legacy() {
-        // FEAT-015 shipped no production contextual command, so the assertion
-        // below used to exclude nothing. FEAT-018 migrates the utility group;
-        // FEAT-019 migrates the memory group; FEAT-021 migrates the project group.
+    fn feat015_unmigrated_production_entries_remain_legacy() {
+        // FEAT-015 shipped no production contextual command. Later FEATs
+        // register bounded portable groups/slices; every entry outside the
+        // explicit list must still use the original legacy dispatcher.
         const MIGRATED_GROUPS: &[&str] = &[
             // FEAT-018 utility group.
             "attach",
@@ -2136,6 +2136,15 @@ mod tests {
             "title",
             // FEAT-025 session export slice.
             "export",
+            // FEAT-029 debug diagnostics slice (mutation stays legacy).
+            "tokens",
+            "cost",
+            "balance",
+            "cache",
+            "preview-request",
+            "tools",
+            "system",
+            "context",
         ];
         for info in command_infos() {
             if info.name == "feat015ctx" || MIGRATED_GROUPS.contains(&info.name) {
