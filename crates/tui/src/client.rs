@@ -5457,7 +5457,10 @@ pub(crate) fn chat_messages_for_test(messages: &[codewhale_models::Message]) -> 
     chat::build_chat_messages(None, messages, "gpt-4o")
 }
 
-pub(crate) use chat::{CacheWarmupKey, PromptInspection};
+pub(crate) use chat::{
+    CacheWarmupKey, PromptInspection, PromptLayerInspection, PromptLayerStability,
+    ToolResultInspection, TurnMetaInspection,
+};
 pub(crate) use prepared::{
     CallerStreamMode, EndpointIdentity, PreparedOutboundRequest, RouteShape, WireBodyView,
     WireDialect, canonical_json,

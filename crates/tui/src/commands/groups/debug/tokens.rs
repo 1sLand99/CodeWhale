@@ -1,5 +1,6 @@
 //! Token/cost introspection and context commands.
 
+use crate::commands::contract::DebugCostComponents as CostComponents;
 use crate::compaction::estimate_input_tokens_conservative;
 use crate::tui::app::{App, AppAction};
 use codewhale_localization::{Locale, MessageId, tr};
@@ -143,59 +144,8 @@ fn cost_report_amount(app: &App, locale: Locale) -> String {
     }
 }
 
-/// The `/cost` headline decomposed into the exact terms it is computed from.
-///
-/// The headline is `max(parent turns + sub-agents, display high-water)` in the
-/// display currency (the #244 monotonic guarantee). Those are its only inputs,
-/// so the three components below always sum back to it — asserted by test, so
-/// the breakdown can never drift from the number above it (#4939).
-struct CostComponents {
-    /// Accumulated parent-turn spend.
-    parent_turns: f64,
-    /// Accumulated sub-agent/background spend.
-    subagents: f64,
-    /// Amount by which the monotonic display floor exceeds the live
-    /// accumulators after a downward reconciliation (#244). Zero whenever the
-    /// live sum is the headline.
-    display_floor: f64,
-}
-
-impl CostComponents {
-    fn compute(app: &App) -> Self {
-        // Each term is sanitized exactly the way the accumulator fold
-        // sanitizes it, so `current` here is bitwise the `current` inside
-        // `displayed_session_cost_for_currency` and the floor is exact.
-        fn sanitize(amount: f64) -> f64 {
-            if amount.is_finite() && amount >= 0.0 {
-                amount
-            } else {
-                0.0
-            }
-        }
-        let currency = app.cost_display_currency(app.cost_currency);
-        let parent_turns = sanitize(app.session_cost_for_currency(currency));
-        let subagents = sanitize(app.subagent_cost_for_currency(currency));
-        let current = {
-            let sum = parent_turns + subagents;
-            if sum.is_finite() { sum } else { f64::MAX }
-        };
-        let headline = app.displayed_session_cost_for_currency(app.cost_currency);
-        Self {
-            parent_turns,
-            subagents,
-            display_floor: (headline - current).max(0.0),
-        }
-    }
-
-    /// The recomposed headline. Test-only: production renders the components
-    /// and the headline from the same state, and the tests assert this sum
-    /// equals the displayed headline exactly.
-    #[cfg(test)]
-    fn sum(&self) -> f64 {
-        self.parent_turns + self.subagents + self.display_floor
-    }
-}
-
+// Host-owned cost component calculation is shared with the diagnostics
+// adapter; this command continues to own the exact user-facing composition.
 /// Append the headline decomposition: the accumulator components the headline
 /// is computed from, then parent-turn spend attributed per route from the
 /// audited turn-telemetry ring.

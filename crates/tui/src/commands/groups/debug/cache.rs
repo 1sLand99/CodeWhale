@@ -3,10 +3,11 @@
 use std::time::Instant;
 
 use super::CommandResult;
-use crate::client::{CacheWarmupKey, PromptInspection, inspect_prompt_for_request};
+use crate::client::{CacheWarmupKey, PromptInspection};
+use crate::commands::contract::observe_cache_for_app;
 use crate::tui::app::{App, AppAction, TurnCacheRecord};
+use codewhale_command_contract::facets::DebugCacheInspectionUnavailable;
 use codewhale_localization::{Locale, MessageId, tr};
-use codewhale_models::MessageRequest;
 
 /// Show per-turn DeepSeek prefix-cache telemetry for the last N turns (#263).
 ///
@@ -75,38 +76,17 @@ fn format_cache_inspect(app: &mut App, verbose: bool, json_mode: bool) -> String
         return "cache inspect: --json and --verbose cannot be combined".to_string();
     }
 
-    let Some(target) = app.cache_replay_target() else {
-        return "cache inspect: Auto has no concrete route yet; send a turn first".to_string();
+    let (inspection, current_warmup_key) = match observe_cache_for_app(app) {
+        Ok(observation) => observation,
+        Err(DebugCacheInspectionUnavailable::NoConcreteRoute) => {
+            return "cache inspect: Auto has no concrete route yet; send a turn first".to_string();
+        }
+        Err(DebugCacheInspectionUnavailable::MissingCapturedEndpoint) => {
+            return "cache inspect: the restored Auto route has no captured endpoint; send a turn first"
+                .to_string();
+        }
     };
-    let Some(replay_base_url) = target.base_url.as_deref() else {
-        return "cache inspect: the restored Auto route has no captured endpoint; send a turn first"
-            .to_string();
-    };
-    let reasoning_effort = app
-        .reasoning_effort_api_value_for_replay(target.provider, replay_base_url, &target.model)
-        .map(str::to_string);
-    let request = MessageRequest {
-        model: target.model.clone(),
-        messages: app.api_messages.as_ref().clone(),
-        max_tokens: 0,
-        system: app.system_prompt.clone(),
-        tools: app.session.last_tool_catalog.clone(),
-        tool_choice: None,
-        metadata: None,
-        thinking: None,
-        reasoning_effort,
-        stream: Some(true),
-        temperature: None,
-        top_p: None,
-    };
-    let inspection = inspect_prompt_for_request(&request);
     let previous = app.session.last_cache_inspection.as_ref();
-    let current_warmup_key = CacheWarmupKey::from_inspection(
-        &target.provider_identity,
-        &target.model,
-        replay_base_url,
-        &inspection,
-    );
     let warmup_status =
         format_warmup_status(app.session.last_warmup_key.as_ref(), &current_warmup_key);
     if json_mode {
