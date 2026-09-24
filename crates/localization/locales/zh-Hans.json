@@ -360,6 +360,7 @@
   "ModelPickerAutoLocalHint": "每轮 · 本地启发式 · 不发送路由请求",
   "ModelPickerAutoLastRoute": "上次 {provider} · {model}",
   "AutoRouteSelectedToast": "Auto: {provider} / {model}（{source}）· Ctrl+O：路由详情",
+  "ModelPickerNotListed": "{provider} 未列出（{date} 检查）",
   "HelpGroupCommonCommands": "常用命令",
   "HelpGroupAllCommands": "全部命令",
   "HelpTitle": "帮助",

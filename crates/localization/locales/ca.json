@@ -357,6 +357,7 @@
   "ModelPickerAutoLocalHint": "per torn · heurística local · sense petició al router",
   "ModelPickerAutoLastRoute": "última {provider} · {model}",
   "AutoRouteSelectedToast": "Auto: {provider} / {model} via {source} · Ctrl+O: detalls de la ruta",
+  "ModelPickerNotListed": "no llistat per {provider} (comprovat {date})",
   "HelpGroupCommonCommands": "Ordres habituals",
   "HelpGroupAllCommands": "Totes les ordres",
   "HelpTitle": "Ajuda",

@@ -10,8 +10,9 @@ setup and adding a model are deliberately separate operations.
    is configured when `config::provider_is_configured` finds the active route,
    usable auth/external consent, or meaningful explicit provider configuration
    (`provider_is_configured` in `crates/tui/src/config.rs`; grep the symbol
-   rather than trusting a line number). An enabled model is a
-   `(provider identity, model id)` entry in `Settings::enabled_models`; the
+   rather than trusting a line number). An enabled model was a
+   `(provider identity, model id)` entry in `Settings::enabled_models` (no
+   longer read since #6533; see item 10); the
    current model is `App::{api_provider,model,auto_model}`; a saved
    provider-specific preference is `Settings::provider_models`; and the startup
    default is `Settings::default_provider` plus the provider-scoped preference
@@ -74,7 +75,10 @@ setup and adding a model are deliberately separate operations.
    selected model (`provider_readiness.rs`, `tui/model_picker.rs:971-1018`).
    `configured`, `ready`, `managed`, and `unavailable` are not synonyms.
 
-10. **Migration is additive.** `enabled_models` is optional and serde-defaulted,
+10. **Migration is additive.** *Superseded by #6533: `enabled_models` is still
+    parsed so old files load, but nothing reads or writes it; the picker's
+    default view ranks by recent use (`crates/tui/src/model_relevance.rs`).*
+    `enabled_models` is optional and serde-defaulted,
     so old files load unchanged. At startup, all existing `provider_models` and
     the current provider/model are seeded into the in-memory enabled map. The
     next successful selection writes both the old provider preference and the

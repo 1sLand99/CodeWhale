@@ -360,6 +360,7 @@
   "ModelPickerAutoLocalHint": "ターンごと · ローカル判定 · ルーター送信なし",
   "ModelPickerAutoLastRoute": "前回 {provider} · {model}",
   "AutoRouteSelectedToast": "Auto: {provider} / {model}（{source}）· Ctrl+O: ルート詳細",
+  "ModelPickerNotListed": "{provider} の一覧にありません（{date} 確認）",
   "HelpGroupCommonCommands": "よく使うコマンド",
   "HelpGroupAllCommands": "すべてのコマンド",
   "HelpTitle": "ヘルプ",

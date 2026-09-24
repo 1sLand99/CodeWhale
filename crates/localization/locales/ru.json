@@ -357,6 +357,7 @@
   "ModelPickerAutoLocalHint": "на ход · локальная эвристика · без запроса к маршрутизатору",
   "ModelPickerAutoLastRoute": "последний {provider} · {model}",
   "AutoRouteSelectedToast": "Auto: {provider} / {model} через {source} · Ctrl+O: детали маршрута",
+  "ModelPickerNotListed": "нет в списке {provider} (проверено {date})",
   "HelpGroupCommonCommands": "Частые команды",
   "HelpGroupAllCommands": "Все команды",
   "HelpTitle": "Справка",

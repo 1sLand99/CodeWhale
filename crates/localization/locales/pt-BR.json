@@ -360,6 +360,7 @@
   "ModelPickerAutoLocalHint": "por turno · heurística local · sem solicitação ao roteador",
   "ModelPickerAutoLastRoute": "última {provider} · {model}",
   "AutoRouteSelectedToast": "Auto: {provider} / {model} via {source} · Ctrl+O: detalhes da rota",
+  "ModelPickerNotListed": "não listado por {provider} (verificado em {date})",
   "HelpGroupCommonCommands": "Comandos comuns",
   "HelpGroupAllCommands": "Todos os comandos",
   "HelpTitle": "Ajuda",
