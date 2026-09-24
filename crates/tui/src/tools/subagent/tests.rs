@@ -255,7 +255,7 @@ fn child_approval_ids_stay_unique_within_and_across_manager_boots() {
 
     let mut first_ids = Vec::new();
     for _ in 0..3 {
-        let (id, _rx) = first.register_child_approval("resumed-agent-7");
+        let (id, _rx) = first.register_child_approval("resumed-agent-7", "bash", "fixture");
         assert!(
             SubAgentManager::is_child_approval_id(&id),
             "routing hint must still recognize {id}"
@@ -274,7 +274,7 @@ fn child_approval_ids_stay_unique_within_and_across_manager_boots() {
     let mut second = SubAgentManager::new(tmp.path().to_path_buf(), 4);
     let mut second_ids = Vec::new();
     for _ in 0..3 {
-        let (id, _rx) = second.register_child_approval("resumed-agent-7");
+        let (id, _rx) = second.register_child_approval("resumed-agent-7", "bash", "fixture");
         assert!(SubAgentManager::is_child_approval_id(&id));
         second_ids.push(id);
     }
@@ -18886,6 +18886,158 @@ async fn agent_wait_wakes_when_child_settles() {
     assert_eq!(settled[0]["agent_id"], json!(agent_id));
     assert_eq!(settled[0]["status"], json!("completed"));
     assert_eq!(payload["timed_out"], json!(false));
+    assert!(
+        payload.get("needs_person").is_none(),
+        "nothing pending, so the payload shape is unchanged"
+    );
+}
+
+#[tokio::test]
+async fn agent_wait_returns_early_with_needs_approval() {
+    let mut inner = SubAgentManager::new(PathBuf::from("."), 1);
+    let agent_id = insert_running_agent(&mut inner, "test_agent_wait_needs_person");
+    // The child is blocked on the Ask prompt for a shell call.
+    let (_approval_id, _rx) =
+        inner.register_child_approval(&agent_id, "bash", "Tool bash requires approval\nand more");
+    let manager = Arc::new(RwLock::new(inner));
+
+    let context = ToolContext::new(".");
+    let started = Instant::now();
+    let result = wait_for_subagents_from_input(
+        &json!({"action": "wait", "timeout_secs": 30}),
+        Arc::clone(&manager),
+        &context,
+    )
+    .await
+    .expect("wait should succeed");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "wait must return early"
+    );
+    let payload: serde_json::Value =
+        serde_json::from_str(&result.content).expect("wait payload should be json");
+    let needs = payload["needs_person"].as_array().expect("needs_person");
+    assert_eq!(needs.len(), 1);
+    assert_eq!(needs[0]["agent_id"], json!(agent_id));
+    assert_eq!(needs[0]["kind"], json!("needs_approval"));
+    assert_eq!(needs[0]["tool"], json!("bash"));
+    assert_eq!(
+        needs[0]["summary"],
+        json!("Tool bash requires approval and more"),
+        "the summary is one line"
+    );
+    assert_eq!(payload["timed_out"], json!(false));
+    assert!(
+        payload["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("Tell the user")),
+        "{payload}"
+    );
+}
+
+#[tokio::test]
+async fn agent_wait_does_not_rewake_on_reported_request() {
+    let mut inner = SubAgentManager::new(PathBuf::from("."), 1);
+    let agent_id = insert_running_agent(&mut inner, "test_agent_wait_no_rewake");
+    let (_approval_id, _rx) = inner.register_child_approval(&agent_id, "bash", "held");
+    let manager = Arc::new(RwLock::new(inner));
+    let context = ToolContext::new(".");
+
+    let first = wait_for_subagents_from_input(
+        &json!({"action": "wait", "timeout_secs": 30}),
+        Arc::clone(&manager),
+        &context,
+    )
+    .await
+    .expect("first wait");
+    let first: serde_json::Value = serde_json::from_str(&first.content).unwrap();
+    assert_eq!(first["needs_person"].as_array().map(Vec::len), Some(1));
+
+    let second = wait_for_subagents_from_input(
+        &json!({"action": "wait", "timeout_secs": 1}),
+        Arc::clone(&manager),
+        &context,
+    )
+    .await
+    .expect("second wait");
+    let second: serde_json::Value = serde_json::from_str(&second.content).unwrap();
+    assert_eq!(second["timed_out"], json!(true), "{second}");
+    assert!(second.get("needs_person").is_none());
+
+    // `until=all` shares the cursor.
+    let joined = coord::dispatch_wait(
+        &json!({"until": "all", "timeout_secs": 1}),
+        Arc::clone(&manager),
+        &context,
+    )
+    .await
+    .expect("join");
+    let joined: serde_json::Value = serde_json::from_str(&joined.content).unwrap();
+    assert!(joined.get("needs_person").is_none(), "{joined}");
+
+    // A new request wakes the join.
+    let (_next_id, _next_rx) =
+        manager
+            .write()
+            .await
+            .register_child_approval(&agent_id, "write_file", "held again");
+    let joined = coord::dispatch_wait(
+        &json!({"until": "all", "timeout_secs": 30}),
+        Arc::clone(&manager),
+        &context,
+    )
+    .await
+    .expect("join");
+    let joined: serde_json::Value = serde_json::from_str(&joined.content).unwrap();
+    assert_eq!(
+        joined["needs_person"][0]["tool"],
+        json!("write_file"),
+        "{joined}"
+    );
+}
+
+#[tokio::test]
+async fn status_waiting_is_derived_from_pending_store() {
+    let mut inner = SubAgentManager::new(PathBuf::from("."), 1);
+    let agent_id = insert_running_agent(&mut inner, "test_status_pending_store");
+    inner.register_worker_for_session(
+        make_worker_spec(&agent_id, PathBuf::from(".")),
+        "workspace",
+        None,
+    );
+    let (approval_id, _rx) = inner.register_child_approval(&agent_id, "bash", "held");
+    // The WaitingForUser progress write was skipped under contention; the
+    // store still makes the record waiting, with the request and the action.
+    let record = inner.get_worker_record(&agent_id).expect("worker record");
+    assert_eq!(record.status, AgentWorkerStatus::WaitingForUser);
+    let pending = record.pending_request.expect("pending request");
+    assert_eq!(pending.tool, "bash");
+    assert_eq!(pending.kind, "needs_approval");
+    assert_eq!(record.recommended_action.action, "tell_user");
+    assert!(record.recommended_action.tool.is_none());
+    assert!(
+        record
+            .recommended_action
+            .reason
+            .contains("you cannot approve it"),
+        "{}",
+        record.recommended_action.reason
+    );
+
+    // A stale WaitingForUser from the progress path flips off as soon as the
+    // decision lands, with no further progress event.
+    inner.record_worker_event(
+        &agent_id,
+        AgentWorkerStatus::WaitingForUser,
+        Some("waiting".to_string()),
+        None,
+        Some("bash".to_string()),
+    );
+    assert!(inner.resolve_child_approval(&approval_id, ChildApprovalOutcome::Approved));
+    let record = inner.get_worker_record(&agent_id).expect("worker record");
+    assert_ne!(record.status, AgentWorkerStatus::WaitingForUser);
+    assert!(record.pending_request.is_none());
+    assert_ne!(record.recommended_action.action, "tell_user");
 }
 
 #[tokio::test]
@@ -22810,6 +22962,72 @@ mod child_permission_gate {
         }
     }
 
+    #[test]
+    fn child_approval_keys_use_agent_scoped_normal_scheme() {
+        let (exact_a, grouping_a) = child_approval_keys(
+            "agent_one",
+            "bash",
+            &json!({"command": "cargo test -p demo"}),
+        );
+        let (exact_b, grouping_b) = child_approval_keys(
+            "agent_one",
+            "bash",
+            &json!({"command": "cargo test -p demo --lib"}),
+        );
+        assert_eq!(grouping_a, grouping_b, "one command family, one grant");
+        assert_ne!(exact_a, exact_b, "denials stay exact");
+        for key in [&exact_a, &grouping_a, &exact_b, &grouping_b] {
+            assert!(key.starts_with("agent:agent_one:shell:"), "{key}");
+            assert!(!key.contains(":approval:"), "{key}");
+        }
+    }
+
+    #[test]
+    fn child_grant_does_not_match_parent_or_sibling() {
+        let input = json!({"command": "cargo test -p demo"});
+        let (_, child) = child_approval_keys("agent_one", "bash", &input);
+        let (_, sibling) = child_approval_keys("agent_two", "bash", &input);
+        let parent = crate::tools::approval_cache::build_approval_grouping_key("bash", &input).0;
+        assert_ne!(child, sibling);
+        assert_ne!(child, parent);
+        assert!(
+            child.ends_with(&parent),
+            "child key reuses the normal scheme"
+        );
+    }
+
+    #[tokio::test]
+    async fn child_prompt_carries_agent_scoped_keys() {
+        let (registry, mut rx, manager) = worker_registry(ApprovalMode::Suggest, false, true, None);
+        let input = json!({"command": "echo gated"});
+        let expected = child_approval_keys("agent_gate", "bash", &input);
+        let manager_for_answer = Arc::clone(&manager);
+        let answerer = tokio::spawn(async move {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while let Some(event) = rx.recv().await {
+                    if let Event::ApprovalRequired {
+                        id,
+                        approval_key,
+                        approval_grouping_key,
+                        ..
+                    } = event
+                    {
+                        manager_for_answer
+                            .write()
+                            .await
+                            .resolve_child_approval(&id, ChildApprovalOutcome::Denied);
+                        return (approval_key, approval_grouping_key);
+                    }
+                }
+                panic!("channel closed before the child prompt");
+            })
+            .await
+            .expect("child prompt arrives")
+        });
+        let _ = registry.execute("agent_gate", "bash", input).await;
+        assert_eq!(answerer.await.expect("answerer"), expected);
+    }
+
     #[tokio::test]
     async fn closed_child_approval_waiter_persists_unavailable_not_cancelled() {
         let (registry, mut rx, manager) = worker_registry(ApprovalMode::Suggest, false, true, None);
@@ -22828,6 +23046,214 @@ mod child_permission_gate {
         assert!(err.to_string().contains("could no longer reach"), "{err}");
         assert_completed_receipt(&receipt_store, &session_id, ApprovalOutcome::Unavailable);
         assert_eq!(manager.read().await.pending_child_approvals(), 0);
+    }
+
+    /// Wait for the non-droppable progress that ends `approval_id`'s wait.
+    async fn next_wait_end(
+        rx: &mut tokio::sync::mpsc::Receiver<Event>,
+        approval_id: &str,
+    ) -> AgentWorkerStatus {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(event) = rx.recv().await {
+                if let Event::AgentProgress { activity, .. } = event
+                    && activity.approval_id.as_deref() == Some(approval_id)
+                    && activity.worker_status != AgentWorkerStatus::WaitingForUser
+                {
+                    return activity.worker_status;
+                }
+            }
+            panic!("event channel closed before the wait ended");
+        })
+        .await
+        .expect("the end of the wait reaches hosts")
+    }
+
+    /// A running agent in the gate's own manager, so cancel and status paths
+    /// see the same pending store the gate writes.
+    async fn running_gate_agent(
+        registry: &SubAgentToolRegistry,
+        manager: &SharedSubAgentManager,
+        name: &str,
+    ) -> String {
+        let mut manager = manager.write().await;
+        let agent_id = insert_running_agent(&mut manager, name);
+        manager.register_worker_for_session(
+            make_worker_spec(&agent_id, registry.gate_runtime.context.workspace.clone()),
+            "guardian-test-session",
+            None,
+        );
+        agent_id
+    }
+
+    #[tokio::test]
+    async fn cancel_while_pending_withdraws_request_with_cancelled_receipt() {
+        let (registry, mut rx, manager) = worker_registry(ApprovalMode::Suggest, false, true, None);
+        let (receipt_store, session_id) = receipt_context(&registry);
+        let agent_id = running_gate_agent(&registry, &manager, "cancel_pending").await;
+        let registry = Arc::new(registry);
+        let task = tokio::spawn({
+            let registry = Arc::clone(&registry);
+            let agent_id = agent_id.clone();
+            async move {
+                let _ = registry
+                    .execute(&agent_id, "bash", json!({"command": "echo gated"}))
+                    .await;
+            }
+        });
+        let approval_id = next_child_approval_id(&mut rx).await;
+        {
+            let mut manager = manager.write().await;
+            let record = manager.get_worker_record(&agent_id).expect("record");
+            assert_eq!(record.status, AgentWorkerStatus::WaitingForUser);
+            // The agent's task is the gate's task, so cancel aborts the wait.
+            if let Some(old) = manager
+                .agents
+                .get_mut(&agent_id)
+                .and_then(|agent| agent.task_handle.replace(task))
+            {
+                old.abort();
+            }
+            manager.cancel_agent(&agent_id).expect("cancel");
+            assert_eq!(manager.pending_child_approvals(), 0);
+            let record = manager.get_worker_record(&agent_id).expect("record");
+            assert_ne!(
+                record.status,
+                AgentWorkerStatus::WaitingForUser,
+                "a cancelled agent never reports waiting on a person"
+            );
+            assert!(record.pending_request.is_none());
+            assert_ne!(record.recommended_action.action, "tell_user");
+        }
+        let status = next_wait_end(&mut rx, &approval_id).await;
+        assert!(
+            status.is_terminal(),
+            "withdrawal for an ended agent: {status:?}"
+        );
+        assert_completed_receipt(&receipt_store, &session_id, ApprovalOutcome::Cancelled);
+        // A late answer finds nobody waiting and applies to nothing.
+        assert!(
+            !manager
+                .write()
+                .await
+                .resolve_child_approval(&approval_id, ChildApprovalOutcome::Approved)
+        );
+    }
+
+    #[tokio::test]
+    async fn wall_deadline_ends_pending_wait_with_receipt() {
+        let (registry, mut rx, manager) = worker_registry(ApprovalMode::Suggest, false, true, None);
+        let (receipt_store, session_id) = receipt_context(&registry);
+        let work_deadline = Instant::now() + Duration::from_millis(300);
+        let ran = run_tool_with_person_aware_timeout(
+            Duration::from_secs(60),
+            Some(work_deadline),
+            &registry.person_wait,
+            registry.execute("agent_gate", "bash", json!({"command": "echo gated"})),
+        )
+        .await;
+        assert!(
+            ran.is_none(),
+            "the wall-clock deadline still ends the agent"
+        );
+        let approval_id = next_child_approval_id(&mut rx).await;
+        let status = next_wait_end(&mut rx, &approval_id).await;
+        assert!(status.is_terminal(), "{status:?}");
+        assert_eq!(manager.read().await.pending_child_approvals(), 0);
+        assert_completed_receipt(&receipt_store, &session_id, ApprovalOutcome::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn pending_approval_longer_than_tool_timeout_is_answered_and_runs() {
+        let (registry, mut rx, manager) = worker_registry(ApprovalMode::Suggest, false, true, None);
+        let (receipt_store, session_id) = receipt_context(&registry);
+        // Wide margins: after approval the call spawns a real shell, which
+        // can take well over 200ms on a loaded Windows runner.
+        let tool_timeout = Duration::from_secs(2);
+        let manager_for_answer = Arc::clone(&manager);
+        let answerer = tokio::spawn(async move {
+            let id = next_child_approval_id(&mut rx).await;
+            // The person takes several tool timeouts to decide.
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            assert!(
+                manager_for_answer
+                    .write()
+                    .await
+                    .resolve_child_approval(&id, ChildApprovalOutcome::Approved)
+            );
+        });
+        let output = run_tool_with_person_aware_timeout(
+            tool_timeout,
+            None,
+            &registry.person_wait,
+            registry.execute("agent_gate", "bash", json!({"command": "echo gated-ran"})),
+        )
+        .await
+        .expect("the approval wait never spends the tool timeout")
+        .expect("the approved call runs");
+        answerer.await.expect("answerer");
+        assert!(output.contains("gated-ran"), "{output}");
+        assert_completed_receipt(&receipt_store, &session_id, ApprovalOutcome::ApprovedOnce);
+
+        // Without a person wait the same bound still fires.
+        let clock = PersonWaitClock::default();
+        let slow = run_tool_with_person_aware_timeout(
+            tool_timeout,
+            None,
+            &clock,
+            tokio::time::sleep(Duration::from_secs(3)),
+        )
+        .await;
+        assert!(slow.is_none(), "ordinary tool work keeps its timeout");
+    }
+
+    #[tokio::test]
+    async fn session_close_withdraws_old_children_requests() {
+        let (registry, _rx, manager) = worker_registry(ApprovalMode::Suggest, false, true, None);
+        let agent_id = running_gate_agent(&registry, &manager, "old_session_child").await;
+        let mut manager = manager.write().await;
+        let (_id, receiver) = manager.register_child_approval(&agent_id, "bash", "held");
+        assert!(manager.finalize_session_close_for_session("workspace") > 0);
+        assert_eq!(
+            manager.pending_child_approvals(),
+            0,
+            "a conversation boundary ends its children's waits"
+        );
+        assert!(
+            receiver.await.is_err(),
+            "a live waiter sees its channel close"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_event_channel_still_delivers_child_approval_retirement() {
+        let (registry, _rx, _manager) = worker_registry(ApprovalMode::Suggest, false, true, None);
+        let mut runtime = registry.gate_runtime;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        tx.try_send(Event::status("host is busy")).unwrap();
+        runtime.event_tx = Some(tx);
+        let delivery = announce_child_approval_wait_ended(
+            &runtime,
+            "agent_busy",
+            "agent:agent_busy:approval:boot:1",
+            "bash",
+            AgentWorkerStatus::Cancelled,
+            "agent stopped".to_string(),
+        );
+        tokio::pin!(delivery);
+        assert!(
+            futures_util::poll!(&mut delivery).is_pending(),
+            "retirement waits for channel capacity instead of dropping the event"
+        );
+        assert!(matches!(rx.recv().await, Some(Event::Status { .. })));
+        tokio::time::timeout(Duration::from_secs(1), delivery)
+            .await
+            .expect("retirement is delivered once the host drains");
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Event::AgentProgress { activity, .. })
+                if activity.approval_id.as_deref() == Some("agent:agent_busy:approval:boot:1")
+                    && activity.worker_status == AgentWorkerStatus::Cancelled
+        ));
     }
 
     #[tokio::test]
