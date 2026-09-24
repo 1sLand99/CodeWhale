@@ -8112,12 +8112,83 @@ async fn small_surface_read_only_child_discovers_web_deferred() {
             &mut surface,
             &request_active,
             "Web",
-            json!({"action": "search", "query": "codewhale"}),
+            // Malformed on purpose: a well-formed first use now executes.
+            json!({"not_a_web_field": "codewhale"}),
         )
         .await
-        .expect("same-batch first use hydrates instead of executing");
+        .expect("a malformed first use hydrates instead of executing");
     assert!(same_batch.result.content.contains("deferred"));
     assert!(model_tool_names(model_request_tools(&mut surface)).contains("Web"));
+}
+
+/// First-call tool policy: a read-only investigator's well-formed first call
+/// to a deferred inspection tool runs immediately instead of costing a
+/// discovery turn, while mutation stays refused at dispatch.
+#[tokio::test]
+async fn small_surface_read_only_child_runs_well_formed_deferred_first_call() {
+    let registry = small_surface_registry(FleetRole::Scout);
+    let catalog = registry.deferred_catalog_for_model(&FleetRole::Scout);
+    assert_eq!(
+        catalog
+            .iter()
+            .find(|tool| tool.name == "list_dir")
+            .and_then(|tool| tool.defer_loading),
+        Some(true),
+        "list_dir is a deferred evidence tool for Scouts"
+    );
+    let mut surface = SubAgentToolSurface::new(catalog, &[]);
+    assert!(!model_tool_names(model_request_tools(&mut surface)).contains("list_dir"));
+    let listing = execute_surface_tool(&registry, &mut surface, "list_dir", json!({}))
+        .await
+        .expect("well-formed first call executes");
+    assert!(
+        !listing.contains("was deferred"),
+        "the call ran instead of returning its schema: {listing}"
+    );
+    assert!(model_tool_names(model_request_tools(&mut surface)).contains("list_dir"));
+
+    let hint = execute_surface_tool(
+        &registry,
+        &mut SubAgentToolSurface::new(registry.deferred_catalog_for_model(&FleetRole::Scout), &[]),
+        "list_dir",
+        json!({"directory": "."}),
+    )
+    .await
+    .expect("malformed first call returns the schema");
+    assert!(
+        hint.contains("was deferred") && hint.contains("path"),
+        "{hint}"
+    );
+
+    for mutation in [
+        ("write", json!({"path": "scout.txt", "content": "x"})),
+        (
+            "edit",
+            json!({"path": "scout.txt", "old_string": "x", "new_string": "y"}),
+        ),
+    ] {
+        assert!(
+            execute_surface_tool(&registry, &mut surface, mutation.0, mutation.1)
+                .await
+                .is_err(),
+            "a Scout must not {}",
+            mutation.0
+        );
+    }
+}
+
+/// Tools an assignment names explicitly start on the child's first request.
+#[test]
+fn small_surface_warms_explicitly_allowed_deferred_tools() {
+    let registry = small_surface_registry(FleetRole::Scout);
+    let catalog = registry.deferred_catalog_for_model(&FleetRole::Scout);
+    let mut surface =
+        SubAgentToolSurface::new(catalog, &["list_dir".to_string(), "read".to_string()]);
+    let names = model_tool_names(model_request_tools(&mut surface));
+    assert!(
+        names.contains("list_dir") && names.contains("read"),
+        "{names:?}"
+    );
 }
 
 #[tokio::test]
@@ -8219,7 +8290,7 @@ async fn small_surface_denied_warm_tool_is_not_resurrected() {
     .await
     .expect("search remains available");
     assert!(!searched.contains("\"tool_name\":\"Web\""));
-    assert!(surface.hydrate("Web").is_err());
+    assert!(surface.hydrate("Web", &json!({})).is_err());
 }
 
 fn synthetic_deferred_tool(name: &str, description_bytes: usize) -> Tool {
@@ -8263,7 +8334,7 @@ fn small_surface_caches_are_independent_bounded_and_revalidated() {
     first
         .catalog
         .push(synthetic_deferred_tool("oversized", 17 * 1024));
-    assert!(first.hydrate("oversized").is_err());
+    assert!(first.hydrate("oversized", &json!({})).is_err());
 
     let mut byte_catalog = (0..3)
         .map(|index| synthetic_deferred_tool(&format!("bytes_{index}"), 6 * 1024))
@@ -8307,7 +8378,9 @@ async fn small_surface_successful_cached_use_touches_lru() {
     execute_surface_tool(&registry, &mut surface, "get_goal", json!({}))
         .await
         .expect("cached read tool executes");
-    surface.hydrate(&ninth).expect("ninth activation");
+    surface
+        .hydrate(&ninth, &json!({}))
+        .expect("ninth activation");
     assert!(model_tool_names(model_request_tools(&mut surface)).contains("get_goal"));
 }
 

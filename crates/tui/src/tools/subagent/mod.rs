@@ -34,6 +34,7 @@ use crate::client::CodewhaleClient;
 use crate::config::{MAX_SUBAGENTS, SubagentModelOverride};
 use crate::core::engine::tool_catalog::{
     TOOL_SEARCH_NAME, ToolMode, active_tools_for_request, apply_native_tool_deferral,
+    deferred_first_call_matches_schema, deferred_tool_schema_hydration_result,
     ensure_advanced_tooling, execute_tool_search_with_cache, initial_active_tools,
     is_tool_search_tool, remove_evicted_cache_activations, tool_denied,
     touch_cached_tool_after_execution,
@@ -13236,7 +13237,12 @@ async fn run_subagent(
         ));
     }
     let tool_catalog = tool_registry.deferred_catalog_for_model(&agent_type);
-    let mut tool_surface = SubAgentToolSurface::new(tool_catalog, &[]);
+    // Tools the assignment named explicitly are the ones it expects to use:
+    // put them on the first request instead of behind a discovery hop. The
+    // activation cache keeps its own size bound, and dispatch still enforces
+    // every grant; this changes visibility, never authority.
+    let mut tool_surface =
+        SubAgentToolSurface::new(tool_catalog, allowed_tools.as_deref().unwrap_or_default());
     let mut steps = 0;
     let mut final_result: Option<String> = None;
     let mut pending_inputs: VecDeque<SubAgentInput> = VecDeque::new();
@@ -17026,14 +17032,23 @@ impl SubAgentToolSurface {
         .map_err(|error| anyhow!(error))
     }
 
-    fn hydrate(&mut self, name: &str) -> Result<String> {
+    /// Activate a deferred tool on its first call. `Ok(None)`: the call
+    /// already matches the schema and should execute now. `Ok(Some(text))`:
+    /// the schema the model must retry against.
+    fn hydrate(&mut self, name: &str, input: &Value) -> Result<Option<String>> {
         let activation = self.cache.activate(&self.catalog, &[name.to_string()]);
         remove_evicted_cache_activations(&self.catalog, &mut self.active_names, activation.evicted);
         self.active_names
             .extend(activation.admitted.iter().cloned());
         if activation.admitted.iter().any(|admitted| admitted == name) {
-            return Ok(format!(
-                "Tool `{name}` was deferred and has now been loaded. Retry the call with the newly available schema."
+            let Some(tool) = self.catalog.iter().find(|tool| tool.name == name) else {
+                return Err(anyhow!("Tool {name} left this child's catalog"));
+            };
+            if deferred_first_call_matches_schema(tool, input) {
+                return Ok(None);
+            }
+            return Ok(Some(
+                deferred_tool_schema_hydration_result(tool, input).content,
             ));
         }
         Err(anyhow!(
@@ -18533,11 +18548,10 @@ impl SubAgentToolRegistry {
             ));
         };
         if deferred && !request_active_names.contains(name) {
-            return surface
-                .hydrate(name)
-                .map(|content| RichToolResult::plain(ToolResult::success(content)));
-        }
-        if !request_active_names.contains(name) {
+            if let Some(schema) = surface.hydrate(name, &input)? {
+                return Ok(RichToolResult::plain(ToolResult::success(schema)));
+            }
+        } else if !request_active_names.contains(name) {
             return Err(anyhow!("Tool {name} is not active for this sub-agent"));
         }
         let result = self.execute_full(agent_id, tool_id, name, input).await;

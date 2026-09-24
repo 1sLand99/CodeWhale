@@ -3509,21 +3509,33 @@ impl Engine {
 
             let first_hydration_this_batch =
                 !deferred_tools_hydrated_this_batch.contains(&tool_name);
-            if blocked_error.is_none()
-                && let Some(result) = maybe_hydrate_requested_deferred_tool(
+            let hydration = if blocked_error.is_none() {
+                maybe_hydrate_requested_deferred_tool(
                     &tool_name,
                     &tool_input,
                     tool_catalog,
                     &active_tools_at_batch_start,
                     &mut deferred_tools_hydrated_this_batch,
                 )
+            } else {
+                None
+            };
+            if first_hydration_this_batch && deferred_tools_hydrated_this_batch.contains(&tool_name)
             {
-                if first_hydration_this_batch {
-                    // Retain first-proposal order separately from the set
-                    // used to deduplicate calls in this batch. LRU bounds
-                    // must not depend on randomized HashSet iteration.
-                    deferred_tools_hydrated_in_order.push(tool_name.clone());
+                // Retain first-proposal order separately from the set used to
+                // deduplicate calls in this batch. LRU bounds must not depend
+                // on randomized HashSet iteration. A well-formed first call
+                // executes below and activates exactly like a hydrated one.
+                deferred_tools_hydrated_in_order.push(tool_name.clone());
+                if hydration.is_none() {
+                    emit_tool_audit(json!({
+                        "event": "tool.deferred_first_use_executed",
+                        "tool_id": tool_id.clone(),
+                        "tool_name": tool_name.clone(),
+                    }));
                 }
+            }
+            if let Some(result) = hydration {
                 emit_tool_audit(json!({
                     "event": "tool.schema_hydrated",
                     "tool_id": tool_id.clone(),
@@ -3536,8 +3548,8 @@ impl Engine {
                 // receives it in the tool result below (E3). The audit
                 // record above is the receipt.
                 // The provider did not advertise this schema in the current
-                // request. Hydration is discovery, never execution authority:
-                // return the schema now and require a subsequent model call.
+                // request and the call does not match it: return the schema
+                // now and require a corrected model call.
                 guard_result = Some(result);
             }
 
