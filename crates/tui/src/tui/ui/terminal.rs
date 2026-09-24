@@ -748,8 +748,14 @@ pub(crate) fn next_unfocused(unfocused: bool, evt: &Event) -> bool {
 /// visible (side-by-side macOS/Windows windows, split panes), so freezing
 /// frames on `FocusLost` made streaming output look stuck until the user
 /// clicked, scrolled or typed back into the terminal.
-pub(crate) fn focus_loss_defers_frames(vte_version: Option<&str>) -> bool {
-    vte_version.is_some_and(|v| !v.trim().is_empty())
+///
+/// `VTE_VERSION` only proves VTE is the *immediate* terminal when no
+/// multiplexer sits in between: tmux started from GNOME Terminal inherits it,
+/// yet tmux reports `FocusLost` for a still-visible split pane. Inside tmux
+/// (`TMUX` set) frames keep flowing.
+pub(crate) fn focus_loss_defers_frames(vte_version: Option<&str>, tmux: Option<&str>) -> bool {
+    let inside_tmux = tmux.is_some_and(|v| !v.trim().is_empty());
+    !inside_tmux && vte_version.is_some_and(|v| !v.trim().is_empty())
 }
 
 pub(crate) fn terminal_pause_has_live_owner(app: &App) -> bool {

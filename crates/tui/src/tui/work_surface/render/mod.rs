@@ -634,6 +634,7 @@ fn render_dock_tabs(frame: &mut Frame, area: Rect, app: &mut App) {
     // the running turn, which the posture bar already says with the turn
     // status; a bare `×` here keeps the two from reading as one shortcut.
     let esc_closes = app.work_surface.focused
+        && !super::interaction::opened_detail_on_screen(app)
         && (app.work_surface.explicit_view || !visible_rows_for_panel(app).is_empty());
     let close = if esc_closes && area.width >= 60 {
         format!(" Esc {close_mark} ")
