@@ -1,4 +1,4 @@
-//! FEAT-029 Phase 2: public command-surface parity for the
+//! FEAT-029: public command-surface and localization parity for the
 //! `debug::diagnostics` slice.
 //!
 //! The host regressions prove handler/rendering parity. This module proves the
@@ -107,6 +107,77 @@ fn diagnostics_names_aliases_and_description_bridge_are_exact() {
             assert_eq!(via_alias.info().usage, canonical.usage, "/{alias} usage");
         }
     }
+}
+
+/// Portable description keys resolve to the exact original catalog ids for
+/// every member; metadata does not grant a runtime presentation facet.
+#[test]
+fn diagnostics_description_keys_resolve_to_the_original_catalog() {
+    let keys = [
+        ("tokens", "cmd_tokens_description"),
+        ("cost", "cmd_cost_description"),
+        ("balance", "cmd_balance_description"),
+        ("cache", "cmd_cache_description"),
+        ("preview-request", "cmd_preview_request_description"),
+        ("tools", "cmd_tools_description"),
+        ("system", "cmd_system_description"),
+        ("context", "cmd_context_description"),
+    ];
+    for ((name, _, id), (expected_name, key)) in DIAGNOSTICS.iter().zip(keys) {
+        assert_eq!(*name, expected_name);
+        assert_eq!(super::contract::key_to_message_id(key), Some(*id));
+        assert_eq!(info(name).description_id, *id);
+        assert!(!info(name).description_for(Locale::Ja).is_empty());
+    }
+    assert_eq!(
+        super::contract::key_to_message_id("cmd_not_registered_description"),
+        None
+    );
+}
+
+/// Runtime presentation uses the existing catalog and exact named-placeholder
+/// contract for only the three commands that need it. Literal metadata is
+/// separately bridged above; an unknown key or incomplete replacements fail.
+#[test]
+fn diagnostics_runtime_translation_uses_original_catalog_and_placeholder_contract() {
+    let mut harness = DiagnosticsHarness::new();
+    harness.app.ui_locale = Locale::Ja;
+    let mut bundle = harness.app.command_contexts();
+    let mut parts = bundle
+        .contexts(codewhale_command_contract::handler::CommandCapabilities::PRESENTATION)
+        .into_parts();
+    let presentation = parts.presentation.as_deref_mut().unwrap();
+    assert_eq!(
+        presentation.translate("cmd_cost_coverage", &[("priced", "2"), ("turns", "3")]),
+        Ok("対象: 課金対象ターン 3 件のうち 2 件を算定しました。".into())
+    );
+    assert_eq!(
+        presentation.translate(
+            "cmd_cache_totals",
+            &[
+                ("sum_in", "4"),
+                ("sum_hit", "2"),
+                ("sum_miss", "1"),
+                ("avg", "50%")
+            ],
+        ),
+        Ok("Σ 入力: 4   Σ ヒット: 2   Σ ミス: 1   平均ヒット率: 50%\n".into())
+    );
+    assert_eq!(
+        presentation.translate(
+            "cmd_tokens_context_with_window",
+            &[("used", "6"), ("window", "12"), ("percent", "50.0")],
+        ),
+        Ok("~6 / 12 (50.0%)".into())
+    );
+    assert_eq!(
+        presentation.translate("cmd_cost_coverage", &[("priced", "2")]),
+        Err("invalid translation replacement contract".into())
+    );
+    assert_eq!(
+        presentation.translate("cmd_not_registered", &[]),
+        Err("unknown translation key".into())
+    );
 }
 
 /// Registry position inside the debug group is preserved: the eight
@@ -228,14 +299,13 @@ fn public_dispatch_canonical_and_alias_are_byte_equivalent() {
     assert_eq!(render(&canonical), render(&aliased));
 }
 
-/// `/preview-request` must register as a `Pure` handler that builds no host
-/// envelope, while the seven contextual commands are still on the legacy
-/// dispatch path until their owning phases.
+/// `/preview-request` remains a pure action-only leaf through the public
+/// dispatch path; no prompt, route or provider state is read.
 #[test]
 fn preview_request_remains_the_pure_registration() {
-    // The public dispatcher routes the command through the legacy function
-    // path today; the assertion that it never needs `App` state is behavioural:
-    // an app with no provider and no session still parses the same action.
+    // The public dispatcher still uses the staged function wrapper until
+    // Phase 6 wires the portable registrations. Even here preview creates no
+    // facet bundle and parses the action without provider/session state.
     let mut harness = DiagnosticsHarness::new();
     harness.app.api_provider = ApiProvider::Ollama;
     let result = execute("/preview-request", &mut harness.app);
