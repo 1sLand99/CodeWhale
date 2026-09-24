@@ -2293,5 +2293,14 @@
   "FleetReviewWorkspaceLimits": "{workspace} · agents {enabled} ({concurrent} simultanis, {launch_slots} places d’inici, {admitted} admesos) · recursió agent {agent_depth} / Fleet {fleet_depth} (límit {ceiling})",
   "FleetReviewPolicy": "Els agents no tenen límit de tokens per defecte · API {api_secs}s, senyal d’activitat {heartbeat_secs}s. Inicia amb Fleet → exec; /fleet workers (o /subagents) mostra els agents d’aquesta sessió; /fleet status i codewhale fleet status llegeixen l’historial desat a .codewhale/fleet.jsonl.",
   "SetupProjectPermissionsInvalid": "No s’ha pogut interpretar la configuració del projecte {path} ({reason}). Les seves restriccions de permisos NO són vigents; aquest espai de treball fa servir els teus valors per defecte d’usuari.",
-  "SetupProjectPermissionsOverride": "La configuració del projecte conté {fields}. Els preajustos desen els valors per defecte d’usuari; la configuració del projecte encara pot restringir els permisos en aquest espai de treball."
+  "SetupProjectPermissionsOverride": "La configuració del projecte conté {fields}. Els preajustos desen els valors per defecte d’usuari; la configuració del projecte encara pot restringir els permisos en aquest espai de treball.",
+  "WorkflowCountRunning": "{count} en curs",
+  "WorkflowCountDone": "{count} fets",
+  "WorkflowCountFailed": "{count} fallits",
+  "WorkflowCountCancelled": "{count} cancel·lats",
+  "WorkflowNoTasksYet": "encara sense tasques",
+  "WorkflowSettledOfTotal": "{done}/{total} fets",
+  "WorkflowPhaseCountOne": "{count} fase",
+  "WorkflowPhaseCountMany": "{count} fases",
+  "WorkflowPhaseOrdinal": "fase {n}/{total}"
 }

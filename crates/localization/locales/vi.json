@@ -2293,5 +2293,14 @@
   "FleetReviewWorkspaceLimits": "{workspace} · tác tử {enabled} ({concurrent} đồng thời, {launch_slots} chỗ khởi chạy, {admitted} đã nhận) · đệ quy tác tử {agent_depth} / Fleet {fleet_depth} (giới hạn {ceiling})",
   "FleetReviewPolicy": "Mặc định tác tử không có giới hạn token · API {api_secs}s, nhịp hoạt động {heartbeat_secs}s. Khởi chạy bằng Fleet → exec; /fleet workers (hoặc /subagents) hiển thị tác tử trong phiên này; /fleet status và codewhale fleet status đọc lịch sử đã lưu tại .codewhale/fleet.jsonl.",
   "SetupProjectPermissionsInvalid": "Không thể phân tích cấu hình dự án {path} ({reason}). Các giới hạn quyền của cấu hình này KHÔNG có hiệu lực; không gian làm việc dùng giá trị mặc định của bạn.",
-  "SetupProjectPermissionsOverride": "Cấu hình dự án chứa {fields}. Thiết lập sẵn lưu giá trị mặc định của người dùng; cấu hình dự án vẫn có thể thu hẹp quyền trong không gian làm việc này."
+  "SetupProjectPermissionsOverride": "Cấu hình dự án chứa {fields}. Thiết lập sẵn lưu giá trị mặc định của người dùng; cấu hình dự án vẫn có thể thu hẹp quyền trong không gian làm việc này.",
+  "WorkflowCountRunning": "{count} đang chạy",
+  "WorkflowCountDone": "{count} xong",
+  "WorkflowCountFailed": "{count} thất bại",
+  "WorkflowCountCancelled": "{count} đã hủy",
+  "WorkflowNoTasksYet": "chưa có tác vụ",
+  "WorkflowSettledOfTotal": "{done}/{total} xong",
+  "WorkflowPhaseCountOne": "{count} giai đoạn",
+  "WorkflowPhaseCountMany": "{count} giai đoạn",
+  "WorkflowPhaseOrdinal": "giai đoạn {n}/{total}"
 }

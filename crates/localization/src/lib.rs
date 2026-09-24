@@ -2515,6 +2515,15 @@ pub enum MessageId {
     McpShowUnavailableWhileTurnRuns,
     McpLivePoolRefreshDeferredWhileTurnRuns,
     McpRetryDeferredWhileTurnRuns,
+    WorkflowCountRunning,
+    WorkflowCountDone,
+    WorkflowCountFailed,
+    WorkflowCountCancelled,
+    WorkflowNoTasksYet,
+    WorkflowSettledOfTotal,
+    WorkflowPhaseCountOne,
+    WorkflowPhaseCountMany,
+    WorkflowPhaseOrdinal,
 }
 
 #[allow(dead_code)]
@@ -4815,6 +4824,15 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::McpShowUnavailableWhileTurnRuns,
     MessageId::McpLivePoolRefreshDeferredWhileTurnRuns,
     MessageId::McpRetryDeferredWhileTurnRuns,
+    MessageId::WorkflowCountRunning,
+    MessageId::WorkflowCountDone,
+    MessageId::WorkflowCountFailed,
+    MessageId::WorkflowCountCancelled,
+    MessageId::WorkflowNoTasksYet,
+    MessageId::WorkflowSettledOfTotal,
+    MessageId::WorkflowPhaseCountOne,
+    MessageId::WorkflowPhaseCountMany,
+    MessageId::WorkflowPhaseOrdinal,
 ];
 
 pub fn tr(locale: Locale, id: MessageId) -> Cow<'static, str> {
