@@ -6,11 +6,91 @@
 use codewhale_command_contract::facets::{
     CommandPresentationContext, DebugCostProjection, DebugSystemPrompt, DebugTokenProjection,
 };
-use codewhale_command_contract::handler::CommandContexts;
+use codewhale_command_contract::handler::{CommandCapabilities, CommandContexts, CommandHandler};
+use codewhale_command_contract::metadata::{
+    CommandInfo as ContractInfo, RegisterCommand as ContractRegisterCommand,
+};
 
 use super::CommandResult;
 use crate::commands::portable_reports as reports;
 use crate::tui::app::AppAction;
+
+pub(in crate::commands) struct TokensCmd;
+pub(in crate::commands) struct CostCmd;
+pub(in crate::commands) struct SystemCmd;
+pub(in crate::commands) struct ContextCmd;
+
+const TOKENS_INFO: ContractInfo = ContractInfo {
+    name: "tokens",
+    aliases: &[],
+    usage: "/tokens",
+    description_key: "cmd_tokens_description",
+};
+const COST_INFO: ContractInfo = ContractInfo {
+    name: "cost",
+    aliases: &[],
+    usage: "/cost",
+    description_key: "cmd_cost_description",
+};
+const SYSTEM_INFO: ContractInfo = ContractInfo {
+    name: "system",
+    aliases: &["xitong"],
+    usage: "/system",
+    description_key: "cmd_system_description",
+};
+const CONTEXT_INFO: ContractInfo = ContractInfo {
+    name: "context",
+    aliases: &["ctx"],
+    usage: "/context [report|json|prompt-json|summary]",
+    description_key: "cmd_context_description",
+};
+
+impl ContractRegisterCommand<CommandResult> for TokensCmd {
+    fn info() -> &'static ContractInfo {
+        &TOKENS_INFO
+    }
+    fn handler() -> CommandHandler<CommandResult> {
+        CommandHandler::Contextual {
+            capabilities: CommandCapabilities::DEBUG_DIAGNOSTICS
+                .union(CommandCapabilities::PRESENTATION),
+            handler: |contexts, _| tokens(contexts),
+        }
+    }
+}
+impl ContractRegisterCommand<CommandResult> for CostCmd {
+    fn info() -> &'static ContractInfo {
+        &COST_INFO
+    }
+    fn handler() -> CommandHandler<CommandResult> {
+        CommandHandler::Contextual {
+            capabilities: CommandCapabilities::DEBUG_DIAGNOSTICS
+                .union(CommandCapabilities::PRESENTATION),
+            handler: |contexts, _| cost(contexts),
+        }
+    }
+}
+impl ContractRegisterCommand<CommandResult> for SystemCmd {
+    fn info() -> &'static ContractInfo {
+        &SYSTEM_INFO
+    }
+    fn handler() -> CommandHandler<CommandResult> {
+        CommandHandler::Contextual {
+            capabilities: CommandCapabilities::DEBUG_DIAGNOSTICS,
+            handler: |contexts, _| system_prompt(contexts),
+        }
+    }
+}
+impl ContractRegisterCommand<CommandResult> for ContextCmd {
+    fn info() -> &'static ContractInfo {
+        &CONTEXT_INFO
+    }
+    fn handler() -> CommandHandler<CommandResult> {
+        CommandHandler::Contextual {
+            capabilities: CommandCapabilities::DEBUG_DIAGNOSTICS,
+            handler: context,
+        }
+    }
+}
 
 const DIAGNOSTICS_UNAVAILABLE: &str = "Command capability unavailable: debug_diagnostics";
 const PRESENTATION_UNAVAILABLE: &str = "Command capability unavailable: presentation";

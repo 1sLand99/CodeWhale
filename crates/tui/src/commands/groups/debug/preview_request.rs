@@ -43,6 +43,29 @@
 
 use super::CommandResult;
 use crate::tui::app::AppAction;
+use codewhale_command_contract::handler::CommandHandler;
+use codewhale_command_contract::metadata::{
+    CommandInfo as ContractInfo, RegisterCommand as ContractRegisterCommand,
+};
+
+pub(in crate::commands) struct PreviewRequestCmd;
+
+const CONTRACT_INFO: ContractInfo = ContractInfo {
+    name: "preview-request",
+    aliases: &["dryrun", "preview_request"],
+    usage: "/preview-request [json] [--prompt <text>]",
+    description_key: "cmd_preview_request_description",
+};
+
+impl ContractRegisterCommand<CommandResult> for PreviewRequestCmd {
+    fn info() -> &'static ContractInfo {
+        &CONTRACT_INFO
+    }
+
+    fn handler() -> CommandHandler<CommandResult> {
+        CommandHandler::Pure(preview_request)
+    }
+}
 
 /// Usage line, kept in one place so the error path and the docs agree.
 ///

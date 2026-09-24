@@ -1,7 +1,32 @@
 use crate::commands::CommandResult;
 use crate::commands::portable_reports::{render_tool_snapshot_json, render_tool_snapshot_text};
 use crate::tui::app::AppAction;
-use codewhale_command_contract::handler::CommandContexts;
+use codewhale_command_contract::handler::{CommandCapabilities, CommandContexts, CommandHandler};
+use codewhale_command_contract::metadata::{
+    CommandInfo as ContractInfo, RegisterCommand as ContractRegisterCommand,
+};
+
+pub(in crate::commands) struct ToolsCmd;
+
+const CONTRACT_INFO: ContractInfo = ContractInfo {
+    name: "tools",
+    aliases: &["tool-studio"],
+    usage: "/tools [text|json]",
+    description_key: "cmd_tools_description",
+};
+
+impl ContractRegisterCommand<CommandResult> for ToolsCmd {
+    fn info() -> &'static ContractInfo {
+        &CONTRACT_INFO
+    }
+
+    fn handler() -> CommandHandler<CommandResult> {
+        CommandHandler::Contextual {
+            capabilities: CommandCapabilities::DEBUG_DIAGNOSTICS,
+            handler: tools,
+        }
+    }
+}
 
 pub(super) fn tools(contexts: CommandContexts<'_>, arg: Option<&str>) -> CommandResult {
     let mut parts = contexts.into_parts();

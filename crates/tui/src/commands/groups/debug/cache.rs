@@ -14,7 +14,33 @@ use codewhale_command_contract::facets::{
     CommandDebugDiagnosticsContext, CommandPresentationContext, DebugCacheInspectionObservation,
     DebugCacheInspectionUnavailable,
 };
-use codewhale_command_contract::handler::CommandContexts;
+use codewhale_command_contract::handler::{CommandCapabilities, CommandContexts, CommandHandler};
+use codewhale_command_contract::metadata::{
+    CommandInfo as ContractInfo, RegisterCommand as ContractRegisterCommand,
+};
+
+pub(in crate::commands) struct CacheCmd;
+
+const CONTRACT_INFO: ContractInfo = ContractInfo {
+    name: "cache",
+    aliases: &[],
+    usage: "/cache [count|inspect|stats|zones|warmup]",
+    description_key: "cmd_cache_description",
+};
+
+impl ContractRegisterCommand<CommandResult> for CacheCmd {
+    fn info() -> &'static ContractInfo {
+        &CONTRACT_INFO
+    }
+
+    fn handler() -> CommandHandler<CommandResult> {
+        CommandHandler::Contextual {
+            capabilities: CommandCapabilities::DEBUG_DIAGNOSTICS
+                .union(CommandCapabilities::PRESENTATION),
+            handler: cache,
+        }
+    }
+}
 
 /// Show per-turn prefix-cache telemetry, a static status or an inspection.
 pub fn cache(contexts: CommandContexts<'_>, arg: Option<&str>) -> CommandResult {

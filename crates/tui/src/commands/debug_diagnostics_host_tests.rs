@@ -3,7 +3,6 @@
 //! `commands::debug_diagnostics` filter; mutation-only tests stay in the group.
 
 use super::groups::debug::cache_format::format_tokens;
-use super::groups::debug::dispatch;
 use super::groups::debug::tests::{create_test_app, test_tool};
 use crate::client::CacheWarmupKey;
 use crate::tui::app::{App, AppAction, TurnCacheRecord};
@@ -12,7 +11,21 @@ use codewhale_models::Role;
 use codewhale_models::{ContentBlock, Message, SystemBlock, SystemPrompt};
 use std::time::Instant;
 
-// Keep the relocated host assertions on the actual diagnostics adapter path.
+// Exercise the real registry/dispatcher, not the legacy debug group's
+// mutation-only dispatch. The caller-supplied argument is unchanged after
+// the one separator inserted by the public slash-command parser.
+fn dispatch(
+    app: &mut App,
+    name: &str,
+    arg: Option<&str>,
+) -> Option<crate::commands::CommandResult> {
+    let input = match arg {
+        Some(arg) => format!("/{name} {arg}"),
+        None => format!("/{name}"),
+    };
+    Some(super::execute(&input, app))
+}
+
 fn system_prompt(app: &mut App) -> crate::commands::CommandResult {
     dispatch(app, "system", None).expect("registered system command")
 }

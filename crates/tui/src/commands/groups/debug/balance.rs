@@ -2,9 +2,34 @@
 
 use crate::tui::app::AppAction;
 use codewhale_command_contract::facets::CommandDebugDiagnosticsContext;
-use codewhale_command_contract::handler::CommandContexts;
+use codewhale_command_contract::handler::{CommandCapabilities, CommandContexts, CommandHandler};
+use codewhale_command_contract::metadata::{
+    CommandInfo as ContractInfo, RegisterCommand as ContractRegisterCommand,
+};
 
 use super::CommandResult;
+
+pub(in crate::commands) struct BalanceCmd;
+
+const CONTRACT_INFO: ContractInfo = ContractInfo {
+    name: "balance",
+    aliases: &[],
+    usage: "/balance",
+    description_key: "cmd_balance_description",
+};
+
+impl ContractRegisterCommand<CommandResult> for BalanceCmd {
+    fn info() -> &'static ContractInfo {
+        &CONTRACT_INFO
+    }
+
+    fn handler() -> CommandHandler<CommandResult> {
+        CommandHandler::Contextual {
+            capabilities: CommandCapabilities::DEBUG_DIAGNOSTICS,
+            handler: |contexts, _| balance(contexts),
+        }
+    }
+}
 
 /// Query provider account balance / credits.
 pub fn balance(contexts: CommandContexts<'_>) -> CommandResult {
