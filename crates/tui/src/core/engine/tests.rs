@@ -24171,7 +24171,7 @@ async fn background_completion_after_a_turn_is_delivered_once_on_the_next_turn()
     assert!(text.contains("stdout-end"), "{text}");
     assert!(text.contains(evidence_ref), "{text}");
     assert!(
-        text.contains("the full output is retained and can be reviewed in the tool details view"),
+        text.contains("call retrieve_tool_result") && !text.contains("tool details view"),
         "{text}"
     );
     assert!(
