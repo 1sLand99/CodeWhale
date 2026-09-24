@@ -4801,6 +4801,40 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_adapter_limits_sensitive_content_to_declared_operations() {
+        let mut harness =
+            crate::commands::debug_diagnostics_test_support::DiagnosticsHarness::new();
+        let secret = "DIAGNOSTICS-PRIVATE-SYSTEM-SENTINEL";
+        harness.app.system_prompt = Some(SystemPrompt::Text(secret.into()));
+        let mut bundle = harness.app.command_contexts();
+        let mut parts = bundle
+            .contexts(CommandCapabilities::DEBUG_DIAGNOSTICS)
+            .into_parts();
+        let diagnostics = parts.debug_diagnostics.as_mut().unwrap();
+        for public_projection in [
+            format!("{:?}", diagnostics.balance_projection()),
+            format!("{:?}", diagnostics.cost_projection()),
+            format!("{:?}", diagnostics.token_projection()),
+            format!("{:?}", diagnostics.cache_telemetry()),
+        ] {
+            assert!(
+                !public_projection.contains(secret),
+                "unrelated operation must not include the prompt"
+            );
+        }
+        let system = diagnostics.system_projection();
+        assert_eq!(
+            system.prompt,
+            codewhale_command_contract::facets::DebugSystemPrompt::Text(secret.into())
+        );
+        assert!(
+            serde_json::to_string(&diagnostics.prompt_context())
+                .unwrap()
+                .contains(secret)
+        );
+    }
+
+    #[test]
     fn diagnostics_adapter_retains_full_tool_snapshot_schema() {
         let mut harness =
             crate::commands::debug_diagnostics_test_support::DiagnosticsHarness::new();
