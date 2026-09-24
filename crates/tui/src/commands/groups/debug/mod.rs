@@ -2,16 +2,16 @@
 //! and the change log.
 
 mod balance;
-mod cache;
+pub(in crate::commands) mod cache;
 mod change;
 mod preview_request;
 mod receipts;
-mod tokens;
+pub(in crate::commands) mod tokens;
 mod tool_inspection;
 mod undo;
 
 #[cfg(test)]
-mod tests;
+pub(in crate::commands) mod tests;
 
 use crate::commands::CommandResult;
 use crate::commands::traits::{Command, CommandGroup, CommandInfo, FunctionCommand};

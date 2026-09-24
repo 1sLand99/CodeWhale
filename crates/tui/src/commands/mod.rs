@@ -63,6 +63,10 @@ pub use groups::core::voice;
 
 #[cfg(test)]
 mod debug_diagnostics_baseline_tests;
+// Host fixtures for the eight diagnostics commands live outside the movable
+// debug group; CW-SLICE selects them together with the frozen baseline tests.
+#[cfg(test)]
+mod debug_diagnostics_host_tests;
 #[cfg(test)]
 mod debug_diagnostics_regression_tests;
 #[cfg(test)]

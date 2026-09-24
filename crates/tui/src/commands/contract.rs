@@ -4738,6 +4738,69 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_adapter_cost_and_cache_telemetry_preserve_real_distinctions() {
+        let mut harness =
+            crate::commands::debug_diagnostics_test_support::DiagnosticsHarness::new();
+        let app = &mut harness.app;
+        app.session.cost_priced_turns = 1;
+        app.accrue_session_cost_estimate(crate::pricing::CostEstimate {
+            usd: 0.05,
+            cny: 0.0,
+        });
+        app.accrue_subagent_cost_estimate(crate::pricing::CostEstimate {
+            usd: 0.02,
+            cny: 0.0,
+        });
+        app.session.displayed_cost_high_water = 0.10;
+        app.push_turn_cache_record(crate::tui::app::TurnCacheRecord {
+            provider: None,
+            provider_identity: None,
+            model: None,
+            auto_model: false,
+            input_tokens: 120,
+            output_tokens: 0,
+            cache_hit_tokens: Some(0),
+            cache_miss_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            reasoning_replay_tokens: None,
+            cost_audit: None,
+            recorded_at: std::time::Instant::now(),
+        });
+        let expected_total =
+            app.displayed_session_cost_for_currency(crate::pricing::CostCurrency::Usd);
+        let mut bundle = app.command_contexts();
+        let mut parts = bundle
+            .contexts(CommandCapabilities::DEBUG_DIAGNOSTICS)
+            .into_parts();
+        let diagnostic = parts.debug_diagnostics.as_mut().unwrap();
+        let cost = diagnostic.cost_projection();
+        assert_eq!(cost.parent_turns, 0.05);
+        assert_eq!(cost.subagents, 0.02);
+        assert!(cost.display_floor > 0.0);
+        assert_eq!(
+            cost.parent_turns + cost.subagents + cost.display_floor,
+            expected_total
+        );
+        let telemetry = diagnostic.cache_telemetry();
+        assert_eq!(telemetry.history.len(), 1);
+        let turn = &telemetry.history[0];
+        assert_eq!(
+            turn.cache_hit_tokens,
+            Some(0),
+            "reported zero is not missing telemetry"
+        );
+        assert_eq!(turn.cache_miss_tokens, None);
+        assert_eq!(turn.priced_amount, None, "no audit is not priced zero");
+        assert_eq!(turn.priced_cache_miss, 120);
+        assert!(turn.age_seconds < 3);
+        assert!(
+            diagnostic.tool_snapshot().is_none(),
+            "no request differs from an empty catalog"
+        );
+    }
+
+    #[test]
     fn diagnostics_adapter_retains_full_tool_snapshot_schema() {
         let mut harness =
             crate::commands::debug_diagnostics_test_support::DiagnosticsHarness::new();
