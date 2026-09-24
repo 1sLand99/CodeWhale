@@ -2616,7 +2616,52 @@ pub struct AutoRouterConfig {
     /// hung local router cannot stall a turn indefinitely.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Router kind (#6525): `"chat"` (default) asks a chat model for JSON;
+    /// `"decision"` asks a System One decision model (Jev) a typed Choice
+    /// between the active provider's fast and strong tiers. Any other value
+    /// leaves the router unconfigured (shown as failing, never guessed).
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Decision routers only: below this answer confidence (0..=1, default
+    /// [`DEFAULT_AUTO_ROUTER_MIN_CONFIDENCE`]) the turn takes the local
+    /// fallback instead of the decision.
+    #[serde(default)]
+    pub min_confidence: Option<f64>,
+    /// Decision routers only: endpoint override for `provider = "typesafe"`
+    /// (default `https://api.typesafe.ai/v1`). OpenRouter decision routers use
+    /// the configured OpenRouter base URL.
+    #[serde(default)]
+    pub base_url: Option<String>,
 }
+
+/// `[auto.router] kind` (#6525).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AutoRouterKind {
+    /// A chat model returns `{provider, model, thinking}` JSON.
+    Chat,
+    /// A System One decision model answers a typed Choice over tiers.
+    Decision,
+}
+
+impl AutoRouterKind {
+    /// `None` (absent) is the chat default; an unknown value is `None` so the
+    /// caller reports the router as not configured instead of guessing.
+    #[must_use]
+    pub(crate) fn parse(raw: Option<&str>) -> Option<Self> {
+        match raw.map(str::trim).filter(|kind| !kind.is_empty()) {
+            None => Some(Self::Chat),
+            Some(kind) if kind.eq_ignore_ascii_case("chat") => Some(Self::Chat),
+            Some(kind) if kind.eq_ignore_ascii_case("decision") => Some(Self::Decision),
+            Some(_) => None,
+        }
+    }
+}
+
+/// Default `[auto.router] min_confidence` for decision routers: TypeSafe's
+/// "below 0.5, don't act" band (for two options, the chosen tier's
+/// probability must reach 0.75).
+pub(crate) const DEFAULT_AUTO_ROUTER_MIN_CONFIDENCE: f64 = 0.5;
 
 fn default_update_check_for_updates() -> bool {
     true
@@ -4781,6 +4826,19 @@ impl Config {
             .filter(|secs| *secs > 0)
             .unwrap_or(DEFAULT_AUTO_ROUTER_TIMEOUT_SECS)
             .min(MAX_AUTO_ROUTER_TIMEOUT_SECS)
+    }
+
+    /// Decision-router confidence floor, clamped to `0..=1`; absent or
+    /// non-finite values use [`DEFAULT_AUTO_ROUTER_MIN_CONFIDENCE`].
+    #[must_use]
+    pub(crate) fn auto_router_min_confidence(&self) -> f64 {
+        self.auto
+            .as_ref()
+            .and_then(|a| a.router.as_ref())
+            .and_then(|r| r.min_confidence)
+            .filter(|value| value.is_finite())
+            .unwrap_or(DEFAULT_AUTO_ROUTER_MIN_CONFIDENCE)
+            .clamp(0.0, 1.0)
     }
 
     #[must_use]

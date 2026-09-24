@@ -16919,6 +16919,8 @@ fn turn_started_route_is_captured_before_cancel_suppression() {
         reason: crate::model_routing::AutoRouteReason::LocalFallback(
             crate::model_routing::AutoRouteHeuristicReason::DeclaredDefault,
         ),
+        decision: None,
+        router_failure: None,
     });
     let created_at = chrono::Utc::now();
     let event = EngineEvent::TurnStarted {
@@ -21934,6 +21936,8 @@ fn auto_route_receipt_survives_session_snapshot_and_restore() {
         reason: crate::model_routing::AutoRouteReason::LocalFallback(
             crate::model_routing::AutoRouteHeuristicReason::ComplexRequest,
         ),
+        decision: None,
+        router_failure: None,
     };
     let mut app = create_test_app();
     app.set_model_selection("auto".to_string());

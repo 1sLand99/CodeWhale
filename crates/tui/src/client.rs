@@ -5156,6 +5156,7 @@ mod provider_native_search;
 mod responses;
 mod role_placement;
 mod stream_entry;
+pub(crate) mod system_one;
 
 /// Longest a request may take to open its stream and deliver the first body
 /// byte before the client itself times out (#6184): the header wait plus the
