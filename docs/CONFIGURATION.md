@@ -706,8 +706,55 @@ A classifier call happens only when `[auto.router]` names both `provider` and
 `ModelInventory::from_config` (`crates/tui/src/model_inventory.rs`). If either
 condition fails, or the classifier call errors or times out, the local
 fallback decides: the default model, or the fast sibling under `cost_saving`.
-That is a fallback, not a failure. The turn's route receipt
-(`/status` → Auto) records which path was taken.
+The turn's route receipt (`/status` → Auto) records which path was taken, and a
+router you configured that cannot run or fails (missing key, HTTP error,
+timeout, invalid answer) is shown as `Auto router: failing — …` rather than
+silently ignored.
+
+#### Set up model routing
+
+`/router` (also `/model router`) opens one Router setup view with these
+presets. Each writes only `[auto.router]`; none is ever chosen for you.
+
+| Preset | What it writes | Cost and privacy |
+| --- | --- | --- |
+| `/router jev` | Jev, TypeSafe's decision model, over OpenRouter (`typesafe/jev-1.13`) or TypeSafe direct, whichever key you have | About $0.00002 per turn ($0.042 per million input tokens, output free). Your latest request and up to six recent context lines go to OpenRouter → TypeSafe (or TypeSafe). |
+| `/router fast` | The active provider's runnable fast tier with thinking off | Your existing key; the classifier sees the same request text. |
+| `/router off` | Removes `[auto.router]` | No router call; every Auto turn uses the default model. |
+| `/router custom` | Nothing; prints the TOML to edit | — |
+
+Choosing Jev or Fast makes **one test call** with a fixed sample request and
+shows the tier it picked, the probabilities and confidence, the latency and the
+provider-reported cost. `Enter` (or `/router save <preset>`) then saves through
+the normal config writer; `Esc` discards it. TypeSafe paused new signups on
+2026-09-22, so OpenRouter is the default route for new users. A TypeSafe key is
+read from `TYPESAFE_API_KEY`, the `typesafe` secret-store entry, or
+`[providers.typesafe] api_key` / `api_key_env`.
+
+#### Decision routers (`kind = "decision"`)
+
+A decision router asks a non-generative decision model one typed question per
+turn — a Choice between the active provider's `fast` and `strong` tiers, plus a
+thinking level — and gets calibrated probabilities back. No prose is parsed.
+
+```toml
+[auto.router]
+kind = "decision"             # default "chat"
+provider = "openrouter"       # or "typesafe"
+model = "typesafe/jev-1.13"   # "~typesafe/jev-latest" also works; TypeSafe direct: "jev-latest"
+timeout_secs = 2
+min_confidence = 0.5          # default 0.5, clamped to 0..1
+```
+
+- The router is called only when the active provider has a runnable strong/fast
+  pair; otherwise there is no call and no spend.
+- An answer below `min_confidence` takes the local fallback. Under
+  `[auto] cost_saving`, a `strong` answer also needs a probability of at least
+  0.75, or the turn stays on the fast tier.
+- An unknown `kind`, or a decision `provider` other than `openrouter` /
+  `typesafe`, leaves the router unconfigured and shown as failing.
+- `thinking` is ignored for decision routers. OpenRouter spend is recorded like
+  any routed usage; TypeSafe-direct spend appears on the receipt only.
 
 Two `[auto]` keys shape routing (`AutoConfig` in `crates/tui/src/config.rs`):
 
@@ -728,7 +775,8 @@ cross_provider = false  # default false
   is configured to use. The classifier is only shown that provider's models,
   and the fallback never leaves it. Setting `cross_provider = true` lets the
   classifier choose among every runnable provider. There is no interactive
-  toggle; it has to be set in config.
+  toggle for `cross_provider`; it has to be set in config. A decision router
+  always chooses within the active provider.
 
 To bootstrap MCP and skills directories at their resolved paths, run `codewhale setup`.
 To only scaffold MCP, run `codewhale mcp init`.
