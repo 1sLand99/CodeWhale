@@ -10087,7 +10087,7 @@ impl ToolSpec for AgentTool {
                 },
                 "cwd": {
                     "type": "string",
-                    "description": "Working directory for this child. With worktree=true it becomes the worktree root; otherwise the child's workspace. Pass it when the parent directory holds several checkouts and the spawn names no single repository."
+                    "description": "Working directory for this child. Must be an existing directory inside your own workspace (relative paths resolve against it); paths outside it are refused. With worktree=true it becomes the worktree root; otherwise the child's workspace. Pass it when the parent directory holds several checkouts and the spawn names no single repository."
                 },
                 "write_roots": {
                     "type": "array",
