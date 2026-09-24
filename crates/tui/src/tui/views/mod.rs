@@ -1179,6 +1179,12 @@ pub trait ModalView: std::any::Any {
     fn approval_request_id(&self) -> Option<&str> {
         None
     }
+
+    /// When this approval card was raised, when this view is one. Keys
+    /// observed before it are type-ahead and must not answer it.
+    fn approval_requested_at(&self) -> Option<std::time::Instant> {
+        None
+    }
 }
 
 #[derive(Default)]
@@ -1225,13 +1231,46 @@ impl ViewStack {
         self.views.last().map(|view| view.kind())
     }
 
-    /// Whether the top view is the approval card deciding exactly `gate`.
-    /// Identity-aware: a web-mirror dismissal closes its own card, never an
-    /// unrelated approval that happens to be on top.
-    pub fn top_matches_approval_gate(&self, gate: &str) -> bool {
-        self.views.last().is_some_and(|view| {
-            crate::remote_control::view_is_approval_for_gate(view.as_ref(), gate)
-        })
+    /// Remove the approval card deciding exactly `gate` at any depth, not
+    /// only the top: a decision made elsewhere (web, phone) must retire its
+    /// card even when another view sits above it. Identity-aware: it never
+    /// closes an unrelated approval card.
+    pub fn remove_approval_for_gate(&mut self, gate: &str) -> bool {
+        let before = self.views.len();
+        self.views
+            .retain(|view| !crate::remote_control::view_is_approval_for_gate(view.as_ref(), gate));
+        self.views.len() != before
+    }
+
+    /// Remove the approval card for tool/approval id `id` at any depth.
+    pub fn remove_approval_by_id(&mut self, id: &str) -> bool {
+        let before = self.views.len();
+        self.views
+            .retain(|view| view.approval_request_id() != Some(id));
+        self.views.len() != before
+    }
+
+    /// Whether an approval card for `id` is anywhere in the stack.
+    pub fn contains_approval_id(&self, id: &str) -> bool {
+        self.views
+            .iter()
+            .any(|view| view.approval_request_id() == Some(id))
+    }
+
+    /// The approval id of the top view, when it is an approval card.
+    pub fn top_approval_id(&self) -> Option<&str> {
+        self.views
+            .last()
+            .and_then(|view| view.approval_request_id())
+    }
+
+    /// Whether a key observed at `observed_at` predates the approval card on
+    /// top, i.e. it was typed ahead and must not answer that card.
+    pub fn key_predates_top_approval(&self, observed_at: std::time::Instant) -> bool {
+        self.views
+            .last()
+            .and_then(|view| view.approval_requested_at())
+            .is_some_and(|requested_at| observed_at < requested_at)
     }
 
     pub fn contains_kind(&self, kind: ModalKind) -> bool {

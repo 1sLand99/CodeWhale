@@ -17440,7 +17440,7 @@ impl SubAgentToolRegistry {
             .filter(|_| self.gate_runtime.parent_can_prompt)
         else {
             return ChildGateVerdict::Deny(format!(
-                "{reason} (this host cannot raise a prompt for a worker; run the call in the main conversation, or switch the session to Auto-Review or Full Access)"
+                "{reason} (this host cannot raise a prompt for an agent; run the call in the main conversation, or switch the session to Auto-Review or Full Access)"
             ));
         };
         let (approval_id, receiver) = self
@@ -17463,11 +17463,13 @@ impl SubAgentToolRegistry {
                 .cancel_child_approval(&approval_id);
             return ChildGateVerdict::Deny(error.to_string());
         }
-        let description = format!(
-            "{} (worker {}) wants to run '{name}': {reason}",
-            self.owner_agent_name,
+        // §19 copy: the person sees "Agent", never "worker".
+        let agent_name = if self.owner_agent_name.trim().is_empty() {
             agent_id.chars().take(12).collect::<String>()
-        );
+        } else {
+            self.owner_agent_name.clone()
+        };
+        let description = format!("{agent_name} wants to run '{name}': {reason}");
         let (approval_key, approval_grouping_key) = child_approval_keys(agent_id, name, input);
         let sent = event_tx
             .send(Event::ApprovalRequired {
@@ -17505,7 +17507,8 @@ impl SubAgentToolRegistry {
             &self.gate_runtime,
             agent_id,
             AgentProgressEventMeta::new(AgentWorkerStatus::WaitingForUser)
-                .with_tool(name.to_string()),
+                .with_tool(name.to_string())
+                .with_approval_id(approval_id.clone()),
             format!("waiting for your decision on '{name}'"),
         );
         #[derive(Clone, Copy)]
@@ -17540,7 +17543,7 @@ impl SubAgentToolRegistry {
         };
         if let Err(error) = self
             .commit_child_approval_receipt(crate::approval_log::ApprovalReceipt::decided(
-                approval_id,
+                approval_id.clone(),
                 receipt_outcome,
             ))
             .await
@@ -17549,7 +17552,8 @@ impl SubAgentToolRegistry {
                 &self.gate_runtime,
                 agent_id,
                 AgentProgressEventMeta::new(AgentWorkerStatus::RunningTool)
-                    .with_tool(name.to_string()),
+                    .with_tool(name.to_string())
+                    .with_approval_id(approval_id),
                 format!("blocked '{name}': approval evidence could not be committed"),
             );
             return ChildGateVerdict::Deny(error.to_string());
@@ -17557,7 +17561,9 @@ impl SubAgentToolRegistry {
         record_agent_progress(
             &self.gate_runtime,
             agent_id,
-            AgentProgressEventMeta::new(AgentWorkerStatus::RunningTool).with_tool(name.to_string()),
+            AgentProgressEventMeta::new(AgentWorkerStatus::RunningTool)
+                .with_tool(name.to_string())
+                .with_approval_id(approval_id),
             match outcome {
                 WaitOutcome::Answer(ChildApprovalOutcome::Approved) => {
                     format!("approved '{name}'")
@@ -17578,7 +17584,7 @@ impl SubAgentToolRegistry {
                 "Tool {name} was cancelled while awaiting the user's decision"
             )),
             WaitOutcome::Unavailable => ChildGateVerdict::Deny(format!(
-                "Tool {name} approval could no longer reach the worker; tool execution was blocked"
+                "Tool {name} approval could no longer reach the agent; tool execution was blocked"
             )),
         }
     }

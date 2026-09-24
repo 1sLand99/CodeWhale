@@ -2298,6 +2298,14 @@ pub(crate) async fn handle_view_events(
                     app.view_stack.pop();
                 }
                 crate::tui::agent_focus::focus_agent(app, &agent_id);
+                // A hidden approval card for this agent comes back on top of
+                // its transcript so the person can answer it (approvals C1).
+                crate::tui::pending_requests::repush_for_agent(
+                    app,
+                    &agent_id,
+                    config.approval_default_selection(),
+                    config.approval_timeout(),
+                );
                 app.needs_redraw = true;
             }
             ViewEvent::AgentDetailsClosed { agent_id } => {

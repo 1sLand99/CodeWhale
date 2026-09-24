@@ -7428,14 +7428,16 @@ mod tests {
         let mut stack = ViewStack::new();
         stack.push(card);
         assert!(
-            stack.top_matches_approval_gate(&gate_a),
-            "the matching gate must match"
-        );
-        assert!(
-            !stack.top_matches_approval_gate(&gate_b),
+            !stack.remove_approval_for_gate(&gate_b),
             "a different gate must NEVER match this card — the whole point of identity-aware dismissal"
         );
-        assert!(!stack.top_matches_approval_gate("local_approval_missing"));
+        assert!(!stack.remove_approval_for_gate("local_approval_missing"));
+        assert!(!stack.is_empty());
+        assert!(
+            stack.remove_approval_for_gate(&gate_a),
+            "the matching gate must match"
+        );
+        assert!(stack.is_empty());
     }
 
     #[tokio::test]

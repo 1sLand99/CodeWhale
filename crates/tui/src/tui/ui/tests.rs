@@ -17013,6 +17013,12 @@ fn local_cancel_marks_late_stream_events_for_suppression() {
             message: "Request cancelled".to_string(),
         }
     ));
+    // Approval requests are never hidden by the stream matcher: a stale
+    // parent request is answered explicitly and a child's is delivered
+    // (approvals C1).
+    assert!(!suppress_engine_event_after_local_cancel(
+        &stream_drop_approval_event()
+    ));
 }
 
 #[test]
@@ -24788,7 +24794,9 @@ fn recoverable_engine_error_does_not_enter_offline_mode() {
     );
     assert!(!app.is_loading);
     assert!(app.runtime_turn_status.is_none());
-    assert!(ignore_stale_stream_event_while_idle(
+    // The idle parent no longer drops a late approval in the stream matcher;
+    // `resolve_stale_parent_request` answers it explicitly instead.
+    assert!(!ignore_stale_stream_event_while_idle(
         &stream_drop_approval_event()
     ));
     assert!(app.turn_error_posted, "turn_error_posted must be set");
@@ -25211,8 +25219,8 @@ fn stream_drop_approval_event() -> EngineEvent {
     }
 }
 
-#[test]
-fn recoverable_stream_error_keeps_active_turn_for_pending_approval() {
+#[tokio::test]
+async fn recoverable_stream_error_keeps_active_turn_for_pending_approval() {
     use crate::core::authority::ApprovalRequestDisposition;
     use crate::error_taxonomy::{ErrorCategory, ErrorEnvelope, ErrorSeverity};
 
@@ -25246,8 +25254,13 @@ fn recoverable_stream_error_keeps_active_turn_for_pending_approval() {
     assert_eq!(app.dispatch_started_at, Some(dispatch_started_at));
     assert!(!app.suppress_stream_events_until_turn_complete);
     assert!(
-        app.is_loading || !ignore_stale_stream_event_while_idle(&stream_drop_approval_event()),
+        !ignore_stale_stream_event_while_idle(&stream_drop_approval_event()),
         "the event loop must deliver the pending approval after the error"
+    );
+    let mock = mock_engine_handle();
+    assert!(
+        !resolve_stale_parent_request(&app, &mock.handle, &stream_drop_approval_event()).await,
+        "an active turn's approval is not stale"
     );
     // Delivery must preserve the user's existing permission posture. In
     // particular, Never must reach its denial instead of waiting invisibly.
@@ -25290,8 +25303,8 @@ fn recoverable_stream_error_keeps_active_turn_for_pending_approval() {
     );
 }
 
-#[test]
-fn recoverable_stream_error_after_local_cancel_keeps_approval_suppressed() {
+#[tokio::test]
+async fn recoverable_stream_error_after_local_cancel_resolves_stale_approval() {
     let mut app = create_test_app();
     app.is_loading = true;
     app.runtime_turn_status = Some("in_progress".to_string());
@@ -25305,12 +25318,410 @@ fn recoverable_stream_error_after_local_cancel_keeps_approval_suppressed() {
     assert!(!app.is_loading);
     assert!(app.runtime_turn_status.is_none());
     assert!(app.suppress_stream_events_until_turn_complete);
-    assert!(suppress_engine_event_after_local_cancel(
-        &stream_drop_approval_event()
+    // The cancelled turn's approval is answered with an explicit deny, never
+    // silently dropped, and no card opens.
+    let mut mock = mock_engine_handle();
+    assert!(resolve_stale_parent_request(&app, &mock.handle, &stream_drop_approval_event()).await);
+    assert_eq!(
+        mock.recv_approval_event().await,
+        Some(crate::core::engine::MockApprovalEvent::Denied {
+            id: "stream-drop-tool".to_string()
+        })
+    );
+    assert!(app.view_stack.is_empty());
+    // A child agent's request in the same state is delivered.
+    let child = child_approval_event("agent:agent_a:approval:boot:7");
+    assert!(!resolve_stale_parent_request(&app, &mock.handle, &child).await);
+}
+
+fn child_approval_event(id: &str) -> EngineEvent {
+    EngineEvent::ApprovalRequired {
+        id: id.to_string(),
+        tool_name: "exec_shell".to_string(),
+        description: "agent_a wants to run 'exec_shell': needs a decision".to_string(),
+        input: serde_json::json!({"command": "cargo build --release"}),
+        approval_key: "agent:agent_a:shell:exec_shell:k".to_string(),
+        approval_grouping_key: "agent:agent_a:shell:cargo build".to_string(),
+        intent_summary: None,
+        approval_force_prompt: false,
+    }
+}
+
+/// Feed one engine event through the same two steps the drain runs for an
+/// approval: the stale-request resolver, then the approval handler.
+async fn drain_approval_event(
+    app: &mut App,
+    handle: &crate::core::engine::EngineHandle,
+    event: EngineEvent,
+) {
+    if resolve_stale_parent_request(app, handle, &event).await {
+        return;
+    }
+    let EngineEvent::ApprovalRequired {
+        id,
+        tool_name,
+        description,
+        input,
+        approval_key,
+        approval_grouping_key,
+        intent_summary,
+        approval_force_prompt,
+    } = event
+    else {
+        panic!("approval fixture");
+    };
+    handle_approval_required_event(
+        app,
+        handle,
+        &Config::default(),
+        ApprovalRequiredEvent {
+            id,
+            tool_name,
+            description,
+            input,
+            approval_key,
+            approval_grouping_key,
+            intent_summary,
+            approval_force_prompt,
+        },
+    )
+    .await;
+}
+
+fn ask_posture_app() -> App {
+    let mut app = create_test_app();
+    app.mode = AppMode::Agent;
+    app.approval_mode = ApprovalMode::Suggest;
+    app
+}
+
+fn top_child_owner(app: &mut App) -> Option<String> {
+    let mut view = app.view_stack.pop()?;
+    let owner = view
+        .as_any_mut()
+        .downcast_mut::<ApprovalView>()
+        .and_then(|card| card.owner().map(|owner| owner.agent_id.clone()));
+    app.view_stack.push_boxed(view);
+    owner
+}
+
+#[tokio::test]
+async fn idle_parent_receives_child_approval_card() {
+    let mut app = ask_posture_app();
+    app.is_loading = false;
+    let mock = mock_engine_handle();
+    drain_approval_event(
+        &mut app,
+        &mock.handle,
+        child_approval_event("agent:agent_a:approval:boot:1"),
+    )
+    .await;
+    assert_eq!(app.view_stack.top_kind(), Some(ModalKind::Approval));
+    assert_eq!(top_child_owner(&mut app).as_deref(), Some("agent_a"));
+    assert_eq!(app.pending_child_requests.len(), 1);
+}
+
+#[tokio::test]
+async fn child_approval_survives_local_cancel_suppression() {
+    let mut app = ask_posture_app();
+    app.is_loading = false;
+    app.suppress_stream_events_until_turn_complete = true;
+    let mock = mock_engine_handle();
+    drain_approval_event(
+        &mut app,
+        &mock.handle,
+        child_approval_event("agent:agent_a:approval:boot:2"),
+    )
+    .await;
+    assert_eq!(top_child_owner(&mut app).as_deref(), Some("agent_a"));
+    assert_eq!(app.pending_child_requests.len(), 1);
+}
+
+#[tokio::test]
+async fn stale_parent_approval_is_denied_explicitly_not_dropped() {
+    let mut app = ask_posture_app();
+    app.is_loading = false;
+    let mut mock = mock_engine_handle();
+    drain_approval_event(&mut app, &mock.handle, stream_drop_approval_event()).await;
+    assert_eq!(
+        mock.recv_approval_event().await,
+        Some(crate::core::engine::MockApprovalEvent::Denied {
+            id: "stream-drop-tool".to_string()
+        })
+    );
+    assert!(
+        app.view_stack.is_empty(),
+        "no card for a stale parent request"
+    );
+    assert!(app.pending_child_requests.is_empty());
+
+    // A stale parent question is cancelled the same way.
+    let question = EngineEvent::UserInputRequired {
+        id: "stale-question".to_string(),
+        request: crate::tools::user_input::UserInputRequest {
+            questions: Vec::new(),
+        },
+    };
+    assert!(resolve_stale_parent_request(&app, &mock.handle, &question).await);
+    assert_eq!(
+        mock.recv_user_input_cancellation().await.as_deref(),
+        Some("stale-question")
+    );
+}
+
+#[tokio::test]
+async fn esc_on_child_card_keeps_badge_and_does_not_cancel_turn() {
+    let mut app = ask_posture_app();
+    app.is_loading = true;
+    let mock = mock_engine_handle();
+    drain_approval_event(
+        &mut app,
+        &mock.handle,
+        child_approval_event("agent:agent_a:approval:boot:3"),
+    )
+    .await;
+    assert!(
+        build_pending_input_preview(&app)
+            .pending_approvals
+            .is_empty(),
+        "no footer row while the card itself is on top"
+    );
+    let events = app
+        .view_stack
+        .handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(events.is_empty(), "Esc on a child card emits no decision");
+    assert!(app.view_stack.is_empty(), "Esc hides the card");
+    assert!(!mock.cancel_token.is_cancelled());
+    assert!(app.is_loading, "the parent turn keeps running");
+    assert_eq!(app.pending_child_requests.len(), 1);
+    let rows = build_pending_input_preview(&app).pending_approvals;
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].contains("Approval needed in"), "{rows:?}");
+    assert!(rows[0].contains("/agents"), "{rows:?}");
+
+    // `/agents` → the agent re-raises the hidden card.
+    assert!(crate::tui::pending_requests::repush_for_agent(
+        &mut app,
+        "agent_a",
+        crate::config::ApprovalDefaultSelection::Deny,
+        None,
     ));
-    assert!(ignore_stale_stream_event_while_idle(
-        &stream_drop_approval_event()
+    assert_eq!(top_child_owner(&mut app).as_deref(), Some("agent_a"));
+    assert!(
+        !crate::tui::pending_requests::repush_for_agent(
+            &mut app,
+            "agent_a",
+            crate::config::ApprovalDefaultSelection::Deny,
+            None,
+        ),
+        "a card already in the stack is not duplicated"
+    );
+}
+
+#[tokio::test]
+async fn child_card_abort_decision_never_cancels_parent_turn() {
+    let mut app = ask_posture_app();
+    app.is_loading = true;
+    let mut mock = mock_engine_handle();
+    let mut config = Config::default();
+    apply_approval_decision(
+        &mut app,
+        &mut mock.handle,
+        &mut config,
+        ApprovalDecisionEvent {
+            tool_id: "agent:agent_a:approval:boot:9".to_string(),
+            tool_name: "exec_shell".to_string(),
+            decision: crate::tui::approval::ReviewDecision::Abort,
+            timed_out: false,
+            approval_key: "k".to_string(),
+            approval_grouping_key: "g".to_string(),
+            persistent_rules: Vec::new(),
+        },
+    )
+    .await;
+    assert!(!mock.cancel_token.is_cancelled());
+    assert!(app.is_loading);
+}
+
+#[tokio::test]
+async fn child_card_offers_go_to_agent_and_no_stop_turn() {
+    let mut app = ask_posture_app();
+    let mock = mock_engine_handle();
+    drain_approval_event(
+        &mut app,
+        &mock.handle,
+        child_approval_event("agent:agent_a:approval:boot:4"),
+    )
+    .await;
+    let events = app
+        .view_stack
+        .handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+    assert!(matches!(
+        events.as_slice(),
+        [ViewEvent::OpenAgentTranscript { agent_id }] if agent_id == "agent_a"
     ));
+    assert_eq!(
+        app.view_stack.top_kind(),
+        Some(ModalKind::Approval),
+        "Go to agent keeps the card open"
+    );
+    let mut view = app.view_stack.pop().expect("child card");
+    let card = view
+        .as_any_mut()
+        .downcast_mut::<ApprovalView>()
+        .expect("approval view");
+    // Walk every option: none of them is "Stop this turn".
+    for steps in 0..4 {
+        let mut probe = card.clone();
+        for _ in 0..steps {
+            probe.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        let ViewAction::EmitAndClose(ViewEvent::ApprovalDecision { decision, .. }) =
+            probe.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        else {
+            panic!("Enter commits the selected option");
+        };
+        assert_ne!(decision, crate::tui::approval::ReviewDecision::Abort);
+    }
+}
+
+#[test]
+fn typeahead_before_card_does_not_answer() {
+    let mut app = ask_posture_app();
+    let typed_before = Instant::now();
+    std::thread::sleep(Duration::from_millis(2));
+    push_approval_request_view(
+        &mut app,
+        "agent:agent_a:approval:boot:5",
+        "exec_shell",
+        "agent_a wants to run 'exec_shell'",
+        &serde_json::json!({"command": "cargo build --release"}),
+        "k",
+        "g",
+        None,
+        crate::config::ApprovalDefaultSelection::AllowOnce,
+        None,
+    );
+    assert!(app.view_stack.key_predates_top_approval(typed_before));
+    assert!(!app.view_stack.key_predates_top_approval(Instant::now()));
+    assert_eq!(app.view_stack.top_kind(), Some(ModalKind::Approval));
+}
+
+#[tokio::test]
+async fn web_decision_dismisses_buried_child_card() {
+    // Web mirroring needs an active parent turn (see the C1 known limit).
+    let mut app = ask_posture_app();
+    app.is_loading = true;
+    app.runtime_turn_id = Some("turn_current".to_string());
+    app.runtime_turn_status = Some("in_progress".to_string());
+    let mut mock = mock_engine_handle();
+    let child_id = "agent:agent_a:approval:boot:6";
+    drain_approval_event(&mut app, &mock.handle, child_approval_event(child_id)).await;
+    // Bury the child's card under another approval card.
+    push_approval_request_view(
+        &mut app,
+        "parent-tool",
+        "exec_shell",
+        "Run cargo check",
+        &serde_json::json!({"command": "cargo check"}),
+        "k",
+        "",
+        None,
+        crate::config::ApprovalDefaultSelection::Deny,
+        None,
+    );
+    // Record the shared gate before the fixture attaches, so the test does
+    // not need a relay journal for the approval upload.
+    let gate = app.remote_control.record_remote_approval(
+        child_id,
+        "exec_shell",
+        "agent_a wants to run 'exec_shell'",
+        &serde_json::json!({}),
+        "k",
+        None,
+    );
+    app.remote_control
+        .force_mirror_connected_for_tests("run_fixture", "turn_current");
+    app.remote_control
+        .queue_remote_event_for_tests(crate::remote_control::RemoteEvent::Command {
+            run_id: "run_fixture".to_string(),
+            seq: 1,
+            command: crate::remote_control::RemoteCommand::Approval {
+                gate,
+                approved: true,
+            },
+        });
+    drain_remote_control_events(&mut app, &Config::default(), &mock.handle)
+        .await
+        .unwrap();
+    let decision = tokio::time::timeout(Duration::from_secs(2), mock.recv_approval_event()).await;
+    assert_eq!(
+        decision.ok().flatten(),
+        Some(crate::core::engine::MockApprovalEvent::Approved {
+            id: child_id.to_string()
+        }),
+        "status: {:?}",
+        app.status_message
+    );
+    assert!(app.pending_child_requests.is_empty());
+    assert!(!app.view_stack.contains_approval_id(child_id));
+    assert!(
+        app.view_stack.contains_approval_id("parent-tool"),
+        "the unrelated card on top stays"
+    );
+}
+
+#[tokio::test]
+async fn child_progress_with_resolved_id_clears_card() {
+    use crate::core::events::AgentProgressEventMeta;
+    use crate::tools::subagent::AgentWorkerStatus;
+    let mut app = ask_posture_app();
+    let mock = mock_engine_handle();
+    let child_id = "agent:agent_a:approval:boot:8";
+    drain_approval_event(&mut app, &mock.handle, child_approval_event(child_id)).await;
+
+    let still_waiting =
+        AgentProgressEventMeta::new(AgentWorkerStatus::WaitingForUser).with_approval_id(child_id);
+    assert!(!crate::tui::pending_requests::observe_progress(
+        &mut app,
+        &still_waiting
+    ));
+    assert_eq!(app.pending_child_requests.len(), 1);
+
+    let resumed =
+        AgentProgressEventMeta::new(AgentWorkerStatus::RunningTool).with_approval_id(child_id);
+    assert!(crate::tui::pending_requests::observe_progress(
+        &mut app, &resumed
+    ));
+    assert!(app.pending_child_requests.is_empty());
+    assert!(app.view_stack.is_empty());
+}
+
+#[tokio::test]
+async fn agent_complete_clears_child_pending() {
+    let mut app = ask_posture_app();
+    let mock = mock_engine_handle();
+    drain_approval_event(
+        &mut app,
+        &mock.handle,
+        child_approval_event("agent:agent_a:approval:boot:10"),
+    )
+    .await;
+    drain_approval_event(
+        &mut app,
+        &mock.handle,
+        child_approval_event("agent:agent_b:approval:boot:11"),
+    )
+    .await;
+    // Hide both cards; both agents show a footer row.
+    app.view_stack.pop();
+    app.view_stack.pop();
+    assert_eq!(build_pending_input_preview(&app).pending_approvals.len(), 2);
+
+    crate::tui::pending_requests::clear_for_agent(&mut app, "agent_a");
+    assert_eq!(app.pending_child_requests.len(), 1);
+    let rows = build_pending_input_preview(&app).pending_approvals;
+    assert_eq!(rows.len(), 1);
 }
 
 /// Hard failures (auth, billing, malformed request) DO need to flip offline

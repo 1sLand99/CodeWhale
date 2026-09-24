@@ -2793,7 +2793,16 @@ pub(crate) async fn apply_approval_decision(
         persist_rules_from_approval(app, config, &event.persistent_rules);
     }
 
+    // A child's card was answered here: its pending entry is done. An Abort
+    // on a child's card only hides it (the entry stays for the footer).
+    if event.decision != ReviewDecision::Abort {
+        crate::tui::pending_requests::resolve(app, &event.tool_id);
+    }
+
     match event.decision {
+        // A child's card never stops the parent's turn (approvals C1).
+        ReviewDecision::Abort
+            if crate::tools::subagent::SubAgentManager::is_child_approval_id(&event.tool_id) => {}
         ReviewDecision::Approved | ReviewDecision::ApprovedForSession => {
             // Mirror mode: clear the shared-approval gate so a late web
             // decision acks "no longer pending" instead of double-answering.

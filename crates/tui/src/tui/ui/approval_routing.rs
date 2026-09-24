@@ -37,6 +37,7 @@ pub(super) fn end_turn_scoped_denials(app: &mut App) {
 pub(super) fn reset_approval_scope_for_new_conversation(app: &mut App) {
     app.approval_session_denied.clear();
     app.approval_session_approved.clear();
+    crate::tui::pending_requests::clear_all(app);
 }
 
 pub(super) fn session_denied_notice(app: &App, tool_name: &str) -> String {
@@ -125,6 +126,52 @@ pub(super) fn resolve_ui_approval_disposition(
         is_session_denied_for_key(app, approval_key),
         approval_force_prompt,
     )
+}
+
+/// While the parent is idle or its turn was cancelled locally, a request the
+/// parent owns can only be stale. Answer it explicitly — an approval gets a
+/// deny, a question a cancel — so nothing waits on a card that never shows.
+/// A child agent's request is never stale on this basis: the child is still
+/// running and waiting on the person, so it falls through to the normal
+/// handler. Returns `true` when the event was consumed here (approvals C1).
+pub(super) async fn resolve_stale_parent_request(
+    app: &App,
+    engine_handle: &EngineHandle,
+    event: &crate::core::events::Event,
+) -> bool {
+    use crate::core::events::Event;
+    if !(app.suppress_stream_events_until_turn_complete || !app.is_loading) {
+        return false;
+    }
+    match event {
+        Event::ApprovalRequired { id, tool_name, .. }
+            if !crate::tools::subagent::SubAgentManager::is_child_approval_id(id) =>
+        {
+            log_sensitive_event(
+                "tool.approval.stale_parent_resolved",
+                serde_json::json!({
+                    "tool_name": tool_name,
+                    "session_id": app.current_session_id,
+                }),
+            );
+            let _ = engine_handle.deny_tool_call(id.clone()).await;
+            true
+        }
+        Event::UserInputRequired { id, .. }
+            if !crate::tools::subagent::SubAgentManager::is_child_approval_id(id) =>
+        {
+            log_sensitive_event(
+                "tool.user_input.stale_parent_resolved",
+                serde_json::json!({
+                    "tool_id": id,
+                    "session_id": app.current_session_id,
+                }),
+            );
+            let _ = engine_handle.cancel_user_input(id.clone()).await;
+            true
+        }
+        _ => false,
+    }
 }
 
 pub(super) fn should_suppress_user_input_prompt(app: &App) -> bool {
