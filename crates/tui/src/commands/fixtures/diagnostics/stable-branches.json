@@ -144,5 +144,30 @@
     "message": "System Prompt (ACT mode):\n─────────────────────────────\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa...\n\n(truncated, 504 chars total)",
     "action": null,
     "is_error": false
+  },
+  "balance_unsupported": {
+    "message": "Balance check is not supported for OpenAI Codex (ChatGPT) yet. Check the provider dashboard for account balance details.",
+    "action": null,
+    "is_error": false
+  },
+  "tokens_reported_telemetry": {
+    "message": "Token Usage:\n ─────────────────────────────\n Active context:        ~48 / 1000000 (0.0%)\n Last API input:        100 (turn telemetry; may count repeated prefix across tool rounds)\n Last API output:       25\n Cache hit/miss:        70 hit / 30 miss (telemetry/cost only)\n Cumulative tokens:     1234 (session usage telemetry)\n Priced amount:         unknown\n API messages:          0\n Chat messages:         0\n Model:                 deepseek-v4-pro\nCache-write (cache-creation) tokens this session: 250. Billed above the input rate where the provider publishes a write premium; see /cache for the per-turn breakdown.\n\nThis is an estimate, not a bill: it is computed locally from provider-reported token usage and published rates, and can differ from your invoice.\nCovered: 0 of 0 money-metered turn(s) priced.",
+    "action": null,
+    "is_error": false
+  },
+  "cost_priced_zero": {
+    "message": "Session Cost:\n ─────────────────────────────\n Estimated total: $0.0000\n\n Based on audited provider-reported usage and published rates.\n\nBreakdown (components sum to the total above):\n  Parent turns: $0.0000\n\nThis is an estimate, not a bill: it is computed locally from provider-reported token usage and published rates, and can differ from your invoice.\nCovered: 1 of 1 money-metered turn(s) priced.",
+    "action": null,
+    "is_error": false
+  },
+  "cost_legacy_unknown": {
+    "message": "Session Cost:\n ─────────────────────────────\n Estimated total: unknown\n\n No turn has an authoritative price in the selected currency.\n\nThis is an estimate, not a bill: it is computed locally from provider-reported token usage and published rates, and can differ from your invoice.\nCoverage: unknown. This session was saved before per-turn pricing coverage was recorded, so how much of the total above is accounted for cannot be established.",
+    "action": null,
+    "is_error": false
+  },
+  "system_blocks": {
+    "message": "System Prompt (ACT mode):\n─────────────────────────────\nFirst block\n\n---\n\nSecond block",
+    "action": null,
+    "is_error": false
   }
 }

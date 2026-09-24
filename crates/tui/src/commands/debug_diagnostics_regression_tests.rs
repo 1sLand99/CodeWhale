@@ -8,7 +8,7 @@
 use super::{CommandResult, execute};
 use crate::config::Config;
 use crate::tui::app::{App, AppAction};
-use codewhale_models::SystemPrompt;
+use codewhale_models::{SystemBlock, SystemPrompt};
 use serde_json::{Value, json};
 
 fn outcome(result: CommandResult) -> Value {
@@ -87,6 +87,50 @@ fn collect() -> Value {
             format!("/system:{label}"),
             outcome(execute("/system", &mut app)),
         );
+    }
+    for (label, command) in [
+        ("balance_unsupported", "/balance"),
+        ("tokens_reported_telemetry", "/tokens"),
+        ("cost_priced_zero", "/cost"),
+        ("cost_legacy_unknown", "/cost"),
+        ("system_blocks", "/system"),
+    ] {
+        let workspace = tempfile::tempdir().expect("owned fixture workspace");
+        let mut app = App::new(
+            crate::test_support::test_tui_options(workspace.path()),
+            &Config::default(),
+        );
+        app.ui_locale = codewhale_localization::Locale::En;
+        app.api_provider = crate::config::ApiProvider::Deepseek;
+        match label {
+            "balance_unsupported" => app.api_provider = crate::config::ApiProvider::OpenaiCodex,
+            "tokens_reported_telemetry" => {
+                app.session.total_tokens = 1234;
+                app.session.last_prompt_tokens = Some(100);
+                app.session.last_completion_tokens = Some(25);
+                app.session.last_prompt_cache_hit_tokens = Some(70);
+                app.session.last_prompt_cache_miss_tokens = Some(30);
+                app.session.total_cache_write_tokens = 250;
+            }
+            "cost_priced_zero" => app.session.cost_priced_turns = 1,
+            "cost_legacy_unknown" => app.session.cost_coverage_unknown_legacy = true,
+            "system_blocks" => {
+                app.system_prompt = Some(SystemPrompt::Blocks(vec![
+                    SystemBlock {
+                        block_type: "text".into(),
+                        text: "First block".into(),
+                        cache_control: None,
+                    },
+                    SystemBlock {
+                        block_type: "text".into(),
+                        text: "Second block".into(),
+                        cache_control: None,
+                    },
+                ]));
+            }
+            _ => unreachable!("fixture case list is exhaustive"),
+        }
+        samples.insert(label.into(), outcome(execute(command, &mut app)));
     }
     Value::Object(samples)
 }
