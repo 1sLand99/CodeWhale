@@ -11391,6 +11391,7 @@ impl RuntimeThreadManager {
                 search_provider: cfg.search_provider(),
                 search_api_key: cfg.search.as_ref().and_then(|s| s.api_key.clone()),
                 search_base_url: cfg.search.as_ref().and_then(|s| s.base_url.clone()),
+                search_native: cfg.search_native(),
                 tools_always_load: if isolated_chat {
                     HashSet::new()
                 } else {

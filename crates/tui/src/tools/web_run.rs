@@ -1963,11 +1963,9 @@ mod tests {
         assert_eq!(search["results"][0]["domain"], "docs.example.com");
         assert_eq!(search["receipt"]["backend"], "searxng");
         assert_eq!(search["receipt"]["honored"]["domains"], true);
-        assert!(
-            search["warning"]
-                .as_str()
-                .expect("visible degraded warning")
-                .contains("recency")
+        assert_eq!(
+            search["receipt"]["honored"]["recency"], true,
+            "SearXNG forwards recency as time_range"
         );
     }
 

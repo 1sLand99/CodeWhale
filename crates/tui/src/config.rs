@@ -4733,6 +4733,23 @@ impl Config {
         self.search_provider_resolution().provider
     }
 
+    /// Whether provider-native search may lead the search chain.
+    ///
+    /// `[search] native = true|false` is explicit. Unset, a user-chosen
+    /// provider (config, env, or a Tavily key) wins over provider-native
+    /// search (`Some(false)`); with no provider configured it stays `None`,
+    /// which keeps native search first on routes that offer it.
+    #[must_use]
+    pub fn search_native(&self) -> Option<bool> {
+        self.search
+            .as_ref()
+            .and_then(|search| search.native)
+            .or_else(|| {
+                (self.search_provider_resolution().source != SearchProviderSource::Default)
+                    .then_some(false)
+            })
+    }
+
     /// Store a session/config provider choice and return the effective runtime
     /// provider after applying the documented environment precedence.
     pub fn set_search_provider(&mut self, provider: SearchProvider) -> SearchProvider {
