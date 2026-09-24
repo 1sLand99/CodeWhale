@@ -2340,5 +2340,13 @@
   "WorkflowSettledOfTotal": "{done}/{total} selesai",
   "WorkflowPhaseCountOne": "{count} fase",
   "WorkflowPhaseCountMany": "{count} fase",
-  "WorkflowPhaseOrdinal": "fase {n}/{total}"
+  "WorkflowPhaseOrdinal": "fase {n}/{total}",
+  "ModelPickerPinned": "{route} disematkan",
+  "ModelPickerUnpinned": "Sematan {route} dilepas",
+  "ModelPickerPinFailed": "Tidak dapat memperbarui sematan: {error}",
+  "ModelPickerPinOrderUpdated": "Urutan model yang disematkan diperbarui",
+  "ModelPickerPinReorderFailed": "Tidak dapat mengubah urutan sematan: {error}",
+  "ModelPickerReadinessRefreshed": "Kesiapan model diperbarui · baris katalog dibangun ulang",
+  "ModelPickerOpenToRefresh": "Buka /model untuk memperbarui kesiapan dan katalog",
+  "ModelPickerPinnedChip": "disematkan"
 }

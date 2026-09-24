@@ -2340,5 +2340,13 @@
   "WorkflowSettledOfTotal": "{done}/{total} fets",
   "WorkflowPhaseCountOne": "{count} fase",
   "WorkflowPhaseCountMany": "{count} fases",
-  "WorkflowPhaseOrdinal": "fase {n}/{total}"
+  "WorkflowPhaseOrdinal": "fase {n}/{total}",
+  "ModelPickerPinned": "S'ha fixat {route}",
+  "ModelPickerUnpinned": "S'ha deixat de fixar {route}",
+  "ModelPickerPinFailed": "No s'ha pogut actualitzar la fixació: {error}",
+  "ModelPickerPinOrderUpdated": "S'ha actualitzat l'ordre dels models fixats",
+  "ModelPickerPinReorderFailed": "No s'ha pogut reordenar la fixació: {error}",
+  "ModelPickerReadinessRefreshed": "S'ha actualitzat la disponibilitat dels models · files del catàleg reconstruïdes",
+  "ModelPickerOpenToRefresh": "Obre /model per actualitzar la disponibilitat i el catàleg",
+  "ModelPickerPinnedChip": "fixat"
 }

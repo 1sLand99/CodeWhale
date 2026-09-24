@@ -2340,5 +2340,13 @@
   "WorkflowSettledOfTotal": "{done}/{total} पूरे",
   "WorkflowPhaseCountOne": "{count} चरण",
   "WorkflowPhaseCountMany": "{count} चरण",
-  "WorkflowPhaseOrdinal": "चरण {n}/{total}"
+  "WorkflowPhaseOrdinal": "चरण {n}/{total}",
+  "ModelPickerPinned": "{route} पिन किया गया",
+  "ModelPickerUnpinned": "{route} का पिन हटाया गया",
+  "ModelPickerPinFailed": "पिन अपडेट नहीं हो सका: {error}",
+  "ModelPickerPinOrderUpdated": "पिन किए गए मॉडलों का क्रम अपडेट हुआ",
+  "ModelPickerPinReorderFailed": "पिन का क्रम नहीं बदला जा सका: {error}",
+  "ModelPickerReadinessRefreshed": "मॉडल की तैयारी रीफ़्रेश हुई · कैटलॉग पंक्तियाँ फिर से बनीं",
+  "ModelPickerOpenToRefresh": "तैयारी और कैटलॉग रीफ़्रेश करने के लिए /model खोलें",
+  "ModelPickerPinnedChip": "पिन किया"
 }

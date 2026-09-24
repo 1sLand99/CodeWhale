@@ -57,7 +57,7 @@ pub(crate) fn refresh_parked_fleet_roster(app: &mut App, config: &Config) {
 pub(super) fn refresh_open_model_picker(
     app: &mut App,
     config: &Config,
-    notice: Option<(String, bool)>,
+    notice: Option<(String, StatusToastLevel)>,
 ) -> bool {
     if app.view_stack.top_kind() != Some(ModalKind::ModelPicker) {
         return false;
@@ -70,8 +70,8 @@ pub(super) fn refresh_open_model_picker(
         .downcast_mut::<crate::tui::model_picker::ModelPickerView>()
     {
         picker.re_resolve_from_app(app, config);
-        if let Some((text, failed)) = notice {
-            picker.set_notice(text, failed);
+        if let Some((text, level)) = notice {
+            picker.set_notice(text, level);
         }
     }
     app.view_stack.push_boxed(boxed);
@@ -85,18 +85,29 @@ pub(super) fn toggle_model_picker_pin(
     provider_key: &str,
     model: &str,
 ) {
-    let (receipt, failed) = match crate::settings::Settings::transact(|settings| {
+    let locale = app.ui_locale;
+    let route = format!("{provider_key}/{model}");
+    let (receipt, level) = match crate::settings::Settings::transact(|settings| {
         Ok(settings.toggle_pinned_model(provider_key, model))
     }) {
-        Ok(true) => (format!("Pinned {provider_key}/{model}"), false),
-        Ok(false) => (format!("Unpinned {provider_key}/{model}"), false),
-        Err(error) => (format!("Could not update pin: {error}"), true),
+        Ok(true) => (
+            tr(locale, MessageId::ModelPickerPinned).replace("{route}", &route),
+            StatusToastLevel::Success,
+        ),
+        Ok(false) => (
+            tr(locale, MessageId::ModelPickerUnpinned).replace("{route}", &route),
+            StatusToastLevel::Success,
+        ),
+        Err(error) => (
+            tr(locale, MessageId::ModelPickerPinFailed).replace("{error}", &error.to_string()),
+            StatusToastLevel::Error,
+        ),
     };
     if let Ok(settings) = crate::settings::Settings::load_persisted() {
         app.pinned_models = settings.pinned_models;
     }
     app.status_message = Some(receipt.clone());
-    refresh_open_model_picker(app, config, Some((receipt, failed)));
+    refresh_open_model_picker(app, config, Some((receipt, level)));
     app.needs_redraw = true;
 }
 
@@ -110,11 +121,11 @@ pub(super) fn toggle_model_picker_fleet(
 ) {
     use crate::fleet::members::{FleetModelChange, change_receipt, toggle_fleet_model};
     let locale = app.ui_locale;
-    let (receipt, failed) = if let Some(rejection) =
+    let (receipt, level) = if let Some(rejection) =
         crate::commands::fleet_provider_rejection(app, config, provider_key)
     {
         app.set_sticky_status(rejection.clone(), StatusToastLevel::Error, None);
-        (rejection, true)
+        (rejection, StatusToastLevel::Error)
     } else {
         match toggle_fleet_model(&app.workspace, provider_key, model) {
             Ok(change) => {
@@ -126,17 +137,17 @@ pub(super) fn toggle_model_picker_fleet(
                 };
                 let receipt = change_receipt(locale, provider_key, model, &change);
                 app.push_status_toast(receipt.clone(), level, Some(FLEET_TOGGLE_TOAST_TTL_MS));
-                (receipt, false)
+                (receipt, level)
             }
             Err(error) => {
                 let message = tr(locale, MessageId::FleetToggleFailed)
                     .replace("{error}", &error.message(locale));
                 app.set_sticky_status(message.clone(), StatusToastLevel::Error, None);
-                (message, true)
+                (message, StatusToastLevel::Error)
             }
         }
     };
-    refresh_open_model_picker(app, config, Some((receipt, failed)));
+    refresh_open_model_picker(app, config, Some((receipt, level)));
     app.needs_redraw = true;
 }
 
@@ -2451,15 +2462,14 @@ pub(crate) async fn handle_view_events(
                 // rebuild catalog rows. Non-destructive: never clears the list
                 // when a refresh fails; just re-project from current config.
                 sync_config_provider_from_app(config, app);
-                let refreshed = "Model readiness refreshed · catalog rows rebuilt";
-                app.status_message = Some(
-                    if refresh_open_model_picker(app, config, Some((refreshed.into(), false))) {
-                        refreshed
-                    } else {
-                        "Open /model to refresh readiness and catalog"
-                    }
-                    .into(),
-                );
+                let refreshed =
+                    tr(app.ui_locale, MessageId::ModelPickerReadinessRefreshed).into_owned();
+                let notice = Some((refreshed.clone(), StatusToastLevel::Info));
+                app.status_message = Some(if refresh_open_model_picker(app, config, notice) {
+                    refreshed
+                } else {
+                    tr(app.ui_locale, MessageId::ModelPickerOpenToRefresh).into_owned()
+                });
                 app.needs_redraw = true;
             }
             ViewEvent::ModelPickerToggleFleet {
@@ -2495,14 +2505,24 @@ pub(crate) async fn handle_view_events(
                     Ok(None) => {}
                     Ok(Some(pinned_models)) => {
                         app.pinned_models = pinned_models;
-                        let receipt = "Pinned model order updated".to_string();
+                        let receipt =
+                            tr(app.ui_locale, MessageId::ModelPickerPinOrderUpdated).into_owned();
                         app.status_message = Some(receipt.clone());
-                        refresh_open_model_picker(app, config, Some((receipt, false)));
+                        refresh_open_model_picker(
+                            app,
+                            config,
+                            Some((receipt, StatusToastLevel::Success)),
+                        );
                     }
                     Err(error) => {
-                        let receipt = format!("Could not reorder pin: {error}");
+                        let receipt = tr(app.ui_locale, MessageId::ModelPickerPinReorderFailed)
+                            .replace("{error}", &error.to_string());
                         app.status_message = Some(receipt.clone());
-                        refresh_open_model_picker(app, config, Some((receipt, true)));
+                        refresh_open_model_picker(
+                            app,
+                            config,
+                            Some((receipt, StatusToastLevel::Error)),
+                        );
                     }
                 }
                 app.needs_redraw = true;

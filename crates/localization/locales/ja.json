@@ -2340,5 +2340,13 @@
   "WorkflowSettledOfTotal": "{done}/{total} 完了",
   "WorkflowPhaseCountOne": "{count} フェーズ",
   "WorkflowPhaseCountMany": "{count} フェーズ",
-  "WorkflowPhaseOrdinal": "フェーズ {n}/{total}"
+  "WorkflowPhaseOrdinal": "フェーズ {n}/{total}",
+  "ModelPickerPinned": "{route} をピン留めしました",
+  "ModelPickerUnpinned": "{route} のピン留めを外しました",
+  "ModelPickerPinFailed": "ピン留めを更新できませんでした: {error}",
+  "ModelPickerPinOrderUpdated": "ピン留めしたモデルの順序を更新しました",
+  "ModelPickerPinReorderFailed": "ピン留めの順序を変更できませんでした: {error}",
+  "ModelPickerReadinessRefreshed": "モデルの準備状況を更新しました · カタログ行を再構築しました",
+  "ModelPickerOpenToRefresh": "準備状況とカタログを更新するには /model を開いてください",
+  "ModelPickerPinnedChip": "ピン留め"
 }
