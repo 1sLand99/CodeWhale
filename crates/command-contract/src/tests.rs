@@ -362,6 +362,97 @@ fn debug_tool_schema_keeps_unknown_distinct_from_known_empty() {
 }
 
 #[test]
+fn debug_tool_snapshot_schema_preserves_unobserved_and_absent_states() {
+    let snapshot = DebugToolSnapshot {
+        schema_version: 1,
+        capture_source: "prepared model-client request".into(),
+        delivery_status: "unknown (capture does not prove provider delivery)".into(),
+        turn_id: DebugBoundedString {
+            value: "turn".into(),
+            truncated: false,
+        },
+        step: 0,
+        terminal: None,
+        tools_field_present: false,
+        tool_count: 0,
+        rendered_tool_count: 0,
+        omitted_tool_count: 0,
+        payload_json_bytes: None,
+        payload_measurement_status: "unavailable".into(),
+        active_tool_catalog_sha256: None,
+        unavailable_for_this_request: vec!["provider_wire_payload".into()],
+        provider: DebugProviderAvailability::Unknown,
+        registry_facts_present: false,
+        registry_tool_count: DebugEvidence::Unknown {
+            reason: "not captured".into(),
+        },
+        registry_only_tools: DebugEvidence::Unknown {
+            reason: "not captured".into(),
+        },
+        tools: vec![],
+    };
+    let value = serde_json::to_value(&snapshot).expect("bounded snapshot");
+    assert!(
+        value.get("terminal").is_none(),
+        "absent terminal is omitted"
+    );
+    assert!(
+        value["payload_json_bytes"].is_null(),
+        "unmeasured is not zero"
+    );
+    assert!(value["active_tool_catalog_sha256"].is_null());
+    assert_eq!(value["registry_tool_count"]["status"], "unknown");
+    assert_eq!(value["provider"]["status"], "unknown");
+    assert_eq!(
+        value["unavailable_for_this_request"],
+        serde_json::json!(["provider_wire_payload"])
+    );
+    assert_eq!(snapshot.tools, vec![]);
+}
+
+#[test]
+fn debug_cache_observation_retains_previous_until_explicit_commit() {
+    let previous = DebugPromptInspection {
+        base_static_prefix_hash: "before".into(),
+        full_request_prefix_hash: "before".into(),
+        tool_catalog_hash: "".into(),
+        layers: vec![],
+    };
+    let mut current = previous.clone();
+    current.base_static_prefix_hash = "after".into();
+    let observation = DebugCacheInspectionObservation {
+        current: current.clone(),
+        previous: Some(previous),
+        current_warmup_key: DebugWarmupKey {
+            provider: "provider".into(),
+            model: "model".into(),
+            base_url: "endpoint".into(),
+            static_prefix_hash: "after".into(),
+            tool_catalog_hash: "".into(),
+            project_pack_hash: "".into(),
+            skills_hash: "".into(),
+        },
+        last_warmup_key: None,
+        current_warmup_hash_short: "digest".into(),
+        last_warmup_hash_short: None,
+    };
+    assert_eq!(
+        observation
+            .previous
+            .as_ref()
+            .unwrap()
+            .base_static_prefix_hash,
+        "before"
+    );
+    assert_eq!(observation.current.base_static_prefix_hash, "after");
+    assert_ne!(observation.previous.as_ref(), Some(&observation.current));
+    let mut facet = DebugDiagnostics;
+    facet.remember_cache_inspection(current);
+    // This fake cannot prove host persistence; Phase 3 adapter tests own the
+    // actual state transition. The contract proves the two distinct operations.
+}
+
+#[test]
 fn debug_diagnostics_facet_is_object_safe_and_independently_transportable() {
     fn object_safe(_: &dyn CommandDebugDiagnosticsContext) {}
     object_safe(&DebugDiagnostics);
