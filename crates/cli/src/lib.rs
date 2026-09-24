@@ -4289,6 +4289,7 @@ fn run_auth_command_with_secrets_and_runtime(
             } else {
                 println!("saved API key for {slot} to {}", store.path().display());
             }
+            println!("model unchanged; run `codewhale model resolve` to see the active model");
             Ok(())
         }
         AuthCommand::Get { provider } => {
@@ -7749,10 +7750,11 @@ verbosity = "project-imported"
 
         assert!(store.config.api_key.is_none());
         assert!(store.config.providers.deepseek.api_key.is_none());
-        assert_eq!(
-            store.config.default_text_model.as_deref(),
-            Some("deepseek-v4-pro")
-        );
+        // Intentional change: auth set used to pin `deepseek-v4-pro` here,
+        // silently moving a fresh install off the cheaper `deepseek-flash`
+        // provider default. Saving a key must not choose a model.
+        assert!(store.config.default_text_model.is_none());
+        assert!(store.config.providers.deepseek.model.is_none());
         let saved = std::fs::read_to_string(&path).expect("config should be written");
         assert!(!saved.contains("sk-test"), "{saved}");
         assert!(
@@ -7760,7 +7762,7 @@ verbosity = "project-imported"
                 .lines()
                 .any(|line| line.trim_start().starts_with("api_key="))
         );
-        assert!(saved.contains("default_text_model = \"deepseek-v4-pro\""));
+        assert!(!saved.contains("default_text_model"), "{saved}");
         assert_eq!(
             secrets.get("deepseek").expect("read secret").as_deref(),
             Some("sk-test")
