@@ -5,11 +5,12 @@
 //! `CommandHandler<crate::commands::CommandResult>`.
 
 use crate::facets::{
-    CommandCostContext, CommandMediaContext, CommandMemoryContext, CommandModePolicyContext,
-    CommandModelContext, CommandPluginContext, CommandPresentationContext, CommandProjectContext,
-    CommandSessionContext, CommandSessionControlContext, CommandSessionExportContext,
-    CommandSessionLifecycleContext, CommandSkillGroupContext, CommandSkillsContext,
-    CommandSystemPromptContext, CommandWorkspaceContext,
+    CommandCostContext, CommandDebugDiagnosticsContext, CommandMediaContext, CommandMemoryContext,
+    CommandModePolicyContext, CommandModelContext, CommandPluginContext,
+    CommandPresentationContext, CommandProjectContext, CommandSessionContext,
+    CommandSessionControlContext, CommandSessionExportContext, CommandSessionLifecycleContext,
+    CommandSkillGroupContext, CommandSkillsContext, CommandSystemPromptContext,
+    CommandWorkspaceContext,
 };
 
 /// Exact host capabilities exposed to one contextual command handler.
@@ -124,6 +125,7 @@ pub struct CommandContexts<'a> {
     lifecycle: Option<&'a mut dyn CommandSessionLifecycleContext>,
     control: Option<&'a mut dyn CommandSessionControlContext>,
     export: Option<&'a mut dyn CommandSessionExportContext>,
+    debug_diagnostics: Option<&'a mut dyn CommandDebugDiagnosticsContext>,
 }
 
 /// Consumed envelope used when one handler needs several independent facets.
@@ -144,6 +146,7 @@ pub struct ContextParts<'a> {
     pub lifecycle: Option<&'a mut dyn CommandSessionLifecycleContext>,
     pub control: Option<&'a mut dyn CommandSessionControlContext>,
     pub export: Option<&'a mut dyn CommandSessionExportContext>,
+    pub debug_diagnostics: Option<&'a mut dyn CommandDebugDiagnosticsContext>,
 }
 
 impl<'a> CommandContexts<'a> {
@@ -165,6 +168,7 @@ impl<'a> CommandContexts<'a> {
             lifecycle: None,
             control: None,
             export: None,
+            debug_diagnostics: None,
         }
     }
 
@@ -186,6 +190,7 @@ impl<'a> CommandContexts<'a> {
             lifecycle: self.lifecycle,
             control: self.control,
             export: self.export,
+            debug_diagnostics: self.debug_diagnostics,
         }
     }
 
@@ -310,6 +315,17 @@ impl<'a> CommandContexts<'a> {
         assert!(
             self.export.replace(value).is_none(),
             "export facet already set"
+        );
+        self
+    }
+
+    pub fn with_debug_diagnostics(
+        mut self,
+        value: &'a mut dyn CommandDebugDiagnosticsContext,
+    ) -> Self {
+        assert!(
+            self.debug_diagnostics.replace(value).is_none(),
+            "debug diagnostics facet already set"
         );
         self
     }

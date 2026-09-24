@@ -145,6 +145,73 @@ fn envelope_carries_independent_facets() {
     assert!(parts.cost.is_none());
 }
 
+struct DebugDiagnostics;
+impl CommandDebugDiagnosticsContext for DebugDiagnostics {
+    fn balance_projection(&self) -> DebugBalanceProjection {
+        DebugBalanceProjection {
+            provider_display_name: "Example".into(),
+            supports_balance_api: false,
+        }
+    }
+}
+
+#[test]
+fn debug_diagnostics_facet_is_object_safe_and_independently_transportable() {
+    fn object_safe(_: &dyn CommandDebugDiagnosticsContext) {}
+    object_safe(&DebugDiagnostics);
+
+    let mut diagnostics = DebugDiagnostics;
+    let parts = CommandContexts::empty()
+        .with_debug_diagnostics(&mut diagnostics)
+        .into_parts();
+    assert_eq!(
+        parts
+            .debug_diagnostics
+            .expect("declared diagnostics facet")
+            .balance_projection(),
+        DebugBalanceProjection {
+            provider_display_name: "Example".into(),
+            supports_balance_api: false,
+        }
+    );
+    for absent in [
+        parts.session.is_none(),
+        parts.model.is_none(),
+        parts.cost.is_none(),
+        parts.mode_policy.is_none(),
+        parts.system_prompt.is_none(),
+        parts.skills.is_none(),
+        parts.workspace.is_none(),
+        parts.presentation.is_none(),
+        parts.media.is_none(),
+        parts.memory.is_none(),
+        parts.project.is_none(),
+        parts.skill_group.is_none(),
+        parts.plugin.is_none(),
+        parts.lifecycle.is_none(),
+        parts.control.is_none(),
+        parts.export.is_none(),
+    ] {
+        assert!(absent, "diagnostics must not expose another facet");
+    }
+    assert!(
+        CommandContexts::empty()
+            .into_parts()
+            .debug_diagnostics
+            .is_none()
+    );
+}
+
+#[test]
+#[should_panic(expected = "debug diagnostics facet already set")]
+fn debug_diagnostics_envelope_rejects_duplicate_authority() {
+    let mut first = DebugDiagnostics;
+    let mut second = DebugDiagnostics;
+    let _ = CommandContexts::empty()
+        .with_debug_diagnostics(&mut first)
+        .with_debug_diagnostics(&mut second);
+}
+
 fn pure(value: Option<&str>) -> String {
     value.unwrap_or_default().to_owned()
 }

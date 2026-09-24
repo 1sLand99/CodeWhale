@@ -115,6 +115,28 @@ pub trait CommandMediaContext {
 }
 
 // ---------------------------------------------------------------------------
+// Debug diagnostics (FEAT-029 D3)
+// ---------------------------------------------------------------------------
+
+/// Only the provider identity and support decision consumed by `/balance`.
+/// The adapter derives support from the authoritative provider policy; the
+/// portable handler decides whether to emit `FetchBalance` or the original text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebugBalanceProjection {
+    pub provider_display_name: String,
+    pub supports_balance_api: bool,
+}
+
+/// Narrow, synchronous data boundary for the debug diagnostics slice.
+///
+/// No concrete provider, App, completed message, or network operation crosses
+/// this interface. Additional operations belong here only as their handlers
+/// are migrated; this projection alone does not yet migrate `/balance`.
+pub trait CommandDebugDiagnosticsContext {
+    fn balance_projection(&self) -> DebugBalanceProjection;
+}
+
+// ---------------------------------------------------------------------------
 // Project (FEAT-021 D1/D2/D3/D4)
 // ---------------------------------------------------------------------------
 
