@@ -411,7 +411,7 @@ fn debug_tool_snapshot_schema_preserves_unobserved_and_absent_states() {
 }
 
 #[test]
-fn debug_cache_observation_retains_previous_until_explicit_commit() {
+fn debug_cache_observation_keeps_current_and_previous_distinct() {
     let previous = DebugPromptInspection {
         base_static_prefix_hash: "before".into(),
         full_request_prefix_hash: "before".into(),
@@ -446,10 +446,8 @@ fn debug_cache_observation_retains_previous_until_explicit_commit() {
     );
     assert_eq!(observation.current.base_static_prefix_hash, "after");
     assert_ne!(observation.previous.as_ref(), Some(&observation.current));
-    let mut facet = DebugDiagnostics;
-    facet.remember_cache_inspection(current);
-    // This fake cannot prove host persistence; Phase 3 adapter tests own the
-    // actual state transition. The contract proves the two distinct operations.
+    // Contract data alone cannot prove a host write; Phase 3 adapter tests
+    // must assert that the synchronous post-render commit stores `current`.
 }
 
 #[test]
