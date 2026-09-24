@@ -545,6 +545,28 @@ export interface ChangelogDict {
   emptyBody: string;
 }
 
+export interface LegalTermsDict {
+  metaTitle: string;
+  metaDescription: string;
+  kicker: string;
+  title: string;
+  /** "Effective and last updated {date}." — zh also says the English text binds. */
+  updated: string;
+  privacyLink: string;
+  homeLink: string;
+}
+
+export interface LegalPrivacyDict {
+  metaTitle: string;
+  metaDescription: string;
+  kicker: string;
+  title: string;
+  /** Same template as `LegalTermsDict.updated`. */
+  updated: string;
+  termsLink: string;
+  homeLink: string;
+}
+
 /**
  * `app/[locale]/docs/hooks/page.tsx`.
  *
