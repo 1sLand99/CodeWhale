@@ -7528,7 +7528,7 @@ pub(super) async fn handle_approval_required_event(
             // during this process; auto-deny so the
             // model's retry loop doesn't keep re-prompting
             // (#360).
-            auto_deny_session_approval(app, &engine_handle, &id, &tool_name, &approval_key).await;
+            auto_deny_session_approval(app, engine_handle, &id, &tool_name, &approval_key).await;
         }
         ApprovalRequestDisposition::AutoDenyFullAccessPolicyHold => {
             log_sensitive_event(

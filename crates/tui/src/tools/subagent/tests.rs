@@ -22928,7 +22928,7 @@ mod child_permission_gate {
         let expected = child_approval_keys("agent_gate", "bash", &input);
         let manager_for_answer = Arc::clone(&manager);
         let answerer = tokio::spawn(async move {
-            let keys = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
                 while let Some(event) = rx.recv().await {
                     if let Event::ApprovalRequired {
                         id,
@@ -22947,8 +22947,7 @@ mod child_permission_gate {
                 panic!("channel closed before the child prompt");
             })
             .await
-            .expect("child prompt arrives");
-            keys
+            .expect("child prompt arrives")
         });
         let _ = registry.execute("agent_gate", "bash", input).await;
         assert_eq!(answerer.await.expect("answerer"), expected);
