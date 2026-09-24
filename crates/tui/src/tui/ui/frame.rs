@@ -1023,6 +1023,7 @@ pub(crate) fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         search_provider: config.search_provider(),
         search_api_key: config.search.as_ref().and_then(|s| s.api_key.clone()),
         search_base_url: config.search.as_ref().and_then(|s| s.base_url.clone()),
+        search_native: config.search_native(),
         tools_always_load: config.tools_always_load(),
         user_input_limits: config.user_input_limits(),
         user_input_timeout: config.user_input_timeout(),
