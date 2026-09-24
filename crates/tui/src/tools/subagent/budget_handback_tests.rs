@@ -81,6 +81,8 @@ async fn fixture(mode: &'static str, first_tokens: u64, max_steps: u32) -> Fixtu
                             "tool_calls": [{"id": "must-not-write", "type": "function", "function": {
                                 "name": "write_file", "arguments": "{\"path\":\"report.md\",\"content\":\"must not execute\"}"
                             }}]}, "finish_reason": "tool_calls"})
+                    } else if mode == "truncated" {
+                        json!({"index": 0, "message": {"role": "assistant", "content": "TRUNCATED_REPORT: README evid"}, "finish_reason": "length"})
                     } else {
                         json!({"index": 0, "message": {"role": "assistant", "content":
                             "PARTIAL_REPORT: README evidence identifies missing checksum validation. No report file was produced. Next: implement and verify the checksum check."}, "finish_reason": "stop"})
@@ -271,6 +273,42 @@ async fn budget_handback_turn_consolidates_tool_only_work_and_checks_declared_de
     assert!(completion.payload.contains("budget_exhausted"));
     assert!(completion.payload.contains("deliverable_missing"));
     assert!(fixture.completions.try_recv().is_err());
+}
+
+/// #6536 — the provider truncates the hand-back report. The deterministic
+/// digest recorded before that turn stays the deliverable: in the result
+/// text `agent result` / `agent wait` return, and as a private file.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn budget_handback_truncated_report_leaves_the_digest_as_the_deliverable() {
+    let _retry = crate::retry_status::test_guard();
+    crate::retry_status::clear_rate_limit();
+    let mut fixture = fixture("truncated", 15, 1).await;
+    let result = fixture.finish().await;
+    assert_eq!(fixture.requests.lock().unwrap().len(), 2);
+    assert_eq!(result.status, SubAgentStatus::BudgetExhausted);
+    let text = result.result.as_deref().unwrap();
+    assert!(
+        text.contains("RECORDED_FINDING"),
+        "digest is the result: {text}"
+    );
+    assert!(!text.contains("TRUNCATED_REPORT"), "{text}");
+    assert!(text.contains("did not finish"), "{text}");
+    assert!(text.contains("this child's deliverable"), "{text}");
+
+    let state_root = fixture.manager.read().await.state_root.clone();
+    let artifact = checked_subagent_state_path(
+        &state_root,
+        &Path::new(".codewhale/state/subagent-results").join(format!(
+            "{}.md",
+            crate::hashing::sha256_hex(b"report-worker")
+        )),
+    )
+    .unwrap();
+    let saved = fs::read_to_string(&artifact).expect("digest artifact written");
+    assert!(saved.contains("RECORDED_FINDING"), "{saved}");
+    assert!(!saved.contains("TRUNCATED_REPORT"), "{saved}");
+    assert!(text.contains(&artifact.display().to_string()), "{text}");
 }
 
 #[tokio::test]
