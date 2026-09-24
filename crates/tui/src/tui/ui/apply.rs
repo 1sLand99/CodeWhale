@@ -1364,6 +1364,7 @@ pub(crate) async fn apply_command_result(
                             return Ok(false);
                         }
                     };
+                crate::runtime_threads::prepare_canonical_sessions_root().await;
                 let respawn = match apply_loaded_session_config_snapshot(
                     app,
                     config,
