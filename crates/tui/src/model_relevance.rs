@@ -18,7 +18,7 @@
 //! - Receipts are redacted strings; a model id containing characters the
 //!   receipt formatter replaces is keyed by its redacted spelling.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 use chrono::{DateTime, Duration, Utc};
@@ -52,6 +52,9 @@ pub(crate) struct RouteUsage {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RouteUsageIndex {
     entries: HashMap<RouteKey, RouteUsage>,
+    /// Routes already counted by [`Self::record`] in this live session, so
+    /// switching A → B → A counts A once.
+    live: HashSet<RouteKey>,
 }
 
 /// Shared between the startup builder thread and the UI.
@@ -113,10 +116,13 @@ impl RouteUsageIndex {
         }
     }
 
-    /// Record in-session use of a route (a committed switch). Counts as one
-    /// more session so a route picked today outranks one last used a month ago.
+    /// Record in-session use of a route (a committed switch). The first record
+    /// of a route counts as one more session so a route picked today outranks
+    /// one last used a month ago; later records of the same route in this
+    /// session only refresh its last-used time.
     pub(crate) fn record(&mut self, identity: &str, model: &str, at: DateTime<Utc>) {
-        self.add(identity, model, at, 1);
+        let first_this_session = self.live.insert(key(identity, model));
+        self.add(identity, model, at, u32::from(first_this_session));
     }
 
     /// Fold a freshly built index into this one, keeping in-session records
@@ -375,5 +381,22 @@ mod tests {
             .map(|usage| usage.model.clone())
             .collect();
         assert_eq!(order, ["step-5-preview", "deepseek-v4-pro"]);
+    }
+
+    #[test]
+    fn switching_back_and_forth_counts_each_route_once_per_session() {
+        let now = Utc::now();
+        let mut live = RouteUsageIndex::default();
+        live.record("deepseek", "deepseek-v4-pro", now - Duration::minutes(5));
+        live.record("xai", "grok-4.7", now - Duration::minutes(4));
+        live.record("deepseek", "DeepSeek-V4-Pro", now - Duration::minutes(3));
+        live.record("deepseek", "deepseek-v4-pro", now);
+        let pro = live
+            .ranked(now)
+            .into_iter()
+            .find(|usage| usage.identity == "deepseek")
+            .expect("deepseek route recorded");
+        assert_eq!(pro.sessions, 1, "re-selecting a route is not a new session");
+        assert_eq!(pro.last_used, now, "re-selecting refreshes last use");
     }
 }
