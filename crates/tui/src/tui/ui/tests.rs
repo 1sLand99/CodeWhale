@@ -3311,6 +3311,29 @@ fn focus_loss_defers_frames_until_focus_or_input_returns() {
     assert!(!next_unfocused(false, &key()));
 }
 
+/// Focus loss only defers frames on VTE terminals, where an occluded window
+/// replays queued damage. A visible-but-unfocused window elsewhere (macOS
+/// side-by-side, split panes) must keep painting streaming output.
+#[test]
+fn focus_loss_defers_frames_only_on_vte_terminals() {
+    assert!(focus_loss_defers_frames(Some("7600"), None));
+    assert!(focus_loss_defers_frames(Some("7600"), Some("")));
+    assert!(!focus_loss_defers_frames(None, None));
+    assert!(!focus_loss_defers_frames(Some(""), None));
+    assert!(!focus_loss_defers_frames(Some("  "), None));
+}
+
+/// tmux started from a VTE host inherits `VTE_VERSION`, but tmux is the
+/// immediate terminal and reports `FocusLost` for a still-visible split
+/// pane. Deferring frames there would freeze streaming output (#6519 review).
+#[test]
+fn focus_loss_keeps_painting_inside_tmux_even_under_a_vte_host() {
+    assert!(!focus_loss_defers_frames(
+        Some("7600"),
+        Some("/tmp/tmux-501/default,1234,0")
+    ));
+}
+
 // ANSI byte sequences are only written on platforms where crossterm uses the
 // ANSI execution path. On Windows the same logical commands route through the
 // WinAPI console backend and never reach the writer, so byte-level assertions
