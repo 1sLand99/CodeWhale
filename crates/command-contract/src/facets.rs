@@ -127,13 +127,175 @@ pub struct DebugBalanceProjection {
     pub supports_balance_api: bool,
 }
 
+/// Source text consumed by `/system`; retain Text/Blocks/None separately
+/// so the portable handler alone owns the separators and empty-state text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DebugSystemPrompt {
+    None,
+    Text(String),
+    Blocks(Vec<String>),
+}
+
+/// Only the data read by the `/system` renderer, with the host's mode label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebugSystemProjection {
+    pub mode_label: String,
+    pub prompt: DebugSystemPrompt,
+}
+
+/// Published usage telemetry remains optional: absence is not zero.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DebugTokenProjection {
+    pub active_context_used: usize,
+    pub context_window: u32,
+    pub last_input: Option<u32>,
+    pub last_output: Option<u32>,
+    pub cache_hit: Option<u32>,
+    pub cache_miss: Option<u32>,
+    pub total_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub api_message_count: usize,
+    pub chat_message_count: usize,
+    pub model: String,
+    pub cost: DebugCostProjection,
+}
+
+/// Already-authoritative monetary values and bounded route attribution.
+/// Calculation and price/source selection stay with the TUI host; formatting,
+/// ordering and coverage wording belong to the portable handlers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DebugCostProjection {
+    pub currency: CommandCurrency,
+    pub total: f64,
+    pub parent_turns: f64,
+    pub subagents: f64,
+    pub display_floor: f64,
+    pub priced_turns: u32,
+    pub unpriced_turns: u32,
+    pub legacy_coverage_unknown: bool,
+    pub user_declared_estimates: bool,
+    pub itemized_turns: u32,
+    pub route_amounts: Vec<DebugRouteCost>,
+    pub turn_history_capacity: usize,
+    pub unpriced_reason_labels: Vec<String>,
+    pub unpriced_classes: Vec<String>,
+    pub pricing_provenances: Vec<String>,
+    pub live_pricing_defects: Vec<String>,
+    pub unusable_pricing_defects: Vec<String>,
+    pub route_receipts: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DebugRouteCost {
+    pub route: String,
+    pub amount: f64,
+}
+
+/// A cache inspection's semantic layer, retaining the same public JSON
+/// field order as the baseline without borrowing the client request type.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DebugPromptLayer {
+    pub name: String,
+    pub stability: DebugPromptLayerStability,
+    pub char_len: usize,
+    pub byte_len: usize,
+    pub token_estimate: usize,
+    pub sha256: String,
+    pub tool_result: Option<DebugToolResultInspection>,
+    pub turn_meta: Option<DebugTurnMetaInspection>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum DebugPromptLayerStability {
+    Static,
+    History,
+    Dynamic,
+}
+
+impl DebugPromptLayerStability {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Static => "static",
+            Self::History => "history",
+            Self::Dynamic => "dynamic",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DebugToolResultInspection {
+    pub original_chars: usize,
+    pub sent_chars: usize,
+    pub truncated: bool,
+    pub deduplicated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DebugTurnMetaInspection {
+    pub original_chars: usize,
+    pub sent_chars: usize,
+    pub deduplicated: bool,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DebugPromptInspection {
+    pub base_static_prefix_hash: String,
+    pub full_request_prefix_hash: String,
+    pub tool_catalog_hash: String,
+    pub layers: Vec<DebugPromptLayer>,
+}
+
+/// Full key fields are needed for the existing comparison and JSON report;
+/// the short hash is computed by the authoritative host hashing function.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DebugWarmupKey {
+    pub provider: String,
+    pub model: String,
+    pub base_url: String,
+    pub static_prefix_hash: String,
+    pub tool_catalog_hash: String,
+    pub project_pack_hash: String,
+    pub skills_hash: String,
+}
+
+/// One coherent observation, including previous inspection before any write.
+/// Inspect errors occur before this value exists and never update session state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebugCacheInspectionObservation {
+    pub current: DebugPromptInspection,
+    pub previous: Option<DebugPromptInspection>,
+    pub current_warmup_key: DebugWarmupKey,
+    pub last_warmup_key: Option<DebugWarmupKey>,
+    pub current_warmup_hash_short: String,
+    pub last_warmup_hash_short: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DebugCacheInspectionUnavailable {
+    NoConcreteRoute,
+    MissingCapturedEndpoint,
+}
+
 /// Narrow, synchronous data boundary for the debug diagnostics slice.
 ///
 /// No concrete provider, App, completed message, or network operation crosses
-/// this interface. Additional operations belong here only as their handlers
-/// are migrated; this projection alone does not yet migrate `/balance`.
+/// this interface. Add operations only when their live branches require them.
+/// These projections do not yet migrate either command.
 pub trait CommandDebugDiagnosticsContext {
     fn balance_projection(&self) -> DebugBalanceProjection;
+    fn system_projection(&self) -> DebugSystemProjection;
+    fn token_projection(&self) -> DebugTokenProjection;
+    fn cost_projection(&self) -> DebugCostProjection;
+    /// Route resolution and request inspection remain host-owned. This call
+    /// must not update the remembered inspection on failure or success.
+    fn inspect_cache(
+        &self,
+    ) -> Result<DebugCacheInspectionObservation, DebugCacheInspectionUnavailable>;
+    /// Store the already-observed inspection after portable rendering, without
+    /// rebuilding or re-inspecting the request. The baseline also commits on
+    /// JSON serialization fallback.
+    fn remember_cache_inspection(&mut self, inspection: DebugPromptInspection);
 }
 
 // ---------------------------------------------------------------------------

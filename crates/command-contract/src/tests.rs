@@ -153,6 +153,102 @@ impl CommandDebugDiagnosticsContext for DebugDiagnostics {
             supports_balance_api: false,
         }
     }
+    fn system_projection(&self) -> DebugSystemProjection {
+        DebugSystemProjection {
+            mode_label: "plan".into(),
+            prompt: DebugSystemPrompt::Blocks(vec!["first".into(), "second".into()]),
+        }
+    }
+    fn token_projection(&self) -> DebugTokenProjection {
+        DebugTokenProjection {
+            active_context_used: 0,
+            context_window: 8192,
+            last_input: None,
+            last_output: Some(0),
+            cache_hit: None,
+            cache_miss: Some(0),
+            total_tokens: 0,
+            cache_write_tokens: 0,
+            api_message_count: 0,
+            chat_message_count: 0,
+            model: "example".into(),
+            cost: self.cost_projection(),
+        }
+    }
+    fn cost_projection(&self) -> DebugCostProjection {
+        DebugCostProjection {
+            currency: CommandCurrency::Usd,
+            total: 0.0,
+            parent_turns: 0.0,
+            subagents: 0.0,
+            display_floor: 0.0,
+            priced_turns: 0,
+            unpriced_turns: 0,
+            legacy_coverage_unknown: false,
+            user_declared_estimates: false,
+            itemized_turns: 0,
+            route_amounts: vec![],
+            turn_history_capacity: 10,
+            unpriced_reason_labels: vec![],
+            unpriced_classes: vec![],
+            pricing_provenances: vec![],
+            live_pricing_defects: vec![],
+            unusable_pricing_defects: vec![],
+            route_receipts: vec![],
+        }
+    }
+    fn inspect_cache(
+        &self,
+    ) -> Result<DebugCacheInspectionObservation, DebugCacheInspectionUnavailable> {
+        Err(DebugCacheInspectionUnavailable::NoConcreteRoute)
+    }
+    fn remember_cache_inspection(&mut self, _inspection: DebugPromptInspection) {}
+}
+
+#[test]
+fn debug_inspection_schema_preserves_order_and_absence() {
+    let inspection = DebugPromptInspection {
+        base_static_prefix_hash: "base".into(),
+        full_request_prefix_hash: "full".into(),
+        tool_catalog_hash: "".into(),
+        layers: vec![DebugPromptLayer {
+            name: "history".into(),
+            stability: DebugPromptLayerStability::History,
+            char_len: 0,
+            byte_len: 0,
+            token_estimate: 0,
+            sha256: "digest".into(),
+            tool_result: None,
+            turn_meta: None,
+        }],
+    };
+    assert_eq!(
+        serde_json::to_string(&inspection).expect("structured inspection"),
+        r#"{"base_static_prefix_hash":"base","full_request_prefix_hash":"full","tool_catalog_hash":"","layers":[{"name":"history","stability":"History","char_len":0,"byte_len":0,"token_estimate":0,"sha256":"digest","tool_result":null,"turn_meta":null}]}"#,
+    );
+    assert_eq!(DebugPromptLayerStability::Static.label(), "static");
+    assert_eq!(DebugPromptLayerStability::Dynamic.label(), "dynamic");
+    assert_ne!(
+        DebugCacheInspectionUnavailable::NoConcreteRoute,
+        DebugCacheInspectionUnavailable::MissingCapturedEndpoint,
+    );
+    let key = DebugWarmupKey {
+        provider: "provider".into(),
+        model: "model".into(),
+        base_url: "local".into(),
+        static_prefix_hash: "static".into(),
+        tool_catalog_hash: "".into(),
+        project_pack_hash: "".into(),
+        skills_hash: "".into(),
+    };
+    assert_eq!(
+        serde_json::to_string(&key).expect("structured key"),
+        r#"{"provider":"provider","model":"model","base_url":"local","static_prefix_hash":"static","tool_catalog_hash":"","project_pack_hash":"","skills_hash":""}"#,
+    );
+    assert_eq!(
+        DebugDiagnostics.inspect_cache(),
+        Err(DebugCacheInspectionUnavailable::NoConcreteRoute)
+    );
 }
 
 #[test]
@@ -174,6 +270,23 @@ fn debug_diagnostics_facet_is_object_safe_and_independently_transportable() {
             supports_balance_api: false,
         }
     );
+    assert_eq!(
+        DebugDiagnostics.system_projection(),
+        DebugSystemProjection {
+            mode_label: "plan".into(),
+            prompt: DebugSystemPrompt::Blocks(vec!["first".into(), "second".into()]),
+        }
+    );
+    assert_ne!(
+        DebugSystemPrompt::None,
+        DebugSystemPrompt::Text(String::new())
+    );
+    assert_ne!(DebugSystemPrompt::Blocks(vec![]), DebugSystemPrompt::None);
+    let usage = DebugDiagnostics.token_projection();
+    assert_eq!(usage.last_input, None);
+    assert_eq!(usage.last_output, Some(0));
+    assert_eq!(usage.cache_miss, Some(0));
+    assert_eq!(usage.cost, DebugDiagnostics.cost_projection());
     for absent in [
         parts.session.is_none(),
         parts.model.is_none(),

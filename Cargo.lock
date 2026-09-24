@@ -875,6 +875,7 @@ name = "codewhale-command-contract"
 version = "0.10.0"
 dependencies = [
  "codewhale-core",
+ "serde",
  "serde_json",
 ]
 
