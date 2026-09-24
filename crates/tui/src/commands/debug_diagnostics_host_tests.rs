@@ -2,7 +2,7 @@
 //! `groups/debug` source closure. Selected by CW-SLICE's
 //! `commands::debug_diagnostics` filter; mutation-only tests stay in the group.
 
-use super::groups::debug::cache::{cache, format_tokens, format_warmup_status};
+use super::groups::debug::cache_format::format_tokens;
 use super::groups::debug::dispatch;
 use super::groups::debug::tests::{create_test_app, test_tool};
 use crate::client::CacheWarmupKey;
@@ -27,6 +27,21 @@ fn cost(app: &mut App) -> crate::commands::CommandResult {
 
 fn tokens(app: &mut App) -> crate::commands::CommandResult {
     dispatch(app, "tokens", None).expect("registered tokens command")
+}
+
+fn cache(app: &mut App, arg: Option<&str>) -> crate::commands::CommandResult {
+    dispatch(app, "cache", arg).expect("registered cache command")
+}
+
+fn format_warmup_status(last: Option<&CacheWarmupKey>, current: &CacheWarmupKey) -> String {
+    let previous = last.cloned().map(super::contract::project_debug_warmup_key);
+    let projected = super::contract::project_debug_warmup_key(current.clone());
+    super::groups::debug::cache_format::format_warmup_status(
+        previous.as_ref(),
+        &projected,
+        last.map(CacheWarmupKey::hash_short).as_deref(),
+        &current.hash_short(),
+    )
 }
 
 #[test]
@@ -1595,5 +1610,209 @@ mod cost_breakdown_tests {
         let msg = cost(&mut app).message.expect("cost report");
         assert!(!msg.contains("Breakdown"), "{msg}");
         assert!(!msg.contains("Parent turns:"), "{msg}");
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+
+    #[test]
+    fn cache_route_keeps_exact_named_custom_identity() {
+        let record = TurnCacheRecord {
+            provider: Some(crate::config::ApiProvider::Custom),
+            provider_identity: Some("lm-studio".to_string()),
+            model: Some("local-code-model".to_string()),
+            auto_model: false,
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_hit_tokens: None,
+            cache_miss_tokens: None,
+            reasoning_replay_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            cost_audit: None,
+            recorded_at: Instant::now(),
+        };
+
+        let mut app = create_test_app();
+        app.push_turn_cache_record(record);
+        let mut bundle = app.command_contexts();
+        let mut parts = bundle
+            .contexts(codewhale_command_contract::handler::CommandCapabilities::DEBUG_DIAGNOSTICS)
+            .into_parts();
+        let turn = parts
+            .debug_diagnostics
+            .as_deref_mut()
+            .unwrap()
+            .cache_telemetry()
+            .history
+            .pop()
+            .unwrap();
+        assert_eq!(
+            crate::commands::groups::debug::cache_format::format_turn_cache_route(&turn),
+            "lm-studio/local-code-..."
+        );
+    }
+}
+
+#[cfg(test)]
+mod zones_tests {
+    use super::*;
+    use crate::config::Config;
+    use std::path::PathBuf;
+
+    #[test]
+    fn cache_zones_output_reports_real_wiring() {
+        let mut app = App::new(
+            crate::test_support::test_tui_options(PathBuf::from(".")),
+            &Config::default(),
+        );
+        app.api_messages = std::sync::Arc::new(Vec::new());
+        app.last_pinned_prefix_hash = None;
+        app.prefix_change_count = 0;
+
+        let expected = "\
+Cache Zones (#2264 three-zone contract)
+
+── PinnedPrefix (system + tools, frozen baseline)
+  Status:    unavailable (not yet frozen)
+  Run a turn first to freeze the baseline.
+
+── AppendLog (conversation history, append-only)
+  Status:      wired — backs the engine session history
+  Messages:    0
+  History msgs: 0
+
+── TurnScratch (per-turn ephemeral data)
+  Status:      not wired — type scaffolding, unused by requests
+
+── Contract Status
+  PinnedPrefix: not frozen
+  AppendLog:    wired (session history)
+  TurnScratch:  not wired
+";
+        assert_eq!(
+            cache(&mut app, Some("zones")).message.as_deref(),
+            Some(expected)
+        );
+    }
+}
+
+#[cfg(test)]
+mod arg_tests {
+    use super::*;
+    use crate::config::Config;
+    use std::path::PathBuf;
+
+    fn app() -> App {
+        App::new(
+            crate::test_support::test_tui_options(PathBuf::from(".")),
+            &Config::default(),
+        )
+    }
+
+    #[test]
+    fn cache_rejects_unknown_word_args() {
+        let mut app = app();
+        for arg in ["stat", "inspector", "inspect--json"] {
+            let result = cache(&mut app, Some(arg));
+            assert!(result.is_error, "/cache {arg} must be a usage error");
+            let text = result.message.as_deref().unwrap_or_default();
+            assert!(
+                text.contains(arg) && text.contains("Usage: /cache"),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn cache_inspect_matches_whole_word_with_optional_flags() {
+        let mut app = app();
+        for arg in ["inspect", "inspect --json", "inspect  --verbose"] {
+            let result = cache(&mut app, Some(arg));
+            let text = result.message.as_deref().unwrap_or_default();
+            assert!(!result.is_error, "/cache {arg}: {text}");
+            assert!(
+                !text.contains("Unknown /cache argument"),
+                "/cache {arg}: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn cache_numeric_arg_still_selects_count() {
+        let mut app = app();
+        let result = cache(&mut app, Some("5"));
+        assert!(!result.is_error);
+    }
+}
+
+mod preview_host_tests {
+    use super::*;
+    use crate::config::Config;
+    use codewhale_models::Role;
+
+    #[test]
+    fn unknown_argument_is_rejected_without_touching_state() {
+        let options = crate::test_support::test_tui_options(std::path::PathBuf::from(
+            "/tmp/test-workspace-preview-request",
+        ));
+        let mut app = App::new(options, &Config::default());
+        let messages_before = app.api_messages.len();
+        let history_before = app.history.len();
+
+        let result = dispatch(&mut app, "preview-request", Some("nope"))
+            .expect("registered preview command");
+
+        assert!(!result.is_error);
+        assert!(
+            result
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("/preview-request")),
+            "{result:?}"
+        );
+        assert!(result.action.is_none());
+        assert_eq!(app.api_messages.len(), messages_before);
+        assert_eq!(app.history.len(), history_before);
+    }
+
+    #[test]
+    fn command_delegates_to_the_engine_and_mutates_nothing() {
+        let options = crate::test_support::test_tui_options(std::path::PathBuf::from(
+            "/tmp/test-workspace-preview-request-pure",
+        ));
+        let mut app = App::new(options, &Config::default());
+        app.api_messages_mut().push(codewhale_models::Message {
+            role: Role::User,
+            content: vec![codewhale_models::ContentBlock::Text {
+                text: "hello".to_string(),
+                cache_control: None,
+            }],
+        });
+
+        let result = dispatch(&mut app, "preview-request", Some("json"))
+            .expect("registered preview command");
+
+        // The command itself renders nothing: the engine is the authority.
+        assert!(result.message.is_none(), "{result:?}");
+        assert!(matches!(
+            result.action,
+            Some(AppAction::PreviewOutboundRequest { json: true, .. })
+        ));
+        assert_eq!(app.api_messages.len(), 1);
+        assert!(app.history.is_empty());
+    }
+
+    #[test]
+    fn base_prompt_provenance_is_runtime_not_a_source_path() {
+        let label = crate::prompts::base_prompt_origin().label();
+        assert!(!label.contains("crates/"), "{label}");
+        assert!(!label.contains(".rs"), "{label}");
+        assert!(
+            label.contains("bundled") || label.contains("override"),
+            "{label}"
+        );
     }
 }

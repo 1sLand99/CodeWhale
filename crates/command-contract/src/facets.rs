@@ -300,6 +300,8 @@ pub struct DebugCacheTurn {
     pub reasoning_replay_tokens: Option<u32>,
     pub priced_amount: Option<f64>,
     pub unpriced_reason_key: Option<String>,
+    /// Original host enum order for deduplicated /cache note ordering.
+    pub unpriced_reason_sort_rank: Option<u8>,
     pub unpriced_classes: Vec<String>,
     pub priced_cache_read: u64,
     pub priced_cache_miss: u64,

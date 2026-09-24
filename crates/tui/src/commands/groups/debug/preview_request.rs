@@ -186,9 +186,6 @@ fn parse_args(raw: &str) -> Result<PreviewArgs, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
-    use crate::tui::app::App;
-    use codewhale_models::Role;
 
     fn args(raw: &str) -> Result<PreviewArgs, String> {
         parse_args(raw)
@@ -335,67 +332,6 @@ mod tests {
     #[test]
     fn leading_and_repeated_whitespace_between_flags_is_ignored() {
         assert_eq!(args("   json   --manifest  ").unwrap(), args("").unwrap());
-    }
-
-    #[test]
-    fn unknown_argument_is_rejected_without_touching_state() {
-        let options = crate::test_support::test_tui_options(std::path::PathBuf::from(
-            "/tmp/test-workspace-preview-request",
-        ));
-        let app = App::new(options, &Config::default());
-        let messages_before = app.api_messages.len();
-        let history_before = app.history.len();
-
-        let result = preview_request(Some("nope"));
-
-        assert!(!result.is_error);
-        assert!(
-            result
-                .message
-                .as_deref()
-                .is_some_and(|message| message.contains("/preview-request")),
-            "{result:?}"
-        );
-        assert!(result.action.is_none());
-        assert_eq!(app.api_messages.len(), messages_before);
-        assert_eq!(app.history.len(), history_before);
-    }
-
-    #[test]
-    fn command_delegates_to_the_engine_and_mutates_nothing() {
-        let options = crate::test_support::test_tui_options(std::path::PathBuf::from(
-            "/tmp/test-workspace-preview-request-pure",
-        ));
-        let mut app = App::new(options, &Config::default());
-        app.api_messages_mut().push(codewhale_models::Message {
-            role: Role::User,
-            content: vec![codewhale_models::ContentBlock::Text {
-                text: "hello".to_string(),
-                cache_control: None,
-            }],
-        });
-
-        let result = preview_request(Some("json"));
-
-        // The command itself renders nothing: the engine is the authority.
-        assert!(result.message.is_none(), "{result:?}");
-        assert!(matches!(
-            result.action,
-            Some(AppAction::PreviewOutboundRequest { json: true, .. })
-        ));
-        assert_eq!(app.api_messages.len(), 1);
-        assert!(app.history.is_empty());
-    }
-
-    #[test]
-    fn base_prompt_provenance_is_runtime_not_a_source_path() {
-        let label = crate::prompts::base_prompt_origin().label();
-        assert!(!label.contains("crates/"), "{label}");
-        assert!(!label.contains(".rs"), "{label}");
-        assert!(
-            label.contains("bundled") || label.contains("override"),
-            "{label}"
-        );
     }
 
     #[test]

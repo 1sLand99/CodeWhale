@@ -34,9 +34,11 @@ use std::rc::Rc;
 mod debug_diagnostics;
 mod diagnostics_messages;
 use debug_diagnostics::DebugDiagnosticsAdapter;
+#[cfg(test)]
+pub(crate) use debug_diagnostics::warmup_key as project_debug_warmup_key;
 pub(crate) use debug_diagnostics::{
-    CostComponents as DebugCostComponents, observe_cache_for_app,
-    source_map as project_debug_context_source_map, tool_snapshot as project_debug_tool_snapshot,
+    CostComponents as DebugCostComponents, source_map as project_debug_context_source_map,
+    tool_snapshot as project_debug_tool_snapshot,
 };
 
 use codewhale_command_contract::facets::{

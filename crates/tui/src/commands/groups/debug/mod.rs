@@ -2,7 +2,8 @@
 //! and the change log.
 
 mod balance;
-pub(in crate::commands) mod cache;
+mod cache;
+pub(in crate::commands) mod cache_format;
 mod change;
 mod preview_request;
 mod receipts;
@@ -202,7 +203,15 @@ pub(in crate::commands) fn dispatch(
             let mut bundle = app.command_contexts();
             balance::balance(bundle.contexts(CommandCapabilities::DEBUG_DIAGNOSTICS))
         }
-        "cache" => cache::cache(app, arg),
+        "cache" => {
+            let mut bundle = app.command_contexts();
+            cache::cache(
+                bundle.contexts(
+                    CommandCapabilities::DEBUG_DIAGNOSTICS | CommandCapabilities::PRESENTATION,
+                ),
+                arg,
+            )
+        }
         "preview-request" | "preview_request" | "dryrun" => preview_request::preview_request(arg),
         "tools" | "tool-studio" => {
             let mut bundle = app.command_contexts();

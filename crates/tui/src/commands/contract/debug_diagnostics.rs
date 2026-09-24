@@ -120,6 +120,10 @@ impl CommandDebugDiagnosticsContext for DebugDiagnosticsAdapter<'_> {
                             .unpriced_reason
                             .map(|reason| reason.label().to_string())
                     }),
+                    unpriced_reason_sort_rank: rec
+                        .cost_audit
+                        .as_ref()
+                        .and_then(|audit| audit.unpriced_reason.map(|reason| reason as u8)),
                     unpriced_classes: rec.cost_audit.as_ref().map_or_else(Vec::new, |audit| {
                         audit
                             .unpriced_classes
@@ -559,7 +563,7 @@ fn host_inspection(inspection: DebugPromptInspection) -> PromptInspection {
     }
 }
 
-fn warmup_key(key: CacheWarmupKey) -> DebugWarmupKey {
+pub(crate) fn warmup_key(key: CacheWarmupKey) -> DebugWarmupKey {
     DebugWarmupKey {
         provider: key.provider,
         model: key.model,
