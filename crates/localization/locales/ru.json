@@ -2292,5 +2292,14 @@
   "FleetReviewWorkspaceLimits": "{workspace} · агенты {enabled} (одновременно {concurrent}, слотов запуска {launch_slots}, допущено {admitted}) · рекурсия: агент {agent_depth} / Fleet {fleet_depth} (предел {ceiling})",
   "FleetReviewPolicy": "По умолчанию у агентов нет лимита токенов · API {api_secs}с, сигнал активности {heartbeat_secs}с. Запуск через Fleet → exec; /fleet workers (или /subagents) показывает агентов этого сеанса; /fleet status и codewhale fleet status читают сохранённую историю .codewhale/fleet.jsonl.",
   "SetupProjectPermissionsInvalid": "Не удалось разобрать конфигурацию проекта {path} ({reason}). Её ограничения разрешений НЕ действуют; в этом рабочем пространстве используются ваши пользовательские значения по умолчанию.",
-  "SetupProjectPermissionsOverride": "Конфигурация проекта содержит {fields}. Предустановки сохраняют пользовательские значения по умолчанию; конфигурация проекта по-прежнему может ужесточать разрешения в этом рабочем пространстве."
+  "SetupProjectPermissionsOverride": "Конфигурация проекта содержит {fields}. Предустановки сохраняют пользовательские значения по умолчанию; конфигурация проекта по-прежнему может ужесточать разрешения в этом рабочем пространстве.",
+  "WorkflowCountRunning": "{count} выполняется",
+  "WorkflowCountDone": "{count} готово",
+  "WorkflowCountFailed": "{count} с ошибкой",
+  "WorkflowCountCancelled": "{count} отменено",
+  "WorkflowNoTasksYet": "задач пока нет",
+  "WorkflowSettledOfTotal": "{done}/{total} готово",
+  "WorkflowPhaseCountOne": "фаз: {count}",
+  "WorkflowPhaseCountMany": "фаз: {count}",
+  "WorkflowPhaseOrdinal": "фаза {n}/{total}"
 }

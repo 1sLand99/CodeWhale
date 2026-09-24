@@ -2292,5 +2292,14 @@
   "FleetReviewWorkspaceLimits": "{workspace} · エージェント {enabled}（同時実行 {concurrent}、起動枠 {launch_slots}、受入済み {admitted}）· 再帰：エージェント {agent_depth} / Fleet {fleet_depth}（上限 {ceiling}）",
   "FleetReviewPolicy": "エージェントのトークン数は既定で無制限 · API {api_secs} 秒、ハートビート {heartbeat_secs} 秒。Fleet → exec で起動します。/fleet workers（または /subagents）はこのセッションのエージェントを表示し、/fleet status と codewhale fleet status は保存済みの .codewhale/fleet.jsonl 履歴を読み取ります。",
   "SetupProjectPermissionsInvalid": "プロジェクト設定 {path} を解析できませんでした（{reason}）。この設定の権限制限は適用されていません。このワークスペースではユーザーの既定値が使われます。",
-  "SetupProjectPermissionsOverride": "プロジェクト設定に {fields} が含まれています。プリセットはユーザーの既定値を保存しますが、プロジェクト設定でこのワークスペースの権限をさらに制限できます。"
+  "SetupProjectPermissionsOverride": "プロジェクト設定に {fields} が含まれています。プリセットはユーザーの既定値を保存しますが、プロジェクト設定でこのワークスペースの権限をさらに制限できます。",
+  "WorkflowCountRunning": "{count} 実行中",
+  "WorkflowCountDone": "{count} 完了",
+  "WorkflowCountFailed": "{count} 失敗",
+  "WorkflowCountCancelled": "{count} キャンセル",
+  "WorkflowNoTasksYet": "タスクはまだありません",
+  "WorkflowSettledOfTotal": "{done}/{total} 完了",
+  "WorkflowPhaseCountOne": "{count} フェーズ",
+  "WorkflowPhaseCountMany": "{count} フェーズ",
+  "WorkflowPhaseOrdinal": "フェーズ {n}/{total}"
 }

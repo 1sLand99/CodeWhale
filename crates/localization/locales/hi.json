@@ -2292,5 +2292,14 @@
   "FleetReviewWorkspaceLimits": "{workspace} · एजेंट {enabled} ({concurrent} एक साथ, {launch_slots} लॉन्च स्लॉट, {admitted} स्वीकृत) · रिकर्शन एजेंट {agent_depth} / Fleet {fleet_depth} (सीमा {ceiling})",
   "FleetReviewPolicy": "एजेंट के लिए डिफ़ॉल्ट रूप से टोकन सीमा नहीं है · API {api_secs}s, गतिविधि संकेत {heartbeat_secs}s। Fleet → exec से शुरू करें; /fleet workers (या /subagents) इस सत्र के एजेंट दिखाता है; /fleet status और codewhale fleet status .codewhale/fleet.jsonl में सहेजा गया इतिहास पढ़ते हैं।",
   "SetupProjectPermissionsInvalid": "प्रोजेक्ट कॉन्फ़िगरेशन {path} पढ़ा नहीं जा सका ({reason})। इसकी अनुमति संबंधी पाबंदियाँ लागू नहीं हैं; यह वर्कस्पेस आपके उपयोगकर्ता डिफ़ॉल्ट का इस्तेमाल करता है।",
-  "SetupProjectPermissionsOverride": "प्रोजेक्ट कॉन्फ़िगरेशन में {fields} है। प्रीसेट उपयोगकर्ता डिफ़ॉल्ट सहेजते हैं; प्रोजेक्ट कॉन्फ़िगरेशन इस वर्कस्पेस में अनुमतियों को और सीमित कर सकता है।"
+  "SetupProjectPermissionsOverride": "प्रोजेक्ट कॉन्फ़िगरेशन में {fields} है। प्रीसेट उपयोगकर्ता डिफ़ॉल्ट सहेजते हैं; प्रोजेक्ट कॉन्फ़िगरेशन इस वर्कस्पेस में अनुमतियों को और सीमित कर सकता है।",
+  "WorkflowCountRunning": "{count} चल रहे",
+  "WorkflowCountDone": "{count} पूरे",
+  "WorkflowCountFailed": "{count} विफल",
+  "WorkflowCountCancelled": "{count} रद्द",
+  "WorkflowNoTasksYet": "अभी कोई कार्य नहीं",
+  "WorkflowSettledOfTotal": "{done}/{total} पूरे",
+  "WorkflowPhaseCountOne": "{count} चरण",
+  "WorkflowPhaseCountMany": "{count} चरण",
+  "WorkflowPhaseOrdinal": "चरण {n}/{total}"
 }

@@ -2292,5 +2292,14 @@
   "FleetReviewWorkspaceLimits": "{workspace} · 에이전트 {enabled} (동시 실행 {concurrent}, 시작 슬롯 {launch_slots}, 수용됨 {admitted}) · 재귀 에이전트 {agent_depth} / Fleet {fleet_depth} (상한 {ceiling})",
   "FleetReviewPolicy": "에이전트는 기본적으로 토큰 한도가 없습니다 · API {api_secs}초, 상태 신호 {heartbeat_secs}초. Fleet → exec로 시작하세요. /fleet workers(또는 /subagents)는 이 세션의 에이전트를 표시하며, /fleet status와 codewhale fleet status는 저장된 .codewhale/fleet.jsonl 기록을 읽습니다.",
   "SetupProjectPermissionsInvalid": "프로젝트 설정 {path}을(를) 해석할 수 없습니다({reason}). 이 설정의 권한 제한이 적용되지 않습니다. 이 작업 공간은 사용자 기본값을 사용합니다.",
-  "SetupProjectPermissionsOverride": "프로젝트 설정에 {fields}이(가) 포함되어 있습니다. 사전 설정은 사용자 기본값을 저장하지만, 프로젝트 설정으로 이 작업 공간의 권한을 더 제한할 수 있습니다."
+  "SetupProjectPermissionsOverride": "프로젝트 설정에 {fields}이(가) 포함되어 있습니다. 사전 설정은 사용자 기본값을 저장하지만, 프로젝트 설정으로 이 작업 공간의 권한을 더 제한할 수 있습니다.",
+  "WorkflowCountRunning": "{count} 실행 중",
+  "WorkflowCountDone": "{count} 완료",
+  "WorkflowCountFailed": "{count} 실패",
+  "WorkflowCountCancelled": "{count} 취소",
+  "WorkflowNoTasksYet": "아직 작업 없음",
+  "WorkflowSettledOfTotal": "{done}/{total} 완료",
+  "WorkflowPhaseCountOne": "{count}개 단계",
+  "WorkflowPhaseCountMany": "{count}개 단계",
+  "WorkflowPhaseOrdinal": "단계 {n}/{total}"
 }

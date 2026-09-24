@@ -2292,5 +2292,14 @@
   "FleetReviewWorkspaceLimits": "{workspace} · 智慧體{enabled}（同時執行 {concurrent}，啟動槽位 {launch_slots}，已接納 {admitted}）· 遞迴深度：智慧體 {agent_depth} / Fleet {fleet_depth}（上限 {ceiling}）",
   "FleetReviewPolicy": "智慧體預設不設 token 上限 · API {api_secs} 秒，心跳 {heartbeat_secs} 秒。透過 Fleet → exec 啟動；/fleet workers（或 /subagents）顯示目前工作階段的智慧體；/fleet status 和 codewhale fleet status 讀取已儲存的 .codewhale/fleet.jsonl 歷史。",
   "SetupProjectPermissionsInvalid": "無法解析專案設定 {path}（{reason}）。該設定的權限限制未生效；此工作區將使用你的使用者預設值。",
-  "SetupProjectPermissionsOverride": "專案設定包含 {fields}。預設組合儲存使用者預設值；專案設定仍可收緊此工作區的權限。"
+  "SetupProjectPermissionsOverride": "專案設定包含 {fields}。預設組合儲存使用者預設值；專案設定仍可收緊此工作區的權限。",
+  "WorkflowCountRunning": "{count} 執行中",
+  "WorkflowCountDone": "{count} 已完成",
+  "WorkflowCountFailed": "{count} 失敗",
+  "WorkflowCountCancelled": "{count} 已取消",
+  "WorkflowNoTasksYet": "尚無任務",
+  "WorkflowSettledOfTotal": "{done}/{total} 已完成",
+  "WorkflowPhaseCountOne": "{count} 個階段",
+  "WorkflowPhaseCountMany": "{count} 個階段",
+  "WorkflowPhaseOrdinal": "階段 {n}/{total}"
 }

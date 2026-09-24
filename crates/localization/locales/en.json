@@ -2292,5 +2292,14 @@
   "FleetReviewWorkspaceLimits": "{workspace} · agents {enabled} ({concurrent} concurrent, {launch_slots} launch slots, {admitted} admitted) · recursion agent {agent_depth} / Fleet {fleet_depth} (ceiling {ceiling})",
   "FleetReviewPolicy": "Agents run without a token cap by default · {api_secs}s API, {heartbeat_secs}s heartbeat. Launch with Fleet → exec; /fleet workers (or /subagents) shows agents in this session; /fleet status and codewhale fleet status read the saved .codewhale/fleet.jsonl history.",
   "SetupProjectPermissionsInvalid": "Project config {path} could not be parsed ({reason}). Its permission restrictions are NOT in effect; this workspace falls back to your user defaults.",
-  "SetupProjectPermissionsOverride": "Project config contains {fields}. Presets save user defaults; project config can still tighten permissions in this workspace."
+  "SetupProjectPermissionsOverride": "Project config contains {fields}. Presets save user defaults; project config can still tighten permissions in this workspace.",
+  "WorkflowCountRunning": "{count} running",
+  "WorkflowCountDone": "{count} done",
+  "WorkflowCountFailed": "{count} failed",
+  "WorkflowCountCancelled": "{count} cancelled",
+  "WorkflowNoTasksYet": "no tasks yet",
+  "WorkflowSettledOfTotal": "{done}/{total} done",
+  "WorkflowPhaseCountOne": "{count} phase",
+  "WorkflowPhaseCountMany": "{count} phases",
+  "WorkflowPhaseOrdinal": "phase {n}/{total}"
 }

@@ -558,10 +558,7 @@ fn register_clickable_chrome_for_hover(app: &App) {
             // every cell) across the entire card whenever the pointer rested
             // on it, and a pointer left there when the terminal lost focus
             // kept it lit (#6503).
-            app.viewport.last_workflow_panel_area.map(|area| Rect {
-                height: area.height.min(1),
-                ..area
-            }),
+            crate::tui::mouse_ui::workflow_panel_header_area(app),
             MessageId::CmdWorkflowDescription,
         ),
     ];

@@ -2292,5 +2292,14 @@
   "FleetReviewWorkspaceLimits": "{workspace} · agen {enabled} ({concurrent} serentak, {launch_slots} slot peluncuran, {admitted} diterima) · rekursi agen {agent_depth} / Fleet {fleet_depth} (batas {ceiling})",
   "FleetReviewPolicy": "Agen tidak memiliki batas token secara bawaan · API {api_secs}s, sinyal aktivitas {heartbeat_secs}s. Jalankan lewat Fleet → exec; /fleet workers (atau /subagents) menampilkan agen dalam sesi ini; /fleet status dan codewhale fleet status membaca riwayat tersimpan di .codewhale/fleet.jsonl.",
   "SetupProjectPermissionsInvalid": "Konfigurasi proyek {path} tidak dapat diurai ({reason}). Pembatasan izinnya TIDAK berlaku; ruang kerja ini menggunakan nilai bawaan pengguna Anda.",
-  "SetupProjectPermissionsOverride": "Konfigurasi proyek berisi {fields}. Prasetel menyimpan nilai bawaan pengguna; konfigurasi proyek masih dapat memperketat izin dalam ruang kerja ini."
+  "SetupProjectPermissionsOverride": "Konfigurasi proyek berisi {fields}. Prasetel menyimpan nilai bawaan pengguna; konfigurasi proyek masih dapat memperketat izin dalam ruang kerja ini.",
+  "WorkflowCountRunning": "{count} berjalan",
+  "WorkflowCountDone": "{count} selesai",
+  "WorkflowCountFailed": "{count} gagal",
+  "WorkflowCountCancelled": "{count} dibatalkan",
+  "WorkflowNoTasksYet": "belum ada tugas",
+  "WorkflowSettledOfTotal": "{done}/{total} selesai",
+  "WorkflowPhaseCountOne": "{count} fase",
+  "WorkflowPhaseCountMany": "{count} fase",
+  "WorkflowPhaseOrdinal": "fase {n}/{total}"
 }

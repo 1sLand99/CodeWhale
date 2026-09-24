@@ -2292,5 +2292,14 @@
   "FleetReviewWorkspaceLimits": "{workspace} · Agenten {enabled} ({concurrent} gleichzeitig, {launch_slots} Startplätze, {admitted} zugelassen) · Rekursion Agent {agent_depth} / Fleet {fleet_depth} (Obergrenze {ceiling})",
   "FleetReviewPolicy": "Agenten haben standardmäßig kein Token-Limit · API {api_secs}s, Lebenszeichen {heartbeat_secs}s. Start über Fleet → exec; /fleet workers (oder /subagents) zeigt die Agenten dieser Sitzung; /fleet status und codewhale fleet status lesen den gespeicherten Verlauf in .codewhale/fleet.jsonl.",
   "SetupProjectPermissionsInvalid": "Die Projektkonfiguration {path} konnte nicht gelesen werden ({reason}). Ihre Berechtigungseinschränkungen gelten NICHT; dieser Arbeitsbereich verwendet deine Benutzerstandardwerte.",
-  "SetupProjectPermissionsOverride": "Die Projektkonfiguration enthält {fields}. Voreinstellungen speichern Benutzerstandardwerte; die Projektkonfiguration kann die Berechtigungen in diesem Arbeitsbereich weiterhin einschränken."
+  "SetupProjectPermissionsOverride": "Die Projektkonfiguration enthält {fields}. Voreinstellungen speichern Benutzerstandardwerte; die Projektkonfiguration kann die Berechtigungen in diesem Arbeitsbereich weiterhin einschränken.",
+  "WorkflowCountRunning": "{count} laufen",
+  "WorkflowCountDone": "{count} fertig",
+  "WorkflowCountFailed": "{count} fehlgeschlagen",
+  "WorkflowCountCancelled": "{count} abgebrochen",
+  "WorkflowNoTasksYet": "noch keine Aufgaben",
+  "WorkflowSettledOfTotal": "{done}/{total} fertig",
+  "WorkflowPhaseCountOne": "{count} Phase",
+  "WorkflowPhaseCountMany": "{count} Phasen",
+  "WorkflowPhaseOrdinal": "Phase {n}/{total}"
 }

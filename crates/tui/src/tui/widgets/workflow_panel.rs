@@ -445,20 +445,20 @@ impl WorkflowPanelPhase {
 
     /// Labelled non-zero counts, e.g. `4 running · 1 done` (#6503). Replaces
     /// the unlabelled `[0✓ 5… 0! 0⊘]` glyph counters.
-    fn counts_text(&self, separator: &str) -> String {
+    fn counts_text(&self, locale: Locale, separator: &str) -> String {
         let (done, running, failed, cancelled) = self.counts();
         let counts = [
-            (running, "running"),
-            (done, "done"),
-            (failed, "failed"),
-            (cancelled, "cancelled"),
+            (running, MessageId::WorkflowCountRunning),
+            (done, MessageId::WorkflowCountDone),
+            (failed, MessageId::WorkflowCountFailed),
+            (cancelled, MessageId::WorkflowCountCancelled),
         ]
         .into_iter()
         .filter(|(count, _)| *count > 0)
-        .map(|(count, word)| format!("{count} {word}"))
+        .map(|(count, id)| count_text(locale, id, count))
         .collect::<Vec<_>>();
         if counts.is_empty() {
-            "no tasks yet".to_string()
+            tr(locale, MessageId::WorkflowNoTasksYet).into_owned()
         } else {
             counts.join(separator)
         }
@@ -999,19 +999,32 @@ impl WorkflowPanel {
     /// `N/M done · P phases[ · F failed][ · C cancelled] · elapsed`. The
     /// settled count is left out until a child exists.
     fn summary_counts_text(&self) -> String {
-        let (done, total) = self.done_total();
+        let (_, total) = self.done_total();
         let phases = self.phase_count();
-        let phase_word = if phases == 1 { "phase" } else { "phases" };
+        let phase_id = if phases == 1 {
+            MessageId::WorkflowPhaseCountOne
+        } else {
+            MessageId::WorkflowPhaseCountMany
+        };
         let settled = if total > 0 {
-            format!("{done}/{total} done · ")
+            format!("{} · ", self.settled_text())
         } else {
             String::new()
         };
         format!(
-            "{settled}{phases} {phase_word}{problems} · {elapsed}",
+            "{settled}{phases}{problems} · {elapsed}",
+            phases = count_text(self.locale, phase_id, phases),
             problems = self.problem_counts_suffix(),
             elapsed = self.elapsed_label(),
         )
+    }
+
+    /// `N/M done`, localized.
+    fn settled_text(&self) -> String {
+        let (done, total) = self.done_total();
+        tr(self.locale, MessageId::WorkflowSettledOfTotal)
+            .replace("{done}", &done.to_string())
+            .replace("{total}", &total.to_string())
     }
 
     /// ` · N failed · N cancelled`, each only when non-zero (#6503): a
@@ -1020,10 +1033,20 @@ impl WorkflowPanel {
         let (failed, cancelled) = self.failure_cancel_counts();
         let mut out = String::new();
         if failed > 0 {
-            out.push_str(&format!(" · {failed} failed"));
+            out.push_str(" · ");
+            out.push_str(&count_text(
+                self.locale,
+                MessageId::WorkflowCountFailed,
+                failed,
+            ));
         }
         if cancelled > 0 {
-            out.push_str(&format!(" · {cancelled} cancelled"));
+            out.push_str(" · ");
+            out.push_str(&count_text(
+                self.locale,
+                MessageId::WorkflowCountCancelled,
+                cancelled,
+            ));
         }
         out
     }
@@ -1082,7 +1105,7 @@ impl WorkflowPanel {
                 chips.push(format!(
                     "{marker}{title} ({counts})",
                     title = short_label(&phase.title, 24),
-                    counts = phase.counts_text(", "),
+                    counts = phase.counts_text(self.locale, ", "),
                 ));
             }
             if self.phases.len() > MAX_PHASE_SUMMARY {
@@ -1746,7 +1769,7 @@ impl WorkflowPanel {
     pub fn header_text(&self, width: usize) -> String {
         let glyph = if self.expanded { '▼' } else { '▶' };
         let focus = if self.keyboard_focus { "*" } else { "" };
-        let (done, total) = self.done_total();
+        let (_, total) = self.done_total();
         let budget =
             format_budget_chrome(self.budget_spent, self.budget_remaining, self.budget_total);
         let cancel_hint = if self.lifecycle.is_running() {
@@ -1760,7 +1783,7 @@ impl WorkflowPanel {
         };
         let head = format!("{glyph}{focus} ");
         let settled = if total > 0 {
-            format!(" · {done}/{total} done")
+            format!(" · {}", self.settled_text())
         } else {
             String::new()
         };
@@ -1878,7 +1901,10 @@ impl WorkflowPanel {
         // Selected phase: one labelled line, then one line per child (#6503).
         if let Some(phase) = self.phases.get(self.selected_phase) {
             lines.push(Line::from(Span::styled(
-                truncate_line_to_width(&self.phase_line_text(self.selected_phase), content_width),
+                truncate_line_to_width(
+                    &self.phase_line_text(self.selected_phase, content_width),
+                    content_width,
+                ),
                 Style::default()
                     .fg(palette::WHALE_ACTION)
                     .add_modifier(Modifier::BOLD),
@@ -1968,20 +1994,22 @@ impl WorkflowPanel {
         lines
     }
 
-    /// `phase 2/3 Verify · 4 running · 1 done` — the phase named in full
-    /// (the line truncates, the name is not pre-clipped) with labelled
-    /// counts; zero counts are omitted (#6503).
-    fn phase_line_text(&self, idx: usize) -> String {
+    /// `phase 2/3 Verify · 4 running · 1 done` — labelled counts, zero
+    /// counts omitted (#6503). Only the title is elastic: it shrinks (on a
+    /// word boundary) so the counts survive a long runtime-supplied title.
+    fn phase_line_text(&self, idx: usize, width: usize) -> String {
         let Some(phase) = self.phases.get(idx) else {
             return String::new();
         };
-        format!(
-            "phase {n}/{total} {title} · {counts}",
-            n = idx + 1,
-            total = self.phases.len(),
-            title = phase.title.split_whitespace().collect::<Vec<_>>().join(" "),
-            counts = phase.counts_text(" · "),
-        )
+        let prefix = format!(
+            "{} ",
+            tr(self.locale, MessageId::WorkflowPhaseOrdinal)
+                .replace("{n}", &(idx + 1).to_string())
+                .replace("{total}", &self.phases.len().to_string())
+        );
+        let suffix = format!(" · {}", phase.counts_text(self.locale, " · "));
+        let title = phase.title.split_whitespace().collect::<Vec<_>>().join(" ");
+        crate::tui::ui_text::semantic_truncate_with_affixes(&prefix, &title, &suffix, width)
     }
 
     /// The launch route most children of this run share (ties go to the
@@ -2203,6 +2231,11 @@ fn lifecycle_from_status(status: &str) -> WorkflowPanelLifecycle {
         "pending" => WorkflowPanelLifecycle::Pending,
         _ => WorkflowPanelLifecycle::Failed,
     }
+}
+
+/// `{count} running`-style labelled count.
+fn count_text(locale: Locale, id: MessageId, count: usize) -> String {
+    tr(locale, id).replace("{count}", &count.to_string())
 }
 
 fn localized_field(locale: Locale, id: MessageId, value: &str) -> String {
@@ -4260,9 +4293,24 @@ mod tests {
     /// repeated provenance, and running is not painted in an alarm colour.
     #[test]
     fn founder_workflow_card_is_one_line_per_child_at_80_and_200_columns() {
-        let panel = founder_card_panel();
+        let mut panel = founder_card_panel();
+        let labels = [
+            "loop-prompt",
+            "tools-approval",
+            "models-context",
+            "surfaces-sdk",
+            "evals-mcp-agents",
+        ];
+        let started: Vec<u64> = labels
+            .iter()
+            .map(|label| panel.find_row_mut(label).expect("row").started_at_ms)
+            .collect();
         for width in [80_u16, 200] {
+            // Bracket the render with the clock so the elapsed assertion
+            // holds however long the process was descheduled (#6520 review).
+            let before = now_ms();
             let lines = panel.render_lines(width);
+            let after = now_ms();
             let text: Vec<String> = lines.iter().map(line_text).collect();
             let joined = text.join("\n");
             assert_eq!(lines.len(), 7, "header + phase + 5 children:\n{joined}");
@@ -4282,17 +4330,17 @@ mod tests {
 
             assert_eq!(text[1], "phase 2/2 plan · 5 running", "{joined}");
 
-            for (row, label) in text[2..].iter().zip([
-                "loop-prompt",
-                "tools-approval",
-                "models-context",
-                "surfaces-sdk",
-                "evals-mcp-agents",
-            ]) {
+            for ((row, label), started) in text[2..].iter().zip(labels).zip(&started) {
                 assert!(row.contains(label), "{row}");
                 assert!(row.contains("running"), "{row}");
                 assert_eq!(row.matches("deepseek-flash").count(), 1, "{row}");
-                assert!(row.contains("14s") || row.contains("15s"), "{row}");
+                let lo = before.saturating_sub(*started) / 1000;
+                let hi = after.saturating_sub(*started) / 1000;
+                assert!(
+                    (lo..=hi)
+                        .any(|secs| row.contains(&crate::elapsed::format_elapsed_ms(secs * 1000))),
+                    "elapsed within [{lo}s, {hi}s]: {row}"
+                );
                 for noise in [
                     "–",
                     " - ",
@@ -4323,6 +4371,26 @@ mod tests {
                 );
                 assert_ne!(fg, Some(palette::STATUS_ERROR), "running is not failure");
             }
+        }
+    }
+
+    /// #6520 review: a long runtime-supplied phase title shrinks; the labelled
+    /// counts after it never fall off the right edge.
+    #[test]
+    fn long_phase_title_truncates_before_the_counts() {
+        let mut panel = founder_card_panel();
+        // The five running children live in phase 2; give it the long
+        // `workflow: {goal}` title a runtime can supply.
+        panel.phases[1].title = format!("workflow: {}", panel.label);
+        for width in [40_usize, 60, 80] {
+            let line = panel.phase_line_text(1, width);
+            assert!(line.width() <= width, "{width}: {line:?}");
+            assert!(line.starts_with("phase 2/2 "), "{line:?}");
+            assert!(
+                line.ends_with(" · 5 running"),
+                "{width}: counts kept: {line:?}"
+            );
+            assert!(line.contains('…'), "{width}: title truncated: {line:?}");
         }
     }
 
