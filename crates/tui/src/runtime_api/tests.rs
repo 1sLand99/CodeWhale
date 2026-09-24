@@ -2769,6 +2769,7 @@ async fn agent_runs_runtime_api_exposes_persisted_worker_receipts() -> Result<()
             tool: Some("handle_read".to_string()),
             reason: "Worker agent_receipt completed; verify its self-report.".to_string(),
         },
+        pending_request: None,
         status: AgentWorkerStatus::Completed,
         created_at_ms: 1,
         updated_at_ms: 2,

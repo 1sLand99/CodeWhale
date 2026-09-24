@@ -24611,7 +24611,11 @@ async fn idle_engine_routes_child_approval_decisions_to_the_waiting_child() {
     let manager = engine.subagent_manager.clone();
     let run = tokio::spawn(engine.run());
 
-    let (approval_id, receiver) = manager.write().await.register_child_approval("agent_child");
+    let (approval_id, receiver) =
+        manager
+            .write()
+            .await
+            .register_child_approval("agent_child", "bash", "fixture");
     handle
         .approve_tool_call(approval_id.clone())
         .await
@@ -24624,7 +24628,11 @@ async fn idle_engine_routes_child_approval_decisions_to_the_waiting_child() {
     assert_eq!(manager.read().await.pending_child_approvals(), 0);
 
     // A denial for a second prompt routes the same way.
-    let (approval_id, receiver) = manager.write().await.register_child_approval("agent_child");
+    let (approval_id, receiver) =
+        manager
+            .write()
+            .await
+            .register_child_approval("agent_child", "bash", "fixture");
     handle
         .deny_tool_call(approval_id)
         .await

@@ -254,7 +254,7 @@ fn child_approval_ids_stay_unique_within_and_across_manager_boots() {
 
     let mut first_ids = Vec::new();
     for _ in 0..3 {
-        let (id, _rx) = first.register_child_approval("resumed-agent-7");
+        let (id, _rx) = first.register_child_approval("resumed-agent-7", "bash", "fixture");
         assert!(
             SubAgentManager::is_child_approval_id(&id),
             "routing hint must still recognize {id}"
@@ -273,7 +273,7 @@ fn child_approval_ids_stay_unique_within_and_across_manager_boots() {
     let mut second = SubAgentManager::new(tmp.path().to_path_buf(), 4);
     let mut second_ids = Vec::new();
     for _ in 0..3 {
-        let (id, _rx) = second.register_child_approval("resumed-agent-7");
+        let (id, _rx) = second.register_child_approval("resumed-agent-7", "bash", "fixture");
         assert!(SubAgentManager::is_child_approval_id(&id));
         second_ids.push(id);
     }
@@ -18811,6 +18811,158 @@ async fn agent_wait_wakes_when_child_settles() {
     assert_eq!(settled[0]["agent_id"], json!(agent_id));
     assert_eq!(settled[0]["status"], json!("completed"));
     assert_eq!(payload["timed_out"], json!(false));
+    assert!(
+        payload.get("needs_person").is_none(),
+        "nothing pending, so the payload shape is unchanged"
+    );
+}
+
+#[tokio::test]
+async fn agent_wait_returns_early_with_needs_approval() {
+    let mut inner = SubAgentManager::new(PathBuf::from("."), 1);
+    let agent_id = insert_running_agent(&mut inner, "test_agent_wait_needs_person");
+    // The child is blocked on the Ask prompt for a shell call.
+    let (_approval_id, _rx) =
+        inner.register_child_approval(&agent_id, "bash", "Tool bash requires approval\nand more");
+    let manager = Arc::new(RwLock::new(inner));
+
+    let context = ToolContext::new(".");
+    let started = Instant::now();
+    let result = wait_for_subagents_from_input(
+        &json!({"action": "wait", "timeout_secs": 30}),
+        Arc::clone(&manager),
+        &context,
+    )
+    .await
+    .expect("wait should succeed");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "wait must return early"
+    );
+    let payload: serde_json::Value =
+        serde_json::from_str(&result.content).expect("wait payload should be json");
+    let needs = payload["needs_person"].as_array().expect("needs_person");
+    assert_eq!(needs.len(), 1);
+    assert_eq!(needs[0]["agent_id"], json!(agent_id));
+    assert_eq!(needs[0]["kind"], json!("needs_approval"));
+    assert_eq!(needs[0]["tool"], json!("bash"));
+    assert_eq!(
+        needs[0]["summary"],
+        json!("Tool bash requires approval and more"),
+        "the summary is one line"
+    );
+    assert_eq!(payload["timed_out"], json!(false));
+    assert!(
+        payload["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("Tell the user")),
+        "{payload}"
+    );
+}
+
+#[tokio::test]
+async fn agent_wait_does_not_rewake_on_reported_request() {
+    let mut inner = SubAgentManager::new(PathBuf::from("."), 1);
+    let agent_id = insert_running_agent(&mut inner, "test_agent_wait_no_rewake");
+    let (_approval_id, _rx) = inner.register_child_approval(&agent_id, "bash", "held");
+    let manager = Arc::new(RwLock::new(inner));
+    let context = ToolContext::new(".");
+
+    let first = wait_for_subagents_from_input(
+        &json!({"action": "wait", "timeout_secs": 30}),
+        Arc::clone(&manager),
+        &context,
+    )
+    .await
+    .expect("first wait");
+    let first: serde_json::Value = serde_json::from_str(&first.content).unwrap();
+    assert_eq!(first["needs_person"].as_array().map(Vec::len), Some(1));
+
+    let second = wait_for_subagents_from_input(
+        &json!({"action": "wait", "timeout_secs": 1}),
+        Arc::clone(&manager),
+        &context,
+    )
+    .await
+    .expect("second wait");
+    let second: serde_json::Value = serde_json::from_str(&second.content).unwrap();
+    assert_eq!(second["timed_out"], json!(true), "{second}");
+    assert!(second.get("needs_person").is_none());
+
+    // `until=all` shares the cursor.
+    let joined = coord::dispatch_wait(
+        &json!({"until": "all", "timeout_secs": 1}),
+        Arc::clone(&manager),
+        &context,
+    )
+    .await
+    .expect("join");
+    let joined: serde_json::Value = serde_json::from_str(&joined.content).unwrap();
+    assert!(joined.get("needs_person").is_none(), "{joined}");
+
+    // A new request wakes the join.
+    let (_next_id, _next_rx) =
+        manager
+            .write()
+            .await
+            .register_child_approval(&agent_id, "write_file", "held again");
+    let joined = coord::dispatch_wait(
+        &json!({"until": "all", "timeout_secs": 30}),
+        Arc::clone(&manager),
+        &context,
+    )
+    .await
+    .expect("join");
+    let joined: serde_json::Value = serde_json::from_str(&joined.content).unwrap();
+    assert_eq!(
+        joined["needs_person"][0]["tool"],
+        json!("write_file"),
+        "{joined}"
+    );
+}
+
+#[tokio::test]
+async fn status_waiting_is_derived_from_pending_store() {
+    let mut inner = SubAgentManager::new(PathBuf::from("."), 1);
+    let agent_id = insert_running_agent(&mut inner, "test_status_pending_store");
+    inner.register_worker_for_session(
+        make_worker_spec(&agent_id, PathBuf::from(".")),
+        "workspace",
+        None,
+    );
+    let (approval_id, _rx) = inner.register_child_approval(&agent_id, "bash", "held");
+    // The WaitingForUser progress write was skipped under contention; the
+    // store still makes the record waiting, with the request and the action.
+    let record = inner.get_worker_record(&agent_id).expect("worker record");
+    assert_eq!(record.status, AgentWorkerStatus::WaitingForUser);
+    let pending = record.pending_request.expect("pending request");
+    assert_eq!(pending.tool, "bash");
+    assert_eq!(pending.kind, "needs_approval");
+    assert_eq!(record.recommended_action.action, "tell_user");
+    assert!(record.recommended_action.tool.is_none());
+    assert!(
+        record
+            .recommended_action
+            .reason
+            .contains("you cannot approve it"),
+        "{}",
+        record.recommended_action.reason
+    );
+
+    // A stale WaitingForUser from the progress path flips off as soon as the
+    // decision lands, with no further progress event.
+    inner.record_worker_event(
+        &agent_id,
+        AgentWorkerStatus::WaitingForUser,
+        Some("waiting".to_string()),
+        None,
+        Some("bash".to_string()),
+    );
+    assert!(inner.resolve_child_approval(&approval_id, ChildApprovalOutcome::Approved));
+    let record = inner.get_worker_record(&agent_id).expect("worker record");
+    assert_ne!(record.status, AgentWorkerStatus::WaitingForUser);
+    assert!(record.pending_request.is_none());
+    assert_ne!(record.recommended_action.action, "tell_user");
 }
 
 #[tokio::test]

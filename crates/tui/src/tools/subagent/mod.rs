@@ -986,6 +986,11 @@ pub struct AgentWorkerRecord {
     pub verification: AgentRunVerificationSummary,
     #[serde(default = "default_agent_run_recommended_action")]
     pub recommended_action: AgentRunRecommendedAction,
+    /// What this worker is waiting on a person for, derived from the live
+    /// pending store on read (approvals C2). Never persisted: a restart ends
+    /// every pending wait.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub pending_request: Option<PendingRequestView>,
     pub status: AgentWorkerStatus,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
@@ -1072,6 +1077,7 @@ impl AgentWorkerRecord {
             delivery_evidence,
             verification,
             recommended_action,
+            pending_request: None,
             status: AgentWorkerStatus::Starting,
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
@@ -1350,6 +1356,27 @@ fn default_agent_run_recommended_action() -> AgentRunRecommendedAction {
         tool: Some(default_agent_inspect_tool()),
         reason: "Inspect the returned transcript handle if the child result needs audit detail."
             .to_string(),
+    }
+}
+
+/// A person must decide something for this agent. No tool approves on the
+/// model's behalf, so the action is to tell the user where to answer.
+fn tell_user_recommended_action(
+    spec: &AgentWorkerSpec,
+    pending: &PendingRequestView,
+) -> AgentRunRecommendedAction {
+    let agent_ref = spec
+        .session_name
+        .as_deref()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(&spec.worker_id);
+    AgentRunRecommendedAction {
+        action: "tell_user".to_string(),
+        tool: None,
+        reason: format!(
+            "A decision is waiting in {agent_ref}: '{}' — {}. Tell the user; you cannot approve it.",
+            pending.tool, pending.summary
+        ),
     }
 }
 
@@ -3616,8 +3643,52 @@ pub struct SubAgentManager {
     /// waiting child. The engine
     /// routes the person's decision here; a decision for an id nobody is
     /// waiting on is dropped, never applied to a different call.
-    child_approvals: HashMap<String, tokio::sync::oneshot::Sender<ChildApprovalOutcome>>,
+    child_approvals: HashMap<String, ChildPendingRequest>,
     child_approval_seq: u64,
+    /// Wake cursor for `agent wait` (approvals C2): approval ids already
+    /// reported to the parent model as `needs_person`. A reported id keeps a
+    /// later wait blocking instead of re-waking on the same request.
+    reported_pending: HashSet<String>,
+}
+
+/// One child request waiting on a person (approvals C2). The store is the
+/// authority for "waiting": status and `agent wait` derive from it rather
+/// than from a progress event that can be skipped under lock contention.
+#[derive(Debug)]
+pub struct ChildPendingRequest {
+    tx: tokio::sync::oneshot::Sender<ChildApprovalOutcome>,
+    agent_id: String,
+    tool_name: String,
+    summary: String,
+    requested_at: std::time::Instant,
+}
+
+/// What a waiting child needs from a person, as the parent model sees it.
+/// Children cannot ask questions today, so `kind` is always
+/// `needs_approval`; `needs_input` is reserved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingRequestView {
+    pub kind: String,
+    pub approval_id: String,
+    pub tool: String,
+    pub summary: String,
+}
+
+/// Bound for the one-line summary carried in `needs_person` / status.
+const PENDING_REQUEST_SUMMARY_MAX_CHARS: usize = 160;
+
+fn one_line_pending_summary(reason: &str) -> String {
+    let collapsed = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= PENDING_REQUEST_SUMMARY_MAX_CHARS {
+        collapsed
+    } else {
+        let mut bounded: String = collapsed
+            .chars()
+            .take(PENDING_REQUEST_SUMMARY_MAX_CHARS.saturating_sub(1))
+            .collect();
+        bounded.push('…');
+        bounded
+    }
 }
 
 /// Approval keys for a child's held call: the normal exact/grouping scheme
@@ -3648,6 +3719,8 @@ impl SubAgentManager {
     pub fn register_child_approval(
         &mut self,
         agent_id: &str,
+        tool_name: &str,
+        reason: &str,
     ) -> (String, tokio::sync::oneshot::Receiver<ChildApprovalOutcome>) {
         self.child_approval_seq = self.child_approval_seq.wrapping_add(1);
         // Namespace with the manager's boot id (#5615): the sequence restarts
@@ -3660,8 +3733,99 @@ impl SubAgentManager {
             self.current_session_boot_id, self.child_approval_seq
         );
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.child_approvals.insert(id.clone(), tx);
+        self.child_approvals.insert(
+            id.clone(),
+            ChildPendingRequest {
+                tx,
+                agent_id: agent_id.to_string(),
+                tool_name: tool_name.to_string(),
+                summary: one_line_pending_summary(reason),
+                requested_at: std::time::Instant::now(),
+            },
+        );
         (id, rx)
+    }
+
+    /// Requests from `agent_id` still waiting on a person, oldest first.
+    #[must_use]
+    pub fn pending_requests_for_agent(&self, agent_id: &str) -> Vec<PendingRequestView> {
+        let mut pending: Vec<(&String, &ChildPendingRequest)> = self
+            .child_approvals
+            .iter()
+            .filter(|(_, request)| request.agent_id == agent_id)
+            .collect();
+        pending.sort_by_key(|(_, request)| request.requested_at);
+        pending
+            .into_iter()
+            .map(|(id, request)| PendingRequestView {
+                kind: "needs_approval".to_string(),
+                approval_id: id.clone(),
+                tool: request.tool_name.clone(),
+                summary: request.summary.clone(),
+            })
+            .collect()
+    }
+
+    /// Whether any of `agent_ids` has a pending request not yet reported to
+    /// the parent model by `agent wait`.
+    #[must_use]
+    pub fn has_unreported_needs_person(&self, agent_ids: &[String]) -> bool {
+        self.child_approvals.iter().any(|(id, request)| {
+            agent_ids.contains(&request.agent_id) && !self.reported_pending.contains(id)
+        })
+    }
+
+    /// The unreported pending requests of `agent_ids` as `needs_person`
+    /// entries, marking each reported so the next wait does not re-wake on it.
+    pub fn take_unreported_needs_person(&mut self, agent_ids: &[String]) -> Vec<Value> {
+        let mut entries = Vec::new();
+        for agent_id in agent_ids {
+            let name = self
+                .agents
+                .get(agent_id)
+                .map(|agent| agent.session_name.clone())
+                .unwrap_or_else(|| agent_id.clone());
+            for request in self.pending_requests_for_agent(agent_id) {
+                if !self.reported_pending.insert(request.approval_id.clone()) {
+                    continue;
+                }
+                entries.push(json!({
+                    "agent_id": agent_id,
+                    "name": name,
+                    "kind": request.kind,
+                    "tool": request.tool,
+                    "summary": request.summary,
+                }));
+            }
+        }
+        entries
+    }
+
+    /// Derive "waiting on a person" from the pending store (approvals C2):
+    /// a pending request makes the record `waiting_for_user` with a
+    /// `pending_request` and a tell-the-user action; a running agent whose
+    /// recorded wait already ended (the post-wait progress was skipped under
+    /// contention) is no longer reported as waiting.
+    fn overlay_pending_request(&self, record: &mut AgentWorkerRecord) {
+        let agent_id = record.spec.worker_id.clone();
+        if let Some(pending) = self
+            .pending_requests_for_agent(&agent_id)
+            .into_iter()
+            .next()
+        {
+            record.status = AgentWorkerStatus::WaitingForUser;
+            record.recommended_action = tell_user_recommended_action(&record.spec, &pending);
+            record.pending_request = Some(pending);
+        } else if record.status == AgentWorkerStatus::WaitingForUser
+            && self
+                .agents
+                .get(&agent_id)
+                .is_some_and(|agent| agent.status == SubAgentStatus::Running)
+        {
+            record.status = AgentWorkerStatus::RunningTool;
+            record.recommended_action =
+                recommended_action_for_worker_status(record.status, &record.spec);
+        }
     }
 
     /// Whether an approval id belongs to a child prompt (routing hint for the
@@ -3675,8 +3839,9 @@ impl SubAgentManager {
     /// no child is waiting on that id (already answered, cancelled, or not a
     /// child prompt).
     pub fn resolve_child_approval(&mut self, id: &str, outcome: ChildApprovalOutcome) -> bool {
+        self.reported_pending.remove(id);
         match self.child_approvals.remove(id) {
-            Some(tx) => tx.send(outcome).is_ok(),
+            Some(request) => request.tx.send(outcome).is_ok(),
             None => false,
         }
     }
@@ -3684,6 +3849,7 @@ impl SubAgentManager {
     /// Forget a prompt the child stopped waiting for (cancellation).
     pub fn cancel_child_approval(&mut self, id: &str) {
         self.child_approvals.remove(id);
+        self.reported_pending.remove(id);
     }
 
     /// Number of child prompts currently awaiting a person.
@@ -3743,6 +3909,7 @@ impl SubAgentManager {
             resume_targets: HashMap::new(),
             child_approvals: HashMap::new(),
             child_approval_seq: 0,
+            reported_pending: HashSet::new(),
         }
     }
 
@@ -5345,7 +5512,13 @@ impl SubAgentManager {
     }
 
     pub fn get_worker_record(&self, worker_id: &str) -> Option<AgentWorkerRecord> {
-        self.worker_records.get(worker_id).cloned()
+        self.worker_records
+            .get(worker_id)
+            .cloned()
+            .map(|mut record| {
+                self.overlay_pending_request(&mut record);
+                record
+            })
     }
 
     pub(crate) fn get_worker_record_for_session(
@@ -5354,8 +5527,13 @@ impl SubAgentManager {
         worker_id: &str,
     ) -> Option<AgentWorkerRecord> {
         self.worker_records.get(worker_id).and_then(|record| {
-            (!active_session_id.is_empty() && record.owner_session_id == active_session_id)
-                .then(|| record.clone())
+            (!active_session_id.is_empty() && record.owner_session_id == active_session_id).then(
+                || {
+                    let mut record = record.clone();
+                    self.overlay_pending_request(&mut record);
+                    record
+                },
+            )
         })
     }
 
@@ -10313,7 +10491,7 @@ async fn wait_for_subagents_from_input(
             if snapshot.status != SubAgentStatus::Running {
                 let running = manager.running_count_for_session(&context.state_namespace);
                 drop(manager);
-                return wait_result_payload(&[snapshot], running, 0, false).await;
+                return wait_result_payload(&[snapshot], &[], running, 0, false).await;
             }
             vec![snapshot.agent_id]
         } else {
@@ -10367,11 +10545,32 @@ async fn wait_for_subagents_from_input(
         };
 
         if !settled.is_empty() || running == 0 {
-            return wait_result_payload(&settled, running, started.elapsed().as_millis(), false)
-                .await;
+            return wait_result_payload(
+                &settled,
+                &[],
+                running,
+                started.elapsed().as_millis(),
+                false,
+            )
+            .await;
+        }
+        // A watched child is blocked on a person (approvals C2): return now
+        // so the parent can tell the user, instead of waiting out the
+        // timeout. Reported ids do not re-wake a later wait.
+        let needs_person = take_new_needs_person(&manager, &watched).await;
+        if !needs_person.is_empty() {
+            return wait_result_payload(
+                &[],
+                &needs_person,
+                running,
+                started.elapsed().as_millis(),
+                false,
+            )
+            .await;
         }
         if started.elapsed() >= timeout {
-            return wait_result_payload(&[], running, started.elapsed().as_millis(), true).await;
+            return wait_result_payload(&[], &[], running, started.elapsed().as_millis(), true)
+                .await;
         }
 
         tokio::select! {
@@ -10388,8 +10587,24 @@ async fn wait_for_subagents_from_input(
 /// Compact `action=wait` result. Deliberately not a full projection: the
 /// runtime's completion sentinels (and a follow-up peek on a settled child)
 /// carry the full payload; duplicating it here would double token cost.
+/// The watched agents' pending requests not yet reported to the parent,
+/// marked reported. Takes the write lock only when there is something new.
+pub(super) async fn take_new_needs_person(
+    manager: &SharedSubAgentManager,
+    watched: &[String],
+) -> Vec<Value> {
+    if !manager.read().await.has_unreported_needs_person(watched) {
+        return Vec::new();
+    }
+    manager.write().await.take_unreported_needs_person(watched)
+}
+
+/// Note for a wait that returned because a person must decide something.
+pub(super) const NEEDS_PERSON_WAIT_NOTE: &str = "A child agent is blocked on a decision only the user can make (see needs_person). Tell the user which agent is waiting and what it wants to run — they answer on that agent's approval card; you cannot approve it. Do not replace or re-dispatch the agent for this.";
+
 async fn wait_result_payload(
     settled: &[SubAgentResult],
+    needs_person: &[Value],
     running: usize,
     waited_ms: u128,
     timed_out: bool,
@@ -10404,14 +10619,16 @@ async fn wait_result_payload(
             })
         })
         .collect();
-    let note = if timed_out {
+    let note = if !needs_person.is_empty() {
+        NEEDS_PERSON_WAIT_NOTE
+    } else if timed_out {
         "Wait timed out with children still running. Do not poll — wait again (until=\"all\" blocks for the whole batch), continue independent work, or end your turn; results arrive automatically as <codewhale:subagent.done> sentinels."
     } else if settled_entries.is_empty() {
         "No sub-agents are running anymore."
     } else {
         "Full results arrive as <codewhale:subagent.done> sentinels — read those before synthesizing; do not re-peek settled children unless you need the full projection."
     };
-    let payload = json!({
+    let mut payload = json!({
         "action": "wait",
         "settled": settled_entries,
         "running": running,
@@ -10419,6 +10636,9 @@ async fn wait_result_payload(
         "timed_out": timed_out,
         "note": note,
     });
+    if !needs_person.is_empty() {
+        payload["needs_person"] = json!(needs_person);
+    }
     let mut tool_result =
         ToolResult::json(&payload).map_err(|err| ToolError::execution_failed(err.to_string()))?;
     tool_result.metadata = Some(json!({
@@ -10426,6 +10646,7 @@ async fn wait_result_payload(
         "settled": settled.len(),
         "running": running,
         "timed_out": timed_out,
+        "needs_person": needs_person.len(),
     }));
     Ok(tool_result)
 }
@@ -17448,7 +17669,7 @@ impl SubAgentToolRegistry {
             .manager
             .write()
             .await
-            .register_child_approval(agent_id);
+            .register_child_approval(agent_id, name, reason);
         if let Err(error) = self
             .commit_child_approval_receipt(crate::approval_log::ApprovalReceipt::asked(
                 approval_id.clone(),
