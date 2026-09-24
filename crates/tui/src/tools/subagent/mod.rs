@@ -301,36 +301,6 @@ fn resolve_max_steps(role: FleetRole, explicit: Option<u32>, configured: Option<
     .min(MAX_SUBAGENT_STEPS)
 }
 
-/// Per-step billed-input guardrail for child runs (#6194 item 7). A long
-/// child re-sends its whole context every step, so cost grows
-/// quadratically; landing when one step's input passes this bound caps the
-/// tail instead of burning to wall/token death. This is deliberately not a
-/// cumulative cap — #6189 settled that token accounting never stops a run.
-/// Half the route's effective window tightens it for small-window models.
-const MAX_CHILD_STEP_INPUT_TOKENS: u64 = 100_000;
-
-fn child_step_input_bound(context_window: Option<u64>) -> u64 {
-    let half_window = context_window
-        .map(|window| window / 2)
-        .filter(|half| *half > 0);
-    half_window
-        .map(|half| half.min(MAX_CHILD_STEP_INPUT_TOKENS))
-        .unwrap_or(MAX_CHILD_STEP_INPUT_TOKENS)
-}
-
-/// Trip reason when one step's billed input passes the bound, or `None`
-/// while the step is affordable. Pure so the boundary is unit-tested
-/// without driving the run loop.
-fn child_context_trip(step_input_tokens: u64, bound: u64) -> Option<String> {
-    if step_input_tokens > bound {
-        Some(format!(
-            "child context budget exhausted: step billed {step_input_tokens} input tokens, over the {bound} per-step bound; landing with a hand-back report instead of growing quadratically. Narrow the task so turns stay focused."
-        ))
-    } else {
-        None
-    }
-}
-
 fn child_wall_time_exhausted_reason(limit: Duration) -> String {
     format!(
         "child wall-time budget exhausted (limit: {}s); partial work is preserved; narrow the task or have the operator raise the inherited limit",
@@ -350,7 +320,6 @@ fn child_runtime_budget_context(
     runtime: &SubAgentRuntime,
     max_steps: u32,
     work_max_steps: u32,
-    step_input_bound: u64,
 ) -> String {
     let wall = match runtime.worker_profile.wall_deadline_ms {
         Some(deadline_ms) => {
@@ -375,9 +344,66 @@ fn child_runtime_budget_context(
     } else {
         format!("{max_steps} model turns")
     };
+    // One compaction policy for the whole tree: the child inherits the
+    // parent session's, so it says here exactly what the parent's does.
+    let context = if runtime.compaction.enabled {
+        "There is no token budget and no per-step context cap: when the conversation nears the model's context window, the host compacts it automatically (older turns become a summary checkpoint) and the run continues."
+    } else {
+        "There is no token budget. Automatic context compaction is disabled for this session, so the model's own context window is the only context limit."
+    };
     format!(
-        "Runtime budget (host-enforced; you cannot raise it):\n- wall clock: {wall}.\n- model steps: {steps}.\nThere is no cumulative token cap and no automatic compaction in this runtime: a single step billing over {step_input_bound} input tokens ends the run with a hand-back report, so keep turns focused instead of accumulating unbounded history. When a limit is reached, task work stops where it stands and only a small reserved hand-back turn remains to report it. Commit or checkpoint work-in-progress early rather than holding it, and keep a current partial report ready."
+        "Runtime budget (host-enforced; you cannot raise it):\n- wall clock: {wall}.\n- model steps: {steps}.\n{context} When a limit is reached, task work stops where it stands and only a small reserved hand-back turn remains to report it. Commit or checkpoint work-in-progress early rather than holding it, and keep a current partial report ready."
     )
+}
+
+/// The parent session's compaction policy, re-resolved for the route this
+/// child actually dispatches on. The parent's trigger is carried over as the
+/// same fraction of the window (exactly, when the windows match), so a child
+/// on a smaller or larger window compacts at the same relative pressure; the
+/// opt-out, summarizer instructions, and retention budget are inherited
+/// unchanged. Cost ownership follows the child's own runtime lease.
+///
+/// Known limitation: a runtime built without a parent session (direct
+/// Workflow runs, tests) inherits `CompactionConfig::default()`, which is
+/// enabled, rather than re-reading the operator's `auto_compact` setting.
+fn child_compaction_config(
+    runtime: &SubAgentRuntime,
+    route: &crate::cost_status::EffectiveRouteEnvelope,
+    image_input: crate::model_profile::SupportState,
+) -> crate::compaction::CompactionConfig {
+    let parent = &runtime.compaction;
+    let route_limits = runtime.client.route_limits();
+    let window = crate::route_budget::route_context_window_tokens(
+        route.provider,
+        &route.model,
+        route_limits,
+    );
+    let token_threshold = match parent.effective_context_window.filter(|window| *window > 0) {
+        Some(parent_window) if parent_window == window => parent.token_threshold,
+        parent_window => crate::route_budget::compaction_threshold_for_route_at_percent(
+            route.provider,
+            &route.model,
+            route_limits,
+            parent_window.map_or(
+                crate::context_budget::DEFAULT_COMPACTION_TRIGGER_PERCENT,
+                |parent_window| parent.token_threshold as f64 * 100.0 / f64::from(parent_window),
+            ),
+        ),
+    };
+    crate::compaction::CompactionConfig {
+        token_threshold,
+        model: runtime.model.clone(),
+        image_input,
+        effective_context_window: Some(window),
+        focus: None,
+        runtime_cost_owner: runtime
+            .runtime_usage_lease
+            .as_ref()
+            .map(|lease| lease.owner().to_string())
+            .or_else(|| parent.runtime_cost_owner.clone()),
+        workspace: Some(runtime.context.workspace.clone()),
+        ..parent.clone()
+    }
 }
 
 /// One-shot mid-run notice fired when any enforced budget is roughly
@@ -2760,6 +2786,11 @@ pub struct SubAgentRuntime {
     /// child runtimes. `None` for runtimes built outside a manager (tests,
     /// tool-only runtimes).
     pub(crate) governor: Option<Arc<governor::RateLimitGovernor>>,
+    /// The parent session's automatic-compaction policy. Every descendant
+    /// compacts its own history at the request boundary exactly like the
+    /// parent turn loop, re-resolved per route by [`child_compaction_config`];
+    /// `enabled == false` (the operator's opt-out) holds for the whole tree.
+    pub(crate) compaction: crate::compaction::CompactionConfig,
 }
 
 impl SubAgentRuntime {
@@ -2822,6 +2853,7 @@ impl SubAgentRuntime {
             ),
             parent_can_prompt: false,
             approval_receipt_store: None,
+            compaction: crate::compaction::CompactionConfig::default(),
             // Stamped by the spawning manager in
             // `spawn_background_with_assignment_options`, so every descendant
             // LLM attempt reports 429s/successes to the fleet's rate-limit
@@ -2967,12 +2999,20 @@ impl SubAgentRuntime {
         self
     }
 
-    /// Bind descendants to the durable accounting owner created by a runtime
-    /// host. Interactive TUI turns have no owner and continue using mailbox
+    /// Inherit the parent session's compaction policy, and bind descendants
+    /// to the durable accounting owner it names (created by a runtime host).
+    /// Interactive TUI turns have no owner and continue using mailbox
     /// delivery only.
     #[must_use]
-    pub(crate) fn with_runtime_cost_owner(mut self, owner: Option<&str>) -> Self {
-        self.runtime_usage_lease = owner.and_then(crate::cost_status::acquire_runtime_usage_lease);
+    pub(crate) fn with_parent_compaction(
+        mut self,
+        compaction: &crate::compaction::CompactionConfig,
+    ) -> Self {
+        self.runtime_usage_lease = compaction
+            .runtime_cost_owner
+            .as_deref()
+            .and_then(crate::cost_status::acquire_runtime_usage_lease);
+        self.compaction = compaction.clone();
         self
     }
 
@@ -3146,6 +3186,7 @@ impl SubAgentRuntime {
             auto_review_policy: Arc::clone(&self.auto_review_policy),
             parent_can_prompt: self.parent_can_prompt,
             approval_receipt_store: self.approval_receipt_store.clone(),
+            compaction: self.compaction.clone(),
         }
     }
 
@@ -8510,11 +8551,19 @@ async fn subagent_session_projection(
 /// message stream. The in-memory `full_transcript` handle deliberately keeps a
 /// bounded tail; this artifact is the durable source used by the TUI's Open
 /// action when the conversation is larger than that tail.
+///
+/// Compaction replaces the worker's live history but never rewrites this
+/// record: the pre-compaction messages stay, the checkpoint the model now sees
+/// is appended after them, and later live messages continue the same index
+/// sequence.
 struct SubAgentTranscriptArtifactWriter {
     state_root: PathBuf,
     path: PathBuf,
     relative_path: PathBuf,
+    /// Message records in the artifact.
     persisted_messages: usize,
+    /// Prefix of the current live history already in the artifact.
+    synced_live_messages: usize,
 }
 
 impl SubAgentTranscriptArtifactWriter {
@@ -8538,31 +8587,51 @@ impl SubAgentTranscriptArtifactWriter {
             path,
             relative_path,
             persisted_messages: 0,
+            synced_live_messages: 0,
         })
     }
 
     fn sync_messages(&mut self, messages: &[Message], durable: bool) -> Result<()> {
-        if messages.len() < self.persisted_messages {
+        if messages.len() < self.synced_live_messages {
             return Err(anyhow!(
                 "sub-agent transcript history shrank from {} to {} messages",
-                self.persisted_messages,
+                self.synced_live_messages,
                 messages.len()
             ));
         }
+        self.append_messages(&messages[self.synced_live_messages..], durable)?;
+        self.synced_live_messages = messages.len();
+        Ok(())
+    }
 
+    /// Record a compaction pass: persist whatever of the replaced history is
+    /// not yet on disk, append the checkpoint the model sees from now on, and
+    /// continue syncing live messages after the replacement history.
+    fn record_compaction(&mut self, replaced: &[Message], replacement: &[Message]) -> Result<()> {
+        self.sync_messages(replaced, false)?;
+        let checkpoints = replacement
+            .iter()
+            .filter(|message| crate::compaction::is_wire_compaction_checkpoint_message(message))
+            .cloned()
+            .collect::<Vec<_>>();
+        self.append_messages(&checkpoints, false)?;
+        self.synced_live_messages = replacement.len();
+        Ok(())
+    }
+
+    fn append_messages(&mut self, messages: &[Message], durable: bool) -> Result<()> {
         let mut encoded = Vec::new();
-        for (index, message) in messages.iter().enumerate().skip(self.persisted_messages) {
+        for (offset, message) in messages.iter().enumerate() {
             encoded.extend(json_line(&json!({
                 "kind": "message",
-                "index": index,
+                "index": self.persisted_messages + offset,
                 "message": message,
             }))?);
         }
-
         if !encoded.is_empty() || durable {
             append_private_subagent_transcript(&self.state_root, &self.path, &encoded, durable)?;
         }
-        self.persisted_messages = messages.len();
+        self.persisted_messages += messages.len();
         Ok(())
     }
 
@@ -12215,8 +12284,6 @@ fn subagent_failure_class(status: &SubAgentStatus, error: &str) -> &'static str 
         "step_budget"
     } else if error.contains("wall-time budget exhausted") {
         "wall_time_budget"
-    } else if error.contains("context budget exhausted") {
-        "context_budget"
     } else if matches!(status, SubAgentStatus::BudgetExhausted) {
         "budget_exhausted"
     } else if error.contains("authorization failed")
@@ -12314,7 +12381,7 @@ async fn insert_subagent_full_transcript_handle(
                     false
                 }
             };
-        writer.metadata(synced && writer.persisted_messages == projected_messages.len())
+        writer.metadata(synced && writer.synced_live_messages == projected_messages.len())
     });
     let payload = json!({
         "kind": "subagent_full_transcript",
@@ -13111,20 +13178,12 @@ async fn run_subagent(
         max_steps
     };
     let (work_deadline, hard_deadline) = budget_handback::wall_deadlines(runtime);
-    // #6194 item 7: per-step context guardrail, disclosed below and enforced
-    // after every billed model step.
-    let step_input_bound = child_step_input_bound(
-        runtime
-            .client
-            .route_limits()
-            .and_then(|limits| limits.context_tokens),
-    );
     // #6194: the child sees what it is racing from the first turn — the
     // resolved budgets ride inside the task text so the transcript artifact
     // logs exactly what the model was told.
     let prompt = format!(
         "{prompt}\n\n{}",
-        child_runtime_budget_context(runtime, max_steps, work_max_steps, step_input_bound)
+        child_runtime_budget_context(runtime, max_steps, work_max_steps)
     );
     let mut messages = build_initial_subagent_messages_with_system(
         &prompt,
@@ -13223,6 +13282,14 @@ async fn run_subagent(
     // #6194: the one-shot ~75% pacing notice; once sent it stays sent so a
     // hovering boundary cannot spam the child's history every step.
     let mut budget_pacing_notice_sent = false;
+    // Request-boundary compaction state, mirroring the parent turn loop:
+    // the last billed input (every step overwrites it, so a compacted
+    // history is never judged by its pre-compaction bill), a pass counter
+    // for receipt ids, and the latch a failed or non-relieving pass sets.
+    let mut last_billed_input_tokens: Option<u64> = None;
+    let mut compaction_passes: u32 = 0;
+    let mut compaction_suppressed = false;
+    let mut compaction_refusal_logged = false;
 
     // A queued child can be parked before it ever acquires a launch permit.
     // Project that terminal state before emitting Started/Starting so the
@@ -13396,7 +13463,6 @@ async fn run_subagent(
         // reaches it the same way the parent's does: through the tool results
         // its own `work_update` calls returned, which are already in
         // `messages`. Nothing synthetic is appended per step.
-        let mut request_messages = messages.clone();
         let request_route = runtime
             .client
             .effective_route_envelope(&runtime.model, chrono::Utc::now());
@@ -13414,6 +13480,145 @@ async fn run_subagent(
             .map_or(crate::model_profile::SupportState::Unknown, |route| {
                 route.candidate.capabilities().image_input
             });
+        // Request-boundary compaction, the same pass the parent turn loop
+        // runs (`compaction_decision_with_billed` + `compact_messages_safe`)
+        // under the parent's inherited policy: a child keeps working past its
+        // context window instead of landing on it.
+        if !compaction_suppressed {
+            let mut prepared = crate::compaction::PreparedCompactionEnvelope::new(
+                child_compaction_config(runtime, &request_route, image_input),
+            );
+            prepared.tools = has_tools.then(|| tools.clone());
+            match crate::compaction::compaction_decision_with_billed(
+                &messages,
+                Some(&request_system),
+                &prepared,
+                last_billed_input_tokens,
+            ) {
+                crate::compaction::CompactionDecision::NotNeeded => {}
+                crate::compaction::CompactionDecision::Refused(reason) => {
+                    if !compaction_refusal_logged {
+                        compaction_refusal_logged = true;
+                        tracing::warn!(
+                            target: "compaction",
+                            agent_id,
+                            ?reason,
+                            billed = ?last_billed_input_tokens,
+                            "sub-agent auto-compaction refused under pressure"
+                        );
+                    }
+                }
+                crate::compaction::CompactionDecision::Compact => {
+                    compaction_passes = compaction_passes.saturating_add(1);
+                    let compaction_id = format!("{agent_id}:compact:{compaction_passes}");
+                    let messages_before = messages.len();
+                    record_agent_progress(
+                        runtime,
+                        &agent_id,
+                        AgentProgressEventMeta::new(AgentWorkerStatus::ModelWait)
+                            .with_step(steps)
+                            .routine_wait(),
+                        format!(
+                            "{}: compacting context",
+                            format_step_counter(steps, max_steps)
+                        ),
+                    );
+                    let mut compaction_usage = Usage::default();
+                    // Cancellation and the work deadline win; the request
+                    // `select!` below then settles either one as usual.
+                    let outcome = tokio::select! {
+                        biased;
+                        () = runtime.cancel_token.cancelled() => None,
+                        () = async {
+                            match work_deadline {
+                                Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                                None => std::future::pending::<()>().await,
+                            }
+                        } => None,
+                        result = crate::compaction::compact_messages_safe(
+                            &runtime.client,
+                            &messages,
+                            Some(&request_system),
+                            &prepared,
+                            &mut compaction_usage,
+                        ) => Some(result),
+                    };
+                    // The summarizer's provider receipt is already reported by
+                    // compaction itself (to `runtime_cost_owner`); fold its
+                    // tokens into this worker's own tally like any step.
+                    if usage_has_reported_data(&compaction_usage) {
+                        tokens_used =
+                            tokens_used.saturating_add(usage_total_tokens(&compaction_usage));
+                        let priced = priced_usd_microusd(&request_route.audit(&compaction_usage));
+                        runtime.manager.write().await.record_worker_usage(
+                            &agent_id,
+                            &format!("subagent:{compaction_id}"),
+                            &compaction_usage,
+                            priced,
+                        );
+                    }
+                    let note = match outcome {
+                        None => None,
+                        Some(Ok(result)) if !result.messages.is_empty() => {
+                            if let Some(writer) = transcript_artifact.as_mut()
+                                && let Err(err) = writer.record_compaction(
+                                    &crate::image_attach::safe_tool_result_message_projection(
+                                        &messages,
+                                    ),
+                                    &crate::image_attach::safe_tool_result_message_projection(
+                                        &result.messages,
+                                    ),
+                                )
+                            {
+                                tracing::warn!(
+                                    target: "subagent",
+                                    ?err,
+                                    agent_id,
+                                    "failed to record sub-agent compaction in its transcript"
+                                );
+                            }
+                            messages = result.messages;
+                            compaction_suppressed = crate::compaction::compaction_pressure_reached(
+                                &messages,
+                                Some(&request_system),
+                                &prepared.config,
+                            );
+                            Some(format!(
+                                "compacted context: {messages_before} → {} messages ({})",
+                                messages.len(),
+                                result.coverage.receipt_clause()
+                            ))
+                        }
+                        Some(Ok(_)) => {
+                            compaction_suppressed = true;
+                            Some("auto-compaction skipped: empty result".to_string())
+                        }
+                        Some(Err(err)) => {
+                            // Parent parity: keep the original history and
+                            // continue; a later overflow takes the ordinary
+                            // provider-error path.
+                            compaction_suppressed = true;
+                            Some(crate::compaction::report_compaction_failure(
+                                "Auto-compaction failed",
+                                &compaction_id,
+                                true,
+                                &err,
+                            ))
+                        }
+                    };
+                    if let Some(note) = note {
+                        record_agent_progress(
+                            runtime,
+                            &agent_id,
+                            AgentProgressEventMeta::new(AgentWorkerStatus::Running)
+                                .with_step(steps),
+                            format!("{}: {note}", format_step_counter(steps, max_steps)),
+                        );
+                    }
+                }
+            }
+        }
+        let mut request_messages = messages.clone();
         crate::image_attach::strip_images_when_unsupported(
             &mut request_messages,
             image_input,
@@ -13652,16 +13857,9 @@ async fn run_subagent(
         .await;
 
         tokens_used = tokens_used.saturating_add(usage_total_tokens(&response.usage));
-
-        // #6194 item 7: one over-bound step lands the run through the normal
-        // budget-death path (digest + hand-back + preservation note) instead
-        // of burning quadratically to wall/token death.
-        if let Some(reason) =
-            child_context_trip(u64::from(response.usage.input_tokens), step_input_bound)
-        {
-            budget_failure_reason = Some(reason);
-            break;
-        }
+        // What the provider billed for this history; the next request
+        // boundary weighs it for compaction exactly as the parent does.
+        last_billed_input_tokens = Some(u64::from(response.usage.input_tokens));
 
         let mut current_response_text = None;
         for block in &response.content {
