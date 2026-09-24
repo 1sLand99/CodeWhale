@@ -307,6 +307,7 @@
   "ScreenModeMouseCaptureOff": "마우스 캡처 꺼짐; 선택은 터미널이 담당합니다.",
   "ScreenModeUnchanged": "화면 변경 없음: {reason}.",
   "ImageInputRejectedResent": "{model}은(는) 이미지를 지원하지 않아 텍스트로 다시 보냈습니다. image_ocr를 사용해 읽으세요",
+  "ImageInputOmitted": "{model}은(는) 이미지를 볼 수 없어 이번 턴의 이미지 {count}개를 텍스트로 보냈습니다. image_ocr로 읽거나 /model로 전환하세요",
   "ProviderToolCallMissing": "공급자가 `{reason}`으로 응답을 종료했지만 도구 호출을 제공하지 않았습니다. 계속하려면 이 턴을 다시 시도하세요.",
   "ConfigLabelShowThinking": "채팅에 모델 추론 표시",
   "ConfigLabelThinkingHighlight": "추론 배경 강조",

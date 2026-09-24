@@ -178,6 +178,7 @@ pub enum MessageId {
     ScreenModeMouseCaptureOff,
     ScreenModeUnchanged,
     ImageInputRejectedResent,
+    ImageInputOmitted,
     ProviderToolCallMissing,
     // First-run anonymous usage disclosure.
     TelemetryNoticeDefaultOn,
@@ -2577,6 +2578,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::ScreenModeMouseCaptureOff,
     MessageId::ScreenModeUnchanged,
     MessageId::ImageInputRejectedResent,
+    MessageId::ImageInputOmitted,
     MessageId::ProviderToolCallMissing,
     MessageId::TelemetryNoticeDefaultOn,
     MessageId::TelemetryNoticeHeadline,

@@ -14913,6 +14913,7 @@ mod doctor_endpoint_tests {
                 provider: Some(crate::config::SearchProvider::Tavily),
                 base_url: None,
                 api_key: None,
+                native: None,
             }),
             ..Default::default()
         };
@@ -14962,6 +14963,7 @@ mod doctor_endpoint_tests {
                 provider: Some(crate::config::SearchProvider::DuckDuckGo),
                 base_url: None,
                 api_key: None,
+                native: None,
             }),
             ..Default::default()
         };
@@ -15005,6 +15007,7 @@ mod doctor_endpoint_tests {
                 provider: Some(crate::config::SearchProvider::Bing),
                 base_url: None,
                 api_key: None,
+                native: None,
             }),
             ..Default::default()
         };
