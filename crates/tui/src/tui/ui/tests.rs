@@ -25270,6 +25270,148 @@ fn non_recoverable_engine_error_enters_offline_mode() {
     assert!(app.pending_provider_switch.is_none());
 }
 
+/// U1: use the real Engine's typed auth failure, not the old WIP assumption
+/// that Engine construction fails synchronously. A routine acknowledgement
+/// may replace the footer; the recovery must still be readable in the frame.
+#[tokio::test]
+async fn keyless_engine_error_stays_visible_after_a_config_ack() {
+    use crate::core::engine::{Engine, EngineConfig};
+    use crate::core::ops::{Op, TurnSpec, UserInputProvenance};
+    use crate::error_taxonomy::ErrorCategory;
+
+    let _home = SettingsHomeGuard::new();
+    let _key = crate::test_support::EnvVarGuard::remove("DEEPSEEK_API_KEY");
+    let _cli_key = crate::test_support::EnvVarGuard::remove(codewhale_config::CLI_API_KEY_ENV);
+    let _secret_backend = crate::test_support::EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+    let workspace = TempDir::new().expect("workspace");
+    // Keep the official route: a loopback override exercises the custom
+    // endpoint's credential-binding error, not DeepSeek's missing-key help.
+    // The isolated home and cleared key sources must reject credentials
+    // before constructing the Engine or sending a turn.
+    let config = Config {
+        provider: Some("deepseek".to_string()),
+        api_key: Some(String::new()),
+        ..Config::default()
+    };
+    let missing_key = config
+        .active_route_api_key()
+        .expect_err("fixture must reject credentials before provider I/O");
+    assert!(
+        missing_key
+            .to_string()
+            .contains("DeepSeek API key not found")
+    );
+    let mut app = create_test_app();
+    app.workspace = workspace.path().to_path_buf();
+    app.onboarding = OnboardingState::None;
+    app.launch.visible = false;
+    app.api_key_env_only = false;
+    app.is_loading = true;
+    app.runtime_turn_status = Some("in_progress".to_string());
+    app.add_message(HistoryCell::User {
+        content: "hello without a key".to_string(),
+    });
+    let (engine, handle) = Engine::new(
+        EngineConfig {
+            workspace: workspace.path().to_path_buf(),
+            snapshots_enabled: false,
+            subagents_enabled: false,
+            terminal_chrome_enabled: false,
+            ..EngineConfig::default()
+        },
+        &config,
+    );
+    let run = tokio::spawn(engine.run());
+    handle
+        .send(Op::SendMessage(TurnSpec {
+            content: "hello without a key".to_string(),
+            images: Vec::new(),
+            mode: AppMode::Agent,
+            route: Box::new(
+                resolve_runtime_route(&config, ApiProvider::Deepseek, Some(&app.model))
+                    .expect("structural route resolution"),
+            ),
+            compaction: Box::default(),
+            initial_routed_usage: Box::default(),
+            max_output_tokens: None,
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+        }))
+        .await
+        .expect("submit to the real Engine");
+
+    let mut events = handle.rx_event.write().await;
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(10), events.recv())
+            .await
+            .expect("keyless Engine response")
+            .expect("Engine event");
+        if let EngineEvent::Error { envelope, .. } = event {
+            assert_eq!(envelope.category, ErrorCategory::Authentication);
+            assert!(!envelope.recoverable);
+            assert!(
+                envelope.message.contains("DeepSeek API key not found"),
+                "unexpected Engine authentication error: {}",
+                envelope.message
+            );
+            apply_engine_error_to_app(&mut app, envelope);
+            break;
+        }
+    }
+    let mut compaction = crate::compaction::CompactionConfig::default();
+    compaction.enabled = !compaction.enabled;
+    handle
+        .send(Op::SetCompaction { config: compaction })
+        .await
+        .expect("change config after the failed turn");
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(10), events.recv())
+            .await
+            .expect("config acknowledgement")
+            .expect("Engine event");
+        if let EngineEvent::Status { message } = event {
+            assert_eq!(message, "Auto-compaction disabled");
+            // Same projection as the event loop's Status arm.
+            app.status_message = Some(message);
+            break;
+        }
+    }
+    drop(events);
+    assert!(app.offline_mode);
+    assert!(!app.is_loading);
+    for (width, height) in [(80, 24), (140, 40)] {
+        let frame = render_test_app(&mut app, &config, width, height);
+        let text = frame.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            text.contains("API key not found"),
+            "{width}x{height}: {text}"
+        );
+        assert!(
+            text.contains("codewhale auth set"),
+            "{width}x{height}: {text}"
+        );
+    }
+    handle.send(Op::Shutdown).await.expect("shutdown");
+    tokio::time::timeout(Duration::from_secs(10), run)
+        .await
+        .expect("Engine shutdown")
+        .expect("Engine task");
+}
+
 #[test]
 fn env_only_auth_failure_reopens_provider_onboarding() {
     use crate::error_taxonomy::ErrorEnvelope;
