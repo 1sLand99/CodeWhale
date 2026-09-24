@@ -13327,7 +13327,7 @@ async fn narrower_posture_patch_during_approval_wait_fails_the_call() {
         let err = result.expect_err("narrowed posture fails the call");
         assert!(
             err.to_string()
-                .contains("posture changed before this tool call executed"),
+                .contains("Permissions changed before this tool call executed"),
             "{change_to:?}: {err}"
         );
         assert!(!written, "{change_to:?}: the shell must not run");
@@ -16367,7 +16367,7 @@ async fn compaction_completed_reports_complete_post_input_tokens() {
         .emit_compaction_completed(
             "compact_test".to_string(),
             false,
-            "Compaction complete".to_string(),
+            "Made room".to_string(),
             Some(4),
             Some(1),
             super::compaction::CompactionPass {
@@ -16520,9 +16520,9 @@ async fn unchanged_compaction_config_is_acknowledged_silently() {
     let mut changed = current;
     changed.enabled = !changed.enabled;
     let expected = if changed.enabled {
-        "Auto-compaction enabled"
+        "Make room automatically: on"
     } else {
-        "Auto-compaction disabled"
+        "Make room automatically: off"
     };
     handle
         .send(Op::SetCompaction { config: changed })
@@ -18932,7 +18932,7 @@ fn turn_metadata_keeps_stable_fields_while_pressure_reports_live_estimates() {
         without_pressure(&second_meta)
     );
     assert!(second_meta.contains("Estimated input:"));
-    assert!(second_meta.contains("Automatic compaction is explicitly disabled"));
+    assert!(second_meta.contains("Making room automatically is off"));
 }
 
 #[tokio::test]
