@@ -1661,6 +1661,7 @@ pub fn model_completion_names_for_provider(provider: ApiProvider) -> Vec<&'stati
         ],
         ApiProvider::Xai => vec![
             DEFAULT_XAI_MODEL,
+            XAI_GROK_4_7_MODEL,
             XAI_GROK_4_5_MODEL,
             XAI_GROK_4_3_MODEL,
             XAI_GROK_BUILD_MODEL,
@@ -4731,6 +4732,23 @@ impl Config {
     #[must_use]
     pub fn search_provider(&self) -> SearchProvider {
         self.search_provider_resolution().provider
+    }
+
+    /// Whether provider-native search may lead the search chain.
+    ///
+    /// `[search] native = true|false` is explicit. Unset, a user-chosen
+    /// provider (config, env, or a Tavily key) wins over provider-native
+    /// search (`Some(false)`); with no provider configured it stays `None`,
+    /// which keeps native search first on routes that offer it.
+    #[must_use]
+    pub fn search_native(&self) -> Option<bool> {
+        self.search
+            .as_ref()
+            .and_then(|search| search.native)
+            .or_else(|| {
+                (self.search_provider_resolution().source != SearchProviderSource::Default)
+                    .then_some(false)
+            })
     }
 
     /// Store a session/config provider choice and return the effective runtime
@@ -8621,7 +8639,7 @@ default_text_model = "{DEFAULT_TEXT_MODEL}"
 
 # Thinking mode (DeepSeek V4 reasoning effort):
 # "auto" | "off" | "low" | "medium" | "high" | "max"
-# Shift+Tab in the TUI cycles between off / high / max.
+# Ctrl+T in the TUI (or /effort) cycles the active model's effort levels.
 reasoning_effort = "auto"
 
 # Startup update check
@@ -10625,21 +10643,6 @@ pub(crate) fn is_exact_direct_moonshot_k3_route(
         && model.trim().eq_ignore_ascii_case(MOONSHOT_KIMI_K3_MODEL)
 }
 
-/// Whether a route is exactly xAI's first-party Grok 4.6 endpoint.
-#[must_use]
-pub(crate) fn is_exact_xai_grok_4_6_route(
-    provider: ApiProvider,
-    base_url: &str,
-    model: &str,
-) -> bool {
-    provider == ApiProvider::Xai
-        && codewhale_config::provider::is_exact_xai_platform_route(
-            codewhale_config::ProviderKind::Xai,
-            base_url,
-        )
-        && model.trim().eq_ignore_ascii_case(XAI_GROK_4_6_MODEL)
-}
-
 /// Whether a route uses either official Kimi Code K3 membership model.
 pub(crate) fn is_exact_kimi_code_k3_route(
     provider: ApiProvider,
@@ -12137,7 +12140,7 @@ auth_mode = "api_key"
 
 # Thinking mode (DeepSeek V4 reasoning effort):
 # "off" | "low" | "medium" | "high" | "max"
-# Shift+Tab in the TUI cycles between off / high / max.
+# Ctrl+T in the TUI (or /effort) cycles the active model's effort levels.
 reasoning_effort = "max"
 "#
         );

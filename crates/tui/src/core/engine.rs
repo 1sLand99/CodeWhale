@@ -452,6 +452,9 @@ pub struct EngineConfig {
     pub search_api_key: Option<String>,
     /// Optional DuckDuckGo-compatible HTML endpoint override.
     pub search_base_url: Option<String>,
+    /// `Config::search_native`: `None` lets provider-native search lead on
+    /// routes that offer it; `Some(false)` keeps the chosen provider first.
+    pub search_native: Option<bool>,
     /// Per-step DeepSeek API timeout for sub-agent `create_message` requests.
     /// Resolved from `[subagents] api_timeout_secs` (clamped to 1..=3600)
     /// once at engine construction, then threaded onto every
@@ -600,6 +603,7 @@ impl Default for EngineConfig {
             search_provider: crate::config::SearchProvider::default(),
             search_api_key: None,
             search_base_url: None,
+            search_native: None,
             subagent_api_timeout: Duration::from_secs(
                 crate::config::DEFAULT_SUBAGENT_API_TIMEOUT_SECS,
             ),
@@ -2620,6 +2624,9 @@ impl Engine {
             super::engine::approval::ApprovalDecision::TimedOut { id } => {
                 (id.clone(), ChildApprovalOutcome::Denied)
             }
+            super::engine::approval::ApprovalDecision::Unavailable { id } => {
+                (id.clone(), ChildApprovalOutcome::Unavailable)
+            }
             // A sandbox retry only exists for the parent's own tool call.
             super::engine::approval::ApprovalDecision::RetryWithPolicy { .. } => return false,
         };
@@ -3152,8 +3159,8 @@ impl Engine {
                             let _ = self
                                 .tx_event
                                 .send(Event::status(format!(
-                                    "Auto-compaction {}",
-                                    if enabled { "enabled" } else { "disabled" }
+                                    "Make room automatically: {}",
+                                    if enabled { "on" } else { "off" }
                                 )))
                                 .await;
                         }
@@ -3554,6 +3561,9 @@ impl Engine {
                     }
                     Op::SetSearchProvider { provider } => {
                         self.config.search_provider = provider;
+                        // A provider picked in-session is a pin; only an
+                        // explicit `[search] native = true` still leads.
+                        self.config.search_native.get_or_insert(false);
                     }
                     Op::Shutdown => {
                         break;
@@ -4849,7 +4859,7 @@ impl Engine {
                 .with_mcp_pool(mcp_pool.clone())
                 .with_todos(self.config.todos.clone())
                 .with_parent_completion_tx(self.tx_subagent_completion.clone())
-                .with_runtime_cost_owner(self.config.compaction.runtime_cost_owner.as_deref())
+                .with_parent_compaction(&self.config.compaction)
                 .with_parent_mode(input_policy.mode)
                 .with_approval_receipt_store(self.approval_receipt_store.clone())
                 .with_permission_posture(
@@ -6054,7 +6064,7 @@ impl Engine {
         .with_mcp_pool(self.mcp_pool.clone())
         .with_todos(self.config.todos.clone())
         .with_parent_completion_tx(self.tx_subagent_completion.clone())
-        .with_runtime_cost_owner(self.config.compaction.runtime_cost_owner.as_deref())
+        .with_parent_compaction(&self.config.compaction)
         .with_parent_mode(mode)
         .with_approval_receipt_store(self.approval_receipt_store.clone())
         .with_permission_posture(
@@ -6197,7 +6207,9 @@ impl Engine {
         ctx.search_api_key = self.config.search_api_key.clone();
         ctx.search_base_url = self.config.search_base_url.clone();
         ctx.route_capabilities = route.capabilities;
-        if route.capabilities.server_side_web_search.is_supported() {
+        if route.capabilities.server_side_web_search.is_supported()
+            && self.config.search_native != Some(false)
+        {
             ctx.provider_native_search = route
                 .client
                 .as_ref()
@@ -7784,6 +7796,9 @@ pub(crate) enum MockApprovalEvent {
     TimedOut {
         id: String,
     },
+    Unavailable {
+        id: String,
+    },
     RetryWithPolicy {
         id: String,
         policy: crate::sandbox::SandboxPolicy,
@@ -7797,6 +7812,7 @@ impl MockEngineHandle {
             ApprovalDecision::Approved { id } => Some(MockApprovalEvent::Approved { id }),
             ApprovalDecision::Denied { id } => Some(MockApprovalEvent::Denied { id }),
             ApprovalDecision::TimedOut { id } => Some(MockApprovalEvent::TimedOut { id }),
+            ApprovalDecision::Unavailable { id } => Some(MockApprovalEvent::Unavailable { id }),
             ApprovalDecision::RetryWithPolicy { id, policy } => {
                 Some(MockApprovalEvent::RetryWithPolicy { id, policy })
             }

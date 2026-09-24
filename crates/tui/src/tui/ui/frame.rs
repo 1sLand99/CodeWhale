@@ -1018,6 +1018,7 @@ pub(crate) fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         search_provider: config.search_provider(),
         search_api_key: config.search.as_ref().and_then(|s| s.api_key.clone()),
         search_base_url: config.search.as_ref().and_then(|s| s.base_url.clone()),
+        search_native: config.search_native(),
         tools_always_load: config.tools_always_load(),
         user_input_limits: config.user_input_limits(),
         user_input_timeout: config.user_input_timeout(),
@@ -1427,6 +1428,7 @@ pub(crate) fn build_pending_input_preview(app: &App) -> PendingInputPreview {
         .iter()
         .map(|m| m.display.clone())
         .collect();
+    preview.pending_approvals = crate::tui::pending_requests::footer_rows(app);
     preview.editing_queued_message = app.queued_draft.as_ref().map(|draft| {
         if app.input.trim().is_empty() {
             draft.display.clone()
