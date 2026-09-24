@@ -16,10 +16,9 @@ use tokio::time::timeout as tokio_timeout;
 
 use crate::config::{
     TOGETHER_INKLING_MODEL, is_exact_direct_moonshot_k3_route, is_exact_kimi_code_k3_route,
-    is_exact_zai_chat_route, is_exact_zai_forced_thinking_route,
-    is_exact_zai_tiered_effort_route, is_kimi_code_membership_model,
-    minimax_m3_route_uses_max_completion_tokens, moonshot_base_url_is_exact_kimi_code,
-    wire_model_for_provider_route,
+    is_exact_zai_chat_route, is_exact_zai_forced_thinking_route, is_exact_zai_tiered_effort_route,
+    is_kimi_code_membership_model, minimax_m3_route_uses_max_completion_tokens,
+    moonshot_base_url_is_exact_kimi_code, wire_model_for_provider_route,
 };
 
 // The bounded response-header wait (`stream_open_timeout`) and its env
@@ -3490,6 +3489,14 @@ fn should_replay_reasoning_content_for_provider_on_route(
         return true;
     }
 
+    // Xiaomi MiMo's API requires the assistant `reasoning_content` back on
+    // tool-call turns (omitting it is a 400), for every MiMo chat model, not
+    // only the ids the offline catalog marks as reasoning (#6501). A turn
+    // that produced no reasoning replays nothing.
+    if provider == ApiProvider::XiaomiMimo {
+        return true;
+    }
+
     if is_exact_mistral_chat_route(provider, base_url)
         && mistral_model_has_adjustable_reasoning(model)
     {
@@ -4892,9 +4899,9 @@ mod alias_thinking_detection_tests {
         apply_inkling_reasoning_effort, apply_kimi_code_fixed_sampling,
         apply_kimi_code_k3_reasoning_effort, apply_openai_reasoning_effort,
         apply_provider_token_limit, apply_route_reasoning_controls, is_reasoning_model_for_stream,
-        provider_accepts_reasoning_content,
-        reasoning_stream_style_for_route, requires_reasoning_content,
-        should_replay_reasoning_content, should_replay_reasoning_content_for_provider,
+        provider_accepts_reasoning_content, reasoning_stream_style_for_route,
+        requires_reasoning_content, should_replay_reasoning_content,
+        should_replay_reasoning_content_for_provider,
         should_replay_reasoning_content_for_provider_on_route,
     };
     use crate::config::ApiProvider;
@@ -5634,24 +5641,49 @@ mod alias_thinking_detection_tests {
     }
 
     #[test]
-    fn grok_46_uses_exact_first_party_reasoning_effort_ladder() {
-        for (requested, expected) in [
-            ("off", "high"),
-            ("low", "low"),
-            ("medium", "medium"),
-            ("high", "high"),
-            ("xhigh", "xhigh"),
-            ("max", "xhigh"),
+    fn grok_47_and_46_use_exact_first_party_reasoning_effort_ladder() {
+        // Both catalog rows document low/medium/high/xhigh; reasoning cannot
+        // be disabled, so `off` is the documented default `high`.
+        for model in [
+            crate::config::XAI_GROK_4_7_MODEL,
+            crate::config::XAI_GROK_4_6_MODEL,
         ] {
+            for (requested, expected) in [
+                ("off", "high"),
+                ("low", "low"),
+                ("medium", "medium"),
+                ("high", "high"),
+                ("xhigh", "xhigh"),
+                ("max", "xhigh"),
+            ] {
+                let mut body = json!({});
+                apply_route_reasoning_controls(
+                    &mut body,
+                    ApiProvider::Xai,
+                    crate::config::DEFAULT_XAI_BASE_URL,
+                    model,
+                    Some(requested),
+                );
+                assert_eq!(
+                    body,
+                    json!({ "reasoning_effort": expected }),
+                    "{model} {requested}"
+                );
+            }
+        }
+
+        // A row without a documented effort option (grok-4.3) and an id the
+        // catalog does not know send nothing.
+        for model in [crate::config::XAI_GROK_4_3_MODEL, "grok-9-unknown"] {
             let mut body = json!({});
             apply_route_reasoning_controls(
                 &mut body,
                 ApiProvider::Xai,
                 crate::config::DEFAULT_XAI_BASE_URL,
-                crate::config::XAI_GROK_4_6_MODEL,
-                Some(requested),
+                model,
+                Some("medium"),
             );
-            assert_eq!(body, json!({ "reasoning_effort": expected }), "{requested}");
+            assert_eq!(body, json!({}), "{model}");
         }
 
         let mut provider_default = json!({});
@@ -6449,6 +6481,23 @@ mod alias_thinking_detection_tests {
             ReasoningStreamStyle::None,
             "an explicit route override still wins"
         );
+    }
+
+    #[test]
+    fn xiaomi_mimo_replays_reasoning_for_every_model_id() {
+        // #6501: MiMo returns 400 when a tool-call turn omits the assistant
+        // `reasoning_content`, including ids newer than the offline catalog.
+        for model in ["mimo-v2.5-pro", "mimo-v2.6-pro", "mimo-v2.7-pro-unreleased"] {
+            assert!(
+                should_replay_reasoning_content_for_provider(ApiProvider::XiaomiMimo, model, None),
+                "{model}"
+            );
+        }
+        assert!(!should_replay_reasoning_content_for_provider(
+            ApiProvider::XiaomiMimo,
+            "mimo-v2.6-pro",
+            Some("off"),
+        ));
     }
 
     #[test]
