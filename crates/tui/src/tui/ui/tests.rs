@@ -26131,7 +26131,7 @@ async fn keyless_engine_error_stays_visible_after_a_config_ack() {
             .expect("config acknowledgement")
             .expect("Engine event");
         if let EngineEvent::Status { message } = event {
-            assert_eq!(message, "Auto-compaction disabled");
+            assert_eq!(message, "Make room automatically: off");
             // Same projection as the event loop's Status arm.
             app.status_message = Some(message);
             break;
