@@ -632,7 +632,9 @@ jobs:
     # non-PR release/main pushes use CNB for Linux.
     # The ternary is safe: matrix.os is always a non-empty literal, so
     # runs-on can never evaluate to empty.
-    timeout-minutes: 90
+    # A cold GitHub-hosted Mac spent 77-80 minutes in Test on 2026-09-23
+    # (fork PRs #6431, #6417), too close to the old 90-minute limit.
+    timeout-minutes: 120
     # macOS legs go to the self-hosted Mac ONLY when all three hold: the
     # change is heavy, the event is trusted (not a fork PR), and the
     # CW_SELF_HOSTED_MAC repo variable is 'true'. That variable is the kill
@@ -761,11 +763,12 @@ jobs:
       # The Ubuntu lint lane validates non-RSS backlog fields. Run the same
       # source-bound measurement on macOS so loss or growth of RSS evidence
       # fails closed instead of becoming an unsupported-field skip.
-      # Trusted events only: here it reuses the warm self-hosted build. Fork
-      # PRs run it in the separate `macos-budget` job with its own timeout,
-      # because on a cold hosted Mac it pushed Test past 90 minutes.
+      # Only on the self-hosted Mac: there it reuses the warm build. Every
+      # hosted Mac leg (fork PRs, or any PR with CW_SELF_HOSTED_MAC off) runs
+      # it in the separate `macos-budget` job with its own timeout, because
+      # on a cold hosted Mac it pushed Test past 90 minutes.
       - name: Check persistence-backlog RSS budget
-        if: needs.changes.outputs.heavy == 'true' && matrix.os == 'macos-latest' && needs.changes.outputs.trusted == 'true'
+        if: needs.changes.outputs.heavy == 'true' && matrix.os == 'macos-latest' && needs.changes.outputs.trusted == 'true' && vars.CW_SELF_HOSTED_MAC == 'true'
         run: python3 scripts/check-persistence-backlog-budget.py
       - name: Lockfile drift guard
         if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
@@ -774,9 +777,9 @@ jobs:
         # The eval harness is OS-independent prompt/composition checking;
         # running it once (on the faster macOS leg, warm from the test build)
         # instead of once per desktop OS keeps the coverage while taking
-        # ~2min off the Windows critical path. Trusted events only; fork PRs
-        # run it in `macos-budget` (see the RSS step above).
-        if: needs.changes.outputs.heavy == 'true' && matrix.os == 'macos-latest' && needs.changes.outputs.trusted == 'true'
+        # ~2min off the Windows critical path. Self-hosted Mac only; hosted
+        # Mac legs run it in `macos-budget` (see the RSS step above).
+        if: needs.changes.outputs.heavy == 'true' && matrix.os == 'macos-latest' && needs.changes.outputs.trusted == 'true' && vars.CW_SELF_HOSTED_MAC == 'true'
         run: cargo run -p codewhale-tui --all-features -- eval
       - name: sccache stats
         if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request') && steps.sccache.outcome == 'success'
@@ -793,11 +796,13 @@ jobs:
     # cancelled fork PRs at the 90-minute limit (jobs 106749104684 and
     # 106235312282) before Test could report. Running both here, in parallel
     # with Test and under their own timeout, keeps the coverage without
-    # holding the required Test (macos-latest) context hostage. Trusted
-    # events run the same two steps inside Test on the warm build instead.
+    # holding the required Test (macos-latest) context hostage. When Test's
+    # macOS leg runs on the self-hosted Mac (trusted event and
+    # CW_SELF_HOSTED_MAC == 'true'), it runs these two steps on the warm
+    # build instead. The name keeps "(fork PR)" so check contexts stay stable.
     name: macOS budget and eval (fork PR)
     needs: changes
-    if: needs.changes.outputs.heavy == 'true' && needs.changes.outputs.trusted != 'true'
+    if: needs.changes.outputs.heavy == 'true' && !(needs.changes.outputs.trusted == 'true' && vars.CW_SELF_HOSTED_MAC == 'true')
     timeout-minutes: 75
     runs-on: macos-latest
     steps:
@@ -807,6 +812,8 @@ jobs:
         with:
           cache-bin: false
           save-if: false
+      - name: Fetch dependencies before offline measurement
+        run: cargo fetch --locked
       - name: Check persistence-backlog RSS budget
         run: python3 scripts/check-persistence-backlog-budget.py
       - name: Run Offline Eval Harness
