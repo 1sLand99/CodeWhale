@@ -62,7 +62,13 @@ pub use groups::project::share;
 pub use groups::core::voice;
 
 #[cfg(test)]
+mod debug_diagnostics_baseline_tests;
+#[cfg(test)]
 mod debug_diagnostics_regression_tests;
+#[cfg(test)]
+mod debug_diagnostics_surface_tests;
+#[cfg(test)]
+mod debug_diagnostics_test_support;
 
 use crate::tui::app::{App, AppAction};
 use codewhale_config::AppMode;

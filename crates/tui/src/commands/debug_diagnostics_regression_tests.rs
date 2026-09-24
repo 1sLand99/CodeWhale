@@ -5,7 +5,6 @@
 //! covers stable branches; timestamped reports and seeded pricing/telemetry
 //! still require separate captured cases before diagnostics handlers are moved.
 
-use super::traits::{CommandDiscovery, CommandGroup};
 use super::{CommandResult, execute};
 use crate::config::Config;
 use crate::tui::app::{App, AppAction};
@@ -143,109 +142,4 @@ fn stable_branches_match_untouched_baseline() {
             .expect("reviewed baseline fixture must parse");
     let actual = collect();
     assert_eq!(actual, expected, "diagnostics parity diverged");
-}
-
-#[test]
-fn registration_metadata_matches_untouched_baseline() {
-    use codewhale_localization::MessageId;
-
-    let commands = super::groups::debug::DebugCommands.commands();
-    let names: Vec<_> = commands.iter().map(|command| command.info().name).collect();
-    assert_eq!(
-        names,
-        [
-            "tokens",
-            "cost",
-            "balance",
-            "cache",
-            "preview-request",
-            "tools",
-            "change",
-            "system",
-            "context",
-            "edit",
-            "diff",
-            "undo",
-            "retry",
-        ],
-        "diagnostics must keep their original positions among mutation commands"
-    );
-
-    let expected = [
-        (
-            0,
-            "tokens",
-            &[][..],
-            "/tokens",
-            MessageId::CmdTokensDescription,
-            CommandDiscovery::Primary,
-        ),
-        (
-            1,
-            "cost",
-            &[][..],
-            "/cost",
-            MessageId::CmdCostDescription,
-            CommandDiscovery::Primary,
-        ),
-        (
-            2,
-            "balance",
-            &[][..],
-            "/balance",
-            MessageId::CmdBalanceDescription,
-            CommandDiscovery::Advanced,
-        ),
-        (
-            3,
-            "cache",
-            &[][..],
-            "/cache [count|inspect|stats|zones|warmup]",
-            MessageId::CmdCacheDescription,
-            CommandDiscovery::Advanced,
-        ),
-        (
-            4,
-            "preview-request",
-            &["dryrun", "preview_request"][..],
-            "/preview-request [json] [--prompt <text>]",
-            MessageId::CmdPreviewRequestDescription,
-            CommandDiscovery::Advanced,
-        ),
-        (
-            5,
-            "tools",
-            &["tool-studio"][..],
-            "/tools [text|json]",
-            MessageId::CmdToolsDescription,
-            CommandDiscovery::Advanced,
-        ),
-        (
-            7,
-            "system",
-            &["xitong"][..],
-            "/system",
-            MessageId::CmdSystemDescription,
-            CommandDiscovery::Advanced,
-        ),
-        (
-            8,
-            "context",
-            &["ctx"][..],
-            "/context [report|json|prompt-json|summary]",
-            MessageId::CmdContextDescription,
-            CommandDiscovery::Advanced,
-        ),
-    ];
-    for (index, name, aliases, usage, description_id, discovery) in expected {
-        let info = commands[index].info();
-        assert_eq!(info.name, name);
-        assert_eq!(info.aliases, aliases, "aliases for {name}");
-        assert_eq!(info.usage, usage, "usage for {name}");
-        assert_eq!(
-            info.description_id, description_id,
-            "description for {name}"
-        );
-        assert_eq!(info.discovery(), discovery, "discovery for {name}");
-    }
 }
