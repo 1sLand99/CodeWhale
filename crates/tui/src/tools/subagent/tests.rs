@@ -22735,6 +22735,73 @@ mod child_permission_gate {
         }
     }
 
+    #[test]
+    fn child_approval_keys_use_agent_scoped_normal_scheme() {
+        let (exact_a, grouping_a) = child_approval_keys(
+            "agent_one",
+            "bash",
+            &json!({"command": "cargo test -p demo"}),
+        );
+        let (exact_b, grouping_b) = child_approval_keys(
+            "agent_one",
+            "bash",
+            &json!({"command": "cargo test -p demo --lib"}),
+        );
+        assert_eq!(grouping_a, grouping_b, "one command family, one grant");
+        assert_ne!(exact_a, exact_b, "denials stay exact");
+        for key in [&exact_a, &grouping_a, &exact_b, &grouping_b] {
+            assert!(key.starts_with("agent:agent_one:shell:"), "{key}");
+            assert!(!key.contains(":approval:"), "{key}");
+        }
+    }
+
+    #[test]
+    fn child_grant_does_not_match_parent_or_sibling() {
+        let input = json!({"command": "cargo test -p demo"});
+        let (_, child) = child_approval_keys("agent_one", "bash", &input);
+        let (_, sibling) = child_approval_keys("agent_two", "bash", &input);
+        let parent = crate::tools::approval_cache::build_approval_grouping_key("bash", &input).0;
+        assert_ne!(child, sibling);
+        assert_ne!(child, parent);
+        assert!(
+            child.ends_with(&parent),
+            "child key reuses the normal scheme"
+        );
+    }
+
+    #[tokio::test]
+    async fn child_prompt_carries_agent_scoped_keys() {
+        let (registry, mut rx, manager) = worker_registry(ApprovalMode::Suggest, false, true, None);
+        let input = json!({"command": "echo gated"});
+        let expected = child_approval_keys("agent_gate", "bash", &input);
+        let manager_for_answer = Arc::clone(&manager);
+        let answerer = tokio::spawn(async move {
+            let keys = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while let Some(event) = rx.recv().await {
+                    if let Event::ApprovalRequired {
+                        id,
+                        approval_key,
+                        approval_grouping_key,
+                        ..
+                    } = event
+                    {
+                        manager_for_answer
+                            .write()
+                            .await
+                            .resolve_child_approval(&id, ChildApprovalOutcome::Denied);
+                        return (approval_key, approval_grouping_key);
+                    }
+                }
+                panic!("channel closed before the child prompt");
+            })
+            .await
+            .expect("child prompt arrives");
+            keys
+        });
+        let _ = registry.execute("agent_gate", "bash", input).await;
+        assert_eq!(answerer.await.expect("answerer"), expected);
+    }
+
     #[tokio::test]
     async fn closed_child_approval_waiter_persists_unavailable_not_cancelled() {
         let (registry, mut rx, manager) = worker_registry(ApprovalMode::Suggest, false, true, None);

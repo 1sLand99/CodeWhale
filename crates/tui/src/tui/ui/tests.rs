@@ -7810,6 +7810,119 @@ fn full_access_auto_approves_requests_while_auto_review_holds_without_a_modal() 
 }
 
 #[test]
+fn child_session_grant_auto_approves_next_child_call() {
+    use crate::core::authority::ApprovalRequestDisposition;
+    let mut app = create_test_app();
+    app.mode = AppMode::Agent;
+    app.approval_mode = ApprovalMode::Suggest;
+    let input = serde_json::json!({"command": "cargo test -p demo"});
+    let (child_exact, child_grouping) =
+        crate::tools::subagent::child_approval_keys("agent_a", "exec_shell", &input);
+
+    // The card stores the engine's agent-scoped grouping key, not its own.
+    push_approval_request_view(
+        &mut app,
+        "agent:agent_a:approval:boot:1",
+        "exec_shell",
+        "agent_a wants to run 'exec_shell'",
+        &input,
+        &child_exact,
+        &child_grouping,
+        None,
+        crate::config::ApprovalDefaultSelection::Deny,
+        None,
+    );
+    let mut view = app.view_stack.pop().expect("approval view");
+    let approval = view
+        .as_any_mut()
+        .downcast_mut::<ApprovalView>()
+        .expect("approval view");
+    let ViewAction::EmitAndClose(ViewEvent::ApprovalDecision {
+        approval_grouping_key,
+        decision,
+        ..
+    }) = approval.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+    else {
+        panic!("allow for this conversation emits a decision");
+    };
+    assert_eq!(
+        decision,
+        crate::tui::approval::ReviewDecision::ApprovedForSession
+    );
+    assert_eq!(approval_grouping_key, child_grouping);
+    app.approval_session_approved.insert(approval_grouping_key);
+
+    // The child's next call in the same family runs without a card.
+    let (next_exact, next_grouping) = crate::tools::subagent::child_approval_keys(
+        "agent_a",
+        "exec_shell",
+        &serde_json::json!({"command": "cargo test -p demo --lib"}),
+    );
+    assert_eq!(next_grouping, child_grouping);
+    assert_eq!(
+        resolve_ui_approval_disposition(&app, "exec_shell", &next_grouping, &next_exact, false),
+        ApprovalRequestDisposition::AutoApprove
+    );
+    // The parent's own call in that family still asks.
+    let parent_grouping =
+        crate::tools::approval_cache::build_approval_grouping_key("exec_shell", &input).0;
+    assert_eq!(
+        resolve_ui_approval_disposition(&app, "exec_shell", &parent_grouping, "key", false),
+        ApprovalRequestDisposition::Prompt
+    );
+    // Never posture still wins over the grant (J).
+    app.approval_mode = ApprovalMode::Never;
+    assert_eq!(
+        resolve_ui_approval_disposition(&app, "exec_shell", &next_grouping, &next_exact, false),
+        ApprovalRequestDisposition::AutoDenyNeverPosture
+    );
+}
+
+#[test]
+fn child_approval_card_hides_always_allow_in_repo() {
+    let mut app = create_test_app();
+    app.workspace = std::path::PathBuf::from("/workspace");
+    let input = serde_json::json!({"command": "cargo test --workspace"});
+    push_approval_request_view(
+        &mut app,
+        "parent-call",
+        "exec_shell",
+        "Run cargo check",
+        &input,
+        "approval-key",
+        "",
+        None,
+        crate::config::ApprovalDefaultSelection::Deny,
+        None,
+    );
+    push_approval_request_view(
+        &mut app,
+        "agent:agent_a:approval:boot:1",
+        "exec_shell",
+        "agent_a wants to run 'exec_shell'",
+        &input,
+        "approval-key",
+        "",
+        None,
+        crate::config::ApprovalDefaultSelection::Deny,
+        None,
+    );
+    for expect_repo_rule in [false, true] {
+        let mut view = app.view_stack.pop().expect("approval view");
+        let approval = view
+            .as_any_mut()
+            .downcast_mut::<ApprovalView>()
+            .expect("approval view");
+        let action = approval.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        assert_eq!(
+            matches!(action, ViewAction::EmitAndClose(_)),
+            expect_repo_rule,
+            "only the parent card offers Always allow in this repo"
+        );
+    }
+}
+
+#[test]
 fn app_auto_approval_helper_covers_bypass_only() {
     let mut app = create_test_app();
     app.mode = AppMode::Agent;
@@ -24217,6 +24330,7 @@ fn approval_prompt_uses_event_input_after_message_complete_drain() {
         "Run cargo tests",
         &event_input,
         "approval-key",
+        "",
         None,
         crate::config::ApprovalDefaultSelection::Deny,
         None,
@@ -24251,6 +24365,7 @@ fn approval_prompt_uses_configured_default_selection() {
         "Run a trusted command",
         &serde_json::json!({"command": "cargo check"}),
         "approval-key",
+        "",
         None,
         crate::config::ApprovalDefaultSelection::AllowOnce,
         None,
@@ -24287,6 +24402,7 @@ fn patch_approval_modal_does_not_displace_the_active_file_receipt() {
         "Apply a file patch",
         &input,
         "approval-key",
+        "",
         None,
         crate::config::ApprovalDefaultSelection::Deny,
         None,

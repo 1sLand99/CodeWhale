@@ -3620,6 +3620,21 @@ pub struct SubAgentManager {
     child_approval_seq: u64,
 }
 
+/// Approval keys for a child's held call: the normal exact/grouping scheme
+/// (`tools/approval_cache.rs`), prefixed with the owning agent. A person's
+/// "allow for this conversation" on a child card then covers that same
+/// agent's later calls in the same family, and never the parent's calls or a
+/// sibling agent's (approvals program C3). Denials keep the exact key.
+#[must_use]
+pub(crate) fn child_approval_keys(agent_id: &str, name: &str, input: &Value) -> (String, String) {
+    let exact = crate::tools::approval_cache::build_approval_key(name, input).0;
+    let grouping = crate::tools::approval_cache::build_approval_grouping_key(name, input).0;
+    (
+        format!("agent:{agent_id}:{exact}"),
+        format!("agent:{agent_id}:{grouping}"),
+    )
+}
+
 /// A person's answer to an approval prompt raised for a child's tool call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChildApprovalOutcome {
@@ -17453,15 +17468,15 @@ impl SubAgentToolRegistry {
             self.owner_agent_name,
             agent_id.chars().take(12).collect::<String>()
         );
-        let approval_key = format!("{approval_id}:{name}");
+        let (approval_key, approval_grouping_key) = child_approval_keys(agent_id, name, input);
         let sent = event_tx
             .send(Event::ApprovalRequired {
                 id: approval_id.clone(),
                 tool_name: name.to_string(),
                 description,
                 input: input.clone(),
-                approval_key: approval_key.clone(),
-                approval_grouping_key: approval_key,
+                approval_key,
+                approval_grouping_key,
                 intent_summary: None,
                 approval_force_prompt: force_prompt,
             })

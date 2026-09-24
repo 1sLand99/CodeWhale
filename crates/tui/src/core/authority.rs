@@ -684,11 +684,13 @@ pub(crate) fn resolve_approval_request_disposition(
     if approval_force_prompt && posture == ToolPermission::Allow {
         return ApprovalRequestDisposition::AutoDenyFullAccessPolicyHold;
     }
-    if !approval_force_prompt && (posture == ToolPermission::Allow || session_approved) {
-        return ApprovalRequestDisposition::AutoApprove;
-    }
+    // The live posture wins over any remembered grant: a conversation grant
+    // given under Ask never outlives a later switch to Never (approvals J).
     if posture == ToolPermission::Deny {
         return ApprovalRequestDisposition::AutoDenyNeverPosture;
+    }
+    if !approval_force_prompt && (posture == ToolPermission::Allow || session_approved) {
+        return ApprovalRequestDisposition::AutoApprove;
     }
     ApprovalRequestDisposition::Prompt
 }
@@ -1129,11 +1131,12 @@ mod tests {
             resolve_approval_request_disposition(&ask, true, false, false),
             ApprovalRequestDisposition::AutoApprove
         );
-        // A session grant still auto-approves under Never (legacy order), and
-        // Never denies everything else promptable.
+        // The live Never posture wins over a remembered session grant
+        // (approvals J, CURRENT_DECISIONS §21), and denies everything else
+        // promptable.
         assert_eq!(
             resolve_approval_request_disposition(&never, true, false, false),
-            ApprovalRequestDisposition::AutoApprove
+            ApprovalRequestDisposition::AutoDenyNeverPosture
         );
         assert_eq!(
             resolve_approval_request_disposition(&never, false, false, false),
