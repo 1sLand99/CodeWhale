@@ -180,6 +180,113 @@ fn diagnostics_runtime_translation_uses_original_catalog_and_placeholder_contrac
     );
 }
 
+/// The production registry now exposes exactly the declared facets, including
+/// each alias. Preview stays a pure function, not a contextual empty envelope.
+#[test]
+fn diagnostics_registrations_expose_exact_facets_and_preview_is_pure() {
+    use codewhale_command_contract::handler::{
+        CommandCapabilities as Caps, CommandContexts, CommandHandler,
+    };
+
+    let mut harness = DiagnosticsHarness::new();
+    for (name, aliases, _) in DIAGNOSTICS {
+        let expected = match *name {
+            "tokens" | "cost" | "cache" => Caps::DEBUG_DIAGNOSTICS | Caps::PRESENTATION,
+            "preview-request" => Caps::NONE,
+            _ => Caps::DEBUG_DIAGNOSTICS,
+        };
+        for spelling in std::iter::once(*name).chain(aliases.iter().copied()) {
+            let registered = crate::commands::registry()
+                .get(spelling)
+                .expect("registered spelling");
+            match registered
+                .contextual_handler()
+                .expect("portable registration")
+            {
+                CommandHandler::Pure(pure) => {
+                    assert_eq!(*name, "preview-request", "only preview is pure");
+                    assert_eq!(expected, Caps::NONE);
+                    assert!(matches!(
+                        pure(Some("json")).action,
+                        Some(AppAction::PreviewOutboundRequest { json: true, .. })
+                    ));
+                }
+                CommandHandler::Contextual {
+                    capabilities,
+                    handler,
+                } => {
+                    assert_ne!(*name, "preview-request");
+                    assert_eq!(capabilities, expected, "/{spelling} declaration");
+                    let result = handler(CommandContexts::empty(), None);
+                    assert!(result.is_error);
+                    assert_eq!(
+                        result.message.as_deref(),
+                        Some("Error: Command capability unavailable: debug_diagnostics")
+                    );
+                    assert!(result.action.is_none());
+
+                    let mut bundle = harness.app.command_contexts();
+                    let parts = bundle.contexts(capabilities).into_parts();
+                    let codewhale_command_contract::handler::ContextParts {
+                        session,
+                        model,
+                        cost,
+                        mode_policy,
+                        system_prompt,
+                        skills,
+                        workspace,
+                        presentation,
+                        media,
+                        memory,
+                        project,
+                        skill_group,
+                        plugin,
+                        lifecycle,
+                        control,
+                        export,
+                        debug_diagnostics,
+                    } = parts;
+                    assert!(debug_diagnostics.is_some(), "/{spelling} needs diagnostics");
+                    assert_eq!(
+                        presentation.is_some(),
+                        expected.contains(Caps::PRESENTATION),
+                        "/{spelling} presentation"
+                    );
+                    for (facet, exposed) in [
+                        ("session", session.is_some()),
+                        ("model", model.is_some()),
+                        ("cost", cost.is_some()),
+                        ("mode_policy", mode_policy.is_some()),
+                        ("system_prompt", system_prompt.is_some()),
+                        ("skills", skills.is_some()),
+                        ("workspace", workspace.is_some()),
+                        ("media", media.is_some()),
+                        ("memory", memory.is_some()),
+                        ("project", project.is_some()),
+                        ("skill_group", skill_group.is_some()),
+                        ("plugin", plugin.is_some()),
+                        ("lifecycle", lifecycle.is_some()),
+                        ("control", control.is_some()),
+                        ("export", export.is_some()),
+                    ] {
+                        assert!(!exposed, "/{spelling} must not expose {facet}");
+                    }
+                }
+            }
+        }
+    }
+    for name in ["change", "edit", "diff", "undo", "retry"] {
+        assert!(
+            crate::commands::registry()
+                .get(name)
+                .unwrap()
+                .contextual_handler()
+                .is_none(),
+            "/{name} must remain unmigrated"
+        );
+    }
+}
+
 /// Registry position inside the debug group is preserved: the eight
 /// diagnostics commands stay in their original relative order and the five
 /// FEAT-030 mutation commands remain registered around them.

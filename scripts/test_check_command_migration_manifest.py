@@ -426,6 +426,26 @@ class LiveGateTests(unittest.TestCase):
         )
 
 
+class DiagnosticsSliceFrontierTests(unittest.TestCase):
+    def test_diagnostics_migration_cannot_remove_mutation_or_root_debug(self) -> None:
+        doc = mod.load_topology()
+        debug = doc["topology"]["debug"]
+        slices = {item["name"]: item for item in debug["slices"]}
+        self.assertEqual(set(slices), {"debug::diagnostics", "debug::mutation"})
+        prefix = "crates/tui/src/commands/groups/debug/"
+        self.assertEqual(
+            set(slices["debug::diagnostics"]["scope"]),
+            {prefix + name for name in ("balance.rs", "cache.rs", "preview_request.rs", "tokens.rs", "tool_inspection.rs")},
+        )
+        self.assertEqual(
+            set(slices["debug::mutation"]["scope"]),
+            {prefix + name for name in ("change.rs", "undo.rs")},
+        )
+        self.assertEqual(set(debug["scope"]), set(slices["debug::diagnostics"]["scope"]) | set(slices["debug::mutation"]["scope"]))
+        self.assertIn("debug", doc["frontier"], "mutation remains App-backed")
+        self.assertIn("debug", mod.load_pending_groups(mod.REPO_ROOT / "crates/tui/src/commands/contract.rs"))
+
+
 class SourceScanTests(unittest.TestCase):
     """Hermetic fixtures for the AST-resolved source scan (Task 3.5/3.6)."""
 
