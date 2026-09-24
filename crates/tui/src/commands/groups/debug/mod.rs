@@ -12,6 +12,8 @@ mod tool_inspection;
 mod undo;
 
 #[cfg(test)]
+mod portable_tests;
+#[cfg(test)]
 pub(in crate::commands) mod tests;
 
 use crate::commands::CommandResult;

@@ -105,8 +105,20 @@ fn format_cache_inspect(
         }
     };
     let output = render_inspection(&observation, verbose, json_mode);
+    commit_rendered_inspection(diagnostics, observation, output)
+}
+
+pub(super) fn commit_rendered_inspection(
+    diagnostics: &mut dyn CommandDebugDiagnosticsContext,
+    observation: DebugCacheInspectionObservation,
+    output: String,
+) -> String {
     diagnostics.remember_cache_inspection(observation.current);
     output
+}
+
+pub(super) fn json_or_fallback(rendered: Result<String, serde_json::Error>) -> String {
+    rendered.unwrap_or_else(|_| "{\"error\":\"cache inspection serialization failed\"}".to_string())
 }
 
 fn render_inspection(
@@ -123,23 +135,19 @@ fn render_inspection(
         &observation.current_warmup_hash_short,
     );
     if json_mode {
-        return serde_json::to_value(inspection)
-            .and_then(|mut value| {
-                if let serde_json::Value::Object(ref mut object) = value {
-                    object.insert(
-                        "current_warmup_key".to_string(),
-                        serde_json::to_value(&observation.current_warmup_key)?,
-                    );
-                    object.insert(
-                        "warmup_status".to_string(),
-                        serde_json::Value::String(warmup_status.trim_end().to_string()),
-                    );
-                }
-                serde_json::to_string_pretty(&value)
-            })
-            .unwrap_or_else(|_| {
-                "{\"error\":\"cache inspection serialization failed\"}".to_string()
-            });
+        return json_or_fallback(serde_json::to_value(inspection).and_then(|mut value| {
+            if let serde_json::Value::Object(ref mut object) = value {
+                object.insert(
+                    "current_warmup_key".to_string(),
+                    serde_json::to_value(&observation.current_warmup_key)?,
+                );
+                object.insert(
+                    "warmup_status".to_string(),
+                    serde_json::Value::String(warmup_status.trim_end().to_string()),
+                );
+            }
+            serde_json::to_string_pretty(&value)
+        }));
     }
 
     let mut out = String::new();
