@@ -313,7 +313,38 @@ model = "glm-5-turbo"
 thinking = "off"        # 可选;默认 off
 ```
 
-分类器调用只在 `[auto.router]` 已设置**且**该 provider 有 key 时发生——`router_available = router_configured && has_api_key_for(...)`(`crates/tui/src/model_inventory.rs:206-218`)。任一条件不满足意味着由启发式决定，而不是失败。回合的路由回执(`/status` → Auto)记录是哪一种。
+分类器调用只在 `[auto.router]` 已设置**且**该 provider 有 key 时发生——`router_available = router_configured && has_api_key_for(...)`(`crates/tui/src/model_inventory.rs`)。任一条件不满足、或分类器调用出错/超时时，由本地回退决定。回合的路由回执(`/status` → Auto)记录是哪一种；你配置了但无法运行或失败的路由器(缺 key、HTTP 错误、超时、无效回答)会显示为 `Auto router: failing — …`,而不是被静默忽略。
+
+#### 设置模型路由
+
+`/router`(也可用 `/model router`)打开同一个 Router 设置视图，提供以下预设。每个预设只写入 `[auto.router]`,不会被自动选中。
+
+| 预设 | 写入内容 | 成本与隐私 |
+| --- | --- | --- |
+| `/router jev` | TypeSafe 的决策模型 Jev,经由 OpenRouter(`typesafe/jev-1.13`)或 TypeSafe 直连，取决于你有哪个 key | 每轮约 $0.00002(每百万输入 token $0.042,输出免费)。你的最新请求和最多六行近期上下文会发送到 OpenRouter → TypeSafe(或 TypeSafe)。 |
+| `/router fast` | 当前 provider 可运行的快速档，关闭思考 | 使用你已有的 key;分类器看到同样的请求文本。 |
+| `/router off` | 删除 `[auto.router]` | 不调用路由器；Auto 回合使用默认模型，`[auto] cost_saving = true` 时使用快速档(Off 不改动该设置)。 |
+| `/router custom` | 不写入；打印可手动编辑的 TOML | — |
+
+选择 Jev 或 Fast 会用固定的示例请求做**一次测试调用**,并显示它选择的档位、概率与置信度、延迟和 provider 报告的费用。随后按 `Enter`(或 `/router save <预设>`)通过常规配置写入器保存；按 `Esc` 放弃。TypeSafe 已于 2026-09-22 暂停新用户注册，因此 OpenRouter 是新用户的默认路线。TypeSafe key 读取自 `TYPESAFE_API_KEY`、`typesafe` 密钥存储条目，或 `[providers.typesafe] api_key` / `api_key_env`。
+
+#### 决策路由器(`kind = "decision"`)
+
+决策路由器每回合向一个非生成式决策模型提一个有类型的问题——在当前 provider 的 `fast` 和 `strong` 档之间做 Choice,外加一个思考档位——并得到校准过的概率。不解析任何散文。
+
+```toml
+[auto.router]
+kind = "decision"             # 默认 "chat"
+provider = "openrouter"       # 或 "typesafe"
+model = "typesafe/jev-1.13"   # 也可用 "~typesafe/jev-latest";TypeSafe 直连用 "jev-latest"
+timeout_secs = 2
+min_confidence = 0.5          # 默认 0.5,限制在 0..1
+```
+
+- 只有当前 provider 有可运行的 strong/fast 档位对时才会调用路由器；否则不调用、不花费。
+- 置信度低于 `min_confidence` 的回答走本地回退。在 `[auto] cost_saving` 下，回答 `strong` 还需要至少 0.75 的概率，否则回合留在快速档。
+- 未知的 `kind`,或决策路由器的 `provider` 不是 `openrouter` / `typesafe`,会让路由器处于未配置状态并显示为 failing。
+- 决策路由器忽略 `thinking`。OpenRouter 的花费像其他路由用量一样记录；TypeSafe 直连的花费只显示在回执上。
 
 要在解析后的路径引导(bootstrap) MCP 和 skills 目录，运行 `codewhale setup`。要只搭建 MCP，运行 `codewhale mcp init`。
 

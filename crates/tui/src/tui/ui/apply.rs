@@ -1719,6 +1719,15 @@ pub(crate) async fn apply_command_result(
                     app.status_message = Some(format!("Could not cancel {agent_id}"));
                 }
             }
+            AppAction::RouterSetup { request } => {
+                crate::tui::views::router_setup::handle_router_request(
+                    app,
+                    config,
+                    task_manager,
+                    request,
+                )
+                .await;
+            }
             AppAction::FetchBalance => {
                 let provider = app.api_provider;
                 if !crate::config::provider_has_balance_api(provider) {

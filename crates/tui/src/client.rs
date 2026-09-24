@@ -760,6 +760,13 @@ fn configured_model_bound_secret_values(config: &Config, active_api_key: &str) -
         }
     }
 
+    // The decision router's TypeSafe key is no chat provider's key; its env
+    // form must still never reach a model. (`for_decision_route` adds the key
+    // from every source to its own client.)
+    if let Ok(value) = std::env::var(system_one::TYPESAFE_API_KEY_ENV) {
+        push_model_bound_secret(&mut values, Some(&value));
+    }
+
     push_file_backed_model_bound_secrets(&mut values);
 
     // Replace longer values first in case one credential happens to contain
@@ -5156,6 +5163,7 @@ mod provider_native_search;
 mod responses;
 mod role_placement;
 mod stream_entry;
+pub(crate) mod system_one;
 
 /// Longest a request may take to open its stream and deliver the first body
 /// byte before the client itself times out (#6184): the header wait plus the
