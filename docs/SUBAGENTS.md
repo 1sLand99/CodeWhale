@@ -669,6 +669,26 @@ manual role pin. A type-only start also selects a unique saved role pin when
 there is no manual override; ambiguous saved roles fail instead of choosing one.
 Durable Fleet runs retain their selected member's frozen route.
 
+A structured role pin may list approved replacement routes:
+
+```toml
+[subagents.roles.reviewer]
+model = "xai/grok-4.6"
+replacements = ["deepseek/deepseek-v4-pro"]
+```
+
+When the pinned route refuses the agent's **first** request (exhausted quota,
+rejected credentials or authorization, or an unavailable model), the agent
+retries that same request on the next listed route, keeping its role,
+permissions, tools, scope and budgets. Listing a route authorizes sending the
+agent's task to that provider, so each entry must name `provider/model`; at
+most three are allowed and each is tried once. The route receipt records the
+effective route, `route_source = "role.replacement"`, and a note with the
+original route, the reason and the attempt. Replacement never happens after
+the agent has run a tool, never for content-policy, context-length or
+invalid-request errors, never for Codewhale's own permission denials, and never
+for exact Fleet members or task-level `model` choices, which stay exact.
+
 Structured role pins accept `provider/model`, preserving the configured provider's
 exact identity and the complete model suffix. Unknown providers, empty pairs,
 and cross-provider `auto` choices fail before admission. A bare structured model
