@@ -1719,7 +1719,13 @@ pub(crate) async fn apply_command_result(
                 }
             }
             AppAction::RouterSetup { request } => {
-                crate::tui::views::router_setup::handle_router_request(app, config, request).await;
+                crate::tui::views::router_setup::handle_router_request(
+                    app,
+                    config,
+                    task_manager,
+                    request,
+                )
+                .await;
             }
             AppAction::FetchBalance => {
                 let provider = app.api_provider;

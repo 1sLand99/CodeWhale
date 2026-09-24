@@ -323,7 +323,7 @@ thinking = "off"        # 可选;默认 off
 | --- | --- | --- |
 | `/router jev` | TypeSafe 的决策模型 Jev,经由 OpenRouter(`typesafe/jev-1.13`)或 TypeSafe 直连，取决于你有哪个 key | 每轮约 $0.00002(每百万输入 token $0.042,输出免费)。你的最新请求和最多六行近期上下文会发送到 OpenRouter → TypeSafe(或 TypeSafe)。 |
 | `/router fast` | 当前 provider 可运行的快速档，关闭思考 | 使用你已有的 key;分类器看到同样的请求文本。 |
-| `/router off` | 删除 `[auto.router]` | 不调用路由器；每个 Auto 回合使用默认模型。 |
+| `/router off` | 删除 `[auto.router]` | 不调用路由器；Auto 回合使用默认模型，`[auto] cost_saving = true` 时使用快速档(Off 不改动该设置)。 |
 | `/router custom` | 不写入；打印可手动编辑的 TOML | — |
 
 选择 Jev 或 Fast 会用固定的示例请求做**一次测试调用**,并显示它选择的档位、概率与置信度、延迟和 provider 报告的费用。随后按 `Enter`(或 `/router save <预设>`)通过常规配置写入器保存；按 `Esc` 放弃。TypeSafe 已于 2026-09-22 暂停新用户注册，因此 OpenRouter 是新用户的默认路线。TypeSafe key 读取自 `TYPESAFE_API_KEY`、`typesafe` 密钥存储条目，或 `[providers.typesafe] api_key` / `api_key_env`。

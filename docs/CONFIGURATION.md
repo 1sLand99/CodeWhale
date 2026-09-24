@@ -720,7 +720,7 @@ presets. Each writes only `[auto.router]`; none is ever chosen for you.
 | --- | --- | --- |
 | `/router jev` | Jev, TypeSafe's decision model, over OpenRouter (`typesafe/jev-1.13`) or TypeSafe direct, whichever key you have | About $0.00002 per turn ($0.042 per million input tokens, output free). Your latest request and up to six recent context lines go to OpenRouter → TypeSafe (or TypeSafe). |
 | `/router fast` | The active provider's runnable fast tier with thinking off | Your existing key; the classifier sees the same request text. |
-| `/router off` | Removes `[auto.router]` | No router call; every Auto turn uses the default model. |
+| `/router off` | Removes `[auto.router]` | No router call; Auto turns use the default model, or the fast tier while `[auto] cost_saving = true` (Off leaves that setting alone). |
 | `/router custom` | Nothing; prints the TOML to edit | — |
 
 Choosing Jev or Fast makes **one test call** with a fixed sample request and

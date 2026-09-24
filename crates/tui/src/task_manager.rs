@@ -1580,6 +1580,22 @@ impl TaskManager {
         &self.execution_lease.scope
     }
 
+    /// Apply `edit` to the runtime threads' authoritative config and reload
+    /// it, so runtime-chat and queued runtime turns see a setting the UI just
+    /// persisted instead of their startup snapshot. No runtime manager is a
+    /// no-op.
+    pub(crate) async fn reload_runtime_config_with(
+        &self,
+        edit: impl FnOnce(&mut crate::config::Config),
+    ) -> Result<()> {
+        let Some(runtime) = &self.runtime_threads else {
+            return Ok(());
+        };
+        let mut config = runtime.read_config().clone();
+        edit(&mut config);
+        runtime.reload_config(config).await.map(|_| ())
+    }
+
     pub(crate) fn session_store_binding(
         &self,
     ) -> Option<crate::runtime_threads::RuntimeStoreBinding> {

@@ -211,6 +211,12 @@ impl CodewhaleClient {
                 )?
                 .build()?;
                 client.base_url = base_url;
+                // `Self::new` froze the redaction set from the chat provider's
+                // secrets; the TypeSafe key is none of them, so add it before
+                // any decision body is built from untrusted context.
+                let mut secrets = client.model_bound_secret_values.as_ref().clone();
+                push_model_bound_secret(&mut secrets, Some(&key));
+                client.model_bound_secret_values = Arc::new(secrets);
                 client.api_key = key;
                 client.request_concurrency = None;
                 client.remote_control_inference_participant = false;
@@ -224,9 +230,14 @@ impl CodewhaleClient {
     ///
     /// Only a failure class leaves this function — provider error bodies can
     /// echo the prompt and must never reach receipts.
+    ///
+    /// `dispatched` is set once both permits are held and the request is
+    /// handed to the transport, so a caller whose deadline cancels this
+    /// future can tell a possibly-billed request from one never sent.
     pub(crate) async fn system_one_decide(
         &self,
         body: &Value,
+        dispatched: &std::sync::atomic::AtomicBool,
     ) -> std::result::Result<SystemOneResponse, AutoRouterFailure> {
         let mut isolated = self.clone();
         isolated.isolated_request_state = true;
@@ -235,6 +246,7 @@ impl CodewhaleClient {
         let _inference = isolated.acquire_remote_control_inference_permit().await;
         let _permit = isolated.acquire_provider_request_permit().await;
         let url = api_url(&isolated.base_url, "systemone");
+        dispatched.store(true, std::sync::atomic::Ordering::Release);
         let response = isolated
             .send_json_with_retry(&url, body)
             .await

@@ -8,12 +8,16 @@
 //! * **Jev** — TypeSafe's decision model through OpenRouter or TypeSafe
 //!   direct, whichever key exists (OpenRouter first).
 //! * **Fast** — the active provider's runnable fast sibling, thinking off.
-//! * **Off** — removes `[auto.router]`; every Auto turn uses the default.
+//! * **Off** — removes `[auto.router]`; Auto takes its local fallback: the
+//!   default model, or the fast tier when `[auto] cost_saving` is on (Off
+//!   leaves that separate opt-in alone and says so).
 //! * **Custom** — shows the TOML to edit by hand.
 //!
 //! Choosing Jev or Fast makes exactly one test call through the per-turn
 //! routing path and shows the result before anything is saved; saving is a
-//! separate, explicit step. No preset is ever elected automatically.
+//! separate, explicit step. No preset is ever elected automatically. The test
+//! call's usage enters session cost like any routing call, and a save is
+//! published to the runtime threads as well as the UI's config.
 //!
 //! Known limits: "Free OpenRouter model" and "Local model" presets need live
 //! catalog and reachability probes and are not offered yet; the `/model`
@@ -176,6 +180,17 @@ pub(crate) fn preset_router_config(
     }
 }
 
+/// What Off does for this config: `[auto] cost_saving` is a separate opt-in
+/// that Off leaves in place, so its fallback is the fast tier, not the default.
+fn off_hint(config: &Config, locale: Locale) -> String {
+    let id = if config.auto_cost_saving() {
+        MessageId::RouterPresetOffCostSavingHint
+    } else {
+        MessageId::RouterPresetOffHint
+    };
+    tr(locale, id).into_owned()
+}
+
 fn no_key_reason(locale: Locale, route: DecisionRouterRoute) -> String {
     tr(locale, MessageId::RouterNoKey).replace("{route}", route.display_name())
 }
@@ -234,6 +249,7 @@ pub(crate) fn persist_auto_router(
 pub(crate) async fn handle_router_request(
     app: &mut App,
     config: &mut Config,
+    task_manager: &crate::task_manager::TaskManager,
     request: RouterRequest,
 ) {
     match request {
@@ -249,7 +265,7 @@ pub(crate) async fn handle_router_request(
             });
         }
         RouterRequest::Test(preset) => test_preset(app, config, preset).await,
-        RouterRequest::Save(preset) => save_preset(app, config, preset).await,
+        RouterRequest::Save(preset) => save_preset(app, config, task_manager, preset).await,
     }
 }
 
@@ -267,7 +283,7 @@ async fn test_preset(app: &mut App, config: &Config, preset: RouterPreset) {
         }
     };
     let lines = match router.as_ref() {
-        None => vec![tr(app.ui_locale, MessageId::RouterPresetOffHint).into_owned()],
+        None => vec![off_hint(config, locale)],
         Some(router) => {
             // The test call awaits a provider inline on the UI loop; refuse
             // while Runtime Chat owns the run, as other inline calls do.
@@ -286,8 +302,21 @@ async fn test_preset(app: &mut App, config: &Config, preset: RouterPreset) {
                 .get_or_insert_with(AutoConfig::default)
                 .router = Some(router.clone());
             let mut lines = vec![router_summary(router, locale)];
+            // Captured before the call, like any background provider request.
+            let cost_scope = crate::cost_status::scope_token();
             match crate::model_routing::test_auto_router(&candidate).await {
                 Ok((selection, latency_ms)) => {
+                    // The test call is real spend: settle it into session
+                    // cost exactly as a turn's routing call is settled.
+                    crate::cost_status::report_runtime_usage_batch(
+                        cost_scope,
+                        None,
+                        &crate::cost_status::RuntimeUsageBatch {
+                            records: selection.routed_usage.clone(),
+                            drop_records: selection.routed_usage_drop_records.clone(),
+                            dropped_records: selection.routed_usage_dropped_records,
+                        },
+                    );
                     lines.extend(describe_test_selection(&selection, latency_ms, locale));
                 }
                 Err(reason) => lines
@@ -307,7 +336,12 @@ async fn test_preset(app: &mut App, config: &Config, preset: RouterPreset) {
         .push(RouterSetupView::confirm(preset, lines, app.ui_locale));
 }
 
-async fn save_preset(app: &mut App, config: &mut Config, preset: RouterPreset) {
+async fn save_preset(
+    app: &mut App,
+    config: &mut Config,
+    task_manager: &crate::task_manager::TaskManager,
+    preset: RouterPreset,
+) {
     let locale = app.ui_locale;
     let router = match preset_router_config(config, preset, locale) {
         Ok(router) => router,
@@ -341,6 +375,22 @@ async fn save_preset(app: &mut App, config: &mut Config, preset: RouterPreset) {
                     .replace("{router}", &what)
                     .replace("{path}", &path.display().to_string()),
             });
+            // Runtime-chat and queued runtime turns resolve Auto from the
+            // runtime manager's own config snapshot; publish the new router
+            // there too, or they keep routing with the old one.
+            let runtime_router = router.clone();
+            if let Err(error) = task_manager
+                .reload_runtime_config_with(|runtime| {
+                    runtime.auto.get_or_insert_with(AutoConfig::default).router = runtime_router;
+                })
+                .await
+            {
+                app.add_message(HistoryCell::Error {
+                    message: tr(locale, MessageId::RouterRuntimeNotReloaded)
+                        .replace("{error}", &error.to_string()),
+                    severity: crate::error_taxonomy::ErrorSeverity::Warning,
+                });
+            }
         }
         Err(error) => app.add_message(HistoryCell::Error {
             message: tr(locale, MessageId::RouterNotSaved).replace("{error}", &error.to_string()),
@@ -465,7 +515,8 @@ pub(crate) struct RouterSetupView {
     current: String,
     cursor: usize,
     locale: Locale,
-    row_hitboxes: RefCell<Vec<Rect>>,
+    /// `(row index, rect)` for the rows actually drawn this frame.
+    row_hitboxes: RefCell<Vec<(usize, Rect)>>,
 }
 
 impl RouterSetupView {
@@ -513,7 +564,7 @@ impl RouterSetupView {
         rows.push(PresetRow {
             preset: RouterPreset::Off,
             label: tr(locale, MessageId::ConfigValueOff).into_owned(),
-            hint: tr(locale, MessageId::RouterPresetOffHint).into_owned(),
+            hint: off_hint(config, locale),
             available: true,
         });
         rows.push(PresetRow {
@@ -603,9 +654,14 @@ impl ModalView for RouterSetupView {
 
     fn handle_mouse(&mut self, mouse: MouseEvent) -> ViewAction {
         if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-            let clicked = self.row_hitboxes.borrow().iter().position(|rect| {
-                rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
-            });
+            let clicked = self
+                .row_hitboxes
+                .borrow()
+                .iter()
+                .find(|(_, rect)| {
+                    rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
+                })
+                .map(|(index, _)| *index);
             if let Some(index) = clicked {
                 self.cursor = index;
                 return self.select();
@@ -672,9 +728,33 @@ impl ModalView for RouterSetupView {
                 )));
             }
             Mode::Pick => {
-                lines.push(Line::from(Span::styled(self.current.clone(), muted)));
-                lines.push(Line::from(""));
-                for (idx, row) in self.rows.iter().enumerate() {
+                // Label + hint per row when everything fits; otherwise one
+                // line per row, windowed so the focused row is always drawn
+                // (compact terminals, e.g. 40x12).
+                let height = usize::from(content.height);
+                let width = usize::from(content.width);
+                let two_line = height >= 2 + self.rows.len() * 2;
+                let header = if two_line {
+                    2
+                } else {
+                    usize::from(height >= 2)
+                };
+                let row_height: u16 = if two_line { 2 } else { 1 };
+                let visible = (height.saturating_sub(header) / usize::from(row_height)).max(1);
+                let start = self
+                    .cursor
+                    .saturating_sub(visible - 1)
+                    .min(self.rows.len().saturating_sub(visible));
+                if header > 0 {
+                    lines.push(Line::from(Span::styled(
+                        crate::tui::ui_text::semantic_truncate(&self.current, width),
+                        muted,
+                    )));
+                }
+                if header > 1 {
+                    lines.push(Line::from(""));
+                }
+                for (idx, row) in self.rows.iter().enumerate().skip(start).take(visible) {
                     let is_cursor = idx == self.cursor;
                     let label_style = if is_cursor {
                         menu_style::selected_row_style()
@@ -688,23 +768,27 @@ impl ModalView for RouterSetupView {
                         .y
                         .saturating_add(u16::try_from(lines.len()).unwrap_or(u16::MAX));
                     lines.push(Line::from(Span::styled(
-                        format!("{pointer} {}", row.label),
+                        crate::tui::ui_text::semantic_truncate(
+                            &format!("{pointer} {}", row.label),
+                            width,
+                        ),
                         label_style,
                     )));
-                    let hint_width = usize::from(content.width).saturating_sub(4);
-                    lines.push(Line::from(Span::styled(
-                        format!(
-                            "    {}",
-                            crate::tui::ui_text::semantic_truncate(&row.hint, hint_width)
-                        ),
-                        muted,
-                    )));
-                    self.row_hitboxes.borrow_mut().push(Rect::new(
-                        content.x,
-                        row_y,
-                        content.width,
-                        2,
-                    ));
+                    if two_line {
+                        lines.push(Line::from(Span::styled(
+                            format!(
+                                "    {}",
+                                crate::tui::ui_text::semantic_truncate(
+                                    &row.hint,
+                                    width.saturating_sub(4)
+                                )
+                            ),
+                            muted,
+                        )));
+                    }
+                    self.row_hitboxes
+                        .borrow_mut()
+                        .push((idx, Rect::new(content.x, row_y, content.width, row_height)));
                 }
             }
         }
@@ -852,6 +936,69 @@ mod tests {
             view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             ViewAction::Close
         ));
+    }
+
+    fn rendered(view: &RouterSetupView, width: u16, height: u16) -> String {
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        view.render(area, &mut buf);
+        (0..height)
+            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn compact_picker_keeps_the_focused_row_visible_and_clickable() {
+        use crossterm::event::KeyModifiers;
+        let _env = hermetic();
+        let mut view = RouterSetupView::picker(&deepseek_with_openrouter_key(true), Locale::En);
+        let last = view.rows.len() - 1;
+        for _ in 0..last {
+            view.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        assert_eq!(view.cursor, last);
+        let text = rendered(&view, 40, 12);
+        let custom = tr(Locale::En, MessageId::RouterPresetCustomLabel);
+        assert!(
+            text.contains(custom.as_ref()),
+            "focused row hidden:\n{text}"
+        );
+        let hitboxes = view.row_hitboxes.borrow();
+        assert!(
+            hitboxes.iter().any(|(index, _)| *index == last),
+            "focused row has no hitbox"
+        );
+        assert!(hitboxes.iter().all(|(_, rect)| rect.bottom() <= 12));
+        drop(hitboxes);
+
+        // A roomy frame still shows every row with its hint.
+        let roomy = rendered(&view, 100, 40);
+        assert!(roomy.contains(tr(Locale::En, MessageId::RouterPresetCustomHint).as_ref()));
+        assert_eq!(view.row_hitboxes.borrow().len(), view.rows.len());
+    }
+
+    #[test]
+    fn off_hint_names_the_cost_saving_fallback() {
+        let _env = hermetic();
+        let mut config = deepseek_with_openrouter_key(true);
+        let off = |config: &Config| {
+            RouterSetupView::picker(config, Locale::En)
+                .rows
+                .into_iter()
+                .find(|row| row.preset == RouterPreset::Off)
+                .expect("off row")
+                .hint
+        };
+        assert_eq!(off(&config), tr(Locale::En, MessageId::RouterPresetOffHint));
+        config.auto = Some(AutoConfig {
+            cost_saving: Some(true),
+            ..Default::default()
+        });
+        assert_eq!(
+            off(&config),
+            tr(Locale::En, MessageId::RouterPresetOffCostSavingHint)
+        );
     }
 
     #[test]

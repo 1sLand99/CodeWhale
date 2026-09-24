@@ -294,8 +294,17 @@ impl ModelInventory {
         // for and privileging one provider. With no explicit `[auto.router]`,
         // legacy Auto is now local/free (heuristic-only).
         let router_table = config.auto.as_ref().and_then(|auto| auto.router.as_ref());
+        // Any populated key declares a router: a table holding only
+        // `timeout_secs` or `base_url` is a malformed router to diagnose, not
+        // an absent one to skip silently.
         let router_declared = router_table.is_some_and(|router| {
-            router.provider.is_some() || router.model.is_some() || router.kind.is_some()
+            router.provider.is_some()
+                || router.model.is_some()
+                || router.kind.is_some()
+                || router.thinking.is_some()
+                || router.timeout_secs.is_some()
+                || router.min_confidence.is_some()
+                || router.base_url.is_some()
         });
         let router_kind = AutoRouterKind::parse(router_table.and_then(|r| r.kind.as_deref()));
         let router_model_setting = router_table
@@ -1496,6 +1505,38 @@ mod decision_router_inventory_tests {
             zai.router_setup_issue,
             Some(AutoRouterSetupIssue::UnsupportedDecisionProvider)
         );
+    }
+
+    #[test]
+    fn a_router_table_with_only_tuning_keys_is_declared_and_incomplete() {
+        let _env = hermetic();
+        let tuning_only = [
+            crate::config::AutoRouterConfig {
+                timeout_secs: Some(3),
+                ..Default::default()
+            },
+            crate::config::AutoRouterConfig {
+                min_confidence: Some(0.6),
+                ..Default::default()
+            },
+            crate::config::AutoRouterConfig {
+                thinking: Some("off".to_string()),
+                ..Default::default()
+            },
+            crate::config::AutoRouterConfig {
+                base_url: Some("https://api.typesafe.ai/v1".to_string()),
+                ..Default::default()
+            },
+        ];
+        for router in tuning_only {
+            let inventory = ModelInventory::from_config(&with_router(router.clone(), true));
+            assert!(!inventory.router_available, "{router:?}");
+            assert_eq!(
+                inventory.router_setup_issue,
+                Some(AutoRouterSetupIssue::Incomplete),
+                "{router:?}"
+            );
+        }
     }
 
     #[test]

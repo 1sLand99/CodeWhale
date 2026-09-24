@@ -810,7 +810,8 @@ pub(crate) const ROUTER_TEST_REQUEST: &str = "Rename the variable foo to bar in 
 
 /// One `/router` preset test call (#6525): exactly the per-turn routing path,
 /// run once against a fixed synthetic request, with its wall-clock latency.
-/// Returns `Err` with a non-secret reason when the router cannot run.
+/// Returns `Err` with a non-secret reason whenever no request was sent, so
+/// the setup view never reports a test that did not happen.
 pub(crate) async fn test_auto_router(
     config: &Config,
 ) -> std::result::Result<(AutoRouteSelection, u64), String> {
@@ -820,6 +821,13 @@ pub(crate) async fn test_auto_router(
             .router_setup_issue
             .map_or("router is not configured", |issue| issue.label())
             .to_string());
+    }
+    // A decision router with no runnable strong/fast pair has nothing to
+    // decide and sends nothing (see `auto_route_via_router`).
+    if inventory.router_kind == AutoRouterKind::Decision
+        && runnable_active_pair(&inventory).is_none()
+    {
+        return Err(AutoRouteHeuristicReason::NoFastSibling.label().to_string());
     }
     let started = Instant::now();
     let selection = auto_route_via_router(
@@ -834,6 +842,15 @@ pub(crate) async fn test_auto_router(
     )
     .await;
     let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    // `NotRunnable` is set only when the client could not be built or the
+    // request failed preflight: nothing reached the network.
+    if let Some(failure @ AutoRouterFailure::NotRunnable) = selection
+        .receipt
+        .as_ref()
+        .and_then(|receipt| receipt.router_failure)
+    {
+        return Err(failure.label());
+    }
     Ok((
         normalize_auto_route_selection_for_config(config, selection),
         latency_ms,
@@ -1545,16 +1562,23 @@ async fn auto_route_decision_recommendation(
     let request_route = (route == DecisionRouterRoute::Openrouter)
         .then(|| client.effective_route_envelope(&inventory.router_model, chrono::Utc::now()));
     let started = Instant::now();
+    let dispatched = std::sync::atomic::AtomicBool::new(false);
     let outcome = tokio::time::timeout(
         Duration::from_secs(inventory.router_timeout_secs),
-        client.system_one_decide(&body),
+        client.system_one_decide(&body, &dispatched),
     )
     .await;
     let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     Ok(match outcome {
-        // Same contract as the chat classifier: a local deadline invents no
-        // provider call and no missing-usage receipt.
-        Err(_) => InventoryAutoRouteAttempt::failed(AutoRouterFailure::Timeout),
+        // A deadline that fired after the request was handed to the transport
+        // may still be billed: record the coverage gap. One that fired while
+        // waiting on a permit sent nothing and invents no receipt.
+        Err(_) => match request_route {
+            Some(route) if dispatched.load(std::sync::atomic::Ordering::Acquire) => {
+                auto_route_attempt_with_dropped_response(route, AutoRouterFailure::Timeout)
+            }
+            _ => InventoryAutoRouteAttempt::failed(AutoRouterFailure::Timeout),
+        },
         Ok(Err(failure)) => match request_route {
             Some(route) => auto_route_attempt_with_dropped_response(route, failure),
             None => InventoryAutoRouteAttempt::failed(failure),
@@ -3208,6 +3232,8 @@ mod decision_router_tests {
         }
     }
 
+    const TYPESAFE_TEST_KEY: &str = "tsbarekey0123456789";
+
     fn answer_body(strong: f64, confidence: f64) -> serde_json::Value {
         serde_json::json!({
             "id": "gen-dec-1",
@@ -3453,7 +3479,7 @@ mod decision_router_tests {
     }
 
     #[tokio::test]
-    async fn timeout_falls_back_and_invents_no_usage() {
+    async fn dispatched_timeout_falls_back_and_marks_usage_missing() {
         let _env = hermetic_env();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -3475,8 +3501,9 @@ mod decision_router_tests {
             AutoRouteReason::ClassifierFallback(_)
         ));
         assert!(selection.routed_usage.is_empty());
-        assert!(selection.routed_usage_drop_records.is_empty());
-        assert_eq!(selection.routed_usage_dropped_records, 0);
+        // The POST was sent before the deadline: coverage must fail closed.
+        assert_eq!(selection.routed_usage_drop_records.len(), 1);
+        assert_eq!(selection.routed_usage_dropped_records, 1);
     }
 
     #[tokio::test]
@@ -3501,6 +3528,12 @@ mod decision_router_tests {
         );
         assert_eq!(receipt.data_path, AutoRouteDataPath::LocalHeuristic);
         assert!(selection.routed_usage.is_empty());
+
+        // The setup test must say no call was made, not report a result.
+        let reason = test_auto_router(&config)
+            .await
+            .expect_err("no test call without a strong/fast pair");
+        assert_eq!(reason, AutoRouteHeuristicReason::NoFastSibling.label());
     }
 
     #[tokio::test]
@@ -3509,7 +3542,10 @@ mod decision_router_tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/systemone"))
-            .and(header("authorization", "Bearer ts-test-key"))
+            .and(header(
+                "authorization",
+                format!("Bearer {TYPESAFE_TEST_KEY}").as_str(),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(answer_body(0.2, 0.6)))
             .expect(1)
             .mount(&server)
@@ -3517,13 +3553,9 @@ mod decision_router_tests {
         let mut config = decision_config("https://openrouter.invalid/api/v1", false, 2);
         let providers = config.providers.as_mut().expect("providers");
         providers.openrouter.api_key = None;
-        providers.custom.insert(
-            "typesafe".to_string(),
-            crate::config::ProviderConfig {
-                api_key: Some("ts-test-key".to_string()),
-                ..Default::default()
-            },
-        );
+        // From the environment: not part of any `[providers.*]` table, so
+        // only the TypeSafe-specific redaction covers it.
+        let _key = crate::test_support::EnvVarGuard::set("TYPESAFE_API_KEY", TYPESAFE_TEST_KEY);
         let router = config
             .auto
             .as_mut()
@@ -3533,7 +3565,17 @@ mod decision_router_tests {
         router.model = Some("jev-latest".to_string());
         router.base_url = Some(format!("{}/v1", server.uri()));
 
-        let selection = route(&config, "Rename a variable", "").await;
+        // The TypeSafe key is no chat provider's key; a bare echo of it in
+        // context must still be redacted from the decision body.
+        let selection = route(
+            &config,
+            "Rename a variable",
+            &format!("assistant: [tool result] {TYPESAFE_TEST_KEY}"),
+        )
+        .await;
+        let requests: Vec<Request> = server.received_requests().await.expect("recorded");
+        let raw = String::from_utf8(requests[0].body.clone()).expect("utf8 body");
+        assert!(!raw.contains(TYPESAFE_TEST_KEY), "TypeSafe key leaked");
 
         assert_eq!(selection.model, "deepseek-v4-flash");
         let receipt = receipt(&selection);
