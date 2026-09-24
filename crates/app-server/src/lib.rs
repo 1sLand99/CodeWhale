@@ -369,7 +369,10 @@ async fn shutdown_signal() {
 /// There is no `/tool`: a direct tool call outside a turn would need its own
 /// tool catalog and approval decision, and the Engine behind the runtime
 /// bridge is the only tool and approval authority. Tools run inside turns
-/// (`/prompt`, `/thread` messages), where approval requests surface normally.
+/// (`/prompt`, `/thread` messages). This server does not surface approvals:
+/// `RuntimeBridge::stream_turn_events` forwards only `item.delta` and the
+/// turn's completion, and there is no decision route, so approval-gated work
+/// belongs on the Runtime API (`/v1/threads/*`, `POST /v1/approvals/{id}`).
 const ADVERTISED_ROUTES: &[&str] = &["/thread", "/app", "/prompt", "/jobs", "/mcp/startup"];
 
 fn app_router(state: AppState, cors_origins: &[String]) -> Router {
