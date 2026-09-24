@@ -307,6 +307,7 @@
   "ScreenModeMouseCaptureOff": "Захват мыши выключен; выбором управляет терминал.",
   "ScreenModeUnchanged": "Экран без изменений: {reason}.",
   "ImageInputRejectedResent": "{model} не принимает изображения — они отправлены повторно как текст; используйте image_ocr для чтения",
+  "ImageInputOmitted": "{model} не видит изображения — {count} изображ. в этом ходе отправлено как текст; используйте image_ocr для чтения или /model для смены модели",
   "ProviderToolCallMissing": "Провайдер завершил ответ с `{reason}`, но не передал вызов инструмента. Повторите этот ход, чтобы продолжить.",
   "ConfigLabelShowThinking": "Рассуждения модели в чате",
   "ConfigLabelThinkingHighlight": "Подсветка фона рассуждений",

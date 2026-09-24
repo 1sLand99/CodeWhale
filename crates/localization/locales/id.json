@@ -307,6 +307,7 @@
   "ScreenModeMouseCaptureOff": "Penangkapan mouse nonaktif; terminal mengatur seleksi.",
   "ScreenModeUnchanged": "Layar tidak berubah: {reason}.",
   "ImageInputRejectedResent": "{model} tidak menerima gambar — gambar dikirim ulang sebagai teks; gunakan image_ocr untuk membacanya",
+  "ImageInputOmitted": "{model} tidak dapat melihat gambar — {count} gambar dikirim sebagai teks pada giliran ini; gunakan image_ocr untuk membacanya atau /model untuk beralih",
   "ProviderToolCallMissing": "Penyedia mengakhiri respons dengan `{reason}`, tetapi tidak menyertakan panggilan alat. Coba ulang giliran ini untuk melanjutkan.",
   "ConfigLabelShowThinking": "Penalaran model di chat",
   "ConfigLabelThinkingHighlight": "Sorotan latar penalaran",
