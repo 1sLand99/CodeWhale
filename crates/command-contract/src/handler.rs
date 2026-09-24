@@ -18,7 +18,7 @@ use crate::facets::{
 /// declare least authority without naming the TUI host. The dispatcher uses
 /// the declaration to populate only those slots in [`CommandContexts`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct CommandCapabilities(u16);
+pub struct CommandCapabilities(u32);
 
 impl CommandCapabilities {
     pub const NONE: Self = Self(0);
@@ -47,9 +47,8 @@ impl CommandCapabilities {
     /// Session-control host data (FEAT-024 D3), the next non-conflicting bit
     /// after `SESSION_LIFECYCLE`. Required only by the six host-dependent
     /// control commands (`/relay`, `/rename`, `/resume`, `/rc`, `/remote-env`,
-    /// `/title`); `/remote-env` also declares `PRESENTATION`. The backing
-    /// storage remains `u16` per the resolved maintainer review on FEAT-023 PR
-    /// #5902 — bit 14 is available, so no speculative widening is performed.
+    /// `/title`); `/remote-env` also declares `PRESENTATION`. Bit 14 fit the
+    /// original `u16` backing without speculative widening in FEAT-023.
     pub const SESSION_CONTROL: Self = Self(1 << 14);
     /// Session-export host data (FEAT-025 D1), the next non-conflicting bit
     /// after `SESSION_CONTROL`. Required only by the host-dependent `/export`
@@ -58,22 +57,21 @@ impl CommandCapabilities {
     /// filesystem, history, and turn-handoff access stays behind the TUI export
     /// adapter.
     ///
-    /// **Capacity: this is the last free bit.** Bits 0-15 are now fully
-    /// allocated, so another capability cannot be added without widening the
-    /// backing storage to `u32`. FEAT-026 (session structcopy) needs its own
-    /// exact-minimum facet and therefore owns that widening decision; reusing
-    /// `SESSION_EXPORT` for it would break the least-capability invariant.
-    /// The `export_capability_space_is_exactly_full` test pins the capacity so
-    /// the next author gets a deliberate decision instead of a compile error
-    /// with no context.
+    /// This filled the original 16-bit space. FEAT-029 widened the backing
+    /// storage before allocating the next independent diagnostics authority;
+    /// the published identity of this bit remains unchanged.
     pub const SESSION_EXPORT: Self = Self(1 << 15);
+    /// Debug diagnostics host data (FEAT-029 D3/D4). This is the first bit in
+    /// the widened backing storage; mutation commands retain their own future
+    /// authority and do not borrow this facet.
+    pub const DEBUG_DIAGNOSTICS: Self = Self(1 << 16);
 
     /// Raw bit pattern, for tests that pin the capability-space capacity.
     ///
-    /// Kept `#[cfg(test)]` so the `u16` backing stays an implementation detail
+    /// Kept `#[cfg(test)]` so the `u32` backing stays an implementation detail
     /// and nothing can widen it accidentally through a public accessor.
     #[cfg(test)]
-    pub(crate) const fn bits_for_test(self) -> u16 {
+    pub(crate) const fn bits_for_test(self) -> u32 {
         self.0
     }
 

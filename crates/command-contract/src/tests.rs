@@ -2561,24 +2561,21 @@ fn export_capability_is_stable_distinct_and_non_conflicting() {
     );
     assert!(!CommandCapabilities::SESSION_CONTROL.contains(export));
     assert!(!export.contains(CommandCapabilities::SESSION_CONTROL));
-    // Storage remains `u16`-backed: bit 15 (1 << 15 = 32768) fits without the
-    // speculative widening FEAT-023's maintainer review ruled out.
+    // FEAT-029 widened storage after bit 15 filled the original space; export
+    // retains its exact published identity.
     assert_eq!(
         std::mem::size_of::<CommandCapabilities>(),
-        std::mem::size_of::<u16>(),
-        "CommandCapabilities storage must stay u16"
+        std::mem::size_of::<u32>(),
+        "CommandCapabilities storage must be widened for diagnostics"
     );
 }
 
-/// Canary: after FEAT-025 the `u16` capability space is *exactly* full.
+/// Canary: FEAT-029 widened the previously full 16-bit capability space.
 ///
-/// This is deliberate capacity documentation, not a health check. When FEAT-026
-/// (session structcopy) adds its own facet it must widen the backing storage to
-/// `u32`, and this test is expected to be updated in that commit. Until then it
-/// guarantees that no capability bit is silently reused, and that anyone who
-/// adds a seventeenth capability is told why `1 << 16` on a `u16` will not do.
+/// The first sixteen identities stay published as before; diagnostics takes
+/// bit 16 and later slices can allocate independently without renumbering.
 #[test]
-fn export_capability_space_is_exactly_full() {
+fn debug_diagnostics_capability_preserves_published_bits() {
     let all = [
         CommandCapabilities::SESSION,
         CommandCapabilities::MODEL,
@@ -2596,13 +2593,14 @@ fn export_capability_space_is_exactly_full() {
         CommandCapabilities::SESSION_LIFECYCLE,
         CommandCapabilities::SESSION_CONTROL,
         CommandCapabilities::SESSION_EXPORT,
+        CommandCapabilities::DEBUG_DIAGNOSTICS,
     ];
 
     let mut union = CommandCapabilities::NONE;
     for (index, capability) in all.iter().enumerate() {
         assert_eq!(
             capability.bits_for_test(),
-            1u16 << index,
+            1u32 << index,
             "capability {index} must occupy exactly bit {index}"
         );
         union = union.union(*capability);
@@ -2610,14 +2608,20 @@ fn export_capability_space_is_exactly_full() {
 
     assert_eq!(
         all.len(),
-        u16::BITS as usize,
-        "the declared capability count must consume the whole u16 space"
+        u16::BITS as usize + 1,
+        "diagnostics is the first bit after the original u16 space"
     );
     assert_eq!(
         union.bits_for_test(),
-        u16::MAX,
-        "bits 0-15 are fully allocated; FEAT-026 must widen the storage to u32"
+        u32::from(u16::MAX) | (1u32 << 16),
+        "bits 0-15 retain their published values and diagnostics occupies bit 16"
     );
+    assert!(union.contains(CommandCapabilities::DEBUG_DIAGNOSTICS));
+    assert!(!CommandCapabilities::SESSION_EXPORT.contains(CommandCapabilities::DEBUG_DIAGNOSTICS));
+    assert!(!CommandCapabilities::DEBUG_DIAGNOSTICS.contains(CommandCapabilities::SESSION_EXPORT));
+    assert!(CommandCapabilities::NONE.is_empty());
+    assert!(!CommandCapabilities::NONE.contains(CommandCapabilities::DEBUG_DIAGNOSTICS));
+    assert!(!CommandCapabilities::DEBUG_DIAGNOSTICS.contains(CommandCapabilities::NONE));
 }
 
 /// Deterministic fake export facet: every delegate returns canned portable
