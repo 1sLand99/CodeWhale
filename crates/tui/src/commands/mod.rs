@@ -61,6 +61,9 @@ pub use groups::project::share;
 // Voice capture plumbing shared with the hotbar and the UI event loop.
 pub use groups::core::voice;
 
+#[cfg(test)]
+mod debug_diagnostics_regression_tests;
+
 use crate::tui::app::{App, AppAction};
 use codewhale_config::AppMode;
 
