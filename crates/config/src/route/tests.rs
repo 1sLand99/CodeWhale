@@ -607,6 +607,54 @@ fn resolver_keeps_deepseek_flash_image_input_on_the_official_route() {
 }
 
 #[test]
+fn resolver_keeps_deepseek_flash_image_input_on_the_messages_route() {
+    // #6521 review: Flash vision is documented for Messages too. Both
+    // spellings of that route must resolve with image input — the legacy
+    // `deepseek-anthropic` kind and canonical DeepSeek with `wire =
+    // "anthropic"` (which selects the `/anthropic` base URL) — while a custom
+    // compatible host and Pro stay unwidened.
+    let messages = |kind: ProviderKind, selector: &str, base_url: Option<&str>| {
+        let mut request = req(Some(kind), Some(selector));
+        request.base_url_override = base_url.map(str::to_string);
+        RouteResolver::new()
+            .resolve(&request)
+            .expect("DeepSeek Messages route resolves")
+            .capabilities()
+            .image_input
+    };
+    for selector in ["deepseek-flash", "deepseek-v4-flash"] {
+        assert_eq!(
+            messages(ProviderKind::DeepseekAnthropic, selector, None),
+            CapabilityState::Supported,
+            "deepseek-anthropic {selector}"
+        );
+        assert_eq!(
+            messages(
+                ProviderKind::Deepseek,
+                selector,
+                Some("https://api.deepseek.com/anthropic")
+            ),
+            CapabilityState::Supported,
+            "deepseek wire=anthropic {selector}"
+        );
+        assert_ne!(
+            messages(
+                ProviderKind::Deepseek,
+                selector,
+                Some("https://proxy.example.com/anthropic")
+            ),
+            CapabilityState::Supported,
+            "a custom compatible host is not DeepSeek's documented route"
+        );
+    }
+    assert_ne!(
+        messages(ProviderKind::DeepseekAnthropic, "deepseek-v4-pro", None),
+        CapabilityState::Supported,
+        "Pro stays text-only on Messages"
+    );
+}
+
+#[test]
 fn resolver_keeps_custom_deepseek_same_name_capabilities_unverified() {
     let route = RouteResolver::new()
         .resolve(&RouteRequest {
