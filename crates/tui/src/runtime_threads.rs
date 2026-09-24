@@ -11892,12 +11892,21 @@ impl RuntimeThreadManager {
     /// Model-facing hints (deferred-tool retry) already reach the model in the
     /// tool result; they are not user items. Scheduler, continuation and
     /// approval-wait rows keep a receipt tagged so clients collapse them.
+    /// An approval-wait heartbeat naming a call in `settled_approval_calls`
+    /// is stale (its approval was already answered) and is dropped, whichever
+    /// path dequeued it.
     async fn publish_status_item(
         &self,
         thread_id: &str,
         turn_id: &str,
         message: String,
+        settled_approval_calls: &HashSet<String>,
     ) -> Result<()> {
+        if crate::core::events::approval_wait_tool_call(&message)
+            .is_some_and(|call| settled_approval_calls.contains(call))
+        {
+            return Ok(());
+        }
         let visibility = crate::core::events::status_visibility(&message);
         if visibility == crate::core::events::StatusVisibility::ModelOnly {
             return Ok(());
@@ -13006,7 +13015,12 @@ impl RuntimeThreadManager {
                                 match event {
                                     Some(EngineEvent::Status { message }) => {
                                         if let Err(err) = self
-                                            .publish_status_item(&thread_id, &turn_id, message)
+                                            .publish_status_item(
+                                                &thread_id,
+                                                &turn_id,
+                                                message,
+                                                &settled_approval_calls,
+                                            )
                                             .await
                                         {
                                             tracing::warn!(
@@ -13229,16 +13243,15 @@ impl RuntimeThreadManager {
                     drop(projection);
                 }
                 EngineEvent::Status { message } => {
-                    // A heartbeat that was queued behind another event while
-                    // its approval was answered names a call that is no
-                    // longer waiting.
-                    if crate::core::events::approval_wait_tool_call(&message)
-                        .is_some_and(|call| settled_approval_calls.contains(call))
-                    {
-                        continue;
-                    }
-                    self.publish_status_item(&thread_id, &turn_id, message)
-                        .await?;
+                    // A heartbeat queued behind another event while its
+                    // approval was answered is dropped inside the helper.
+                    self.publish_status_item(
+                        &thread_id,
+                        &turn_id,
+                        message,
+                        &settled_approval_calls,
+                    )
+                    .await?;
                 }
                 EngineEvent::ToolProjectionWarning {
                     provider,

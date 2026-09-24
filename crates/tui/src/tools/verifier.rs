@@ -25,14 +25,54 @@ const MAX_GATE_OUTPUT_CHARS: usize = 16_000;
 const DEFAULT_MAX_PYTHON_FILES: usize = 200;
 const MAX_CUSTOM_GATES: usize = 12;
 const BACKGROUND_GATE_TIMEOUT_MS: u64 = 600_000;
-/// Wall-clock bound for a built-in (detected) foreground gate. Matches the
-/// background bound so a slow `cargo test` behaves the same either way.
-const DEFAULT_GATE_TIMEOUT_MS: u64 = BACKGROUND_GATE_TIMEOUT_MS;
+/// Wall-clock bound for a built-in (detected) foreground gate unless the call
+/// sets `timeout_ms`.
+const DEFAULT_GATE_TIMEOUT_MS: u64 = 600_000;
 /// Wall-clock bound for a custom foreground gate when `timeout_ms` is absent.
 /// Custom gates run arbitrary programs (headless browsers, servers) that can
 /// finish their work and never exit, so the default is deliberately tighter.
 const DEFAULT_CUSTOM_GATE_TIMEOUT_MS: u64 = 180_000;
 const MAX_GATE_TIMEOUT_MS: u64 = 1_800_000;
+
+/// Wall-clock bounds a foreground gate plan is built with. Background gates
+/// are shell jobs, which the shell manager does not bound; they run until they
+/// finish or are cancelled through task state, so `timeout_ms` is refused there.
+#[derive(Debug, Clone, Copy)]
+struct GateTimeouts {
+    /// Bound for every built-in (detected) gate.
+    builtin_ms: u64,
+    /// Bound for a custom gate that does not set its own `timeout_ms`.
+    custom_default_ms: u64,
+}
+
+impl GateTimeouts {
+    /// A custom gate that never exits (a headless browser that wrote its
+    /// output) holds the turn, so its default is tighter than a built-in's.
+    const DEFAULT: Self = Self {
+        builtin_ms: DEFAULT_GATE_TIMEOUT_MS,
+        custom_default_ms: DEFAULT_CUSTOM_GATE_TIMEOUT_MS,
+    };
+
+    /// `timeout_ms` on the call overrides the built-in gates' bound.
+    fn for_call(builtin_override_ms: Option<u64>) -> Result<Self, ToolError> {
+        let mut timeouts = Self::DEFAULT;
+        if let Some(ms) = builtin_override_ms {
+            check_gate_timeout("timeout_ms", ms)?;
+            timeouts.builtin_ms = ms;
+        }
+        Ok(timeouts)
+    }
+}
+
+fn check_gate_timeout(field: &str, ms: u64) -> Result<(), ToolError> {
+    if (1..=MAX_GATE_TIMEOUT_MS).contains(&ms) {
+        Ok(())
+    } else {
+        Err(ToolError::invalid_input(format!(
+            "{field} must be between 1 and {MAX_GATE_TIMEOUT_MS}"
+        )))
+    }
+}
 /// Bytes kept per stream while a gate runs; the rendered result is further
 /// truncated to `MAX_GATE_OUTPUT_CHARS`.
 const MAX_GATE_CAPTURE_BYTES: usize = 1 << 20;
@@ -113,6 +153,7 @@ struct RunVerifiersInput {
     commands: Vec<CustomVerifierInput>,
     background: bool,
     cwd: Option<String>,
+    timeout_ms: Option<u64>,
 }
 
 impl Default for RunVerifiersInput {
@@ -124,6 +165,7 @@ impl Default for RunVerifiersInput {
             commands: Vec::new(),
             background: false,
             cwd: None,
+            timeout_ms: None,
         }
     }
 }
@@ -300,8 +342,7 @@ impl ToolSpec for RunVerifiersTool {
                                 "type": "integer",
                                 "minimum": 1,
                                 "maximum": MAX_GATE_TIMEOUT_MS,
-                                "default": DEFAULT_CUSTOM_GATE_TIMEOUT_MS,
-                                "description": "Wall-clock limit for this gate. When it elapses the gate's whole process tree is killed and the gate fails as timed out. Raise it for long test suites."
+                                "description": format!("Wall-clock limit for this gate (foreground only; refused with background). When it elapses the gate's whole process tree is killed and the gate fails as timed out. Defaults to {DEFAULT_CUSTOM_GATE_TIMEOUT_MS}. Raise it for long test suites.")
                             }
                         },
                         "required": ["name", "program"],
@@ -316,6 +357,13 @@ impl ToolSpec for RunVerifiersTool {
                 "cwd": {
                     "type": "string",
                     "description": "Optional working directory, relative to the workspace, to detect projects and run gates in. Per-command cwd stays relative to it. Must exist inside the workspace."
+                },
+                "timeout_ms": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": MAX_GATE_TIMEOUT_MS,
+                    "default": DEFAULT_GATE_TIMEOUT_MS,
+                    "description": "Wall-clock limit for each built-in (detected) gate. When it elapses the gate's whole process tree is killed and the gate fails as timed out. Raise it for a `full` run on a large workspace. Foreground only; refused with background. Custom commands use their own timeout_ms."
                 }
             },
             "additionalProperties": false
@@ -369,12 +417,25 @@ impl ToolSpec for RunVerifiersTool {
             )));
         }
 
+        if input.background
+            && (input.timeout_ms.is_some()
+                || input
+                    .commands
+                    .iter()
+                    .any(|custom| custom.timeout_ms.is_some()))
+        {
+            return Err(ToolError::invalid_input(
+                "timeout_ms applies only to foreground gates; background gates run as shell jobs until they finish or are cancelled through task state",
+            ));
+        }
+        let timeouts = GateTimeouts::for_call(input.timeout_ms)?;
         let gates = build_gate_plan(
             context,
             profile,
             level,
             input.max_python_files,
             &input.commands,
+            timeouts,
         )?;
         if gates.is_empty() {
             let verifier_verdict = VerifierVerdict::from_counts(0, 0, 0);
@@ -452,6 +513,7 @@ pub(crate) async fn run_workflow_completion_gates(
         VerifierLevel::Quick,
         DEFAULT_MAX_PYTHON_FILES,
         &[],
+        GateTimeouts::DEFAULT,
     )?;
     if gates.is_empty() {
         return Ok(json!({
@@ -641,6 +703,7 @@ fn build_gate_plan(
     level: VerifierLevel,
     max_python_files: usize,
     custom_commands: &[CustomVerifierInput],
+    timeouts: GateTimeouts,
 ) -> Result<Vec<VerifierGate>, ToolError> {
     let workspace = &context.workspace;
     let mut gates = Vec::new();
@@ -668,8 +731,12 @@ fn build_gate_plan(
         add_go_gates(&mut gates, workspace, level);
     }
 
+    let builtin_timeout = Duration::from_millis(timeouts.builtin_ms);
+    for gate in &mut gates {
+        gate.timeout = builtin_timeout;
+    }
     for custom in custom_commands {
-        gates.push(custom_gate(context, custom)?);
+        gates.push(custom_gate(context, custom, timeouts)?);
     }
 
     Ok(gates)
@@ -847,6 +914,7 @@ fn skipped_gate(
 fn custom_gate(
     context: &ToolContext,
     custom: &CustomVerifierInput,
+    timeouts: GateTimeouts,
 ) -> Result<VerifierGate, ToolError> {
     if custom.name.trim().is_empty() {
         return Err(ToolError::invalid_input(
@@ -863,13 +931,11 @@ fn custom_gate(
         Some(raw) if !raw.trim().is_empty() => context.resolve_path(raw)?,
         _ => context.workspace.clone(),
     };
-    let timeout_ms = custom.timeout_ms.unwrap_or(DEFAULT_CUSTOM_GATE_TIMEOUT_MS);
-    if !(1..=MAX_GATE_TIMEOUT_MS).contains(&timeout_ms) {
-        return Err(ToolError::invalid_input(format!(
-            "Custom verifier '{}' timeout_ms must be between 1 and {MAX_GATE_TIMEOUT_MS}",
-            custom.name
-        )));
-    }
+    let timeout_ms = custom.timeout_ms.unwrap_or(timeouts.custom_default_ms);
+    check_gate_timeout(
+        &format!("Custom verifier '{}' timeout_ms", custom.name),
+        timeout_ms,
+    )?;
     Ok(VerifierGate {
         name: custom.name.clone(),
         ecosystem: "custom".to_string(),
@@ -1464,6 +1530,7 @@ mod tests {
             VerifierLevel::Quick,
             DEFAULT_MAX_PYTHON_FILES,
             &[],
+            GateTimeouts::DEFAULT,
         )
         .expect("plan");
         let names: BTreeSet<&str> = gates.iter().map(|gate| gate.name.as_str()).collect();
@@ -1493,7 +1560,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let gate = custom_gate(&ctx, &custom).expect("custom gate");
+        let gate = custom_gate(&ctx, &custom, GateTimeouts::DEFAULT).expect("custom gate");
 
         assert_eq!(gate.program.as_deref(), Some("bash"));
         assert_eq!(gate.args, vec!["-lc", "echo ok"]);
@@ -1874,5 +1941,78 @@ mod tests {
         task.abort();
         let _ = task.await;
         assert_pids_gone(&pids).await;
+    }
+
+    #[test]
+    fn built_in_gates_take_the_call_timeout_and_custom_gates_keep_their_own() {
+        let tmp = tempdir().expect("tempdir");
+        fs::write(tmp.path().join("Cargo.toml"), "[workspace]\n").expect("cargo manifest");
+        let ctx = ToolContext::new(tmp.path());
+        let custom = [
+            CustomVerifierInput {
+                name: "default".to_string(),
+                program: "true".to_string(),
+                ..CustomVerifierInput::default()
+            },
+            CustomVerifierInput {
+                name: "explicit".to_string(),
+                program: "true".to_string(),
+                timeout_ms: Some(42_000),
+                ..CustomVerifierInput::default()
+            },
+        ];
+        let long = MAX_GATE_TIMEOUT_MS;
+        let gates = build_gate_plan(
+            &ctx,
+            VerifierProfile::Rust,
+            VerifierLevel::Full,
+            DEFAULT_MAX_PYTHON_FILES,
+            &custom,
+            GateTimeouts::for_call(Some(long)).expect("in range"),
+        )
+        .expect("plan");
+        let rust: Vec<_> = gates
+            .iter()
+            .filter(|gate| gate.ecosystem == "rust")
+            .collect();
+        assert!(!rust.is_empty(), "rust gates detected");
+        // A `full` run on a large workspace is no longer capped at 600s.
+        for gate in rust {
+            assert_eq!(gate.timeout, Duration::from_millis(long), "{}", gate.name);
+        }
+        let timeout_of = |name: &str| {
+            gates
+                .iter()
+                .find(|gate| gate.name == name)
+                .unwrap_or_else(|| panic!("gate {name}"))
+                .timeout
+        };
+        assert_eq!(
+            timeout_of("default"),
+            Duration::from_millis(DEFAULT_CUSTOM_GATE_TIMEOUT_MS)
+        );
+        assert_eq!(timeout_of("explicit"), Duration::from_millis(42_000));
+        assert!(GateTimeouts::for_call(Some(0)).is_err());
+        assert!(GateTimeouts::for_call(Some(long + 1)).is_err());
+    }
+
+    #[tokio::test]
+    async fn run_verifiers_background_refuses_timeout_ms_it_cannot_enforce() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path());
+        for input in [
+            json!({"background": true, "timeout_ms": 1000,
+                   "commands": [{"name": "a", "program": "true"}]}),
+            json!({"background": true,
+                   "commands": [{"name": "a", "program": "true", "timeout_ms": 1000}]}),
+        ] {
+            let err = RunVerifiersTool
+                .execute(input.clone(), &ctx)
+                .await
+                .expect_err("background timeout_ms must be refused");
+            assert!(err.to_string().contains("foreground"), "{input}: {err}");
+        }
+        let jobs = ctx.shell_manager.lock().expect("shell manager").list_jobs();
+        assert!(jobs.is_empty(), "nothing may start: {jobs:?}");
     }
 }
