@@ -4968,13 +4968,13 @@ fn stored_api_key_for_provider(
 
 fn env_api_key_for_provider(provider: ProviderKind) -> Option<String> {
     if provider == ProviderKind::Huggingface {
-        return std::env::var("HUGGINGFACE_API_KEY")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| {
-                std::env::var("HF_TOKEN")
+        return ["HUGGINGFACE_API_KEY", "HF_TOKEN"]
+            .into_iter()
+            .find_map(|name| {
+                std::env::var(name)
                     .ok()
-                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| codewhale_secrets::normalize_api_key(&value))
+                    .filter(|value| !value.is_empty())
             });
     }
 

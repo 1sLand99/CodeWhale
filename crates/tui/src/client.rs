@@ -274,6 +274,9 @@ pub struct CodewhaleClient {
     /// stream-header fallback when H2 stalls. Same auth and headers.
     pub(super) http1_client: reqwest::Client,
     api_key: String,
+    /// Where `api_key` came from (secret store slot, config file, env var
+    /// name, CLI, OAuth, …), named in authentication errors (#6528).
+    api_key_source: String,
     /// Exact configured credential values removed from model-bound tool
     /// results. Structural redaction handles config/JSON assignments, while
     /// this list closes the gap for bare provider tokens with no recognizable
@@ -557,6 +560,22 @@ fn mark_recovery_probe_if_due(health: &mut ConnectionHealth, now: Instant) -> bo
     true
 }
 
+/// The one command that replaces a rejected key, by where it came from.
+fn auth_fix_hint(route: &str, key_source: &str) -> String {
+    if key_source.starts_with("--api-key") {
+        "pass a valid --api-key".to_string()
+    } else if let Some(rest) = key_source.strip_prefix("env var ")
+        && rest.contains("api_key_env")
+    {
+        let name = rest.split_whitespace().next().unwrap_or(rest);
+        format!("set {name} to a valid key")
+    } else if key_source.contains("OAuth") || key_source.contains("login") {
+        format!("sign in again for {route}")
+    } else {
+        format!("codewhale auth set --provider {route}")
+    }
+}
+
 fn buffer_pool() -> &'static StdMutex<Vec<Vec<u8>>> {
     static POOL: OnceLock<StdMutex<Vec<Vec<u8>>>> = OnceLock::new();
     POOL.get_or_init(|| StdMutex::new(Vec::new()))
@@ -589,6 +608,7 @@ impl Clone for CodewhaleClient {
             models_http_client: self.models_http_client.clone(),
             http1_client: self.http1_client.clone(),
             api_key: self.api_key.clone(),
+            api_key_source: self.api_key_source.clone(),
             model_bound_secret_values: Arc::clone(&self.model_bound_secret_values),
             catalog_error_secret_values: Arc::clone(&self.catalog_error_secret_values),
             model_bound_masking: self.model_bound_masking,
@@ -1491,27 +1511,31 @@ impl CodewhaleClient {
         if api_provider == ApiProvider::OpencodeGo {
             validate_route(api_provider, &default_model).map_err(anyhow::Error::msg)?;
         }
-        let (api_key, codex_account_id) = if api_provider == ApiProvider::OpenaiCodex {
-            // The official endpoint requires Codex OAuth credentials. A custom
-            // endpoint prefers its own configured key, but an explicit
-            // `OPENAI_CODEX_ACCESS_TOKEN` still wins (`codex_credentials`
-            // checks env before enforcing the official-endpoint consent
-            // grant), so existing token-plus-custom-base-url setups keep
-            // working. Only when no env token exists does the custom endpoint
-            // fall back to the generic provider-scoped key resolver.
-            match config.codex_credentials() {
-                Ok(credentials) => (credentials.access_token, credentials.account_id),
-                Err(error) => {
-                    if config.provider_uses_custom_endpoint(ApiProvider::OpenaiCodex) {
-                        (config.active_route_api_key()?, None)
-                    } else {
-                        return Err(error);
+        let ((api_key, api_key_source), codex_account_id) =
+            if api_provider == ApiProvider::OpenaiCodex {
+                // The official endpoint requires Codex OAuth credentials. A custom
+                // endpoint prefers its own configured key, but an explicit
+                // `OPENAI_CODEX_ACCESS_TOKEN` still wins (`codex_credentials`
+                // checks env before enforcing the official-endpoint consent
+                // grant), so existing token-plus-custom-base-url setups keep
+                // working. Only when no env token exists does the custom endpoint
+                // fall back to the generic provider-scoped key resolver.
+                match config.codex_credentials() {
+                    Ok(credentials) => (
+                        (credentials.access_token, "Codex OAuth login".to_string()),
+                        credentials.account_id,
+                    ),
+                    Err(error) => {
+                        if config.provider_uses_custom_endpoint(ApiProvider::OpenaiCodex) {
+                            (config.active_route_api_key_with_source()?, None)
+                        } else {
+                            return Err(error);
+                        }
                     }
                 }
-            }
-        } else {
-            (config.active_route_api_key()?, None)
-        };
+            } else {
+                (config.active_route_api_key_with_source()?, None)
+            };
         let model_bound_secret_values =
             Arc::new(configured_model_bound_secret_values(config, &api_key));
         // The opt-out is effective only after an explicit startup confirmation;
@@ -1616,6 +1640,7 @@ impl CodewhaleClient {
             models_http_client,
             http1_client,
             api_key,
+            api_key_source,
             model_bound_secret_values,
             catalog_error_secret_values,
             model_bound_masking,
@@ -1645,6 +1670,47 @@ impl CodewhaleClient {
             reasoning_stream_style,
             stream_idle_timeout,
         })
+    }
+
+    /// Map a failed HTTP response, naming the route, host and key source on
+    /// authentication and unknown-model failures (#6528) so a rejected key
+    /// explains which credential was sent where and how to replace it.
+    fn http_error_with_route_context(
+        &self,
+        status: u16,
+        body: &str,
+        retry_after: Option<Duration>,
+    ) -> LlmError {
+        let route = if self.provider_identity.is_empty() {
+            self.api_provider.as_str()
+        } else {
+            self.provider_identity.as_str()
+        };
+        let error = match status {
+            401 | 403 => LlmError::from_http_response_with_auth_context(
+                status,
+                body,
+                Some(
+                    crate::llm_client::AuthenticationErrorContext::from_parts(
+                        Some(route),
+                        Some(&self.base_url),
+                        None,
+                        Some(&self.api_key_source),
+                        Some(&self.api_key),
+                    )
+                    .with_fix(auth_fix_hint(route, &self.api_key_source)),
+                ),
+            ),
+            _ => LlmError::from_http_response_with_retry_after(status, body, retry_after),
+        };
+        match error {
+            LlmError::ModelError(message) => LlmError::ModelError(format!(
+                "{message} (provider route: {route}, host: {}; run `codewhale model resolve` or /model to pick a model this route serves)",
+                crate::llm_client::base_url_authority(&self.base_url)
+                    .unwrap_or_else(|| redact_url_for_display(&self.base_url))
+            )),
+            other => other,
+        }
     }
 
     /// Transport destination for Chat Completions requests.
@@ -3553,11 +3619,7 @@ impl CodewhaleClient {
                     let retry_after = extract_retry_after(response.headers());
                     let raw = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
                     let body = self.disclosed_http_error_body(disclosure, status.as_u16(), &raw);
-                    Err(LlmError::from_http_response_with_retry_after(
-                        status.as_u16(),
-                        &body,
-                        retry_after,
-                    ))
+                    Err(self.http_error_with_route_context(status.as_u16(), &body, retry_after))
                 }
             },
             Some(Box::new(|err, attempt, delay| {
@@ -3634,11 +3696,7 @@ impl CodewhaleClient {
                     let retry_after = extract_retry_after(response.headers());
                     let raw = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
                     let body = self.disclosed_http_error_body(disclosure, status.as_u16(), &raw);
-                    Err(LlmError::from_http_response_with_retry_after(
-                        status.as_u16(),
-                        &body,
-                        retry_after,
-                    ))
+                    Err(self.http_error_with_route_context(status.as_u16(), &body, retry_after))
                 }
             },
             Some(Box::new(|err, attempt, delay| {
@@ -7473,6 +7531,42 @@ mod tests {
             !body.to_string().contains("private-regex-9901"),
             "omitted schema values must not reach the wire: {body}"
         );
+    }
+
+    /// #6528 — a rejected key names the route, host, key source and the
+    /// command that replaces it; an unknown model names the route and host.
+    #[test]
+    fn auth_and_unknown_model_errors_name_route_host_and_key_source() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let config = Config {
+            provider: Some("openrouter".to_string()),
+            providers: Some(ProvidersConfig {
+                openrouter: ProviderConfig {
+                    api_key: Some("or-rejected-key-1234567890".to_string()),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        };
+        let client = CodewhaleClient::new(&config).expect("openrouter client");
+        let auth = client
+            .http_error_with_route_context(401, "Invalid API key", None)
+            .to_string();
+        assert!(auth.contains("provider: openrouter"), "{auth}");
+        assert!(auth.contains("openrouter.ai"), "{auth}");
+        assert!(auth.contains("key source: config file"), "{auth}");
+        assert!(
+            auth.contains("fix: codewhale auth set --provider openrouter"),
+            "{auth}"
+        );
+        assert!(!auth.contains("or-rejected-key-1234567890"), "{auth}");
+
+        let model = client
+            .http_error_with_route_context(404, "model not found: nope", None)
+            .to_string();
+        assert!(model.contains("provider route: openrouter"), "{model}");
+        assert!(model.contains("host: openrouter.ai"), "{model}");
     }
 
     fn concentrate_client(server: &MockServer, model: &str) -> CodewhaleClient {
