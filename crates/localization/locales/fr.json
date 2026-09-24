@@ -307,6 +307,7 @@
   "ScreenModeMouseCaptureOff": "Capture de la souris désactivée ; le terminal contrôle la sélection.",
   "ScreenModeUnchanged": "Écran inchangé : {reason}.",
   "ImageInputRejectedResent": "{model} n’accepte pas les images — elles ont été renvoyées sous forme de texte ; utilisez image_ocr pour les lire",
+  "ImageInputOmitted": "{model} ne voit pas les images — {count} image(s) envoyée(s) sous forme de texte à ce tour ; utilisez image_ocr pour les lire ou /model pour changer",
   "ProviderToolCallMissing": "Le fournisseur a terminé avec `{reason}`, mais sans fournir d’appel d’outil. Réessayez ce tour pour continuer.",
   "ConfigLabelShowThinking": "Raisonnement du modèle dans le chat",
   "ConfigLabelThinkingHighlight": "Surlignage du fond du raisonnement",

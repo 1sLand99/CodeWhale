@@ -308,6 +308,7 @@
   "ScreenModeMouseCaptureOff": "Mouse off — the terminal owns selection.",
   "ScreenModeUnchanged": "Screen unchanged: {reason}.",
   "ImageInputRejectedResent": "{model} does not accept images — resent as text; use image_ocr to read them",
+  "ImageInputOmitted": "{model} can't see images — {count} image(s) sent as text this turn; use image_ocr to read them or /model to switch",
   "ProviderToolCallMissing": "Provider ended with `{reason}` but supplied no tool call. Retry the turn to continue.",
   "ConfigLabelShowThinking": "Model reasoning in chat",
   "ConfigLabelThinkingHighlight": "Thinking background highlight",
