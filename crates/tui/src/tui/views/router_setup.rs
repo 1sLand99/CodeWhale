@@ -130,23 +130,24 @@ pub(crate) fn parse_router_args(args: Option<&str>) -> Result<RouterRequest, Str
 pub(crate) fn preset_router_config(
     config: &Config,
     preset: RouterPreset,
+    locale: Locale,
 ) -> Result<Option<AutoRouterConfig>, String> {
     match preset {
         RouterPreset::Off => Ok(None),
-        RouterPreset::Custom => Err("custom routers are edited by hand".to_string()),
+        RouterPreset::Custom => Err(tr(locale, MessageId::RouterCustomByHand).into_owned()),
         RouterPreset::Jev(route) => {
             let route = match route {
                 Some(route) if route.has_key(config) => route,
                 Some(route) => {
-                    return Err(format!("no {} API key", route.display_name()));
+                    return Err(no_key_reason(locale, route));
                 }
-                None => [DecisionRouterRoute::Openrouter, DecisionRouterRoute::Typesafe]
-                    .into_iter()
-                    .find(|route| route.has_key(config))
-                    .ok_or_else(|| {
-                        "add an OpenRouter key (OPENROUTER_API_KEY) or a TypeSafe key (TYPESAFE_API_KEY)"
-                            .to_string()
-                    })?,
+                None => [
+                    DecisionRouterRoute::Openrouter,
+                    DecisionRouterRoute::Typesafe,
+                ]
+                .into_iter()
+                .find(|route| route.has_key(config))
+                .ok_or_else(|| tr(locale, MessageId::RouterNeedKey).into_owned())?,
             };
             let model = match route {
                 DecisionRouterRoute::Openrouter => JEV_OPENROUTER_MODEL,
@@ -163,7 +164,7 @@ pub(crate) fn preset_router_config(
         }
         RouterPreset::Fast => {
             let (provider, fast) = runnable_fast_tier(config)
-                .ok_or_else(|| "the active provider has no runnable fast tier".to_string())?;
+                .ok_or_else(|| tr(locale, MessageId::RouterNoFastTier).into_owned())?;
             Ok(Some(AutoRouterConfig {
                 kind: Some("chat".to_string()),
                 provider: Some(provider.as_str().to_string()),
@@ -173,6 +174,10 @@ pub(crate) fn preset_router_config(
             }))
         }
     }
+}
+
+fn no_key_reason(locale: Locale, route: DecisionRouterRoute) -> String {
+    tr(locale, MessageId::RouterNoKey).replace("{route}", route.display_name())
 }
 
 /// The active provider's runnable fast sibling, from route capabilities.
@@ -240,16 +245,17 @@ pub(crate) async fn handle_router_request(
         }
         RouterRequest::Test(RouterPreset::Custom) => {
             app.add_message(HistoryCell::System {
-                content: custom_router_help(config),
+                content: custom_router_help(config, app.ui_locale),
             });
         }
         RouterRequest::Test(preset) => test_preset(app, config, preset).await,
-        RouterRequest::Save(preset) => save_preset(app, config, preset),
+        RouterRequest::Save(preset) => save_preset(app, config, preset).await,
     }
 }
 
 async fn test_preset(app: &mut App, config: &Config, preset: RouterPreset) {
-    let router = match preset_router_config(config, preset) {
+    let locale = app.ui_locale;
+    let router = match preset_router_config(config, preset, locale) {
         Ok(router) => router,
         Err(reason) => {
             app.push_status_toast(
@@ -279,20 +285,21 @@ async fn test_preset(app: &mut App, config: &Config, preset: RouterPreset) {
                 .auto
                 .get_or_insert_with(AutoConfig::default)
                 .router = Some(router.clone());
-            let mut lines = vec![router_summary(router)];
+            let mut lines = vec![router_summary(router, locale)];
             match crate::model_routing::test_auto_router(&candidate).await {
                 Ok((selection, latency_ms)) => {
-                    lines.extend(describe_test_selection(&selection, latency_ms));
+                    lines.extend(describe_test_selection(&selection, latency_ms, locale));
                 }
-                Err(reason) => lines.push(format!("Test call not made: {reason}")),
+                Err(reason) => lines
+                    .push(tr(locale, MessageId::RouterTestNotMade).replace("{reason}", &reason)),
             }
             lines
         }
     };
     app.add_message(HistoryCell::System {
         content: format!(
-            "Router test ({})\n{}",
-            preset.command_args(),
+            "{}\n{}",
+            tr(locale, MessageId::RouterTestHeader).replace("{args}", &preset.command_args()),
             lines.join("\n")
         ),
     });
@@ -300,61 +307,86 @@ async fn test_preset(app: &mut App, config: &Config, preset: RouterPreset) {
         .push(RouterSetupView::confirm(preset, lines, app.ui_locale));
 }
 
-fn save_preset(app: &mut App, config: &mut Config, preset: RouterPreset) {
-    let router = match preset_router_config(config, preset) {
+async fn save_preset(app: &mut App, config: &mut Config, preset: RouterPreset) {
+    let locale = app.ui_locale;
+    let router = match preset_router_config(config, preset, locale) {
         Ok(router) => router,
         Err(reason) => {
             app.add_message(HistoryCell::System {
-                content: tr(app.ui_locale, MessageId::RouterPresetUnavailable)
+                content: tr(locale, MessageId::RouterPresetUnavailable)
                     .replace("{reason}", &reason),
             });
             return;
         }
     };
-    match persist_auto_router(app.config_path.as_deref(), router.as_ref()) {
+    // The config writer reads, locks and rewrites config.toml; keep that
+    // file IO off the UI runtime (#6149).
+    let config_path = app.config_path.clone();
+    let to_write = router.clone();
+    let persisted = tokio::task::spawn_blocking(move || {
+        persist_auto_router(config_path.as_deref(), to_write.as_ref())
+    })
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|result| result);
+    match persisted {
         Ok(path) => {
             config.auto.get_or_insert_with(AutoConfig::default).router = router.clone();
-            let what = router
-                .as_ref()
-                .map_or_else(|| "off".to_string(), router_summary);
+            let what = router.as_ref().map_or_else(
+                || tr(locale, MessageId::ConfigValueOff).into_owned(),
+                |router| router_summary(router, locale),
+            );
             app.add_message(HistoryCell::System {
-                content: format!("Router saved ({what}) to {}", path.display()),
+                content: tr(locale, MessageId::RouterSaved)
+                    .replace("{router}", &what)
+                    .replace("{path}", &path.display().to_string()),
             });
         }
         Err(error) => app.add_message(HistoryCell::Error {
-            message: format!("Router not saved: {error}"),
+            message: tr(locale, MessageId::RouterNotSaved).replace("{error}", &error.to_string()),
             severity: crate::error_taxonomy::ErrorSeverity::Error,
         }),
     }
 }
 
-fn router_summary(router: &AutoRouterConfig) -> String {
+fn router_summary(router: &AutoRouterConfig, locale: Locale) -> String {
     let kind = router.kind.as_deref().unwrap_or("chat");
     let provider = router.provider.as_deref().unwrap_or("?");
     let model = router.model.as_deref().unwrap_or("?");
-    match router.thinking.as_deref() {
-        Some(thinking) => format!("{kind} router · {provider} / {model} · thinking {thinking}"),
-        None => format!("{kind} router · {provider} / {model}"),
-    }
+    let id = if router.thinking.is_some() {
+        MessageId::RouterSummaryThinking
+    } else {
+        MessageId::RouterSummary
+    };
+    tr(locale, id)
+        .replace("{kind}", kind)
+        .replace("{provider}", provider)
+        .replace("{model}", model)
+        .replace("{thinking}", router.thinking.as_deref().unwrap_or_default())
 }
 
 /// The test result: which tier it picked, why, and what the call cost.
-fn describe_test_selection(selection: &AutoRouteSelection, latency_ms: u64) -> Vec<String> {
+fn describe_test_selection(
+    selection: &AutoRouteSelection,
+    latency_ms: u64,
+    locale: Locale,
+) -> Vec<String> {
     let percent = |bp: u16| format!("{}%", (u32::from(bp) + 50) / 100);
-    let mut lines = vec![format!(
-        "Would route \"{}\" to {} / {} · {latency_ms} ms",
-        crate::model_routing::ROUTER_TEST_REQUEST,
-        selection.provider.display_name(),
-        selection.model
-    )];
+    let mut lines = vec![
+        tr(locale, MessageId::RouterTestWouldRoute)
+            .replace("{request}", crate::model_routing::ROUTER_TEST_REQUEST)
+            .replace("{provider}", selection.provider.display_name())
+            .replace("{model}", &selection.model)
+            .replace("{latency}", &latency_ms.to_string()),
+    ];
     let Some(receipt) = selection.receipt.as_ref() else {
         return lines;
     };
-    lines.push(format!(
-        "Decision: {} · {}",
-        receipt.tier.label(),
-        receipt.reason.label()
-    ));
+    lines.push(
+        tr(locale, MessageId::RouterTestDecision)
+            .replace("{tier}", receipt.tier.label())
+            .replace("{reason}", &receipt.reason.label()),
+    );
     if let Some(decision) = receipt.decision.as_ref() {
         let probabilities = decision
             .probabilities_bp
@@ -362,37 +394,41 @@ fn describe_test_selection(selection: &AutoRouteSelection, latency_ms: u64) -> V
             .map(|(option, bp)| format!("{option} {}", percent(*bp)))
             .collect::<Vec<_>>()
             .join(" · ");
-        lines.push(format!(
-            "Choice: {} ({probabilities}) · confidence {} (min {})",
-            decision.choice,
-            percent(decision.confidence_bp),
-            percent(decision.min_confidence_bp)
-        ));
+        lines.push(
+            tr(locale, MessageId::RouterTestChoice)
+                .replace("{choice}", &decision.choice)
+                .replace("{probabilities}", &probabilities)
+                .replace("{confidence}", &percent(decision.confidence_bp))
+                .replace("{min}", &percent(decision.min_confidence_bp)),
+        );
         lines.push(match decision.provider_reported_cost_usd.as_deref() {
-            Some(cost) => format!("Cost: ${cost} (provider-reported)"),
-            None => "Cost: not reported by the provider".to_string(),
+            Some(cost) => tr(locale, MessageId::RouterTestCostReported).replace("{cost}", cost),
+            None => tr(locale, MessageId::RouterTestCostUnreported).into_owned(),
         });
     } else if let Some(usage) = selection.routed_usage.first() {
-        lines.push(format!(
-            "Usage: {} in · {} out",
-            usage.usage.usage.input_tokens, usage.usage.usage.output_tokens
-        ));
+        lines.push(
+            tr(locale, MessageId::RouterTestUsage)
+                .replace("{input}", &usage.usage.usage.input_tokens.to_string())
+                .replace("{output}", &usage.usage.usage.output_tokens.to_string()),
+        );
     }
     if let Some(failure) = receipt.router_failure {
-        lines.push(format!("Router failing: {}", failure.label()));
+        lines.push(tr(locale, MessageId::RouterTestFailing).replace("{reason}", &failure.label()));
     }
     lines
 }
 
-fn custom_router_help(config: &Config) -> String {
+fn custom_router_help(config: &Config, locale: Locale) -> String {
     let current = config
         .auto
         .as_ref()
         .and_then(|auto| auto.router.as_ref())
-        .map_or_else(|| "none".to_string(), router_summary);
+        .map_or_else(
+            || tr(locale, MessageId::ConfigValueOff).into_owned(),
+            |router| router_summary(router, locale),
+        );
     format!(
-        "Current router: {current}\n\
-Edit [auto.router] in config.toml, for example:\n\n\
+        "{}\n{}\n\n\
 [auto.router]\n\
 kind = \"chat\"            # or \"decision\" for Jev\n\
 provider = \"deepseek\"    # decision: \"openrouter\" or \"typesafe\"\n\
@@ -400,7 +436,10 @@ model = \"deepseek-v4-flash\"\n\
 thinking = \"off\"         # chat routers only\n\
 timeout_secs = 4\n\
 # min_confidence = 0.5     # decision routers only\n\n\
-Remove the table (or run /router off) to route every Auto turn to the default model."
+{}",
+        tr(locale, MessageId::RouterCurrent).replace("{router}", &current),
+        tr(locale, MessageId::RouterCustomHelpIntro),
+        tr(locale, MessageId::RouterCustomHelpOutro),
     )
 }
 
@@ -444,7 +483,7 @@ impl RouterSetupView {
                 tr(locale, MessageId::RouterPresetJevHint).replace("{route}", route.display_name());
             let available = route.has_key(config);
             if !available {
-                hint = unavailable(format!("no {} API key", route.display_name()));
+                hint = unavailable(no_key_reason(locale, route));
             }
             if route == DecisionRouterRoute::Typesafe {
                 hint = format!(
@@ -462,37 +501,37 @@ impl RouterSetupView {
         let fast = runnable_fast_tier(config);
         rows.push(PresetRow {
             preset: RouterPreset::Fast,
-            label: "Fast tier".to_string(),
+            label: tr(locale, MessageId::RouterPresetFastLabel).into_owned(),
             hint: match fast.as_ref() {
                 Some((provider, model)) => tr(locale, MessageId::RouterPresetFastHint)
                     .replace("{model}", model)
                     .replace("{provider}", provider.display_name()),
-                None => unavailable("the active provider has no runnable fast tier".to_string()),
+                None => unavailable(tr(locale, MessageId::RouterNoFastTier).into_owned()),
             },
             available: fast.is_some(),
         });
         rows.push(PresetRow {
             preset: RouterPreset::Off,
-            label: "Off".to_string(),
+            label: tr(locale, MessageId::ConfigValueOff).into_owned(),
             hint: tr(locale, MessageId::RouterPresetOffHint).into_owned(),
             available: true,
         });
         rows.push(PresetRow {
             preset: RouterPreset::Custom,
-            label: "Custom".to_string(),
+            label: tr(locale, MessageId::RouterPresetCustomLabel).into_owned(),
             hint: tr(locale, MessageId::RouterPresetCustomHint).into_owned(),
             available: true,
         });
         let inventory = ModelInventory::from_config(config);
         let current = match config.auto.as_ref().and_then(|auto| auto.router.as_ref()) {
-            None => "Current: off".to_string(),
+            None => tr(locale, MessageId::RouterCurrent)
+                .replace("{router}", &tr(locale, MessageId::ConfigValueOff)),
             Some(router) => match inventory.router_setup_issue {
-                Some(issue) => format!(
-                    "Current: {} · failing: {}",
-                    router_summary(router),
-                    issue.label()
-                ),
-                None => format!("Current: {}", router_summary(router)),
+                Some(issue) => tr(locale, MessageId::RouterCurrentFailing)
+                    .replace("{router}", &router_summary(router, locale))
+                    .replace("{reason}", issue.label()),
+                None => tr(locale, MessageId::RouterCurrent)
+                    .replace("{router}", &router_summary(router, locale)),
             },
         };
         Self {
@@ -601,18 +640,19 @@ impl ModalView for RouterSetupView {
         let inner = block.inner(popup_area);
         block.render(popup_area, buf);
 
-        let hints: &[ActionHint] = match self.mode {
-            Mode::Pick => &[
-                ActionHint::new("↑/↓", "move"),
-                ActionHint::new("Enter", "test"),
-                ActionHint::new("Esc", "close"),
+        let locale = self.locale;
+        let hints = match self.mode {
+            Mode::Pick => vec![
+                ActionHint::new("↑/↓", tr(locale, MessageId::PickerActionMove)),
+                ActionHint::new("Enter", tr(locale, MessageId::RouterActionTest)),
+                ActionHint::new("Esc", tr(locale, MessageId::SessionsActionClose)),
             ],
-            Mode::Confirm { .. } => &[
-                ActionHint::new("Enter", "save"),
-                ActionHint::new("Esc", "discard"),
+            Mode::Confirm { .. } => vec![
+                ActionHint::new("Enter", tr(locale, MessageId::RouterActionSave)),
+                ActionHint::new("Esc", tr(locale, MessageId::RouterActionDiscard)),
             ],
         };
-        let content = render_modal_footer(inner, buf, hints);
+        let content = render_modal_footer(inner, buf, &hints);
         self.row_hitboxes.borrow_mut().clear();
 
         let muted = Style::default().fg(palette::TEXT_MUTED);
@@ -736,7 +776,7 @@ mod tests {
     fn presets_derive_from_keys_and_route_capabilities() {
         let _env = hermetic();
         let config = deepseek_with_openrouter_key(true);
-        let jev = preset_router_config(&config, RouterPreset::Jev(None))
+        let jev = preset_router_config(&config, RouterPreset::Jev(None), Locale::En)
             .expect("jev available")
             .expect("jev writes a table");
         assert_eq!(jev.kind.as_deref(), Some("decision"));
@@ -744,7 +784,7 @@ mod tests {
         assert_eq!(jev.model.as_deref(), Some(JEV_OPENROUTER_MODEL));
         assert_eq!(jev.timeout_secs, Some(2));
 
-        let fast = preset_router_config(&config, RouterPreset::Fast)
+        let fast = preset_router_config(&config, RouterPreset::Fast, Locale::En)
             .expect("fast available")
             .expect("fast writes a table");
         assert_eq!(fast.kind.as_deref(), Some("chat"));
@@ -753,13 +793,13 @@ mod tests {
         assert_eq!(fast.thinking.as_deref(), Some("off"));
 
         assert!(matches!(
-            preset_router_config(&config, RouterPreset::Off),
+            preset_router_config(&config, RouterPreset::Off, Locale::En),
             Ok(None)
         ));
 
         // No key anywhere: Jev is unavailable, never guessed.
         let no_key = deepseek_with_openrouter_key(false);
-        assert!(preset_router_config(&no_key, RouterPreset::Jev(None)).is_err());
+        assert!(preset_router_config(&no_key, RouterPreset::Jev(None), Locale::En).is_err());
     }
 
     #[test]
@@ -773,7 +813,7 @@ mod tests {
         )
         .expect("seed config");
         let config = deepseek_with_openrouter_key(true);
-        let jev = preset_router_config(&config, RouterPreset::Jev(None))
+        let jev = preset_router_config(&config, RouterPreset::Jev(None), Locale::En)
             .expect("jev")
             .expect("table");
 
@@ -812,5 +852,38 @@ mod tests {
             view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             ViewAction::Close
         ));
+    }
+
+    #[test]
+    fn picker_and_reasons_follow_the_ui_locale() {
+        let _env = hermetic();
+        let config = deepseek_with_openrouter_key(false);
+        let view = RouterSetupView::picker(&config, Locale::Ja);
+        let fast = view
+            .rows
+            .iter()
+            .find(|row| row.preset == RouterPreset::Fast)
+            .expect("fast row");
+        assert_eq!(fast.label, tr(Locale::Ja, MessageId::RouterPresetFastLabel));
+        assert_ne!(fast.label, "Fast tier");
+        let english = ["Current:", "no OpenRouter API key", "Custom"];
+        let rendered: Vec<&str> = std::iter::once(view.current.as_str())
+            .chain(
+                view.rows
+                    .iter()
+                    .flat_map(|row| [row.label.as_str(), row.hint.as_str()]),
+            )
+            .collect();
+        for text in &rendered {
+            for word in english {
+                assert!(
+                    !text.contains(word),
+                    "{word:?} left in Japanese view: {text}"
+                );
+            }
+        }
+        let reason = preset_router_config(&config, RouterPreset::Jev(None), Locale::Ja)
+            .expect_err("no decision key");
+        assert_eq!(reason, tr(Locale::Ja, MessageId::RouterNeedKey));
     }
 }
