@@ -307,6 +307,7 @@
   "ScreenModeMouseCaptureOff": "Захоплення миші вимкнено; вибором керує термінал.",
   "ScreenModeUnchanged": "Екран без змін: {reason}.",
   "ImageInputRejectedResent": "{model} не приймає зображення — їх повторно надіслано як текст; скористайтеся image_ocr, щоб їх прочитати",
+  "ImageInputOmitted": "{model} не бачить зображень — {count} зображ. у цьому ході надіслано як текст; скористайтеся image_ocr, щоб прочитати, або /model, щоб змінити модель",
   "ProviderToolCallMissing": "Провайдер завершив відповідь із `{reason}`, але не передав виклик інструмента. Повторіть цей хід, щоб продовжити.",
   "ConfigLabelShowThinking": "Міркування моделі в чаті",
   "ConfigLabelThinkingHighlight": "Підсвічування тла міркувань",
