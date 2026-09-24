@@ -6,7 +6,7 @@ use crate::worker_profile::ShellPolicy;
 use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::post};
 use std::collections::HashSet;
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tempfile::{Builder as TempDirBuilder, tempdir};
 
 mod launch_receipt;
@@ -14756,6 +14756,7 @@ pub(crate) fn stub_runtime() -> SubAgentRuntime {
         // Test stubs run without a manager-stamped governor; the LLM call
         // path treats `None` as "report nothing".
         governor: None,
+        compaction: crate::compaction::CompactionConfig::default(),
     }
 }
 
@@ -18101,37 +18102,226 @@ async fn worker_stops_with_typed_wall_time_reason() {
     assert!(reason.contains("operator"), "{reason}");
 }
 
-#[tokio::test]
-async fn worker_lands_with_typed_context_reason_past_the_step_input_bound() {
-    // #6194 item 7: one step billing past the per-step bound lands the run
-    // through budget death (report + preservation) instead of burning
-    // quadratically to wall/token death.
-    let tmp = tempdir().expect("tempdir");
-    let (manager, agent_id, calls, task_handle) =
-        spawn_budget_capped_worker(tmp.path(), 150_000, 40, 120, Duration::from_secs(300)).await;
+/// Scripted provider for the child-compaction test. Task steps call
+/// `read_file` while billing `step_prompt_tokens` each; the compaction
+/// summary request (recognized by its instruction) returns a handoff; the
+/// first task step after it finishes the run and records whether the request
+/// carried the compaction checkpoint instead of the replaced history.
+async fn compacting_child_chat_client(
+    step_prompt_tokens: u64,
+) -> (
+    CodewhaleClient,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+    Arc<AtomicBool>,
+) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let summaries = Arc::new(AtomicUsize::new(0));
+    let saw_checkpoint = Arc::new(AtomicBool::new(false));
+    let app = Router::new().route(
+        "/{*path}",
+        post({
+            let calls = Arc::clone(&calls);
+            let summaries = Arc::clone(&summaries);
+            let saw_checkpoint = Arc::clone(&saw_checkpoint);
+            move |Json(body): Json<Value>| {
+                let calls = Arc::clone(&calls);
+                let summaries = Arc::clone(&summaries);
+                let saw_checkpoint = Arc::clone(&saw_checkpoint);
+                async move {
+                    let attempt = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                    let wire = body["messages"].to_string();
+                    let usage = |prompt: u64, completion: u64| {
+                        json!({
+                            "prompt_tokens": prompt,
+                            "completion_tokens": completion,
+                            "total_tokens": prompt + completion
+                        })
+                    };
+                    let message = if wire.contains("context checkpoint compaction") {
+                        summaries.fetch_add(1, Ordering::SeqCst);
+                        return Json(json!({
+                            "id": format!("chatcmpl-compact-{attempt}"),
+                            "model": "deepseek-v4-flash",
+                            "choices": [{
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "Objective: inspect README.md. Progress: the file was read three times. Next action: report that the inspection is done."
+                                },
+                                "finish_reason": "stop"
+                            }],
+                            "usage": usage(1_000, 200)
+                        }));
+                    } else if summaries.load(Ordering::SeqCst) > 0 {
+                        saw_checkpoint.store(
+                            wire.contains(crate::compaction::COMPACTION_SUMMARY_MARKER),
+                            Ordering::SeqCst,
+                        );
+                        json!({ "role": "assistant", "content": "done after compaction" })
+                    } else {
+                        json!({
+                            "role": "assistant",
+                            "content": null,
+                            "tool_calls": [{
+                                "id": format!("call_read_{attempt}"),
+                                "type": "function",
+                                "function": {
+                                    "name": "read_file",
+                                    "arguments": "{\"path\":\"README.md\"}"
+                                }
+                            }]
+                        })
+                    };
+                    let finish = if message.get("tool_calls").is_some() {
+                        "tool_calls"
+                    } else {
+                        "stop"
+                    };
+                    let prompt = if summaries.load(Ordering::SeqCst) > 0 {
+                        3_000
+                    } else {
+                        step_prompt_tokens
+                    };
+                    Json(json!({
+                        "id": format!("chatcmpl-step-{attempt}"),
+                        "model": "deepseek-v4-flash",
+                        "choices": [{ "index": 0, "message": message, "finish_reason": finish }],
+                        "usage": usage(prompt, 40)
+                    }))
+                }
+            }
+        }),
+    );
 
-    tokio::time::timeout(Duration::from_secs(10), task_handle)
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("context-capped worker must terminate")
-        .expect("task should finish");
+        .expect("bind fake chat server");
+    let addr = listener.local_addr().expect("fake chat server addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let config = crate::config::Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(format!("http://{addr}/v1")),
+        ..crate::config::Config::default()
+    };
+    let client = CodewhaleClient::new(&config).expect("fake chat client");
+    (client, calls, summaries, saw_checkpoint)
+}
+
+#[tokio::test]
+async fn worker_compacts_past_its_context_window_and_keeps_working() {
+    // A child whose billed input runs far past the old 100k per-step bound
+    // (and past its route's compaction trigger) compacts at the request
+    // boundary like the parent and completes, instead of landing with
+    // BudgetExhausted.
+    let tmp = tempdir().expect("tempdir");
+    std::fs::write(tmp.path().join("README.md"), "hello from the readme\n").expect("readme");
+    let manager = Arc::new(RwLock::new(SubAgentManager::new(
+        tmp.path().to_path_buf(),
+        2,
+    )));
+    let agent_id = "agent_compacting_worker".to_string();
+    let (task_input_tx, task_input_rx) = mpsc::unbounded_channel();
+    let agent = SubAgent::new(
+        agent_id.clone(),
+        FleetRole::Worker,
+        "Inspect the readme".to_string(),
+        make_assignment(),
+        "deepseek-v4-flash".to_string(),
+        Some("Compact".to_string()),
+        Some(vec!["read_file".to_string()]),
+        task_input_tx,
+        tmp.path().to_path_buf(),
+        "boot_compact".to_string(),
+    );
+    {
+        let mut manager = manager.write().await;
+        manager.agents.insert(agent_id.clone(), agent);
+        manager.register_worker(make_worker_spec(&agent_id, tmp.path().to_path_buf()));
+    }
+
+    let (client, calls, summaries, saw_checkpoint) = compacting_child_chat_client(900_000).await;
+    let mut runtime = stub_runtime();
+    runtime.client = client;
+    runtime.manager = Arc::clone(&manager);
+    runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    assert!(runtime.compaction.enabled, "the inherited default compacts");
+
+    let task = SubAgentTask {
+        manager_handle: Arc::clone(&manager),
+        runtime: runtime.clone(),
+        agent_id: agent_id.clone(),
+        agent_type: FleetRole::Worker,
+        prompt: "Inspect the readme".to_string(),
+        assignment: make_assignment(),
+        allowed_tools: Some(vec!["read_file".to_string()]),
+        fork_context: false,
+        started_at: Instant::now(),
+        max_steps: 20,
+        wall_time: Duration::from_secs(300),
+        input_rx: task_input_rx,
+        launch_gate: None,
+        _foreground_child_registration: None,
+    };
+    tokio::time::timeout(Duration::from_secs(20), run_subagent_task(task))
+        .await
+        .expect("compacting worker must terminate");
 
     let result = manager
         .read()
         .await
         .get_result(&agent_id)
         .expect("agent registered");
-    assert_eq!(result.status, SubAgentStatus::BudgetExhausted);
-    let reason = &result
-        .checkpoint
-        .as_ref()
-        .expect("context-budget checkpoint")
-        .reason;
-    assert!(reason.contains("context budget exhausted"), "{reason}");
-    assert!(reason.contains("150000"), "{reason}");
-    // Task work stopped at the first billed step; only hand-back turns follow.
+    assert_eq!(
+        result.status,
+        SubAgentStatus::Completed,
+        "compaction replaces the old context-budget death: {:?}",
+        result
+            .checkpoint
+            .as_ref()
+            .map(|checkpoint| &checkpoint.reason)
+    );
+    assert_eq!(result.result.as_deref(), Some("done after compaction"));
+    assert_eq!(summaries.load(Ordering::SeqCst), 1, "one summarizer pass");
     assert!(
-        calls.load(Ordering::SeqCst) <= 3,
-        "landed early instead of running 120 steps"
+        saw_checkpoint.load(Ordering::SeqCst),
+        "the post-compaction request carries the checkpoint"
+    );
+    // Three 900k-billed tool steps, the summary, and the finishing step.
+    assert_eq!(calls.load(Ordering::SeqCst), 5);
+
+    // The summarizer's tokens count toward the worker like any other step.
+    let usage = manager
+        .read()
+        .await
+        .worker_records
+        .get(&agent_id)
+        .expect("worker record")
+        .usage
+        .clone();
+    assert_eq!(
+        usage.total_tokens,
+        Some(3 * 900_040 + 1_200 + 3_040),
+        "{usage:?}"
+    );
+
+    // The complete transcript keeps the replaced history, then the checkpoint.
+    let state_root = manager.read().await.state_root.clone();
+    let transcript =
+        load_subagent_transcript_artifact(&state_root, &agent_id).expect("transcript loads");
+    let checkpoint_at = transcript
+        .iter()
+        .position(crate::compaction::is_wire_compaction_checkpoint_message)
+        .expect("checkpoint recorded");
+    assert!(checkpoint_at >= 7, "replaced history kept before it");
+    assert!(
+        transcript[checkpoint_at + 1..]
+            .iter()
+            .any(|message| message.role == Role::Assistant),
+        "the run continued after the checkpoint"
     );
 }
 
