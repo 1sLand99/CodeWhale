@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { resolveWhale } from "./whale-tokens";
 import { siteCss } from "./site-css";
 
 // Radii, state roles and motion follow the GPUI client (DESIGN.md, set_theme,
@@ -11,7 +12,7 @@ const WHALE = readFileSync(new URL("../components/whale.tsx", import.meta.url), 
 
 describe("design grammar contract", () => {
   it("draws every radius from the 6/10/14/pill grammar", () => {
-    const defined = [...CSS.matchAll(/--radius-[\w-]+:\s*([^;]+);/g)].map((m) => m[1].trim());
+    const defined = [...CSS.matchAll(/--radius-[\w-]+:\s*([^;]+);/g)].map((m) => resolveWhale(m[1].trim()));
     expect(new Set(defined)).toEqual(new Set(["6px", "10px", "14px", "999px"]));
     const used = [...CSS.matchAll(/border-radius:\s*([^;]+);/g)].map((m) => m[1].trim());
     expect(used.length).toBeGreaterThan(0);
@@ -21,8 +22,10 @@ describe("design grammar contract", () => {
   });
 
   it("has one focus ring and the set_theme selection", () => {
-    expect(CSS.match(/outline:\s*\d/g)).toHaveLength(1);
-    expect(CSS).toMatch(/:focus-visible \{ outline: 2px solid var\(--ring\); outline-offset: 2px; \}/);
+    expect(CSS.match(/outline:/g)).toHaveLength(1);
+    expect(CSS).toContain(":focus-visible { outline: var(--gpui-focus-width) solid var(--ring); outline-offset: var(--gpui-focus-offset); }");
+    expect(resolveWhale("var(--gpui-focus-width)")).toBe("2px");
+    expect(resolveWhale("var(--gpui-focus-offset)")).toBe("3px");
     expect(CSS).not.toMatch(/outline:\s*none/);
     expect(CSS).toMatch(/::selection \{ background: var\(--selection\); \}/);
     // The light ring on the dark stage would fall under 3:1.

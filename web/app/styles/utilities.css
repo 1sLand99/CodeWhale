@@ -147,7 +147,7 @@
 /* The one focus treatment on the site: a 2px primary ring. No component
    restyles it; inputs keep the same ring rather than a glow. */
 ::selection { background: var(--selection); }
-:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+:focus-visible { outline: var(--gpui-focus-width) solid var(--ring); outline-offset: var(--gpui-focus-offset); }
 /* The dark stage keeps the light scheme's page but a sidebar-dark field;
    there the light primary ring is ~2.8:1 (#245bc7 on #191a1c), under the 3:1
    a focus indicator needs, so stage surfaces take the dark scheme's ring. */

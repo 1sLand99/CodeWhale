@@ -234,6 +234,22 @@ impl ApprovalRequest {
         serde_json::to_string(&truncated).unwrap_or_else(|_| truncated.to_string())
     }
 
+    /// The plain summary in `locale` (E6, experience mark 4): the same
+    /// sentence the English card leads with, translated around the verbatim
+    /// command, path or query.
+    #[must_use]
+    pub fn summary_for_locale(&self, locale: Locale) -> String {
+        if locale == Locale::En {
+            return self.summary.clone();
+        }
+        crate::tools::approval_summary::approval_summary_in(
+            locale,
+            &self.tool_name,
+            &self.params,
+            Some(&self.workspace),
+        )
+    }
+
     pub fn description_for_locale(&self, locale: Locale) -> String {
         match locale {
             Locale::ZhHans => localized_description_zh_hans(self.category),

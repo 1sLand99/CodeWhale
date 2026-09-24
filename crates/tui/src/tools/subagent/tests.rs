@@ -11,6 +11,7 @@ use tempfile::{Builder as TempDirBuilder, tempdir};
 
 mod launch_receipt;
 mod roster_routes;
+mod route_replacement;
 
 fn built_in_whale_name_that_cannot_be_generated_for(agent_id: &str) -> &'static str {
     WHALE_NICKNAMES
@@ -14646,6 +14647,7 @@ pub(crate) fn stub_runtime() -> SubAgentRuntime {
         reasoning_effort: None,
         reasoning_effort_auto: false,
         role_models: std::collections::HashMap::new(),
+        route_replacements: Vec::new(),
         context,
         allow_shell: true,
         accept_edits: false,

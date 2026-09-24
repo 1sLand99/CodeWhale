@@ -4176,15 +4176,32 @@ async fn turn_operation_lookup_is_authenticated_read_only_and_survives_restart()
     .await
     .context("old Runtime did not release its store before restart")?;
 
-    let (addr, _manager, server) = spawn_test_server_with_root_token_mobile_workspace(
-        root,
-        sessions,
-        Some(token.into()),
-        false,
-        workspace,
-    )
-    .await?
-    .context("loopback listener required for restarted lookup proof")?;
+    // The old server tears its runtime down on its own thread after the
+    // abort, so its mock TaskManager can hold the execution-scope owner lock
+    // a moment longer than the thread manager above. A second owner is
+    // correctly refused; wait for the release instead of racing it.
+    let deadline = tokio::time::Instant::now() + ci_scaled(Duration::from_secs(10));
+    let (addr, _manager, server) = loop {
+        match spawn_test_server_with_root_token_mobile_workspace(
+            root.clone(),
+            sessions.clone(),
+            Some(token.into()),
+            false,
+            workspace.clone(),
+        )
+        .await
+        {
+            Err(error)
+                if format!("{error:#}").contains("execution scope is already owned")
+                    && tokio::time::Instant::now() < deadline =>
+            {
+                sleep(Duration::from_millis(20)).await;
+            }
+            started => {
+                break started?.context("loopback listener required for restarted lookup proof")?;
+            }
+        }
+    };
     // Startup recovery is complete. No Engine is installed in this Runtime.
     let before = file_bytes(&store_root)?;
     let response = client
@@ -14811,12 +14828,12 @@ async fn terminal_routes_serve_a_live_engine_session_over_http() -> Result<()> {
     )
     .map_err(anyhow::Error::msg)?;
 
-    // Input through the route, then the shell's own echo back through the
-    // route. Bytes in, bytes out, no direct access to the session object.
+    // Input and command output through the route, without direct session
+    // access. Start output on its own line even if the shell paints a prompt.
     let write: serde_json::Value = client
         .post(format!("{base}/input"))
         .json(&serde_json::json!({
-            "data": "printf 'terminal-route-proof\\n'\n",
+            "data": "printf '\\nterminal-route-proof\\n'\n",
             "encoding": "text"
         }))
         .send()
@@ -14846,12 +14863,19 @@ async fn terminal_routes_serve_a_live_engine_session_over_http() -> Result<()> {
             .await
             .expect("terminal output route answers");
         let data = chunk["data"].as_str().unwrap_or_default();
-        if data.contains("terminal-route-proof") {
-            // Reads are non-consuming: the same cursor returns the same bytes.
+        if data
+            .lines()
+            .any(|line| line.trim() == "terminal-route-proof")
+        {
+            // Wait for the command's output, not its echoed input. Reads are
+            // non-consuming, but the shell can append its prompt between them.
             let again = read_chunk(base.clone(), client.clone())
                 .await
                 .expect("terminal output route answers");
-            assert_eq!(again["data"], chunk["data"]);
+            assert!(
+                again["data"].as_str().unwrap_or_default().starts_with(data),
+                "a repeated read must retain every byte already observed"
+            );
             break;
         }
         assert!(
