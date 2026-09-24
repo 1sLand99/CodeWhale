@@ -185,8 +185,18 @@ pub(in crate::commands) fn dispatch(
     arg: Option<&str>,
 ) -> Option<CommandResult> {
     let result = match command {
-        "tokens" => tokens::tokens(app),
-        "cost" => tokens::cost(app),
+        "tokens" => {
+            let mut bundle = app.command_contexts();
+            tokens::tokens(bundle.contexts(
+                CommandCapabilities::DEBUG_DIAGNOSTICS | CommandCapabilities::PRESENTATION,
+            ))
+        }
+        "cost" => {
+            let mut bundle = app.command_contexts();
+            tokens::cost(bundle.contexts(
+                CommandCapabilities::DEBUG_DIAGNOSTICS | CommandCapabilities::PRESENTATION,
+            ))
+        }
         "receipts" | "receipt" => receipts::receipts(app, arg),
         "balance" => {
             let mut bundle = app.command_contexts();
