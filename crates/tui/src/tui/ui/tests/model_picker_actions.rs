@@ -8,6 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{buffer::Buffer, layout::Rect};
 
 /// An app on a keyed DeepSeek route with `/model` open, under a temp home.
+#[cfg(test)]
 fn app_with_open_picker(root: &std::path::Path) -> (App, Config) {
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
