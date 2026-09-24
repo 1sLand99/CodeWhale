@@ -4,7 +4,6 @@
 use super::*;
 use crate::tui::model_picker::ModelPickerView;
 use crate::tui::ui::handlers::{toggle_model_picker_fleet, toggle_model_picker_pin};
-use crate::tui::views::ModalView;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{buffer::Buffer, layout::Rect};
 
