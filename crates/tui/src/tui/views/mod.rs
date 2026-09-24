@@ -38,6 +38,7 @@ pub mod fleet_roster;
 pub mod fleet_setup;
 pub mod mode_picker;
 pub mod route_save_prompt;
+pub(crate) mod router_setup;
 pub mod skills_manager;
 pub mod status_picker;
 pub mod workflows_manager;
@@ -85,6 +86,8 @@ pub enum ModalKind {
     /// "Resume this session?" over the launch card. Resuming replaces the
     /// whole session context, so it asks first.
     LaunchResumeConfirm,
+    /// Router setup (`/router`, `/model router`): presets for `[auto.router]`.
+    RouterSetup,
 }
 
 /// Clear and paint a modal popup with an opaque surface.
