@@ -23,8 +23,8 @@ use codewhale_protocol::{
     ThreadGoalClearParams, ThreadGoalGetParams, ThreadGoalSetParams, ThreadRequest, ThreadResponse,
 };
 use codewhale_state::StateStore;
+use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, RwLock};

@@ -24,11 +24,10 @@ use codewhale_mcp::{
     McpManager, McpStartupCompleteEvent, McpStartupStatus as McpManagerStartupStatus,
 };
 use codewhale_protocol::{
-    AppResponse, EventFrame, ExecApprovalRequestEvent, ResponseChannel, ReviewDecision, Status,
-    Thread, ThreadForkParams, ThreadGoal, ThreadGoalClearParams, ThreadGoalGetParams,
-    ThreadGoalProgressParams, ThreadGoalSetParams, ThreadGoalStatus, ThreadListParams,
-    ThreadReadParams, ThreadRequest, ThreadResponse, ThreadResumeParams, ThreadSetNameParams,
-    ThreadStatus, ToolPayload, UserInputRequestEvent,
+    AppResponse, EventFrame, ResponseChannel, Status, Thread, ThreadForkParams, ThreadGoal,
+    ThreadGoalClearParams, ThreadGoalGetParams, ThreadGoalProgressParams, ThreadGoalSetParams,
+    ThreadGoalStatus, ThreadListParams, ThreadReadParams, ThreadRequest, ThreadResponse,
+    ThreadResumeParams, ThreadSetNameParams, ThreadStatus,
 };
 use codewhale_state::{
     JobStateRecord, JobStateStatus, SessionSource, StateStore, ThreadGoalRecord,

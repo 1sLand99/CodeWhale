@@ -52,7 +52,7 @@ CLI/API surfaces are not implemented yet.
 | `codewhale app-server --mobile` | HTTP/SSE on loopback + `/mobile` | Runtime API + local mobile control page |
 | `codewhale app-server --stdio` | JSON-RPC 2.0 over stdio | Local SDK / control probe (no listener) |
 | `codewhale app-server --socket [--socket-path P]` | JSON-RPC 2.0 over a `0600` unix domain socket | Desktop daemon: multi-client, peer-uid checked, `daemon/attach` claim handshake (macOS/Linux; Windows named pipe reserved, not implemented) |
-| `codewhale app-server` | HTTP on `127.0.0.1:8787` | Legacy in-process app-server (`/healthz`, `/thread`, `/app`, `/prompt`, `/tool`, `/jobs`); `/prompt` and `/thread` messages execute real turns via the runtime bridge |
+| `codewhale app-server` | HTTP on `127.0.0.1:8787` | Legacy in-process app-server (`/healthz`, `/thread`, `/app`, `/prompt`, `/jobs`, `/mcp/startup`); `/prompt` and `/thread` messages execute real turns via the runtime bridge. There is no direct `/tool` route: tools run only inside Engine turns, under the Engine's tool catalog and approval posture, and approval-gated calls surface as normal approval requests |
 | `codewhale serve --http` / `--mobile` | same server as `app-server --http`/`--mobile` | Compatibility aliases |
 
 `app-server --http` and `--mobile` launch the same mature runtime API server
