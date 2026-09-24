@@ -1042,6 +1042,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "codewhale-portable-debug-diagnostics"
+version = "0.10.0"
+dependencies = [
+ "codewhale-command-contract",
+ "serde_json",
+]
+
+[[package]]
 name = "codewhale-protocol"
 version = "0.10.0"
 dependencies = [
