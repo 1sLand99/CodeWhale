@@ -16902,6 +16902,47 @@ fn local_cancel_marks_late_stream_events_for_suppression() {
     ));
 }
 
+/// A turn the Engine stopped itself (here its per-turn wall-clock budget)
+/// posts no error event. Its reason must stay in the transcript, not only the
+/// footer, or a later notice replaces it and the session looks hung.
+#[test]
+fn an_engine_stopped_turn_keeps_its_reason_in_the_transcript() {
+    let mut app = create_test_app();
+    let reason = "Per-turn wall-clock budget exhausted after 3600s (limit: 3600s). Send another message to continue.";
+    super::event_loop::present_turn_failure(
+        &mut app,
+        crate::core::events::TurnOutcomeStatus::Failed,
+        Some(reason),
+    );
+    assert!(
+        app.history.iter().any(|cell| matches!(
+            cell,
+            HistoryCell::Error { message, .. } if message.contains(reason)
+        )),
+        "the stop reason is in the transcript"
+    );
+    assert!(
+        app.sticky_status
+            .as_ref()
+            .is_some_and(|toast| toast.text.contains(reason))
+    );
+
+    // An error event already posted it: never repeat it in the transcript.
+    let mut posted = create_test_app();
+    posted.turn_error_posted = true;
+    super::event_loop::present_turn_failure(
+        &mut posted,
+        crate::core::events::TurnOutcomeStatus::Failed,
+        Some(reason),
+    );
+    assert!(
+        !posted
+            .history
+            .iter()
+            .any(|cell| matches!(cell, HistoryCell::Error { .. }))
+    );
+}
+
 #[test]
 fn turn_started_route_is_captured_before_cancel_suppression() {
     let mut app = create_test_app();
