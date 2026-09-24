@@ -1179,12 +1179,6 @@ pub trait ModalView: std::any::Any {
     fn approval_request_id(&self) -> Option<&str> {
         None
     }
-
-    /// When this approval card was raised, when this view is one. Keys
-    /// observed before it are type-ahead and must not answer it.
-    fn approval_requested_at(&self) -> Option<std::time::Instant> {
-        None
-    }
 }
 
 #[derive(Default)]
@@ -1196,6 +1190,11 @@ pub struct ViewStack {
     /// Theme snapshot for the texture pass, set alongside the mode each
     /// frame. `None` (e.g. tests that never opt in) disables the texture.
     focus_texture_theme: Option<codewhale_palette::UiTheme>,
+    /// When the view now on top became the top view — pushed, or revealed
+    /// by closing or removing the views above it. A key observed before
+    /// this instant was typed at something else and must never answer an
+    /// approval card that only then became visible (approvals M2).
+    top_since: Option<std::time::Instant>,
 }
 
 /// What one [`ViewStack::tick`] produced: events to handle, and whether the
@@ -1212,6 +1211,22 @@ impl ViewStack {
             views: Vec::new(),
             focus_texture: FocusTextureMode::Off,
             focus_texture_theme: None,
+            top_since: None,
+        }
+    }
+
+    /// Identity of the top view, for noticing when a different view becomes
+    /// the top one.
+    fn top_identity(&self) -> Option<*const ()> {
+        self.views
+            .last()
+            .map(|view| std::ptr::from_ref::<dyn ModalView>(view.as_ref()).cast::<()>())
+    }
+
+    /// Restamp `top_since` when the top view changed since `before`.
+    fn note_top_change(&mut self, before: Option<*const ()>) {
+        if self.top_identity() != before {
+            self.top_since = Some(std::time::Instant::now());
         }
     }
 
@@ -1237,16 +1252,20 @@ impl ViewStack {
     /// closes an unrelated approval card.
     pub fn remove_approval_for_gate(&mut self, gate: &str) -> bool {
         let before = self.views.len();
+        let top = self.top_identity();
         self.views
             .retain(|view| !crate::remote_control::view_is_approval_for_gate(view.as_ref(), gate));
+        self.note_top_change(top);
         self.views.len() != before
     }
 
     /// Remove the approval card for tool/approval id `id` at any depth.
     pub fn remove_approval_by_id(&mut self, id: &str) -> bool {
         let before = self.views.len();
+        let top = self.top_identity();
         self.views
             .retain(|view| view.approval_request_id() != Some(id));
+        self.note_top_change(top);
         self.views.len() != before
     }
 
@@ -1264,13 +1283,15 @@ impl ViewStack {
             .and_then(|view| view.approval_request_id())
     }
 
-    /// Whether a key observed at `observed_at` predates the approval card on
-    /// top, i.e. it was typed ahead and must not answer that card.
+    /// Whether a key observed at `observed_at` predates the moment the
+    /// approval card on top became visible — raised, or revealed by closing
+    /// the card above it — i.e. it was typed ahead and must not answer that
+    /// card. Two quick `y` presses answer one card, never the one beneath.
     pub fn key_predates_top_approval(&self, observed_at: std::time::Instant) -> bool {
-        self.views
-            .last()
-            .and_then(|view| view.approval_requested_at())
-            .is_some_and(|requested_at| observed_at < requested_at)
+        self.top_approval_id().is_some()
+            && self
+                .top_since
+                .is_some_and(|top_since| observed_at < top_since)
     }
 
     pub fn contains_kind(&self, kind: ModalKind) -> bool {
@@ -1294,7 +1315,9 @@ impl ViewStack {
 
     pub fn push<V: ModalView + 'static>(&mut self, view: V) {
         let kind = view.kind();
+        let top = self.top_identity();
         self.views.push(Box::new(view));
+        self.note_top_change(top);
         tracing::debug!(target: "codewhale_tui::view_stack", action = "push", kind = ?kind, depth = self.views.len(), "view pushed");
     }
 
@@ -1303,12 +1326,16 @@ impl ViewStack {
     /// the generic `push` re-boxing dance.
     pub fn push_boxed(&mut self, view: Box<dyn ModalView>) {
         let kind = view.kind();
+        let top = self.top_identity();
         self.views.push(view);
+        self.note_top_change(top);
         tracing::debug!(target: "codewhale_tui::view_stack", action = "push_boxed", kind = ?kind, depth = self.views.len(), "view pushed");
     }
 
     pub fn pop(&mut self) -> Option<Box<dyn ModalView>> {
+        let top = self.top_identity();
         let popped = self.views.pop();
+        self.note_top_change(top);
         if let Some(view) = popped.as_ref() {
             tracing::debug!(target: "codewhale_tui::view_stack", action = "pop", kind = ?view.kind(), depth = self.views.len(), "view popped");
         }
@@ -1402,6 +1429,7 @@ impl ViewStack {
 
     fn apply_action(&mut self, action: ViewAction) -> Vec<ViewEvent> {
         let mut events = Vec::new();
+        let top = self.top_identity();
         match action {
             // Key and mouse paths already repaint after dispatch; `tick`
             // reads `Redraw` before calling here.
@@ -1421,6 +1449,7 @@ impl ViewStack {
                 }
             }
         }
+        self.note_top_change(top);
         events
     }
 

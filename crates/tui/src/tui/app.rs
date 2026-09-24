@@ -2079,6 +2079,10 @@ pub struct App {
     /// `/agents` re-open, and retiring answered cards all read this store.
     pub pending_child_requests:
         std::collections::BTreeMap<String, crate::tui::pending_requests::PendingChildRequest>,
+    /// Which conversation owns each child agent this host has seen, from the
+    /// agent lifecycle events. A request from another conversation's child
+    /// is answered `unavailable` instead of shown here.
+    pub child_agent_sessions: std::collections::HashMap<String, String>,
     /// Esc-Esc backtrack state machine (#133). `Inactive` by default; first
     /// Esc primes, second Esc opens the live-transcript overlay scoped to
     /// previous user messages so the user can rewind a turn.

@@ -2620,6 +2620,9 @@ impl Engine {
             super::engine::approval::ApprovalDecision::TimedOut { id } => {
                 (id.clone(), ChildApprovalOutcome::Denied)
             }
+            super::engine::approval::ApprovalDecision::Unavailable { id } => {
+                (id.clone(), ChildApprovalOutcome::Unavailable)
+            }
             // A sandbox retry only exists for the parent's own tool call.
             super::engine::approval::ApprovalDecision::RetryWithPolicy { .. } => return false,
         };
@@ -7738,6 +7741,9 @@ pub(crate) enum MockApprovalEvent {
     TimedOut {
         id: String,
     },
+    Unavailable {
+        id: String,
+    },
     RetryWithPolicy {
         id: String,
         policy: crate::sandbox::SandboxPolicy,
@@ -7751,6 +7757,7 @@ impl MockEngineHandle {
             ApprovalDecision::Approved { id } => Some(MockApprovalEvent::Approved { id }),
             ApprovalDecision::Denied { id } => Some(MockApprovalEvent::Denied { id }),
             ApprovalDecision::TimedOut { id } => Some(MockApprovalEvent::TimedOut { id }),
+            ApprovalDecision::Unavailable { id } => Some(MockApprovalEvent::Unavailable { id }),
             ApprovalDecision::RetryWithPolicy { id, policy } => {
                 Some(MockApprovalEvent::RetryWithPolicy { id, policy })
             }

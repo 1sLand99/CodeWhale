@@ -22973,6 +22973,212 @@ mod child_permission_gate {
         assert_eq!(manager.read().await.pending_child_approvals(), 0);
     }
 
+    /// Wait for the non-droppable progress that ends `approval_id`'s wait.
+    async fn next_wait_end(
+        rx: &mut tokio::sync::mpsc::Receiver<Event>,
+        approval_id: &str,
+    ) -> AgentWorkerStatus {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(event) = rx.recv().await {
+                if let Event::AgentProgress { activity, .. } = event
+                    && activity.approval_id.as_deref() == Some(approval_id)
+                    && activity.worker_status != AgentWorkerStatus::WaitingForUser
+                {
+                    return activity.worker_status;
+                }
+            }
+            panic!("event channel closed before the wait ended");
+        })
+        .await
+        .expect("the end of the wait reaches hosts")
+    }
+
+    /// A running agent in the gate's own manager, so cancel and status paths
+    /// see the same pending store the gate writes.
+    async fn running_gate_agent(
+        registry: &SubAgentToolRegistry,
+        manager: &SharedSubAgentManager,
+        name: &str,
+    ) -> String {
+        let mut manager = manager.write().await;
+        let agent_id = insert_running_agent(&mut manager, name);
+        manager.register_worker_for_session(
+            make_worker_spec(&agent_id, registry.gate_runtime.context.workspace.clone()),
+            "guardian-test-session",
+            None,
+        );
+        agent_id
+    }
+
+    #[tokio::test]
+    async fn cancel_while_pending_withdraws_request_with_cancelled_receipt() {
+        let (registry, mut rx, manager) = worker_registry(ApprovalMode::Suggest, false, true, None);
+        let (receipt_store, session_id) = receipt_context(&registry);
+        let agent_id = running_gate_agent(&registry, &manager, "cancel_pending").await;
+        let registry = Arc::new(registry);
+        let task = tokio::spawn({
+            let registry = Arc::clone(&registry);
+            let agent_id = agent_id.clone();
+            async move {
+                let _ = registry
+                    .execute(&agent_id, "bash", json!({"command": "echo gated"}))
+                    .await;
+            }
+        });
+        let approval_id = next_child_approval_id(&mut rx).await;
+        {
+            let mut manager = manager.write().await;
+            let record = manager.get_worker_record(&agent_id).expect("record");
+            assert_eq!(record.status, AgentWorkerStatus::WaitingForUser);
+            // The agent's task is the gate's task, so cancel aborts the wait.
+            if let Some(old) = manager
+                .agents
+                .get_mut(&agent_id)
+                .and_then(|agent| agent.task_handle.replace(task))
+            {
+                old.abort();
+            }
+            manager.cancel_agent(&agent_id).expect("cancel");
+            assert_eq!(manager.pending_child_approvals(), 0);
+            let record = manager.get_worker_record(&agent_id).expect("record");
+            assert_ne!(
+                record.status,
+                AgentWorkerStatus::WaitingForUser,
+                "a cancelled agent never reports waiting on a person"
+            );
+            assert!(record.pending_request.is_none());
+            assert_ne!(record.recommended_action.action, "tell_user");
+        }
+        let status = next_wait_end(&mut rx, &approval_id).await;
+        assert!(
+            status.is_terminal(),
+            "withdrawal for an ended agent: {status:?}"
+        );
+        assert_completed_receipt(&receipt_store, &session_id, ApprovalOutcome::Cancelled);
+        // A late answer finds nobody waiting and applies to nothing.
+        assert!(
+            !manager
+                .write()
+                .await
+                .resolve_child_approval(&approval_id, ChildApprovalOutcome::Approved)
+        );
+    }
+
+    #[tokio::test]
+    async fn wall_deadline_ends_pending_wait_with_receipt() {
+        let (registry, mut rx, manager) = worker_registry(ApprovalMode::Suggest, false, true, None);
+        let (receipt_store, session_id) = receipt_context(&registry);
+        let work_deadline = Instant::now() + Duration::from_millis(300);
+        let ran = run_tool_with_person_aware_timeout(
+            Duration::from_secs(60),
+            Some(work_deadline),
+            &registry.person_wait,
+            registry.execute("agent_gate", "bash", json!({"command": "echo gated"})),
+        )
+        .await;
+        assert!(
+            ran.is_none(),
+            "the wall-clock deadline still ends the agent"
+        );
+        let approval_id = next_child_approval_id(&mut rx).await;
+        let status = next_wait_end(&mut rx, &approval_id).await;
+        assert!(status.is_terminal(), "{status:?}");
+        assert_eq!(manager.read().await.pending_child_approvals(), 0);
+        assert_completed_receipt(&receipt_store, &session_id, ApprovalOutcome::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn pending_approval_longer_than_tool_timeout_is_answered_and_runs() {
+        let (registry, mut rx, manager) = worker_registry(ApprovalMode::Suggest, false, true, None);
+        let (receipt_store, session_id) = receipt_context(&registry);
+        let tool_timeout = Duration::from_millis(200);
+        let manager_for_answer = Arc::clone(&manager);
+        let answerer = tokio::spawn(async move {
+            let id = next_child_approval_id(&mut rx).await;
+            // The person takes several tool timeouts to decide.
+            tokio::time::sleep(Duration::from_millis(900)).await;
+            assert!(
+                manager_for_answer
+                    .write()
+                    .await
+                    .resolve_child_approval(&id, ChildApprovalOutcome::Approved)
+            );
+        });
+        let output = run_tool_with_person_aware_timeout(
+            tool_timeout,
+            None,
+            &registry.person_wait,
+            registry.execute("agent_gate", "bash", json!({"command": "echo gated-ran"})),
+        )
+        .await
+        .expect("the approval wait never spends the tool timeout")
+        .expect("the approved call runs");
+        answerer.await.expect("answerer");
+        assert!(output.contains("gated-ran"), "{output}");
+        assert_completed_receipt(&receipt_store, &session_id, ApprovalOutcome::ApprovedOnce);
+
+        // Without a person wait the same bound still fires.
+        let clock = PersonWaitClock::default();
+        let slow = run_tool_with_person_aware_timeout(
+            tool_timeout,
+            None,
+            &clock,
+            tokio::time::sleep(Duration::from_millis(900)),
+        )
+        .await;
+        assert!(slow.is_none(), "ordinary tool work keeps its timeout");
+    }
+
+    #[tokio::test]
+    async fn session_close_withdraws_old_children_requests() {
+        let (registry, _rx, manager) = worker_registry(ApprovalMode::Suggest, false, true, None);
+        let agent_id = running_gate_agent(&registry, &manager, "old_session_child").await;
+        let mut manager = manager.write().await;
+        let (_id, receiver) = manager.register_child_approval(&agent_id, "bash", "held");
+        assert!(manager.finalize_session_close_for_session("workspace") > 0);
+        assert_eq!(
+            manager.pending_child_approvals(),
+            0,
+            "a conversation boundary ends its children's waits"
+        );
+        assert!(
+            receiver.await.is_err(),
+            "a live waiter sees its channel close"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_event_channel_still_delivers_child_approval_retirement() {
+        let (registry, _rx, _manager) = worker_registry(ApprovalMode::Suggest, false, true, None);
+        let mut runtime = registry.gate_runtime;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        tx.try_send(Event::status("host is busy")).unwrap();
+        runtime.event_tx = Some(tx);
+        let delivery = announce_child_approval_wait_ended(
+            &runtime,
+            "agent_busy",
+            "agent:agent_busy:approval:boot:1",
+            "bash",
+            AgentWorkerStatus::Cancelled,
+            "agent stopped".to_string(),
+        );
+        tokio::pin!(delivery);
+        assert!(
+            futures_util::poll!(&mut delivery).is_pending(),
+            "retirement waits for channel capacity instead of dropping the event"
+        );
+        assert!(matches!(rx.recv().await, Some(Event::Status { .. })));
+        tokio::time::timeout(Duration::from_secs(1), delivery)
+            .await
+            .expect("retirement is delivered once the host drains");
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Event::AgentProgress { activity, .. })
+                if activity.approval_id.as_deref() == Some("agent:agent_busy:approval:boot:1")
+                    && activity.worker_status == AgentWorkerStatus::Cancelled
+        ));
+    }
+
     #[tokio::test]
     async fn cancelled_child_approval_persists_cancelled() {
         let (registry, mut rx, manager) = worker_registry(ApprovalMode::Suggest, false, true, None);

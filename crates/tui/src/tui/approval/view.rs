@@ -301,10 +301,6 @@ impl ModalView for ApprovalView {
         Some(&self.request.id)
     }
 
-    fn approval_requested_at(&self) -> Option<Instant> {
-        Some(self.requested_at)
-    }
-
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }

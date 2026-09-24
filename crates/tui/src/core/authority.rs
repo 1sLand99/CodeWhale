@@ -661,9 +661,10 @@ pub(crate) enum ApprovalRequestDisposition {
 ///
 /// `session_approved` / `session_denied` are the caller's lookups into the
 /// session approval caches (grouping key or tool name / exact approval key).
-/// The branch order is the legacy handler's order: session denial, then the
-/// full-access forced-hold denial, then auto-approval (full access or a
-/// session grant), then the `Never` denial, and only finally a modal.
+/// The branch order: session denial, then the Auto-Review hold, then the
+/// full-access forced-hold denial, then the `Never` denial — the live posture
+/// wins over any remembered grant (approvals J) — then auto-approval (full
+/// access or a session grant), and only finally a modal.
 #[must_use]
 pub(crate) fn resolve_approval_request_disposition(
     authority: &TurnAuthority,

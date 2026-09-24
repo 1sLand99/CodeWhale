@@ -25324,7 +25324,7 @@ async fn recoverable_stream_error_after_local_cancel_resolves_stale_approval() {
     assert!(resolve_stale_parent_request(&app, &mock.handle, &stream_drop_approval_event()).await);
     assert_eq!(
         mock.recv_approval_event().await,
-        Some(crate::core::engine::MockApprovalEvent::Denied {
+        Some(crate::core::engine::MockApprovalEvent::Unavailable {
             id: "stream-drop-tool".to_string()
         })
     );
@@ -25438,14 +25438,15 @@ async fn child_approval_survives_local_cancel_suppression() {
 }
 
 #[tokio::test]
-async fn stale_parent_approval_is_denied_explicitly_not_dropped() {
+async fn stale_parent_approval_is_resolved_unavailable_not_dropped() {
     let mut app = ask_posture_app();
     app.is_loading = false;
     let mut mock = mock_engine_handle();
     drain_approval_event(&mut app, &mock.handle, stream_drop_approval_event()).await;
+    // Answered explicitly, and never recorded as the person's denial.
     assert_eq!(
         mock.recv_approval_event().await,
-        Some(crate::core::engine::MockApprovalEvent::Denied {
+        Some(crate::core::engine::MockApprovalEvent::Unavailable {
             id: "stream-drop-tool".to_string()
         })
     );
@@ -25499,14 +25500,16 @@ async fn esc_on_child_card_keeps_badge_and_does_not_cancel_turn() {
     assert!(rows[0].contains("Approval needed in"), "{rows:?}");
     assert!(rows[0].contains("/agents"), "{rows:?}");
 
-    // `/agents` → the agent re-raises the hidden card.
-    assert!(crate::tui::pending_requests::repush_for_agent(
-        &mut app,
-        "agent_a",
-        crate::config::ApprovalDefaultSelection::Deny,
-        None,
-    ));
+    // `/agents` → the agent: the same handler `ViewEvent::OpenAgentTranscript`
+    // runs re-raises the hidden card on top of the agent's transcript.
+    open_agent_transcript(&mut app, &Config::default(), "agent_a");
     assert_eq!(top_child_owner(&mut app).as_deref(), Some("agent_a"));
+    assert!(
+        build_pending_input_preview(&app)
+            .pending_approvals
+            .is_empty(),
+        "the footer row goes away once the card is back on top"
+    );
     assert!(
         !crate::tui::pending_requests::repush_for_agent(
             &mut app,
@@ -25607,6 +25610,228 @@ fn typeahead_before_card_does_not_answer() {
     assert_eq!(app.view_stack.top_kind(), Some(ModalKind::Approval));
 }
 
+#[test]
+fn second_quick_y_does_not_answer_the_card_it_reveals() {
+    let mut app = ask_posture_app();
+    for (id, command) in [
+        ("agent:agent_a:approval:boot:10", "cargo build"),
+        ("agent:agent_b:approval:boot:11", "cargo test"),
+    ] {
+        push_approval_request_view(
+            &mut app,
+            id,
+            "exec_shell",
+            "wants to run 'exec_shell'",
+            &serde_json::json!({"command": command}),
+            "k",
+            "g",
+            None,
+            crate::config::ApprovalDefaultSelection::Deny,
+            None,
+        );
+    }
+    std::thread::sleep(Duration::from_millis(2));
+    // Two `y` presses the terminal saw back to back, both after the top card
+    // was visible and before the one beneath it was revealed.
+    let first_y = Instant::now();
+    let second_y = Instant::now();
+    std::thread::sleep(Duration::from_millis(2));
+    let y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+
+    let answered = route_key_to_view_stack(&mut app, y, first_y).expect("top card answers");
+    assert!(
+        matches!(
+            answered.as_slice(),
+            [ViewEvent::ApprovalDecision { tool_id, .. }] if tool_id == "agent:agent_b:approval:boot:11"
+        ),
+        "{answered:?}"
+    );
+    assert_eq!(
+        app.view_stack.top_approval_id(),
+        Some("agent:agent_a:approval:boot:10")
+    );
+    assert!(
+        route_key_to_view_stack(&mut app, y, second_y).is_none(),
+        "a key typed before this card was revealed must not answer it"
+    );
+    assert_eq!(
+        app.view_stack.top_approval_id(),
+        Some("agent:agent_a:approval:boot:10"),
+        "the revealed card is still waiting for its own answer"
+    );
+    // A key pressed after the card became visible answers it.
+    assert!(route_key_to_view_stack(&mut app, y, Instant::now()).is_some());
+    assert!(app.view_stack.is_empty());
+}
+
+fn child_progress_event(
+    owner_session_id: &str,
+    agent_id: &str,
+    worker_status: crate::tools::subagent::AgentWorkerStatus,
+    approval_id: Option<&str>,
+) -> EngineEvent {
+    let mut activity = crate::core::events::AgentProgressEventMeta::new(worker_status);
+    if let Some(approval_id) = approval_id {
+        activity = activity.with_approval_id(approval_id);
+    }
+    EngineEvent::AgentProgress {
+        owner_session_id: owner_session_id.to_string(),
+        id: agent_id.to_string(),
+        status: "progress".to_string(),
+        activity,
+        parent_run_id: None,
+        spawn_depth: 1,
+    }
+}
+
+#[tokio::test]
+async fn withdrawal_retires_hidden_card_footer_and_web_mirror() {
+    let mut app = ask_posture_app();
+    app.is_loading = true;
+    app.current_session_id = Some("current".to_string());
+    let mock = mock_engine_handle();
+    let child_id = "agent:agent_a:approval:boot:12";
+    drain_approval_event(&mut app, &mock.handle, child_approval_event(child_id)).await;
+    let gate = app.remote_control.record_remote_approval(
+        child_id,
+        "exec_shell",
+        "agent_a wants to run 'exec_shell'",
+        &serde_json::json!({}),
+        "k",
+        None,
+    );
+    // Hidden with Esc: only the footer row and the web copy remain.
+    app.view_stack
+        .handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(build_pending_input_preview(&app).pending_approvals.len(), 1);
+
+    // The agent was cancelled: its non-droppable withdrawal arrives. It is
+    // honoured by identity even when stamped with another session.
+    let withdrawal = child_progress_event(
+        "some-other-session",
+        "agent_a",
+        crate::tools::subagent::AgentWorkerStatus::Cancelled,
+        Some(child_id),
+    );
+    assert!(
+        crate::tui::pending_requests::observe_engine_event(&mut app, &withdrawal),
+        "a withdrawal for an ended agent is consumed"
+    );
+    assert!(app.pending_child_requests.is_empty());
+    assert!(
+        build_pending_input_preview(&app)
+            .pending_approvals
+            .is_empty()
+    );
+    assert!(app.view_stack.is_empty());
+    assert!(
+        app.remote_control.take_pending_approval(&gate).is_none(),
+        "the web mirror no longer offers the decision"
+    );
+
+    // The card itself (not hidden) is retired the same way, and a running
+    // agent's end-of-wait progress still reaches the normal handler.
+    let next_id = "agent:agent_a:approval:boot:13";
+    drain_approval_event(&mut app, &mock.handle, child_approval_event(next_id)).await;
+    let resumed = child_progress_event(
+        "current",
+        "agent_a",
+        crate::tools::subagent::AgentWorkerStatus::RunningTool,
+        Some(next_id),
+    );
+    assert!(!crate::tui::pending_requests::observe_engine_event(
+        &mut app, &resumed
+    ));
+    assert!(app.view_stack.is_empty());
+    assert!(app.pending_child_requests.is_empty());
+}
+
+#[tokio::test]
+async fn other_conversations_child_request_is_answered_unavailable_not_shown() {
+    let mut app = ask_posture_app();
+    app.is_loading = true;
+    app.current_session_id = Some("current".to_string());
+    // agent_old belongs to the conversation that was switched away from.
+    crate::tui::pending_requests::observe_engine_event(
+        &mut app,
+        &child_progress_event(
+            "previous",
+            "agent_old",
+            crate::tools::subagent::AgentWorkerStatus::Running,
+            None,
+        ),
+    );
+    let mut mock = mock_engine_handle();
+    let foreign = "agent:agent_old:approval:boot:14";
+    drain_approval_event(&mut app, &mock.handle, child_approval_event(foreign)).await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), mock.recv_approval_event())
+            .await
+            .expect("the old conversation's request is resolved promptly"),
+        Some(crate::core::engine::MockApprovalEvent::Unavailable {
+            id: foreign.to_string()
+        })
+    );
+    assert!(
+        app.view_stack.is_empty(),
+        "never shown in this conversation"
+    );
+    assert!(app.pending_child_requests.is_empty());
+
+    // This conversation's own child is shown as usual.
+    crate::tui::pending_requests::observe_engine_event(
+        &mut app,
+        &child_progress_event(
+            "current",
+            "agent_new",
+            crate::tools::subagent::AgentWorkerStatus::Running,
+            None,
+        ),
+    );
+    drain_approval_event(
+        &mut app,
+        &mock.handle,
+        child_approval_event("agent:agent_new:approval:boot:15"),
+    )
+    .await;
+    assert_eq!(top_child_owner(&mut app).as_deref(), Some("agent_new"));
+}
+
+#[tokio::test]
+async fn stale_elevation_is_resolved_unavailable_not_dropped() {
+    let elevation = EngineEvent::ElevationRequired {
+        tool_id: "elevation-tool".to_string(),
+        tool_name: "exec_shell".to_string(),
+        command: Some("cargo build".to_string()),
+        denial_reason: "write outside the sandbox".to_string(),
+        blocked_network: false,
+        blocked_write: true,
+    };
+    // Neither stream matcher hides it any more.
+    assert!(!ignore_stale_stream_event_while_idle(&elevation));
+    assert!(!suppress_engine_event_after_local_cancel(&elevation));
+
+    for cancelled_locally in [false, true] {
+        let mut app = ask_posture_app();
+        app.is_loading = false;
+        app.suppress_stream_events_until_turn_complete = cancelled_locally;
+        let mut mock = mock_engine_handle();
+        assert!(resolve_stale_parent_request(&app, &mock.handle, &elevation).await);
+        assert_eq!(
+            mock.recv_approval_event().await,
+            Some(crate::core::engine::MockApprovalEvent::Unavailable {
+                id: "elevation-tool".to_string()
+            })
+        );
+        assert!(app.view_stack.is_empty());
+    }
+    // A live turn's elevation is not stale and goes to its normal handler.
+    let mut app = ask_posture_app();
+    app.is_loading = true;
+    let mock = mock_engine_handle();
+    assert!(!resolve_stale_parent_request(&app, &mock.handle, &elevation).await);
+}
+
 #[tokio::test]
 async fn web_decision_dismisses_buried_child_card() {
     // Web mirroring needs an active parent turn (see the C1 known limit).
@@ -25672,29 +25897,24 @@ async fn web_decision_dismisses_buried_child_card() {
 }
 
 #[tokio::test]
-async fn child_progress_with_resolved_id_clears_card() {
-    use crate::core::events::AgentProgressEventMeta;
+async fn child_progress_still_waiting_keeps_card() {
     use crate::tools::subagent::AgentWorkerStatus;
     let mut app = ask_posture_app();
     let mock = mock_engine_handle();
     let child_id = "agent:agent_a:approval:boot:8";
     drain_approval_event(&mut app, &mock.handle, child_approval_event(child_id)).await;
-
-    let still_waiting =
-        AgentProgressEventMeta::new(AgentWorkerStatus::WaitingForUser).with_approval_id(child_id);
-    assert!(!crate::tui::pending_requests::observe_progress(
+    let still_waiting = child_progress_event(
+        "current",
+        "agent_a",
+        AgentWorkerStatus::WaitingForUser,
+        Some(child_id),
+    );
+    assert!(!crate::tui::pending_requests::observe_engine_event(
         &mut app,
         &still_waiting
     ));
     assert_eq!(app.pending_child_requests.len(), 1);
-
-    let resumed =
-        AgentProgressEventMeta::new(AgentWorkerStatus::RunningTool).with_approval_id(child_id);
-    assert!(crate::tui::pending_requests::observe_progress(
-        &mut app, &resumed
-    ));
-    assert!(app.pending_child_requests.is_empty());
-    assert!(app.view_stack.is_empty());
+    assert!(app.view_stack.contains_approval_id(child_id));
 }
 
 #[tokio::test]

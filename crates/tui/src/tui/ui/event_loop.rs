@@ -1954,6 +1954,12 @@ pub(crate) async fn run_event_loop(
                 let redraw_requested_before_event = received_engine_event;
                 received_engine_event = true;
                 capture_turn_started_metadata(app, &event);
+                // Child approval bookkeeping runs before every filter: it is
+                // keyed by approval id and agent, not by the active session,
+                // so a withdrawal always retires its card (approvals M1).
+                if crate::tui::pending_requests::observe_engine_event(app, &event) {
+                    continue;
+                }
                 if app.suppress_stream_events_until_turn_complete {
                     if matches!(event, EngineEvent::TurnStarted { .. }) {
                         // Ctrl+C can race with the engine's per-turn token
@@ -3458,7 +3464,6 @@ pub(crate) async fn run_event_loop(
                         &owner_session_id,
                     ) =>
                     {
-                        crate::tui::pending_requests::observe_progress(app, &activity);
                         let display = bound_agent_activity_text(&friendly_subagent_progress(
                             app,
                             &id,
@@ -5564,16 +5569,12 @@ pub(crate) async fn run_event_loop(
                     app.needs_redraw = true;
                     continue;
                 }
-                // Type-ahead guard (approvals C1): a key the terminal saw
-                // before the approval card on top was raised was meant for
-                // something else and must never answer that card.
-                if app.view_stack.key_predates_top_approval(event_observed_at) {
-                    app.needs_redraw = true;
-                    continue;
-                }
                 let closing_work_inspector = app.work_surface.opened.is_some()
                     && app.view_stack.top_kind() == Some(ModalKind::Pager);
-                let events = app.view_stack.handle_key(key);
+                let Some(events) = route_key_to_view_stack(app, key, event_observed_at) else {
+                    app.needs_redraw = true;
+                    continue;
+                };
                 clear_work_inspector_after_pager_close(app, closing_work_inspector);
                 app.needs_redraw = true;
                 if handle_view_events_boxed(
@@ -7665,4 +7666,19 @@ pub(super) async fn handle_approval_required_event(
             );
         }
     }
+}
+
+/// Route one key to the view stack, unless the terminal saw it before the
+/// approval card on top became visible (approvals M2): such a key was typed
+/// at something else — often the card that was just answered above this
+/// one — and must never answer this card. `None` means it was discarded.
+pub(super) fn route_key_to_view_stack(
+    app: &mut App,
+    key: KeyEvent,
+    observed_at: Instant,
+) -> Option<Vec<ViewEvent>> {
+    if app.view_stack.key_predates_top_approval(observed_at) {
+        return None;
+    }
+    Some(app.view_stack.handle_key(key))
 }

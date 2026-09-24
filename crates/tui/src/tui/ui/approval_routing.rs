@@ -128,18 +128,39 @@ pub(super) fn resolve_ui_approval_disposition(
     )
 }
 
-/// While the parent is idle or its turn was cancelled locally, a request the
-/// parent owns can only be stale. Answer it explicitly — an approval gets a
-/// deny, a question a cancel — so nothing waits on a card that never shows.
-/// A child agent's request is never stale on this basis: the child is still
-/// running and waiting on the person, so it falls through to the normal
-/// handler. Returns `true` when the event was consumed here (approvals C1).
+/// Answer, explicitly, a request that must not open a card here, so nothing
+/// waits on a card that never shows (approvals C1):
+///
+/// - a child agent's approval from another conversation (the agent is known
+///   to belong elsewhere) is answered `unavailable`;
+/// - while the parent is idle or its turn was cancelled locally, a request
+///   the parent owns can only be stale: an approval or sandbox elevation is
+///   answered `unavailable`, a question is cancelled. Neither is recorded
+///   as the person's denial.
+///
+/// A child agent's request from this conversation is never stale on the
+/// idle/cancel basis: the child is still running and waiting on the person,
+/// so it falls through to the normal handler. Returns `true` when the event
+/// was consumed here.
 pub(super) async fn resolve_stale_parent_request(
     app: &App,
     engine_handle: &EngineHandle,
     event: &crate::core::events::Event,
 ) -> bool {
     use crate::core::events::Event;
+    if let Event::ApprovalRequired { id, tool_name, .. } = event
+        && crate::tui::pending_requests::is_foreign_child_request(app, id)
+    {
+        log_sensitive_event(
+            "tool.approval.foreign_session_child_resolved",
+            serde_json::json!({
+                "tool_name": tool_name,
+                "session_id": app.current_session_id,
+            }),
+        );
+        let _ = engine_handle.deny_tool_call_unavailable(id.clone()).await;
+        return true;
+    }
     if !(app.suppress_stream_events_until_turn_complete || !app.is_loading) {
         return false;
     }
@@ -154,7 +175,22 @@ pub(super) async fn resolve_stale_parent_request(
                     "session_id": app.current_session_id,
                 }),
             );
-            let _ = engine_handle.deny_tool_call(id.clone()).await;
+            let _ = engine_handle.deny_tool_call_unavailable(id.clone()).await;
+            true
+        }
+        Event::ElevationRequired {
+            tool_id, tool_name, ..
+        } => {
+            log_sensitive_event(
+                "tool.sandbox.stale_elevation_resolved",
+                serde_json::json!({
+                    "tool_name": tool_name,
+                    "session_id": app.current_session_id,
+                }),
+            );
+            let _ = engine_handle
+                .deny_tool_call_unavailable(tool_id.clone())
+                .await;
             true
         }
         Event::UserInputRequired { id, .. }

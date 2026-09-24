@@ -8,7 +8,8 @@
 
 use std::time::Instant;
 
-use crate::tools::subagent::SubAgentManager;
+use crate::core::events::Event as EngineEvent;
+use crate::tools::subagent::{AgentWorkerStatus, SubAgentManager};
 use crate::tui::app::App;
 use crate::tui::approval::ApprovalOwner;
 use codewhale_localization::MessageId;
@@ -73,22 +74,80 @@ pub(crate) fn resolve(app: &mut App, approval_id: &str) -> bool {
     known || removed_card
 }
 
-/// A progress event that names a child approval id and is no longer waiting
-/// means that wait ended (answered anywhere, cancelled, stopped): retire the
-/// card and entry by identity.
-pub(crate) fn observe_progress(
-    app: &mut App,
-    activity: &crate::core::events::AgentProgressEventMeta,
-) -> bool {
-    match activity.approval_id.as_deref() {
-        Some(approval_id)
-            if activity.worker_status
-                != crate::tools::subagent::AgentWorkerStatus::WaitingForUser =>
-        {
-            resolve(app, approval_id)
+/// The engine ended the wait (the agent's work ended, or the decision was
+/// made elsewhere): retire the card and entry, and withdraw the web
+/// mirror's copy so no surface keeps offering a decision nobody is waiting
+/// on. A local decision uses [`resolve`] instead — the mirror is told the
+/// decision itself.
+pub(crate) fn retire(app: &mut App, approval_id: &str) -> bool {
+    let retired = resolve(app, approval_id);
+    let withdrawn = app.remote_control.withdraw_pending_approval(approval_id);
+    retired || withdrawn
+}
+
+/// Child-approval bookkeeping for one engine event, run before any session
+/// or idle filter (approvals M1, minor 4):
+///
+/// - agent lifecycle events record which conversation owns each agent, so a
+///   request from another conversation's child is never shown here;
+/// - a progress event that names a child approval id and is no longer
+///   waiting ends that wait by identity — answered anywhere, cancelled,
+///   stopped — whatever conversation is active. The engine sends it without
+///   back-pressure drops.
+///
+/// Returns `true` when the event was only a withdrawal for an agent that has
+/// already ended (terminal status): nothing else should process it.
+pub(crate) fn observe_engine_event(app: &mut App, event: &EngineEvent) -> bool {
+    match event {
+        EngineEvent::AgentSpawned {
+            owner_session_id,
+            id,
+            ..
+        }
+        | EngineEvent::AgentComplete {
+            owner_session_id,
+            id,
+            ..
+        } => {
+            note_agent_session(app, id, owner_session_id);
+            false
+        }
+        EngineEvent::AgentProgress {
+            owner_session_id,
+            id,
+            activity,
+            ..
+        } => {
+            note_agent_session(app, id, owner_session_id);
+            match activity.approval_id.as_deref() {
+                Some(approval_id)
+                    if activity.worker_status != AgentWorkerStatus::WaitingForUser =>
+                {
+                    retire(app, approval_id);
+                    activity.worker_status.is_terminal()
+                }
+                _ => false,
+            }
         }
         _ => false,
     }
+}
+
+fn note_agent_session(app: &mut App, agent_id: &str, owner_session_id: &str) {
+    if !owner_session_id.is_empty() {
+        app.child_agent_sessions
+            .insert(agent_id.to_string(), owner_session_id.to_string());
+    }
+}
+
+/// Whether `approval_id` is a child request from an agent known to belong to
+/// a conversation other than the active one. An agent this host has not seen
+/// yet is not foreign: its request is shown rather than lost.
+#[must_use]
+pub(crate) fn is_foreign_child_request(app: &App, approval_id: &str) -> bool {
+    child_agent_id(approval_id)
+        .and_then(|agent_id| app.child_agent_sessions.get(agent_id))
+        .is_some_and(|owner| app.current_session_id.as_deref() != Some(owner.as_str()))
 }
 
 /// The agent finished or stopped: nothing it asked for is pending any more.
@@ -100,15 +159,21 @@ pub(crate) fn clear_for_agent(app: &mut App, agent_id: &str) {
         .map(|(id, _)| id.clone())
         .collect();
     for id in ids {
-        resolve(app, &id);
+        retire(app, &id);
     }
 }
 
-/// A different conversation owns none of this one's pending requests.
+/// A different conversation owns none of this one's pending requests
+/// (session switch, `/new`, `/clear`). The engine side needs no answer from
+/// here: every conversation boundary finalizes the old conversation's running
+/// children (`finalize_session_close_for_session`), which withdraws their
+/// pending requests and records each as `cancelled` — never as a denial.
+/// A late request from such a child is answered `unavailable` on arrival
+/// (`is_foreign_child_request`).
 pub(crate) fn clear_all(app: &mut App) {
     let ids: Vec<String> = app.pending_child_requests.keys().cloned().collect();
     for id in ids {
-        resolve(app, &id);
+        retire(app, &id);
     }
 }
 

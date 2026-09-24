@@ -3711,6 +3711,209 @@ pub(crate) fn child_approval_keys(agent_id: &str, name: &str, input: &Value) -> 
 pub enum ChildApprovalOutcome {
     Approved,
     Denied,
+    /// The host could not put the request in front of a person (for example
+    /// it belongs to a conversation that is no longer shown). Recorded as
+    /// `unavailable`, never as the person's denial.
+    Unavailable,
+}
+
+/// Time a child's tool call has spent waiting on a person's approval
+/// decision (CURRENT_DECISIONS §21). The per-tool timeout does not count it —
+/// an approval gets a decision or stays pending until its agent's work ends,
+/// never timed out into a deny. The wall-clock deadline still counts it.
+#[derive(Debug, Default, Clone, Copy)]
+struct PersonWaitState {
+    waiting_since: Option<Instant>,
+    completed: Duration,
+}
+
+impl PersonWaitState {
+    fn paused_total(&self, now: Instant) -> Duration {
+        self.completed
+            + self
+                .waiting_since
+                .map_or(Duration::ZERO, |since| now.saturating_duration_since(since))
+    }
+}
+
+/// One child's person-wait clock: the approval gate pauses it while it waits,
+/// and [`run_tool_with_person_aware_timeout`] stops the tool timer meanwhile.
+#[derive(Debug)]
+pub(crate) struct PersonWaitClock(tokio::sync::watch::Sender<PersonWaitState>);
+
+impl Default for PersonWaitClock {
+    fn default() -> Self {
+        Self(tokio::sync::watch::channel(PersonWaitState::default()).0)
+    }
+}
+
+impl PersonWaitClock {
+    /// Pause the tool timer until the returned guard drops.
+    fn pause(self: &Arc<Self>) -> PersonWaitPause {
+        self.0.send_modify(|state| {
+            state.waiting_since.get_or_insert_with(Instant::now);
+        });
+        PersonWaitPause(Arc::clone(self))
+    }
+}
+
+struct PersonWaitPause(Arc<PersonWaitClock>);
+
+impl Drop for PersonWaitPause {
+    fn drop(&mut self) {
+        self.0.0.send_modify(|state| {
+            if let Some(since) = state.waiting_since.take() {
+                state.completed += since.elapsed();
+            }
+        });
+    }
+}
+
+/// Run one child tool call under `tool_timeout`, not counting time spent
+/// waiting on a person's approval decision, and under the wall
+/// `work_deadline`, which does count it (§21). `None` means a bound fired and
+/// the call was dropped.
+async fn run_tool_with_person_aware_timeout<F: std::future::Future>(
+    tool_timeout: Duration,
+    work_deadline: Option<Instant>,
+    clock: &PersonWaitClock,
+    future: F,
+) -> Option<F::Output> {
+    let mut changes = clock.0.subscribe();
+    let started = Instant::now();
+    let paused_before = clock.0.borrow().paused_total(started);
+    tokio::pin!(future);
+    loop {
+        let now = Instant::now();
+        let state = *changes.borrow_and_update();
+        let tool_deadline = state.waiting_since.is_none().then(|| {
+            started + tool_timeout + state.paused_total(now).saturating_sub(paused_before)
+        });
+        let deadline = match (tool_deadline, work_deadline) {
+            (Some(tool), Some(work)) => Some(tool.min(work)),
+            (tool, work) => tool.or(work),
+        };
+        if deadline.is_some_and(|deadline| now >= deadline) {
+            return None;
+        }
+        tokio::select! {
+            output = &mut future => return Some(output),
+            () = async {
+                match deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                    None => std::future::pending().await,
+                }
+            } => {}
+            // The sender outlives this call (`clock` is borrowed), so this
+            // only wakes on a pause or resume.
+            _ = changes.changed() => {}
+        }
+    }
+}
+
+/// Ends a child's approval wait honestly when the gate future is dropped
+/// before it could (task abort on cancel or session close, the wall-clock
+/// deadline): forget the pending entry, write a `cancelled` receipt — the
+/// person did not decide — and tell hosts through a non-droppable progress
+/// event so the card, footer row, and web mirror retire (approvals M1).
+struct ChildApprovalWaitGuard {
+    armed: Option<(SubAgentRuntime, String, String, String)>,
+}
+
+impl ChildApprovalWaitGuard {
+    fn armed(runtime: &SubAgentRuntime, agent_id: &str, approval_id: &str, tool: &str) -> Self {
+        Self {
+            armed: Some((
+                runtime.clone(),
+                agent_id.to_string(),
+                approval_id.to_string(),
+                tool.to_string(),
+            )),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = None;
+    }
+}
+
+impl Drop for ChildApprovalWaitGuard {
+    fn drop(&mut self) {
+        let Some((runtime, agent_id, approval_id, tool)) = self.armed.take() else {
+            return;
+        };
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            if let Ok(mut manager) = runtime.manager.try_write() {
+                manager.cancel_child_approval(&approval_id);
+            }
+            return;
+        };
+        handle.spawn(async move {
+            runtime
+                .manager
+                .write()
+                .await
+                .cancel_child_approval(&approval_id);
+            let _ = commit_child_approval_receipt_for(
+                &runtime,
+                crate::approval_log::ApprovalReceipt::decided(
+                    approval_id.clone(),
+                    crate::approval_log::ApprovalOutcome::Cancelled,
+                ),
+            )
+            .await;
+            announce_child_approval_wait_ended(
+                &runtime,
+                &agent_id,
+                &approval_id,
+                &tool,
+                AgentWorkerStatus::Cancelled,
+                format!("stopped waiting on '{tool}': the agent's work ended"),
+            )
+            .await;
+        });
+    }
+}
+
+/// Tell hosts a child's approval wait ended, by identity, without the
+/// back-pressure drop routine progress takes: the event carries the approval
+/// id, so hosts retire exactly that card and pending entry. A terminal
+/// `worker_status` marks a withdrawal whose agent has already ended; its
+/// worker record is left alone.
+async fn announce_child_approval_wait_ended(
+    runtime: &SubAgentRuntime,
+    agent_id: &str,
+    approval_id: &str,
+    tool: &str,
+    worker_status: AgentWorkerStatus,
+    message: String,
+) {
+    if !worker_status.is_terminal()
+        && let Ok(mut manager) = runtime.manager.try_write()
+    {
+        manager.touch(agent_id);
+        manager.record_worker_event(
+            agent_id,
+            worker_status,
+            Some(message.clone()),
+            None,
+            Some(tool.to_string()),
+        );
+    }
+    if let Some(event_tx) = runtime.event_tx.as_ref() {
+        let _ = event_tx
+            .send(Event::AgentProgress {
+                owner_session_id: runtime.context.state_namespace.clone(),
+                id: agent_id.to_string(),
+                status: message,
+                activity: AgentProgressEventMeta::new(worker_status)
+                    .with_tool(tool.to_string())
+                    .with_approval_id(approval_id.to_string()),
+                parent_run_id: runtime.parent_agent_id.clone(),
+                spawn_depth: runtime.spawn_depth,
+            })
+            .await;
+    }
 }
 
 impl SubAgentManager {
@@ -3808,6 +4011,15 @@ impl SubAgentManager {
     /// contention) is no longer reported as waiting.
     fn overlay_pending_request(&self, record: &mut AgentWorkerRecord) {
         let agent_id = record.spec.worker_id.clone();
+        // Only a running agent can be waiting: a cancelled or finished one
+        // reports its stored terminal status, never `tell_user` (approvals M1).
+        if !self
+            .agents
+            .get(&agent_id)
+            .is_some_and(|agent| agent.status == SubAgentStatus::Running)
+        {
+            return;
+        }
         if let Some(pending) = self
             .pending_requests_for_agent(&agent_id)
             .into_iter()
@@ -3816,12 +4028,7 @@ impl SubAgentManager {
             record.status = AgentWorkerStatus::WaitingForUser;
             record.recommended_action = tell_user_recommended_action(&record.spec, &pending);
             record.pending_request = Some(pending);
-        } else if record.status == AgentWorkerStatus::WaitingForUser
-            && self
-                .agents
-                .get(&agent_id)
-                .is_some_and(|agent| agent.status == SubAgentStatus::Running)
-        {
+        } else if record.status == AgentWorkerStatus::WaitingForUser {
             record.status = AgentWorkerStatus::RunningTool;
             record.recommended_action =
                 recommended_action_for_worker_status(record.status, &record.spec);
@@ -3850,6 +4057,21 @@ impl SubAgentManager {
     pub fn cancel_child_approval(&mut self, id: &str) {
         self.child_approvals.remove(id);
         self.reported_pending.remove(id);
+    }
+
+    /// Forget every request `agent_id` is waiting on: its work ended. A gate
+    /// still alive sees its channel close (`unavailable`); an aborted gate's
+    /// drop guard writes the receipt and the withdrawal (approvals M1).
+    fn withdraw_child_approvals_for_agent(&mut self, agent_id: &str) {
+        let ids: Vec<String> = self
+            .child_approvals
+            .iter()
+            .filter(|(_, request)| request.agent_id == agent_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            self.cancel_child_approval(&id);
+        }
     }
 
     /// Number of child prompts currently awaiting a person.
@@ -8265,6 +8487,8 @@ impl SubAgentManager {
             .get(agent_id)
             .and_then(|record| record.spec.child_route.clone());
 
+        // Nothing a finished agent asked for is pending any more.
+        self.withdraw_child_approvals_for_agent(agent_id);
         if abort_task
             && let Some(handle) = self
                 .agents
@@ -13069,6 +13293,58 @@ async fn request_subagent_model_response_with_retries(
     }
 }
 
+/// Append one child approval receipt to the session's approval log.
+async fn commit_child_approval_receipt_for(
+    runtime: &SubAgentRuntime,
+    receipt: crate::approval_log::ApprovalReceipt,
+) -> Result<(), ToolError> {
+    let store = runtime
+        .approval_receipt_store
+        .clone()
+        .ok_or_else(|| {
+            tracing::warn!(
+                target: "approval",
+                "child approval receipt store was not installed"
+            );
+            ToolError::execution_failed(
+                "Approval evidence could not be committed; tool execution was blocked.".to_string(),
+            )
+        })?
+        .map_err(|error| {
+            tracing::warn!(
+                target: "approval",
+                %error,
+                "child approval receipt store is unavailable"
+            );
+            ToolError::execution_failed(
+                "Approval evidence could not be committed; tool execution was blocked.".to_string(),
+            )
+        })?;
+    let session_id = runtime.context.state_namespace.clone();
+    let write = tokio::task::spawn_blocking(move || store.append(&session_id, &receipt))
+        .await
+        .map_err(|error| {
+            tracing::warn!(
+                target: "approval",
+                %error,
+                "child approval receipt writer did not complete"
+            );
+            ToolError::execution_failed(
+                "Approval evidence could not be committed; tool execution was blocked.".to_string(),
+            )
+        })?;
+    write.map_err(|error| {
+        tracing::warn!(
+            target: "approval",
+            error_kind = ?error.kind(),
+            "child approval receipt write failed"
+        );
+        ToolError::execution_failed(
+            "Approval evidence could not be committed; tool execution was blocked.".to_string(),
+        )
+    })
+}
+
 fn record_agent_progress(
     runtime: &SubAgentRuntime,
     agent_id: &str,
@@ -14096,26 +14372,28 @@ async fn run_subagent(
                     step: steps,
                 });
             }
-            let tool_timeout = work_deadline.map_or(runtime.tool_timeout, |deadline| {
-                runtime
-                    .tool_timeout
-                    .min(deadline.saturating_duration_since(Instant::now()))
-            });
-            let output = match tokio::time::timeout(tool_timeout, async {
-                tool_registry
-                    .execute_from_surface(
-                        &agent_id,
-                        &tool_id,
-                        &mut tool_surface,
-                        &request_active_tool_names,
-                        &tool_name,
-                        tool_input.clone(),
-                    )
-                    .await
-            })
+            // The tool timer stops while the call waits on a person's
+            // approval; the wall-clock work deadline does not (§21).
+            let output = match run_tool_with_person_aware_timeout(
+                runtime.tool_timeout,
+                work_deadline,
+                &tool_registry.person_wait,
+                async {
+                    tool_registry
+                        .execute_from_surface(
+                            &agent_id,
+                            &tool_id,
+                            &mut tool_surface,
+                            &request_active_tool_names,
+                            &tool_name,
+                            tool_input.clone(),
+                        )
+                        .await
+                },
+            )
             .await
             {
-                Ok(Ok(output)) => {
+                Some(Ok(output)) => {
                     let digest = FleetDenialGuard::original_content_digest(
                         &tool_name,
                         &tool_input,
@@ -14136,7 +14414,7 @@ async fn run_subagent(
                     );
                     output
                 }
-                Ok(Err(e)) => {
+                Some(Err(e)) => {
                     // Typed denials stay typed for the no-progress guard; an
                     // opaque anyhow failure is an ordinary execution error.
                     let typed = match e.downcast::<ToolError>() {
@@ -14161,7 +14439,7 @@ async fn run_subagent(
                     );
                     RichToolResult::plain(ToolResult::error(format!("Error: {typed}")))
                 }
-                Err(_) => RichToolResult::plain(ToolResult::error(format!(
+                None => RichToolResult::plain(ToolResult::error(format!(
                     "Error: Tool {tool_name} timed out"
                 ))),
             };
@@ -17135,6 +17413,9 @@ struct SubAgentToolRegistry {
     /// [`SubAgentToolRegistry::gate_held_call`]). Cloned from the spawning
     /// runtime so a child is gated exactly like the parent turn.
     gate_runtime: SubAgentRuntime,
+    /// Paused while this child waits on a person's approval decision, so
+    /// that wait never spends the per-tool timeout (§21).
+    person_wait: Arc<PersonWaitClock>,
 }
 
 /// What the child permission gate decided for one held call.
@@ -17261,6 +17542,7 @@ impl SubAgentToolRegistry {
             enforce_write_claim: true,
             registry,
             gate_runtime: runtime,
+            person_wait: Arc::new(PersonWaitClock::default()),
         }
     }
 
@@ -17592,55 +17874,7 @@ impl SubAgentToolRegistry {
         &self,
         receipt: crate::approval_log::ApprovalReceipt,
     ) -> Result<(), ToolError> {
-        let store = self
-            .gate_runtime
-            .approval_receipt_store
-            .clone()
-            .ok_or_else(|| {
-                tracing::warn!(
-                    target: "approval",
-                    "child approval receipt store was not installed"
-                );
-                ToolError::execution_failed(
-                    "Approval evidence could not be committed; tool execution was blocked."
-                        .to_string(),
-                )
-            })?
-            .map_err(|error| {
-                tracing::warn!(
-                    target: "approval",
-                    %error,
-                    "child approval receipt store is unavailable"
-                );
-                ToolError::execution_failed(
-                    "Approval evidence could not be committed; tool execution was blocked."
-                        .to_string(),
-                )
-            })?;
-        let session_id = self.gate_runtime.context.state_namespace.clone();
-        let write = tokio::task::spawn_blocking(move || store.append(&session_id, &receipt))
-            .await
-            .map_err(|error| {
-                tracing::warn!(
-                    target: "approval",
-                    %error,
-                    "child approval receipt writer did not complete"
-                );
-                ToolError::execution_failed(
-                    "Approval evidence could not be committed; tool execution was blocked."
-                        .to_string(),
-                )
-            })?;
-        write.map_err(|error| {
-            tracing::warn!(
-                target: "approval",
-                error_kind = ?error.kind(),
-                "child approval receipt write failed"
-            );
-            ToolError::execution_failed(
-                "Approval evidence could not be committed; tool execution was blocked.".to_string(),
-            )
-        })
+        commit_child_approval_receipt_for(&self.gate_runtime, receipt).await
     }
 
     /// Ask: raise the held call as an approval prompt in the parent's UI and
@@ -17692,6 +17926,11 @@ impl SubAgentToolRegistry {
         };
         let description = format!("{agent_name} wants to run '{name}': {reason}");
         let (approval_key, approval_grouping_key) = child_approval_keys(agent_id, name, input);
+        // From here until an explicit end below, dropping this future (task
+        // abort on cancel or session close, the wall-clock deadline) still
+        // ends the wait honestly: see `ChildApprovalWaitGuard`.
+        let mut wait_guard =
+            ChildApprovalWaitGuard::armed(&self.gate_runtime, agent_id, &approval_id, name);
         let sent = event_tx
             .send(Event::ApprovalRequired {
                 id: approval_id.clone(),
@@ -17706,6 +17945,7 @@ impl SubAgentToolRegistry {
             .await
             .is_ok();
         if !sent {
+            wait_guard.disarm();
             self.gate_runtime
                 .manager
                 .write()
@@ -17734,33 +17974,49 @@ impl SubAgentToolRegistry {
         );
         #[derive(Clone, Copy)]
         enum WaitOutcome {
-            Answer(ChildApprovalOutcome),
+            Approved,
+            Denied,
             Cancelled,
             Unavailable,
         }
+        // A person's decision has no deadline of its own: the tool timer is
+        // paused for the whole wait (§21). Only the agent's own end — cancel,
+        // session close, wall-clock deadline — stops it.
+        let person_wait = self.person_wait.pause();
         let outcome = tokio::select! {
             () = self.gate_runtime.cancel_token.cancelled() => WaitOutcome::Cancelled,
             answer = receiver => match answer {
-                Ok(answer) => WaitOutcome::Answer(answer),
-                Err(_) => WaitOutcome::Unavailable,
+                Ok(ChildApprovalOutcome::Approved) => WaitOutcome::Approved,
+                Ok(ChildApprovalOutcome::Denied) => WaitOutcome::Denied,
+                Ok(ChildApprovalOutcome::Unavailable) | Err(_) => WaitOutcome::Unavailable,
             },
         };
-        if !matches!(outcome, WaitOutcome::Answer(_)) {
-            self.gate_runtime
-                .manager
-                .write()
-                .await
-                .cancel_child_approval(&approval_id);
-        }
+        drop(person_wait);
+        wait_guard.disarm();
+        let agent_still_running = {
+            let mut manager = self.gate_runtime.manager.write().await;
+            if matches!(outcome, WaitOutcome::Cancelled | WaitOutcome::Unavailable) {
+                manager.cancel_child_approval(&approval_id);
+            }
+            manager
+                .agents
+                .get(agent_id)
+                .is_none_or(|agent| agent.status == SubAgentStatus::Running)
+        };
         let receipt_outcome = match outcome {
-            WaitOutcome::Answer(ChildApprovalOutcome::Approved) => {
-                crate::approval_log::ApprovalOutcome::ApprovedOnce
-            }
-            WaitOutcome::Answer(ChildApprovalOutcome::Denied) => {
-                crate::approval_log::ApprovalOutcome::Denied
-            }
+            WaitOutcome::Approved => crate::approval_log::ApprovalOutcome::ApprovedOnce,
+            WaitOutcome::Denied => crate::approval_log::ApprovalOutcome::Denied,
             WaitOutcome::Cancelled => crate::approval_log::ApprovalOutcome::Cancelled,
             WaitOutcome::Unavailable => crate::approval_log::ApprovalOutcome::Unavailable,
+        };
+        // The end of the wait reaches hosts even under event back-pressure:
+        // it retires the card, footer row, and web mirror by approval id. An
+        // agent that already ended gets a terminal-status withdrawal that
+        // leaves its record alone.
+        let end_status = if agent_still_running {
+            AgentWorkerStatus::RunningTool
+        } else {
+            AgentWorkerStatus::Cancelled
         };
         if let Err(error) = self
             .commit_child_approval_receipt(crate::approval_log::ApprovalReceipt::decided(
@@ -17769,36 +18025,34 @@ impl SubAgentToolRegistry {
             ))
             .await
         {
-            record_agent_progress(
+            announce_child_approval_wait_ended(
                 &self.gate_runtime,
                 agent_id,
-                AgentProgressEventMeta::new(AgentWorkerStatus::RunningTool)
-                    .with_tool(name.to_string())
-                    .with_approval_id(approval_id),
+                &approval_id,
+                name,
+                end_status,
                 format!("blocked '{name}': approval evidence could not be committed"),
-            );
+            )
+            .await;
             return ChildGateVerdict::Deny(error.to_string());
         }
-        record_agent_progress(
+        announce_child_approval_wait_ended(
             &self.gate_runtime,
             agent_id,
-            AgentProgressEventMeta::new(AgentWorkerStatus::RunningTool)
-                .with_tool(name.to_string())
-                .with_approval_id(approval_id),
+            &approval_id,
+            name,
+            end_status,
             match outcome {
-                WaitOutcome::Answer(ChildApprovalOutcome::Approved) => {
-                    format!("approved '{name}'")
-                }
-                WaitOutcome::Answer(ChildApprovalOutcome::Denied) => {
-                    format!("denied '{name}'")
-                }
+                WaitOutcome::Approved => format!("approved '{name}'"),
+                WaitOutcome::Denied => format!("denied '{name}'"),
                 WaitOutcome::Cancelled => format!("stopped waiting on '{name}'"),
                 WaitOutcome::Unavailable => format!("lost approval channel for '{name}'"),
             },
-        );
+        )
+        .await;
         match outcome {
-            WaitOutcome::Answer(ChildApprovalOutcome::Approved) => ChildGateVerdict::Proceed,
-            WaitOutcome::Answer(ChildApprovalOutcome::Denied) => {
+            WaitOutcome::Approved => ChildGateVerdict::Proceed,
+            WaitOutcome::Denied => {
                 ChildGateVerdict::Deny(format!("Tool {name} was denied by the user"))
             }
             WaitOutcome::Cancelled => ChildGateVerdict::Deny(format!(
