@@ -197,6 +197,52 @@ impl CommandDebugDiagnosticsContext for DebugDiagnostics {
             route_receipts: vec![],
         }
     }
+    fn cache_telemetry(&self) -> DebugCacheTelemetry {
+        DebugCacheTelemetry {
+            model: "example".into(),
+            history: vec![],
+            history_capacity: 50,
+            prefix_stability_pct: None,
+            prefix_checks_total: 0,
+            prefix_change_count: 0,
+            prefix_drift_count: 0,
+            prefix_context_updates: 0,
+            prefix_pin_reason: None,
+            prefix_last_miss_reason: None,
+            last_prefix_change_desc: None,
+            last_pinned_prefix_hash: None,
+            api_message_count: 0,
+            non_system_message_count: 0,
+        }
+    }
+    fn context_source_map(&self) -> DebugPromptSourceMap {
+        DebugPromptSourceMap {
+            entries: vec![],
+            total_estimated_tokens: 0,
+            active_context_estimated_tokens: 0,
+            overflow_guard_estimated_tokens: None,
+            context_window_tokens: None,
+            context_window_source: None,
+            budget_used_percent: None,
+            generated_at: "2026-01-01T00:00:00Z".into(),
+            note: String::new(),
+        }
+    }
+    fn prompt_context(&self) -> DebugPromptContext {
+        DebugPromptContext {
+            schema_version: 1,
+            provider: "example".into(),
+            model: "model".into(),
+            system_prompt_state: "unknown".into(),
+            tool_catalog_state: "absent".into(),
+            sections: vec![],
+            tools: vec![],
+            source_map: self.context_source_map(),
+        }
+    }
+    fn tool_snapshot(&self) -> Option<DebugToolSnapshot> {
+        None
+    }
     fn inspect_cache(
         &self,
     ) -> Result<DebugCacheInspectionObservation, DebugCacheInspectionUnavailable> {
@@ -252,6 +298,70 @@ fn debug_inspection_schema_preserves_order_and_absence() {
 }
 
 #[test]
+fn debug_context_schema_preserves_explicit_nulls_and_omits_optional_tool_fields() {
+    let mut context = DebugDiagnostics.prompt_context();
+    context.tools.push(DebugPromptTool {
+        tool_type: None,
+        name: "search".into(),
+        description: "Search".into(),
+        input_schema: serde_json::json!({"type": "object"}),
+        allowed_callers: None,
+        defer_loading: Some(false),
+        input_examples: None,
+        strict: None,
+        cache_control: None,
+    });
+    let value = serde_json::to_value(&context).expect("semantic prompt context");
+    assert_eq!(
+        value["source_map"]["context_window_tokens"],
+        serde_json::Value::Null
+    );
+    assert_eq!(value["system_prompt_state"], "unknown");
+    assert_eq!(value["tool_catalog_state"], "absent");
+    assert_eq!(value["tools"][0]["defer_loading"], false);
+    assert!(value["tools"][0].get("type").is_none());
+    assert!(value["tools"][0].get("input_examples").is_none());
+    assert_eq!(
+        serde_json::to_value(DebugSourceKind::ProjectContextWarning).unwrap(),
+        "project_context_warning"
+    );
+    assert_eq!(
+        serde_json::to_value(DebugActivationReason::PerRequest).unwrap(),
+        "per_request"
+    );
+}
+
+#[test]
+fn debug_tool_schema_keeps_unknown_distinct_from_known_empty() {
+    let unknown: DebugEvidence<DebugBoundedList> = DebugEvidence::Unknown {
+        reason: "no surface".into(),
+    };
+    let empty = DebugEvidence::Known {
+        value: DebugBoundedList {
+            count: 0,
+            rendered: vec![],
+            omitted: 0,
+        },
+    };
+    assert_eq!(
+        serde_json::to_value(unknown).unwrap(),
+        serde_json::json!({"status":"unknown", "reason":"no surface"}),
+    );
+    assert_eq!(
+        serde_json::to_value(empty).unwrap(),
+        serde_json::json!({"status":"known", "value":{"count":0,"rendered":[],"omitted":0}}),
+    );
+    assert_eq!(
+        serde_json::to_value(DebugProviderAvailability::Unknown).unwrap(),
+        serde_json::json!({"status":"unknown"}),
+    );
+    assert_eq!(
+        serde_json::to_value(DebugToolVisibility::InRequest).unwrap(),
+        "in_request"
+    );
+}
+
+#[test]
 fn debug_diagnostics_facet_is_object_safe_and_independently_transportable() {
     fn object_safe(_: &dyn CommandDebugDiagnosticsContext) {}
     object_safe(&DebugDiagnostics);
@@ -283,6 +393,15 @@ fn debug_diagnostics_facet_is_object_safe_and_independently_transportable() {
     );
     assert_ne!(DebugSystemPrompt::Blocks(vec![]), DebugSystemPrompt::None);
     let usage = DebugDiagnostics.token_projection();
+    assert_eq!(
+        DebugDiagnostics.cache_telemetry().prefix_stability_pct,
+        None
+    );
+    assert_eq!(
+        DebugDiagnostics.prompt_context().tool_catalog_state,
+        "absent"
+    );
+    assert!(DebugDiagnostics.tool_snapshot().is_none());
     assert_eq!(usage.last_input, None);
     assert_eq!(usage.last_output, Some(0));
     assert_eq!(usage.cache_miss, Some(0));

@@ -7,6 +7,11 @@
 
 use std::path::{Path, PathBuf};
 
+mod diagnostics_report;
+mod diagnostics_tools;
+pub use diagnostics_report::*;
+pub use diagnostics_tools::*;
+
 use codewhale_core::request::{Message, SystemPrompt};
 use serde_json::Value;
 
@@ -277,6 +282,52 @@ pub enum DebugCacheInspectionUnavailable {
     MissingCapturedEndpoint,
 }
 
+/// A bounded turn row. Pricing class partition and amount come from the
+/// authoritative host, not a second implementation of provider billing.
+/// Missing telemetry, missing audit and a measured zero remain distinct.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DebugCacheTurn {
+    pub provider: Option<String>,
+    pub provider_identity: Option<String>,
+    pub model: Option<String>,
+    pub auto_model: bool,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub cache_hit_tokens: Option<u32>,
+    pub cache_miss_tokens: Option<u32>,
+    pub cache_write_tokens: Option<u32>,
+    pub reasoning_tokens: Option<u32>,
+    pub reasoning_replay_tokens: Option<u32>,
+    pub priced_amount: Option<f64>,
+    pub unpriced_reason_key: Option<String>,
+    pub unpriced_classes: Vec<String>,
+    pub priced_cache_read: u64,
+    pub priced_cache_miss: u64,
+    pub priced_cache_write: u64,
+    /// Coherent age at observation time; portable display rounds seconds.
+    pub age_seconds: u64,
+}
+
+/// Shared source for `/cache [count|stats|zones]` branches. One host read
+/// preserves ring order, optional telemetry and prefix stability evidence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DebugCacheTelemetry {
+    pub model: String,
+    pub history: Vec<DebugCacheTurn>,
+    pub history_capacity: usize,
+    pub prefix_stability_pct: Option<u32>,
+    pub prefix_checks_total: u64,
+    pub prefix_change_count: u64,
+    pub prefix_drift_count: u64,
+    pub prefix_context_updates: u64,
+    pub prefix_pin_reason: Option<String>,
+    pub prefix_last_miss_reason: Option<String>,
+    pub last_prefix_change_desc: Option<String>,
+    pub last_pinned_prefix_hash: Option<String>,
+    pub api_message_count: usize,
+    pub non_system_message_count: usize,
+}
+
 /// Narrow, synchronous data boundary for the debug diagnostics slice.
 ///
 /// No concrete provider, App, completed message, or network operation crosses
@@ -287,6 +338,14 @@ pub trait CommandDebugDiagnosticsContext {
     fn system_projection(&self) -> DebugSystemProjection;
     fn token_projection(&self) -> DebugTokenProjection;
     fn cost_projection(&self) -> DebugCostProjection;
+    fn cache_telemetry(&self) -> DebugCacheTelemetry;
+    /// The report builder stays host-owned; format and JSON serialization
+    /// consume only this data-only source map.
+    fn context_source_map(&self) -> DebugPromptSourceMap;
+    fn prompt_context(&self) -> DebugPromptContext;
+    /// None means no prepared snapshot exists; argument validation occurs
+    /// only after this check in the portable `/tools` handler.
+    fn tool_snapshot(&self) -> Option<DebugToolSnapshot>;
     /// Route resolution and request inspection remain host-owned. This call
     /// must not update the remembered inspection on failure or success.
     fn inspect_cache(
