@@ -2983,14 +2983,19 @@ mod tests {
         app.is_loading = true;
 
         let row = tab_row(&mut app);
-        assert!(!row.contains("Esc"), "unfocused dock must not claim Esc: {row:?}");
+        assert!(
+            !row.contains("Esc"),
+            "unfocused dock must not claim Esc: {row:?}"
+        );
 
         app.work_surface.focused = true;
         let row = tab_row(&mut app);
-        assert!(row.contains("Esc"), "focused dock names its close key: {row:?}");
         assert!(
-            super::handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
-                .is_some(),
+            row.contains("Esc"),
+            "focused dock names its close key: {row:?}"
+        );
+        assert!(
+            super::handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).is_some(),
             "the advertised Esc is the one that closes the dock"
         );
         assert!(app.work_surface.dismissed);
