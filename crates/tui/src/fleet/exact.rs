@@ -818,6 +818,77 @@ impl std::fmt::Debug for ExactFleetWorkflow {
     }
 }
 
+/// Whether `tool` is removed by a deny entry (exact, case-insensitive, or a
+/// trailing-`*` prefix glob).
+fn tool_denied_by(tool: &str, denied: &[String]) -> bool {
+    denied.iter().any(|entry| match entry.strip_suffix('*') {
+        Some(prefix) => tool
+            .to_ascii_lowercase()
+            .starts_with(&prefix.to_ascii_lowercase()),
+        None => entry.eq_ignore_ascii_case(tool),
+    })
+}
+
+/// Refuse a task whose explicitly requested tools do not all survive the
+/// role ceiling and deny list (SHA-6734). The error names the requested
+/// tools, what the role allows, and what was dropped, so the caller can fix
+/// the request instead of launching a child that flounders without tools.
+fn refuse_dropped_requested_tools(
+    member_id: &str,
+    member_role: &str,
+    requested: &[String],
+    ceiling: &ChildAuthority,
+    authority: &ChildAuthority,
+) -> Result<(), String> {
+    let mut requested: Vec<String> = requested.to_vec();
+    requested.sort();
+    requested.dedup();
+    if requested.is_empty() {
+        // An explicit empty list is a deliberate tool-free child.
+        return Ok(());
+    }
+    let survives = |tool: &String| {
+        authority
+            .allowed_tools
+            .as_ref()
+            .is_none_or(|allowed| allowed.contains(tool))
+            && !tool_denied_by(tool, &authority.disallowed_tools)
+    };
+    let dropped: Vec<&String> = requested.iter().filter(|tool| !survives(tool)).collect();
+    if dropped.is_empty() {
+        return Ok(());
+    }
+    let kept = requested.len() - dropped.len();
+    let role_allows = match ceiling.allowed_tools.as_ref() {
+        Some(allowed) if allowed.is_empty() => "no tools".to_string(),
+        Some(allowed) => format!("[{}]", allowed.join(", ")),
+        None if ceiling.disallowed_tools.is_empty() => "all inherited tools".to_string(),
+        None => format!(
+            "all inherited tools except [{}]",
+            ceiling.disallowed_tools.join(", ")
+        ),
+    };
+    let join = |tools: &[&String]| {
+        tools
+            .iter()
+            .map(|tool| tool.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let requested_refs: Vec<&String> = requested.iter().collect();
+    let headline = if kept == 0 {
+        format!("Agent '{member_id}' (role {member_role}) would start with no tools")
+    } else {
+        format!("Agent '{member_id}' (role {member_role}) would lose requested tools")
+    };
+    Err(format!(
+        "{headline}: requested [{}], role allows {role_allows}, dropped [{}]. Request only tools \
+         the role allows, or pick a member whose role carries them.",
+        join(&requested_refs),
+        join(&dropped),
+    ))
+}
+
 /// One member, resolved and admitted — but **not yet routed**.
 ///
 /// This is the value the caller holds between admission and the Router call.
@@ -891,7 +962,22 @@ impl ExactMemberBinding {
             .extend_from_slice(disallowed_tools);
         self.task_disallowed_tools.sort();
         self.task_disallowed_tools.dedup();
-        self.authority = self.recompute_authority(&self.member_role);
+        let authority = self.recompute_authority(&self.member_role);
+        // SHA-6734: narrowing an explicit request against the role ceiling
+        // used to be silent and could start a child with no tools at all.
+        // Every tool the caller asked for by name must survive, or the spawn
+        // is refused with what was asked, allowed, and dropped.
+        if let Some(requested) = allowed_tools {
+            let ceiling = ChildAuthority::from_runtime_role(&self.member_role, self.session);
+            refuse_dropped_requested_tools(
+                &self.member_id,
+                &self.member_role,
+                requested,
+                &ceiling,
+                &authority,
+            )?;
+        }
+        self.authority = authority;
         Ok(())
     }
 
@@ -2195,6 +2281,60 @@ permissions = "read_only"
 
     /// `tools = false` means zero model tools — an empty allowlist, which the
     /// child registry treats as "nothing is visible and nothing is callable".
+    #[test]
+    fn spawn_refuses_empty_effective_toolset() {
+        let authority = ChildAuthority::clamp(PermissionCeiling::ROUTER, full_session());
+        let err = refuse_dropped_requested_tools(
+            "router",
+            "advisor",
+            &["read_file".to_string(), "grep_files".to_string()],
+            &authority,
+            &authority,
+        )
+        .expect_err("a child that would start with no tools is refused");
+        assert!(
+            err.contains("Agent 'router' (role advisor) would start with no tools"),
+            "{err}"
+        );
+        assert!(err.contains("requested [grep_files, read_file]"), "{err}");
+        assert!(err.contains("role allows no tools"), "{err}");
+        // An explicit empty request stays a deliberate tool-free child.
+        refuse_dropped_requested_tools("router", "advisor", &[], &authority, &authority)
+            .expect("explicit empty toolset is allowed");
+    }
+
+    #[test]
+    fn spawn_error_names_dropped_tools() {
+        let workflow = workflow_with(None, GLM_FLEET);
+        let mut binding = workflow
+            .bind_member(None, Some("reviewer"), full_session())
+            .expect("role lookup");
+        let err = binding
+            .narrow_for_task(
+                None,
+                Some(&["read_file".to_string(), "exec_shell".to_string()]),
+                &[],
+                None,
+            )
+            .expect_err("a requested tool the role denies is refused");
+        assert!(err.contains("would lose requested tools"), "{err}");
+        assert!(err.contains("dropped [exec_shell]"), "{err}");
+        assert!(err.contains("requested [exec_shell, read_file]"), "{err}");
+        assert!(
+            err.contains("role allows all inherited tools except ["),
+            "{err}"
+        );
+
+        // Tools the role allows narrow cleanly.
+        binding
+            .narrow_for_task(None, Some(&["read_file".to_string()]), &[], None)
+            .expect("an allowed narrowing succeeds");
+        assert_eq!(
+            binding.authority.allowed_tools.as_deref(),
+            Some(&["read_file".to_string()] as &[String])
+        );
+    }
+
     #[test]
     fn tools_false_yields_an_empty_tool_surface() {
         let authority = ChildAuthority::clamp(PermissionCeiling::ROUTER, full_session());

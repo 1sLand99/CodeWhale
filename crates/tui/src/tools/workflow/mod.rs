@@ -6900,10 +6900,20 @@ permissions = "read_only"
         assert_eq!(clean.write_authority.as_deref(), Some("read_only"));
         assert_eq!(clean.subagent_type, None);
         // A task allowlist can only narrow; it never removes Runtime denials.
+        // Asking for a tool the role denies is refused loudly (SHA-6734)
+        // instead of silently launching a child with nothing usable.
         let mut narrowed = exact_task_request("reviewer");
         narrowed.allowed_tools = Some(vec!["exec_shell".to_string()]);
+        let err = bind_exact_fleet_task_request(&operation, exact_session(), &mut narrowed)
+            .expect_err("a requested tool the Runtime denylist removes is refused");
+        let message = format!("{err:?}");
+        assert!(message.contains("would start with no tools"), "{message}");
+        assert!(message.contains("dropped [exec_shell]"), "{message}");
+        // A request the role allows still narrows the surface.
+        let mut narrowed = exact_task_request("reviewer");
+        narrowed.allowed_tools = Some(vec!["read_file".to_string()]);
         bind_exact_fleet_task_request(&operation, exact_session(), &mut narrowed)
-            .expect("allowlist narrows without overriding the Runtime denylist");
+            .expect("allowlist narrows within the role");
         assert_eq!(narrowed.write_authority.as_deref(), Some("read_only"));
         assert!(
             narrowed
