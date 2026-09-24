@@ -971,7 +971,7 @@ pub(crate) async fn apply_model_picker_choice(
         let provider_identity = app.provider_identity_for_persistence().to_string();
         app.provider_models
             .insert(provider_identity.clone(), resolved_model.clone());
-        app.enable_provider_model(&provider_identity, &resolved_model);
+        app.note_route_used(&provider_identity, &resolved_model);
         app.clear_model_scoped_telemetry();
     }
     let preference_changed = if model_is_auto && !preserve_auto_effort {

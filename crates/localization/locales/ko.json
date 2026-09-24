@@ -361,6 +361,7 @@
   "ModelPickerAutoLocalHint": "턴별 · 로컬 휴리스틱 · 라우터 요청 없음",
   "ModelPickerAutoLastRoute": "최근 {provider} · {model}",
   "AutoRouteSelectedToast": "Auto: {provider} / {model} ({source}) · Ctrl+O: 경로 세부 정보",
+  "ModelPickerNotListed": "{provider} 목록에 없음 ({date} 확인)",
   "HelpGroupCommonCommands": "자주 쓰는 명령",
   "HelpGroupAllCommands": "모든 명령",
   "HelpTitle": "도움말",

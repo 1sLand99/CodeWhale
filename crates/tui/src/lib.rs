@@ -72,6 +72,7 @@ mod model_context;
 mod model_inventory;
 mod model_profile;
 mod model_registry;
+mod model_relevance;
 mod model_routing;
 mod models_dev_live;
 mod native_memory;

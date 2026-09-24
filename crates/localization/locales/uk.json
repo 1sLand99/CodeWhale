@@ -358,6 +358,7 @@
   "ModelPickerAutoLocalHint": "за крок · локальна евристика · без запиту до маршрутизатора",
   "ModelPickerAutoLastRoute": "останній {provider} · {model}",
   "AutoRouteSelectedToast": "Auto: {provider} / {model} через {source} · Ctrl+O: деталі маршруту",
+  "ModelPickerNotListed": "немає в списку {provider} (перевірено {date})",
   "HelpGroupCommonCommands": "Часті команди",
   "HelpGroupAllCommands": "Усі команди",
   "HelpTitle": "Довідка",

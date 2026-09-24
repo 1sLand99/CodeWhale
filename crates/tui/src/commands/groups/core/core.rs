@@ -412,7 +412,7 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
         let provider_identity = app.provider_identity_for_persistence().to_string();
         app.provider_models
             .insert(provider_identity.clone(), model_id.clone());
-        app.enable_provider_model(&provider_identity, &model_id);
+        app.note_route_used(&provider_identity, &model_id);
         // Route changes are temporary by default: nothing is written here.
         // The route-save prompt offers the explicit persistence choices.
         app.note_session_route_change(&provider_identity, &model_id);

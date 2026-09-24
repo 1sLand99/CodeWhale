@@ -1251,6 +1251,7 @@
   "NotificationSubagentInterrupted": "子代理已中斷",
   "NotificationTurnComplete": "本輪已完成",
   "OnboardApiKeyRejectedEnv": "來自 {env} 的 {provider} API 金鑰被拒絕。請粘貼有效金鑰並儲存到 {path}，或更新該環境變數。",
+  "ModelPickerNotListed": "{provider} 未列出（{date} 檢查）",
   "OnboardLanguageBlurb": "選擇介面語言。可隨時使用 `/settings set locale <tag>` 修改。",
   "OnboardLanguageTitle": "選擇語言",
   "OnboardOfflineNotice": "正在離線瀏覽。尚未連線 — 想連線時請執行 /provider。",
