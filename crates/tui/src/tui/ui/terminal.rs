@@ -91,7 +91,10 @@ pub(crate) fn collect_pending_terminal_events(
 fn observe_terminal_attention(event: &Event) {
     match event {
         Event::FocusGained => crate::tui::notifications::set_terminal_focused(true),
-        Event::FocusLost => crate::tui::notifications::set_terminal_focused(false),
+        Event::FocusLost => {
+            crate::tui::notifications::set_terminal_focused(false);
+            crate::tui::hover_layer::clear_pointer();
+        }
         _ => {}
     }
 }

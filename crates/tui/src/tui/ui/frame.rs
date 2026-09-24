@@ -553,7 +553,15 @@ fn register_clickable_chrome_for_hover(app: &App) {
             MessageId::KbCloseMenu,
         ),
         (
-            app.viewport.last_workflow_panel_area,
+            // Only the header row is the toggle/cancel affordance. Registering
+            // the whole panel painted the link glow (accent fg + underline on
+            // every cell) across the entire card whenever the pointer rested
+            // on it, and a pointer left there when the terminal lost focus
+            // kept it lit (#6503).
+            app.viewport.last_workflow_panel_area.map(|area| Rect {
+                height: area.height.min(1),
+                ..area
+            }),
             MessageId::CmdWorkflowDescription,
         ),
     ];
