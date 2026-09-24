@@ -16,6 +16,7 @@ pub(in crate::commands) mod tests;
 use crate::commands::CommandResult;
 use crate::commands::traits::{Command, CommandGroup, CommandInfo, FunctionCommand};
 use crate::tui::app::App;
+use codewhale_command_contract::handler::CommandCapabilities;
 use codewhale_localization::MessageId;
 
 pub struct DebugCommands;
@@ -187,14 +188,18 @@ pub(in crate::commands) fn dispatch(
         "tokens" => tokens::tokens(app),
         "cost" => tokens::cost(app),
         "receipts" | "receipt" => receipts::receipts(app, arg),
-        "balance" => balance::balance(app),
-        "cache" => cache::cache(app, arg),
-        "preview-request" | "preview_request" | "dryrun" => {
-            preview_request::preview_request(app, arg)
+        "balance" => {
+            let mut bundle = app.command_contexts();
+            balance::balance(bundle.contexts(CommandCapabilities::DEBUG_DIAGNOSTICS))
         }
+        "cache" => cache::cache(app, arg),
+        "preview-request" | "preview_request" | "dryrun" => preview_request::preview_request(arg),
         "tools" | "tool-studio" => tool_inspection::tools(app, arg),
         "change" => change::change(app, arg),
-        "system" | "xitong" => tokens::system_prompt(app),
+        "system" | "xitong" => {
+            let mut bundle = app.command_contexts();
+            tokens::system_prompt(bundle.contexts(CommandCapabilities::DEBUG_DIAGNOSTICS))
+        }
         "context" | "ctx" => tokens::context(app, arg),
         "edit" => undo::edit(app),
         "diff" => undo::diff(app),

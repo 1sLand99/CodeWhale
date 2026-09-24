@@ -3,8 +3,9 @@
 use crate::commands::contract::DebugCostComponents as CostComponents;
 use crate::compaction::estimate_input_tokens_conservative;
 use crate::tui::app::{App, AppAction};
+use codewhale_command_contract::facets::{CommandDebugDiagnosticsContext, DebugSystemPrompt};
+use codewhale_command_contract::handler::CommandContexts;
 use codewhale_localization::{Locale, MessageId, tr};
-use codewhale_models::SystemPrompt;
 
 use super::CommandResult;
 
@@ -347,15 +348,20 @@ fn cost_coverage_counts(app: &App) -> (u32, u32) {
 }
 
 /// Show current system prompt
-pub fn system_prompt(app: &mut App) -> CommandResult {
-    let prompt_text = match &app.system_prompt {
-        Some(SystemPrompt::Text(text)) => text.clone(),
-        Some(SystemPrompt::Blocks(blocks)) => blocks
-            .iter()
-            .map(|b| b.text.clone())
-            .collect::<Vec<_>>()
-            .join("\n\n---\n\n"),
-        None => "(no system prompt)".to_string(),
+pub fn system_prompt(contexts: CommandContexts<'_>) -> CommandResult {
+    let mut parts = contexts.into_parts();
+    let Some(diagnostics) = parts.debug_diagnostics.as_deref_mut() else {
+        return CommandResult::error("Command capability unavailable: debug_diagnostics");
+    };
+    system_prompt_portable(diagnostics)
+}
+
+fn system_prompt_portable(diagnostics: &mut dyn CommandDebugDiagnosticsContext) -> CommandResult {
+    let system = diagnostics.system_projection();
+    let prompt_text = match system.prompt {
+        DebugSystemPrompt::Text(text) => text,
+        DebugSystemPrompt::Blocks(blocks) => blocks.join("\n\n---\n\n"),
+        DebugSystemPrompt::None => "(no system prompt)".to_string(),
     };
 
     // Truncate if too long
@@ -377,8 +383,7 @@ pub fn system_prompt(app: &mut App) -> CommandResult {
 
     CommandResult::message(format!(
         "System Prompt ({} mode):\n─────────────────────────────\n{}",
-        app.mode.label(),
-        display
+        system.mode_label, display
     ))
 }
 

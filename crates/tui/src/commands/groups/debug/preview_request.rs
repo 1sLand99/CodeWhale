@@ -42,7 +42,7 @@
 //! from PR #1099 by TaoMu (GTC2080); no code from that PR is reused.
 
 use super::CommandResult;
-use crate::tui::app::{App, AppAction};
+use crate::tui::app::AppAction;
 
 /// Usage line, kept in one place so the error path and the docs agree.
 ///
@@ -52,7 +52,7 @@ const USAGE: &str = "Usage: /preview-request [json] [--prompt <text>] | base-pro
     (flags first; --prompt takes the rest)";
 
 /// Entry point for `/preview-request` (aliases `/dryrun`, `/preview_request`).
-pub fn preview_request(_app: &mut App, arg: Option<&str>) -> CommandResult {
+pub fn preview_request(arg: Option<&str>) -> CommandResult {
     match parse_args(arg.unwrap_or_default()) {
         Ok(PreviewArgs {
             json,
@@ -187,6 +187,7 @@ fn parse_args(raw: &str) -> Result<PreviewArgs, String> {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::tui::app::App;
     use codewhale_models::Role;
 
     fn args(raw: &str) -> Result<PreviewArgs, String> {
@@ -341,11 +342,11 @@ mod tests {
         let options = crate::test_support::test_tui_options(std::path::PathBuf::from(
             "/tmp/test-workspace-preview-request",
         ));
-        let mut app = App::new(options, &Config::default());
+        let app = App::new(options, &Config::default());
         let messages_before = app.api_messages.len();
         let history_before = app.history.len();
 
-        let result = preview_request(&mut app, Some("nope"));
+        let result = preview_request(Some("nope"));
 
         assert!(!result.is_error);
         assert!(
@@ -374,7 +375,7 @@ mod tests {
             }],
         });
 
-        let result = preview_request(&mut app, Some("json"));
+        let result = preview_request(Some("json"));
 
         // The command itself renders nothing: the engine is the authority.
         assert!(result.message.is_none(), "{result:?}");
