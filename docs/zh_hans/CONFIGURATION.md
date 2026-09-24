@@ -1326,6 +1326,25 @@ exec_policy = true
 
 配置的 API provider 先被尝试。运行时失败或空结果通过 DuckDuckGo 然后 Bing 可见地降级；结构化搜索回执记录每一步。缺失配置和网络策略拒绝失败关闭，不把查询发送到另一个 provider。
 
+**Provider 原生搜索。** 当路由的 provider 提供自带的网页搜索工具（OpenAI、xAI、Anthropic、DeepSeek、Kimi 等）时，该搜索可以排在已配置 provider 之前。它是在当前路由上的一次独立模型调用。`[search] native` 决定顺序：
+
+- 不设置（默认）：只有在没有配置搜索 provider 时原生搜索才优先；通过 `[search] provider`、`CODEWHALE_SEARCH_PROVIDER`、Tavily key 或会话内 `/search` 选择的 provider 优先；
+- `native = true`：即使固定了 provider，原生搜索也优先；
+- `native = false`：从不使用原生搜索。
+
+原生搜索的回答完整返回；过大的工具输出会溢出到会话 artifact，模型可以分页取回。
+
+**时效与区域。** `recency` 和 `locale` 会在后端 API 支持时转发，搜索回执会报告每一项是否生效：
+
+| 后端 | 时效 | 区域 |
+| --- | --- | --- |
+| Firecrawl | `tbs=qdr:d/w/m/y` | 从地区部分取 `country`（`de-DE` → `DE`）；只有语言时忽略 |
+| Tavily | `time_range` | 不发送（Tavily 使用国家全名） |
+| SearXNG | `time_range` | `language`，原样发送 |
+| Serply | 不发送（文档未说明） | `hl` 语言，`gl` 国家 |
+
+时效会向上取整到后端最接近的窗口（天、周、月、年），所以 `recency = 10` 会搜索最近一个月。其他后端忽略这两项，并在回执中说明。
+
 对服务 DuckDuckGo 兼容 HTML 的私有/内部搜索服务，保持 `provider = "duckduckgo"` 并设置 `base_url`；Codewhale 把 `q` 查询参数追加到该端点，并把网络策略应用到它的主机。自定义端点不回退到公共 Bing。`CODEWHALE_SEARCH_BASE_URL` 可按进程覆盖；`DEEPSEEK_SEARCH_BASE_URL` 仍作为旧别名接受。
 
 **SearXNG**([docs](https://docs.searxng.org/dev/search_api.html))使用配置实例的 JSON API。设置 `provider = "searxng"` 和 `base_url = "https://your-searxng.example"`；Codewhale 调用 `/search?q=...&format=json`。Codewhale 默认不使用公共 SearXNG 实例，因为公共实例常禁用 JSON 输出或对 API 流量限速。
@@ -1362,6 +1381,7 @@ Codewhale 按 `score` 从高到低排序返回行，再对排序结果应用 `ma
 provider = "firecrawl" # 也 duckduckgo | bing | tavily | bocha | metaso | searxng | baidu | volcengine | sofya | serply
 # base_url = "https://search.example/" # provider = "duckduckgo" 时可选;"searxng" 时必填
 # api_key = "YOUR_KEY" # firecrawl 可选;其他 API 提供商必填
+# native = false # provider 原生搜索:不设置 = 仅在未配置 provider 时使用
 ```
 
 ## 本地媒体附件

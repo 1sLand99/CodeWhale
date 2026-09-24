@@ -2940,6 +2940,35 @@ result visibly degrades through DuckDuckGo and then Bing; the structured search
 receipt records every hop. Missing configuration and network-policy denials
 fail closed without sending the query to another provider.
 
+**Provider-native search.** On routes whose provider offers its own web-search
+tool (OpenAI, xAI, Anthropic, DeepSeek, Kimi and others), that search can run
+ahead of the configured provider. It is a separate model call on the active
+route. `[search] native` decides the order:
+
+- unset (default): native search leads only when no search provider is
+  configured; a provider chosen in `[search] provider`,
+  `CODEWHALE_SEARCH_PROVIDER`, a Tavily key, or `/search` in-session wins;
+- `native = true`: native search leads even when a provider is pinned;
+- `native = false`: native search is never used.
+
+The native answer is returned whole; oversized tool output spills to a session
+artifact the model can page back.
+
+**Recency and locale.** `recency` and `locale` are forwarded where the
+backend's API takes them, and the search receipt reports each as honored or
+ignored:
+
+| Backend | Recency | Locale |
+| --- | --- | --- |
+| Firecrawl | `tbs=qdr:d/w/m/y` | `country` from the region (`de-DE` → `DE`); a bare language is ignored |
+| Tavily | `time_range` | not sent (Tavily takes country names) |
+| SearXNG | `time_range` | `language`, as given |
+| Serply | not sent (undocumented) | `hl` language, `gl` country |
+
+Recency is rounded up to the backend's nearest window (day, week, month,
+year), so `recency = 10` searches the last month. Other backends ignore both
+knobs and say so in the receipt.
+
 For a private/internal search service that serves DuckDuckGo-compatible HTML,
 keep `provider = "duckduckgo"` and set `base_url`; Codewhale appends the `q`
 query parameter to that endpoint and applies network policy to its host.
@@ -3019,6 +3048,7 @@ any non-empty `[search] api_key` and is configured by that key or
 provider = "firecrawl" # also duckduckgo | bing | tavily | bocha | metaso | searxng | baidu | volcengine | sofya | serply
 # base_url = "https://search.example/" # optional with provider = "duckduckgo"; required with "searxng"
 # api_key = "YOUR_KEY" # optional for firecrawl; required by the other API providers
+# native = false # provider-native search: unset = only when no provider is configured
 ```
 
 ## Local Media Attachments
