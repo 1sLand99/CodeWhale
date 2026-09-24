@@ -778,7 +778,7 @@ impl ToolRegistryBuilder {
 
     /// Include only read-only file tools (read, list).
     #[must_use]
-    #[cfg_attr(not(test), expect(dead_code))]
+    #[cfg(test)]
     pub fn with_read_only_file_tools(self) -> Self {
         use super::file::{ListDirTool, ReadFileTool};
         use super::file_tool::FileTool;

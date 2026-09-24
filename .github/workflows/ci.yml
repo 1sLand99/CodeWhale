@@ -593,6 +593,35 @@ jobs:
         if: needs.changes.outputs.heavy == 'true'
         run: echo "Linux clippy/test gates run on CNB for mirrored fix/*, rebrand/*, work/v*, and main branches."
 
+  msrv:
+    # The workspace must build on its minimum supported toolchain. A lint
+    # expectation that newer rustc fulfils can be unfulfilled on 1.89 and
+    # fail the build there while stable stays green (#6543).
+    name: MSRV check (1.89)
+    needs: changes
+    if: needs.changes.outputs.heavy == 'true'
+    timeout-minutes: 45
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.89"
+      - name: Install Linux system dependencies
+        run: |
+          for i in 1 2 3 4 5; do
+            sudo apt-get update && break
+            echo "apt-get update failed (attempt $i); retrying in 15s"
+            sleep 15
+          done
+          sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: cargo +1.89 check
+        run: cargo +1.89 check --workspace --locked
+
   workflow-rlm-cache:
     name: Workflow RLM cache
     needs: changes
