@@ -876,11 +876,17 @@ impl Engine {
             // must see mid-turn (LSP diagnostics, steer input, subagent
             // completions) are appended to history above, never spliced into
             // the frozen prefix.
+            // A zero-tool turn (plain `exec`) spends extra steps only on
+            // output-limit continuations. It has no work to wrap up or report
+            // on, so the agent wrap-up notices below would only bend a
+            // one-shot answer; at the limit it ends honestly instead.
+            let zero_tool_turn = tool_catalog.is_empty();
             // A1 soft landing: with a finite step budget, once ~80% of it is
             // spent tell the model once to stop exploring and write its final
             // report. Savings proved out by the grok-style parity work (ops
             // A1): a step-faithful harness ends mid-report far too often.
-            if !turn.stop_diagnostics.soft_landing_sent
+            if !zero_tool_turn
+                && !turn.stop_diagnostics.soft_landing_sent
                 && let Some(step_limit) = turn.step_limit()
                 && step_limit > 0
                 && turn.steps_used() >= ((step_limit as f32 * 0.8).floor() as u32).max(1)
@@ -904,7 +910,7 @@ impl Engine {
 
             if turn.at_max_steps() {
                 turn.stop_diagnostics.reason = Some(TurnStopReason::StepBudgetExhausted);
-                if step_budget_exhaustion_is_terminal && !final_report_sent {
+                if step_budget_exhaustion_is_terminal && !final_report_sent && !zero_tool_turn {
                     // A2 report-on-exhaustion: the budget died while the model
                     // still owes work. Never finish silently — grant exactly
                     // one final provider turn to write a bounded report, then

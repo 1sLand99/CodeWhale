@@ -164,6 +164,17 @@ fn run_exec_stream_json(server: &MockServer) -> Vec<Value> {
 
 /// Run `codewhale-tui exec <exec_args>` against `server` and return stdout.
 fn run_exec(server: &MockServer, exec_args: &[&str]) -> String {
+    let (success, stdout, stderr) = run_exec_unchecked(server, exec_args);
+    assert!(
+        success,
+        "codewhale-tui exec failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    stdout
+}
+
+/// Run `codewhale-tui exec <exec_args>` and return whether it exited
+/// successfully, its stdout and its stderr.
+fn run_exec_unchecked(server: &MockServer, exec_args: &[&str]) -> (bool, String, String) {
     let workspace = TempDir::new().expect("workspace tempdir");
     let home = TempDir::new().expect("home tempdir");
 
@@ -225,14 +236,11 @@ fn run_exec(server: &MockServer, exec_args: &[&str]) -> String {
 
     let stdout = join_pipe_reader(stdout_reader, "stdout");
     let stderr = join_pipe_reader(stderr_reader, "stderr");
-    assert!(
+    (
         status.success(),
-        "codewhale-tui exec failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&stdout),
-        String::from_utf8_lossy(&stderr)
-    );
-
-    String::from_utf8_lossy(&stdout).into_owned()
+        String::from_utf8_lossy(&stdout).into_owned(),
+        String::from_utf8_lossy(&stderr).into_owned(),
+    )
 }
 
 fn read_pipe_in_background<R>(mut reader: R) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>>
@@ -529,4 +537,61 @@ async fn plain_exec_continues_past_an_output_limit_stop() {
         "the continuation names the truncation: {}",
         bodies[1]["messages"]
     );
+}
+
+/// #6510 review: a model that keeps stopping at its output limit must not be
+/// re-asked until the turn wall clock. Plain exec caps its continuations at a
+/// small default (8 model steps) unless `--max-turns` sets another, ends the
+/// run as failed with the partial answer, and never injects the agent wrap-up
+/// notices (soft landing, final report) into a one-shot answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn plain_exec_bounds_output_limit_continuations() {
+    let always_truncated = [
+        sse_chunk(json!({
+            "id": "chatcmpl-cut",
+            "object": "chat.completion.chunk",
+            "model": TEST_MODEL,
+            "choices": [{"index": 0, "delta": {"content": "again"}, "finish_reason": null}]
+        })),
+        sse_chunk(json!({
+            "id": "chatcmpl-cut",
+            "object": "chat.completion.chunk",
+            "model": TEST_MODEL,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "length"}]
+        })),
+        "data: [DONE]\n\n".to_string(),
+    ]
+    .join("");
+
+    for (flags, expected_requests) in [(&[][..], 8usize), (&["--max-turns", "2"][..], 2)] {
+        let server = start_mock_llm(always_truncated.clone()).await;
+        let mut args = flags.to_vec();
+        args.extend(["--json", "--model", TEST_MODEL, "answer briefly"]);
+        let (success, stdout, stderr) = run_exec_unchecked(&server, &args);
+        assert!(
+            !success,
+            "{flags:?}: a capped run must not exit 0\n{stderr}"
+        );
+        let receipt: Value = serde_json::from_str(&stdout)
+            .unwrap_or_else(|err| panic!("--json receipt should parse: {err}\n{stdout}"));
+        assert_eq!(receipt["mode"], "one-shot", "{receipt}");
+        assert_eq!(receipt["success"], false, "{receipt}");
+        assert!(
+            receipt["output"]
+                .as_str()
+                .is_some_and(|output| output.contains("again")),
+            "the partial answer is kept: {receipt}"
+        );
+
+        let bodies = chat_bodies(&server).await;
+        assert_eq!(bodies.len(), expected_requests, "{flags:?}: {bodies:#?}");
+        for body in &bodies {
+            let messages = body["messages"].to_string();
+            assert!(
+                !messages.contains("Step budget soft landing")
+                    && !messages.contains("Write your final report now"),
+                "{flags:?}: no agent wrap-up notice in a one-shot answer: {messages}"
+            );
+        }
+    }
 }

@@ -433,7 +433,7 @@ non-interactive agent-with-tools execution. Tools are offered only with
 `--auto`, `--yolo`, `--allowed-tools`, or when resuming a session; limits such
 as `--max-turns`, `--disallowed-tools` or `--sandbox`, and the output format,
 never add tools. A reply cut off at the provider's output limit is continued
-in the same turn (bounded by `--max-turns`), so the output is the whole reply.
+in the same turn, at most 8 model steps unless `--max-turns` says otherwise.
 `--auto` does not change the sandbox posture or elevate a denied tool. Use `--sandbox danger-full-access`
 or `--allow-sandbox-elevation` to explicitly authorize sandbox elevation.
 ")]
@@ -629,6 +629,20 @@ fn exec_grants_tool_surface(
         || args.allowed_tools.is_some()
         || args.tool_authority_json.is_some()
         || env_tool_surface
+}
+
+/// Flags that only shape a tool surface, passed on a run that has none.
+fn exec_tool_flags_without_grant(args: &ExecArgs) -> Vec<&'static str> {
+    [
+        (args.max_tool_calls.is_some(), "--max-tool-calls"),
+        (args.disallowed_tools.is_some(), "--disallowed-tools"),
+        (args.sandbox.is_some(), "--sandbox"),
+        (args.allow_sandbox_elevation, "--allow-sandbox-elevation"),
+        (args.hooks, "--hooks"),
+    ]
+    .into_iter()
+    .filter_map(|(passed, flag)| passed.then_some(flag))
+    .collect()
 }
 
 fn resolve_exec_allowed_tools(
@@ -2494,7 +2508,22 @@ async fn run_async_main_dispatch(
                         |value| value.clamp(1, MAX_SUBAGENTS),
                     );
                     let auto_mode = args.auto || yolo;
-                    let max_turns = exec_max_steps(args.max_turns);
+                    // A zero-tool run only spends model steps on output-limit
+                    // continuations; without `--max-turns` those would run to
+                    // the turn wall clock, so it gets a small default ceiling.
+                    let max_turns = exec_max_steps(
+                        args.max_turns
+                            .or((!tool_surface_requested).then_some(ONE_SHOT_DEFAULT_MAX_STEPS)),
+                    );
+                    if !tool_surface_requested {
+                        let ignored = exec_tool_flags_without_grant(&args);
+                        if !ignored.is_empty() {
+                            eprintln!(
+                                "codewhale exec: {} only apply to tools, and this run offers none; add --auto or --allowed-tools to run with tools.",
+                                ignored.join(", ")
+                            );
+                        }
+                    }
                     let allowed_tools = if tool_surface_requested {
                         resolve_exec_allowed_tools(args.allowed_tools.as_deref(), env_tool_surface)
                     } else {

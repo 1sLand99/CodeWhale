@@ -18,6 +18,13 @@ pub(crate) fn exec_max_steps(max_turns: Option<u32>) -> u32 {
     crate::core::engine::turn_budget::resolve_max_model_steps(max_turns)
 }
 
+/// Model-step ceiling for a plain (zero-tool) `exec` run without
+/// `--max-turns`. Its only extra steps are output-limit continuations, which
+/// have no progress signal of their own; without this a model stuck at the
+/// output limit would be re-asked, with growing history, until the turn wall
+/// clock (#6510 review).
+pub(crate) const ONE_SHOT_DEFAULT_MAX_STEPS: u32 = 8;
+
 /// Default-denied tools for headless `exec`, on top of the operator's own
 /// `--disallowed-tools` flag.
 ///

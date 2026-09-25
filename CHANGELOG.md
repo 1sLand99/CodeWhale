@@ -76,14 +76,18 @@ quieter, and Fleet runs can be checked before they spend anything.
   `lane start`/`lane stop --json` flags handle their edge cases.
 - Plain `codewhale exec` (no `--auto`) runs one Engine turn with the same
   system prompt as every other run, so `--json` no longer changes the model's
-  instructions, and the run is recorded as a session. It offers no tools
-  unless a flag grants them (`--auto`, `--yolo`, `--allowed-tools`, or
-  resuming a session): `--max-turns`, `--disallowed-tools`,
-  `--append-system-prompt`, `--sandbox` and `--output-format stream-json` no
-  longer turn a chat call into a tool-using agent. The `--json` one-shot
-  receipt drops `stop_reason` and gains the agent receipt's fields. A reply
+  instructions. It offers no tools unless a flag grants them (`--auto`,
+  `--yolo`, `--allowed-tools`, or resuming a session): `--max-turns`,
+  `--disallowed-tools`, `--append-system-prompt`, `--sandbox` and
+  `--output-format stream-json` no longer turn a chat call into a tool-using
+  agent, and tool-only flags passed without a grant print a warning. A reply
   cut off at the provider's output limit is continued instead of failing the
-  run ([#6510](https://github.com/Hmbown/Codewhale/issues/6510)).
+  run, for at most 8 model steps unless `--max-turns` sets another limit.
+  Breaking for scripts: the `--json` one-shot receipt no longer has
+  `stop_reason`, adds the agent receipt's fields (`prompt`, `tools`,
+  `outcomes`, `status`, `termination_reason`, `error_category`), and leaves
+  out `usage` when the turn never settled
+  ([#6510](https://github.com/Hmbown/Codewhale/issues/6510)).
 - `codewhale review` of a plain diff uses the same review prompt as
   `review --pr` and prints the structured review as Markdown, or the model's
   prose when it ignores the JSON format

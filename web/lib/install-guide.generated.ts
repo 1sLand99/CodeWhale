@@ -1,7 +1,7 @@
 // Generated from docs/INSTALL.md by scripts/derive-install.mjs. Do not edit.
 
 export const INSTALL_GUIDE = {
-  "sourceHash": "66049ab3a88107612056c01bfb87783098322efae0aa71eed842939a0f99c54e",
+  "sourceHash": "960bff960bd4addc5e5c8756082f88d061e3c0f45f6b7bfb84f07999187424a1",
   "anchors": [
     "installing-codewhale",
     "60-second-quickstart-linux-or-macos",
@@ -342,7 +342,7 @@ export const INSTALL_GUIDE = {
     },
     {
       "kind": "html",
-      "text": "<p><code>--auto</code> auto-approves shell commands, so use it only in a repo or sandbox you\ntrust.</p>\n<p>Plain <code>exec</code> offers the model no tools. Only <code>--auto</code>, <code>--yolo</code>,\n<code>--allowed-tools</code> or resuming a session opens a tool surface; limits such as\n<code>--max-turns</code>, <code>--disallowed-tools</code>, <code>--sandbox</code> and the output format never\nadd tools. If the provider stops a reply at its output limit, the model is\nasked to continue and the printed answer is the whole reply; <code>--max-turns</code>\ncaps those continuations.</p>\n<h3 id=\"resuming\">Resuming</h3>\n"
+      "text": "<p><code>--auto</code> auto-approves shell commands, so use it only in a repo or sandbox you\ntrust.</p>\n<p>Plain <code>exec</code> offers the model no tools. Only <code>--auto</code>, <code>--yolo</code>,\n<code>--allowed-tools</code> or resuming a session opens a tool surface; limits such as\n<code>--max-turns</code>, <code>--disallowed-tools</code>, <code>--sandbox</code> and the output format never\nadd tools (tool-only flags print a warning). If the provider stops a reply at\nits output limit, the model is asked to continue and the printed answer is the\nwhole reply. A plain run takes at most 8 model steps unless <code>--max-turns</code> sets\nanother limit; a reply still cut off at that limit fails the run.</p>\n<h3 id=\"resuming\">Resuming</h3>\n"
     },
     {
       "kind": "code",
