@@ -1624,6 +1624,13 @@ impl Engine {
             .filter(|registry| registry.workspace() == config.workspace)
             .cloned()
             .unwrap_or_else(|| Arc::new(crate::plugins::PluginRegistry::empty(&config.workspace)));
+        // Experimental extension host: start in the background, never on the
+        // first-prompt path. Its tools join at the next turn's rebuild.
+        if config.features.enabled(Feature::ExtensionHost) {
+            let manager = crate::extension_host::manager();
+            manager.begin_session();
+            manager.sync_in_background(Arc::clone(&plugin_registry));
+        }
 
         // Create clients for both providers
         let (codewhale_client, codewhale_client_error) = match CodewhaleClient::new(api_config) {
@@ -4905,8 +4912,23 @@ impl Engine {
         // Load plugin tools from the user's tools directory and apply any
         // config.toml overrides. Explicit overrides win over auto-discovered
         // scripts with the same tool name.
-        let plugin_tool_names =
+        let extension_host = self
+            .config
+            .features
+            .enabled(Feature::ExtensionHost)
+            .then(crate::extension_host::manager);
+        if let Some(manager) = &extension_host {
+            // Natives only: scripts are added next and must not count as built-ins.
+            manager.note_native_names(tool_registry.names());
+            manager.sync_in_background(Arc::clone(&self.plugin_registry));
+        }
+        let mut plugin_tool_names =
             configure_plugin_tools(&mut tool_registry, self.config.tools.as_ref());
+        // Extension tools go in last and never replace a name already present
+        // (`ToolRegistry::register` would overwrite it silently).
+        if let Some(manager) = &extension_host {
+            plugin_tool_names.extend(manager.install_tools(&mut tool_registry));
+        }
 
         let mcp_state = if self.config.features.enabled(Feature::Mcp) {
             if mcp_access.may_connect() {

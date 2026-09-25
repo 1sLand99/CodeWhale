@@ -49,6 +49,7 @@ mod dsh_credentials;
 mod elapsed;
 mod error_taxonomy;
 mod eval;
+mod extension_host;
 mod external_credentials;
 mod fast_hash;
 mod features;
@@ -8330,7 +8331,28 @@ fn load_structural_config_from_cli(cli: &Cli) -> Result<Config> {
         apply_saved_reasoning_preference(&mut config, &settings);
     }
     cli.feature_toggles.apply(&mut config)?;
+    install_extension_host_boot_config(&config);
     Ok(config)
+}
+
+/// Select the plugin activation policy (v3, or v4 with the experimental
+/// extension host) and the host's Node override, once per process, before
+/// any plugin discovery. Later config reloads never flip either.
+fn install_extension_host_boot_config(config: &Config) {
+    let enabled = config
+        .features()
+        .enabled(crate::features::Feature::ExtensionHost);
+    crate::plugins::activation::install_extension_host_policy(enabled);
+    if enabled {
+        crate::extension_host::configure(crate::extension_host::ExtensionHostOptions {
+            node_override: config
+                .extension_host
+                .as_ref()
+                .and_then(|table| table.node.as_deref())
+                .map(|node| PathBuf::from(shellexpand::tilde(node).as_ref())),
+            root: None,
+        });
+    }
 }
 
 fn effective_config_profile(cli: &Cli) -> Option<String> {
@@ -8350,6 +8372,7 @@ fn load_config_from_cli_with_effective_profile(cli: &Cli) -> Result<(Config, Opt
         apply_saved_reasoning_preference(&mut config, &settings);
     }
     cli.feature_toggles.apply(&mut config)?;
+    install_extension_host_boot_config(&config);
     // Install the foreign-instruction opt-in before anything can load project
     // context. This is the single funnel every runtime goes through — TUI,
     // exec, ACP, and the app-server passthrough all resolve config here — so
