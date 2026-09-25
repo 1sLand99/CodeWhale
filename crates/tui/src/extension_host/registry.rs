@@ -151,7 +151,6 @@ impl OwnerRegistry {
         self.owners.get(plugin_id)
     }
 
-    #[must_use]
     pub fn owners(&self) -> impl Iterator<Item = &OwnerEntry> {
         self.owners.values()
     }
