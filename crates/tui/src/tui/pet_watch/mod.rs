@@ -1123,7 +1123,8 @@ mod tests {
         .expect("agent spawns are observed");
         assert_eq!(
             serde_json::from_str::<Value>(&spawned).unwrap(),
-            json!({"event":"agent_spawned","id":"agent-1","worker_status":"running"})
+            // A spawn opens the span; the reducer reads no status from it.
+            json!({"event":"agent_spawned","id":"agent-1"})
         );
 
         // The JS finishes a span when progress reports a terminal status.
@@ -1166,7 +1167,7 @@ mod tests {
         .expect("agent completions are observed");
         assert_eq!(
             serde_json::from_str::<Value>(&complete).unwrap(),
-            json!({"event":"agent_complete","id":"agent-1","worker_status":"completed"})
+            json!({"event":"agent_complete","id":"agent-1"})
         );
 
         for (label, payload) in [
