@@ -366,6 +366,10 @@ pub enum EventMsg {
     /// Trusted Engine-owned activity for an operation that passed dispatch
     /// and authority checks. No tool name, arguments, command, or result is
     /// included in the pet-facing activity contract.
+    ///
+    /// Reserved on the wire: `protocol_parity` maps the engine event, but no
+    /// runtime thread emits the pair yet, so Runtime API and GPUI clients do
+    /// not receive it. The shared pet (`pet_watch`) is the only consumer today.
     OperationActivityStarted {
         thread_id: ThreadId,
         session_id: SessionId,

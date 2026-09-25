@@ -106,7 +106,7 @@ export class PetEngineTelemetry {
     if (fresh) {
       if (this.waiting) authoritativePresence = 'needs_you';
       else if (terminalFresh && this.turnOutcome === 'completed' && this.turnId) authoritativePresence = 'done';
-      else if (terminalFresh && this.turnOutcome) authoritativePresence = 'idle';
+      else if (terminalFresh) authoritativePresence = 'idle';
       else if (active.length > 0 || this.turnId) authoritativePresence = 'working';
     }
     const activityKind = fresh && authoritativePresence !== 'needs_you'
@@ -364,7 +364,11 @@ export class PetEngineTelemetry {
         this.active.clear();
         this.waiting = undefined;
         this.turnId = id;
-        this.turnOutcome = outcome as OwnerTurnOutcome;
+        // An outcome belongs to a turn. `/purge`, an edit rejection or a
+        // session switch mid-turn completes with no turn id; recording the
+        // outcome alone would break the projection invariant the Rust
+        // contract checks (`turn_outcome` requires `turn_id`).
+        this.turnOutcome = id ? outcome as OwnerTurnOutcome : undefined;
         this.terminalAt = at;
         if (outcome === 'completed' && id && this.addOnce(this.completedTurns, id, 256))
           this.add('turn_completed', 'communication', at).status = 'success';

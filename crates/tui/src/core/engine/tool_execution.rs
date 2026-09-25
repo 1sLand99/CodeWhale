@@ -24,6 +24,77 @@ fn inherited_interactive_shell_refusal(tool_name: &str, interactive: bool) -> Op
         .map(|message| ToolError::execution_failed(message.to_string()))
 }
 
+/// Pairs one `OperationActivityStarted` with exactly one
+/// `OperationActivityCompleted`.
+///
+/// The turn loop drops an in-flight tool future when the user cancels
+/// (`tokio::select!` on the cancel token, or `drop(tool_tasks)` for a parallel
+/// batch), so a Completed sent inline after the await would never be sent.
+/// Dropping an unfinished span sends `Completed { Cancelled }` with
+/// `try_send`: best effort, like the other guards here, because `Drop` cannot
+/// await a full channel.
+pub(super) struct OperationSpanGuard {
+    tx: mpsc::Sender<Event>,
+    span: Option<(String, codewhale_protocol::engine_owner::OwnerActivityKind)>,
+}
+
+impl OperationSpanGuard {
+    /// A process-unique span id. The model's tool-call id is not unique:
+    /// gateways that elide ids fall back to `call_{block_index}`, which
+    /// repeats every step, and a consumer deduplicates completed spans.
+    fn span_id(call_id: &str) -> String {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        format!("{call_id}#{seq}")
+    }
+
+    pub(super) async fn start(
+        tx: mpsc::Sender<Event>,
+        call_id: &str,
+        activity_kind: codewhale_protocol::engine_owner::OwnerActivityKind,
+    ) -> Self {
+        let span_id = Self::span_id(call_id);
+        // `Sender::send` is cancel safe: if this future is dropped the event
+        // was either sent or not, and the guard is armed only once it was.
+        let sent = tx
+            .send(Event::OperationActivityStarted {
+                span_id: span_id.clone(),
+                activity_kind,
+            })
+            .await
+            .is_ok();
+        Self {
+            tx,
+            span: sent.then_some((span_id, activity_kind)),
+        }
+    }
+
+    async fn complete(mut self, outcome: codewhale_protocol::engine_owner::OwnerOperationOutcome) {
+        if let Some((span_id, activity_kind)) = self.span.take() {
+            let _ = self
+                .tx
+                .send(Event::OperationActivityCompleted {
+                    span_id,
+                    activity_kind,
+                    outcome,
+                })
+                .await;
+        }
+    }
+}
+
+impl Drop for OperationSpanGuard {
+    fn drop(&mut self) {
+        if let Some((span_id, activity_kind)) = self.span.take() {
+            let _ = self.tx.try_send(Event::OperationActivityCompleted {
+                span_id,
+                activity_kind,
+                outcome: codewhale_protocol::engine_owner::OwnerOperationOutcome::Cancelled,
+            });
+        }
+    }
+}
+
 /// Emits delayed, best-effort liveness pulses for one running tool.
 ///
 /// Keep the ticker in its own task instead of embedding `tokio::time::Interval`
@@ -570,8 +641,8 @@ impl Engine {
                     .lock()
                     .await
                     .resolved_tool_servers()
-                    .contains_key(&tool_name)
-                    .then(|| crate::tools::activity::mcp_activity_kind(&tool_name)),
+                    .get(&tool_name)
+                    .map(|server| crate::tools::activity::mcp_activity_kind(server)),
                 None => None,
             },
             Some(_)
@@ -590,14 +661,12 @@ impl Engine {
                     crate::tools::activity::registry_activity_kind(&tool_name, &tool_input)
                 }),
         };
-        if let (Some(span_id), Some(activity_kind)) = (activity_call_id.as_ref(), activity_kind) {
-            let _ = tx_event
-                .send(Event::OperationActivityStarted {
-                    span_id: span_id.clone(),
-                    activity_kind,
-                })
-                .await;
-        }
+        let operation_span = match (activity_call_id.as_deref(), activity_kind) {
+            (Some(call_id), Some(activity_kind)) => {
+                Some(OperationSpanGuard::start(tx_event.clone(), call_id, activity_kind).await)
+            }
+            _ => None,
+        };
 
         let outcome: Result<RichToolResult, ToolError> = if McpPool::is_mcp_tool(&tool_name) {
             if let Some(pool) = mcp_pool {
@@ -651,17 +720,14 @@ impl Engine {
             )))
         };
 
-        if let (Some(span_id), Some(activity_kind)) = (activity_call_id, activity_kind) {
+        if let Some(operation_span) = operation_span {
             let cancelled = cancel_token
                 .as_ref()
                 .is_some_and(CancellationToken::is_cancelled);
-            let operation_outcome = crate::tools::activity::operation_outcome(&outcome, cancelled);
-            let _ = tx_event
-                .send(Event::OperationActivityCompleted {
-                    span_id,
-                    activity_kind,
-                    outcome: operation_outcome,
-                })
+            operation_span
+                .complete(crate::tools::activity::operation_outcome(
+                    &outcome, cancelled,
+                ))
                 .await;
         }
 

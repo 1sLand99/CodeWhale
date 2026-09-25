@@ -20460,10 +20460,19 @@ async fn dispatch_reports_typed_operation_activity_without_names_or_arguments() 
                     activity_kind: OwnerActivityKind::Reading,
                     outcome: OwnerOperationOutcome::Succeeded,
                 },
-            ] if started == "call-1" && completed == "call-1"
+            ] if started == completed && started.starts_with("call-1#")
         ),
         "unexpected activity: {events:?}"
     );
+    // A repeated model call id (gateways that elide ids fall back to
+    // `call_{block_index}`) still gets a fresh span, so a consumer that
+    // deduplicates completed spans sees the second call.
+    let again = run("read", Some("call-1"), json!({"path": "private-note.txt"})).await;
+    let span_of = |events: &[Event]| match events.first() {
+        Some(Event::OperationActivityStarted { span_id, .. }) => span_id.clone(),
+        other => panic!("unexpected activity: {other:?}"),
+    };
+    assert_ne!(span_of(&events), span_of(&again));
     let wire = format!("{events:?}");
     assert!(!wire.contains("private-note"), "arguments leaked: {wire}");
 
@@ -20473,7 +20482,7 @@ async fn dispatch_reports_typed_operation_activity_without_names_or_arguments() 
         matches!(
             events.last(),
             Some(Event::OperationActivityCompleted {
-                outcome: OwnerOperationOutcome::Failed | OwnerOperationOutcome::Denied,
+                outcome: OwnerOperationOutcome::Failed,
                 ..
             })
         ),
@@ -20501,6 +20510,65 @@ async fn dispatch_reports_typed_operation_activity_without_names_or_arguments() 
         .await
         .is_empty()
     );
+
+    // A call refused by the cancel gate never ran, so it reports nothing.
+    let (tx_event, mut rx_event) = mpsc::channel(16);
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    let refused = Engine::execute_tool_with_lock(
+        Arc::new(RwLock::new(())),
+        false,
+        false,
+        tx_event,
+        Some(cancelled),
+        "read".to_string(),
+        Some("call-5".to_string()),
+        json!({"path": "private-note.txt"}),
+        tmp.path().to_path_buf(),
+        Some(&registry),
+        None,
+        Some(context.clone()),
+    )
+    .await;
+    assert!(refused.is_err());
+    while let Ok(event) = rx_event.try_recv() {
+        assert!(
+            !matches!(
+                event,
+                Event::OperationActivityStarted { .. } | Event::OperationActivityCompleted { .. }
+            ),
+            "a refused call reported activity: {event:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn dropped_operation_span_completes_as_cancelled() {
+    use codewhale_protocol::engine_owner::{OwnerActivityKind, OwnerOperationOutcome};
+
+    // The turn loop drops an in-flight tool future on cancel; the span it
+    // opened must still close, or every host leaks an active operation.
+    let (tx_event, mut rx_event) = mpsc::channel(16);
+    let span = super::tool_execution::OperationSpanGuard::start(
+        tx_event,
+        "call-x",
+        OwnerActivityKind::Editing,
+    )
+    .await;
+    drop(span);
+    let started = match rx_event.try_recv() {
+        Ok(Event::OperationActivityStarted { span_id, .. }) => span_id,
+        other => panic!("unexpected event: {other:?}"),
+    };
+    match rx_event.try_recv() {
+        Ok(Event::OperationActivityCompleted {
+            span_id,
+            activity_kind: OwnerActivityKind::Editing,
+            outcome: OwnerOperationOutcome::Cancelled,
+        }) => assert_eq!(span_id, started),
+        other => panic!("unexpected event: {other:?}"),
+    }
+    assert!(rx_event.try_recv().is_err(), "exactly one Completed");
 }
 
 #[tokio::test]

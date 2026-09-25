@@ -55,11 +55,12 @@ pub(crate) fn registry_activity_kind(tool_name: &str, input: &Value) -> Option<O
     Some(kind_for_operation(canonical_action_alias(tool_name, input)))
 }
 
-/// Classify an MCP call whose server the pool resolved. Desktop-control
-/// servers report `Computer`; everything else is a generic `Tool`.
+/// Classify an MCP call by the server the pool resolved it to, not by the
+/// model-facing name. Desktop-control servers report `Computer`; everything
+/// else is a generic `Tool`.
 #[must_use]
-pub(crate) fn mcp_activity_kind(tool_name: &str) -> OwnerActivityKind {
-    if super::subagent::is_machine_control_tool(tool_name) {
+pub(crate) fn mcp_activity_kind(server: &str) -> OwnerActivityKind {
+    if super::subagent::is_machine_control_tool(&format!("mcp_{server}_tool")) {
         OwnerActivityKind::Computer
     } else {
         OwnerActivityKind::Tool
@@ -78,16 +79,17 @@ pub(crate) fn operation_outcome(
         _ if cancelled => OwnerOperationOutcome::Cancelled,
         Ok(_) => OwnerOperationOutcome::Failed,
         Err(ToolError::Cancelled { .. }) => OwnerOperationOutcome::Cancelled,
+        // Only a policy refusal is a denial. Bad input, an escaped path or a
+        // missing tool is the call failing, and the pet should show it.
+        Err(ToolError::PermissionDenied { .. }) => OwnerOperationOutcome::Denied,
         Err(
             ToolError::InvalidInput { .. }
             | ToolError::MissingField { .. }
             | ToolError::PathEscape { .. }
             | ToolError::NotAvailable { .. }
-            | ToolError::PermissionDenied { .. },
-        ) => OwnerOperationOutcome::Denied,
-        Err(ToolError::ExecutionFailed { .. } | ToolError::Timeout { .. }) => {
-            OwnerOperationOutcome::Failed
-        }
+            | ToolError::ExecutionFailed { .. }
+            | ToolError::Timeout { .. },
+        ) => OwnerOperationOutcome::Failed,
     }
 }
 
@@ -147,15 +149,10 @@ mod tests {
 
     #[test]
     fn shipped_desktop_control_servers_are_computer_activity() {
-        for name in [
-            "mcp_codewhale-cu_click",
-            "mcp_codewhale--cu_screenshot",
-            "mcp_computer-use_type",
-            "mcp_local-computer_use_key",
-        ] {
-            assert_eq!(mcp_activity_kind(name), Kind::Computer, "{name}");
+        for server in ["codewhale-cu", "computer-use", "local-computer_use"] {
+            assert_eq!(mcp_activity_kind(server), Kind::Computer, "{server}");
         }
-        assert_eq!(mcp_activity_kind("mcp_github_get_issue"), Kind::Tool);
+        assert_eq!(mcp_activity_kind("github"), Kind::Tool);
     }
 
     #[test]
@@ -180,14 +177,21 @@ mod tests {
             operation_outcome(&denied, false),
             OwnerOperationOutcome::Denied
         );
-        let timeout = Err(ToolError::execution_failed("x"));
         assert_eq!(
             operation_outcome(&Err(ToolError::cancelled("stop")), false),
             OwnerOperationOutcome::Cancelled
         );
-        assert_eq!(
-            operation_outcome(&timeout, false),
-            OwnerOperationOutcome::Failed
-        );
+        for failure in [
+            ToolError::Timeout { seconds: 5 },
+            ToolError::execution_failed("x"),
+            ToolError::invalid_input("bad"),
+            ToolError::missing_field("path"),
+            ToolError::not_available("gone"),
+        ] {
+            assert_eq!(
+                operation_outcome(&Err(failure), false),
+                OwnerOperationOutcome::Failed
+            );
+        }
     }
 }

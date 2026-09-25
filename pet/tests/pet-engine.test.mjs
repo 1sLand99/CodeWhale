@@ -42,6 +42,25 @@ test('only a completed turn is Done; interrupted and failed turns are idle', () 
   untracked.observe({event:'turn_complete',turn_outcome:'completed'},0);
   assert.equal(untracked.activity(10).authoritativePresence,'idle');
   assert.throws(() => untracked.observe({event:'turn_complete',turn_id:null,turn_outcome:'completed'},20));
+  // `/purge`, an edit rejection or a mid-turn session switch complete with no
+  // turn id. An outcome with no turn would fail the Rust projection
+  // invariant (`turn_outcome` requires `turn_id`) and drop the shared frame.
+  for (const outcome of ['completed','interrupted','failed']) {
+    const e = new PetEngineTelemetry();
+    e.observe({event:'turn_started',turn_id:'t'},0);
+    e.observe({event:'turn_complete',turn_outcome:outcome},20);
+    const activity=e.activity(30);
+    assert.equal(activity.turnId,null,outcome); assert.equal(activity.turnOutcome,null,outcome);
+    assert.equal(activity.authoritativePresence,'idle',outcome); assert.equal(activity.doneEffectId,null,outcome);
+  }
+});
+test('a new turn drops spans left open by the previous turn', () => {
+  const e = new PetEngineTelemetry();
+  e.observe({event:'turn_started',turn_id:'t1'},0);
+  e.observe({event:'operation_activity_started',span_id:'orphan',activity_kind:'editing'},10);
+  e.observe({event:'turn_started',turn_id:'t2'},20);
+  const activity=e.activity(30);
+  assert.equal(activity.turnId,'t2'); assert.equal(activity.activityKind,null); assert.deepEqual(activity.activeSpans,[]);
 });
 test('waiting and concurrent activity stay bounded and clear after disconnect', () => {
   const pet=new PetNative(points,'','[]',true);
