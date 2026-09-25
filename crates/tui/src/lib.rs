@@ -432,8 +432,9 @@ same system prompt as every other run, and no tools. Use `--auto` for
 non-interactive agent-with-tools execution. Tools are offered only with
 `--auto`, `--yolo`, `--allowed-tools`, or when resuming a session; limits such
 as `--max-turns`, `--disallowed-tools` or `--sandbox`, and the output format,
-never add tools. `--auto` does not change the
-sandbox posture or elevate a denied tool. Use `--sandbox danger-full-access`
+never add tools. A reply cut off at the provider's output limit is continued
+in the same turn (bounded by `--max-turns`), so the output is the whole reply.
+`--auto` does not change the sandbox posture or elevate a denied tool. Use `--sandbox danger-full-access`
 or `--allow-sandbox-elevation` to explicitly authorize sandbox elevation.
 ")]
 struct ExecArgs {

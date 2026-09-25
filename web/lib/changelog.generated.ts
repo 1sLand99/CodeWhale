@@ -50,7 +50,7 @@ export const CHANGELOG: ChangelogRelease[] = [
           "Code highlighting uses less memory, and long transcripts, the pager and the session picker do less work on the event loop; session previews load in the background (#6014).",
           "The composer's send cue follows the draft, not a paste in progress (#6397)."
         ],
-        "itemCount": 14
+        "itemCount": 17
       },
       {
         "heading": "Experience",

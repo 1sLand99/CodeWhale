@@ -1,7 +1,7 @@
 // Generated from docs/INSTALL.md by scripts/derive-install.mjs. Do not edit.
 
 export const INSTALL_GUIDE = {
-  "sourceHash": "36955c1448b6c6d31046183e696705acc4e16f72530db8305381a968c6c4767b",
+  "sourceHash": "66049ab3a88107612056c01bfb87783098322efae0aa71eed842939a0f99c54e",
   "anchors": [
     "installing-codewhale",
     "60-second-quickstart-linux-or-macos",
@@ -342,7 +342,7 @@ export const INSTALL_GUIDE = {
     },
     {
       "kind": "html",
-      "text": "<p><code>--auto</code> auto-approves shell commands, so use it only in a repo or sandbox you\ntrust.</p>\n<h3 id=\"resuming\">Resuming</h3>\n"
+      "text": "<p><code>--auto</code> auto-approves shell commands, so use it only in a repo or sandbox you\ntrust.</p>\n<p>Plain <code>exec</code> offers the model no tools. Only <code>--auto</code>, <code>--yolo</code>,\n<code>--allowed-tools</code> or resuming a session opens a tool surface; limits such as\n<code>--max-turns</code>, <code>--disallowed-tools</code>, <code>--sandbox</code> and the output format never\nadd tools. If the provider stops a reply at its output limit, the model is\nasked to continue and the printed answer is the whole reply; <code>--max-turns</code>\ncaps those continuations.</p>\n<h3 id=\"resuming\">Resuming</h3>\n"
     },
     {
       "kind": "code",

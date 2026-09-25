@@ -724,6 +724,13 @@ codewhale exec --auto --output-format stream-json "…"   # one JSON event per l
 `--auto` auto-approves shell commands, so use it only in a repo or sandbox you
 trust.
 
+Plain `exec` offers the model no tools. Only `--auto`, `--yolo`,
+`--allowed-tools` or resuming a session opens a tool surface; limits such as
+`--max-turns`, `--disallowed-tools`, `--sandbox` and the output format never
+add tools. If the provider stops a reply at its output limit, the model is
+asked to continue and the printed answer is the whole reply; `--max-turns`
+caps those continuations.
+
 ### Resuming
 
 ```bash
