@@ -567,6 +567,28 @@ impl SnapshotRepo {
             return Ok(false);
         }
         let missing = String::from_utf8_lossy(&named.stdout).trim().to_string();
+        // A lookup can fail for a moment while another session sharing this
+        // repo runs gc or repack. Only a commit that is really absent
+        // justifies touching HEAD: deleting it discards every restore point.
+        if self.is_commit(&missing)? {
+            return Ok(false);
+        }
+        // The newest reflog entry that still names a commit keeps the
+        // restore points before the break.
+        if let Some(recovered) = self.newest_reflog_commit(&missing)? {
+            let reset = run_git(
+                &self.git_dir,
+                &self.work_tree,
+                &["update-ref", "HEAD", &recovered],
+            )?;
+            if reset.status.success() {
+                tracing::warn!(
+                    target: "snapshot",
+                    "snapshot history HEAD pointed at missing commit {missing}; reset to {recovered} from the reflog"
+                );
+                return Ok(false);
+            }
+        }
         let delete = run_git(
             &self.git_dir,
             &self.work_tree,
@@ -583,6 +605,49 @@ impl SnapshotRepo {
             "snapshot history HEAD pointed at missing commit {missing}; started a fresh history"
         );
         Ok(true)
+    }
+
+    fn is_commit(&self, oid: &str) -> io::Result<bool> {
+        let object = format!("{oid}^{{commit}}");
+        Ok(
+            run_git(&self.git_dir, &self.work_tree, &["cat-file", "-e", &object])?
+                .status
+                .success(),
+        )
+    }
+
+    /// The newest commit recorded in HEAD's reflogs (its branch's, then
+    /// HEAD's own) that still exists, skipping `missing`.
+    fn newest_reflog_commit(&self, missing: &str) -> io::Result<Option<String>> {
+        let branch = run_git(&self.git_dir, &self.work_tree, &["symbolic-ref", "HEAD"])?;
+        let mut logs = Vec::new();
+        if branch.status.success() {
+            let name = String::from_utf8_lossy(&branch.stdout).trim().to_string();
+            logs.push(self.git_dir.join("logs").join(name));
+        }
+        logs.push(self.git_dir.join("logs").join("HEAD"));
+        for log in logs {
+            let Ok(text) = std::fs::read_to_string(&log) else {
+                continue;
+            };
+            // Each line is `<old> <new> <who> <when>\t<message>`.
+            for line in text.lines().rev() {
+                let mut fields = line.split(' ');
+                let (Some(old), Some(new)) = (fields.next(), fields.next()) else {
+                    continue;
+                };
+                for oid in [new, old] {
+                    if oid.len() >= 40
+                        && oid != missing
+                        && oid.bytes().any(|b| b != b'0')
+                        && self.is_commit(oid)?
+                    {
+                        return Ok(Some(oid.to_string()));
+                    }
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Point the side repo's HEAD branch at a commit id that does not exist.
@@ -1746,6 +1811,19 @@ mod tests {
             "a broken head cannot list its history"
         );
 
+        // With a reflog, the last commit that still exists is restored and
+        // the restore points before the break survive.
+        assert!(
+            !repo.repair_broken_head().expect("recover"),
+            "recovered from the reflog, not restarted"
+        );
+        let list = repo.list(10).expect("list after recovery");
+        assert_eq!(list.len(), 1, "{list:?}");
+        assert_eq!(list[0].label, "pre-turn:1");
+
+        // Without one, the broken ref is deleted and history restarts.
+        repo.point_head_at_missing_commit_for_test();
+        std::fs::remove_dir_all(repo.git_dir.join("logs")).expect("drop reflogs");
         assert!(repo.repair_broken_head().expect("repair"), "repaired once");
         assert!(!repo.repair_broken_head().expect("idempotent"));
         std::fs::write(repo.work_tree().join("a.txt"), b"beta").unwrap();

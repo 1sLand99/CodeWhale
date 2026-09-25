@@ -554,6 +554,28 @@ async fn contract_edit_keeps_non_utf8_bytes() {
     );
 }
 
+/// A valid UTF-8 file may use the placeholder range itself (Nerd Font
+/// Material Design icons are U+F0000..U+F00FF). Those characters are text,
+/// not raw bytes, and an edit elsewhere must keep them.
+#[tokio::test]
+async fn contract_edit_keeps_placeholder_range_characters_in_utf8_files() {
+    let temporary = tempfile::tempdir().expect("tempdir");
+    let path = temporary.path().join("starship.toml");
+    let original = "icon = \"\u{F0026}\"\nwide = \"\u{F00A0}\"\ncolor = \"red\"\n";
+    std::fs::write(&path, original).expect("fixture");
+    let context = ToolContext::new(temporary.path());
+    EditFileTool::execute_contract_edits(
+        json!({"path": "starship.toml", "edits": [{"oldText": "red", "newText": "blue"}]}),
+        &context,
+    )
+    .await
+    .expect("edit");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("still UTF-8"),
+        original.replace("red", "blue")
+    );
+}
+
 /// B6: in a file with mixed line endings, only the lines an edit wrote take
 /// the dominant ending; every untouched line keeps its own.
 #[tokio::test]

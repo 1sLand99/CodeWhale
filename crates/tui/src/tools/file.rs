@@ -1749,13 +1749,17 @@ fn is_raw_byte_placeholder(ch: char) -> bool {
 /// [`encode_lossless_text`] turns back into the same byte. A file that is not
 /// UTF-8 and already uses the placeholder range (or edits that do) cannot be
 /// round-tripped, so the edit is refused rather than risk a silent rewrite.
+///
+/// The flag is `true` only when placeholders were introduced. A valid UTF-8
+/// file keeps its characters as they are, including any in the placeholder
+/// range (Nerd Font icons live there), and is written back as plain UTF-8.
 fn decode_bytes_losslessly(
     bytes: &[u8],
     edits: &[ContractEdit],
     path: &str,
-) -> Result<String, ToolError> {
+) -> Result<(String, bool), ToolError> {
     if let Ok(text) = std::str::from_utf8(bytes) {
-        return Ok(text.to_string());
+        return Ok((text.to_string(), false));
     }
     let refuse = || {
         ToolError::execution_failed(format!(
@@ -1781,10 +1785,11 @@ fn decode_bytes_losslessly(
             );
         }
     }
-    Ok(out)
+    Ok((out, true))
 }
 
-/// Inverse of [`decode_bytes_losslessly`].
+/// Inverse of [`decode_bytes_losslessly`] for a file it decoded with
+/// placeholders. Never call it on text from a valid UTF-8 file.
 fn encode_lossless_text(text: &str) -> Vec<u8> {
     if !text.chars().any(is_raw_byte_placeholder) {
         return text.as_bytes().to_vec();
@@ -2221,7 +2226,7 @@ impl EditFileTool {
         check_file_operation_cancelled(context)?;
         // Bytes that are not UTF-8 ride through the edit as placeholders and
         // are written back unchanged (B6), instead of becoming U+FFFD.
-        let raw = decode_bytes_losslessly(&raw_bytes, &edits, path_str)?;
+        let (raw, has_raw_bytes) = decode_bytes_losslessly(&raw_bytes, &edits, path_str)?;
         let (bom, without_bom) = raw
             .strip_prefix('\u{FEFF}')
             .map_or(("", raw.as_str()), |text| ("\u{FEFF}", text));
@@ -2238,7 +2243,12 @@ impl EditFileTool {
             final_content = normalized;
         }
 
-        run_blocking_write_atomic(&file_path, encode_lossless_text(&final_content)).await?;
+        let bytes = if has_raw_bytes {
+            encode_lossless_text(&final_content)
+        } else {
+            final_content.clone().into_bytes()
+        };
+        run_blocking_write_atomic(&file_path, bytes).await?;
         check_file_operation_cancelled(context)?;
         context.note_file_read(&file_path);
         drop(mutation_guard);
