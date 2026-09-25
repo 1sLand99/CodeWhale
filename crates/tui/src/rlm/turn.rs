@@ -54,12 +54,10 @@ const MAX_RLM_ITERATIONS: u32 = 25;
 /// hard-fail. The paper requires `code → REPL → Final`; anything else is
 /// not the RLM contract.
 const MAX_CONSECUTIVE_NO_CODE: u32 = 3;
-/// Max output tokens for the root LLM — it just needs to generate code.
 /// Max chars of stdout shown as metadata to the root LLM in next iteration.
 const STDOUT_METADATA_PREVIEW_LEN: usize = 800;
 /// Max chars of `context` shown as a preview in the metadata.
 const PROMPT_PREVIEW_LEN: usize = 500;
-/// Temperature for root LLM calls.
 
 // ---------------------------------------------------------------------------
 // Public API

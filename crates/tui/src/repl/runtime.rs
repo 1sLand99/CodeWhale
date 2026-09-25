@@ -1459,7 +1459,8 @@ mod tests {
             )
             .await
             .expect("execute");
-        let out = &round.stdout;
+        // Windows Python prints CRLF; compare line content, not line endings.
+        let out = &round.stdout.replace("\r\n", "\n");
         assert!(
             out.contains("partial answer 0\n[rlm_query incomplete: RLM loop exhausted"),
             "{out}"
