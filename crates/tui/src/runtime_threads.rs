@@ -4637,7 +4637,10 @@ struct ActiveThreads {
 
 pub(crate) struct PreparedThreadFork {
     source_id: String,
-    target_turn_id: String,
+    /// The first turn the fork *drops*, when it drops any: the turn whose
+    /// prompt the receipt hands back. `None` for a fork that keeps the whole
+    /// conversation (a branch point at the last turn).
+    dropped_turn_id: Option<String>,
     depth_from_tail: usize,
     thread: ThreadRecord,
     records: Vec<(TurnRecord, Vec<TurnItemRecord>)>,
@@ -8915,12 +8918,14 @@ impl RuntimeThreadManager {
     /// `None` when no detail was recorded (defensive — every persisted
     /// `UserMessage` since v0.6 carries a detail string).
     ///
-    /// Counts user turns by iterating `list_turns_for_thread` (sorted
-    /// oldest → newest) backwards. A turn is counted as a "user turn"
+    /// Counts user turns over `list_turns_for_thread` (sorted
+    /// oldest → newest). A turn is counted as a "user turn"
     /// when at least one of its items has `kind ==
     /// TurnItemKind::UserMessage`. Steered turns (which append additional
     /// `UserMessage` items) still count as one turn — backtrack rewinds
-    /// at the turn boundary, not at the steer boundary.
+    /// at the turn boundary, not at the steer boundary. That predicate lives
+    /// in `user_turn_indices`, which the named anchor is resolved through
+    /// (`fork_cut_for_user_turn`) as well.
     ///
     /// Errors:
     /// - `depth_from_tail` exceeds the number of user turns
@@ -8942,6 +8947,87 @@ impl RuntimeThreadManager {
         self.publish_prepared_fork(prepared).await
     }
 
+    /// Fork a thread at a named user turn — the branch point a transcript's
+    /// "continue from here" row names.
+    ///
+    /// The fork *keeps* that turn and every turn before it, and drops the
+    /// turns after it; the first dropped turn's prompt comes back so a client
+    /// can put it in the composer as the thing that was asked next, to edit or
+    /// replace. Naming the last turn keeps every turn — a fork of the whole
+    /// conversation — which is the same rule read at the end of the thread.
+    ///
+    /// `turn_id` is a turn id as `GET /v1/threads/{id}` reports it and must
+    /// name a user turn (the same predicate [`Self::fork_at_user_message`]
+    /// counts). This exists because a client cannot count those turns for
+    /// itself: the transcript it renders and the turn store this cuts are not
+    /// the same list — steers, image-only prompts and injected handoffs each
+    /// sit on one side only — so a depth the client computed is an off-by-one
+    /// waiting to fork the wrong prefix and report success. Naming the turn
+    /// moves that decision to the side that owns the list.
+    ///
+    /// Like every other fork, this touches neither the source thread nor the
+    /// workspace: it is a sibling conversation, never an undo. Rollback of
+    /// the dropped turns' file changes is `/patch-undo` territory and is
+    /// deliberately absent here — a fork that rewound the workspace would
+    /// rewind it for the branch that was left behind too.
+    pub async fn fork_at_user_turn(
+        &self,
+        id: &str,
+        turn_id: &str,
+    ) -> Result<(
+        ThreadRecord,
+        Option<String>,
+        Vec<codewhale_protocol::runtime::RuntimeImageInput>,
+        Option<std::num::NonZeroU32>,
+    )> {
+        let prepared = self.prepare_fork_at_user_turn(id, turn_id).await?;
+        self.publish_prepared_fork(prepared).await
+    }
+
+    /// How many turns a named anchor keeps, and its distance from the tail.
+    ///
+    /// The fork keeps the anchor turn, so the cut is one past it: the branch
+    /// point is the answer a person is looking at, not the question above it.
+    fn fork_cut_for_user_turn(
+        &self,
+        turns: &[TurnRecord],
+        turn_id: &str,
+    ) -> Result<(usize, usize)> {
+        // Oldest → newest, so the named turn's position is a direct index.
+        let user_turn_indices = self.user_turn_indices(turns)?;
+        let position = user_turn_indices
+            .iter()
+            .position(|index| turns[*index].id == turn_id)
+            .with_context(|| {
+                format!("fork_at_user_turn: turn {turn_id} is not a user turn of this thread")
+            })?;
+        Ok((
+            user_turn_indices[position] + 1,
+            user_turn_indices.len() - 1 - position,
+        ))
+    }
+
+    /// The indices into `turns` that count as user turns, oldest → newest.
+    ///
+    /// A turn is a user turn when at least one of its items has `kind ==
+    /// TurnItemKind::UserMessage`; a steered turn counts once, at its turn
+    /// boundary, not once per steer. One home for that rule, so a
+    /// tail-relative depth and a named-turn anchor can never disagree about
+    /// which turn they mean.
+    fn user_turn_indices(&self, turns: &[TurnRecord]) -> Result<Vec<usize>> {
+        let mut indices = Vec::new();
+        for (idx, turn) in turns.iter().enumerate() {
+            let items = self.store.list_items_for_turn(&turn.id)?;
+            if items
+                .iter()
+                .any(|item| item.kind == TurnItemKind::UserMessage)
+            {
+                indices.push(idx);
+            }
+        }
+        Ok(indices)
+    }
+
     pub(crate) async fn prepare_fork_at_user_message(
         &self,
         id: &str,
@@ -8950,18 +9036,9 @@ impl RuntimeThreadManager {
         let source = self.get_thread(id).await?;
         let source_turns = self.store.list_turns_for_thread(&source.id)?;
 
-        // Walk turns from newest to oldest. For each turn, ask: does it
-        // contain a UserMessage item? If yes, it counts toward the depth.
-        let mut user_turn_indices: Vec<usize> = Vec::new();
-        for (idx, turn) in source_turns.iter().enumerate().rev() {
-            let items = self.store.list_items_for_turn(&turn.id)?;
-            if items
-                .iter()
-                .any(|item| item.kind == TurnItemKind::UserMessage)
-            {
-                user_turn_indices.push(idx);
-            }
-        }
+        // Which turns count as user turns, oldest first; the depth names one
+        // of them counting back from the end.
+        let user_turn_indices = self.user_turn_indices(&source_turns)?;
         if depth_from_tail >= user_turn_indices.len() {
             bail!(
                 "fork_at_user_message: depth {} exceeds {} user turn(s)",
@@ -8969,33 +9046,74 @@ impl RuntimeThreadManager {
                 user_turn_indices.len()
             );
         }
-        // `user_turn_indices` is newest-first because we iterated in
-        // reverse, so the Nth element is exactly the Nth-from-tail user
-        // turn in the original chronological list.
-        let target_turn_idx = user_turn_indices[depth_from_tail];
-        let target_turn_id = source_turns[target_turn_idx].id.clone();
+        let target_turn_idx = user_turn_indices[user_turn_indices.len() - 1 - depth_from_tail];
+        // A depth-relative cut *drops* the turn it names — `/undo` removes the
+        // exchange a person pointed at — where a named-turn cut keeps it. That
+        // one turn is the whole difference between "undo this" and "branch
+        // after this", and it lives here rather than in either caller.
+        self.prepare_fork_from_cutoff(source, source_turns, target_turn_idx, depth_from_tail)
+    }
 
-        // Pull the original user-message text out of the dropped turn so
-        // the caller can drop it back into the composer.
-        let target_items = self.store.list_items_for_turn(&target_turn_id)?;
-        let original_user_text = target_items
-            .iter()
-            .find(|item| item.kind == TurnItemKind::UserMessage)
+    pub(crate) async fn prepare_fork_at_user_turn(
+        &self,
+        id: &str,
+        turn_id: &str,
+    ) -> Result<PreparedThreadFork> {
+        let source = self.get_thread(id).await?;
+        let source_turns = self.store.list_turns_for_thread(&source.id)?;
+        let (cutoff_turn_idx, depth_from_tail) =
+            self.fork_cut_for_user_turn(&source_turns, turn_id)?;
+        self.prepare_fork_from_cutoff(source, source_turns, cutoff_turn_idx, depth_from_tail)
+    }
+
+    /// Clone the turns before `cutoff_turn_idx` into a sibling thread, and name
+    /// the first turn left behind in the receipt.
+    ///
+    /// One body for every fork that cuts a suffix: the depth-relative path
+    /// (`/undo`, retry, backtrack) passes the anchor turn's own index and drops
+    /// it, the named-anchor path passes one past its anchor and keeps it, so
+    /// the cloning, the saved-session prefix and the receipt cannot drift apart
+    /// between them.
+    fn prepare_fork_from_cutoff(
+        &self,
+        source: ThreadRecord,
+        source_turns: Vec<TurnRecord>,
+        cutoff_turn_idx: usize,
+        depth_from_tail: usize,
+    ) -> Result<PreparedThreadFork> {
+        // The first turn the fork drops, when it drops any. Its prompt is what
+        // the caller puts back in the composer: for a depth-relative cut that
+        // is the turn being undone, and for an anchored cut it is the question
+        // that followed the branch point.
+        let dropped_turn = source_turns.get(cutoff_turn_idx);
+        let dropped_turn_id = dropped_turn.map(|turn| turn.id.clone());
+        let dropped_user_item = match dropped_turn {
+            Some(turn) => self
+                .store
+                .list_items_for_turn(&turn.id)?
+                .into_iter()
+                .find(|item| item.kind == TurnItemKind::UserMessage),
+            None => None,
+        };
+        let original_user_text = dropped_user_item
+            .as_ref()
             .and_then(|item| item.detail.clone());
-        let original_images = target_items
-            .iter()
-            .find(|item| item.kind == TurnItemKind::UserMessage)
+        let original_images = dropped_user_item
+            .as_ref()
             .map(|item| {
                 item.user_content()
                     .and_then(|content| crate::image_attach::runtime_images_from_blocks(&content))
             })
             .transpose()?
             .unwrap_or_default();
+        // The next turn's allowance travels with the prompt it belongs to;
+        // with nothing dropped there is no next turn to inherit from.
+        let max_output_tokens = dropped_turn.and_then(|turn| turn.max_output_tokens);
 
-        // Copy turns strictly before `target_turn_idx` into a new thread.
-        // Mirrors `fork_thread` but stops at the cutoff instead of copying
-        // every turn. Kept structurally close so future parity reviews
-        // can spot drift between the two paths.
+        // Copy the turns before the cutoff into a new thread. Mirrors
+        // `fork_thread` but stops at the cutoff instead of copying every turn.
+        // Kept structurally close so future parity reviews can spot drift
+        // between the two paths.
         let mut forked = source.clone();
         let now = Utc::now();
         forked.id = format!("thr_{}", &Uuid::new_v4().to_string()[..8]);
@@ -9008,12 +9126,12 @@ impl RuntimeThreadManager {
         // own — see `bind_fork_to_own_session`.
         let mut fork_prefix: Option<(Vec<Message>, usize)> = None;
         if let Some((messages, covered)) = self.saved_session_prefix(&source, &source_turns)? {
-            let kept_turns = covered.min(target_turn_idx);
-            let retained_messages = if covered <= target_turn_idx {
+            let kept_turns = covered.min(cutoff_turn_idx);
+            let retained_messages = if covered <= cutoff_turn_idx {
                 messages.len()
             } else {
                 let kept_messages =
-                    self.reconstruct_messages_from_turns(&source_turns[..target_turn_idx])?;
+                    self.reconstruct_messages_from_turns(&source_turns[..cutoff_turn_idx])?;
                 let kept_projection = session_recovery_projection(&kept_messages);
                 // An exact projection match is the strongest proof: message for
                 // message, this prefix *is* the kept history. It holds for a
@@ -9028,24 +9146,30 @@ impl RuntimeThreadManager {
                     // transcript carries the per-turn `<turn_meta>` preamble and
                     // tool results as the route's compaction left them, neither
                     // of which the records keep. The prompt is recorded
-                    // verbatim, so it still names the message the undone turn
-                    // begins at — see `saved_history_boundary`.
-                    let target_prompt = projected_user_texts(
-                        &self.reconstruct_messages_from_turns(
-                            &source_turns[target_turn_idx..=target_turn_idx],
-                        )?,
+                    // verbatim, so it still names the message the first dropped
+                    // turn begins at — see `saved_history_boundary`.
+                    //
+                    // That turn is the one the kept history stops *before*: the
+                    // anchor itself for a depth-relative cut, and the turn after
+                    // the anchor for a fork at a named turn, which keeps it.
+                    let dropped_turn = dropped_turn.context(
+                        "A fork that trims saved history has no dropped turn to align it with",
+                    )?;
+                    let dropped_prompt = projected_user_texts(
+                        &self.reconstruct_messages_from_turns(std::slice::from_ref(dropped_turn))?,
                     )
                     .into_iter()
                     .next()
                     .with_context(|| {
                         format!(
-                            "Turn {target_turn_id} records no user prompt to align the saved history with; the source thread was preserved"
+                            "Turn {} records no user prompt to align the saved history with; the source thread was preserved",
+                            dropped_turn.id
                         )
                     })?;
                     saved_history_boundary(
                         &messages,
                         &projected_user_texts(&kept_messages),
-                        &target_prompt,
+                        &dropped_prompt,
                     )
                     .context("Cannot identify an exact saved-history boundary for this backtrack; the source thread was preserved")?
                 }
@@ -9063,8 +9187,8 @@ impl RuntimeThreadManager {
             fork_prefix = Some((messages[..retained_messages].to_vec(), kept_turns));
         }
 
-        let mut cloned_records = Vec::with_capacity(target_turn_idx);
-        for source_turn in source_turns.iter().take(target_turn_idx) {
+        let mut cloned_records = Vec::with_capacity(cutoff_turn_idx);
+        for source_turn in source_turns.iter().take(cutoff_turn_idx) {
             let mut cloned_turn = source_turn.clone();
             cloned_turn.id = format!("turn_{}", &Uuid::new_v4().to_string()[..8]);
             cloned_turn.thread_id = forked.id.clone();
@@ -9101,13 +9225,13 @@ impl RuntimeThreadManager {
         );
         Ok(PreparedThreadFork {
             source_id: source.id,
-            target_turn_id,
+            dropped_turn_id,
             depth_from_tail,
             thread: forked,
             records: cloned_records,
             original_user_text,
             original_images,
-            max_output_tokens: source_turns[target_turn_idx].max_output_tokens,
+            max_output_tokens,
             own_session,
         })
     }
@@ -9149,7 +9273,7 @@ impl RuntimeThreadManager {
                     "thread": prepared.thread,
                     "source_thread_id": prepared.source_id,
                     "backtrack_depth_from_tail": prepared.depth_from_tail,
-                    "dropped_turn_id": prepared.target_turn_id,
+                    "dropped_turn_id": prepared.dropped_turn_id,
                 }),
             )
             .await
