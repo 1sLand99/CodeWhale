@@ -52,10 +52,17 @@ fn run_report_relative_path(run_id: &str) -> Option<PathBuf> {
 }
 
 /// The run's report path relative to the workspace, only when the report
-/// was actually written.
-pub(super) fn written_run_report(workspace: &Path, run_id: &str) -> Option<PathBuf> {
+/// was actually written. Always `/`-separated: the path is shown to the model
+/// and the user in receipts, and must read the same on every platform.
+pub(super) fn written_run_report(workspace: &Path, run_id: &str) -> Option<String> {
     let relative = run_report_relative_path(run_id)?;
-    workspace.join(&relative).is_file().then_some(relative)
+    workspace.join(&relative).is_file().then(|| {
+        relative
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/")
+    })
 }
 
 /// Bounded preview of a raw `responseSchema` reply for run records and

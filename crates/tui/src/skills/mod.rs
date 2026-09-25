@@ -762,6 +762,9 @@ fn is_valid_skill_name(name: &str) -> bool {
             .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
 }
 
+/// Parsed frontmatter: lowercased metadata keys and the body after the fence.
+pub(crate) type Frontmatter<'a> = (HashMap<String, String>, &'a str);
+
 /// Split a Markdown file into its `---` frontmatter metadata and body.
 ///
 /// Returns `Ok(None)` when the file does not open with a `---` fence. Keys are
@@ -770,7 +773,7 @@ fn is_valid_skill_name(name: &str) -> bool {
 /// one frontmatter reader: skills and Claude Code agent files both use it.
 pub(crate) fn parse_frontmatter(
     content: &str,
-) -> std::result::Result<Option<(HashMap<String, String>, &str)>, String> {
+) -> std::result::Result<Option<Frontmatter<'_>>, String> {
     if !content.trim_start().starts_with("---") {
         return Ok(None);
     }

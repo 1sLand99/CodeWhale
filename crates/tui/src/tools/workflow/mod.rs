@@ -337,8 +337,7 @@ fn finish_workflow_controller(state: &WorkflowWorkspaceState, record: &WorkflowR
             "child_count": record.child_ids.len(),
             "detail": { "tool": "workflow", "action": "status", "run_id": truncate_chars(&record.run_id, 64) },
         });
-        let report = written_run_report(&controller.driver.workspace, &record.run_id)
-            .map(|path| path.display().to_string());
+        let report = written_run_report(&controller.driver.workspace, &record.run_id);
         if let Some(report) = &report {
             receipt["report"] = json!(report);
         }
