@@ -3510,8 +3510,11 @@ pub(crate) async fn run_event_loop(
                         }
                         // #3030: progress can arrive before AgentSpawned is
                         // observed — assign the stable label on first sight.
-                        let label = app.ensure_agent_label(&id);
-                        app.status_message = Some(format!("{label}: {display}"));
+                        // The label and the step stay on the agent row. They
+                        // used to overwrite the parent status line, so every
+                        // child tool call looked like the turn being watched
+                        // (#6565).
+                        let _ = app.ensure_agent_label(&id);
                         // A progress-first agent (its AgentSpawned was dropped
                         // under channel pressure) exists only in agent_progress
                         // until a ListSubAgents refresh promotes it into
