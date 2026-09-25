@@ -181,6 +181,9 @@
   "crates/tui/src/fleet/artifacts.rs": {
     "std_fs": 1
   },
+  "crates/tui/src/fleet/exact.rs": {
+    "std_fs": 2
+  },
   "crates/tui/src/fleet/executor.rs": {
     "std_fs": 1
   },
