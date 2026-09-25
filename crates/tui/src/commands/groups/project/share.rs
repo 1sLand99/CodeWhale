@@ -113,27 +113,37 @@ fn count_redactions(markdown: &str) -> usize {
 
 const NOTHING_TO_SHARE: &str = "Nothing to share. The current session is empty.";
 
-/// Plain `/share`: describe the page, upload nothing.
-fn preview(export: &dyn CommandSessionExportContext) -> CommandResult {
-    let Some(plan) = plan(export) else {
-        return CommandResult::error(NOTHING_TO_SHARE);
-    };
+/// The counts both steps print, measured on the page itself. `confirm`
+/// re-renders, so it states what it actually uploads rather than repeating
+/// the preview's numbers (messages that arrived in between are included).
+fn plan_summary(plan: &SharePlan) -> String {
     let tool_output = match plan.tool_results {
         Some(0) => "none".to_string(),
         Some(count) => format!("included ({count} tool result(s), redacted)"),
         None => "may be included (visible history, redacted)".to_string(),
     };
+    format!(
+        "Messages: {}\n\
+         Tool output: {tool_output}\n\
+         Redacted: {} item(s)\n\
+         Omitted: hidden instructions, internal reasoning, reasoning signatures",
+        plan.message_count, plan.redactions
+    )
+}
+
+/// Plain `/share`: describe the page, upload nothing.
+fn preview(export: &dyn CommandSessionExportContext) -> CommandResult {
+    let Some(plan) = plan(export) else {
+        return CommandResult::error(NOTHING_TO_SHARE);
+    };
     CommandResult::message(format!(
         "Share preview — nothing has been uploaded.\n\
          \n\
-         Messages: {}\n\
-         Tool output: {tool_output}\n\
-         Redacted: {} item(s)\n\
-         Omitted: hidden instructions, internal reasoning, reasoning signatures\n\
+         {}\n\
          \n\
          Run `/share confirm` to upload this page as {VISIBILITY_NOTE}.\n\
          Use `/export file <path>` to read the exact text first.",
-        plan.message_count, plan.redactions
+        plan_summary(&plan)
     ))
 }
 
@@ -145,8 +155,10 @@ fn confirm(export: &dyn CommandSessionExportContext) -> CommandResult {
     let html = render_session_html(&plan.markdown, &plan.model, &plan.mode);
     CommandResult::with_message_and_action(
         format!(
-            "Uploading {} message(s) as {VISIBILITY_NOTE}...",
-            plan.message_count
+            "Uploading this page as {VISIBILITY_NOTE}...\n\
+             \n\
+             {}",
+            plan_summary(&plan)
         ),
         AppAction::ShareSession { html },
     )
@@ -472,6 +484,13 @@ mod tests {
                 .contains("unlisted, not private"),
             "{result:?}"
         );
+        let msg = result.message.as_deref().unwrap();
+        assert!(msg.contains("Messages: 4"), "{msg}");
+        assert!(
+            msg.contains("Tool output: included (1 tool result(s), redacted)"),
+            "{msg}"
+        );
+        assert!(msg.contains("Redacted: 2 item(s)"), "{msg}");
         let html = share_html(&result);
         assert!(!html.contains(FAKE_KEY), "secret leaked into the page");
         assert!(

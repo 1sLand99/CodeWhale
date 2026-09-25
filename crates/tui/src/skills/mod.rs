@@ -898,6 +898,29 @@ pub(crate) fn parse_frontmatter(
                     block_lines.join("\n")
                 };
                 metadata.insert(key.trim().to_ascii_lowercase(), description);
+            } else if value.is_empty()
+                && lines
+                    .get(i + 1)
+                    .is_some_and(|next| is_block_sequence_item(next))
+            {
+                // A block sequence (`tools:` then `  - Read` lines) becomes
+                // one comma-separated value, the same as the flow form
+                // `tools: Read, Grep`. Dropping it would read as "no list".
+                let mut items = Vec::new();
+                i += 1;
+                while let Some(next) = lines.get(i).filter(|next| is_block_sequence_item(next)) {
+                    let item = next.trim()[1..].trim();
+                    let item = item
+                        .strip_prefix('"')
+                        .and_then(|v| v.strip_suffix('"'))
+                        .or_else(|| item.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+                        .unwrap_or(item);
+                    if !item.is_empty() {
+                        items.push(item);
+                    }
+                    i += 1;
+                }
+                metadata.insert(key.trim().to_ascii_lowercase(), items.join(", "));
             } else {
                 let unquoted = match value {
                     v if (v.starts_with('"') && v.ends_with('"') && v.len() >= 2)
@@ -916,6 +939,12 @@ pub(crate) fn parse_frontmatter(
     }
 
     Ok(Some((metadata, body)))
+}
+
+/// A YAML block-sequence entry: `- item` (or a bare `-`) on its own line.
+fn is_block_sequence_item(line: &str) -> bool {
+    let line = line.trim();
+    line == "-" || line.starts_with("- ")
 }
 
 pub(crate) fn normalize_skill_name_for_lookup(name: &str) -> String {

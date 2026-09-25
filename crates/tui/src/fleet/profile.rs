@@ -1382,6 +1382,29 @@ reasoning = "expensive"
         );
     }
 
+    #[test]
+    fn claude_agent_tools_as_a_yaml_list_keep_the_read_only_posture() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_profile(
+            tmp.path(),
+            "reader.md",
+            "---\nname: reader\ntools:\n  - Read\n  - \"Grep\"\ndescription: Reads\n---\nBody.\n",
+        );
+        write_profile(
+            tmp.path(),
+            "writer.md",
+            "---\nname: writer\ntools:\n- Read\n- Edit\n---\nBody.\n",
+        );
+        let (mut profiles, issues) = load_claude_agent_profiles_from_dir(tmp.path()).unwrap();
+        assert!(issues.is_empty(), "{issues:?}");
+        profiles.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(profiles[0].id, "reader");
+        assert_eq!(profiles[0].profile.role.name, "explore");
+        assert_eq!(profiles[0].description.as_deref(), Some("Reads"));
+        assert_eq!(profiles[1].id, "writer");
+        assert_eq!(profiles[1].profile.role.name, "implement");
+    }
+
     fn write_profile(dir: &Path, filename: &str, contents: &str) -> PathBuf {
         let path = dir.join(filename);
         std::fs::write(&path, contents).unwrap();
