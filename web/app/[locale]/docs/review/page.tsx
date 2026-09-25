@@ -1,19 +1,19 @@
 import { DocArticle } from "../_components/doc-article";
-import { getDocsWork } from "@/lib/i18n/dictionaries";
+import { getDocsReview } from "@/lib/i18n/dictionaries";
 import { buildPageMetadata } from "@/lib/page-meta";
 
 export async function generateMetadata({ params }: { params: Promise<{ locale: string }> }) {
   const { locale } = await params;
-  const t = getDocsWork(locale);
+  const t = getDocsReview(locale);
   return buildPageMetadata({
-    path: "/docs/work",
+    path: "/docs/review",
     locale,
     title: t.metaTitle,
     description: t.metaDescription,
   });
 }
 
-export default async function WorkPage({ params }: { params: Promise<{ locale: string }> }) {
+export default async function ReviewPage({ params }: { params: Promise<{ locale: string }> }) {
   const { locale } = await params;
-  return <DocArticle t={getDocsWork(locale)} locale={locale} />;
+  return <DocArticle t={getDocsReview(locale)} locale={locale} />;
 }

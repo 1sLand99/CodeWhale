@@ -28,6 +28,7 @@ import type {
   DocsSandboxDict,
   DocsShellDict,
   DocsModesDict,
+  DocsReviewDict,
   DocsSubagentsDict,
   DocsTroubleshootingDict,
   DocsTrustDict,
@@ -75,6 +76,8 @@ import { docsAuth as enDocsAuth } from "./en/docs-auth";
 import { docsAuth as zhDocsAuth } from "./zh/docs-auth";
 import { docsTrust as enDocsTrust } from "./en/docs-trust";
 import { docsTrust as zhDocsTrust } from "./zh/docs-trust";
+import { docsReview as enDocsReview } from "./en/docs-review";
+import { docsReview as zhDocsReview } from "./zh/docs-review";
 import { computerUse as enComputerUse } from "./en/computer-use";
 import { computerUse as zhComputerUse } from "./zh/computer-use";
 import { computerUse as jaComputerUse } from "./ja/computer-use";
@@ -292,6 +295,10 @@ const DOCS_TRUST: Record<string, DocsTrustDict> = {
   zh: zhDocsTrust,
 };
 
+const DOCS_REVIEW: Record<string, DocsReviewDict> = {
+  zh: zhDocsReview,
+};
+
 /**
  * Shared surface states, the changelog page, the two legal pages and the
  * digest page follow the same optional per-locale rule as the docs page
@@ -394,6 +401,10 @@ export function getDocsTrust(locale: string): DocsTrustDict {
   return DOCS_TRUST[locale] ?? enDocsTrust;
 }
 
+export function getDocsReview(locale: string): DocsReviewDict {
+  return DOCS_REVIEW[locale] ?? enDocsReview;
+}
+
 export function getComputerUse(locale: string): ComputerUseDict {
   return COMPUTER_USE[locale] ?? enComputerUse;
 }
@@ -454,6 +465,7 @@ export const EN_DOCS_WORK = enDocsWork;
 export const EN_DOCS_COMPUTERS = enDocsComputers;
 export const EN_DOCS_AUTH = enDocsAuth;
 export const EN_DOCS_TRUST = enDocsTrust;
+export const EN_DOCS_REVIEW = enDocsReview;
 export const EN_COMPUTER_USE = enComputerUse;
 export const EN_STATES = enStates;
 export const EN_CHANGELOG = enChangelog;
