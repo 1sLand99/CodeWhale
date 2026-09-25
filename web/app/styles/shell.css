@@ -231,7 +231,10 @@
   transition: background-color var(--dur-state) var(--ease-out);
 }
 .mm-link:hover { background: var(--hover); }
-.mm-link[aria-current="page"] { background: var(--selected); }
+.mm-link[aria-current="page"] { background: var(--selected); box-shadow: inset 3px 0 0 var(--accent); font-weight: 600; }
+@media (forced-colors: active) {
+  .mm-link[aria-current="page"] { outline-style: solid; outline-width: 2px; outline-color: Highlight; outline-offset: -2px; }
+}
 .mm-link-chevron { margin-inline-start: auto; color: var(--muted); }
 
 .mm-action {
@@ -249,16 +252,22 @@
 .site-footer {
   position: relative;
   overflow: hidden;
-  background: var(--sea), var(--ocean-abyss);
+  background: var(--sea), var(--ocean-floor);
   color: var(--muted);
 }
 .site-footer > .horizon { position: absolute; inset: 0 0 auto; z-index: 1; }
 
-/* A page whose main already ends in the sea continues into the footer with
-   no second horizon. */
-main:has(.sea-continues:last-child) + .site-footer { background: var(--ocean-abyss); }
-main:has(.sea-continues:last-child) + .site-footer > .horizon,
-main:has(.sea-continues:last-child) + .site-footer > .sea-texture { display: none; }
+/* In dark, a page whose main already ends in the sea continues into the
+   footer with no second horizon. In light the home sea settles back to
+   paper, so the footer keeps its own horizon. */
+:root[data-theme="dark"] main:has(.sea-continues:last-child) + .site-footer { background: var(--ocean-floor); }
+:root[data-theme="dark"] main:has(.sea-continues:last-child) + .site-footer > .horizon,
+:root[data-theme="dark"] main:has(.sea-continues:last-child) + .site-footer > .sea-texture { display: none; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) main:has(.sea-continues:last-child) + .site-footer { background: var(--ocean-floor); }
+  :root:not([data-theme="light"]) main:has(.sea-continues:last-child) + .site-footer > .horizon,
+  :root:not([data-theme="light"]) main:has(.sea-continues:last-child) + .site-footer > .sea-texture { display: none; }
+}
 
 .site-footer-main,
 .site-footer-meta {

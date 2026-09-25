@@ -34,8 +34,8 @@ export const DOC_TASKS: DocTask[] = [
     id: "install",
     label: { en: "Install Codewhale", zh: "安装 Codewhale" },
     description: {
-      en: "One command on macOS or Linux; npm, the Homebrew tap, Cargo, and release binaries also work.",
-      zh: "在 macOS 或 Linux 上只需一条命令；也可以用 npm、Homebrew tap、Cargo 或发布版二进制文件安装。",
+      en: "One command on macOS or Linux; npm, Cargo, release binaries, and the Homebrew tap on Linux also work.",
+      zh: "在 macOS 或 Linux 上只需一条命令；也可以用 npm、Cargo、发布版二进制文件，或在 Linux 上用 Homebrew tap 安装。",
     },
     href: "/install",
     topicId: "install",

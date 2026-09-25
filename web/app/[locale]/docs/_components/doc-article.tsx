@@ -67,7 +67,7 @@ function Block({
   }
   if ("code" in block) {
     return (
-      <pre className="code-block mt-4" aria-label={block.lang}>
+      <pre tabIndex={0} className="code-block mt-4" aria-label={block.lang}>
         <code>{block.code}</code>
       </pre>
     );

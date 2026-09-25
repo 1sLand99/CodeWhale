@@ -45,7 +45,7 @@ export default async function ProductPage({ params }: { params: Promise<{ locale
       <PageHeader
         title={t(PRODUCT_COPY.title)}
         lede={t(PRODUCT_COPY.lede)}
-        pose="busy"
+        pose="think"
         actions={
           <>
             <Link href={`/${locale}/install`} className="btn btn-primary btn-lg">

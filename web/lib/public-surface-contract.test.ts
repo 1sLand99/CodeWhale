@@ -457,7 +457,7 @@ done
     expect(roadmap.indexOf('{ title: "Local web client"')).toBeLessThan(
       roadmap.indexOf('title: "Underway"'),
     );
-    expect(roadmap).toContain("Implemented in the v0.9.1 source candidate");
+    expect(roadmap).toContain("In published releases: `codewhale web`");
     for (const name of matrix.toolSurface.defaultActive) {
       expect(toolDoc, name).toContain(`\`${name}\``);
       expect(toolsPage, name).toContain(name);
@@ -589,7 +589,7 @@ done
     // the media manifest instead of a stale version embedded in translations.
     expect(homepage).toContain("alt={fill(d.screenshotAlt, { version: TERMINAL_SCREENSHOT.version })}");
     expect(homepage).toContain("fill(d.shotBuild, { version: TERMINAL_SCREENSHOT.version })");
-    expect(getHome("en").shotBuild).toBe("v{version} development build");
+    expect(getHome("en").shotBuild).toBe("v{version} pre-release build");
     for (const locale of ["en", "zh", "ja", "vi", "ko", "ru", "uk", "es", "pt-BR", "id", "fr", "de", "ca", "hi", "tr", "it", "pl", "ar"]) {
       const home = getHome(locale);
       expect(home.shotBuild, `${locale} shotBuild`).toContain("{version}");

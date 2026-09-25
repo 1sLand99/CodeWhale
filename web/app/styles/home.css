@@ -12,6 +12,8 @@
 .home-sky {
   position: relative;
   padding-block: clamp(2.5rem, 7vw, 5.5rem) 0;
+  /* The sky rises into the logo's blue at the horizon, not away from it. */
+  background: linear-gradient(180deg, transparent 0, transparent 30%, var(--sky-rise) 100%);
 }
 
 .home-hero-inner {
@@ -66,9 +68,18 @@
 .home-sea {
   position: relative;
   overflow: hidden;
-  background: var(--sea), var(--ocean-abyss);
+  background: var(--home-sea);
   background-size: 100% 70rem, auto;
   background-repeat: no-repeat;
+}
+
+/* The resting whale breathes: a slow rise of a few pixels, and its
+   reflection answers. Still under reduced motion. */
+@keyframes whale-breathe { from { translate: 0 0; } to { translate: 0 -4px; } }
+@keyframes whale-breathe-reflect { from { translate: 0 0; } to { translate: 0 4px; } }
+@media (prefers-reduced-motion: no-preference) {
+  .home-whale .whale-pose { animation: whale-breathe 4.5s ease-in-out infinite alternate; }
+  .home-reflection .whale-pose { animation: whale-breathe-reflect 4.5s ease-in-out infinite alternate; }
 }
 
 /* The whale's reflection: the same pose, flipped and fading into the water. */

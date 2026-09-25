@@ -52,7 +52,7 @@ export default async function PluginsPage({ params }: { params: Promise<{ locale
         <Section id="cu-title" title={t(PLUGINS_COPY.cuTitle)} scope={t(PLUGINS_COPY.cuLead)}>
           <div className="split">
             <div className="stack">
-              <pre className="code-block">{t(PLUGINS_COPY.cuInstall)}</pre>
+              <pre tabIndex={0} className="code-block">{t(PLUGINS_COPY.cuInstall)}</pre>
               <p className="section-scope">{t(PLUGINS_COPY.cuToolsNote)}</p>
               <Link href={`/${locale}/computer-use`} className="section-link">
                 Computer Use
@@ -71,7 +71,7 @@ export default async function PluginsPage({ params }: { params: Promise<{ locale
         </Section>
 
         <Section id="catalog-title" title={t(PLUGINS_COPY.catalogTitle)} scope={t(PLUGINS_COPY.catalogLead)}>
-          <pre className="code-block mb-4">{t(PLUGINS_COPY.catalogBrowse)}</pre>
+          <pre tabIndex={0} className="code-block mb-4">{t(PLUGINS_COPY.catalogBrowse)}</pre>
           <ul className="dir-list dir-list-card" role="list">
             {PLUGINS_COPY.catalogEntries.map((entry) => (
               <li key={entry.reference}>
@@ -121,7 +121,7 @@ export default async function PluginsPage({ params }: { params: Promise<{ locale
         </Section>
 
         <Section id="commands-title" title={t(PLUGINS_COPY.commandsTitle)} scope={t(PLUGINS_COPY.commandsLead)} link={authoringLink}>
-          <pre className="code-block">{PLUGIN_COMMANDS.join("\n")}</pre>
+          <pre tabIndex={0} className="code-block">{PLUGIN_COMMANDS.join("\n")}</pre>
         </Section>
       </div>
     </>

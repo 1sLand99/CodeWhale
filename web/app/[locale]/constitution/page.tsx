@@ -81,8 +81,8 @@ export default async function ConstitutionPage({ params }: { params: Promise<{ l
           title={isZh ? "位阶，从最稳到最活" : "The rank, most-static first"}
           scope={
             isZh
-              ? "三层之下依次是项目说明（AGENTS.md）、记忆与交接。你此刻的要求和实时工具证据仍然主宰当前回合——模型可以被给到很多层，但它绝不能报告一个工具没有返回的事实。"
-              : "Below the three layers rank project instructions (AGENTS.md), then memory and handoffs. Your current request and live tool evidence still control the active turn — the model may be given many layers, but it may never report a fact the tools did not return."
+              ? "三层之下依次是项目说明（AGENTS.md）、记忆与交接。你此刻的要求和实时工具证据仍然主宰当前回合——模型可以被给到很多层，但它被要求不去报告工具没有返回的事实。"
+              : "Below the three layers rank project instructions (AGENTS.md), then memory and handoffs. Your current request and live tool evidence still control the active turn — the model may be given many layers, but it is instructed never to report a fact the tools did not return."
           }
         >
           <ol className="steps">

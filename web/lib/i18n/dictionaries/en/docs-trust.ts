@@ -81,7 +81,7 @@ CODEWHALE_TELEMETRY=0 codewhale        # stop for this process, erase nothing`,
       title: "Report a vulnerability",
       blocks: [
         {
-          p: "Please email security reports to the maintainer instead of opening a public issue. Include your Codewhale version (`codewhale --version`) and steps to reproduce if you have them.",
+          p: "Email security reports to the address below instead of opening a public issue. Include your Codewhale version (`codewhale --version`) and steps to reproduce if you have them.",
         },
       ],
     },

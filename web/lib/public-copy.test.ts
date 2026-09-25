@@ -62,7 +62,7 @@ describe("public website copy contracts", () => {
 
     expect(runtime).toContain("ACP (Agent Client Protocol)");
     expect(runtime).toContain("Baseline JSON-RPC adapter over stdio");
-    expect(runtime).toContain("Phase 0 companion for the local runtime");
+    expect(runtime).toContain("Early companion for the local runtime");
     expect(runtime).not.toContain("Agent Communication Protocol");
     expect(runtime).not.toContain("IETF-standard");
     expect(runtime).not.toContain("embeds Codewhale as a side-panel agent");

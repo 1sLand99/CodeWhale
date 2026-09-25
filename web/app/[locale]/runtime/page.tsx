@@ -15,7 +15,7 @@ export async function generateMetadata({ params }: { params: Promise<{ locale: s
     title: isZh ? "Runtime & 集成 · Codewhale" : "Runtime & Integrations · Codewhale",
     description: isZh
       ? "Codewhale 的本地 Runtime API、HTTP/SSE、ACP stdio 适配器、MCP 服务器、VS Code 配套扩展与消息桥接。"
-      : "Codewhale's local Runtime API, HTTP/SSE, baseline ACP stdio adapter, MCP servers, Phase 0 VS Code companion, and messaging bridges.",
+      : "Codewhale's local Runtime API, HTTP/SSE, baseline ACP stdio adapter, MCP servers, an early VS Code companion, and messaging bridges.",
   });
 }
 
@@ -53,8 +53,8 @@ const INTEGRATIONS: Integration[] = [
   {
     name: "VS Code Extension",
     icon: "monitor",
-    desc: "Phase 0 companion for the local runtime. It can open Codewhale in a terminal, start and check the Runtime API, and show read-only thread summaries and restore points. It does not yet provide full chat, inline edits, or editor actions.",
-    descZh: "本地 Runtime 的 Phase 0 配套扩展。它可以在终端中打开 Codewhale、启动并检查 Runtime API，以及显示只读线程摘要和还原点；目前尚不提供完整聊天、内联编辑或编辑器操作。",
+    desc: "Early companion for the local runtime. It can open Codewhale in a terminal, start and check the Runtime API, and show read-only thread summaries and restore points. It does not yet provide full chat, inline edits, or editor actions.",
+    descZh: "本地 Runtime 的早期配套扩展。它可以在终端中打开 Codewhale、启动并检查 Runtime API，以及显示只读线程摘要和还原点；目前尚不提供完整聊天、内联编辑或编辑器操作。",
     href: "https://github.com/Hmbown/CodeWhale/tree/main/extensions/vscode",
   },
   {
@@ -96,8 +96,8 @@ export default async function RuntimePage({ params }: { params: Promise<{ locale
     {
       title: isZh ? "认证必需" : "Auth required",
       body: isZh
-        ? "所有 Runtime API 路由（/v1/*）需要 Bearer Token。配置 CODEWHALE_RUNTIME_TOKEN 环境变量或 config.toml 中的 auth_token。"
-        : "All Runtime API routes (/v1/*) require a Bearer token. Set CODEWHALE_RUNTIME_TOKEN env var or auth_token in config.toml.",
+        ? "Runtime API 路由（/v1/*）需要 Bearer Token。启动时传入 --auth-token，或设置 CODEWHALE_RUNTIME_TOKEN 环境变量。仅在回环地址上可用 --insecure-no-auth 关闭认证。"
+        : "Runtime API routes (/v1/*) require a Bearer token. Pass --auth-token at startup or set CODEWHALE_RUNTIME_TOKEN. Only a loopback bind can turn this off, with --insecure-no-auth.",
     },
     {
       title: isZh ? "权限用户控制" : "Permissions user-controlled",

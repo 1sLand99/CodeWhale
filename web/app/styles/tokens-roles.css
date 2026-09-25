@@ -48,9 +48,10 @@
   --brand-fill: linear-gradient(135deg, #1877c9, var(--brand-deep));
   --brand-fill-hover: linear-gradient(135deg, #1670c2, #0a3fa6);
   --on-brand: #ffffff;
-  /* The sea below the horizon: bright at the waterline, deep within a few
-     rows, so text from 3rem down sits on >= 4.5:1 muted contrast. */
-  --sea: linear-gradient(180deg, #0b48bb 0, #0a3a94 2.5rem, #06205a 9rem, #041234 18rem, var(--ocean-abyss) 100%);
+  /* The sea below the horizon: bright at the waterline, settling into navy
+     within a few rows (never near-black), so text from 3rem down sits on
+     >= 4.5:1 muted contrast. */
+  --sea: linear-gradient(180deg, #0b48bb 0, #0a3a94 2.5rem, #06205a 9rem, #051a4a 18rem, var(--ocean-floor) 36rem);
   --horizon-glow: rgb(144 185 255 / 0.9);
 
   /* Type: Shannon Sans for every role, the system monospace stack for
@@ -150,6 +151,10 @@
   --diff-del: rgb(189 119 116 / 0.11);
   /* The sky: paper that brightens toward blue at the top of the page. */
   --ground: linear-gradient(180deg, #e9f1fb 0, var(--gpui-light-bg) 26rem);
+  /* The home sky brightens toward the horizon; the home sea is shallow water
+     that settles back to paper. */
+  --sky-rise: rgb(30 143 216 / 0.1);
+  --home-sea: linear-gradient(180deg, #cfe2f6 0, #e2ecf8 5rem, var(--gpui-light-bg) 24rem), var(--gpui-light-bg);
   /* On paper, light is a quiet ring. */
   --glow: 0 0 0 3px color-mix(in srgb, currentColor 16%, transparent);
   --glow-focus: 0 0 0 6px rgb(var(--gpui-light-primary-rgb) / 0.12);
@@ -182,6 +187,8 @@
     --diff-add: rgb(80 170 140 / 0.16);
     --diff-del: rgb(227 154 144 / 0.12);
     --ground: radial-gradient(90rem 38rem at 50% -14rem, rgb(30 143 216 / 0.3), transparent 70%), linear-gradient(180deg, var(--ocean-sky) 0, var(--ocean-floor) 34rem);
+    --sky-rise: rgb(30 143 216 / 0.24);
+    --home-sea: var(--sea), var(--ocean-floor);
     --glow: 0 0 0 3px color-mix(in srgb, currentColor 20%, transparent), 0 0 12px 1px color-mix(in srgb, currentColor 45%, transparent);
     --glow-focus: 0 0 14px 2px rgb(var(--gpui-dark-primary-rgb) / 0.35);
     --shadow-popover: 0 4px 8px rgb(0 0 0 / 0.4);
@@ -212,6 +219,8 @@
   --diff-add: rgb(80 170 140 / 0.16);
   --diff-del: rgb(227 154 144 / 0.12);
   --ground: radial-gradient(90rem 38rem at 50% -14rem, rgb(30 143 216 / 0.3), transparent 70%), linear-gradient(180deg, var(--ocean-sky) 0, var(--ocean-floor) 34rem);
+  --sky-rise: rgb(30 143 216 / 0.24);
+  --home-sea: var(--sea), var(--ocean-floor);
   --glow: 0 0 0 3px color-mix(in srgb, currentColor 20%, transparent), 0 0 12px 1px color-mix(in srgb, currentColor 45%, transparent);
   --glow-focus: 0 0 14px 2px rgb(var(--gpui-dark-primary-rgb) / 0.35);
   --shadow-popover: 0 4px 8px rgb(0 0 0 / 0.4);

@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { currentNavHref, type ChromeLink } from "@/lib/i18n/links";
 import { Icon } from "./icon";
+import { ArrowLabel } from "./arrow-label";
 
 export function MobileMenu({
   links,
@@ -210,7 +211,7 @@ export function MobileMenu({
               onClick={() => setOpen(false)}
               className="mm-action paper-install-cta"
             >
-              {installLabel}
+              <ArrowLabel text={installLabel} />
             </Link>
             <Link
               href={signInHref}

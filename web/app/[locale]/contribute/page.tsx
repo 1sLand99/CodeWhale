@@ -230,7 +230,7 @@ export default async function ContributePage({ params }: { params: Promise<{ loc
               : "The repository uses stable Rust. Run the focused test for your change first, followed by formatting, Clippy, and the workspace suite."
           }
         >
-          <pre className="code-block">
+          <pre tabIndex={0} className="code-block">
 {`git clone https://github.com/YOUR_USERNAME/CodeWhale.git
 cd CodeWhale
 git checkout -b fix/your-change

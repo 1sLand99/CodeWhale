@@ -103,8 +103,9 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
         <div className="horizon" aria-hidden="true" />
       </section>
 
-      {/* THE SEA — the stage in both appearances, down into the footer. */}
-      <div className="home-sea stage sea-continues">
+      {/* THE SEA — deep water in dark, continuing into the footer; shallow
+          water settling back to paper in light. */}
+      <div className="home-sea sea-continues">
         <div className="sea-texture" aria-hidden="true" />
         <div className="home-reflection" aria-hidden="true">
           <WhalePose pose="rest" />
@@ -279,7 +280,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
               <div className="section-head-text">
                 <h2 className="section-title" id="home-install">{d.installBandHeading}</h2>
                 <p className="home-install-channels">
-                  GitHub Releases ({d.binaries}) · npm · Cargo · Docker · Nix · Windows · Android / Termux · {d.chinaMirrors}
+                  GitHub Releases ({d.binaries}) · npm · Cargo · Docker · Windows · Android / Termux · {d.chinaMirrors}
                 </p>
                 <Link href={`/${locale}/install`} className="section-link">
                   {d.installGuideLink}

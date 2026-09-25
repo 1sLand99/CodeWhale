@@ -8,6 +8,7 @@ import { MobileMenu } from "./mobile-menu";
 import { NavLinks } from "./nav-links";
 import { ThemeToggle } from "./theme-toggle";
 import { WhalePose } from "./whale-pose";
+import { ArrowLabel } from "./arrow-label";
 
 /**
  * Masthead + primary nav. Like the GPUI titlebar it carries few visible
@@ -54,7 +55,7 @@ export function Nav({ locale = "en" }: { locale?: Locale }) {
             href={`/${locale}/install`}
             className="paper-install-cta hidden lg:inline-flex"
           >
-            {chrome.installCta}
+            <ArrowLabel text={chrome.installCta} />
           </Link>
           <MobileMenu
             installHref={`/${locale}/install`}

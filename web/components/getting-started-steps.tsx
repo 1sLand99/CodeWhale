@@ -12,7 +12,15 @@ import { GETTING_STARTED_STEPS } from "@/lib/content/getting-started";
 import { pickText } from "@/lib/i18n/dictionaries";
 import { Icon } from "./icon";
 
-export function GettingStartedSteps({ locale = "en" }: { locale?: string }) {
+export function GettingStartedSteps({
+  locale = "en",
+  headingLevel = 3,
+}: {
+  locale?: string;
+  /** 2 when the steps sit directly under the page title, 3 under a section. */
+  headingLevel?: 2 | 3;
+}) {
+  const StepHeading = headingLevel === 2 ? "h2" : "h3";
   return (
     <ol className="gs-steps">
       {GETTING_STARTED_STEPS.map((step, index) => (
@@ -20,10 +28,10 @@ export function GettingStartedSteps({ locale = "en" }: { locale?: string }) {
           <span className="gs-step-index" aria-hidden="true">
             {index + 1}
           </span>
-          <h3>{pickText(step.title, locale)}</h3>
+          <StepHeading className="gs-step-title">{pickText(step.title, locale)}</StepHeading>
           <p>{pickText(step.body, locale)}</p>
           {step.commands.length > 0 && (
-            <pre className="code-block gs-step-commands"><code>{step.commands.join("\n")}</code></pre>
+            <pre tabIndex={0} className="code-block gs-step-commands"><code>{step.commands.join("\n")}</code></pre>
           )}
           <Link href={`/${locale}${step.link.href}`} className="gs-step-link">
             {pickText(step.link.label, locale)}

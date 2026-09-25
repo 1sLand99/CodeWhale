@@ -76,7 +76,7 @@ CODEWHALE_TELEMETRY=0 codewhale        # stop for this process, erase nothing`,
       title: "报告安全漏洞",
       blocks: [
         {
-          p: "请通过电子邮件把安全问题报告给维护者，不要公开提交 issue。请附上你的 Codewhale 版本（`codewhale --version`），如有复现步骤也请一并提供。",
+          p: "请把安全问题发送到下方邮箱，不要公开提交 issue。请附上你的 Codewhale 版本（`codewhale --version`），如有复现步骤也请一并提供。",
         },
       ],
     },

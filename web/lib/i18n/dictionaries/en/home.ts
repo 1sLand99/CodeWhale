@@ -17,15 +17,15 @@ export const home: HomeDict = {
 
   heroTitle: "Build and automate with the models you choose",
   heroIntro:
-    "{brand} is an open-source agent that reads files, edits code, runs commands, and checks its work. Use it in your terminal or local browser with a hosted or local model. You choose the tools and permissions; the session keeps the conversation and tool results.",
+    "{brand} is an open-source agent that reads files, edits code, runs commands, and can run your tests to check its work. Use it in your terminal or local browser with a hosted or local model. You choose the tools and permissions; the session keeps the conversation and tool results.",
   getCodewhale: "Get Codewhale",
   heroInstallAria: "Install command",
   exploreProduct: "Explore the product",
 
   shotPreview: "Terminal preview",
-  shotBuild: "v{version} development build",
+  shotBuild: "v{version} pre-release build",
   screenshotAlt:
-    "Codewhale v{version} development build: whale mark, new session, message composer, Ask permissions, Work mode and model status. Rendered from an isolated terminal capture.",
+    "Codewhale v{version} pre-release build: whale mark, new session, message composer, Ask permissions, Work mode and model status. Rendered from an isolated terminal capture.",
 
   latestRelease: "Latest release {tag}",
   releaseUnavailable: "Release status unavailable",
@@ -80,7 +80,7 @@ export const home: HomeDict = {
     [
       "Hosted web app",
       "Development preview",
-      "Sign in with a Codewhale account and pair a computer in the development preview. Hosted task execution is still being qualified.",
+      "Sign in with a Codewhale account, then type /rc in a running terminal session to continue it from the web app. Hosted task execution is still being qualified.",
     ],
     [
       "Desktop",
@@ -101,7 +101,7 @@ export const home: HomeDict = {
   surfaces: [
     ["Files and commands", "Read a project, edit files, run tests, and inspect command output within the permissions you set."],
     ["Plugins and MCP", "Connect additional tools and services. Review and enable plugins before the agent can use them."],
-    ["Computer Use · source preview", "The current source includes a plugin for seeing and interacting with other applications. Enable it explicitly and grant the required system permissions."],
+    ["Computer Use · preview", "A plugin that lets the agent see and operate other applications. Enable it explicitly and grant the system permissions it asks for."],
     ["Saved sessions", "Keep the conversation and tool results together. The local browser connects to the same Codewhale session on your computer; resume saved work instead of starting over."],
     ["Fleet", "Assign parts of a task to agents with different models and roles, and follow their progress."],
   ],

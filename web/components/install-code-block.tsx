@@ -34,7 +34,7 @@ export function InstallCodeBlock({ cmd, copyLabel = "Copy", copiedLabel = "Copie
 
   return (
     <div className="code">
-      <pre className="code-block">{cmd}</pre>
+      <pre tabIndex={0} className="code-block">{cmd}</pre>
       <button
         type="button"
         lang={copyLocale}
