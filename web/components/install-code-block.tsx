@@ -33,7 +33,7 @@ export function InstallCodeBlock({ cmd, copyLabel = "Copy", copiedLabel = "Copie
         onClick={copy}
         aria-label={copied ? copiedLabel : copyLabel}
         data-copied={copied}
-        className="copy-btn absolute top-3 right-3 z-10 px-3 py-1 bg-paper hairline-t hairline-b hairline-l hairline-r font-mono text-[0.7rem] uppercase tracking-wider hover:bg-indigo hover:text-paper transition-colors"
+        className="copy-btn absolute top-3 right-3 z-10 px-3 py-1 bg-paper hairline-t hairline-b hairline-l hairline-r rounded text-xs hover:bg-indigo hover:text-paper transition-colors"
       >
         {copied ? copiedLabel : copyLabel}
       </button>
