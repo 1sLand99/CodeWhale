@@ -4,7 +4,6 @@ import {
   DICTIONARY_LOCALES,
   EN_CHROME,
   EN_DOCS_GUIDE,
-  EN_DOCS_CONSTITUTION,
   EN_DOCS_HOOKS,
   EN_DOCS_MCP,
   EN_DOCS_RUNTIME_API,
@@ -27,7 +26,6 @@ import {
   fill,
   getChrome,
   getDocsGuide,
-  getDocsConstitution,
   getDocsHooks,
   getDocsMcp,
   getDocsRuntimeApi,
@@ -53,7 +51,6 @@ import {
   pickText,
   pickTextLocale,
   splitToken,
-  splitTokens,
 } from "./dictionaries";
 import { locales, partialLocales } from "./config";
 import type { ChromeDict, HomeDict } from "./dictionaries/types";
@@ -64,9 +61,7 @@ import type { ChromeDict, HomeDict } from "./dictionaries/types";
  * missing translation.
  */
 const NON_PROSE_KEYS = new Set([
-  "wordmarkSeal",
   "dateLocale",
-  "tickerLiveTag",
 ]);
 
 /** Chrome keys that are real sentences/labels and must be translated. */
@@ -77,9 +72,6 @@ const CHROME_PROSE_KEYS = [
   "navCommunity",
   "navPrimaryAria",
   "navHomeAria",
-  "wordmarkTag",
-  "traceLabel",
-  "traceTabsAria",
   "menuOpen",
   "menuClose",
   "themeAria",
@@ -93,15 +85,6 @@ const CHROME_PROSE_KEYS = [
   "switcherLabel",
   "switcherSwitchTo",
   "partialBadge",
-  // Ticker chrome. The repository's own record (titles, handles, tags) stays
-  // verbatim, but the verbs the strip prints around it are copy.
-  "tickerMerged",
-  "tickerOpened",
-  "tickerClosed",
-  "tickerReleased",
-  "tickerFirstContribution",
-  "tickerBy",
-  "tickerAria",
 ] as const satisfies readonly (keyof ChromeDict)[];
 
 /**
@@ -126,11 +109,8 @@ const HOME_PROSE_KEYS = [
   "shotPreview",
   "shotBuild",
   "screenshotAlt",
-  "chapterTerminal",
-  "chapterTerminalTitle",
   "gainHeading",
   "gainLede",
-  "chapterModels",
   "modelsHeading",
   "modelsBody",
   "modelsLink",
@@ -138,7 +118,6 @@ const HOME_PROSE_KEYS = [
   "startLede",
   "startGuideLink",
   "startVocabularyLink",
-  "chapterAccount",
   "availabilityHeading",
   "availabilityLede",
   "availabilityNote",
@@ -271,7 +250,6 @@ describe("website dictionaries", () => {
     for (const [label, get, reference] of [
       ["docs-hooks", getDocsHooks, EN_DOCS_HOOKS],
       ["docs-troubleshooting", getDocsTroubleshooting, EN_DOCS_TROUBLESHOOTING],
-      ["docs-constitution", getDocsConstitution, EN_DOCS_CONSTITUTION],
       ["docs-runtime-api", getDocsRuntimeApi, EN_DOCS_RUNTIME_API],
       ["docs-sandbox", getDocsSandbox, EN_DOCS_SANDBOX],
       ["docs-subagents", getDocsSubagents, EN_DOCS_SUBAGENTS],
@@ -380,37 +358,6 @@ describe("website dictionaries", () => {
         }
       }
     }
-  });
-
-  it("carries every code-span token through the constitution copy", () => {
-    const tokensOf = (template: string) =>
-      splitTokens(template).flatMap((part) => ("token" in part ? [part.token] : []));
-    for (const locale of [...DICTIONARY_LOCALES, "und"]) {
-      const constitution = getDocsConstitution(locale);
-      expect(tokensOf(constitution.overviewLead), `${locale} overviewLead`).toEqual([
-        "constitutionCommand",
-        "homeConfig",
-        "repoConfig",
-      ]);
-      // Exactly one link slot, so the translated label is never concatenated
-      // onto a fragment the call site owns.
-      expect(tokensOf(constitution.authorityNote), `${locale} authorityNote`).toEqual([
-        "configDocs",
-      ]);
-    }
-  });
-
-  it("splitTokens interleaves literal text and token names in template order", () => {
-    expect(splitTokens("a {one} b {two}")).toEqual([
-      { text: "a " },
-      { token: "one" },
-      { text: " b " },
-      { token: "two" },
-    ]);
-    // A template with no token is one literal run, and an empty run between
-    // adjacent tokens is dropped rather than rendered as an empty node.
-    expect(splitTokens("plain")).toEqual([{ text: "plain" }]);
-    expect(splitTokens("{one}{two}")).toEqual([{ token: "one" }, { token: "two" }]);
   });
 
   it("pickText selects the locale side of legacy { en, zh } pairs", () => {
@@ -538,18 +485,6 @@ describe("website dictionaries", () => {
       const parts = splitToken(lede, "brand");
       expect(parts.length, `${locale} heroIntro brand split`).toBe(2);
       expect(parts.join("").includes("{brand}")).toBe(false);
-    }
-  });
-
-  it("carries the {handle} token through every ticker by-line", () => {
-    // components/ticker.tsx splits on the token so the handle is typeset in
-    // its own element. A locale that drops it would print a by-line with no
-    // contributor in it — the opposite of the point.
-    for (const locale of ["en", ...DICTIONARY_LOCALES]) {
-      const byLine = getChrome(locale).tickerBy;
-      expect(byLine, `${locale} tickerBy`).toContain("{handle}");
-      const parts = splitToken(byLine, "handle");
-      expect(parts.length, `${locale} tickerBy split`).toBe(2);
     }
   });
 

@@ -14,9 +14,8 @@ export const docsShell: DocsShellDict = {
   heroTitle: "用 Codewhale 把事情做完。",
   heroLead: "从你想做的事开始。每一页都会说明你需要准备什么，给出今天就能运行的命令，并指向下一步。",
   installCta: "安装 Codewhale",
-  sourceDocsCta: "浏览源文档 ↗",
 
-  releaseLabel: "版本事实",
+  releaseLabel: "版本",
   releasePublished: "最新发布 {tag} · {date}",
   releaseCandidate: "本站文档描述的是尚未发布的 {version} 源码候选版。",
   releaseMatches: "本站文档描述的是已发布的 {tag}。",

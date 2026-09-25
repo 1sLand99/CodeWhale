@@ -72,9 +72,6 @@
 .btn-secondary:hover,
 .portal-button-secondary:hover { background: var(--hover); }
 
-.btn-outline { border-color: var(--line-strong); }
-.btn-outline:hover { background: var(--hover); }
-
 .btn-ghost { color: var(--text); }
 .btn-ghost:hover { background: var(--hover); }
 
@@ -226,7 +223,6 @@
   background: color-mix(in srgb, var(--panel) 72%, transparent);
   overflow: hidden;
 }
-.group-title { margin-bottom: var(--space-2); color: var(--muted); font-size: var(--text-caption); font-weight: 500; }
 .group-row { padding: var(--space-3) var(--space-4); }
 .group-row + .group-row { border-top: 1px solid var(--line); }
 
@@ -377,8 +373,7 @@ a.dir-row:hover .dir-action { color: var(--text); }
 .status-badge-unavailable .status-badge-dot { background: var(--muted); }
 
 /* ---------- segmented choice ---------- */
-.segmented,
-.hero-install-switch {
+.segmented {
   display: inline-flex;
   gap: 2px;
   padding: 2px;
@@ -386,8 +381,7 @@ a.dir-row:hover .dir-action { color: var(--text); }
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
 }
-.segmented button,
-.hero-install-switch button {
+.segmented button {
   min-height: 1.75rem;
   padding-inline: 0.625rem;
   color: var(--muted);
@@ -397,13 +391,10 @@ a.dir-row:hover .dir-action { color: var(--text); }
   cursor: pointer;
   transition: background-color var(--dur-state) var(--ease-out), color var(--dur-state) var(--ease-out);
 }
-.segmented button:hover,
-.hero-install-switch button:hover { background: var(--hover); color: var(--text); }
-.segmented button[aria-pressed="true"],
-.hero-install-switch button[aria-pressed="true"] { background: var(--selected); color: var(--text); }
+.segmented button:hover { background: var(--hover); color: var(--text); }
+.segmented button[aria-pressed="true"] { background: var(--selected); color: var(--text); }
 @media (pointer: coarse) {
-  .segmented button,
-  .hero-install-switch button { min-height: 2.5rem; }
+  .segmented button { min-height: 2.5rem; }
 }
 
 /* ---------- nav tabs ---------- */
@@ -435,13 +426,19 @@ a.dir-row:hover .dir-action { color: var(--text); }
 
 /* ---------- code with copy ---------- */
 .code { position: relative; min-width: 0; }
-.code pre.code-block { padding-inline-end: 3rem; }
+.code pre.code-block { padding-right: 3rem; }
+/* A long command scrolls under the button, so the button sits flush with the
+   block's edge and a short fade on its leading side hides the text beneath
+   it instead of letting a sliver show on either side. Commands are always
+   left to right (see base.css), so the button is on the physical right. */
 .code .code-copy {
   position: absolute;
   background: var(--surface);
-  top: 0.375rem;
-  inset-inline-end: 0.375rem;
+  top: 0.25rem;
+  right: 1px;
+  box-shadow: -0.75rem 0 0.5rem -0.25rem var(--surface);
 }
+.code .code-copy:focus-visible { box-shadow: var(--glow-focus); }
 .code .code-copy:hover { background: var(--hover); }
 .code-copy[data-copied="true"] { color: var(--live); }
 
@@ -556,8 +553,7 @@ h1.state-title { font-size: var(--text-display); }
 
 .state-skeleton,
 .skeleton { display: grid; gap: var(--space-2); width: min(100%, 24rem); }
-.state-skeleton span,
-.skeleton-bar {
+.state-skeleton span {
   display: block;
   height: 0.75rem;
   background: var(--surface);

@@ -47,11 +47,6 @@
 
 .home-hero-copy .hero-install { max-width: 34rem; }
 
-.home-release {
-  color: var(--muted);
-  font-size: var(--text-caption);
-}
-
 /* The whale rests on the horizon: its lowest point sits on the line. */
 .home-whale {
   position: relative;

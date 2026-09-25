@@ -60,59 +60,12 @@ export interface ChromeDict {
    */
   authSignIn: string;
 
-  /** Wordmark seal glyph beside the masthead brand (components/seal.tsx). */
-  wordmarkSeal: string;
-  /** Wordmark strapline under the brand, e.g. "any model, on your machine". */
-  wordmarkTag: string;
-
-  /** Masthead issue line, e.g. "Issue {date}". */
-  issueLabel: string;
   /**
    * BCP 47 tag used for the masthead weekday via `toLocaleDateString` — not
    * rendered copy, but per-locale, so it belongs beside it. Without this the
    * masthead date renders in English for every non-Chinese locale.
    */
   dateLocale: string;
-
-  /** Live-ticker seal label (components/ticker.tsx). */
-  tickerLiveLabel: string;
-  /** Live-ticker mono tag beside the seal label, e.g. "LIVE". */
-  tickerLiveTag: string;
-
-  /**
-   * Ticker event verbs — the chrome around the repository's own record.
-   * Pull-request titles, issue titles, release tags, and contributor handles
-   * are CONTENT and stay verbatim in every locale; these verbs are copy and
-   * must be translated.
-   *
-   * `tickerReleased` covers `state: "published"`, and `tickerOpened` covers
-   * both a newly filed issue and an open pull request. There is deliberately
-   * no draft verb: the strip reports events, and a draft pull request is one
-   * its author has marked not-ready (components/ticker.tsx `EVENT_STATES`).
-   */
-  tickerMerged: string;
-  tickerOpened: string;
-  tickerClosed: string;
-  tickerReleased: string;
-  /**
-   * Mark shown when GitHub itself reports the author as a
-   * FIRST_TIME_CONTRIBUTOR — the warmest item on the strip, and never our
-   * inference. Keep it short; it sits inline in a scrolling mono line.
-   */
-  tickerFirstContribution: string;
-  /**
-   * By-line template carrying a `{handle}` token, e.g. "by {handle}". The
-   * handle is typeset in its own element, so a locale may place it anywhere
-   * (or make it the whole value, as ja/ko do with an honorific suffix).
-   */
-  tickerBy: string;
-  /** aria-label for the ticker's group landmark. */
-  tickerAria: string;
-
-  /** Reasoning trace title-bar label, e.g. "reasoning trace". */
-  traceLabel: string;
-  /** aria-label for the reasoning trace scene tablist. */
-  traceTabsAria: string;
 
   /** Mobile-menu toggle labels. */
   menuOpen: string;
@@ -203,23 +156,15 @@ export interface HomeDict {
   /** "Source" / "Unreleased" — prepended to `v{version}`. */
   currentSource: string;
   sourceCandidate: string;
-  /** "{count} providers" */
-  providerRoutes: string;
   /** "released" / "unreleased" — the machine-readable source-state label. */
   publishedRelease: string;
   figcaptionSourceCandidate: string;
-
-  /** The running head on the water beside the capture. */
-  chapterTerminal: string;
-  chapterTerminalTitle: string;
 
   /** What a person gains: heading, lede, and three [title, body] columns. */
   gainHeading: string;
   gainLede: string;
   gain: [string, string][];
 
-  /** Models chapter. */
-  chapterModels: string;
   modelsHeading: string;
   modelsBody: string;
   /** Three [route kind, description] rows. */
@@ -231,11 +176,6 @@ export interface HomeDict {
   startGuideLink: string;
   startVocabularyLink: string;
 
-  /**
-   * Availability chapter: four [surface, status, detail] rows stating what
-   * is released, what is a development build, and what is not available.
-   */
-  chapterAccount: string;
   availabilityHeading: string;
   availabilityLede: string;
   availability: [string, string, string][];
@@ -298,10 +238,9 @@ export interface DocsShellDict {
   heroTitle: string;
   heroLead: string;
   installCta: string;
-  sourceDocsCta: string;
 
   // --- release truth band (docs layout; facts + CHANGELOG.md) ---
-  /** Eyebrow over the band, e.g. "Release truth". */
+  /** Eyebrow over the band, e.g. "Release". */
   releaseLabel: string;
   /** "Latest release {tag} · {date}" — date already formatted per locale. */
   releasePublished: string;
@@ -378,7 +317,6 @@ export interface StatesDict {
   notFoundTitle: string;
   notFoundBody: string;
   notFoundHomeLink: string;
-  notFoundPosterAlt: string;
   /**
    * A data-bearing page whose source was not asked (build-time prerender)
    * or refused (rate limit, outage). Distinct from `empty`, which asserts
@@ -526,32 +464,6 @@ export type DocsTroubleshootingDict = DocsPageDict;
 
 export type DocsConfigurationDict = DocsPageDict;
 
-/**
- * `app/[locale]/docs/constitution/page.tsx`.
- *
- * `overviewLead` carries three `{token}` placeholders and `authorityNote` one
- * more. Per `docs/VOICE.md` — keep commands, key names and paths as code-owned
- * placeholders — the literals themselves live in the page, along with the
- * en/zh badge pair on each principle row, which is a fixed bilingual glyph
- * rather than copy.
- */
-export interface DocsConstitutionDict {
-  metaTitle: string;
-  metaDescription: string;
-  /** Body-copy typography for this locale (CJK needs looser leading). */
-  bodyClassName: string;
-  overviewTitle: string;
-  /** Opposite-language echo the heading prints beside the title. */
-  overviewTitleAside: string;
-  overviewLead: string;
-  /** Three `[key, detail]` rows; the key selects the page's badge pair. */
-  principles: [string, string][];
-  authorityNote: string;
-  /** Link text inside `authorityNote`'s `{configDocs}` slot. */
-  configDocsLabel: string;
-  sourceNote: string;
-}
-
 export type DocsFleetDict = DocsPageDict;
 
 export type DocsMcpDict = DocsPageDict;
@@ -599,7 +511,4 @@ export interface ComputerUseDict {
   demo: string;
   source: string;
   platforms: string;
-  installTitle: string;
-  installLead: string;
-  installLink: string;
 }

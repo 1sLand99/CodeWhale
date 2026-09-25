@@ -17,7 +17,6 @@ export const states: StatesDict = {
   notFoundTitle: "这个页面不在这里",
   notFoundBody: "链接可能已经过期，或者地址有拼写错误。请从首页或文档重新开始。",
   notFoundHomeLink: "返回首页",
-  notFoundPosterAlt: "虚构游戏《Codwhale: Modern Whalefare》的海报，一只身穿战术装备的蓝鲸。",
   unavailableTitle: "实时记录尚未加载",
   unavailableBody: "数据源没有响应上一次刷新，或者此页面自构建以来尚未刷新。这里不会用编造的内容填充。",
 

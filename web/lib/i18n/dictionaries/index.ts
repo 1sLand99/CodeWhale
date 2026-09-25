@@ -19,7 +19,6 @@ import type {
   DocsAuthDict,
   DocsComputersDict,
   DocsConfigurationDict,
-  DocsConstitutionDict,
   DocsFleetDict,
   DocsGuideDict,
   DocsHooksDict,
@@ -52,8 +51,6 @@ import { docsTroubleshooting as enDocsTroubleshooting } from "./en/docs-troubles
 import { docsTroubleshooting as zhDocsTroubleshooting } from "./zh/docs-troubleshooting";
 import { docsConfiguration as enDocsConfiguration } from "./en/docs-configuration";
 import { docsConfiguration as zhDocsConfiguration } from "./zh/docs-configuration";
-import { docsConstitution as enDocsConstitution } from "./en/docs-constitution";
-import { docsConstitution as zhDocsConstitution } from "./zh/docs-constitution";
 import { docsFleet as enDocsFleet } from "./en/docs-fleet";
 import { docsFleet as zhDocsFleet } from "./zh/docs-fleet";
 import { docsMcp as enDocsMcp } from "./en/docs-mcp";
@@ -227,10 +224,6 @@ const DOCS_CONFIGURATION: Record<string, DocsConfigurationDict> = {
   zh: zhDocsConfiguration,
 };
 
-const DOCS_CONSTITUTION: Record<string, DocsConstitutionDict> = {
-  zh: zhDocsConstitution,
-};
-
 const DOCS_FLEET: Record<string, DocsFleetDict> = {
   zh: zhDocsFleet,
 };
@@ -353,10 +346,6 @@ export function getDocsConfiguration(locale: string): DocsConfigurationDict {
   return DOCS_CONFIGURATION[locale] ?? enDocsConfiguration;
 }
 
-export function getDocsConstitution(locale: string): DocsConstitutionDict {
-  return DOCS_CONSTITUTION[locale] ?? enDocsConstitution;
-}
-
 export function getDocsFleet(locale: string): DocsFleetDict {
   return DOCS_FLEET[locale] ?? enDocsFleet;
 }
@@ -453,7 +442,6 @@ export const EN_DOCS_SHELL = enDocsShell;
 export const EN_DOCS_HOOKS = enDocsHooks;
 export const EN_DOCS_TROUBLESHOOTING = enDocsTroubleshooting;
 export const EN_DOCS_CONFIGURATION = enDocsConfiguration;
-export const EN_DOCS_CONSTITUTION = enDocsConstitution;
 export const EN_DOCS_FLEET = enDocsFleet;
 export const EN_DOCS_MCP = enDocsMcp;
 export const EN_DOCS_MODES = enDocsModes;
@@ -492,16 +480,3 @@ export function splitToken(template: string, token: string): string[] {
   return template.split(`{${token}}`);
 }
 
-/**
- * Split a template on every `{token}` it carries, for a sentence with more
- * than one substituted node. Returns literal text and token names
- * interleaved in template order, so a locale that reorders the tokens still
- * renders correctly and no translated fragment is concatenated by the
- * call site.
- */
-export function splitTokens(template: string): Array<{ text: string } | { token: string }> {
-  return template
-    .split(/\{(\w+)\}/g)
-    .map((part, i) => (i % 2 === 1 ? { token: part } : { text: part }))
-    .filter((part) => "token" in part || part.text !== "");
-}

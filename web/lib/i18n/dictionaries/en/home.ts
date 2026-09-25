@@ -31,12 +31,8 @@ export const home: HomeDict = {
   releaseUnavailable: "Release status unavailable",
   currentSource: "Source",
   sourceCandidate: "Unreleased",
-  providerRoutes: "{count} providers",
   publishedRelease: "released",
   figcaptionSourceCandidate: "unreleased",
-
-  chapterTerminal: "Your terminal",
-  chapterTerminalTitle: "Start with something you want to make",
 
   gainHeading: "What you can do with Codewhale",
   gainLede:
@@ -56,7 +52,6 @@ export const home: HomeDict = {
     ]
   ],
 
-  chapterModels: "Your models",
   modelsHeading: "A choice of models for every task",
   modelsBody:
     "Choose the provider and model for each session: connect with an API key, use a supported provider sign-in, or run a local model. Your Codewhale account and your model connection serve different purposes.",
@@ -73,7 +68,6 @@ export const home: HomeDict = {
   startGuideLink: "Read the getting-started guide",
   startVocabularyLink: "Look up a term",
 
-  chapterAccount: "Get Codewhale",
   availabilityHeading: "Where you can use Codewhale",
   availabilityLede:
     "The terminal and local browser client are available now. Desktop and hosted web apps are being developed around the same session model; their availability is listed separately below.",

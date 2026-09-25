@@ -21,8 +21,6 @@ export const states: StatesDict = {
   notFoundBody:
     "The link may be out of date, or the address has a typo. Start again from the home page or the documentation.",
   notFoundHomeLink: "Go to the home page",
-  notFoundPosterAlt:
-    "A blue whale in tactical gear on the fictional Codwhale: Modern Whalefare game poster.",
   unavailableTitle: "The live record has not loaded",
   unavailableBody:
     "The source did not answer the last refresh, or this page has not refreshed since it was built. Nothing is shown in its place.",

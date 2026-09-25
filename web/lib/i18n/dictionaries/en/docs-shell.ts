@@ -15,9 +15,8 @@ export const docsShell: DocsShellDict = {
   heroLead:
     "Start from what you want to do. Each page says what you need, shows commands you can run today, and points to the next step.",
   installCta: "Install Codewhale",
-  sourceDocsCta: "Browse source docs ↗",
 
-  releaseLabel: "Release truth",
+  releaseLabel: "Release",
   releasePublished: "Latest release {tag} · {date}",
   releaseCandidate:
     "These pages describe the {version} source candidate, which is not published yet.",

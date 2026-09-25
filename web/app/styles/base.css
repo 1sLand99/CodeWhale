@@ -31,8 +31,6 @@ body {
 main { flex: 1 0 auto; }
 main, header, footer, nav { position: relative; z-index: 1; }
 
-.codewhale-mark-primary { fill: var(--mark-ink); }
-
 /* ---------- type ---------- */
 /* One face: Shannon Sans for headings, body and labels, a little negative
    tracking on the big headings. Code uses the system monospace stack. No
@@ -84,8 +82,7 @@ html[lang="ko"] :is(h1, h2, h3) {
 
 /* ---------- containers ---------- */
 .site-container,
-.portal-container,
-.product-container {
+.portal-container {
   width: var(--container);
   margin-inline: auto;
 }
@@ -104,7 +101,6 @@ html[lang="ko"] :is(h1, h2, h3) {
 }
 
 /* ---------- legacy structures still used by the docs ---------- */
-.hairline { border-color: var(--line); }
 .hairline-t { border-top: 1px solid var(--line); }
 .hairline-b { border-bottom: 1px solid var(--line); }
 .hairline-l { border-inline-start: 1px solid var(--line); }
@@ -227,16 +223,8 @@ mark.search-highlight {
 }
 .skip-link:focus-visible { top: 0.5rem; }
 
-.sr-only-focusable:not(:focus-visible) {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
-
-/* The docs band's mark and label (docs/layout.tsx). */
+/* The docs band's mark and label (docs/layout.tsx): the reading whale. */
+.portal-mark-pose { --pose-size: 2.25rem; flex: none; }
 .portal-mark {
   display: flex;
   align-items: center;

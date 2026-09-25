@@ -36,6 +36,10 @@
   line-height: var(--leading-prose);
 }
 
+/* A step card is a panel, not a line of prose: its rows span the card so
+   the dividers meet both edges. */
+.docs-content .gs-steps li { max-width: none; }
+
 .docs-content > section + section {
   padding-top: 0.5rem;
 }
@@ -81,17 +85,20 @@
   font-weight: 600;
 }
 
+/* The link is a flex row (label, then an optional external arrow); the
+   current-page tick is its first item, and the label grows so the tick stays
+   beside it instead of being pushed to the far edge. */
 .docs-sidebar-link-current::before {
   content: "";
-  display: inline-block;
+  flex: none;
   width: 0.4rem;
   height: 1px;
-  margin-right: 0.45rem;
-  vertical-align: middle;
+  margin-inline-end: -0.35rem;
   background: var(--indigo);
 }
+.docs-sidebar-link > span:first-child { flex: 1 1 auto; min-width: 0; }
 
-/* Topic rows on the hub: a title with room to breathe, the source path quiet. */
+/* Topic rows on the hub: a title with room to breathe. */
 .docs-topic-title {
   font-size: 0.98rem;
 }

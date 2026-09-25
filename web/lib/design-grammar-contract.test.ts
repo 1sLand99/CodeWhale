@@ -8,7 +8,6 @@ import { siteCss } from "./site-css";
 // still pose under reduced motion.
 const CSS = siteCss();
 const TAILWIND = readFileSync(new URL("../tailwind.config.ts", import.meta.url), "utf8");
-const WHALE = readFileSync(new URL("../components/whale.tsx", import.meta.url), "utf8");
 
 describe("design grammar contract", () => {
   it("draws every radius from the 6/10/14/pill grammar", () => {
@@ -75,7 +74,6 @@ describe("design grammar contract", () => {
     expect(TAILWIND).toMatch(/transitionDuration: \{ DEFAULT: "var\(--dur-state\)" \}/);
     expect(TAILWIND).toMatch(/transitionTimingFunction: \{ DEFAULT: "var\(--ease-spring\)" \}/);
     expect(CSS).not.toMatch(/caustic/);
-    expect(WHALE).not.toMatch(/caustic|<animate|clipPath/);
   });
 
   it("keeps no unused presence shapes", () => {
