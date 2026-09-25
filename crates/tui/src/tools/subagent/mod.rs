@@ -16942,8 +16942,9 @@ fn parse_optional_bounded_limit(
     let mut limit = None;
     for name in names {
         if let Some(value) = input.get(*name) {
-            let parsed = value
-                .as_u64()
+            // Whole-number floats (`900.0`) are integers too: some providers
+            // serialize every JSON number as a float.
+            let parsed = codewhale_tools::json_nonnegative_integer(value)
                 .filter(|value| *value > 0 && *value <= maximum)
                 .ok_or_else(|| {
                     ToolError::invalid_input(if maximum == u64::MAX {

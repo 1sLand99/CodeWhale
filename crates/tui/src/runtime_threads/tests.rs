@@ -17822,8 +17822,8 @@ async fn unset_thread_shell_takes_the_interactive_default_unless_policy_denies()
         .await?;
     assert!(!explicit.allow_shell);
 
-    // A profile denial wins over the default at creation.
-    manager.config.write().allow_shell = Some(false);
+    // A profile denial wins over the default at creation. The host's merged
+    // snapshot is left unset so only the policy check can refuse it.
     let profile_denied = manager
         .create_thread_with_shell_policy(
             CreateThreadRequest {
@@ -17836,9 +17836,26 @@ async fn unset_thread_shell_takes_the_interactive_default_unless_policy_denies()
         .await?;
     assert!(!profile_denied.allow_shell);
 
+    // A managed `allow_shell = false` wins even when the host's merged
+    // snapshot never picked it up.
+    let managed = dir.path().join("managed.toml");
+    fs::write(&managed, "allow_shell = false\n")?;
+    manager.config.write().managed_config_path = Some(managed.to_string_lossy().into_owned());
+    let managed_denied = manager
+        .create_thread_with_shell_policy(
+            CreateThreadRequest {
+                workspace: Some(workspace.clone()),
+                ..Default::default()
+            },
+            Some(&config_path),
+            None,
+        )
+        .await?;
+    assert!(!managed_denied.allow_shell);
+    manager.config.write().managed_config_path = None;
+
     // A project-local `allow_shell = false` in the thread's own folder wins
     // even when the host's merged config would allow shell.
-    manager.config.write().allow_shell = None;
     let project = workspace.join(codewhale_config::CODEWHALE_APP_DIR);
     fs::create_dir(&project)?;
     fs::write(project.join("config.toml"), "allow_shell = false\n")?;

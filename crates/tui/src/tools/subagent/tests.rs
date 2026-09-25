@@ -5933,6 +5933,31 @@ fn agent_start_schema_documents_hidden_spawn_requirements() {
 }
 
 #[test]
+fn spawn_limits_accept_whole_number_floats_and_still_refuse_fractions() {
+    // Providers that serialize every number as a float send `900.0`.
+    let request = parse_spawn_request(&json!({
+        "prompt": "p",
+        "max_steps": 300.0,
+        "wall_time_secs": 900.0,
+        "max_output_tokens": 4096.0,
+    }))
+    .expect("whole-number floats are integers");
+    assert_eq!(request.max_steps, Some(300));
+    assert_eq!(request.wall_time, Some(Duration::from_secs(900)));
+    assert_eq!(request.max_output_tokens, Some(4096));
+
+    for bad in [json!(2.5), json!(0.0), json!(-1.0), json!("900")] {
+        let error = parse_spawn_request(&json!({"prompt": "p", "wall_time_secs": bad}))
+            .expect_err("fractional, zero, negative and string limits stay refused")
+            .to_string();
+        assert!(
+            error.contains("wall_time_secs must be between 1 and"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn agent_tool_unadvertised_fields_remain_parse_accepted() {
     // #5324 compat: the fields removed from the advertised schema must stay
     // parse-accepted and honored unchanged — saved transcripts, ACP/MCP
