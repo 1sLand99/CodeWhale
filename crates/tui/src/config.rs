@@ -7162,6 +7162,14 @@ impl Config {
     /// explicitly set the field (not the legacy `API_KEYRING_SENTINEL`
     /// placeholder, not empty whitespace).
     pub fn active_route_api_key(&self) -> Result<String> {
+        self.active_route_api_key_with_source().map(|(key, _)| key)
+    }
+
+    /// The active route's key with a display label naming its source
+    /// (secret store slot, config file, env var name, CLI, OAuth, …) for
+    /// authentication diagnostics. The key is normalized with
+    /// [`codewhale_secrets::normalize_api_key`] (#6528).
+    pub fn active_route_api_key_with_source(&self) -> Result<(String, String)> {
         self.active_route_api_key_with_secret_store_mode(false)
     }
 
@@ -7175,6 +7183,15 @@ impl Config {
     /// behavior.
     pub(crate) fn active_route_api_key_read_only(&self) -> Result<String> {
         self.active_route_api_key_with_secret_store_mode(true)
+            .map(|(key, _)| key)
+    }
+
+    fn active_route_api_key_with_secret_store_mode(
+        &self,
+        read_only: bool,
+    ) -> Result<(String, String)> {
+        self.resolve_active_route_api_key(read_only)
+            .map(|(key, source)| (codewhale_secrets::normalize_api_key(&key), source))
     }
 
     /// Clone this route with a diagnostic-only credential in its in-memory
@@ -7193,14 +7210,18 @@ impl Config {
         Ok(diagnostic)
     }
 
-    fn active_route_api_key_with_secret_store_mode(&self, read_only: bool) -> Result<String> {
+    /// The active route's key and a display label for where it came from
+    /// (#6528). Callers go through [`Self::active_route_api_key_with_source`],
+    /// which normalizes the key.
+    fn resolve_active_route_api_key(&self, read_only: bool) -> Result<(String, String)> {
+        let keyless = || (String::new(), "none (keyless route)".to_string());
         let provider = self.api_provider();
         if provider == ApiProvider::Antigravity {
             anyhow::bail!(codewhale_config::LEGACY_ANTIGRAVITY_TOMBSTONE_MESSAGE);
         }
         let auth_mode = self.auth_mode_for_provider(provider);
         if auth_mode_disables_api_key(auth_mode.as_deref()) {
-            return Ok(String::new());
+            return Ok(keyless());
         }
         let custom_endpoint = self.provider_uses_custom_endpoint(provider);
         let explicit_cli_key = explicit_cli_api_key_override();
@@ -7218,13 +7239,17 @@ impl Config {
         //   codewhale --provider deepseek --api-key ark-... --base-url ... --model auto
         if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN)
             && cli_api_key_source().as_deref() == Some("cli")
-            && let Some(env_key) = explicit_cli_key
+            && let Some((env_key, source)) = explicit_cli_key
                 .as_ref()
                 .cloned()
-                .or_else(|| provider_env_api_key(provider))
+                .map(|key| (key, "--api-key (CLI)".to_string()))
+                .or_else(|| {
+                    provider_env_api_key_named(provider)
+                        .map(|(name, key)| (key, format!("env var {name}")))
+                })
             && !env_key.trim().is_empty()
         {
-            return Ok(env_key);
+            return Ok((env_key, source));
         }
         if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN)
             && self.config_credentials_are_bound_to_provider_endpoint(provider)
@@ -7232,7 +7257,7 @@ impl Config {
             && classify_config_api_key_value(configured) == ConfigApiKeyValueKind::Literal
         {
             warn_on_config_api_key_shadowing(self, provider, "the root api_key");
-            return Ok(configured.clone());
+            return Ok((configured.clone(), "config file (root api_key)".to_string()));
         }
 
         if provider == ApiProvider::Moonshot
@@ -7261,7 +7286,8 @@ impl Config {
                 .is_some_and(provider_config_uses_xai_oauth)
             && crate::oauth::credentials_present(crate::oauth::OAuthProvider::Xai, self)
         {
-            return crate::oauth::get_xai_access_token(self);
+            return crate::oauth::get_xai_access_token(self)
+                .map(|key| (key, "xAI OAuth login".to_string()));
         }
 
         // OpenAI Codex (ChatGPT) can read an existing Codex CLI OAuth login
@@ -7269,7 +7295,10 @@ impl Config {
         // rewrites that file. Explicit env overrides remain process-scoped.
         if provider == ApiProvider::OpenaiCodex && !custom_endpoint {
             if let Some(credentials) = crate::oauth::credentials_from_env() {
-                return Ok(credentials.access_token);
+                return Ok((
+                    credentials.access_token,
+                    "OPENAI_CODEX_ACCESS_TOKEN".to_string(),
+                ));
             }
             let path = crate::oauth::auth_file_path();
             let grant = self.external_credential_read_grant(
@@ -7277,7 +7306,10 @@ impl Config {
                 codewhale_config::ExternalCredentialSource::CodexCli,
                 &path,
             )?;
-            return Ok(crate::oauth::get_credentials(&grant)?.access_token);
+            return Ok((
+                crate::oauth::get_credentials(&grant)?.access_token,
+                "Codex CLI login (consented)".to_string(),
+            ));
         }
 
         // The dispatcher cannot know the effective provider until the TUI
@@ -7285,7 +7317,7 @@ impl Config {
         // therefore wins over saved API-key slots here, after OAuth routes
         // have made their own credential decision.
         if let Some(value) = explicit_cli_key {
-            return Ok(value);
+            return Ok((value, "--api-key (CLI)".to_string()));
         }
 
         // 1. Config file (provider-scoped slot). This intentionally wins
@@ -7302,7 +7334,7 @@ impl Config {
                 Err(_) => "the provider config-table api_key".to_string(),
             };
             warn_on_config_api_key_shadowing(self, provider, &config_source);
-            return Ok(configured);
+            return Ok((configured, format!("config file ({config_source})")));
         }
         if provider == ApiProvider::Custom
             && self.uses_legacy_literal_custom_route()
@@ -7311,7 +7343,7 @@ impl Config {
             && classify_config_api_key_value(configured) == ConfigApiKeyValueKind::Literal
         {
             warn_on_config_api_key_shadowing(self, provider, "the root api_key");
-            return Ok(configured.clone());
+            return Ok((configured.clone(), "config file (root api_key)".to_string()));
         }
 
         // 1b. A route can explicitly bind an environment variable by name via
@@ -7330,7 +7362,9 @@ impl Config {
             && let Some(env_name) = bound_provider_api_key_env_name(self, provider)
         {
             return match std::env::var(&env_name) {
-                Ok(value) if !value.trim().is_empty() => Ok(value),
+                Ok(value) if !value.trim().is_empty() => {
+                    Ok((value, format!("env var {env_name} (api_key_env)")))
+                }
                 _ => {
                     let route_name = self.provider.as_deref().unwrap_or("<name>");
                     Err(anyhow::anyhow!(
@@ -7343,7 +7377,8 @@ impl Config {
             };
         }
         if let Some(value) = provider_config_env_api_key(self, provider) {
-            return Ok(value);
+            let name = bound_provider_api_key_env_name(self, provider).unwrap_or_default();
+            return Ok((value, format!("env var {name} (api_key_env)")));
         }
 
         // 2. The dispatcher resolves this same provider slot before launching
@@ -7354,7 +7389,13 @@ impl Config {
         if !self.should_skip_secret_store_for_provider(provider)
             && let Some(value) = provider_secret_store_api_key_with_mode(self, provider, read_only)
         {
-            return Ok(value);
+            return Ok((
+                value,
+                format!(
+                    "secret store slot `{}`",
+                    provider_secret_store_slot(provider)
+                ),
+            ));
         }
 
         // 3. Ambient provider environment variables are scoped to official
@@ -7369,13 +7410,13 @@ impl Config {
                 xiaomi_mimo_env_api_key_for_runtime(mode, Some(&self.active_route_base_url()))
                 && !value.trim().is_empty()
             {
-                return Ok(value);
+                return Ok((value, format!("env var ({})", provider.env_vars_label())));
             }
         }
         if !self.should_skip_secret_store_for_provider(provider)
-            && let Some(value) = provider_env_api_key(provider)
+            && let Some((name, value)) = provider_env_api_key_named(provider)
         {
-            return Ok(value);
+            return Ok((value, format!("env var {name}")));
         }
 
         // Official DeepSeek Harness credentials, only after explicit
@@ -7392,14 +7433,17 @@ impl Config {
                 &path,
             ) && let Some(value) = crate::dsh_credentials::deepseek_api_key_from_grant(&grant)?
             {
-                return Ok(value);
+                return Ok((
+                    value,
+                    "DeepSeek Harness credentials (consented)".to_string(),
+                ));
             }
         }
 
         // Account auth is a reversible fallback, never an overwrite of an
         // environment, config-file, or durable provider credential.
         if let Some(key) = self.account_model_api_key(provider) {
-            return Ok(key);
+            return Ok((key, "Codewhale account".to_string()));
         }
 
         // The Codewhale API always authenticates. It is not a self-hosted
@@ -7412,7 +7456,7 @@ impl Config {
             && (provider_route_is_keyless_self_hosted(provider, &self.active_route_base_url())
                 || base_url_uses_local_host(&self.active_route_base_url()))
         {
-            return Ok(String::new());
+            return Ok(keyless());
         }
 
         if custom_endpoint {
@@ -7527,14 +7571,14 @@ impl Config {
             }
             // Self-hosted deployments commonly run without auth on localhost.
             // Return an empty key and let the client omit the Authorization header.
-            ApiProvider::Sglang | ApiProvider::Vllm => Ok(String::new()),
+            ApiProvider::Sglang | ApiProvider::Vllm => Ok(keyless()),
             ApiProvider::Ollama
                 if provider_route_is_keyless_self_hosted(
                     provider,
                     &self.active_route_base_url(),
                 ) =>
             {
-                Ok(String::new())
+                Ok(keyless())
             }
             ApiProvider::Ollama => {
                 let help =
@@ -12041,7 +12085,9 @@ fn save_root_api_key_for_secret_slot(
     secret_slot: &str,
     clear_deepseek_provider_slot: bool,
 ) -> Result<SavedCredential> {
-    let trimmed = api_key.trim();
+    // #6528: strip pasted invisible characters and whitespace in one place.
+    let normalized = codewhale_secrets::normalize_api_key(api_key);
+    let trimmed = normalized.as_str();
     if trimmed.is_empty() {
         anyhow::bail!("Refusing to save an empty API key.");
     }
@@ -12638,7 +12684,8 @@ fn save_api_key_for_identity_unlocked(
         return save_root_api_key_for_secret_slot(api_key, "custom", false);
     }
 
-    let api_key = api_key.trim();
+    let normalized = codewhale_secrets::normalize_api_key(api_key);
+    let api_key = normalized.as_str();
     anyhow::ensure!(!api_key.is_empty(), "Refusing to save an empty API key.");
 
     let config_path =
@@ -13099,26 +13146,23 @@ fn provider_config_table_name(provider: ApiProvider) -> Result<String> {
 }
 
 fn provider_env_api_key(provider: ApiProvider) -> Option<String> {
-    if provider == ApiProvider::Huggingface {
-        return std::env::var("HUGGINGFACE_API_KEY")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| {
-                std::env::var("HF_TOKEN")
-                    .ok()
-                    .filter(|value| !value.trim().is_empty())
-            });
-    }
-    if provider == ApiProvider::Modelscope {
-        return std::env::var("MODELSCOPE_API_KEY")
-            .ok()
-            .filter(|value| !value.trim().is_empty());
-    }
+    provider_env_api_key_named(provider).map(|(_, value)| value)
+}
 
-    provider.env_vars().iter().find_map(|var| {
-        std::env::var(var)
+/// The provider's ambient env key and the variable that supplied it,
+/// normalized with [`codewhale_secrets::normalize_api_key`] (#6528).
+fn provider_env_api_key_named(provider: ApiProvider) -> Option<(&'static str, String)> {
+    let names: &[&'static str] = match provider {
+        ApiProvider::Huggingface => &["HUGGINGFACE_API_KEY", "HF_TOKEN"],
+        ApiProvider::Modelscope => &["MODELSCOPE_API_KEY"],
+        _ => provider.env_vars(),
+    };
+    names.iter().find_map(|name| {
+        std::env::var(name)
             .ok()
-            .filter(|value| !value.trim().is_empty())
+            .map(|value| codewhale_secrets::normalize_api_key(&value))
+            .filter(|value| !value.is_empty())
+            .map(|value| (*name, value))
     })
 }
 
