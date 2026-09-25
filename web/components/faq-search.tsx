@@ -2,6 +2,7 @@
 
 import { useState, useMemo, useRef, useCallback, useEffect } from "react";
 import { faqSourceHref } from "@/lib/faq-source";
+import { fill, getFaq } from "@/lib/i18n/dictionaries";
 import { extractText } from "@/lib/react-text";
 import { highlightSpan } from "@/lib/search-utils";
 import { Icon } from "./icon";
@@ -43,7 +44,7 @@ export function FaqSearch({
   items: FaqSearchItem[];
   locale: string;
 }) {
-  const isZh = locale === "zh";
+  const t = getFaq(locale);
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -96,9 +97,9 @@ export function FaqSearch({
             type="search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder={isZh ? "搜索常见问题" : "Search the FAQ"}
+            placeholder={t.searchPlaceholder}
             className="search-input"
-            aria-label={isZh ? "搜索常见问题" : "Search FAQ"}
+            aria-label={t.searchLabel}
             aria-keyshortcuts="/"
           />
           {hasQuery ? (
@@ -106,8 +107,8 @@ export function FaqSearch({
               type="button"
               onClick={() => setQuery("")}
               className="nav-icon-button nav-icon-button-sm search-field-clear"
-              aria-label={isZh ? "清除" : "Clear"}
-              title={isZh ? "清除" : "Clear"}
+              aria-label={t.searchClear}
+              title={t.searchClear}
             >
               <Icon name="x" className="nav-icon" />
             </button>
@@ -118,12 +119,8 @@ export function FaqSearch({
         <p className="faq-search-count" aria-live="polite">
           {hasQuery
             ? matched > 0
-              ? isZh
-                ? `${matched} / ${total} 个问题匹配 "${query.trim()}"`
-                : `${matched} of ${total} questions match "${query.trim()}"`
-              : isZh
-                ? `未找到匹配 "${query.trim()}" 的问题`
-                : `No questions match "${query.trim()}"`
+              ? fill(t.searchMatches, { matched, total, query: query.trim() })
+              : fill(t.searchNoMatches, { query: query.trim() })
             : ""}
         </p>
       </div>
@@ -137,11 +134,11 @@ export function FaqSearch({
                 <span className="faq-question">{highlight(item.q, query)}</span>
                 <Icon name="chevron-down" className="disclosure-chevron" />
               </summary>
-              <div className="disclosure-body prose faq-answer">
+              <div className={`disclosure-body prose faq-answer ${t.answerClassName}`.trimEnd()}>
                 <div>{item.a}</div>
                 {item.sources && item.sources.length > 0 && (
                   <p className="faq-sources">
-                    <span>{isZh ? "来源" : "Sources"}:</span>
+                    <span>{t.sourcesLabel}:</span>
                     {item.sources.map((s) => {
                       const href = faqSourceHref(s);
                       return href ? (
@@ -161,8 +158,8 @@ export function FaqSearch({
       ) : (
         <div className="empty-state" role="status">
           <WhalePose pose="search" />
-          <p className="empty-state-title">{isZh ? "未找到结果" : "No results found"}</p>
-          <p className="empty-state-reason">{isZh ? "尝试使用不同的关键字。" : "Try a different keyword."}</p>
+          <p className="empty-state-title">{t.noResultsTitle}</p>
+          <p className="empty-state-reason">{t.noResultsBody}</p>
         </div>
       )}
     </>

@@ -20,6 +20,7 @@ import {
   EN_DOCS_SHELL,
   EN_DOCS_TROUBLESHOOTING,
   EN_DIGEST,
+  EN_FAQ,
   EN_HOME,
   EN_LEGAL_PRIVACY,
   EN_LEGAL_TERMS,
@@ -45,6 +46,7 @@ import {
   getDocsModes,
   getDocsReview,
   getDigest,
+  getFaq,
   getHome,
   getLegalPrivacy,
   getLegalTerms,
@@ -264,6 +266,7 @@ describe("website dictionaries", () => {
       ["legal-terms", getLegalTerms, EN_LEGAL_TERMS],
       ["legal-privacy", getLegalPrivacy, EN_LEGAL_PRIVACY],
       ["digest", getDigest, EN_DIGEST],
+      ["faq", getFaq, EN_FAQ],
     ] as const) {
       const enKeys = Object.keys(reference).sort();
       for (const locale of [...DICTIONARY_LOCALES, "fr", "und"]) {

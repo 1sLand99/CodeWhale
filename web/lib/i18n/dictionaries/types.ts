@@ -458,6 +458,30 @@ export interface DigestDict {
   lead: string;
 }
 
+/** `app/[locale]/faq/page.tsx` and its `components/faq-search.tsx`. */
+export interface FaqDict {
+  metaTitle: string;
+  metaDescription: string;
+  eyebrow: string;
+  /** Page H1. */
+  title: string;
+  lead: string;
+  notCovered: string;
+  openIssue: string;
+  searchPlaceholder: string;
+  searchLabel: string;
+  searchClear: string;
+  /** `{matched}`, `{total}` and `{query}` are filled at render time. */
+  searchMatches: string;
+  /** `{query}` is filled at render time. */
+  searchNoMatches: string;
+  /** Extra classes on each answer. Empty in both locales today: CJK leading lives in `.prose` (primitives.css). */
+  answerClassName: string;
+  sourcesLabel: string;
+  noResultsTitle: string;
+  noResultsBody: string;
+}
+
 export type DocsHooksDict = DocsPageDict;
 
 export type DocsTroubleshootingDict = DocsPageDict;
