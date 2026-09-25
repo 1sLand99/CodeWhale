@@ -25837,12 +25837,12 @@ async fn an_answered_question_is_never_retracted() {
     });
 
     assert!(!engine.retract_unanswered_user_message(mark));
-    assert!(!engine.retract_unanswered_user_message(
-        crate::core::turn::UnansweredUserMessage {
+    assert!(
+        !engine.retract_unanswered_user_message(crate::core::turn::UnansweredUserMessage {
             len: 0,
             revision: engine.session.messages_revision,
-        }
-    ));
+        })
+    );
     assert!(session_mentions(&engine, "keep me"));
 }
 

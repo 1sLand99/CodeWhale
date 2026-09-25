@@ -1404,7 +1404,9 @@ impl Engine {
         if mark.len == 0
             || messages.len() != mark.len
             || self.session.messages_revision != mark.revision
-            || messages.last().is_none_or(|message| message.role != Role::User)
+            || messages
+                .last()
+                .is_none_or(|message| message.role != Role::User)
         {
             return false;
         }

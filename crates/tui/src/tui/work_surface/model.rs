@@ -2911,7 +2911,10 @@ mod tests {
     #[test]
     fn a_fact_is_said_only_by_its_whole_name() {
         assert!(names_whole("step 6: finished tool 'read_file'", "step 6"));
-        assert!(names_whole("step 6: finished tool 'read_file'", "read_file"));
+        assert!(names_whole(
+            "step 6: finished tool 'read_file'",
+            "read_file"
+        ));
         assert!(!names_whole("step 10: finished tool 'read_file'", "step 1"));
         assert!(!names_whole("finished tool 'read_file'", "read"));
         assert!(names_whole("read then step 1", "step 1"));

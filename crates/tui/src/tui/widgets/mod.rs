@@ -2034,17 +2034,32 @@ impl<'a> ApprovalWidget<'a> {
     /// dimmed backdrop region always agree.
     ///
     /// The save preview says what a persistent rule would cover while the
-    /// controls offer to save it, so it is never dropped. A band too short
-    /// for the full preview gets one line per rule instead of calling the
-    /// request "truncated" (#6566); if even that does not fit, the render's
-    /// truncation hint says so and points at the details.
-    fn build_inline_content(&self, area: Rect) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
-        let (body, essential_len, controls) = self.build_inline_parts(area, false);
-        if body.len() == essential_len || inline_body_fits(area, &body, &controls) {
-            return (body, controls);
+    /// controls offer to save it, so it is never dropped: it is a trust
+    /// boundary, not decoration. A band too short for the full preview gets
+    /// one line per rule instead of calling the request "truncated" (#6566).
+    /// The band always reserves the compact preview's rows and `render` pins
+    /// the preview above the controls, so a short band cuts the request
+    /// detail (with the details hint), never the preview.
+    fn build_inline_content(&self, area: Rect) -> InlineContent {
+        let (compact, save_start, controls) = self.build_inline_parts(area, true);
+        let save_reserve = measure_wrapped_rows(&compact[save_start..], area.width);
+        let compact = InlineContent {
+            body: compact,
+            save_start,
+            save_reserve,
+            controls,
+        };
+        if save_start == compact.body.len() {
+            return compact;
         }
-        let (compact, _, controls) = self.build_inline_parts(area, true);
-        (compact, controls)
+        let (body, save_start, controls) = self.build_inline_parts(area, false);
+        let full = InlineContent {
+            body,
+            save_start,
+            save_reserve,
+            controls,
+        };
+        if full.body_fits(area) { full } else { compact }
     }
 
     /// The body, how many of its leading lines come before the save preview,
@@ -2334,8 +2349,7 @@ impl<'a> ApprovalWidget<'a> {
                 height: h,
             };
         }
-        let (body, controls) = self.build_inline_content(area);
-        inline_region_for(area, &body, &controls)
+        self.build_inline_content(area).region(area)
     }
 }
 
@@ -2394,8 +2408,14 @@ impl Renderable for ApprovalWidget<'_> {
         } else {
             approval_palette(stakes)
         };
-        let (body, controls) = self.build_inline_content(area);
-        let region = inline_region_for(area, &body, &controls);
+        let content = self.build_inline_content(area);
+        let region = content.region(area);
+        let InlineContent {
+            body,
+            save_start,
+            controls,
+            ..
+        } = content;
         if region.width == 0 || region.height == 0 {
             return;
         }
@@ -2465,24 +2485,42 @@ impl Renderable for ApprovalWidget<'_> {
 
         let body_rows = measure_wrapped_rows(&body, region.width);
         if body_rows > body_height && body_height > 0 {
-            // Body does not fit (short terminal): show as much as we can and
-            // point at the params pager through the platform-aware details chord.
-            let shown = body_height.saturating_sub(1);
-            if shown > 0 {
-                Paragraph::new(body).wrap(Wrap { trim: false }).render(
+            // Body does not fit (short terminal). The save preview is pinned
+            // directly above the controls that offer to save it; the request
+            // detail above it shows as much as fits and points at the params
+            // pager through the platform-aware details chord.
+            let mut body = body;
+            let save = body.split_off(save_start.min(body.len()));
+            let save_rows = measure_wrapped_rows(&save, region.width).min(body_height);
+            let head_height = body_height.saturating_sub(save_rows);
+            if head_height > 0 {
+                let shown = head_height.saturating_sub(1);
+                if shown > 0 {
+                    Paragraph::new(body).wrap(Wrap { trim: false }).render(
+                        Rect {
+                            height: shown,
+                            ..body_rect
+                        },
+                        buf,
+                    );
+                }
+                buf.set_string(
+                    region.x,
+                    body_rect.y.saturating_add(shown),
+                    approval_truncation_hint(self.view.locale()),
+                    Style::default().fg(palette::TEXT_HINT),
+                );
+            }
+            if save_rows > 0 {
+                Paragraph::new(save).wrap(Wrap { trim: false }).render(
                     Rect {
-                        height: shown,
+                        y: body_rect.y.saturating_add(head_height),
+                        height: save_rows,
                         ..body_rect
                     },
                     buf,
                 );
             }
-            buf.set_string(
-                region.x,
-                body_rect.y.saturating_add(shown),
-                approval_truncation_hint(self.view.locale()),
-                Style::default().fg(palette::TEXT_HINT),
-            );
         } else {
             Paragraph::new(body)
                 .wrap(Wrap { trim: false })
@@ -2499,12 +2537,28 @@ impl Renderable for ApprovalWidget<'_> {
     }
 }
 
-/// Whether `body` fits the band `inline_region_for` gives it above `controls`.
-fn inline_body_fits(area: Rect, body: &[Line<'static>], controls: &[Line<'static>]) -> bool {
-    let region = inline_region_for(area, body, controls);
-    let inner_height = region.height.saturating_sub(1);
-    let control_rows = measure_wrapped_rows(controls, region.width).min(inner_height);
-    measure_wrapped_rows(body, region.width) <= inner_height.saturating_sub(control_rows)
+/// The inline approval band's lines. `body[save_start..]` is the
+/// persistent-rule save preview; `save_reserve` is the rows its one-line
+/// form needs, which the band always keeps for it.
+struct InlineContent {
+    body: Vec<Line<'static>>,
+    save_start: usize,
+    save_reserve: u16,
+    controls: Vec<Line<'static>>,
+}
+
+impl InlineContent {
+    fn region(&self, area: Rect) -> Rect {
+        inline_region_for(area, &self.body, self.save_reserve, &self.controls)
+    }
+
+    /// Whether the whole body fits the band above the controls.
+    fn body_fits(&self, area: Rect) -> bool {
+        let region = self.region(area);
+        let inner_height = region.height.saturating_sub(1);
+        let control_rows = measure_wrapped_rows(&self.controls, region.width).min(inner_height);
+        measure_wrapped_rows(&self.body, region.width) <= inner_height.saturating_sub(control_rows)
+    }
 }
 
 /// Bottom-anchored band the inline approval prompt occupies within `area`.
@@ -2512,7 +2566,17 @@ fn inline_body_fits(area: Rect, body: &[Line<'static>], controls: &[Line<'static
 /// permission surfaces in peer coding agents, and always tall enough to show
 /// the reserved controls (#3799). Full details remain available through the
 /// platform-aware details chord.
-fn inline_region_for(area: Rect, body: &[Line<'static>], controls: &[Line<'static>]) -> Rect {
+///
+/// `save_rows` are the rows of the one-line persistent-rule save preview.
+/// They are always reserved after the controls, on every frame height,
+/// because the controls offer to save that rule and the person must see what
+/// it covers.
+fn inline_region_for(
+    area: Rect,
+    body: &[Line<'static>],
+    save_rows: u16,
+    controls: &[Line<'static>],
+) -> Rect {
     if area.width == 0 || area.height == 0 {
         return Rect {
             x: area.x,
@@ -2534,17 +2598,24 @@ fn inline_region_for(area: Rect, body: &[Line<'static>], controls: &[Line<'stati
     // needs one more reserved line than the legacy four-action card. Truly
     // tiny frames prioritize the complete action set and details chord.
     let controls_floor = 1u16.saturating_add(control_rows).min(area.height);
+    // The request's own preview (what runs now) and the save preview (what a
+    // saved rule would cover from now on) are reserved side by side: neither
+    // may push the other off a short band.
+    let head_rows = body_rows.saturating_sub(save_rows);
     let preview_rows = if area.height >= 16 {
-        body_rows.min(4)
+        head_rows.min(4).saturating_add(save_rows)
     } else {
-        0
+        save_rows
     };
     let preview_floor = controls_floor.saturating_add(preview_rows).min(area.height);
     let preferred_cap = area.height.div_ceil(2);
     let short_frame_cap = area.height.saturating_mul(4).div_ceil(5);
+    // The save preview is never traded for the short-frame cap: whenever the
+    // frame has rows after the controls, the preview gets them first.
+    let save_floor = controls_floor.saturating_add(save_rows).min(area.height);
     let max_height = preferred_cap
-        .max(preview_floor.min(short_frame_cap))
-        .max(controls_floor)
+        .max(preview_floor.min(short_frame_cap.saturating_add(save_rows)))
+        .max(save_floor)
         .min(area.height);
     let min_height = controls_floor;
     let height = desired.clamp(min_height, max_height);
@@ -9105,17 +9176,23 @@ diff --git a/src/b.rs b/src/b.rs\n\
         let rendered = render_approval_request(&request, Rect::new(0, 0, 120, 40));
 
         assert!(rendered.contains("src/a.rs"), "{rendered}");
-        assert!(rendered.contains("always ask first · change src/a.rs"), "{rendered}");
+        assert!(
+            rendered.contains("always ask first · change src/a.rs"),
+            "{rendered}"
+        );
         assert!(rendered.contains("+1 more"), "{rendered}");
         assert!(!rendered.contains("truncated"), "{rendered}");
 
-        // Too short for even that: the preview is never dropped silently;
-        // the card says it is cut and where the full details are.
-        let rendered = render_approval_request(&request, Rect::new(0, 0, 120, 14));
-        assert!(
-            rendered.contains("always ask first") || rendered.contains("truncated"),
-            "{rendered}"
-        );
+        // Short bands cut the request detail, never the preview: what a
+        // saved rule covers stays pinned above the controls that save it.
+        // (Below ten rows the controls alone fill the frame.)
+        for height in [10, 11, 12, 14, 16, 20] {
+            let rendered = render_approval_request(&request, Rect::new(0, 0, 120, height));
+            assert!(
+                rendered.contains("always ask first"),
+                "height {height}: {rendered}"
+            );
+        }
     }
 
     #[test]
