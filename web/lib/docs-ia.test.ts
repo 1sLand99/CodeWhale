@@ -142,8 +142,10 @@ describe("sitemap and hreflang preservation", () => {
     expect(entry).toContain("installLocally");
     expect(webText("app/[locale]/signin/page.tsx")).toContain('kind="sign-in"');
     expect(webText("app/[locale]/signup/page.tsx")).toContain('kind="sign-up"');
+    // One identity door in the header; the sign-in page links onward to
+    // account creation.
     expect(nav).toContain("APP_LOGIN_URL");
-    expect(nav).toContain("APP_SIGNUP_URL");
+    expect(nav).not.toContain("APP_SIGNUP_URL");
   });
 });
 
@@ -158,21 +160,19 @@ describe("navigation parity and accessibility", () => {
     // One generator feeds both surfaces — no per-locale hardcoded arrays.
     expect(nav).toContain("navLinks(locale, chrome)");
     expect(nav).not.toMatch(/const (EN|ZH)_LINKS/);
-    // The primary strip does not replace the compact menu until xl;
-    // translated labels are wider than English and used to push real controls
-    // beyond the clipped viewport at md widths.
+    // The primary strip replaces the compact menu at lg, with icon-only
+    // controls leaving room for translated labels (see nav-hit-target.test).
     // Wrapping is the escape valve for a translated strip that outgrows the
-    // 76rem container; the row gap stays tight so a second row does not
-    // double the sticky header's height.
+    // row; the row gap stays tight so a second row does not double the
+    // sticky header's height.
     expect(navLinks).toContain(
-      'className="hidden xl:flex min-w-0 shrink items-center gap-x-5 gap-y-1 flex-wrap"',
+      'className="hidden lg:flex min-w-0 shrink items-center gap-x-5 gap-y-1 flex-wrap"',
     );
-    // Companion labels remain on the compact sheet. They must not return to
-    // the 76rem desktop strip — at 2xl they zeroed the wordmark on de/pt-BR.
-    expect(navLinks).not.toContain("nav-link-secondary");
-    expect(mobileMenu).toContain("l.secondary");
-    expect(mobileMenu).toContain("xl:hidden inline-flex");
-    expect(nav).toContain("paper-install-cta hidden xl:inline-flex");
+    // One label per destination: no companion labels on either surface.
+    expect(navLinks).not.toContain("secondary");
+    expect(mobileMenu).not.toContain("secondary");
+    expect(mobileMenu).toContain('className="nav-icon-button lg:hidden"');
+    expect(nav).toContain("paper-install-cta hidden lg:inline-flex");
     // A fixed descendant of the blurred sticky header uses the header as its
     // containing block and collapses. The open sheet must live at body scope.
     expect(mobileMenu).toContain('import { createPortal } from "react-dom"');
@@ -180,7 +180,7 @@ describe("navigation parity and accessibility", () => {
     expect(mobileMenu).toContain("document.body");
     expect(mobileMenu).toContain("element.inert = true");
     expect(mobileMenu).toContain('if (e.key !== "Tab") return');
-    expect(mobileMenu).toContain('window.matchMedia("(min-width: 1280px)")');
+    expect(mobileMenu).toContain('window.matchMedia("(min-width: 1024px)")');
     expect(mobileMenu).toContain("if (event.matches) closeImmediately()");
     // Locale handlers are shared so a regional tag cannot nest
     // (`/ja/pt-BR/...`); the theme control is site-wide, never route-gated.

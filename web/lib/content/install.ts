@@ -1,3 +1,12 @@
+/**
+ * The two one-line installs, shared by the install page and the homepage
+ * hero. Code-owned shell, never translated.
+ */
+export const INSTALL_COMMANDS = {
+  shell: "curl -fsSL https://codewhale.net/install.sh | sh",
+  npm: "npm install -g codewhale",
+} as const;
+
 export const INSTALL_COPY = {
   metaTitle: { en: "Install · Codewhale", zh: "安装 · Codewhale" },
   metaDescription: { en: "Install Codewhale, connect your model, and start your first task. Guides for macOS, Linux, Windows, package managers, and source builds.", zh: "安装 Codewhale、连接模型并开始第一项任务。提供 macOS、Linux、Windows、包管理器与源码编译指南。" },
