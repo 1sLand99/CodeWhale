@@ -13424,8 +13424,10 @@ impl RuntimeThreadManager {
                             let _ = engine.deny_tool_call(id).await;
                         }
                         Ok(Err(_recv_err)) => {
+                            // The decision channel closed with no answer:
+                            // nobody refused the call, it was unavailable.
                             self.cancel_pending_approval(&approval_id);
-                            let _ = engine.deny_tool_call(id).await;
+                            let _ = engine.deny_tool_call_unavailable(id).await;
                         }
                         Err(_timeout) => {
                             self.cancel_pending_approval(&approval_id);
@@ -13457,7 +13459,9 @@ impl RuntimeThreadManager {
                             )
                             .await
                             .ok();
-                            let _ = engine.deny_tool_call(id).await;
+                            // Recorded and reported as a timeout, not the
+                            // operator's denial.
+                            let _ = engine.deny_tool_call_timed_out(id).await;
                         }
                     }
                 }

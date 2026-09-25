@@ -208,3 +208,25 @@ async fn get_v1_hooks_serves_the_runtime_hook_set() -> Result<()> {
     handle.abort();
     Ok(())
 }
+
+#[test]
+fn hook_listing_masks_url_paths_and_userinfo() {
+    assert_eq!(
+        redact_hook_command_for_listing(
+            "curl -X POST https://hooks.slack.com/services/T000/B000/XXXXsecret -d @-"
+        ),
+        "curl -X POST https://hooks.slack.com/[redacted] -d @-"
+    );
+    assert_eq!(
+        redact_hook_command_for_listing("notify 'https://user:pw@example.test/hook?k=v'"),
+        "notify 'https://example.test/[redacted]'"
+    );
+    assert_eq!(
+        redact_hook_command_for_listing("ping https://example.test"),
+        "ping https://example.test"
+    );
+    assert_eq!(
+        redact_hook_command_for_listing("./scripts/lint.sh --fix"),
+        "./scripts/lint.sh --fix"
+    );
+}

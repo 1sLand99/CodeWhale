@@ -1324,7 +1324,7 @@ also how a client sees model-spawned work.
 - `GET /v1/hooks[?thread_id=...]` — `{workspace, enabled, hooks: [...],
   problems: [...]}`: the hook set Runtime API threads run for that workspace
   (the server workspace, or the named thread's). Per entry: `name`, `event`,
-  `command` (credential-shaped values masked), `background`, `timeout_secs`,
+  `command` (credential-shaped values masked; every URL keeps only its scheme and host), `background`, `timeout_secs`,
   and `source` (`global` user config, `plugin` reviewed plugin, `project`
   trusted and approved `.codewhale/hooks.toml`). `problems` lists hooks
   rejected or warned about at load, one line each.

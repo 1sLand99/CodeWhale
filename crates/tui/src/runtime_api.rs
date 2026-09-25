@@ -3540,6 +3540,42 @@ struct HookEntry {
     source: &'static str,
 }
 
+/// Mask a hook command for `GET /v1/hooks`. Keyed and credential-shaped
+/// values go through the shared redactor; every URL additionally keeps only
+/// its scheme and host, because webhook secrets live in the path
+/// (`https://hooks.slack.com/services/T…/B…/<secret>`) where no key names
+/// them.
+fn redact_hook_command_for_listing(command: &str) -> String {
+    let masked = codewhale_config::persistence::redact_secrets(command);
+    masked
+        .split(' ')
+        .map(|word| match word.find("://") {
+            Some(scheme_end) => {
+                let rest = &word[scheme_end + 3..];
+                let host_end = rest.find(['/', '?', '#', '"', '\'']).unwrap_or(rest.len());
+                let host = &rest[..host_end];
+                // Userinfo (`user:pass@host`) is a credential too.
+                let host = host.rsplit_once('@').map_or(host, |(_, host)| host);
+                let tail = &rest[host_end..];
+                let quote = tail
+                    .chars()
+                    .last()
+                    .filter(|c| matches!(c, '"' | '\''))
+                    .map(String::from)
+                    .unwrap_or_default();
+                let path = if tail.len() > quote.len() {
+                    "/[redacted]"
+                } else {
+                    ""
+                };
+                format!("{}{host}{path}{quote}", &word[..scheme_end + 3])
+            }
+            None => word.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// `GET /v1/hooks` (B4): the hook set Runtime API threads run, from the same
 /// loader their engines use, so clients show one truth instead of keeping a
 /// hook table of their own.
@@ -3572,7 +3608,7 @@ async fn list_hooks(
         .map(|hook| HookEntry {
             name: hook.name.clone(),
             event: hook.event.as_str(),
-            command: codewhale_config::persistence::redact_secrets(&hook.command),
+            command: redact_hook_command_for_listing(&hook.command),
             background: hook.background,
             timeout_secs: hook.timeout_secs,
             source: if hook.project_authority.is_some() {

@@ -1421,8 +1421,20 @@ fn test_manager(data_dir: PathBuf) -> Result<RuntimeThreadManager> {
     )
 }
 
+/// Serializes tests that set or read the process-wide approval-timeout
+/// override, so a parallel test never sees another test's value.
+static APPROVAL_TIMEOUT_OVERRIDE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_approval_timeout_override() -> std::sync::MutexGuard<'static, ()> {
+    APPROVAL_TIMEOUT_OVERRIDE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 struct ApprovalTimeoutGuard {
     previous_ms: u64,
+    // Dropped after `drop` restores the previous value.
+    _lock: std::sync::MutexGuard<'static, ()>,
 }
 
 impl Drop for ApprovalTimeoutGuard {
@@ -1432,8 +1444,10 @@ impl Drop for ApprovalTimeoutGuard {
 }
 
 fn test_approval_timeout_ms(ms: u64) -> ApprovalTimeoutGuard {
+    let lock = lock_approval_timeout_override();
     ApprovalTimeoutGuard {
         previous_ms: set_test_approval_decision_timeout_ms(ms),
+        _lock: lock,
     }
 }
 
@@ -13961,10 +13975,12 @@ async fn approval_timeout_denies_clears_ui_and_next_turn_can_start() -> Result<(
 
     let decision = tokio::time::timeout(Duration::from_secs(2), harness.recv_approval_event())
         .await
-        .context("approval timeout should deny the engine")?;
+        .context("approval timeout should resolve the engine's wait")?;
+    // The engine hears a timeout, not the user's denial, so the model and the
+    // approval receipt both say "timed out" and the budget slot is refunded.
     assert_eq!(
         decision,
-        Some(MockApprovalEvent::Denied {
+        Some(MockApprovalEvent::TimedOut {
             id: "tool_timeout".to_string(),
         })
     );
@@ -18248,6 +18264,7 @@ async fn canonical_sessions_root_is_resolved_off_the_ui_runtime_and_cached() -> 
 /// `[tools] user_input_timeout_seconds` no longer bounds approvals.
 #[test]
 fn runtime_approvals_wait_indefinitely_unless_approval_timeout_is_set() -> Result<()> {
+    let _override = lock_approval_timeout_override();
     let manager = test_manager(test_runtime_dir())?;
     assert_eq!(manager.approval_decision_timeout(), None);
 
