@@ -1075,6 +1075,19 @@ mod tests {
                     error: ToolCallError::Timeout { seconds: 3 },
                 },
             },
+            EventMsg::OperationActivityStarted {
+                thread_id: t.clone(),
+                session_id: s.clone(),
+                span_id: "span-1".into(),
+                activity_kind: crate::engine_owner::OwnerActivityKind::Reading,
+            },
+            EventMsg::OperationActivityCompleted {
+                thread_id: t.clone(),
+                session_id: s.clone(),
+                span_id: "span-1".into(),
+                activity_kind: crate::engine_owner::OwnerActivityKind::Reading,
+                outcome: crate::engine_owner::OwnerOperationOutcome::Succeeded,
+            },
             EventMsg::TurnStarted {
                 thread_id: t.clone(),
                 session_id: s.clone(),
