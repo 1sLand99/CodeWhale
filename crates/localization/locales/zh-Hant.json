@@ -2340,5 +2340,13 @@
   "WorkflowSettledOfTotal": "{done}/{total} 已完成",
   "WorkflowPhaseCountOne": "{count} 個階段",
   "WorkflowPhaseCountMany": "{count} 個階段",
-  "WorkflowPhaseOrdinal": "階段 {n}/{total}"
+  "WorkflowPhaseOrdinal": "階段 {n}/{total}",
+  "ModelPickerPinned": "已釘選 {route}",
+  "ModelPickerUnpinned": "已取消釘選 {route}",
+  "ModelPickerPinFailed": "無法更新釘選：{error}",
+  "ModelPickerPinOrderUpdated": "已更新釘選模型的順序",
+  "ModelPickerPinReorderFailed": "無法調整釘選順序：{error}",
+  "ModelPickerReadinessRefreshed": "已重新整理模型就緒狀態 · 已重建目錄列",
+  "ModelPickerOpenToRefresh": "開啟 /model 以重新整理就緒狀態和目錄",
+  "ModelPickerPinnedChip": "已釘選"
 }

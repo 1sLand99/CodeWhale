@@ -2340,5 +2340,13 @@
   "WorkflowSettledOfTotal": "{done}/{total} terminés",
   "WorkflowPhaseCountOne": "{count} phase",
   "WorkflowPhaseCountMany": "{count} phases",
-  "WorkflowPhaseOrdinal": "phase {n}/{total}"
+  "WorkflowPhaseOrdinal": "phase {n}/{total}",
+  "ModelPickerPinned": "{route} épinglé",
+  "ModelPickerUnpinned": "{route} désépinglé",
+  "ModelPickerPinFailed": "Impossible de mettre à jour l’épingle : {error}",
+  "ModelPickerPinOrderUpdated": "Ordre des modèles épinglés mis à jour",
+  "ModelPickerPinReorderFailed": "Impossible de réordonner l’épingle : {error}",
+  "ModelPickerReadinessRefreshed": "Disponibilité des modèles actualisée · lignes du catalogue reconstruites",
+  "ModelPickerOpenToRefresh": "Ouvrez /model pour actualiser la disponibilité et le catalogue",
+  "ModelPickerPinnedChip": "épinglé"
 }
