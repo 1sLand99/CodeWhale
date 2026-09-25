@@ -15786,6 +15786,75 @@ async fn fork_at_user_message_depth_one_drops_two_turns() -> Result<()> {
 }
 
 #[tokio::test]
+async fn fork_at_user_turn_leaves_a_running_turn_alone() -> Result<()> {
+    // A conversation can be branched while it is working: a person watching a
+    // turn go the wrong way should not have to stop it (and lose what it has
+    // already done) before taking a different path. Two things must hold —
+    // the fork is cut at the named turn, and the running turn is untouched and
+    // still running in the thread it belongs to.
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            model: None,
+            workspace: None,
+            mode: None,
+            allow_shell: None,
+            trust_mode: None,
+            auto_approve: None,
+            archived: false,
+            system_prompt: None,
+            task_id: None,
+            ..Default::default()
+        })
+        .await?;
+    let turn_ids =
+        seed_turns_with_user_messages(&manager, &thread.id, &["first", "second", "third"])?;
+
+    // The newest turn is still in flight: its record exists, its answer does not.
+    let mut running = manager
+        .store
+        .list_turns_for_thread(&thread.id)?
+        .into_iter()
+        .find(|turn| turn.id == turn_ids[2])
+        .context("seeded third turn")?;
+    running.status = RuntimeTurnStatus::InProgress;
+    running.ended_at = None;
+    running.usage = None;
+    let running_item_ids = running.item_ids.clone();
+    manager.store.save_turn(&running)?;
+    let source_before = manager.get_thread(&thread.id).await?;
+
+    let (forked, original_text, _, _) = manager.fork_at_user_turn(&thread.id, &turn_ids[1]).await?;
+
+    // The branch keeps the turn it names, and hands back the question the
+    // running turn is answering — that is what a person wants next.
+    assert_eq!(original_text.as_deref(), Some("third"));
+    let forked_turns = manager.store.list_turns_for_thread(&forked.id)?;
+    let summaries: Vec<&str> = forked_turns
+        .iter()
+        .map(|turn| turn.input_summary.as_str())
+        .collect();
+    assert_eq!(summaries, vec!["first", "second"]);
+
+    // The source thread is exactly as it was, including the turn in flight:
+    // forking never interrupts one, it only copies a prefix.
+    let source_turns = manager.store.list_turns_for_thread(&thread.id)?;
+    assert_eq!(source_turns.len(), 3, "the source keeps every turn");
+    let still_running = source_turns
+        .iter()
+        .find(|turn| turn.id == turn_ids[2])
+        .context("the running turn is still there")?;
+    assert_eq!(still_running.status, RuntimeTurnStatus::InProgress);
+    assert_eq!(still_running.item_ids, running_item_ids);
+    assert_eq!(
+        manager.get_thread(&thread.id).await?,
+        source_before,
+        "the source thread's own record is not rewritten by a fork"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn fork_at_user_message_out_of_range_errors() -> Result<()> {
     let manager = test_manager(test_runtime_dir())?;
     let thread = manager
