@@ -206,7 +206,7 @@ The mouse is a first-class input. Every row here is wired in
 | Wheel up / down      | Scroll the transcript; over the composer, move the cursor a line at a time |
 | Click                | Activate the row, chip, or tool block under the pointer |
 | Drag                 | Select transcript text, or drag the scrollbar       |
-| Right click          | Open context actions for paste, selection, message details, context, and help |
+| Right click          | Act on what is under the pointer: copy, paste, open details or a `file:line` in your editor, focus or stop an agent. Letters and digits shown in the menu run their row; a stop asks for Enter again |
 
 Hover feedback follows the same rule: anything that responds to a click
 highlights under the pointer. A row that highlights but does nothing, or acts

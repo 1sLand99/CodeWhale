@@ -1790,13 +1790,19 @@ pub(crate) fn apply_context_menu_action(
             copy_active_selection(app);
         }
         ContextMenuAction::OpenSelection => {
-            if !open_pager_for_selection(app) {
+            if !open_active_selection(app) {
                 app.status_message = Some("No selection to open".to_string());
             }
         }
         ContextMenuAction::ClearSelection => {
-            clear_transcript_selection(app);
-            app.status_message = Some("Selection cleared".to_string());
+            app.status_message = Some(
+                if clear_active_selection(app) {
+                    "Selection cleared"
+                } else {
+                    "No selection to clear"
+                }
+                .to_string(),
+            );
         }
         ContextMenuAction::CopyCell { cell_index } => {
             copy_cell_to_clipboard(app, cell_index);
@@ -1821,11 +1827,10 @@ pub(crate) fn apply_context_menu_action(
             }
         }
         ContextMenuAction::CopyText { text } => {
-            if app.clipboard.write_text(&text).is_ok() {
-                app.status_message = Some("Copied".to_string());
-            } else {
-                app.status_message = Some("Copy failed".to_string());
-            }
+            app.status_message = Some(match app.clipboard.write_text_status(&text) {
+                Ok(transport) => copy_receipt(app, transport, app.tr(MessageId::ClipboardCopied)),
+                Err(error) => format!("Copy failed: {error}"),
+            });
         }
         ContextMenuAction::ToggleWindowPin => {
             crate::tui::window_control::toggle_pin(app);
@@ -1954,12 +1959,81 @@ pub(crate) fn selection_point_from_position(
     })
 }
 
-pub(crate) fn selection_has_content(app: &App) -> bool {
-    // Composer selection takes priority (same as Cmd+C handler above).
-    if !app.selected_text().is_empty() {
-        return true;
+/// The one selection Copy, Open and Clear act on: the composer's when it has
+/// one, else the transcript's. The menu entries and Ctrl+C all read it here,
+/// so Copy cannot take the composer's text while Clear clears the
+/// transcript's and reports "Selection cleared".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ActiveSelection {
+    Composer(String),
+    Transcript,
+}
+
+pub(crate) fn active_selection(app: &App) -> Option<ActiveSelection> {
+    let composer = app.selected_text();
+    if !composer.is_empty() {
+        return Some(ActiveSelection::Composer(composer));
     }
-    selection_to_text(app).is_some_and(|text| !text.is_empty())
+    selection_to_text(app)
+        .is_some_and(|text| !text.is_empty())
+        .then_some(ActiveSelection::Transcript)
+}
+
+pub(crate) fn selection_has_content(app: &App) -> bool {
+    active_selection(app).is_some()
+}
+
+/// The receipt for a clipboard write. `native` is said only when a native
+/// clipboard took the text; a terminal (OSC 52 / tmux) write is never
+/// acknowledged, so its receipt says where the text went, not that it
+/// arrived. An asynchronous failure still replaces either receipt through
+/// the event loop's `poll_write_completion` drain.
+pub(crate) fn copy_receipt(
+    app: &App,
+    transport: crate::tui::clipboard::CopyTransport,
+    native: impl Into<String>,
+) -> String {
+    match transport {
+        crate::tui::clipboard::CopyTransport::Native => native.into(),
+        crate::tui::clipboard::CopyTransport::Terminal => {
+            app.tr(MessageId::ClipboardSentToTerminal).into_owned()
+        }
+    }
+}
+
+fn open_active_selection(app: &mut App) -> bool {
+    match active_selection(app) {
+        Some(ActiveSelection::Composer(text)) => {
+            let width = app
+                .viewport
+                .last_transcript_area
+                .map(|area| area.width)
+                .unwrap_or(80);
+            app.view_stack.push(crate::tui::pager::PagerView::from_text(
+                "Selection",
+                &text,
+                width.saturating_sub(2),
+            ));
+            true
+        }
+        Some(ActiveSelection::Transcript) => open_pager_for_selection(app),
+        None => false,
+    }
+}
+
+fn clear_active_selection(app: &mut App) -> bool {
+    match active_selection(app) {
+        Some(ActiveSelection::Composer(_)) => {
+            app.clear_selection();
+            app.needs_redraw = true;
+            true
+        }
+        Some(ActiveSelection::Transcript) => {
+            clear_transcript_selection(app);
+            true
+        }
+        None => false,
+    }
 }
 
 /// Branches taken by the Ctrl+C key handler. The order encodes priority and is
@@ -2011,11 +2085,12 @@ pub(crate) fn copy_active_selection(app: &mut App) {
     // Composer selection takes priority.
     let sel = app.selected_text();
     if !sel.is_empty() {
-        if app.clipboard.write_text(&sel).is_ok() {
-            app.status_message = Some("Selection copied".to_string());
-            app.clear_selection();
-        } else {
-            app.status_message = Some("Copy failed".to_string());
+        match app.clipboard.write_text_status(&sel) {
+            Ok(transport) => {
+                app.status_message = Some(copy_receipt(app, transport, "Selection copied"));
+                app.clear_selection();
+            }
+            Err(_) => app.status_message = Some("Copy failed".to_string()),
         }
         return;
     }
@@ -2037,7 +2112,14 @@ pub(crate) fn copy_active_selection(app: &mut App) {
             .map(|text| (text, None))
     });
     if let Some((text, markdown_cells)) = payload {
-        if app.clipboard.write_text(&text).is_ok() {
+        let written = app.clipboard.write_text_status(&text);
+        if let Ok(crate::tui::clipboard::CopyTransport::Terminal) = written {
+            app.status_message = Some(copy_receipt(
+                app,
+                crate::tui::clipboard::CopyTransport::Terminal,
+                "",
+            ));
+        } else if written.is_ok() {
             match markdown_cells {
                 Some(cells) => {
                     let toast = app
@@ -3217,6 +3299,137 @@ mod tests {
         let entries = build_context_menu_entries(&empty, right_click(4, 4));
         assert!(has_palette(&entries));
         assert_eq!(entries[0].action, ContextMenuAction::Paste);
+    }
+
+    /// T6: Copy took the composer selection while Clear cleared only the
+    /// transcript's and still said "Selection cleared", and Open ignored the
+    /// composer. All three now act on the same selection.
+    #[test]
+    fn copy_open_and_clear_act_on_the_composer_selection() {
+        let root = tempdir().expect("tempdir");
+        let mut app = app_with_answer(root.path(), "alpha beta");
+        // A transcript selection too: the composer's must still win.
+        app.viewport.transcript_selection.anchor =
+            Some(crate::tui::selection::TranscriptSelectionPoint {
+                line_index: 0,
+                column: 0,
+            });
+        app.viewport.transcript_selection.head =
+            Some(crate::tui::selection::TranscriptSelectionPoint {
+                line_index: 0,
+                column: 6,
+            });
+        let select = |app: &mut App| {
+            app.input = "hello world".to_string();
+            app.selection_anchor = Some(0);
+            app.cursor_position = 5;
+        };
+
+        select(&mut app);
+        super::apply_context_menu_action(&mut app, ContextMenuAction::CopySelection);
+        assert_eq!(app.clipboard.last_written_text(), Some("hello"));
+        assert_eq!(app.status_message.as_deref(), Some("Selection copied"));
+
+        select(&mut app);
+        super::apply_context_menu_action(&mut app, ContextMenuAction::OpenSelection);
+        assert_eq!(app.view_stack.top_kind(), Some(ModalKind::Pager));
+        app.view_stack.pop();
+
+        super::apply_context_menu_action(&mut app, ContextMenuAction::ClearSelection);
+        assert!(
+            app.selected_text().is_empty(),
+            "the composer selection cleared"
+        );
+        assert_eq!(app.status_message.as_deref(), Some("Selection cleared"));
+        assert!(
+            app.viewport.transcript_selection.is_active(),
+            "Clear acts on the selection Copy would take, not both"
+        );
+
+        super::clear_transcript_selection(&mut app);
+        super::apply_context_menu_action(&mut app, ContextMenuAction::ClearSelection);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("No selection to clear"),
+            "nothing cleared is not reported as cleared"
+        );
+    }
+
+    /// N9: an OSC 52 / tmux write is never acknowledged, so its receipt says
+    /// the text was sent to the terminal, not that it was copied.
+    #[test]
+    fn copy_receipts_name_the_transport() {
+        let mut app = create_test_app();
+        super::apply_context_menu_action(
+            &mut app,
+            ContextMenuAction::CopyText {
+                text: "agent_1".to_string(),
+            },
+        );
+        assert_eq!(app.clipboard.last_written_text(), Some("agent_1"));
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Copied to the clipboard")
+        );
+
+        app.clipboard = crate::tui::clipboard::ClipboardHandler::terminal_only_for_test();
+        super::apply_context_menu_action(
+            &mut app,
+            ContextMenuAction::CopyText {
+                text: "agent_1".to_string(),
+            },
+        );
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Sent to the terminal clipboard (terminals do not confirm it)")
+        );
+
+        // The terminal lane holds one write at a time; let the first land.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while app.clipboard.poll_write_completion().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "terminal write landed"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        app.input = "hello".to_string();
+        app.selection_anchor = Some(0);
+        app.cursor_position = 5;
+        super::apply_context_menu_action(&mut app, ContextMenuAction::CopySelection);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Sent to the terminal clipboard (terminals do not confirm it)")
+        );
+
+        app.clipboard = crate::tui::clipboard::ClipboardHandler::unavailable_for_test(false);
+        super::apply_context_menu_action(
+            &mut app,
+            ContextMenuAction::CopyText {
+                text: "agent_1".to_string(),
+            },
+        );
+        assert!(
+            app.status_message
+                .as_deref()
+                .is_some_and(|status| status.starts_with("Copy failed")),
+            "{:?}",
+            app.status_message
+        );
+    }
+
+    /// T11: Paste with nothing to paste used to do nothing and say nothing.
+    #[test]
+    fn paste_with_nothing_to_paste_says_so() {
+        let mut app = create_test_app();
+        app.clipboard = crate::tui::clipboard::ClipboardHandler::unavailable_for_test(false);
+        app.input = "draft".to_string();
+        super::apply_context_menu_action(&mut app, ContextMenuAction::Paste);
+        assert_eq!(app.input, "draft");
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Nothing to paste: the clipboard is empty or could not be read")
+        );
     }
 
     #[test]

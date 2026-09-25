@@ -966,6 +966,13 @@ pub enum MessageId {
     KbPasteAttach,
     KbCopySelection,
     ClipboardSshPasteHint,
+    /// Copy receipt when a native clipboard confirmed the write.
+    ClipboardCopied,
+    /// Copy receipt when the text went to the terminal (OSC 52 / tmux),
+    /// which never acknowledges it.
+    ClipboardSentToTerminal,
+    /// Paste found nothing: the clipboard read came back empty or failed.
+    ClipboardNothingToPaste,
     KbContextMenu,
     KbPointerScroll,
     KbPointerClick,
@@ -3428,6 +3435,9 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::KbPasteAttach,
     MessageId::KbCopySelection,
     MessageId::ClipboardSshPasteHint,
+    MessageId::ClipboardCopied,
+    MessageId::ClipboardSentToTerminal,
+    MessageId::ClipboardNothingToPaste,
     MessageId::KbContextMenu,
     MessageId::KbPointerScroll,
     MessageId::KbPointerClick,

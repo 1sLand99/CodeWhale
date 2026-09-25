@@ -298,6 +298,17 @@ impl TerminalClipboardWriter {
     }
 }
 
+/// Which transport took a clipboard write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyTransport {
+    /// A native clipboard accepted the text before the write returned.
+    Native,
+    /// Handed to the terminal (OSC 52, or tmux's buffer). Terminals never
+    /// acknowledge these, so success cannot be confirmed; a failure surfaces
+    /// later through `poll_write_completion`.
+    Terminal,
+}
+
 /// Clipboard reader/writer helper.
 pub struct ClipboardHandler {
     terminal_context: TerminalClipboardContext,
@@ -377,11 +388,31 @@ impl ClipboardHandler {
         })
     }
 
+    /// A clipboard whose writes go to the terminal (OSC 52) and always
+    /// succeed, for receipt tests.
+    #[cfg(test)]
+    pub(crate) fn terminal_only_for_test() -> Self {
+        let mut handler = Self::for_test(true, false);
+        handler.terminal_writer =
+            Some(TerminalClipboardWriter::spawn_with(|_| Ok(())).expect("terminal writer"));
+        handler
+    }
+
     /// Construct a deterministic unavailable clipboard for command tests.
     #[cfg(test)]
     pub(crate) fn unavailable_for_test(in_ssh_session: bool) -> Self {
         let mut handler = Self::for_test(in_ssh_session, false);
         handler.fail_text_writes = true;
+        // Reads are unavailable too: never fall through to the host's real
+        // clipboard from a test.
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "windows",
+            all(target_os = "linux", not(target_env = "ohos"))
+        ))]
+        {
+            handler.clipboard_init_attempted = true;
+        }
         handler
     }
 
@@ -570,16 +601,26 @@ impl ClipboardHandler {
     /// background worker; asynchronous transport failures are exposed through
     /// [`Self::poll_write_completion`].
     pub fn write_text(&mut self, text: &str) -> Result<()> {
+        self.write_text_status(text).map(|_| ())
+    }
+
+    /// [`Self::write_text`], reporting which transport took the text, so a
+    /// receipt can say "copied" only when a native clipboard confirmed it.
+    /// The transport is only known here: native is tried first and OSC 52 or
+    /// tmux is the fallback.
+    pub fn write_text_status(&mut self, text: &str) -> Result<CopyTransport> {
         #[cfg(test)]
         {
             if let Some(writer) = self.terminal_writer.as_ref() {
-                return writer.enqueue(text, self.terminal_context.in_tmux);
+                return writer
+                    .enqueue(text, self.terminal_context.in_tmux)
+                    .map(|()| CopyTransport::Terminal);
             }
             if self.fail_text_writes {
                 bail!("test clipboard unavailable");
             }
             self.written_text.push(text.to_string());
-            Ok(())
+            Ok(CopyTransport::Native)
         }
 
         #[cfg(not(test))]
@@ -587,12 +628,13 @@ impl ClipboardHandler {
             if self.terminal_context.write_order() == ClipboardWriteOrder::TerminalClientOnly {
                 return self
                     .enqueue_terminal_write(text)
+                    .map(|()| CopyTransport::Terminal)
                     .map_err(|err| anyhow::anyhow!("Clipboard unavailable: {err}"));
             }
 
             #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
             if write_text_with_wlcopy(text).is_ok() {
-                return Ok(());
+                return Ok(CopyTransport::Native);
             }
 
             #[cfg(any(
@@ -605,21 +647,22 @@ impl ClipboardHandler {
                 if let Some(clipboard) = self.clipboard.as_mut()
                     && clipboard.set_text(text.to_string()).is_ok()
                 {
-                    return Ok(());
+                    return Ok(CopyTransport::Native);
                 }
             }
 
             #[cfg(target_os = "macos")]
             if write_text_with_pbcopy(text).is_ok() {
-                return Ok(());
+                return Ok(CopyTransport::Native);
             }
 
             #[cfg(target_os = "windows")]
             if write_text_with_set_clipboard(text).is_ok() {
-                return Ok(());
+                return Ok(CopyTransport::Native);
             }
 
             self.enqueue_terminal_write(text)
+                .map(|()| CopyTransport::Terminal)
                 .map_err(|err| anyhow::anyhow!("Clipboard unavailable: {err}"))
         }
     }
