@@ -128,6 +128,23 @@ pub(super) fn remove_unchanged_worktree(
     if !changed.is_some_and(std::collections::BTreeSet::is_empty) || !worktree.exists() {
         return false;
     }
+    // The delivery inventory sees tracked and untracked paths but not ignored
+    // ones, and removal is forced. A fresh worktree holds no ignored files, so
+    // any (a report, a build output) was written by the worker: keep it.
+    let pristine = Git::output(
+        &[
+            "status",
+            "--porcelain",
+            "--ignored",
+            "--untracked-files=all",
+            "-z",
+        ],
+        worktree,
+    )
+    .is_ok_and(|output| output.status.success() && output.stdout.is_empty());
+    if !pristine {
+        return false;
+    }
     if let Err(err) = codewhale_lane::remove_worktree_if_expired(worktree, Some(0), None) {
         tracing::debug!(
             "kept unchanged sub-agent worktree {}: {err:#}",

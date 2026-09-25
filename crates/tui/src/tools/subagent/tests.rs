@@ -11604,6 +11604,15 @@ fn unchanged_isolated_worktree_is_removed_and_changed_one_is_kept() {
     assert!(unknown.exists(), "no evidence means no removal");
     assert!(branch_exists("unknown"));
 
+    // An ignored file is invisible to the delivery inventory but was still
+    // written by the worker, so the worktree is kept.
+    let ignored = make("ignored");
+    std::fs::write(repo.path().join(".git/info/exclude"), "scratch/\n").expect("exclude");
+    std::fs::create_dir_all(ignored.join("scratch")).expect("scratch dir");
+    std::fs::write(ignored.join("scratch/report.md"), "findings").expect("ignored file");
+    assert!(!worktree::remove_unchanged_worktree(&ignored, Some(&empty)));
+    assert!(ignored.join("scratch/report.md").exists());
+
     // Never deletes a directory git does not list as a linked worktree.
     let plain = worktree_home.path().join("plain");
     std::fs::create_dir_all(&plain).expect("plain dir");

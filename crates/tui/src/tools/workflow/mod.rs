@@ -377,13 +377,13 @@ fn workflow_receipt_summary(
         .filter(|goal| !goal.is_empty())
         .map(|goal| format!("Workflow \"{}\"", truncate_chars(goal, 160)))
         .unwrap_or_else(|| format!("Workflow {}", truncate_chars(&record.run_id, 64)));
+    // Counts come from the driver's ledger; the retained events (at most
+    // WORKFLOW_RUN_EVENTS_MAX_RETAINED) only name the agents that stopped.
     let mut tally = WorkflowTally::from_events(&record.events);
-    if record.events_dropped > 0 {
-        tally.count_from_ledger(
-            tasks.iter().map(|task| task.status),
-            record.dispatch_failure_count,
-        );
-    }
+    tally.count_from_ledger(
+        tasks.iter().map(|task| task.status),
+        record.dispatch_failure_count,
+    );
     let mut summary = format!(
         "{name} {}: {}.",
         view::run_outcome_phrase(record.status),

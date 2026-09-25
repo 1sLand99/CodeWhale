@@ -60,7 +60,9 @@ struct SharePlan {
     model: String,
     mode: String,
     message_count: usize,
-    tool_results: usize,
+    /// `None` when the page is the visible-history fallback, which may carry
+    /// tool output it cannot count.
+    tool_results: Option<usize>,
     redactions: usize,
 }
 
@@ -72,13 +74,17 @@ fn plan(export: &dyn CommandSessionExportContext) -> Option<SharePlan> {
         return None;
     }
     projection.restore_points = RestorePointProjection::None;
+    // The visible-history fallback cannot tell tool output apart from the
+    // rest, so it is not counted as "none".
     let tool_results = match &projection.transcript {
-        TranscriptProjection::Authoritative(messages) => messages
-            .iter()
-            .flat_map(|message| &message.blocks)
-            .filter(|block| matches!(block, ExportBlock::ToolResult { .. }))
-            .count(),
-        TranscriptProjection::HistoryFallback(_) => 0,
+        TranscriptProjection::Authoritative(messages) => Some(
+            messages
+                .iter()
+                .flat_map(|message| &message.blocks)
+                .filter(|block| matches!(block, ExportBlock::ToolResult { .. }))
+                .count(),
+        ),
+        TranscriptProjection::HistoryFallback(_) => None,
     };
     let model = projection.metadata.model.clone();
     let mode = projection.metadata.mode.clone();
@@ -112,10 +118,10 @@ fn preview(export: &dyn CommandSessionExportContext) -> CommandResult {
     let Some(plan) = plan(export) else {
         return CommandResult::error(NOTHING_TO_SHARE);
     };
-    let tool_output = if plan.tool_results == 0 {
-        "none".to_string()
-    } else {
-        format!("included ({} tool result(s), redacted)", plan.tool_results)
+    let tool_output = match plan.tool_results {
+        Some(0) => "none".to_string(),
+        Some(count) => format!("included ({count} tool result(s), redacted)"),
+        None => "may be included (visible history, redacted)".to_string(),
     };
     CommandResult::message(format!(
         "Share preview — nothing has been uploaded.\n\
