@@ -4199,9 +4199,8 @@ impl SubAgentManager {
     }
 
     /// The rate-limit governor backing [`Self::launch_gate`]; exposed so the
-    /// engine can stamp it onto root runtimes and tests can drive the
-    /// adaptive scheduler. (Surfacing governor state in status events is a
-    /// parent-repo follow-up.)
+    /// engine can stamp it onto root runtimes, `GET /v1/agent-runs` can report
+    /// it (addendum F5), and tests can drive the adaptive scheduler.
     #[must_use]
     pub(crate) fn rate_limit_governor(&self) -> Arc<governor::RateLimitGovernor> {
         Arc::clone(&self.governor)
@@ -6234,6 +6233,32 @@ impl SubAgentManager {
         self.agents
             .get(agent_id)
             .map(|agent| self.snapshot_for_listing(agent))
+    }
+
+    /// Write-scoped descendants of `ancestor` that the same Stop cancelled and
+    /// that carry no preservation receipt yet (F4 per-descendant receipts).
+    /// Read-only descendants are skipped: they have no baseline to inventory.
+    fn freshly_cancelled_writing_descendants(&self, ancestor: &str) -> Vec<String> {
+        self.agents
+            .values()
+            .filter(|agent| {
+                agent.id != ancestor
+                    && agent.status == SubAgentStatus::Cancelled
+                    && agent.result.as_deref() == Some(CANCELLED_BY_PARENT_RESULT)
+                    && self
+                        .worker_records
+                        .get(&agent.id)
+                        .is_some_and(|record| record.spec.runtime_profile.permissions.write)
+                    && self
+                        .ensure_caller_controls_descendant(
+                            &agent.id,
+                            Some(ancestor),
+                            "agent/cancel",
+                        )
+                        .is_ok()
+            })
+            .map(|agent| agent.id.clone())
+            .collect()
     }
 
     /// Terminalize a child that already left `Running` but whose worker record
@@ -11994,6 +12019,11 @@ fn budget_partial_result(
 /// isolated-worktree checkpoint a budget death gets, off the manager lock,
 /// and appends it to the child's result. Read-only children have no
 /// delivery baseline and are returned unchanged.
+///
+/// A Stop cascades to the child's descendants (`cancel_agent_for_session`),
+/// so each write-scoped descendant stopped with it gets its own receipt too:
+/// the work a grandchild left is named on the grandchild's record instead of
+/// vanishing behind the parent's single line.
 pub(crate) async fn preserve_cancelled_work(
     manager: &SharedSubAgentManager,
     snapshot: SubAgentResult,
@@ -12002,6 +12032,20 @@ pub(crate) async fn preserve_cancelled_work(
         || snapshot.result.as_deref() != Some(CANCELLED_BY_PARENT_RESULT)
     {
         return snapshot;
+    }
+    let descendants = manager
+        .read()
+        .await
+        .freshly_cancelled_writing_descendants(&snapshot.agent_id);
+    for descendant in descendants {
+        if let Some(note) =
+            budget_work_preservation_note(manager, &descendant, "cancelled with its parent").await
+        {
+            manager
+                .write()
+                .await
+                .append_cancel_preservation_note(&descendant, &note);
+        }
     }
     let Some(note) =
         budget_work_preservation_note(manager, &snapshot.agent_id, "cancelled by parent").await
