@@ -49,11 +49,7 @@ pub fn approval_summary_in(
 
     match name {
         "exec_shell" | "task_shell_start" => match text("command") {
-            Some(command) => with(
-                MessageId::ApprovalSummaryRunCommand,
-                "command",
-                &clip(command),
-            ),
+            Some(command) => run_command_summary(locale, command),
             None => msg(MessageId::ApprovalSummaryRunShell),
         },
         "exec_shell_wait" | "exec_wait" => msg(MessageId::ApprovalSummaryShellWait),
@@ -85,30 +81,39 @@ pub fn approval_summary_in(
             None => msg(MessageId::ApprovalSummarySearchWeb),
         },
         "web.run" => web_run_summary(locale, input),
-        "run_verifiers" => verifiers_summary(input),
+        "run_verifiers" => verifiers_summary(locale, input),
         "run_tests" => match text("args") {
-            Some(args) => format!(
-                "Run {}",
-                code(&clip_command(
-                    &format!("cargo test {args}"),
-                    MAX_QUOTED_CHARS
-                ))
-            ),
-            None => "Run the project's tests".to_string(),
+            Some(args) => run_command_summary(locale, &format!("cargo test {args}")),
+            None if locale == Locale::En => "Run the project's tests".to_string(),
+            None => with(MessageId::ApprovalSummaryUseTool, "name", name),
         },
-        name if name.starts_with("mcp_") => mcp_summary(name, input, workspace),
-        name => match argument_hint(input, workspace) {
-            Some(hint) => format!("{}: {hint}", humanize(name)),
-            None => format!("Use the {name} tool"),
+        name if name.starts_with("mcp_") => mcp_summary(locale, name, input, workspace),
+        name => match (locale, argument_hint(input, workspace)) {
+            (Locale::En, Some(hint)) => format!("{}: {hint}", humanize(name)),
+            (Locale::En, None) => format!("Use the {name} tool"),
+            (_, Some(hint)) => {
+                format!(
+                    "{}: {hint}",
+                    with(MessageId::ApprovalSummaryUseName, "name", name)
+                )
+            }
+            (_, None) => with(MessageId::ApprovalSummaryUseTool, "name", name),
         },
     }
+}
+
+fn run_command_summary(locale: Locale, command: &str) -> String {
+    tr(locale, MessageId::ApprovalSummaryRunCommand).replace(
+        "`{command}`",
+        &code(&clip_command(command, MAX_QUOTED_CHARS)),
+    )
 }
 
 /// `run_verifiers{commands}` spawns arbitrary programs, so the heading names
 /// what will run rather than the tool that runs it. The program always leads
 /// — the model-chosen `name` is only a label after it — and arguments are
 /// shell-quoted so `["a b"]` never reads like `["a", "b"]`.
-fn verifiers_summary(input: &Value) -> String {
+fn verifiers_summary(locale: Locale, input: &Value) -> String {
     let commands = input
         .get("commands")
         .and_then(Value::as_array)
@@ -145,6 +150,14 @@ fn verifiers_summary(input: &Value) -> String {
             .filter(|name| !name.is_empty())
             .map(|name| clip_to(name, MAX_QUOTED_CHARS / 3))
     };
+    if locale != Locale::En {
+        let lines: Vec<String> = commands.iter().filter_map(command_line).collect();
+        return if lines.is_empty() {
+            tr(locale, MessageId::ApprovalSummaryUseTool).replace("{name}", "run_verifiers")
+        } else {
+            run_command_summary(locale, &lines.join("; "))
+        };
+    }
     match commands {
         [] => "Run the project's checks".to_string(),
         [one] => match command_line(one) {
@@ -324,15 +337,20 @@ fn patch_summary(locale: Locale, input: &Value, workspace: Option<&Path>) -> Str
     }
 }
 
-fn mcp_summary(name: &str, input: &Value, workspace: Option<&Path>) -> String {
+fn mcp_summary(locale: Locale, name: &str, input: &Value, workspace: Option<&Path>) -> String {
     // `mcp_<server>_<tool>`; server names may themselves hold `_`, so this is
     // presentation only and never a policy decision.
     let rest = name.trim_start_matches("mcp_");
     let (server, tool) = match mcp_server_and_tool(rest) {
         Some(parts) => parts,
-        None => return format!("Use {rest}"),
+        None => return tr(locale, MessageId::ApprovalSummaryUseName).replace("{name}", rest),
     };
     let server = server_display(server);
+    if locale != Locale::En {
+        return tr(locale, MessageId::ApprovalSummaryMcpTool)
+            .replace("{tool}", tool)
+            .replace("{server}", &server);
+    }
     let text = |key: &str| {
         input
             .get(key)
@@ -787,6 +805,15 @@ mod tests {
         assert_eq!(
             approval_summary_in(Locale::Fr, "mcp_github_create_issue", &json!({}), None),
             "Utiliser create_issue de github"
+        );
+        assert_eq!(
+            approval_summary_in(
+                Locale::Fr,
+                "run_verifiers",
+                &json!({"commands": [{"program": "cargo", "args": ["test"]}]}),
+                None,
+            ),
+            "Exécuter `cargo test`"
         );
         // Every summary a non-English pack produces is its own sentence, never
         // the English one leaking through the fallback.
