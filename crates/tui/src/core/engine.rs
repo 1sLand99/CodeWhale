@@ -2051,6 +2051,7 @@ impl Engine {
                     self.tx_event.clone(),
                     Some(self.cancel_token.clone()),
                     tool_name.clone(),
+                    Some(tool_id.clone()),
                     tool_input.clone(),
                     self.session.workspace.clone(),
                     Some(&registry),
