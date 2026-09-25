@@ -3627,8 +3627,9 @@ pub struct SubAgentManager {
     max_steps: Option<u32>,
     /// Configured default per-child wall-clock budget (`[subagents]
     /// default_wall_time_secs`, #5324). `None` keeps
-    /// `DEFAULT_CHILD_WALL_TIME`; an explicit spawn `wall_time_secs` still
-    /// wins.
+    /// `DEFAULT_CHILD_WALL_TIME`, which an explicit spawn `wall_time_secs`
+    /// may raise up to `MAX_CHILD_WALL_TIME`; a configured value is also a
+    /// ceiling on explicit requests.
     wall_time: Option<Duration>,
     max_agents: usize,
     max_admitted_agents: usize,
@@ -7482,10 +7483,14 @@ impl SubAgentManager {
                 runtime.max_spawn_depth
             ));
         }
+        // The built-in 30-minute clock is a default, not a ceiling: an explicit
+        // `wall_time_secs` may raise it up to MAX_CHILD_WALL_TIME. An operator
+        // `[subagents] default_wall_time_secs` stays a ceiling, and inherited
+        // profiles and deadlines still only narrow.
         let wall_time = options
             .wall_time
-            .unwrap_or(MAX_CHILD_WALL_TIME)
-            .min(self.wall_time.unwrap_or(DEFAULT_CHILD_WALL_TIME))
+            .unwrap_or_else(|| self.wall_time.unwrap_or(DEFAULT_CHILD_WALL_TIME))
+            .min(self.wall_time.unwrap_or(MAX_CHILD_WALL_TIME))
             .min(
                 runtime
                     .worker_profile
@@ -10129,7 +10134,7 @@ impl ToolSpec for AgentTool {
                 },
                 "wall_time_secs": {
                     "type": "integer", "minimum": 1, "maximum": MAX_CHILD_WALL_TIME.as_secs(),
-                    "description": "Whole-run wall time including queue, model and tools. Only narrows inherited/operator deadlines; continuation does not restart the clock."
+                    "description": "Whole-run wall time including queue, model and tools; default 1800. May raise that default, never inherited or operator limits; continuation does not restart the clock."
                 },
                 "deliverables": {
                     "type": "array", "maxItems": 16,

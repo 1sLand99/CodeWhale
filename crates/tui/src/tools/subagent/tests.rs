@@ -21164,7 +21164,9 @@ const READ_ONLY_CHILD_ENVELOPE_BYTE_CEILING: usize = 89_000;
 // (105ad9d3e).
 // Re-measured 2026-09-25 at 88,937B on Linux (88,924B on macOS), +222B: the
 // agent schema advertises `fork_context` (it was parse-accepted but hidden).
-const PARENT_SURFACE_BYTE_CEILING: usize = 88_937;
+// Re-measured 2026-09-25 at 88,968B on Linux (88,955B on macOS), +31B: the
+// `wall_time_secs` description states that it may raise the 1800s default.
+const PARENT_SURFACE_BYTE_CEILING: usize = 88_968;
 
 #[tokio::test]
 async fn read_only_child_envelope_stays_within_measured_ceiling() {
