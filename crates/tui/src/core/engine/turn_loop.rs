@@ -1701,6 +1701,19 @@ impl Engine {
                     );
                     let mut envelope = crate::error_taxonomy::envelope_for_llm_error(e, message);
                     envelope.message = display_message.clone();
+                    turn.credential_rejected = envelope.category == ErrorCategory::Authentication;
+                    // #6566: no model saw the question. Take it back out of
+                    // the session before reporting, so the next request does
+                    // not send it twice and a resumed session does not show
+                    // it twice; the code tells the host to hand the text back.
+                    if turn.credential_rejected
+                        && let Some(len) = turn.unanswered_user_message_len
+                        && self.retract_unanswered_user_message(len)
+                    {
+                        envelope.code =
+                            crate::error_taxonomy::CREDENTIAL_REJECTED_UNSENT_CODE.to_string();
+                        self.emit_session_updated().await;
+                    }
                     turn_error = Some(display_message);
                     let _ = self.tx_event.send(Event::error(envelope)).await;
                     return (TurnOutcomeStatus::Failed, turn_error);

@@ -268,16 +268,18 @@ fn initial_onboarding_state(
         return OnboardingState::None;
     }
 
-    if was_onboarded && needs_api_key {
-        // Missing-key recovery uses the canonical provider picker so it can
-        // preserve the configured provider, endpoint, and model route before
-        // asking for a replacement secret.
+    if needs_api_key {
+        // Nothing can answer until a model is connected, so the first screen
+        // is the one that connects it (#6566). A returning user keeps the
+        // configured route focused; a new user sees the provider list. It is
+        // one screen, not the old five-gate wizard, and Esc leaves it for the
+        // composer.
         OnboardingState::Provider
     } else if was_onboarded && needs_workspace_trust {
         OnboardingState::TrustDirectory
     } else {
-        // First paint is the composer. Language, provider, and trust stay in
-        // /setup. A 5-gate wizard must not block the first keystroke.
+        // A new user who already has a key starts at the composer. Language
+        // and trust stay in /setup.
         OnboardingState::None
     }
 }
@@ -304,7 +306,7 @@ fn launch_onboarding_decision(
     needs_workspace_trust: bool,
     xai_oauth_needs_reauth: bool,
 ) -> (OnboardingState, bool) {
-    let onboarding = if xai_oauth_needs_reauth && was_onboarded {
+    let onboarding = if xai_oauth_needs_reauth {
         OnboardingState::None
     } else {
         initial_onboarding_state(
@@ -315,8 +317,10 @@ fn launch_onboarding_decision(
             needs_workspace_trust,
         )
     };
-    let missing_key_recovery =
-        !skip_onboarding && was_onboarded && needs_api_key && !xai_oauth_needs_reauth;
+    // Both a new user and a returning one reach the picker directly, and Esc
+    // returns to the composer; `was_onboarded` only decides whether the
+    // picker focuses the saved route (see `onboarding_had_provider_step`).
+    let missing_key_recovery = !skip_onboarding && needs_api_key && !xai_oauth_needs_reauth;
     (onboarding, missing_key_recovery)
 }
 
@@ -1947,6 +1951,11 @@ pub struct App {
     /// Maps raw agent_id to a stable user-facing label (#3030).
     /// Populated when `AgentSpawned` fires; read by sidebar rendering.
     pub agent_label_map: HashMap<String, String>,
+    /// The label a workflow gave each child task (`task_id` == `agent_id`),
+    /// from its `task_started` event. It outranks role- and counter-derived
+    /// labels on every surface, so the card, status, roster and dock name a
+    /// workflow child the same way (#6565).
+    pub workflow_agent_labels: HashMap<String, String>,
     /// The child whose full transcript currently owns the main conversation
     /// area and whose fork the composer addresses (`None` = main session).
     pub agent_focus: Option<crate::tui::agent_focus::AgentFocus>,
@@ -2997,6 +3006,14 @@ impl App {
         );
         self.hotbar_actions.replace_skills(&cached_skills);
         self.cached_skills = cached_skills;
+    }
+
+    /// Whether the onboarding provider picker should focus the saved route.
+    /// Only a returning user recovering a missing key has one; a new user's
+    /// "route" is the built-in default, and focusing it would open the picker
+    /// on that provider's missing key instead of the provider list (#6566).
+    pub(crate) fn onboarding_recovers_configured_route(&self) -> bool {
+        self.onboarding_missing_key_recovery && !self.onboarding_had_provider_step
     }
 
     pub fn finish_onboarding_without_feature_intro(&mut self) {
@@ -4427,9 +4444,12 @@ impl App {
         self.collapsed_cell_map.clear();
     }
 
-    /// Resolve the dispatch/session name for an agent. `None` when the agent
-    /// is unnamed (the manager seeds `name` with the raw id) or absent from
-    /// the cache — the raw id is a lookup handle, never a display name.
+    /// The name a sub-agent was dispatched under, when it has one (#5287).
+    ///
+    /// `SubAgentResult::name` carries the session name, which the manager
+    /// seeds with the agent id and only replaces when the dispatch supplied a
+    /// name. An id is a lookup handle, never the identity an operator
+    /// dispatched by, so it is reported as absent here.
     fn agent_session_name(&self, agent_id: &str) -> Option<String> {
         let agent = self
             .subagent_cache
@@ -4503,6 +4523,9 @@ impl App {
     /// when the role is not already part of the name; unnamed children are
     /// disambiguated with a per-role sequence counter.
     fn resolved_identity_label(&mut self, agent_id: &str) -> Option<String> {
+        if let Some(label) = self.workflow_agent_labels.get(agent_id) {
+            return Some(label.clone());
+        }
         let name = self.agent_session_name(agent_id);
         let role = self.agent_role_label(agent_id);
         match (name, role) {
@@ -4520,6 +4543,31 @@ impl App {
     fn next_agent_placeholder(&mut self) -> String {
         self.agent_counter = self.agent_counter.saturating_add(1);
         format!("Agent {}", self.agent_counter)
+    }
+
+    /// Record the label a workflow gave a child (#6565). It replaces whatever
+    /// label the child got before the workflow event arrived — a counter
+    /// placeholder or a role-derived name — so no surface keeps the old one.
+    pub(crate) fn note_workflow_agent_label(&mut self, agent_id: &str, label: &str) {
+        let label = label.trim();
+        if agent_id.trim().is_empty() || label.is_empty() {
+            return;
+        }
+        self.workflow_agent_labels
+            .insert(agent_id.to_string(), label.to_string());
+        self.agent_label_map
+            .insert(agent_id.to_string(), label.to_string());
+    }
+
+    /// The name this agent was given: its workflow task label, else its
+    /// dispatch (session) name — the same order `resolved_identity_label`
+    /// uses. Every surface that names an agent leads with this, so they
+    /// cannot disagree (#6565).
+    pub(crate) fn agent_given_name(&self, agent_id: &str) -> Option<String> {
+        self.workflow_agent_labels
+            .get(agent_id)
+            .cloned()
+            .or_else(|| self.agent_session_name(agent_id))
     }
 
     /// #3030: return the stable user-facing label for an agent id. Labels are
@@ -5357,6 +5405,14 @@ impl App {
         };
         if event_run_id.trim().is_empty() {
             return false;
+        }
+        if let WorkflowPanelEvent::TaskStarted {
+            task_id,
+            label: Some(label),
+            ..
+        } = &event
+        {
+            self.note_workflow_agent_label(task_id, label);
         }
         if let WorkflowPanelEvent::RunStarted { run_id, .. } = &event
             && run_id != event_run_id

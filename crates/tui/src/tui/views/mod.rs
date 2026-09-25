@@ -5736,8 +5736,8 @@ pub(crate) fn subagent_view_agents(
     for agent in &mut agents[..manager_agent_count] {
         // The row headline reads `nickname`, so the dispatch name lands there
         // when the agent has one; the generated whale names the rest (#5287).
-        let display_name = crate::tui::sidebar::dispatched_agent_name(agent)
-            .map(str::to_string)
+        let display_name = app
+            .agent_given_name(&agent.agent_id)
             .or_else(|| display_names.remove(&agent.agent_id));
         agent.nickname = display_name;
     }

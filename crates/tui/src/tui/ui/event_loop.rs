@@ -1028,12 +1028,14 @@ pub async fn run_tui(
         persist_offline_queue_state(&app);
     }
 
-    // Returning users recovering a missing key open the picker immediately so
-    // recovery cannot silently replace a persisted route. First-run users
-    // start on Welcome; Enter shows the provider explanation, and a second
-    // Enter opens the picker.
+    // A launch without a usable key opens the picker immediately (#6566).
+    // A returning user's picker focuses the saved route so recovery cannot
+    // silently replace it; a new user has no saved route, so the picker opens
+    // on the provider list rather than on the built-in default's missing key.
     if app.onboarding == OnboardingState::Provider && app.onboarding_missing_key_recovery {
-        open_onboarding_provider_picker(&mut app, config, &engine_handle, true).await;
+        let recover_configured_route = app.onboarding_recovers_configured_route();
+        open_onboarding_provider_picker(&mut app, config, &engine_handle, recover_configured_route)
+            .await;
     }
 
     // #4605: create the dispatch completion channel before any submit path so
@@ -5213,7 +5215,8 @@ pub(crate) async fn run_event_loop(
                             onboarding::advance_onboarding_after_language(app);
                         }
                         OnboardingState::Provider => {
-                            let recover_configured_route = app.onboarding_missing_key_recovery;
+                            let recover_configured_route =
+                                app.onboarding_recovers_configured_route();
                             open_onboarding_provider_picker(
                                 app,
                                 config,
@@ -6902,7 +6905,22 @@ async fn adopt_live_local_ollama_catalog(
     }
     app.onboarding_needs_api_key = false;
     app.onboarding_missing_key_recovery = false;
-    app.status_message = Some(format!("Local Ollama ready · {tag} (from GET /api/tags)"));
+    // A launch with no key opens the provider picker (#6566). The local model
+    // just answered that question, so close the picker and its onboarding
+    // step rather than leave a stale "connect a model" screen whose Esc would
+    // now walk back to the welcome screen.
+    if app.onboarding == OnboardingState::Provider {
+        if app.view_stack.top_kind() == Some(ModalKind::ProviderPicker) {
+            app.view_stack.pop();
+        }
+        app.onboarding = OnboardingState::None;
+    }
+    // Say plainly which model is in use and how to change it, instead of the
+    // endpoint it was discovered from (#6566).
+    let adopted = app
+        .tr(MessageId::LocalModelAdopted)
+        .replace("{model}", &tag);
+    app.status_message = Some(adopted);
     app.needs_redraw = true;
 }
 

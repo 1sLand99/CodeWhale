@@ -2032,7 +2032,29 @@ impl<'a> ApprovalWidget<'a> {
     /// `controls` (which are always reserved and can never be clipped). Both
     /// `render` and `inline_region` use this so the painted band and the
     /// dimmed backdrop region always agree.
+    ///
+    /// The save preview after the essential body is optional: when the band
+    /// cannot hold it, it is dropped here, before sizing, so the band neither
+    /// keeps blank rows for it nor calls the request "truncated" when only
+    /// the preview was cut (#6566).
     fn build_inline_content(&self, area: Rect) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
+        let (mut body, essential_len, controls) = self.build_inline_parts(area);
+        if body.len() > essential_len {
+            let region = inline_region_for(area, &body, &controls);
+            let inner_height = region.height.saturating_sub(1);
+            let control_rows = measure_wrapped_rows(&controls, region.width).min(inner_height);
+            let body_height = inner_height.saturating_sub(control_rows);
+            if measure_wrapped_rows(&body, region.width) > body_height {
+                body.truncate(essential_len);
+            }
+        }
+        (body, controls)
+    }
+
+    /// The body, how many of its leading lines are essential, and the
+    /// controls. Lines after the essential prefix are the optional save
+    /// preview.
+    fn build_inline_parts(&self, area: Rect) -> (Vec<Line<'static>>, usize, Vec<Line<'static>>) {
         let risk = self.request.risk;
         let stakes = self.request.stakes();
         let locale = self.view.locale();
@@ -2261,6 +2283,7 @@ impl<'a> ApprovalWidget<'a> {
 
         // Preview the validated persistent-rule candidates. Informational, so
         // they live in the scrollable body rather than the action rows.
+        let essential_len = body.len();
         if let Some(preview) = self.request.ask_rule_save_preview() {
             push_permission_rule_save_preview(
                 &mut body,
@@ -2286,7 +2309,7 @@ impl<'a> ApprovalWidget<'a> {
             palette_colors.accent,
             palette_colors.shortcut,
         );
-        (body, controls)
+        (body, essential_len, controls)
     }
 
     /// Bottom-anchored band this inline prompt occupies within `area`. Must
@@ -3013,17 +3036,11 @@ fn destructive_approval_compact_semantics(locale: Locale) -> (&'static str, &'st
 fn destructive_approval_semantics(locale: Locale) -> [(&'static str, &'static str); 2] {
     match locale {
         Locale::ZhHans => [
-            (
-                "规则: ",
-                "当前批准策略、审查规则或显式询问规则要求用户确认。",
-            ),
+            ("规则: ", "你的设置要求先确认这一步。"),
             ("取消: ", "拒绝只跳过本次工具调用；Esc 会中止整轮。"),
         ],
         _ => [
-            (
-                "Why: ",
-                "Your permissions, a review rule, or an ask rule requires confirmation.",
-            ),
+            ("Why: ", "Your settings ask you to confirm this step first."),
             (
                 "Stop: ",
                 "Don't allow skips only this step; Esc stops the whole turn.",
@@ -8899,19 +8916,20 @@ mod tests {
         let rendered = render_approval_request(&request, Rect::new(0, 0, 120, 40));
 
         assert!(
-            rendered.contains("s allow once + always ask exact rule"),
+            rendered.contains("s allow now, and always ask before this again"),
             "{rendered}"
         );
         assert!(rendered.contains("Always allow in this repo"), "{rendered}");
         assert!(rendered.contains("Save:"), "{rendered}");
-        assert!(rendered.contains("1 ask rule"), "{rendered}");
-        assert!(rendered.contains("1 allow rule"), "{rendered}");
+        assert!(rendered.contains("always ask first"), "{rendered}");
+        assert!(rendered.contains("always allow"), "{rendered}");
         assert!(
-            rendered.contains("tool=exec_shell command=cargo test --workspace"),
+            rendered.contains("run cargo test --workspace"),
             "{rendered}"
         );
-        assert!(rendered.contains("command_exact=true"), "{rendered}");
-        assert!(rendered.contains("workspace=/workspace"), "{rendered}");
+        assert!(rendered.contains("run exactly cargo test"), "{rendered}");
+        assert!(rendered.contains("in /workspace"), "{rendered}");
+        assert!(!rendered.contains("tool="), "{rendered}");
     }
 
     #[test]
@@ -8923,7 +8941,7 @@ mod tests {
                     "path": "src/main.rs",
                     "content": "fn main() {}\n",
                 }),
-                "tool=write_file path=src/main.rs",
+                "write src/main.rs",
             ),
             (
                 "edit_file",
@@ -8932,7 +8950,7 @@ mod tests {
                     "old_string": "old",
                     "new_string": "new",
                 }),
-                "tool=edit_file path=src/lib.rs",
+                "edit src/lib.rs",
             ),
         ];
 
@@ -8948,9 +8966,12 @@ mod tests {
             let rendered = render_approval_request(&request, Rect::new(0, 0, 120, 40));
 
             assert!(rendered.contains("Save:"), "{tool_name}:\n{rendered}");
-            assert!(rendered.contains("1 ask rule"), "{tool_name}:\n{rendered}");
             assert!(
-                rendered.contains("1 allow rule"),
+                rendered.contains("always ask first"),
+                "{tool_name}:\n{rendered}"
+            );
+            assert!(
+                rendered.contains("always allow"),
                 "{tool_name}:\n{rendered}"
             );
             assert!(
@@ -8985,16 +9006,10 @@ diff --git a/src/b.rs b/src/b.rs\n\
         let rendered = render_approval_request(&request, Rect::new(0, 0, 120, 40));
 
         assert!(rendered.contains("Save:"), "{rendered}");
-        assert!(rendered.contains("2 ask rules"), "{rendered}");
-        assert!(rendered.contains("2 allow rules"), "{rendered}");
-        assert!(
-            rendered.contains("tool=apply_patch path=src/a.rs"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("tool=apply_patch path=src/b.rs"),
-            "{rendered}"
-        );
+        assert!(rendered.contains("always ask first"), "{rendered}");
+        assert!(rendered.contains("always allow"), "{rendered}");
+        assert!(rendered.contains("change src/a.rs"), "{rendered}");
+        assert!(rendered.contains("change src/b.rs"), "{rendered}");
     }
 
     #[test]
@@ -9015,18 +9030,44 @@ diff --git a/src/b.rs b/src/b.rs\n\
             "apply_patch:many",
         );
 
-        let rendered = render_approval_request(&request, Rect::new(0, 0, 120, 40));
+        // Tall enough for the optional save preview: a band that cannot fit
+        // it drops the preview rather than calling the request truncated.
+        let rendered = render_approval_request(&request, Rect::new(0, 0, 120, 80));
 
-        assert!(rendered.contains("5 ask rules"), "{rendered}");
-        assert!(
-            rendered.contains("tool=apply_patch path=src/a.rs"),
-            "{rendered}"
-        );
+        assert!(rendered.contains("always ask first"), "{rendered}");
+        assert!(rendered.contains("change src/a.rs"), "{rendered}");
         assert!(rendered.contains("... 1 more"), "{rendered}");
         assert!(
-            !rendered.contains("tool=apply_patch path=src/e.rs"),
+            !rendered.contains("change src/e.rs"),
             "truncated rule should not render directly:\n{rendered}"
         );
+    }
+
+    /// #6566: when all that does not fit is the optional save preview, the
+    /// card drops it and does not claim the request was truncated.
+    #[test]
+    fn approval_card_drops_the_save_preview_before_saying_truncated() {
+        let request = crate::tui::approval::ApprovalRequest::new(
+            "approval-1",
+            "apply_patch",
+            "Apply a patch",
+            &serde_json::json!({
+                "replace": [
+                    { "path": "src/a.rs", "content": "a" },
+                    { "path": "src/b.rs", "content": "b" },
+                    { "path": "src/c.rs", "content": "c" },
+                    { "path": "src/d.rs", "content": "d" },
+                    { "path": "src/e.rs", "content": "e" }
+                ]
+            }),
+            "apply_patch:many",
+        );
+
+        let rendered = render_approval_request(&request, Rect::new(0, 0, 120, 40));
+
+        assert!(rendered.contains("src/a.rs"), "{rendered}");
+        assert!(!rendered.contains("always ask first"), "{rendered}");
+        assert!(!rendered.contains("truncated"), "{rendered}");
     }
 
     #[test]
@@ -9053,7 +9094,7 @@ diff --git a/src/b.rs b/src/b.rs\n\
             let rendered = render_approval_request(&request, Rect::new(0, 0, 120, 40));
 
             assert!(
-                !rendered.contains("s allow once + always ask exact rule"),
+                !rendered.contains("s allow now, and always ask before this again"),
                 "S shortcut should stay hidden:\n{rendered}"
             );
             assert!(
@@ -9061,7 +9102,7 @@ diff --git a/src/b.rs b/src/b.rs\n\
                 "save preview should stay hidden:\n{rendered}"
             );
             assert!(
-                !rendered.contains("ask rule"),
+                !rendered.contains("always ask first"),
                 "ask-rule details should stay hidden:\n{rendered}"
             );
         }

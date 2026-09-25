@@ -707,6 +707,18 @@ fn fire_tool_completion_hooks(
     }
 }
 
+const APPROVAL_NOTE_PREFIX: &str = "[approval] ";
+
+/// The tool output after the engine's model-facing approval note: the note is
+/// one line, followed by a blank line when there was other output.
+fn without_approval_note(content: &str) -> &str {
+    content
+        .strip_prefix(APPROVAL_NOTE_PREFIX)
+        .map_or(content, |rest| {
+            rest.split_once("\n\n").map_or("", |(_, output)| output)
+        })
+}
+
 pub(super) fn handle_tool_call_complete(
     app: &mut App,
     id: &str,
@@ -749,6 +761,21 @@ pub(super) fn handle_tool_call_complete(
     // exploring-tool completions and orphaned completions never emitted the
     // event at all, so "fires after each tool call" was not true.
     fire_tool_completion_hooks(app, id, name, result);
+
+    // The engine prefixes an approved call's result with a note for the model
+    // ("[approval] This tool call required approval…"). The person gave that
+    // approval a moment ago; repeating it as the first line of the output
+    // reads as an internal log (#6566). The model's copy keeps the note.
+    let displayed;
+    let result = match result {
+        Ok(tool_result) if tool_result.content.starts_with(APPROVAL_NOTE_PREFIX) => {
+            let mut shown = tool_result.clone();
+            shown.content = without_approval_note(&tool_result.content).to_string();
+            displayed = Ok(shown);
+            &displayed
+        }
+        _ => result,
+    };
 
     // Exploring entries land in the per-tool map regardless of whether they
     // live in the active cell or in finalized history; the path is the same.
@@ -1955,6 +1982,25 @@ mod tests {
     use super::*;
     use crate::tools::plan::StepStatus;
     use serde_json::json;
+
+    /// #6566: the engine's model-facing approval note is not shown as the
+    /// first line of the tool output the person reads.
+    #[test]
+    fn approval_note_is_not_shown_in_tool_output() {
+        assert_eq!(
+            without_approval_note(
+                "[approval] This tool call required approval and was approved by the user before execution.\n\ntest result: ok"
+            ),
+            "test result: ok"
+        );
+        assert_eq!(
+            without_approval_note(
+                "[approval] This tool call required approval and was approved by the user before execution."
+            ),
+            ""
+        );
+        assert_eq!(without_approval_note("plain output"), "plain output");
+    }
 
     #[test]
     fn late_live_event_from_prior_run_does_not_mutate_active_run() {

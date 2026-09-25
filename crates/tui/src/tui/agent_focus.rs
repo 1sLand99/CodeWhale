@@ -140,11 +140,7 @@ pub(crate) fn resolve_agent_transcript_messages(
 /// The same name the rail shows for a worker: its dispatch/session name when
 /// it has one, else the generated or labelled display name.
 pub(crate) fn agent_display_label(app: &App, agent_id: &str) -> String {
-    app.subagent_cache
-        .iter()
-        .find(|agent| agent.agent_id == agent_id)
-        .and_then(crate::tui::sidebar::dispatched_agent_name)
-        .map(str::to_string)
+    app.agent_given_name(agent_id)
         .unwrap_or_else(|| crate::tui::agent_details::safe_agent_display_name(app, agent_id))
 }
 

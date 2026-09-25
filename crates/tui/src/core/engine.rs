@@ -1380,6 +1380,19 @@ impl Engine {
         ))
     }
 
+    /// Remove this turn's user message when nothing followed it — the request
+    /// was refused before any model output (#6566). `user_message_len` is the
+    /// session length right after the message was added; anything appended
+    /// since (an answer, a tool call, a runtime note) leaves it in place.
+    pub(super) fn retract_unanswered_user_message(&mut self, user_message_len: usize) -> bool {
+        if user_message_len == 0 || self.session.messages.len() != user_message_len {
+            return false;
+        }
+        self.session.messages.truncate_to(user_message_len - 1);
+        self.session.bump_messages_revision();
+        true
+    }
+
     pub(super) fn decorate_auth_error_message(&self, message: String) -> String {
         let Some(hint) = self.api_key_env_only_recovery.as_ref() else {
             return message;
@@ -5519,6 +5532,7 @@ impl Engine {
         };
         user_msg.content.splice(image_index..image_index, images);
         self.session.add_message(user_msg);
+        turn.unanswered_user_message_len = Some(self.session.messages.len());
 
         self.emit_session_updated().await;
 

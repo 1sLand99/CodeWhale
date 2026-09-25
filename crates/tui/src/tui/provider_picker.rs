@@ -1608,7 +1608,7 @@ fn model_cost_label_for_pricing(provider: ApiProvider, pricing: Option<&PricingS
             input_per_mtok,
             output_per_mtok,
         }) => match (input_per_mtok, output_per_mtok) {
-            (Some(input), Some(output)) => format!("${input:.2}/${output:.2} mtok"),
+            (Some(input), Some(output)) => format!("${input:.2}/${output:.2} per 1M"),
             _ => "token-priced".to_string(),
         },
         Some(PricingSku::SubscriptionQuota { .. }) => "plan".to_string(),
@@ -1618,7 +1618,7 @@ fn model_cost_label_for_pricing(provider: ApiProvider, pricing: Option<&PricingS
             ApiProvider::Ollama | ApiProvider::Sglang | ApiProvider::Vllm => "local".to_string(),
             ApiProvider::OpenaiCodex => "oauth quota".to_string(),
             ApiProvider::OpencodeZen => "pay-as-you-go".to_string(),
-            _ => "price ?".to_string(),
+            _ => "price unknown".to_string(),
         },
     }
 }
@@ -2998,7 +2998,9 @@ impl ProviderPickerView {
                 // operator saved, or a custom id. It used to ride the list
                 // row's pipe dump; the row is short now and this is where the
                 // route's own facts live.
-                format!("Route: {route} · {}", row.model_origin.label()),
+                // "Route" is internal vocabulary (§19); the person picks a
+                // model (#6566).
+                format!("Model: {route} · {}", row.model_origin.label()),
                 Style::default().fg(palette::TEXT_PRIMARY),
             )),
             Line::from(Span::styled(
@@ -3128,7 +3130,7 @@ impl ProviderPickerView {
         // or the guided setup flow.
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "Models · $in/$out per mtok",
+            "Models · price in/out",
             Style::default()
                 .fg(palette::TEXT_PRIMARY)
                 .add_modifier(Modifier::BOLD),
@@ -3283,7 +3285,7 @@ impl ProviderPickerView {
                 inner,
                 buf,
                 &[
-                    ActionHint::new("Type/paste", "replace saved key"),
+                    ActionHint::new("Type/paste", "replace the key"),
                     ActionHint::new("Esc", "keep current key"),
                 ],
             )
@@ -3302,7 +3304,9 @@ impl ProviderPickerView {
         let display = if codex_oauth {
             "(run codex login; then explicitly grant read-only access)".to_string()
         } else if masked.is_empty() && saved_credential {
-            "Saved credential configured".to_string()
+            // The key may come from the environment rather than a save, so
+            // "saved" was not always true (#6566).
+            "A key is already set up".to_string()
         } else if masked.is_empty() {
             "(paste key here)".to_string()
         } else {
@@ -3405,7 +3409,7 @@ impl ProviderPickerView {
 
         if let Some(ref error) = self.key_entry_error {
             hint_lines.push(Line::from(Span::styled(
-                format!("Verification failed: {error}"),
+                error.clone(),
                 Style::default().fg(palette::STATUS_ERROR),
             )));
         }
@@ -7044,10 +7048,7 @@ mod tests {
         let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
         move_to_provider(&mut picker, ApiProvider::Ollama);
         let rendered = render_text(&picker, 80, 52);
-        assert!(
-            rendered.contains("Models · $in/$out per mtok"),
-            "{rendered}"
-        );
+        assert!(rendered.contains("Models · price in/out"), "{rendered}");
         assert!(rendered.contains("(default)"), "{rendered}");
         assert!(rendered.contains("local"), "{rendered}");
         assert!(!rendered.contains("cost:"), "{rendered}");
@@ -7486,7 +7487,7 @@ mod tests {
         assert!(rendered.contains("key saved"));
         assert!(!rendered.contains("key:configured"));
         assert!(!rendered.contains("auth:configured"));
-        assert!(rendered.contains("Route: custom-model"));
+        assert!(rendered.contains("Model: custom-model"));
         let ViewAction::Emit(ViewEvent::OpenTextPager { content, .. }) =
             picker.open_provider_details()
         else {
@@ -7497,7 +7498,7 @@ mod tests {
         // Slice D: provider detail carries no cost; the models pane does.
         assert!(!rendered.contains("cost:"));
         assert!(!rendered.contains("Usage:"));
-        assert!(rendered.contains("Models · $in/$out per mtok"));
+        assert!(rendered.contains("Models · price in/out"));
         assert!(rendered.contains("Endpoint: http://localhost:9000/v1"));
     }
 
@@ -8151,7 +8152,9 @@ mod tests {
         assert_eq!(picker.stage, Stage::KeyEntry);
         assert_eq!(picker.selected_provider(), ApiProvider::Openrouter);
         let rendered = render_text(&picker, 90, 14);
-        assert!(rendered.contains("Verification failed: HTTP 401: unauthorized"));
+        // The caller supplies the plain sentence; the picker shows it as is.
+        assert!(rendered.contains("HTTP 401: unauthorized"), "{rendered}");
+        assert!(!rendered.contains("Verification failed"), "{rendered}");
     }
 
     #[test]
@@ -8481,7 +8484,7 @@ mod tests {
         let zen = model_cost_label_for_pricing(ApiProvider::OpencodeZen, Some(&token));
         assert_ne!(go, zen);
         assert_eq!(go, "plan", "Go label was {go:?}");
-        assert_eq!(zen, "$1.00/$2.00 mtok", "Zen label was {zen:?}");
+        assert_eq!(zen, "$1.00/$2.00 per 1M", "Zen label was {zen:?}");
         assert_ne!(
             go,
             model_cost_label_for_pricing(ApiProvider::Openrouter, None)
@@ -8501,7 +8504,7 @@ mod tests {
         };
         assert_eq!(
             model_cost_label_for_pricing(ApiProvider::Deepseek, Some(&token)),
-            "$1.50/$6.00 mtok"
+            "$1.50/$6.00 per 1M"
         );
         // Partial token pricing never fabricates the missing leg.
         let partial = PricingSku::Token {
@@ -8547,7 +8550,7 @@ mod tests {
         );
         assert_eq!(
             model_cost_label_for_pricing(ApiProvider::Deepseek, None),
-            "price ?"
+            "price unknown"
         );
     }
 
@@ -8587,10 +8590,7 @@ mod tests {
         let config = Config::default();
         let picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
         let rendered = render_text(&picker, 124, 24);
-        assert!(
-            rendered.contains("Models · $in/$out per mtok"),
-            "{rendered}"
-        );
+        assert!(rendered.contains("Models · price in/out"), "{rendered}");
         assert!(rendered.contains("(default)"), "{rendered}");
         assert!(!rendered.contains("cost:"), "{rendered}");
         assert!(!rendered.contains("Usage:"), "{rendered}");
@@ -8855,11 +8855,11 @@ mod tests {
             let rendered = render_text(&picker, 100, 20);
 
             assert!(
-                rendered.contains("Saved credential configured"),
+                rendered.contains("A key is already set up"),
                 "{provider:?}:\n{rendered}"
             );
             assert!(rendered.contains("stored credential"), "{rendered}");
-            assert!(rendered.contains("replace saved key"), "{rendered}");
+            assert!(rendered.contains("replace the key"), "{rendered}");
             assert!(rendered.contains("keep current key"), "{rendered}");
             assert!(!rendered.contains("paste key here"), "{rendered}");
             assert!(!rendered.contains(secret), "{rendered}");
@@ -9695,7 +9695,7 @@ mod tests {
 
         assert!(rendered.contains("DeepSeek *"));
         assert!(rendered.contains(picker.tr(MessageId::CtxMenuOpenDetails).as_ref()));
-        assert!(rendered.contains("Route:"));
+        assert!(rendered.contains("Model:"));
     }
 
     /// The four terminal sizes the v0.8.66 modal blocker (#3732) requires every

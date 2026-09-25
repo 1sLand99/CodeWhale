@@ -201,6 +201,10 @@ pub(crate) fn apply_engine_error_to_app(
     // An idle or locally cancelled turn must never be reactivated by an error.
     let turn_remains_active =
         recoverable && turn_was_in_progress && !app.suppress_stream_events_until_turn_complete;
+    // The engine decides whether the question was taken back out of the
+    // session; the host only follows, so the two cannot disagree (#6566).
+    let credential_rejected_before_output = turn_was_in_progress
+        && envelope.code == crate::error_taxonomy::CREDENTIAL_REJECTED_UNSENT_CODE;
     streaming_thinking::finalize_current(app);
     if turn_was_in_progress {
         app.finalize_streaming_assistant_as_interrupted();
@@ -237,6 +241,16 @@ pub(crate) fn apply_engine_error_to_app(
         app.dispatch_started_at = None;
     }
     app.turn_error_posted = true;
+    if credential_rejected_before_output {
+        // #6566: the provider refused the key before any model output, so the
+        // engine takes the question back out of the session. Give it back to
+        // the person with the one next step, instead of an error with no way
+        // forward and a message they must retype.
+        app.restore_last_submitted_prompt_if_empty();
+        app.add_message(HistoryCell::System {
+            content: app.tr(MessageId::AuthRejectedRecovery).into_owned(),
+        });
+    }
     if matches!(
         envelope.category,
         crate::error_taxonomy::ErrorCategory::Authentication
@@ -3147,6 +3161,23 @@ pub(crate) async fn apply_provider_picker_test_connection(
     .await;
 }
 
+/// One plain sentence for a key the provider did not accept, with the next
+/// step, in place of the provider's raw reply (#6566). Only a failure with no
+/// plain reading keeps a sanitized, bounded excerpt of that reply.
+fn plain_key_verification_error(app: &App, reason: &str, api_key: &str) -> String {
+    use crate::error_taxonomy::ErrorCategory;
+    match provider_verification_error_category(reason) {
+        ErrorCategory::Authentication => app.tr(MessageId::ProviderKeyRejected).into_owned(),
+        ErrorCategory::Authorization => app.tr(MessageId::ProviderKeyForbidden).into_owned(),
+        ErrorCategory::Network | ErrorCategory::Timeout => {
+            app.tr(MessageId::ProviderKeyUnreachable).into_owned()
+        }
+        _ => app
+            .tr(MessageId::ProviderKeyCheckFailed)
+            .replace("{reason}", &sanitize_probe_status(reason, api_key)),
+    }
+}
+
 fn sanitize_probe_status(reason: &str, api_key: &str) -> String {
     let mut text = reason.to_string();
     if let Some(rest) = reason.strip_prefix("HTTP ")
@@ -3321,8 +3352,9 @@ pub(crate) async fn apply_provider_picker_api_key_with_verifier(
                 );
             } else {
                 app.status_message = Some(format!(
-                    "{} connection checked (/models returned 2xx), but the guided setup could not be re-opened.",
-                    provider.as_str()
+                    "{} {}",
+                    app.tr(MessageId::ProviderConnectionChecked),
+                    "The guided setup could not be re-opened."
                 ));
             }
             app.needs_redraw = true;
@@ -3333,10 +3365,13 @@ pub(crate) async fn apply_provider_picker_api_key_with_verifier(
             // the key instead of dead-ending with a status toast. Name the
             // endpoint the probe actually used: a 401 from the wrong host
             // (a legacy root `base_url` leaking into this route, say) is
-            // otherwise indistinguishable from a bad key.
+            // otherwise indistinguishable from a bad key. The provider's raw
+            // reply (often truncated JSON) is not the message: say what went
+            // wrong and what to do next in plain words (#6566).
+            let plain = plain_key_verification_error(app, &reason, &api_key);
             let reason = match crate::llm_client::base_url_authority(&base_url) {
-                Some(authority) => format!("{reason} (endpoint: {authority})"),
-                None => reason,
+                Some(authority) => format!("{plain} ({authority})"),
+                None => plain.clone(),
             };
             let runtime_status = query_provider_runtime_status(engine_handle).await;
             if let Some(picker) =
@@ -3354,15 +3389,9 @@ pub(crate) async fn apply_provider_picker_api_key_with_verifier(
                 })
             {
                 app.view_stack.push(picker);
-                app.status_message = Some(format!(
-                    "{} API key verification failed - check the key and try again.",
-                    provider.as_str()
-                ));
+                app.status_message = Some(plain);
             } else {
-                app.status_message = Some(format!(
-                    "{} API key verification failed, but the provider could not be re-opened.",
-                    provider.as_str()
-                ));
+                app.status_message = Some(format!("{plain} The provider could not be re-opened."));
             }
             app.needs_redraw = true;
         }

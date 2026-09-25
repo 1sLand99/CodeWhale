@@ -696,11 +696,8 @@ fn ask_rule_save_preview_formats_shell_rule() {
 
     let preview = request.ask_rule_save_preview().expect("save preview");
     assert_eq!(preview.rule_count, 1);
-    assert_eq!(preview.summary(), "1 ask rule");
-    assert_eq!(
-        preview.entries,
-        vec!["tool=exec_shell command=cargo test --workspace"]
-    );
+    assert_eq!(preview.summary(), "always ask first");
+    assert_eq!(preview.entries, vec!["run cargo test --workspace"]);
     assert_eq!(preview.omitted, 0);
 }
 
@@ -713,12 +710,10 @@ fn safe_shell_request_builds_exact_workspace_allow_rule() {
     assert!(request.can_save_allow_rule());
     assert_eq!(request.persistent_allow_rules, vec![expected]);
     let preview = request.allow_rule_save_preview().expect("allow preview");
-    assert_eq!(preview.summary(), "1 allow rule");
+    assert_eq!(preview.summary(), "always allow");
     assert_eq!(
         preview.entries,
-        vec![
-            "tool=exec_shell command=cargo test --workspace command_exact=true workspace=/workspace"
-        ]
+        vec!["run exactly cargo test --workspace in /workspace"]
     );
 }
 
@@ -776,7 +771,7 @@ fn file_write_builds_exact_workspace_allow_rule() {
             .allow_rule_save_preview()
             .expect("allow preview")
             .entries,
-        vec!["tool=write_file path=src/main.rs workspace=/workspace"]
+        vec!["write src/main.rs in /workspace"]
     );
 }
 
@@ -796,13 +791,13 @@ fn ask_rule_save_preview_formats_write_and_edit_file_paths() {
             .ask_rule_save_preview()
             .expect("write save preview")
             .entries,
-        vec!["tool=write_file path=src/main.rs"]
+        vec!["write src/main.rs"]
     );
     assert_eq!(
         edit.ask_rule_save_preview()
             .expect("edit save preview")
             .entries,
-        vec!["tool=edit_file path=src/lib.rs"]
+        vec!["edit src/lib.rs"]
     );
 }
 
@@ -891,14 +886,8 @@ diff --git a/src/b.rs b/src/b.rs
     );
     assert!(request.can_save_ask_rule());
     let preview = request.ask_rule_save_preview().expect("save preview");
-    assert_eq!(preview.summary(), "2 ask rules");
-    assert_eq!(
-        preview.entries,
-        vec![
-            "tool=apply_patch path=src/a.rs",
-            "tool=apply_patch path=src/b.rs"
-        ]
-    );
+    assert_eq!(preview.summary(), "always ask first");
+    assert_eq!(preview.entries, vec!["change src/a.rs", "change src/b.rs"]);
     assert_eq!(
         request.persistent_allow_rules,
         vec![
@@ -1025,14 +1014,8 @@ fn ask_rule_save_preview_truncates_rule_list() {
 
     let preview = build_permission_rule_save_preview(&rules, 2).expect("save preview");
     assert_eq!(preview.rule_count, 4);
-    assert_eq!(preview.summary(), "4 ask rules");
-    assert_eq!(
-        preview.entries,
-        vec![
-            "tool=apply_patch path=src/a.rs",
-            "tool=apply_patch path=src/b.rs"
-        ]
-    );
+    assert_eq!(preview.summary(), "always ask first");
+    assert_eq!(preview.entries, vec!["change src/a.rs", "change src/b.rs"]);
     assert_eq!(preview.omitted, 2);
 }
 
@@ -1928,7 +1911,7 @@ fn render_critical_shows_warning_badge_and_policy_semantics() {
     );
     assert_approval_key_badges_visible(&joined);
     assert!(
-        joined.contains("Your permissions, a review rule"),
+        joined.contains("Your settings ask you to confirm this step first"),
         "missing permission/review-rule semantics:\n{joined}"
     );
     assert!(

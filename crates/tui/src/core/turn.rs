@@ -63,6 +63,13 @@ pub struct TurnContext {
     /// granted (#5994). Set by the turn loop; the cross-turn goal fence reads
     /// it so an exhausted goal pauses instead of re-arming.
     pub budget_exhausted_final_report: bool,
+    /// The provider refused the request for its credential (401-class).
+    pub credential_rejected: bool,
+    /// Session length right after this turn's user message was added, when
+    /// the turn has one. A credential rejection while nothing has followed
+    /// that message takes it back out of the session, so a retry after
+    /// fixing the key is not a duplicate (#6566).
+    pub unanswered_user_message_len: Option<usize>,
 
     pub(crate) stop_diagnostics: crate::tool_inspection::TurnStopDiagnostics,
     pub(crate) last_request_snapshot: Option<crate::tool_inspection::ToolInspectionSnapshot>,
@@ -124,6 +131,8 @@ impl TurnContext {
             max_steps,
             budget_source,
             budget_exhausted_final_report: false,
+            credential_rejected: false,
+            unanswered_user_message_len: None,
             stop_diagnostics: crate::tool_inspection::TurnStopDiagnostics {
                 effective_max_steps: (max_steps != u32::MAX).then_some(max_steps),
                 step_budget_source: budget_source.key_label(),

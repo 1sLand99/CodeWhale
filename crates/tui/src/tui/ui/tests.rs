@@ -11597,6 +11597,8 @@ async fn immediate_submit_custom_provider_missing_key_preflight_shows_auth_next_
     provider.api_key = None;
     provider.api_key_env = Some("CODEWHALE_TEST_MISSING_LM_STUDIO_KEY".to_string());
     let mut app = create_test_app();
+    // A returning user: the saved route lost its key.
+    app.onboarding_had_provider_step = false;
     app.set_provider_identity(ApiProvider::Custom, "lm-studio");
     app.set_model_selection("local-model".to_string());
     app.input = "preserve 用户 input".to_string();
@@ -11617,12 +11619,12 @@ async fn immediate_submit_custom_provider_missing_key_preflight_shows_auth_next_
     .await
     .expect("provider preflight failures must remain inside the TUI");
 
-    // Echo first: missing-key must paint HistoryCell::User, not restore the
-    // composer as the only place the turn exists.
-    assert!(
-        app.input.is_empty(),
-        "auth failure must not restore the composer when the echo landed: {:?}",
-        app.input
+    // #6566: the unsent message is neither lost nor doubled. It is back in
+    // the composer, and no echo of it stays in the transcript, so pressing
+    // Enter once a model is connected shows it exactly once.
+    assert_eq!(
+        app.input, "preserve 用户 input",
+        "a message that was never sent must return to the composer"
     );
     assert!(app.api_messages.is_empty());
     assert_eq!(
@@ -11630,8 +11632,15 @@ async fn immediate_submit_custom_provider_missing_key_preflight_shows_auth_next_
             .iter()
             .filter(|cell| matches!(cell, HistoryCell::User { content } if content == "preserve 用户 input"))
             .count(),
-        1,
-        "missing-key submit must keep exactly one user echo: {:?}",
+        0,
+        "an unsent message must not stay in the transcript as if it were sent: {:?}",
+        app.history
+    );
+    assert!(
+        app.history.iter().any(
+            |cell| matches!(cell, HistoryCell::System { content } if content.starts_with("No model is connected"))
+        ),
+        "one transcript line says why: {:?}",
         app.history
     );
     assert!(app.last_submitted_prompt.is_none());
@@ -30551,4 +30560,131 @@ async fn task_inventory_failure_preserves_only_the_same_session_snapshot() -> an
     assert!(app.task_panel.is_empty());
     tasks.shutdown_and_wait().await?;
     Ok(())
+}
+
+// ---- #6566 / #6565: first run, key errors, background agents ----
+
+/// #6566: a turn the provider refused for its key, before any output, gives
+/// the message back in the composer with one plain next step. The engine has
+/// already taken the question out of the session, so sending it again does
+/// not send it twice.
+#[test]
+fn credential_rejected_turn_restores_the_prompt_with_one_next_step() {
+    let mut app = create_test_app();
+    app.is_loading = true;
+    app.last_submitted_prompt = Some("explain this repo".to_string());
+    app.add_message(HistoryCell::User {
+        content: "explain this repo".to_string(),
+    });
+
+    let mut envelope = ErrorEnvelope::fatal_auth("Authentication failed: invalid API key");
+    envelope.code = crate::error_taxonomy::CREDENTIAL_REJECTED_UNSENT_CODE.to_string();
+    apply_engine_error_to_app(&mut app, envelope);
+
+    assert_eq!(app.input, "explain this repo");
+    assert!(
+        app.history.iter().any(|cell| matches!(
+            cell,
+            HistoryCell::System { content } if content.contains("did not accept the key")
+                && content.contains("/provider")
+        )),
+        "{:?}",
+        app.history
+    );
+}
+
+/// An authentication error the engine did not mark as unsent (the model had
+/// already answered, say) keeps the message where it is: no restore and no
+/// claim that the model never got it.
+#[test]
+fn credential_rejection_after_output_keeps_the_composer_empty() {
+    let mut app = create_test_app();
+    app.is_loading = true;
+    app.last_submitted_prompt = Some("explain this repo".to_string());
+    app.add_message(HistoryCell::User {
+        content: "explain this repo".to_string(),
+    });
+    app.add_message(HistoryCell::Assistant {
+        content: "Looking at the repo".to_string(),
+        streaming: false,
+    });
+
+    apply_engine_error_to_app(
+        &mut app,
+        ErrorEnvelope::fatal_auth("Authentication failed: invalid API key"),
+    );
+
+    assert!(app.input.is_empty(), "{:?}", app.input);
+    assert!(!app.history.iter().any(|cell| matches!(
+        cell,
+        HistoryCell::System { content } if content.contains("did not accept the key")
+    )));
+}
+
+/// #6565: a child's unanswered approval reaches the footer as "waiting on
+/// you", not as "agents underway".
+#[test]
+fn pending_child_approval_drives_the_phase_to_waiting_on_you() {
+    use crate::tui::underwater::ShellPhase;
+
+    let mut app = create_test_app();
+    app.is_loading = true;
+    assert_eq!(ShellPhase::from_app(&app), ShellPhase::Working);
+
+    app.pending_child_requests.insert(
+        "agent:agent_a1:approval:1:1".to_string(),
+        crate::tui::pending_requests::PendingChildRequest {
+            agent_id: "agent_a1".to_string(),
+            tool_name: "exec_shell".to_string(),
+            description: "Run tests".to_string(),
+            input: serde_json::json!({ "command": "cargo test" }),
+            approval_key: "exec_shell:cargo-test".to_string(),
+            approval_grouping_key: "exec_shell".to_string(),
+            intent_summary: None,
+            requested_at: std::time::Instant::now(),
+        },
+    );
+
+    let phase = ShellPhase::from_app(&app);
+    assert_eq!(phase, ShellPhase::Waiting);
+    assert_eq!(phase.label(app.ui_locale), "needs you");
+}
+
+/// #6565: the label a workflow gives a child is its one name. It replaces the
+/// counter placeholder the child got before the workflow event arrived, and
+/// the status line, card owner and roster all read it.
+#[test]
+fn workflow_task_label_is_the_one_name_for_that_agent() {
+    use crate::tui::widgets::workflow_panel::WorkflowPanelEvent;
+
+    let mut app = create_test_app();
+    // Progress arrived first and assigned the placeholder.
+    assert_eq!(app.ensure_agent_label("agent_wf1"), "Agent 1");
+
+    app.apply_workflow_panel_event(
+        "run-1",
+        WorkflowPanelEvent::TaskStarted {
+            task_id: "agent_wf1".to_string(),
+            label: Some("audit docs".to_string()),
+            profile: Some("explore".to_string()),
+            model: None,
+            strength: None,
+            resolved_model: None,
+            worktree: false,
+            workspace: None,
+            route: Box::default(),
+            at_ms: 1_000,
+        },
+    );
+
+    assert_eq!(app.ensure_agent_label("agent_wf1"), "audit docs");
+    assert_eq!(app.agent_display_label("agent_wf1"), "audit docs");
+    assert_eq!(
+        crate::tui::agent_focus::agent_display_label(&app, "agent_wf1"),
+        "audit docs"
+    );
+    assert_eq!(
+        crate::tui::pending_requests::owner_for(&mut app, "agent_wf1").label,
+        "audit docs"
+    );
 }
