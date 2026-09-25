@@ -2448,6 +2448,7 @@ pub(crate) async fn run_event_loop(
                         }
                     }
                     EngineEvent::TurnStarted { turn_id, route, .. } => {
+                        app.prune_settled_workflow_runs();
                         // A prior turn that died without its `TurnComplete`
                         // must not leak its provisional estimate into this one.
                         app.clear_pending_turn_cost();
@@ -3740,24 +3741,26 @@ pub(crate) async fn run_event_loop(
                             received_engine_event = redraw_requested_before_event;
                             continue;
                         }
-                        // #4095 residual: budget_updated is high-frequency under
-                        // multi-agent fan-out. Data is already applied; pace the
-                        // repaint like AgentProgress so the panel does not churn.
-                        let is_budget = event
-                            .get("type")
-                            .and_then(|v| v.as_str())
-                            .is_some_and(|t| t == "budget_updated");
-                        if is_budget {
-                            if workflow_budget_redraw_permitted(
+                        // Coalesce progress (#4095): a 75-agent fan-out streams
+                        // task and budget events far faster than a frame. The
+                        // state is already applied; only a run's start and end
+                        // paint at once, the rest share the AgentProgress pace.
+                        // The transcript is not marked here — the only cells a
+                        // workflow event touches mark it themselves.
+                        let lifecycle =
+                            event.get("type").and_then(|v| v.as_str()).is_some_and(|t| {
+                                matches!(t, "run_started" | "run_completed" | "run_cancelled")
+                            });
+                        if lifecycle
+                            || workflow_budget_redraw_permitted(
                                 &mut app.last_workflow_budget_redraw,
                                 Instant::now(),
-                            ) {
-                                app.needs_redraw = true;
-                            } else {
-                                received_engine_event = redraw_requested_before_event;
-                            }
+                            )
+                        {
+                            app.needs_redraw = true;
+                        } else {
+                            received_engine_event = redraw_requested_before_event;
                         }
-                        transcript_batch_updated = true;
                     }
                     EngineEvent::ApprovalRequired {
                         id,
@@ -5016,15 +5019,6 @@ pub(crate) async fn run_event_loop(
                 continue;
             }
 
-            // Clicking the WorkflowPanel gives its non-text controls focus,
-            // but ordinary characters always return directly to the composer.
-            // This keeps the panel keyboard-accessible without stealing the
-            // first t/c/j/k (or any other letter) of a new chat.
-            if app.view_stack.is_empty() && handle_workflow_panel_key(app, &key) {
-                submit_initial_input_if_ready(app, config, &engine_handle).await?;
-                continue;
-            }
-
             // The Ocean work surface is a real focus owner. Route its keys
             // before global transcript/composer navigation so PageUp/Down,
             // Home/End, arrows, and row actions stay panel-local.
@@ -5807,8 +5801,14 @@ pub(crate) async fn run_event_loop(
                             open_agents_register(app, &engine_handle).await;
                         }
                     }
+                    // `↓ to manage` opens the workflows view while the workbar
+                    // shows runs, else the agent register.
                     crate::tui::agent_focus::AgentShellShortcut::ManageAgents => {
-                        open_agents_register(app, &engine_handle).await;
+                        if app.workflow_runs.is_empty() {
+                            open_agents_register(app, &engine_handle).await;
+                        } else {
+                            crate::tui::views::workflows_manager::open(app);
+                        }
                     }
                 }
                 continue;

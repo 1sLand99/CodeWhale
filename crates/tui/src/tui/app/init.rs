@@ -1115,7 +1115,7 @@ impl App {
                 settings.contextual_tips,
             ),
             footer_hint_uses: settings.footer_hint_uses.clone(),
-            workflow_panel: None,
+            workflow_runs: Vec::new(),
             session_started_at: chrono::Utc::now(),
             needs_redraw: true,
             fleet_roster_stale: false,
