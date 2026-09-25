@@ -1587,10 +1587,10 @@ pub struct App {
     /// Persisted model selections by provider name. Loaded from settings so
     /// `/model` and the picker can surface saved provider-specific choices.
     pub provider_models: HashMap<String, String>,
-    /// Additive provider-scoped model IDs enabled for the ordinary picker.
-    /// The catalog remains separately discoverable and selecting from it adds
-    /// to this set rather than replacing earlier enabled choices.
-    pub enabled_provider_models: HashMap<String, Vec<String>>,
+    /// Which routes this person actually used recently (#6533): built from
+    /// saved sessions off the UI thread at startup, bumped on route switches.
+    /// The `/model` picker's default view ranks by it.
+    pub route_usage: crate::model_relevance::SharedRouteUsage,
     /// Non-secret declarations from the loaded config snapshot. Completion
     /// reads this snapshot without reloading credentials on each keystroke.
     pub configured_models: Vec<codewhale_config::catalog::configured::ConfiguredModel>,
@@ -2074,6 +2074,15 @@ pub struct App {
     pub view_stack: ViewStack,
     /// Last `request_user_input` prompt, retained so a failed modal submit can reopen (#1198).
     pub pending_user_input_prompt: Option<(String, crate::tools::user_input::UserInputRequest)>,
+    /// Child-agent approval requests shown to the person and not yet
+    /// answered, keyed by approval id (approvals C1). The footer row, the
+    /// `/agents` re-open, and retiring answered cards all read this store.
+    pub pending_child_requests:
+        std::collections::BTreeMap<String, crate::tui::pending_requests::PendingChildRequest>,
+    /// Which conversation owns each child agent this host has seen, from the
+    /// agent lifecycle events. A request from another conversation's child
+    /// is answered `unavailable` instead of shown here.
+    pub child_agent_sessions: std::collections::HashMap<String, String>,
     /// Esc-Esc backtrack state machine (#133). `Inactive` by default; first
     /// Esc primes, second Esc opens the live-transcript overlay scoped to
     /// previous user messages so the user can rewind a turn.
@@ -2585,25 +2594,6 @@ fn default_composer_arrows_scroll_for_platform(use_mouse_capture: bool, _is_wind
     !use_mouse_capture
 }
 
-fn push_enabled_provider_model(
-    enabled: &mut HashMap<String, Vec<String>>,
-    provider: &str,
-    model: &str,
-) {
-    let provider = provider.trim();
-    let model = model.trim();
-    if provider.is_empty() || model.is_empty() || model.eq_ignore_ascii_case("auto") {
-        return;
-    }
-    let models = enabled.entry(provider.to_string()).or_default();
-    if !models
-        .iter()
-        .any(|existing| existing.eq_ignore_ascii_case(model))
-    {
-        models.push(model.to_string());
-    }
-}
-
 impl App {
     /// A retained roster remains readable only in its owning conversation.
     pub(crate) fn current_agent_roster(&self) -> &[crate::agent_roster::AgentRosterRow] {
@@ -2898,19 +2888,12 @@ impl App {
         )
     }
 
-    pub fn enable_provider_model(&mut self, provider: &str, model: &str) {
-        push_enabled_provider_model(&mut self.enabled_provider_models, provider, model);
-    }
-
-    #[must_use]
-    pub fn provider_model_is_enabled(&self, provider: &str, model: &str) -> bool {
-        self.enabled_provider_models
-            .get(provider)
-            .is_some_and(|models| {
-                models
-                    .iter()
-                    .any(|enabled| enabled.eq_ignore_ascii_case(model))
-            })
+    /// Record that the session is now using `provider` / `model`, so the
+    /// picker's recent section reflects it before any session is saved.
+    pub fn note_route_used(&mut self, provider: &str, model: &str) {
+        if let Ok(mut usage) = self.route_usage.write() {
+            usage.record(provider, model, chrono::Utc::now());
+        }
     }
 
     /// Advance and return the model-draft generation. Call when a draft is

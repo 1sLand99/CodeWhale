@@ -1659,6 +1659,34 @@ fn with_search_resolution_env<R>(set: &[(&str, &str)], body: impl FnOnce() -> R)
 }
 
 #[test]
+fn pinned_search_provider_wins_over_provider_native_search() {
+    let parse = |toml_text: &str| -> Config { toml::from_str(toml_text).expect("search config") };
+    with_search_resolution_env(&[], || {
+        // Nothing configured: native search keeps leading where offered.
+        assert_eq!(Config::default().search_native(), None);
+        // A pinned provider wins unless native is explicitly re-enabled.
+        assert_eq!(
+            parse("[search]\nprovider = \"tavily\"\n").search_native(),
+            Some(false)
+        );
+        assert_eq!(
+            parse("[search]\nprovider = \"tavily\"\nnative = true\n").search_native(),
+            Some(true)
+        );
+        assert_eq!(
+            parse("[search]\nnative = false\n").search_native(),
+            Some(false)
+        );
+    });
+    with_search_resolution_env(&[("CODEWHALE_SEARCH_PROVIDER", "searxng")], || {
+        assert_eq!(Config::default().search_native(), Some(false));
+    });
+    with_search_resolution_env(&[("TAVILY_API_KEY", "tvly-test")], || {
+        assert_eq!(Config::default().search_native(), Some(false));
+    });
+}
+
+#[test]
 fn search_provider_scenario() {
     // Scenario consolidation of: search_provider_defaults_to_firecrawl, search_provider_resolution_reports_default_source, search_provider_resolution_reports_config_source, search_provider_resolution_reports_env_override_source, search_provider_env_override_accepts_baidu, search_provider_resolution_ignores_invalid_env_override
     // from search_provider_defaults_to_firecrawl
@@ -4091,6 +4119,9 @@ fn ensure_config_file_exists_creates_first_run_template() -> Result<()> {
     assert_eq!(created, temp_root.join(".deepseek").join("config.toml"));
     assert!(content.contains(&format!("default_text_model = \"{DEFAULT_TEXT_MODEL}\"")));
     assert!(content.contains("reasoning_effort = \"auto\""));
+    // Shift+Tab cycles the permission posture; effort moved to Ctrl+T.
+    assert!(content.contains("# Ctrl+T in the TUI"));
+    assert!(!content.contains("Shift+Tab"));
     assert!(!content.contains("api_key ="));
     assert!(ensure_config_file_exists(None)?.is_none());
     Ok(())
@@ -4210,6 +4241,8 @@ fn save_deepseek_key_uses_isolated_file_store_without_plaintext_config() -> Resu
             .any(|line| line.trim_start().starts_with("api_key ="))
     );
     assert!(config.contains("auth_mode = \"api_key\""));
+    // Saving a key leaves the model to the provider default.
+    assert!(!config.contains("default_text_model"), "{config}");
     assert_eq!(
         codewhale_secrets::Secrets::auto_detect().get("deepseek")?,
         Some("deepseek-test-credential".to_string())

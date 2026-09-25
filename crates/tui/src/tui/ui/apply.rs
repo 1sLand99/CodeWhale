@@ -971,7 +971,7 @@ pub(crate) async fn apply_model_picker_choice(
         let provider_identity = app.provider_identity_for_persistence().to_string();
         app.provider_models
             .insert(provider_identity.clone(), resolved_model.clone());
-        app.enable_provider_model(&provider_identity, &resolved_model);
+        app.note_route_used(&provider_identity, &resolved_model);
         app.clear_model_scoped_telemetry();
     }
     let preference_changed = if model_is_auto && !preserve_auto_effort {
@@ -1364,6 +1364,7 @@ pub(crate) async fn apply_command_result(
                             return Ok(false);
                         }
                     };
+                crate::runtime_threads::prepare_canonical_sessions_root().await;
                 let respawn = match apply_loaded_session_config_snapshot(
                     app,
                     config,
@@ -1717,6 +1718,15 @@ pub(crate) async fn apply_command_result(
                 {
                     app.status_message = Some(format!("Could not cancel {agent_id}"));
                 }
+            }
+            AppAction::RouterSetup { request } => {
+                crate::tui::views::router_setup::handle_router_request(
+                    app,
+                    config,
+                    task_manager,
+                    request,
+                )
+                .await;
             }
             AppAction::FetchBalance => {
                 let provider = app.api_provider;
@@ -2793,7 +2803,16 @@ pub(crate) async fn apply_approval_decision(
         persist_rules_from_approval(app, config, &event.persistent_rules);
     }
 
+    // A child's card was answered here: its pending entry is done. An Abort
+    // on a child's card only hides it (the entry stays for the footer).
+    if event.decision != ReviewDecision::Abort {
+        crate::tui::pending_requests::resolve(app, &event.tool_id);
+    }
+
     match event.decision {
+        // A child's card never stops the parent's turn (approvals C1).
+        ReviewDecision::Abort
+            if crate::tools::subagent::SubAgentManager::is_child_approval_id(&event.tool_id) => {}
         ReviewDecision::Approved | ReviewDecision::ApprovedForSession => {
             // Mirror mode: clear the shared-approval gate so a late web
             // decision acks "no longer pending" instead of double-answering.
@@ -3592,16 +3611,33 @@ pub(crate) fn apply_loaded_session_with_goal(
         // scope-pinned automation. A force-quit leaves the second shape — the
         // store is on disk, ownerless and holding zero events — and refusing
         // it protected nothing while making the session unopenable (#6207).
-        let nothing_to_abandon = binding
+        let refusal = if binding
             .is_missing_session_store()
             .map_err(|error| error.to_string())?
-            || binding
-                .is_adoptable_empty_store()
-                .map_err(|error| error.to_string())?;
-        if nothing_to_abandon {
+        {
+            None
+        } else {
+            binding
+                .adoption_refusal()
+                .map_err(|error| error.to_string())?
+        };
+        if refusal.is_none() {
             recovered_binding = tasks.session_store_binding();
         }
+        if let Some(crate::runtime_threads::StoreAdoptionRefusal::HeldByLiveProcess) = refusal {
+            // A fresh `codewhale resume` would meet the same live holder, so
+            // name the step that actually frees the store (#6418).
+            return Err(format!(
+                "This session's saved Runtime store is open in another running \
+                 Codewhale process. Close that session there, then open this one \
+                 again, or run `codewhale resume {}` after it exits.",
+                session.metadata.id
+            ));
+        }
         if recovered_binding.is_none() {
+            let reason = refusal
+                .map(|refusal| format!(" ({refusal})"))
+                .unwrap_or_default();
             // Name the real condition and the path that actually works. The
             // old wording ("resume it in a new Codewhale process") sent users
             // in circles: starting a new process and then picking the session
@@ -3612,7 +3648,7 @@ pub(crate) fn apply_loaded_session_with_goal(
             // adopts it (runtime_threads.rs, `validate_existing_store` then
             // `open_inner`). So the advice has to say which one (#6207, #6225).
             return Err(format!(
-                "This session's saved Runtime store belongs to a different host. \
+                "This session's saved Runtime store belongs to a different host{reason}. \
                  Switching to it from inside a running session cannot carry that \
                  store's queued work across, but opening it directly can: run \
                  `codewhale resume {}` from your shell.",

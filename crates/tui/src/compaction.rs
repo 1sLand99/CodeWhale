@@ -75,6 +75,11 @@ pub struct PreparedCompactionEnvelope {
     /// Exact tool prefix of the interrupted request. Tool execution remains
     /// disabled on the summary call; retaining schemas preserves cache reuse.
     pub tools: Option<Vec<Tool>>,
+    /// Resolved reasoning tier the parent turn sends (#6540). Reasoning
+    /// routes render the effort into the head of the prompt, so a summary
+    /// request that omits it shares no cacheable prefix with the turn it
+    /// summarizes and re-bills the whole history uncached.
+    pub reasoning_effort: Option<String>,
 }
 
 impl PreparedCompactionEnvelope {
@@ -84,6 +89,7 @@ impl PreparedCompactionEnvelope {
             config,
             session_id: None,
             tools: None,
+            reasoning_effort: None,
         }
     }
 }
@@ -1056,7 +1062,7 @@ pub fn report_compaction_failure(
                 .to_string()
         }
         Some(crate::llm_client::LlmError::RateLimited { .. }) => {
-            "provider rate limit blocked compaction — retry after the limit resets or switch provider/model"
+            "provider rate limit blocked making room — retry after the limit resets or switch provider/model"
                 .to_string()
         }
         Some(crate::llm_client::LlmError::AuthenticationError(_)) => {
@@ -1064,12 +1070,12 @@ pub fn report_compaction_failure(
                 .to_string()
         }
         Some(crate::llm_client::LlmError::AuthorizationError(_)) => {
-            "provider authorization rejected compaction — verify account access or switch provider/model"
+            "provider authorization rejected making room — verify account access or switch provider/model"
                 .to_string()
         }
         _ => match crate::error_taxonomy::classify_error_message(&raw) {
             crate::error_taxonomy::ErrorCategory::RateLimit => {
-                "provider rate limit blocked compaction — retry after the limit resets or switch provider/model"
+                "provider rate limit blocked making room — retry after the limit resets or switch provider/model"
                     .to_string()
             }
             crate::error_taxonomy::ErrorCategory::Authentication => {
@@ -1077,7 +1083,7 @@ pub fn report_compaction_failure(
                     .to_string()
             }
             crate::error_taxonomy::ErrorCategory::Authorization => {
-                "provider authorization rejected compaction — verify account access or switch provider/model"
+                "provider authorization rejected making room — verify account access or switch provider/model"
                     .to_string()
             }
             _ => safe_raw,
@@ -1221,6 +1227,7 @@ pub async fn compact_messages_safe(
             config,
             system_prompt,
             prepared.tools.as_deref(),
+            prepared.reasoning_effort.as_deref(),
             &mut quality_retries,
             invocation_usage,
         )
@@ -1235,7 +1242,7 @@ pub async fn compact_messages_safe(
                         >= estimate_input_tokens_for_pressure(messages, system_prompt)
                 {
                     anyhow::bail!(
-                        "Compaction did not reduce context; original conversation was preserved."
+                        "Making room did not shrink the context; the original conversation was preserved."
                     );
                 }
                 let keep: CompactionKeep = inspect_compaction_keep(&kept);
@@ -1274,7 +1281,7 @@ pub async fn compact_messages_safe(
     }
 
     Err(last_error
-        .unwrap_or_else(|| anyhow::anyhow!("Compaction failed after {MAX_RETRIES} retries")))
+        .unwrap_or_else(|| anyhow::anyhow!("Making room failed after {MAX_RETRIES} retries")))
 }
 
 pub(crate) fn build_compaction_summary_block_text(summary: &str, anchors: &str) -> String {
@@ -1383,6 +1390,7 @@ async fn compact_messages(
         config,
         None,
         None,
+        None,
         &mut quality_retries,
         &mut invocation_usage,
     )
@@ -1396,6 +1404,7 @@ async fn compact_messages_with_metadata(
     config: &CompactionConfig,
     system_prompt: Option<&SystemPrompt>,
     tools: Option<&[Tool]>,
+    reasoning_effort: Option<&str>,
     quality_retries: &mut u32,
     invocation_usage: &mut Usage,
 ) -> Result<(Vec<Message>, Option<SystemPrompt>, CompactionCoverage)> {
@@ -1409,6 +1418,7 @@ async fn compact_messages_with_metadata(
         config,
         system_prompt,
         tools,
+        reasoning_effort,
         quality_retries,
         invocation_usage,
     )
@@ -1516,7 +1526,7 @@ checkpoint machinery, or return a placeholder. {COMPACTION_LANGUAGE_CONTRACT}"
 fn validate_compaction_summary(summary: &str) -> Result<()> {
     let trimmed = summary.trim();
     if trimmed.is_empty() {
-        anyhow::bail!("Compaction summary response was unusable: no text was returned.");
+        anyhow::bail!("The summary for making room was unusable: no text was returned.");
     }
 
     // Strip every non-word edge, not just ASCII punctuation. Providers can
@@ -1529,7 +1539,7 @@ fn validate_compaction_summary(summary: &str) -> Result<()> {
         .to_ascii_lowercase();
     if normalized.is_empty() {
         anyhow::bail!(
-            "Compaction summary response was unusable: only whitespace or punctuation was returned."
+            "The summary for making room was unusable: only whitespace or punctuation was returned."
         );
     }
     if matches!(
@@ -1544,7 +1554,7 @@ fn validate_compaction_summary(summary: &str) -> Result<()> {
             | "i can't provide a summary"
             | "unable to provide a summary"
     ) {
-        anyhow::bail!("Compaction summary response was unusable: a placeholder was returned.");
+        anyhow::bail!("The summary for making room was unusable: a placeholder was returned.");
     }
     Ok(())
 }
@@ -1567,12 +1577,58 @@ fn drop_oldest_history_messages(messages: &mut Vec<Message>) {
     }
 }
 
+/// The summary request for one compaction pass: the parent turn's exact
+/// request inputs — model, system prompt, tools, reasoning tier, and stored
+/// history in order — plus one trailing user instruction. Only per-request
+/// controls differ (output cap, streaming, tool choice), so the provider's
+/// prefix cache covers the history the turn already paid for (#6540).
+///
+/// Known limit: `tool_choice: "none"` keeps the summary from executing tools.
+/// Anthropic Messages documents a `tool_choice` change as invalidating the
+/// cached *message* blocks (system and tools stay cached), so on those routes
+/// the history is still re-read uncached. The Responses (Codex) builder does
+/// not send this field; its cache effect on Chat Completions routes has not
+/// been measured live.
+pub(crate) fn compaction_summary_request(
+    history: Vec<Message>,
+    config: &CompactionConfig,
+    system_prompt: Option<&SystemPrompt>,
+    tools: Option<&[Tool]>,
+    reasoning_effort: Option<&str>,
+    max_tokens: u32,
+) -> MessageRequest {
+    MessageRequest {
+        model: config.model.clone(),
+        messages: history,
+        max_tokens,
+        system: system_prompt.cloned(),
+        tools: tools.map(<[Tool]>::to_vec),
+        // Tool schemas stay for prefix parity; execution stays off.
+        tool_choice: tools
+            .filter(|tools| !tools.is_empty())
+            .map(|_| serde_json::json!("none")),
+        metadata: None,
+        thinking: None,
+        reasoning_effort: reasoning_effort.map(str::to_string),
+        stream: Some(false),
+        // Route parity with ordinary turns: turns send no sampling
+        // params, so every provider's own normalization/defaults apply.
+        // A hard-coded 0.3 leaked to the wire on routes that pass
+        // temperature through (e.g. Kimi Code membership), where the
+        // fixed-sampling contract rejects it and the whole compaction
+        // pass fails.
+        temperature: None,
+        top_p: None,
+    }
+}
+
 async fn create_summary(
     client: &dyn ModelClient,
     messages: &[Message],
     config: &CompactionConfig,
     system_prompt: Option<&SystemPrompt>,
     tools: Option<&[Tool]>,
+    reasoning_effort: Option<&str>,
     quality_retries: &mut u32,
     invocation_usage: &mut Usage,
 ) -> Result<String> {
@@ -1608,28 +1664,14 @@ async fn create_summary(
         // much output the model may need instead of imposing a smaller,
         // compaction-only ceiling that can be consumed by hidden reasoning.
         let cost_route = client.effective_route_envelope(&config.model, chrono::Utc::now());
-        let request = MessageRequest {
-            model: config.model.clone(),
-            messages: request_messages.clone(),
-            max_tokens: client.effective_max_output_tokens(&cost_route.model),
-            system: system_prompt.cloned(),
-            tools: tools.map(<[Tool]>::to_vec),
-            tool_choice: tools
-                .filter(|tools| !tools.is_empty())
-                .map(|_| serde_json::json!("none")),
-            metadata: None,
-            thinking: None,
-            reasoning_effort: None,
-            stream: Some(false),
-            // Route parity with ordinary turns: turns send no sampling
-            // params, so every provider's own normalization/defaults apply.
-            // A hard-coded 0.3 leaked to the wire on routes that pass
-            // temperature through (e.g. Kimi Code membership), where the
-            // fixed-sampling contract rejects it and the whole compaction
-            // pass fails.
-            temperature: None,
-            top_p: None,
-        };
+        let request = compaction_summary_request(
+            request_messages.clone(),
+            config,
+            system_prompt,
+            tools,
+            reasoning_effort,
+            client.effective_max_output_tokens(&cost_route.model),
+        );
 
         // Capture the session scope before awaiting so a late response cannot
         // accrue into a subsequently loaded/new session.
@@ -1673,7 +1715,7 @@ async fn create_summary(
         // with a fragment.
         if codewhale_models::is_incomplete_stop_reason(response.stop_reason.as_deref()) {
             anyhow::bail!(
-                "Compaction summary response incomplete: provider stop reason `{}`; the partial summary was not accepted.",
+                "The summary for making room was incomplete: provider stop reason `{}`; the partial summary was not accepted.",
                 codewhale_models::stop_reason_detail(response.stop_reason.as_deref())
             );
         }
@@ -1683,7 +1725,7 @@ async fn create_summary(
             .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
         {
             anyhow::bail!(
-                "Compaction returned a tool call instead of a completed handoff; original conversation was preserved."
+                "Making room returned a tool call instead of a summary; the original conversation was preserved."
             );
         }
 

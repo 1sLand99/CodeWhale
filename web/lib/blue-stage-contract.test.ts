@@ -34,8 +34,8 @@ const BELOW_WATERLINE = selectorBlock(
 describe("GPUI public-surface contract", () => {
   it("grounds the paper sheet in the GPUI light theme's warm paper and inks", () => {
     // Above the waterline the field is the GPUI light background — warm
-    // paper — and the ink is its foreground. The literals are the GPUI_LIGHT_*
-    // consts in crates/palette/src/tokens.rs (mirrored from set_theme),
+    // paper — and the ink is its foreground. Values come from the versioned
+    // vendor/codewhale-design/tokens.json artifact,
     // reached through the generated tokens in app/tokens.css.
     expect(cssHexIn(ROOT, "paper")).toBe("#faf8f5");
     expect(cssHexIn(ROOT, "paper-deep")).toBe("#f0ede8");
@@ -47,7 +47,7 @@ describe("GPUI public-surface contract", () => {
     // Action on paper is the GPUI light primary; hover is the same hue at
     // 0.9 opacity (`button_primary_hover`), not a second blue.
     expect(cssHexIn(ROOT, "indigo")).toBe("#245bc7");
-    expect(resolveWhale("var(--gpui-primary-hover)")).toBe("rgb(var(--gpui-light-primary-rgb) / 0.9)");
+    expect(resolveWhale("var(--gpui-primary-hover)")).toBe("rgb(var(--gpui-light-primary-rgb) / var(--gpui-primary-hover-opacity))");
     expect(ROOT).toMatch(/--indigo-deep:\s*var\(--gpui-primary-hover\);/);
     expect(cssHexIn(ROOT, "mark-ink")).toBe("#28292b");
     // The deep field is always the stage's darkest, and code plates keep the
@@ -96,21 +96,17 @@ describe("GPUI public-surface contract", () => {
 
     expect(mobile).toMatch(/\.site-nav-inner\s*\{\s*gap:\s*0\.5rem/);
     expect(mobile).toMatch(/\.site-nav-actions\s*\{[\s\S]*?min-width:\s*0/);
-    expect(mobile).toMatch(
-      /\.site-nav-actions select\s*\{[\s\S]*?width:\s*6\.75rem;[\s\S]*?min-width:\s*0/,
-    );
     expect(CSS).toMatch(/\.paper-wordmark-mark\s*\{[^}]*height:\s*22px;/);
     expect(CSS).toMatch(/\.paper-wordmark-logo\s*\{[^}]*height:\s*20px;/);
     expect(CSS).toMatch(/\.site-nav-actions\s*\{[\s\S]*?flex-shrink:\s*0/);
     expect(CSS).toMatch(/\.site-nav-actions\s*>\s*\*\s*\{\s*flex-shrink:\s*0/);
     expect(CSS).toMatch(/@media \(max-width: 900px\)[\s\S]*?\.site-github-link\s*\{\s*display:\s*none/);
-    expect(mobile).not.toMatch(/body:has\(\.product-home\) \.site-nav-actions select/);
     // The locale <select> and the home wordmark must keep a usable hit
     // target on every viewport, not only below 520px. Long native option
-    // labels and 2xl companion text used to collapse the wordmark to 0.
-    expect(CSS).toMatch(
-      /\.site-nav-actions select\s*\{\s*width:\s*6\.75rem;\s*max-width:\s*6\.75rem;\s*min-width:\s*0;/,
-    );
+    // labels and 2xl companion text used to collapse the wordmark to 0; the
+    // select now sits inside the fixed icon box instead of sizing the row.
+    expect(CSS).not.toMatch(/\.site-nav-actions select/);
+    expect(CSS).toMatch(/\.nav-locale select\s*\{[^}]*position:\s*absolute;[^}]*inset:\s*0;/);
     // `min-width` is the floor that keeps the wordmark clickable; the shrink
     // factor stays at 1 so the compact controls are never the ones pushed
     // past `overflow-x: clip` when the row is over budget.

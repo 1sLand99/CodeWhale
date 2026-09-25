@@ -1,8 +1,10 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { resolveWhale } from "./whale-tokens";
 import { siteCss } from "./site-css";
 
 const CSS = siteCss();
+const DESIGN = JSON.parse(readFileSync(new URL("../../vendor/codewhale-design/tokens.json", import.meta.url), "utf8"));
 const ROLES = ["bg", "surface", "panel", "text", "muted", "line", "accent", "on-accent", "hover", "selected", "selection", "ring"];
 
 function declarations(block: string): Record<string, string> {
@@ -65,17 +67,20 @@ describe("GPUI role tokens", () => {
     }
   });
 
-  it("paints the GPUI set_theme values", () => {
-    expect(hex(light().bg)).toBe("#faf8f5");
-    expect(hex(light().accent)).toBe("#245bc7");
-    expect(hex(light().hover)).toBe("#e8e5e0");
-    expect(hex(light().selected)).toBe("#dfdcd6");
-    expect(hex(osDark().bg)).toBe("#202123");
-    expect(hex(osDark().accent)).toBe("#90b9ff");
-    expect(hex(osDark().hover)).toBe("#303134");
-    expect(hex(osDark().selected)).toBe("#37393d");
-    expect(light().selection).toBe("rgb(var(--gpui-light-primary-rgb) / 0.28)");
-    expect(osDark().selection).toBe("rgb(var(--gpui-dark-primary-rgb) / 0.28)");
+  it("paints the versioned GPUI artifact without a second palette", () => {
+    const roles: Record<string, string> = {
+      bg: "background", surface: "sidebar", panel: "surface", text: "foreground",
+      muted: "muted_foreground", line: "border", accent: "primary",
+      "on-accent": "primary_foreground", hover: "hover", selected: "selected", ring: "primary",
+    };
+    for (const [mode, scheme] of [["light", light()], ["dark", osDark()]] as const) {
+      for (const [role, key] of Object.entries(roles)) {
+        expect(hex(scheme[role]), `${mode}.${role}`).toBe(`#${DESIGN.colors[mode][key]}`);
+      }
+      expect(scheme.selection).toBe(`rgb(var(--gpui-${mode}-primary-rgb) / var(--gpui-selection-opacity))`);
+    }
+    expect(Number(resolveWhale("var(--gpui-selection-opacity)"))).toBe(DESIGN.selection_opacity);
+    expect(Number(resolveWhale("var(--gpui-primary-hover-opacity)"))).toBe(DESIGN.primary_hover_opacity);
   });
 
   it("keeps text, muted text, links, and button text at WCAG AA in both schemes", () => {

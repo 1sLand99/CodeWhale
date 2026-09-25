@@ -2599,6 +2599,92 @@ async fn initial_goal_failure_projects_blocked_state() {
     run_task.await.expect("engine task");
 }
 
+/// A goal the runtime stopped (its turn failed) resumes when the person
+/// writes again; the host still reports Blocked because it only learns of
+/// the resume from this turn's GoalUpdated.
+#[tokio::test]
+async fn user_message_resumes_a_goal_only_the_runtime_blocked() {
+    let objective = "resume after a runtime stop";
+    let model = std::sync::Arc::new(FailingGoalModelClient {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        message: "turn deadline elapsed".to_string(),
+    });
+    let config = goal_custom_route_config();
+    let client: crate::core::model_client::SharedModelClient = model.clone();
+    let (engine, handle) = Engine::new_with_model_client(
+        EngineConfig {
+            model: "local-model".to_string(),
+            snapshots_enabled: false,
+            terminal_chrome_enabled: false,
+            ..EngineConfig::default()
+        },
+        &config,
+        client,
+    );
+    let goal_state = engine.config.goal_state.clone();
+    let run_task = tokio::spawn(engine.run());
+    let settle = || async {
+        tokio::time::timeout(model_turn_event_timeout(), handle.get_session_snapshot())
+            .await
+            .expect("turn did not settle")
+            .expect("session snapshot")
+    };
+
+    handle
+        .send(active_goal_message_op(&config, "start", objective, None))
+        .await
+        .expect("send goal turn");
+    settle().await;
+    let blocked = goal_state.lock().expect("goal lock").snapshot();
+    assert_eq!(blocked.status, "blocked");
+
+    let Op::SendMessage(mut spec) = active_goal_message_op(&config, "continue", objective, None)
+    else {
+        unreachable!()
+    };
+    spec.goal_status = crate::tools::goal::GoalStatus::Blocked;
+    handle
+        .send(Op::SendMessage(spec))
+        .await
+        .expect("send continue");
+    settle().await;
+    assert_eq!(model.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let resumed = goal_state.lock().expect("goal lock").snapshot();
+    assert_ne!(
+        resumed.goal_id, blocked.goal_id,
+        "the continue turn ran as a resumed goal revision"
+    );
+
+    // A blocker the model reported is a judgement: the next message is an
+    // ordinary turn and the goal stays blocked on that report.
+    goal_state
+        .lock()
+        .expect("goal lock")
+        .mark_blocked("needs the staging credentials".to_string())
+        .unwrap();
+    let reported = goal_state.lock().expect("goal lock").snapshot();
+    let Op::SendMessage(mut spec) = active_goal_message_op(&config, "continue", objective, None)
+    else {
+        unreachable!()
+    };
+    spec.goal_status = crate::tools::goal::GoalStatus::Blocked;
+    handle
+        .send(Op::SendMessage(spec))
+        .await
+        .expect("send ordinary turn");
+    settle().await;
+    let after = goal_state.lock().expect("goal lock").snapshot();
+    assert_eq!(after.status, "blocked");
+    assert_eq!(after.goal_id, reported.goal_id);
+    assert_eq!(
+        after.blocker.as_deref(),
+        Some("needs the staging credentials")
+    );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
+}
+
 #[tokio::test]
 async fn initial_goal_interruption_keeps_goal_active() {
     let objective = "keep goal active after interrupted turn";
@@ -12008,7 +12094,7 @@ fn print_skill_discovery_turn_metrics() {
 }
 
 #[test]
-fn deferred_apply_patch_first_use_hydrates_schema_without_execution() {
+fn deferred_first_use_executes_well_formed_calls_and_hydrates_malformed_ones() {
     let mut apply_patch = api_tool("apply_patch");
     apply_patch.defer_loading = Some(true);
     apply_patch.input_schema = json!({
@@ -12022,40 +12108,48 @@ fn deferred_apply_patch_first_use_hydrates_schema_without_execution() {
     let catalog = vec![apply_patch];
     let active_at_batch_start = HashSet::new();
     let mut hydrated_this_batch = HashSet::new();
-    let result = maybe_hydrate_requested_deferred_tool(
-        "apply_patch",
-        &json!({"patch": "*** Begin Patch\n*** End Patch"}),
-        &catalog,
-        &active_at_batch_start,
-        &mut hydrated_this_batch,
-    )
-    .expect("first deferred use should hydrate");
-
-    assert!(!active_at_batch_start.contains("apply_patch"));
-    assert!(hydrated_this_batch.contains("apply_patch"));
-    assert!(result.success);
-    assert!(result.content.contains("Tool `apply_patch` was deferred"));
-    assert!(result.content.contains("patch: string"));
-    assert!(result.content.contains("The tool was not executed"));
-
-    let metadata = result.metadata.expect("metadata");
-    assert_eq!(metadata["event"], "tool.schema_hydrated");
-    assert_eq!(metadata["executed"], false);
-    assert_eq!(metadata["retry_required"], true);
-
-    let second_result = maybe_hydrate_requested_deferred_tool(
-        "apply_patch",
-        &json!({"patch": "*** Begin Patch\n*** End Patch"}),
-        &catalog,
-        &active_at_batch_start,
-        &mut hydrated_this_batch,
-    )
-    .expect("later calls in the same batch should hydrate instead of executing");
-    assert_eq!(second_result.metadata.unwrap()["executed"], false);
-    assert_eq!(
-        hydrated_this_batch,
-        HashSet::from(["apply_patch".to_string()])
+    // A call already shaped like the unseen schema must not lose its turn.
+    assert!(
+        maybe_hydrate_requested_deferred_tool(
+            "apply_patch",
+            &json!({"patch": "*** Begin Patch\n*** End Patch"}),
+            &catalog,
+            &active_at_batch_start,
+            &mut hydrated_this_batch,
+        )
+        .is_none(),
+        "a well-formed first call executes"
     );
+    assert!(
+        hydrated_this_batch.contains("apply_patch"),
+        "the executed tool still activates for later requests"
+    );
+
+    for malformed in [
+        json!({}),
+        json!({"diff": "*** Begin Patch\n*** End Patch"}),
+        json!({"patch": "x", "path": "src/lib.rs"}),
+        json!("*** Begin Patch"),
+    ] {
+        let mut hydrated = HashSet::new();
+        let result = maybe_hydrate_requested_deferred_tool(
+            "apply_patch",
+            &malformed,
+            &catalog,
+            &active_at_batch_start,
+            &mut hydrated,
+        )
+        .unwrap_or_else(|| panic!("{malformed} must return the schema instead of executing"));
+        assert!(hydrated.contains("apply_patch"));
+        assert!(result.success);
+        assert!(result.content.contains("Tool `apply_patch` was deferred"));
+        assert!(result.content.contains("patch: string"));
+        assert!(result.content.contains("The tool was not executed"));
+        let metadata = result.metadata.expect("metadata");
+        assert_eq!(metadata["event"], "tool.schema_hydrated");
+        assert_eq!(metadata["executed"], false);
+        assert_eq!(metadata["retry_required"], true);
+    }
 
     let mut active_next_batch = active_at_batch_start.clone();
     active_next_batch.extend(hydrated_this_batch);
@@ -12063,13 +12157,13 @@ fn deferred_apply_patch_first_use_hydrates_schema_without_execution() {
     assert!(
         maybe_hydrate_requested_deferred_tool(
             "apply_patch",
-            &json!({"patch": "*** Begin Patch\n*** End Patch"}),
+            &json!({}),
             &catalog,
             &active_next_batch,
             &mut hydrated_next_batch,
         )
         .is_none(),
-        "tools hydrated in a previous batch should execute normally"
+        "tools hydrated in a previous batch execute normally, even malformed"
     );
 }
 
@@ -12088,7 +12182,9 @@ async fn deferred_tool_first_use_does_not_emit_a_retry_status() {
     let tool_call_sse = concat!(
         "data: {\"id\":\"chatcmpl-e3\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[",
         "{\"index\":0,\"id\":\"call_e3_map\",\"type\":\"function\",\"function\":{\"name\":\"project_map\",",
-        "\"arguments\":\"{}\"}}",
+        // Malformed on purpose: a well-formed first call now executes, and
+        // this test covers the schema hint returned for a malformed one.
+        "\"arguments\":\"{\\\"not_a_project_map_field\\\":true}\"}}",
         "]},\"finish_reason\":null}]}\n\n",
         "data: {\"id\":\"chatcmpl-e3\",\"choices\":[{\"index\":0,\"delta\":{},",
         "\"finish_reason\":\"tool_calls\"}]}\n\n",
@@ -13231,7 +13327,7 @@ async fn narrower_posture_patch_during_approval_wait_fails_the_call() {
         let err = result.expect_err("narrowed posture fails the call");
         assert!(
             err.to_string()
-                .contains("posture changed before this tool call executed"),
+                .contains("Permissions changed before this tool call executed"),
             "{change_to:?}: {err}"
         );
         assert!(!written, "{change_to:?}: the shell must not run");
@@ -16271,7 +16367,7 @@ async fn compaction_completed_reports_complete_post_input_tokens() {
         .emit_compaction_completed(
             "compact_test".to_string(),
             false,
-            "Compaction complete".to_string(),
+            "Made room".to_string(),
             Some(4),
             Some(1),
             super::compaction::CompactionPass {
@@ -16424,9 +16520,9 @@ async fn unchanged_compaction_config_is_acknowledged_silently() {
     let mut changed = current;
     changed.enabled = !changed.enabled;
     let expected = if changed.enabled {
-        "Auto-compaction enabled"
+        "Make room automatically: on"
     } else {
-        "Auto-compaction disabled"
+        "Make room automatically: off"
     };
     handle
         .send(Op::SetCompaction { config: changed })
@@ -18836,7 +18932,7 @@ fn turn_metadata_keeps_stable_fields_while_pressure_reports_live_estimates() {
         without_pressure(&second_meta)
     );
     assert!(second_meta.contains("Estimated input:"));
-    assert!(second_meta.contains("Automatic compaction is explicitly disabled"));
+    assert!(second_meta.contains("Making room automatically is off"));
 }
 
 #[tokio::test]
@@ -24171,7 +24267,7 @@ async fn background_completion_after_a_turn_is_delivered_once_on_the_next_turn()
     assert!(text.contains("stdout-end"), "{text}");
     assert!(text.contains(evidence_ref), "{text}");
     assert!(
-        text.contains("the full output is retained and can be reviewed in the tool details view"),
+        text.contains("call retrieve_tool_result") && !text.contains("tool details view"),
         "{text}"
     );
     assert!(
@@ -24611,7 +24707,11 @@ async fn idle_engine_routes_child_approval_decisions_to_the_waiting_child() {
     let manager = engine.subagent_manager.clone();
     let run = tokio::spawn(engine.run());
 
-    let (approval_id, receiver) = manager.write().await.register_child_approval("agent_child");
+    let (approval_id, receiver) =
+        manager
+            .write()
+            .await
+            .register_child_approval("agent_child", "bash", "fixture");
     handle
         .approve_tool_call(approval_id.clone())
         .await
@@ -24624,7 +24724,11 @@ async fn idle_engine_routes_child_approval_decisions_to_the_waiting_child() {
     assert_eq!(manager.read().await.pending_child_approvals(), 0);
 
     // A denial for a second prompt routes the same way.
-    let (approval_id, receiver) = manager.write().await.register_child_approval("agent_child");
+    let (approval_id, receiver) =
+        manager
+            .write()
+            .await
+            .register_child_approval("agent_child", "bash", "fixture");
     handle
         .deny_tool_call(approval_id)
         .await
@@ -25582,5 +25686,33 @@ async fn supervisor_update_refreshes_error_map_and_generation() {
     assert_eq!(
         engine.mcp_event_generation, 2,
         "an empty sweep emits nothing"
+    );
+}
+
+/// #6540: every summary call billed ~219k input tokens at a 0% cache hit
+/// because the summary request dropped the reasoning tier the parent turn
+/// sends, and reasoning routes render that tier at the head of the prompt.
+/// The compaction envelope must carry the exact tier the turn loop resolves.
+#[test]
+fn compaction_envelope_carries_the_turn_reasoning_tier() {
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    for effort in [Some("high"), Some("auto"), None] {
+        engine.session.reasoning_effort = effort.map(str::to_string);
+        let turn_effort = super::turn_loop::resolve_auto_effort(
+            effort,
+            engine.api_provider,
+            &engine.api_config.active_route_base_url(),
+            &engine.config.model,
+        );
+        let prepared = engine.prepare_compaction_envelope(CompactionConfig::default());
+        assert_eq!(prepared.reasoning_effort, turn_effort, "{effort:?}");
+    }
+    engine.session.reasoning_effort = Some("high".to_string());
+    assert_eq!(
+        engine
+            .prepare_compaction_envelope(CompactionConfig::default())
+            .reasoning_effort
+            .as_deref(),
+        Some("high")
     );
 }

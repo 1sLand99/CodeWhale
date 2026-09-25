@@ -87,6 +87,17 @@ pub enum ReviewDecision {
     Abort,
 }
 
+/// The agent a child approval card belongs to (approvals C1). `None` on the
+/// parent's own cards.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalOwner {
+    pub agent_id: String,
+    /// Stable user-facing agent label (`App::ensure_agent_label`).
+    pub label: String,
+    /// Fleet role label, when the roster knows the agent yet.
+    pub role: Option<String>,
+}
+
 /// Request for user approval of a tool execution
 #[derive(Debug, Clone)]
 pub struct ApprovalRequest {
@@ -123,6 +134,8 @@ pub struct ApprovalRequest {
     pub persistent_ask_rules: Vec<ToolAskRule>,
     /// Exact repo-scoped allow rules available for safe approval requests.
     pub persistent_allow_rules: Vec<ToolAskRule>,
+    /// The agent that raised this request, when it is a child's card.
+    pub owner: Option<ApprovalOwner>,
 }
 
 /// Key approval details rendered prominently in the approval card.
@@ -225,6 +238,7 @@ impl ApprovalRequest {
             }),
             persistent_ask_rules,
             persistent_allow_rules,
+            owner: None,
         }
     }
 
@@ -232,6 +246,22 @@ impl ApprovalRequest {
     pub fn params_display(&self) -> String {
         let truncated = truncate_params_value(&self.params, 200);
         serde_json::to_string(&truncated).unwrap_or_else(|_| truncated.to_string())
+    }
+
+    /// The plain summary in `locale` (E6, experience mark 4): the same
+    /// sentence the English card leads with, translated around the verbatim
+    /// command, path or query.
+    #[must_use]
+    pub fn summary_for_locale(&self, locale: Locale) -> String {
+        if locale == Locale::En {
+            return self.summary.clone();
+        }
+        crate::tools::approval_summary::approval_summary_in(
+            locale,
+            &self.tool_name,
+            &self.params,
+            Some(&self.workspace),
+        )
     }
 
     pub fn description_for_locale(&self, locale: Locale) -> String {

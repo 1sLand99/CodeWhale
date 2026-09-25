@@ -15,7 +15,7 @@
  * The token NAMES keep their historical shape (`--paper`, `--ink`,
  * `--indigo`) so every component rule stays diffable; the VALUES resolve
  * through the `--gpui-*` aliases below, which reference the generated GPUI
- * tokens. Only the warm state hues (tan, moss, rust and their AA-adapted
+ * tokens from vendor/codewhale-design/tokens.json. Only the warm state hues (tan, moss, rust and their AA-adapted
  * inks) stay literal: `set_theme` has no slot for them.
  */
 :root {
@@ -28,7 +28,7 @@
   --gpui-ink-mute: var(--gpui-light-text-muted);     /* muted_foreground */
   --gpui-edge: var(--gpui-light-border);             /* border */
   --gpui-primary: var(--gpui-light-primary);         /* primary */
-  --gpui-primary-hover: rgb(var(--gpui-light-primary-rgb) / 0.9); /* button_primary_hover */
+  --gpui-primary-hover: rgb(var(--gpui-light-primary-rgb) / var(--gpui-primary-hover-opacity)); /* button_primary_hover */
 
   /* --- GPUI dark (below the waterline) --- */
   --gpui-stage: var(--gpui-dark-bg);                 /* background — warm charcoal */
@@ -40,9 +40,9 @@
   --gpui-stage-ink-dim: var(--gpui-dark-text-muted); /* muted_foreground (AA, UX-05) */
   --gpui-stage-edge: var(--gpui-dark-border);        /* border */
   --gpui-primary-dark: var(--gpui-dark-primary);     /* primary */
-  --gpui-primary-hover-dark: rgb(var(--gpui-dark-primary-rgb) / 0.9); /* button_primary_hover */
+  --gpui-primary-hover-dark: rgb(var(--gpui-dark-primary-rgb) / var(--gpui-primary-hover-opacity)); /* button_primary_hover */
   --gpui-accent-dark: var(--gpui-dark-accent);       /* accent — hover wash */
-  --gpui-selection-dark: rgb(var(--gpui-dark-primary-rgb) / 0.28); /* selection */
+  --gpui-selection-dark: rgb(var(--gpui-dark-primary-rgb) / var(--gpui-selection-opacity)); /* selection */
 
   /* Warm-muted state hues from the GPUI mockups, darkened or lifted per
      side of the waterline so text uses of them still clear AA. No
@@ -120,14 +120,13 @@
      extended subsets load in app/[locale]/layout.tsx), the system monospace
      stack at 13px for code, prose at 15/23. Han, kana and
      Hangul fall through to the platform's sans. No serif anywhere. */
-  --font-body: var(--font-shannon-latin), var(--font-shannon-ext), "Noto Sans SC",
+  --font-body: var(--font-shannon-latin), var(--font-shannon-ext), var(--gpui-font-fallbacks),
     ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-display: var(--font-body);
   --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Monaco, Consolas,
     "Liberation Mono", monospace;
-  --font-cjk: "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC",
-    "Source Han Sans SC", "Microsoft YaHei", sans-serif;
-  --text-mono: 0.8125rem;
+  --font-cjk: var(--gpui-font-fallbacks), sans-serif;
+  --text-mono: var(--gpui-mono-size);
   --text-prose: 0.9375rem;
   --leading-prose: 1.5334;
 
@@ -140,7 +139,7 @@
 
   /* One site container and one vertical rhythm. Every page gutter aligns
      with the nav; every hero and section shares a single padding token. */
-  --container: min(100% - 2rem, 76rem);
+  --container: min(100% - var(--gpui-spacing-page), 76rem);
   --hero-pad: clamp(3rem, 6vw, 4.75rem);
   --section-pad: clamp(2.75rem, 5vw, 4rem);
 
@@ -148,8 +147,8 @@
      6px for rows, chips and small controls; 10px for code and menu
      surfaces; 14px for the largest raised sheets; 999px for pills. No other
      radius appears in app/styles/ or the Tailwind scale. */
-  --radius-control: 6px;
-  --radius-surface: 10px;
+  --radius-control: var(--gpui-radius-control);
+  --radius-surface: var(--gpui-radius-panel);
   --radius-sheet: 14px;
   --radius-pill: 999px;
 
@@ -181,8 +180,7 @@
 /* ---------- role tokens — GPUI set_theme ---------- */
 /*
  * One token authority: the GPUI desktop client's `set_theme`
- * (codewhale-app/src/workspace/mod.rs), mirrored as the `GPUI_*` /
- * `GPUI_LIGHT_*` consts in crates/palette/src/tokens.rs and generated into
+ * versioned design artifact (vendor/codewhale-design/tokens.json), generated into
  * ./tokens.css as `--gpui-dark-*` / `--gpui-light-*`. Nothing below repeats a
  * hex for a role: every role value is a generated token, or the primary at
  * the opacity `set_theme` derives (hover 0.9, selection 0.28).
@@ -219,7 +217,7 @@
   --on-accent: var(--gpui-light-on-primary);
   --hover: var(--gpui-light-accent);
   --selected: var(--gpui-light-list-active);
-  --selection: rgb(var(--gpui-light-primary-rgb) / 0.28);
+  --selection: rgb(var(--gpui-light-primary-rgb) / var(--gpui-selection-opacity));
   --ring: var(--gpui-light-primary);
 }
 
@@ -235,7 +233,7 @@
     --on-accent: var(--gpui-dark-on-primary);
     --hover: var(--gpui-dark-accent);
     --selected: var(--gpui-dark-list-active);
-    --selection: rgb(var(--gpui-dark-primary-rgb) / 0.28);
+    --selection: rgb(var(--gpui-dark-primary-rgb) / var(--gpui-selection-opacity));
     --ring: var(--gpui-dark-primary);
 
     /* The folio names, re-inked in the GPUI charcoal ramp. */
@@ -290,7 +288,7 @@
   --on-accent: var(--gpui-dark-on-primary);
   --hover: var(--gpui-dark-accent);
   --selected: var(--gpui-dark-list-active);
-  --selection: rgb(var(--gpui-dark-primary-rgb) / 0.28);
+  --selection: rgb(var(--gpui-dark-primary-rgb) / var(--gpui-selection-opacity));
   --ring: var(--gpui-dark-primary);
 
   /* The folio names, re-inked in the GPUI charcoal ramp. */

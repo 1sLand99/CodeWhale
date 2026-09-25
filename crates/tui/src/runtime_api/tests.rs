@@ -2769,6 +2769,7 @@ async fn agent_runs_runtime_api_exposes_persisted_worker_receipts() -> Result<()
             tool: Some("handle_read".to_string()),
             reason: "Worker agent_receipt completed; verify its self-report.".to_string(),
         },
+        pending_request: None,
         status: AgentWorkerStatus::Completed,
         created_at_ms: 1,
         updated_at_ms: 2,
@@ -2822,6 +2823,14 @@ async fn agent_runs_runtime_api_exposes_persisted_worker_receipts() -> Result<()
         .json()
         .await?;
     assert_eq!(runs["runs"][0]["spec"]["run_id"], "run_receipt");
+    // F5: the payload carries the launch governor; a calm fleet has no line.
+    assert_eq!(runs["governor"]["paused"], false);
+    assert_eq!(runs["governor"]["recent_rate_limits"], 0);
+    assert_eq!(
+        runs["governor"]["launch_slots"],
+        runs["governor"]["max_launch_slots"]
+    );
+    assert!(runs["governor"].get("status").is_none());
     assert_eq!(runs["runs"][0]["follow_up"]["tool"], "handle_read");
     assert_eq!(
         runs["runs"][0]["verification"]["status"],
@@ -4176,15 +4185,32 @@ async fn turn_operation_lookup_is_authenticated_read_only_and_survives_restart()
     .await
     .context("old Runtime did not release its store before restart")?;
 
-    let (addr, _manager, server) = spawn_test_server_with_root_token_mobile_workspace(
-        root,
-        sessions,
-        Some(token.into()),
-        false,
-        workspace,
-    )
-    .await?
-    .context("loopback listener required for restarted lookup proof")?;
+    // The old server tears its runtime down on its own thread after the
+    // abort, so its mock TaskManager can hold the execution-scope owner lock
+    // a moment longer than the thread manager above. A second owner is
+    // correctly refused; wait for the release instead of racing it.
+    let deadline = tokio::time::Instant::now() + ci_scaled(Duration::from_secs(10));
+    let (addr, _manager, server) = loop {
+        match spawn_test_server_with_root_token_mobile_workspace(
+            root.clone(),
+            sessions.clone(),
+            Some(token.into()),
+            false,
+            workspace.clone(),
+        )
+        .await
+        {
+            Err(error)
+                if format!("{error:#}").contains("execution scope is already owned")
+                    && tokio::time::Instant::now() < deadline =>
+            {
+                sleep(Duration::from_millis(20)).await;
+            }
+            started => {
+                break started?.context("loopback listener required for restarted lookup proof")?;
+            }
+        }
+    };
     // Startup recovery is complete. No Engine is installed in this Runtime.
     let before = file_bytes(&store_root)?;
     let response = client
@@ -14811,12 +14837,12 @@ async fn terminal_routes_serve_a_live_engine_session_over_http() -> Result<()> {
     )
     .map_err(anyhow::Error::msg)?;
 
-    // Input through the route, then the shell's own echo back through the
-    // route. Bytes in, bytes out, no direct access to the session object.
+    // Input and command output through the route, without direct session
+    // access. Start output on its own line even if the shell paints a prompt.
     let write: serde_json::Value = client
         .post(format!("{base}/input"))
         .json(&serde_json::json!({
-            "data": "printf 'terminal-route-proof\\n'\n",
+            "data": "printf '\\nterminal-route-proof\\n'\n",
             "encoding": "text"
         }))
         .send()
@@ -14846,12 +14872,19 @@ async fn terminal_routes_serve_a_live_engine_session_over_http() -> Result<()> {
             .await
             .expect("terminal output route answers");
         let data = chunk["data"].as_str().unwrap_or_default();
-        if data.contains("terminal-route-proof") {
-            // Reads are non-consuming: the same cursor returns the same bytes.
+        if data
+            .lines()
+            .any(|line| line.trim() == "terminal-route-proof")
+        {
+            // Wait for the command's output, not its echoed input. Reads are
+            // non-consuming, but the shell can append its prompt between them.
             let again = read_chunk(base.clone(), client.clone())
                 .await
                 .expect("terminal output route answers");
-            assert_eq!(again["data"], chunk["data"]);
+            assert!(
+                again["data"].as_str().unwrap_or_default().starts_with(data),
+                "a repeated read must retain every byte already observed"
+            );
             break;
         }
         assert!(
@@ -15106,6 +15139,79 @@ async fn plugin_api_404s_for_unknown_selector() -> Result<()> {
         .await?;
     assert_eq!(trust.status(), StatusCode::NOT_FOUND);
 
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn dsh_package_preview_then_exact_install_over_http() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path().join("runtime");
+    let workspace = tmp.path().join("ws");
+    fs::create_dir_all(&root)?;
+    let package = tmp.path().join("dsh-package");
+    fs::create_dir_all(&package)?;
+    fs::write(
+        package.join("package.json"),
+        r#"{"name": "@demo/docs-dsh", "dsh": {"bundle": {"patch": "./cordis.patch.yml"}}}"#,
+    )?;
+    fs::write(
+        package.join("cordis.patch.yml"),
+        "- insert:\n  - id: docs\n    name: '@deepseek-ai/dsh-mcp-client'\n    config: {serverName: docs, transport: streamable-http, url: 'https://docs.example.invalid/mcp'}\n",
+    )?;
+    let Some((addr, handle)) = spawn_plugin_api_server(root, workspace).await? else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let preview: serde_json::Value = client
+        .post(format!("http://{addr}/v1/apps/plugins/import/dsh/preview"))
+        .json(&serde_json::json!({"path": package.display().to_string()}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(preview["conversion"]["plugin_name"], "docs-dsh");
+    assert_eq!(
+        preview["conversion"]["network_hosts"],
+        serde_json::json!(["docs.example.invalid"])
+    );
+    let plugins: serde_json::Value = client
+        .get(format!("http://{addr}/v1/apps/plugins"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert!(
+        !plugins["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "docs-dsh"),
+        "preview installs nothing"
+    );
+
+    let installed = client
+        .post(format!("http://{addr}/v1/apps/plugins/install"))
+        .json(&serde_json::json!({
+            "source": preview["install_source"],
+            "expected_content_hash": preview["content_hash"],
+        }))
+        .send()
+        .await?;
+    assert_eq!(installed.status(), StatusCode::CREATED);
+    let installed: serde_json::Value = installed.json().await?;
+    assert_eq!(installed["name"], "docs-dsh");
+    assert_eq!(installed["plugin"]["enabled"], false);
+    assert_ne!(installed["plugin"]["trust_status"], "trusted");
+
+    let refused = client
+        .post(format!("http://{addr}/v1/apps/plugins/import/dsh/preview"))
+        .json(&serde_json::json!({"path": tmp.path().join("missing").display().to_string()}))
+        .send()
+        .await?;
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
     handle.abort();
     Ok(())
 }
@@ -16154,7 +16260,7 @@ async fn runtime_image_http_rejects_before_dispatch_and_accepts_large_canonical_
         json!({"prompt":"look", "images":[{"mime":"image/png", "dataBase64":"garbage"}]}),
         json!({"prompt":"", "images":[good.clone()]}),
         json!({"prompt":"look", "model":"auto", "images":[good.clone()]}),
-        json!({"prompt":"look", "model":"deepseek-v4-flash", "images":[good.clone()]}),
+        json!({"prompt":"look", "model":"deepseek-v4-pro", "images":[good.clone()]}),
         json!({"prompt":"look", "images":[{"mime":"image/png", "dataBase64":good.data_base64, "path":"/private/host-only"}]}),
     ] {
         let response = client.post(&url).json(&body).send().await?;
@@ -16269,7 +16375,7 @@ async fn runtime_image_stream_rejection_does_not_leave_empty_threads() -> Result
         json!({"prompt":"look", "images":[{"mime":"image/png","dataBase64":"garbage"}]}),
         json!({"prompt":"", "images":[good.clone()]}),
         json!({"prompt":"look", "model":"auto", "images":[good.clone()]}),
-        json!({"prompt":"look", "model":"deepseek-v4-flash", "images":[good]}),
+        json!({"prompt":"look", "model":"deepseek-v4-pro", "images":[good]}),
         json!({"prompt":"look", "images":[runtime_image_fixture_bytes(4 * 1024 * 1024 + 1)]}),
     ] {
         let response = client

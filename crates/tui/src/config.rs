@@ -1661,6 +1661,7 @@ pub fn model_completion_names_for_provider(provider: ApiProvider) -> Vec<&'stati
         ],
         ApiProvider::Xai => vec![
             DEFAULT_XAI_MODEL,
+            XAI_GROK_4_7_MODEL,
             XAI_GROK_4_5_MODEL,
             XAI_GROK_4_3_MODEL,
             XAI_GROK_BUILD_MODEL,
@@ -2492,6 +2493,24 @@ pub struct SubagentsConfig {
 #[serde(deny_unknown_fields)]
 pub struct SubagentRoleConfig {
     pub model: String,
+    /// Operator-approved `provider/model` routes, tried in order only when
+    /// this pin's first request is refused before the agent has done any
+    /// work (exhausted quota, rejected credentials or authorization, or an
+    /// unavailable model). Listing a route authorizes sending the agent's
+    /// task to that provider. Empty keeps the pin exact.
+    #[serde(default)]
+    pub replacements: Vec<String>,
+}
+
+fn parse_subagent_role_pin(value: &str) -> SubagentModelOverride {
+    let value = value.trim();
+    match value.split_once('/') {
+        Some((provider, model)) => SubagentModelOverride {
+            provider: Some(provider.trim().to_string()),
+            model: model.trim().to_string(),
+        },
+        None => value.into(),
+    }
 }
 
 /// One role override carried through Config, Engine, and child admission.
@@ -2598,7 +2617,52 @@ pub struct AutoRouterConfig {
     /// hung local router cannot stall a turn indefinitely.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Router kind (#6525): `"chat"` (default) asks a chat model for JSON;
+    /// `"decision"` asks a System One decision model (Jev) a typed Choice
+    /// between the active provider's fast and strong tiers. Any other value
+    /// leaves the router unconfigured (shown as failing, never guessed).
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Decision routers only: below this answer confidence (0..=1, default
+    /// [`DEFAULT_AUTO_ROUTER_MIN_CONFIDENCE`]) the turn takes the local
+    /// fallback instead of the decision.
+    #[serde(default)]
+    pub min_confidence: Option<f64>,
+    /// Decision routers only: endpoint override for `provider = "typesafe"`
+    /// (default `https://api.typesafe.ai/v1`). OpenRouter decision routers use
+    /// the configured OpenRouter base URL.
+    #[serde(default)]
+    pub base_url: Option<String>,
 }
+
+/// `[auto.router] kind` (#6525).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AutoRouterKind {
+    /// A chat model returns `{provider, model, thinking}` JSON.
+    Chat,
+    /// A System One decision model answers a typed Choice over tiers.
+    Decision,
+}
+
+impl AutoRouterKind {
+    /// `None` (absent) is the chat default; an unknown value is `None` so the
+    /// caller reports the router as not configured instead of guessing.
+    #[must_use]
+    pub(crate) fn parse(raw: Option<&str>) -> Option<Self> {
+        match raw.map(str::trim).filter(|kind| !kind.is_empty()) {
+            None => Some(Self::Chat),
+            Some(kind) if kind.eq_ignore_ascii_case("chat") => Some(Self::Chat),
+            Some(kind) if kind.eq_ignore_ascii_case("decision") => Some(Self::Decision),
+            Some(_) => None,
+        }
+    }
+}
+
+/// Default `[auto.router] min_confidence` for decision routers: TypeSafe's
+/// "below 0.5, don't act" band (for two options, the chosen tier's
+/// probability must reach 0.75).
+pub(crate) const DEFAULT_AUTO_ROUTER_MIN_CONFIDENCE: f64 = 0.5;
 
 fn default_update_check_for_updates() -> bool {
     true
@@ -4715,6 +4779,23 @@ impl Config {
         self.search_provider_resolution().provider
     }
 
+    /// Whether provider-native search may lead the search chain.
+    ///
+    /// `[search] native = true|false` is explicit. Unset, a user-chosen
+    /// provider (config, env, or a Tavily key) wins over provider-native
+    /// search (`Some(false)`); with no provider configured it stays `None`,
+    /// which keeps native search first on routes that offer it.
+    #[must_use]
+    pub fn search_native(&self) -> Option<bool> {
+        self.search
+            .as_ref()
+            .and_then(|search| search.native)
+            .or_else(|| {
+                (self.search_provider_resolution().source != SearchProviderSource::Default)
+                    .then_some(false)
+            })
+    }
+
     /// Store a session/config provider choice and return the effective runtime
     /// provider after applying the documented environment precedence.
     pub fn set_search_provider(&mut self, provider: SearchProvider) -> SearchProvider {
@@ -4763,6 +4844,19 @@ impl Config {
             .filter(|secs| *secs > 0)
             .unwrap_or(DEFAULT_AUTO_ROUTER_TIMEOUT_SECS)
             .min(MAX_AUTO_ROUTER_TIMEOUT_SECS)
+    }
+
+    /// Decision-router confidence floor, clamped to `0..=1`; absent or
+    /// non-finite values use [`DEFAULT_AUTO_ROUTER_MIN_CONFIDENCE`].
+    #[must_use]
+    pub(crate) fn auto_router_min_confidence(&self) -> f64 {
+        self.auto
+            .as_ref()
+            .and_then(|a| a.router.as_ref())
+            .and_then(|r| r.min_confidence)
+            .filter(|value| value.is_finite())
+            .unwrap_or(DEFAULT_AUTO_ROUTER_MIN_CONFIDENCE)
+            .clamp(0.0, 1.0)
     }
 
     #[must_use]
@@ -8162,19 +8256,41 @@ impl Config {
             for (key, pin) in entries {
                 // Keep blank explicit pins so admission rejects them rather
                 // than silently inheriting a different route.
-                let value = pin.model.trim();
-                let pin = match value.split_once('/') {
-                    Some((provider, model)) => SubagentModelOverride {
-                        provider: Some(provider.trim().to_string()),
-                        model: model.trim().to_string(),
-                    },
-                    None => value.into(),
-                };
-                overrides.insert(canonical(key), pin);
+                overrides.insert(canonical(key), parse_subagent_role_pin(&pin.model));
             }
         }
 
         overrides
+    }
+
+    /// The operator-approved replacement routes declared beside the role pin
+    /// that [`Self::subagent_model_overrides`] resolved under `key`. A
+    /// canonical role key wins over a legacy alias, matching pin precedence.
+    pub fn subagent_route_replacements(&self, key: &str) -> Vec<SubagentModelOverride> {
+        let Some(roles) = self.subagents.as_ref().and_then(|cfg| cfg.roles.as_ref()) else {
+            return Vec::new();
+        };
+        let canonical = |raw: &str| {
+            let raw = raw.trim().to_ascii_lowercase();
+            if raw == "default" {
+                raw
+            } else {
+                crate::fleet::role::migrate_legacy_role_token(&raw)
+                    .unwrap_or(&raw)
+                    .to_string()
+            }
+        };
+        roles
+            .iter()
+            .filter(|(raw, _)| canonical(raw) == key)
+            .max_by_key(|(raw, _)| (canonical(raw) == raw.trim().to_ascii_lowercase(), *raw))
+            .map(|(_, pin)| {
+                pin.replacements
+                    .iter()
+                    .map(|route| parse_subagent_role_pin(route))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Parsed `[fleet]` table, or defaults when the table is absent
@@ -8581,7 +8697,7 @@ default_text_model = "{DEFAULT_TEXT_MODEL}"
 
 # Thinking mode (DeepSeek V4 reasoning effort):
 # "auto" | "off" | "low" | "medium" | "high" | "max"
-# Shift+Tab in the TUI cycles between off / high / max.
+# Ctrl+T in the TUI (or /effort) cycles the active model's effort levels.
 reasoning_effort = "auto"
 
 # Startup update check
@@ -10585,21 +10701,6 @@ pub(crate) fn is_exact_direct_moonshot_k3_route(
         && model.trim().eq_ignore_ascii_case(MOONSHOT_KIMI_K3_MODEL)
 }
 
-/// Whether a route is exactly xAI's first-party Grok 4.6 endpoint.
-#[must_use]
-pub(crate) fn is_exact_xai_grok_4_6_route(
-    provider: ApiProvider,
-    base_url: &str,
-    model: &str,
-) -> bool {
-    provider == ApiProvider::Xai
-        && codewhale_config::provider::is_exact_xai_platform_route(
-            codewhale_config::ProviderKind::Xai,
-            base_url,
-        )
-        && model.trim().eq_ignore_ascii_case(XAI_GROK_4_6_MODEL)
-}
-
 /// Whether a route uses either official Kimi Code K3 membership model.
 pub(crate) fn is_exact_kimi_code_k3_route(
     provider: ApiProvider,
@@ -12040,13 +12141,8 @@ fn save_root_api_key_metadata_without_plaintext(
     ensure_parent_dir(config_path)?;
     crate::config_persistence::mutate_config_document(config_path, |doc| {
         crate::config_persistence::set_document_value(doc, &["auth_mode"], "api_key")?;
-        if !doc.contains_key("default_text_model") {
-            crate::config_persistence::set_document_value(
-                doc,
-                &["default_text_model"],
-                DEFAULT_TEXT_MODEL,
-            )?;
-        }
+        // Saving a key never pins a model (see
+        // `codewhale_config::credentials::prepare_provider_api_key_metadata`).
         if !doc.contains_key("reasoning_effort") {
             crate::config_persistence::set_document_value(doc, &["reasoning_effort"], "max")?;
         }
@@ -12097,12 +12193,12 @@ auth_mode = "api_key"
 # Set https://api.deepseek.com to opt out of beta features.
 # base_url = "https://api.deepseek.com/beta"
 
-# Default model
-default_text_model = "{DEFAULT_TEXT_MODEL}"
+# Default model (unset follows the provider default)
+# default_text_model = "{DEFAULT_TEXT_MODEL}"
 
 # Thinking mode (DeepSeek V4 reasoning effort):
 # "off" | "low" | "medium" | "high" | "max"
-# Shift+Tab in the TUI cycles between off / high / max.
+# Ctrl+T in the TUI (or /effort) cycles the active model's effort levels.
 reasoning_effort = "max"
 "#
         );
