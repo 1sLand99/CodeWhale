@@ -2340,5 +2340,13 @@
   "WorkflowSettledOfTotal": "{done}/{total} concluídos",
   "WorkflowPhaseCountOne": "{count} fase",
   "WorkflowPhaseCountMany": "{count} fases",
-  "WorkflowPhaseOrdinal": "fase {n}/{total}"
+  "WorkflowPhaseOrdinal": "fase {n}/{total}",
+  "ModelPickerPinned": "{route} fixado",
+  "ModelPickerUnpinned": "{route} desafixado",
+  "ModelPickerPinFailed": "Não foi possível atualizar a fixação: {error}",
+  "ModelPickerPinOrderUpdated": "Ordem dos modelos fixados atualizada",
+  "ModelPickerPinReorderFailed": "Não foi possível reordenar a fixação: {error}",
+  "ModelPickerReadinessRefreshed": "Prontidão dos modelos atualizada · linhas do catálogo reconstruídas",
+  "ModelPickerOpenToRefresh": "Abra /model para atualizar a prontidão e o catálogo",
+  "ModelPickerPinnedChip": "fixado"
 }

@@ -2340,5 +2340,13 @@
   "WorkflowSettledOfTotal": "{done}/{total} xong",
   "WorkflowPhaseCountOne": "{count} giai đoạn",
   "WorkflowPhaseCountMany": "{count} giai đoạn",
-  "WorkflowPhaseOrdinal": "giai đoạn {n}/{total}"
+  "WorkflowPhaseOrdinal": "giai đoạn {n}/{total}",
+  "ModelPickerPinned": "Đã ghim {route}",
+  "ModelPickerUnpinned": "Đã bỏ ghim {route}",
+  "ModelPickerPinFailed": "Không thể cập nhật ghim: {error}",
+  "ModelPickerPinOrderUpdated": "Đã cập nhật thứ tự mô hình đã ghim",
+  "ModelPickerPinReorderFailed": "Không thể sắp xếp lại ghim: {error}",
+  "ModelPickerReadinessRefreshed": "Đã làm mới trạng thái sẵn sàng của mô hình · đã dựng lại các dòng danh mục",
+  "ModelPickerOpenToRefresh": "Mở /model để làm mới trạng thái sẵn sàng và danh mục",
+  "ModelPickerPinnedChip": "đã ghim"
 }

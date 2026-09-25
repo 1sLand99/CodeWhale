@@ -2340,5 +2340,13 @@
   "WorkflowSettledOfTotal": "{done}/{total} done",
   "WorkflowPhaseCountOne": "{count} phase",
   "WorkflowPhaseCountMany": "{count} phases",
-  "WorkflowPhaseOrdinal": "phase {n}/{total}"
+  "WorkflowPhaseOrdinal": "phase {n}/{total}",
+  "ModelPickerPinned": "Pinned {route}",
+  "ModelPickerUnpinned": "Unpinned {route}",
+  "ModelPickerPinFailed": "Could not update pin: {error}",
+  "ModelPickerPinOrderUpdated": "Pinned model order updated",
+  "ModelPickerPinReorderFailed": "Could not reorder pin: {error}",
+  "ModelPickerReadinessRefreshed": "Model readiness refreshed · catalog rows rebuilt",
+  "ModelPickerOpenToRefresh": "Open /model to refresh readiness and catalog",
+  "ModelPickerPinnedChip": "pinned"
 }
