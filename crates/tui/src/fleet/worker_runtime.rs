@@ -1574,6 +1574,7 @@ fn profile_origin_label(origin: crate::fleet::roster::ProfileOrigin) -> &'static
         crate::fleet::roster::ProfileOrigin::Config => "config",
         crate::fleet::roster::ProfileOrigin::Personal => "personal",
         crate::fleet::roster::ProfileOrigin::Workspace => "workspace",
+        crate::fleet::roster::ProfileOrigin::ClaudeCode => "claude",
     }
 }
 

@@ -6166,6 +6166,14 @@ impl SubAgentManager {
             write_perm: record.spec.runtime_profile.permissions.write,
             deliverables,
             allowed,
+            // Only an interrupted worker with a continuable checkpoint can be
+            // resumed in the same workspace; every other terminal state is final.
+            remove_worktree_if_unchanged: record
+                .spec
+                .launch_manifest
+                .as_ref()
+                .is_some_and(|manifest| manifest.worktree)
+                && !matches!(result.status, SubAgentStatus::Interrupted(_)),
         })
     }
 
@@ -12206,10 +12214,20 @@ async fn ensure_worker_delivery_verified(
         };
         inputs
     };
-    let verification =
-        tokio::task::spawn_blocking(move || delivery::compute_delivery_verification(&inputs))
-            .await
-            .ok();
+    let verification = tokio::task::spawn_blocking(move || {
+        let mut verification = delivery::compute_delivery_verification(&inputs);
+        if inputs.remove_worktree_if_unchanged {
+            let changed = inputs.evidence.changed_paths(&inputs.workspace);
+            if worktree::remove_unchanged_worktree(&inputs.workspace, changed.as_ref()) {
+                verification
+                    .summary
+                    .push_str(" The worker's isolated worktree changed nothing and was removed.");
+            }
+        }
+        verification
+    })
+    .await
+    .ok();
     let Some(verification) = verification else {
         return;
     };

@@ -11559,6 +11559,59 @@ fn create_isolated_worktree_creates_branch_checkout_outside_parent_repo() {
 }
 
 #[test]
+fn unchanged_isolated_worktree_is_removed_and_changed_one_is_kept() {
+    let repo = init_subagent_git_repo();
+    let worktree_home = tempdir().expect("worktree home");
+    let make = |name: &str| {
+        create_isolated_worktree(
+            repo.path(),
+            &SubAgentWorktreeRequest {
+                branch: Some(format!("codex/agent-{name}")),
+                path: Some(worktree_home.path().join(name)),
+                base_ref: None,
+            },
+            Some(name),
+            &FleetRole::Builder,
+        )
+        .expect("worktree should be created")
+    };
+    let branch_exists = |name: &str| {
+        std::process::Command::new("git")
+            .args(["rev-parse", "--verify", "--quiet"])
+            .arg(format!("refs/heads/codex/agent-{name}"))
+            .current_dir(repo.path())
+            .status()
+            .expect("git rev-parse")
+            .success()
+    };
+
+    let clean = make("clean");
+    let empty = std::collections::BTreeSet::new();
+    assert!(worktree::remove_unchanged_worktree(&clean, Some(&empty)));
+    assert!(!clean.exists(), "unchanged worktree is removed");
+    assert!(!branch_exists("clean"), "its merged branch is deleted too");
+
+    let changed = make("changed");
+    let touched = std::collections::BTreeSet::from(["src/lib.rs".to_string()]);
+    assert!(!worktree::remove_unchanged_worktree(
+        &changed,
+        Some(&touched)
+    ));
+    assert!(changed.exists(), "a worktree with changes is kept");
+
+    let unknown = make("unknown");
+    assert!(!worktree::remove_unchanged_worktree(&unknown, None));
+    assert!(unknown.exists(), "no evidence means no removal");
+    assert!(branch_exists("unknown"));
+
+    // Never deletes a directory git does not list as a linked worktree.
+    let plain = worktree_home.path().join("plain");
+    std::fs::create_dir_all(&plain).expect("plain dir");
+    assert!(!worktree::remove_unchanged_worktree(&plain, Some(&empty)));
+    assert!(plain.exists());
+}
+
+#[test]
 fn create_isolated_worktree_rejects_invalid_branch_as_input() {
     let repo = init_subagent_git_repo();
     let worktree_home = tempdir().expect("worktree home");
