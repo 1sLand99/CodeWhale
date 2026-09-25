@@ -219,7 +219,10 @@ impl ReviewOutput {
         ReviewOutput::fallback(raw)
     }
 
-    fn from_structured_str(raw: &str) -> Option<Self> {
+    /// Parse `raw` only when it is the structured review contract (all four
+    /// top-level fields present), unlike [`Self::from_str`], which falls
+    /// back to wrapping prose.
+    pub(crate) fn from_structured_str(raw: &str) -> Option<Self> {
         let candidate = serde_json::from_str::<Value>(raw)
             .ok()
             .or_else(|| extract_json_block(raw).and_then(|json| serde_json::from_str(json).ok()))?;

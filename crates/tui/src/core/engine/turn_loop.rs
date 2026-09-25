@@ -2255,7 +2255,13 @@ impl Engine {
                 // for sustained work instead of forcing the model through a
                 // separate open/eval/configure control surface.
 
+                // The kernel runs model-written Python, so it answers to the
+                // same command gate as `code_execution`: a narrowed tool
+                // surface (`exec --allowed-tools …`, or plain `exec`'s zero-tool
+                // surface, #6510) must not execute code through a fence.
                 if has_sendable_assistant_content
+                    && tool_policy.passes_allow_list(super::tool_catalog::CODE_EXECUTION_TOOL_NAME)
+                    && !tool_policy.denies_tool(super::tool_catalog::CODE_EXECUTION_TOOL_NAME)
                     && crate::repl::sandbox::has_repl_block(&current_text_visible)
                 {
                     let repl_blocks =
@@ -2309,6 +2315,9 @@ impl Engine {
                             self.session.model.clone(),
                             1,
                         )
+                        // A nested `rlm_query` reports on this turn's stream,
+                        // so its model calls are part of the record (#6511).
+                        .with_events(self.tx_event.clone())
                     });
                     let repl_cost_scope = crate::cost_status::scope_token();
                     let repl_started = Instant::now();

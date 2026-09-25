@@ -140,6 +140,30 @@ fn preserve_host_env(command: &mut Command) {
 }
 
 fn run_exec_stream_json(server: &MockServer) -> Vec<Value> {
+    let stdout = run_exec(
+        server,
+        &[
+            "--auto",
+            "--model",
+            TEST_MODEL,
+            "--output-format",
+            "stream-json",
+            "answer briefly",
+        ],
+    );
+    stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str(line).unwrap_or_else(|err| {
+                panic!("stream-json line should parse: {err}\nline: {line}\nstdout:\n{stdout}")
+            })
+        })
+        .collect()
+}
+
+/// Run `codewhale-tui exec <exec_args>` against `server` and return stdout.
+fn run_exec(server: &MockServer, exec_args: &[&str]) -> String {
     let workspace = TempDir::new().expect("workspace tempdir");
     let home = TempDir::new().expect("home tempdir");
 
@@ -151,12 +175,7 @@ fn run_exec_stream_json(server: &MockServer) -> Vec<Value> {
         .arg(workspace.path())
         .arg("--no-project-config")
         .arg("exec")
-        .arg("--auto")
-        .arg("--model")
-        .arg(TEST_MODEL)
-        .arg("--output-format")
-        .arg("stream-json")
-        .arg("answer briefly")
+        .args(exec_args)
         .env("HOME", home.path())
         .env("USERPROFILE", home.path())
         .env("XDG_CONFIG_HOME", home.path().join(".config"))
@@ -213,16 +232,7 @@ fn run_exec_stream_json(server: &MockServer) -> Vec<Value> {
         String::from_utf8_lossy(&stderr)
     );
 
-    let stdout = String::from_utf8_lossy(&stdout).into_owned();
-    stdout
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            serde_json::from_str(line).unwrap_or_else(|err| {
-                panic!("stream-json line should parse: {err}\nline: {line}\nstdout:\n{stdout}")
-            })
-        })
-        .collect()
+    String::from_utf8_lossy(&stdout).into_owned()
 }
 
 fn read_pipe_in_background<R>(mut reader: R) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>>
@@ -359,4 +369,60 @@ async fn turn_usage_event_is_skipped_when_provider_reports_no_usage() {
     assert!(types.contains(&"content"), "content missing: {types:?}");
     assert_eq!(types.last(), Some(&"done"), "stream must end with done");
     assert_eq!(types.get(types.len() - 2), Some(&"metadata"));
+}
+
+/// #6510: plain `exec` bypassed the Engine — text mode sent no system prompt,
+/// `--json` sent an inline "coding assistant" line — so the output format
+/// changed the model's instructions and nothing was logged. Both now run one
+/// Engine turn with the one base prompt and no tool catalog, and `--json`
+/// keeps its documented one-shot receipt fields.
+#[tokio::test(flavor = "multi_thread")]
+async fn plain_exec_runs_one_engine_turn_under_one_prompt_authority() {
+    let server = start_mock_llm(answer_sse_with_usage("pong")).await;
+
+    let text = run_exec(&server, &["--model", TEST_MODEL, "answer briefly"]);
+    assert_eq!(text.trim(), "pong", "text mode prints the answer: {text}");
+
+    let json_stdout = run_exec(
+        &server,
+        &["--json", "--model", TEST_MODEL, "answer briefly"],
+    );
+    let receipt: Value = serde_json::from_str(&json_stdout)
+        .unwrap_or_else(|err| panic!("--json receipt should parse: {err}\n{json_stdout}"));
+    assert_eq!(receipt["mode"], "one-shot");
+    assert_eq!(receipt["model"], TEST_MODEL);
+    assert_eq!(receipt["success"], true);
+    assert_eq!(receipt["output"], "pong");
+    assert_eq!(receipt["usage"]["input_tokens"], 20);
+    assert_eq!(receipt["usage"]["output_tokens"], 8);
+    assert!(
+        receipt["tools"].as_array().is_some_and(Vec::is_empty),
+        "{receipt}"
+    );
+
+    let bodies: Vec<Value> = server
+        .received_requests()
+        .await
+        .expect("request recording")
+        .into_iter()
+        .filter(|request| request.url.path() == "/v1/chat/completions")
+        .map(|request| serde_json::from_slice(&request.body).expect("request body JSON"))
+        .collect();
+    assert_eq!(bodies.len(), 2, "one model call per run: {bodies:#?}");
+    for body in &bodies {
+        let messages = body["messages"].to_string();
+        assert!(
+            messages.contains("You are Codewhale, an agent working alongside the user"),
+            "both formats must carry the one base prompt: {messages}"
+        );
+        assert!(
+            !messages.contains("You are a coding assistant. Give concise"),
+            "the old --json-only instruction must be gone: {messages}"
+        );
+        assert!(
+            body.get("tools")
+                .is_none_or(|tools| tools.as_array().is_some_and(Vec::is_empty)),
+            "plain exec offers no tools: {body}"
+        );
+    }
 }

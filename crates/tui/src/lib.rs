@@ -427,7 +427,8 @@ Examples:
   codewhale exec --auto \"list crates/ with ls\"
   codewhale exec --auto --output-format stream-json \"fix the failing test\"
 
-Plain `codewhale exec` is a one-shot model response. Use `--auto` for
+Plain `codewhale exec` is a one-shot model response: one Engine turn with the
+same system prompt as every other run, and no tools. Use `--auto` for
 non-interactive agent-with-tools execution. `--auto` does not change the
 sandbox posture or elevate a denied tool. Use `--sandbox danger-full-access`
 or `--allow-sandbox-elevation` to explicitly authorize sandbox elevation.
@@ -2443,7 +2444,11 @@ async fn run_async_main_dispatch(
                 // `config.yolo`), not as a CLI flag. Honour either source.
                 let yolo = cli.yolo || config.yolo.unwrap_or(false);
                 let env_tool_surface = exec_tool_surface_from_env();
-                let needs_engine = args.auto
+                // #6510: every exec runs on the Engine — one turn loop, one
+                // prompt authority (BASE_PROMPT, AGENTS.md, skills). These
+                // flags ask for a tool surface; without any of them the run
+                // is a one-shot answer on a zero-tool surface.
+                let tool_surface_requested = args.auto
                     || yolo
                     || resume_session_id.is_some()
                     || args.output_format == ExecOutputFormat::StreamJson
@@ -2457,7 +2462,7 @@ async fn run_async_main_dispatch(
                     || args.sandbox.is_some()
                     || args.allow_sandbox_elevation
                     || env_tool_surface.is_some();
-                if needs_engine {
+                {
                     if args.parent_death_watch {
                         spawn_parent_death_watch();
                     }
@@ -2468,8 +2473,11 @@ async fn run_async_main_dispatch(
                     );
                     let auto_mode = args.auto || yolo;
                     let max_turns = exec_max_steps(args.max_turns);
-                    let allowed_tools =
-                        resolve_exec_allowed_tools(args.allowed_tools.as_deref(), env_tool_surface);
+                    let allowed_tools = if tool_surface_requested {
+                        resolve_exec_allowed_tools(args.allowed_tools.as_deref(), env_tool_surface)
+                    } else {
+                        Some(Vec::new())
+                    };
                     let disallowed_tools = args
                         .disallowed_tools
                         .as_deref()
@@ -2496,12 +2504,9 @@ async fn run_async_main_dispatch(
                         args.tool_authority_json.clone(),
                         args.hooks,
                         std::sync::Arc::clone(&plugin_registry),
+                        !tool_surface_requested,
                     )
                     .await
-                } else if args.json {
-                    run_one_shot_json(&config, &model, &prompt, force_configured_route).await
-                } else {
-                    run_one_shot(&config, &model, &prompt, force_configured_route).await
                 }
             }
             Commands::Fleet(args) => {
@@ -8698,23 +8703,16 @@ async fn run_review(config: &Config, args: ReviewArgs) -> Result<()> {
         })
         .transpose()?;
     let review_workspace = std::env::current_dir()?;
-    let (prompts, system) = if let (Some((number, view)), Some(plan)) = (&pr_view, &pr_plan) {
-        (
-            crate::tools::review::build_pr_review_prompts(*number, view, plan, &review_workspace)
-                .await?,
-            SystemPrompt::Text(crate::tools::review::review_system_prompt().to_string()),
-        )
+    // #6510: one review prompt authority. Plain diffs and PRs both ask for
+    // the structured review contract; a plain diff renders it locally.
+    let system = SystemPrompt::Text(crate::tools::review::review_system_prompt().to_string());
+    let prompts = if let (Some((number, view)), Some(plan)) = (&pr_view, &pr_plan) {
+        crate::tools::review::build_pr_review_prompts(*number, view, plan, &review_workspace)
+            .await?
     } else {
-        (
-            vec![format!(
-                "Review the following diff and provide feedback:\n\n{diff}\n\nEnd of diff."
-            )],
-            SystemPrompt::Text(
-                "You are a senior code reviewer. Focus on bugs, risks, behavioral regressions, and missing tests. \
-Provide findings ordered by severity with file references, then open questions, then a brief summary."
-                    .to_string(),
-            ),
-        )
+        vec![format!(
+            "Review the following diff and provide feedback:\n\n{diff}\n\nEnd of diff."
+        )]
     };
     let model = resolve_review_model(config, args.model.as_deref());
     let route_input = prompts
@@ -8865,7 +8863,12 @@ Provide findings ordered by severity with file references, then open questions, 
         output = content;
         (Some(review), Some(coverage))
     } else {
-        (None, None)
+        // A plain diff is structured when the model kept the JSON contract;
+        // otherwise its prose is the report, exactly as before.
+        (
+            crate::tools::review::ReviewOutput::from_structured_str(&output),
+            None,
+        )
     };
     let finalized = (|| -> Result<_> {
         if let Some((number, view)) = &pr_view {
@@ -8968,13 +8971,16 @@ Provide findings ordered by severity with file references, then open questions, 
             .expect("structured output exists for PR reviews");
         println!(
             "{}",
-            render_pr_review_markdown(*number, view, review, args.post)
+            render_review_markdown(review, args.post.then_some((*number, view)))
         );
         if let Some((path, _)) = receipt {
             eprintln!("Review receipt written: {}", path.display());
         }
     } else {
-        println!("{output}");
+        match structured.as_ref() {
+            Some(review) => println!("{}", render_review_markdown(review, None)),
+            None => println!("{output}"),
+        }
         if let Some((path, _)) = receipt {
             eprintln!("Review receipt written: {}", path.display());
         }
@@ -9666,13 +9672,12 @@ fn plan_inline_review_comments(
     plan
 }
 
-/// Render a structured review as the markdown body printed for — and, with
-/// `--post`, attached to — a pull-request review.
-fn render_pr_review_markdown(
-    number: u32,
-    view: &GhPullRequest,
+/// Render a structured review as Markdown. `posted` names the PR the body is
+/// being published to; `None` is the local report (plain diffs and unposted
+/// PR reviews), where suggestion fences stay live.
+fn render_review_markdown(
     review: &crate::tools::review::ReviewOutput,
-    posted: bool,
+    posted: Option<(u32, &GhPullRequest)>,
 ) -> String {
     let mut body = String::new();
     body.push_str("## Codewhale review\n\n");
@@ -9736,7 +9741,11 @@ fn render_pr_review_markdown(
                 .filter(|replacement| !replacement.trim().is_empty())
             {
                 let fence = suggestion_fence(replacement);
-                let info = if posted { "text" } else { "suggestion" };
+                let info = if posted.is_some() {
+                    "text"
+                } else {
+                    "suggestion"
+                };
                 body.push_str(&format!("\n  {fence}{info}\n"));
                 for line in replacement.split('\n') {
                     body.push_str(&format!("  {line}\n"));
@@ -9751,7 +9760,7 @@ fn render_pr_review_markdown(
         body.push_str(review.overall_assessment.trim());
         body.push_str("\n\n");
     }
-    if posted {
+    if let Some((number, view)) = posted {
         body.push_str(&format!(
             "---\n*Advisory review by Codewhale (`codewhale review --pr {number} --post`, \
              head `{head}`). Line-specific findings are also posted as inline review \
@@ -9841,7 +9850,7 @@ fn post_pr_review(
     if let Some(receipt) = plan.receipt() {
         eprintln!("{receipt}");
     }
-    let body = render_pr_review_markdown(number, view, review, true);
+    let body = render_review_markdown(review, Some((number, view)));
     run_gh_post_pr_review(
         &repo_name,
         number,
@@ -11805,164 +11814,6 @@ fn should_force_configured_exec_route(
     resuming || explicit_provider.is_some() || explicit_model.is_none()
 }
 
-async fn run_one_shot(
-    config: &Config,
-    model: &str,
-    prompt: &str,
-    force_configured_route: bool,
-) -> Result<()> {
-    use crate::client::CodewhaleClient;
-    use codewhale_models::{
-        ContentBlock, Message, MessageRequest, is_incomplete_stop_reason, stop_reason_detail,
-    };
-
-    let route = resolve_cli_exec_route(config, model, prompt, force_configured_route).await?;
-    let execution_config = config_for_cli_route(config, &route);
-    let client = CodewhaleClient::new(&execution_config)?;
-    let reasoning_effort = route.reasoning_effort.and_then(|effort| {
-        cli_reasoning_effort_value_for_prompt(&execution_config, &route.model, effort)
-    });
-    let model = route.model;
-    let request_route = client.effective_route_envelope(&model, chrono::Utc::now());
-
-    let request = MessageRequest {
-        model,
-        messages: vec![Message {
-            role: Role::User,
-            content: vec![ContentBlock::Text {
-                text: prompt.to_string(),
-                cache_control: None,
-            }],
-        }],
-        max_tokens: client.effective_max_output_tokens(&request_route.model),
-        system: None,
-        tools: None,
-        tool_choice: None,
-        metadata: None,
-        thinking: None,
-        reasoning_effort,
-        stream: Some(false),
-        temperature: None,
-        top_p: None,
-    };
-
-    let response = client.create_message(request).await?;
-    let stop_reason = response.stop_reason.clone();
-
-    for block in response.content {
-        if let ContentBlock::Text { text, .. } = block {
-            println!("{text}");
-        }
-    }
-
-    if is_incomplete_stop_reason(stop_reason.as_deref()) {
-        anyhow::bail!(
-            "Model response incomplete: provider stop reason `{}`; the partial response was printed but the command did not succeed.",
-            stop_reason_detail(stop_reason.as_deref())
-        );
-    }
-
-    Ok(())
-}
-
-async fn run_one_shot_json(
-    config: &Config,
-    model: &str,
-    prompt: &str,
-    force_configured_route: bool,
-) -> Result<()> {
-    use crate::client::CodewhaleClient;
-    use codewhale_models::{
-        ContentBlock, Message, MessageRequest, SystemPrompt, is_incomplete_stop_reason,
-        stop_reason_detail,
-    };
-
-    let route = resolve_cli_exec_route(config, model, prompt, force_configured_route).await?;
-    let execution_config = config_for_cli_route(config, &route);
-    let provider = execution_config.provider_identity_for(route.provider);
-    let client = CodewhaleClient::new(&execution_config)?;
-    let model = route.model.clone();
-    let reasoning_effort = route.reasoning_effort.and_then(|effort| {
-        cli_reasoning_effort_value_for_prompt(&execution_config, &model, effort)
-    });
-    let request_route = client.effective_route_envelope(&model, chrono::Utc::now());
-    let request = MessageRequest {
-        model: model.clone(),
-        messages: vec![Message {
-            role: Role::User,
-            content: vec![ContentBlock::Text {
-                text: prompt.to_string(),
-                cache_control: None,
-            }],
-        }],
-        max_tokens: client.effective_max_output_tokens(&request_route.model),
-        system: Some(SystemPrompt::Text(
-            "You are a coding assistant. Give concise, actionable responses.".to_string(),
-        )),
-        tools: None,
-        tool_choice: None,
-        metadata: None,
-        thinking: None,
-        reasoning_effort,
-        stream: Some(false),
-        temperature: None,
-        top_p: None,
-    };
-
-    let response = client.create_message(request).await?;
-    let stop_reason = response.stop_reason.clone();
-    let usage = response.usage.clone();
-    let mut output = String::new();
-    for block in response.content {
-        if let ContentBlock::Text { text, .. } = block {
-            output.push_str(&text);
-        }
-    }
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&one_shot_exec_json_receipt(
-            provider,
-            model,
-            output,
-            stop_reason.clone(),
-            usage,
-        ))?
-    );
-    if is_incomplete_stop_reason(stop_reason.as_deref()) {
-        anyhow::bail!(
-            "Model response incomplete: provider stop reason `{}`; the JSON receipt records success=false.",
-            stop_reason_detail(stop_reason.as_deref())
-        );
-    }
-    Ok(())
-}
-
-fn one_shot_exec_json_receipt(
-    provider: String,
-    model: String,
-    output: String,
-    stop_reason: Option<String>,
-    usage: codewhale_models::Usage,
-) -> serde_json::Value {
-    let incomplete = codewhale_models::is_incomplete_stop_reason(stop_reason.as_deref());
-    let error = incomplete.then(|| {
-        format!(
-            "Model response incomplete: provider stop reason `{}`.",
-            codewhale_models::stop_reason_detail(stop_reason.as_deref())
-        )
-    });
-    serde_json::json!({
-        "mode": "one-shot",
-        "provider": provider,
-        "model": model,
-        "success": !incomplete,
-        "output": output,
-        "stop_reason": stop_reason,
-        "usage": usage,
-        "error": error,
-    })
-}
-
 fn exec_stream_provider_route(
     identity: &crate::config::ProviderIdentity,
 ) -> (String, Option<String>) {
@@ -13046,6 +12897,22 @@ struct ExecSummary {
     error: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     released_services: Vec<crate::tools::shell::PersistentServiceReceipt>,
+    /// One-shot (`mode: "one-shot"`) receipt fields kept from the pre-#6510
+    /// direct-call path: whether the turn completed without error, and its
+    /// provider-reported usage. Absent on agent receipts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    success: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<codewhale_models::Usage>,
+}
+
+impl ExecSummary {
+    /// Fill the one-shot receipt fields from the settled turn: success means a
+    /// completed status with no error; usage is what the provider reported.
+    fn record_one_shot_outcome(&mut self, usage: Option<codewhale_models::Usage>) {
+        self.success = Some(self.error.is_none() && self.status.as_deref() == Some("completed"));
+        self.usage = usage;
+    }
 }
 
 fn validate_exec_tool_authority_resume(
@@ -17239,7 +17106,7 @@ api_key = "test-only-key"
         multi.end_line = Some(12);
         let review = review_with(Vec::new(), vec![single, multi]);
 
-        let local = render_pr_review_markdown(1, &view, &review, false);
+        let local = render_review_markdown(&review, None);
         assert!(local.contains("### Suggestions"), "{local}");
         assert!(
             local.contains("\n  ```suggestion\n  let b = a.unwrap_or_default();\n  ```\n"),
@@ -17255,7 +17122,7 @@ api_key = "test-only-key"
         // The posted body keeps the fix visible but never as a live
         // one-click block: only diff-validated inline suggestion comments
         // may carry those to GitHub.
-        let posted = render_pr_review_markdown(1, &view, &review, true);
+        let posted = render_review_markdown(&review, Some((1, &view)));
         assert!(
             posted.contains("let b = a.unwrap_or_default();"),
             "{posted}"
@@ -17338,38 +17205,45 @@ api_key = "test-only-key"
     fn exec_json_receipts_keep_exact_named_custom_provider() {
         let config = custom_exec_config("custom-a");
         let provider = config.provider_identity_for(crate::config::ApiProvider::Custom);
-        let one_shot = one_shot_exec_json_receipt(
-            provider.clone(),
-            "model-a".to_string(),
-            "done".to_string(),
-            Some("end_turn".to_string()),
-            codewhale_models::Usage {
-                input_tokens: 12,
-                output_tokens: 3,
-                ..Default::default()
-            },
-        );
-        assert_eq!(one_shot["provider"], "custom-a");
-        assert_eq!(one_shot["success"], true);
-
-        let truncated = one_shot_exec_json_receipt(
-            provider.clone(),
-            "model-a".to_string(),
-            "partial".to_string(),
-            Some("max_output_tokens".to_string()),
-            codewhale_models::Usage {
-                input_tokens: 20,
-                output_tokens: 9,
-                ..Default::default()
-            },
-        );
-        assert_eq!(truncated["success"], false);
-        assert_eq!(truncated["stop_reason"], "max_output_tokens");
-        assert_eq!(truncated["usage"]["input_tokens"], 20);
-        assert_eq!(truncated["usage"]["output_tokens"], 9);
-        assert!(truncated["error"].as_str().is_some_and(|error| {
-            error.contains("Model response incomplete") && error.contains("max_output_tokens")
+        // #6510: plain exec is an Engine turn now; its `--json` receipt keeps
+        // the documented one-shot fields (docs/LIVE_SMOKE.md step 5).
+        let mut one_shot = ExecSummary {
+            mode: "one-shot".to_string(),
+            provider: provider.clone(),
+            model: "model-a".to_string(),
+            output: "done".to_string(),
+            status: Some("completed".to_string()),
+            ..ExecSummary::default()
+        };
+        one_shot.record_one_shot_outcome(Some(codewhale_models::Usage {
+            input_tokens: 12,
+            output_tokens: 3,
+            ..Default::default()
         }));
+        let one_shot = serde_json::to_value(&one_shot).expect("one-shot receipt");
+        assert_eq!(one_shot["mode"], "one-shot");
+        assert_eq!(one_shot["provider"], "custom-a");
+        assert_eq!(one_shot["model"], "model-a");
+        assert_eq!(one_shot["output"], "done");
+        assert_eq!(one_shot["success"], true);
+        assert_eq!(one_shot["usage"]["input_tokens"], 12);
+        assert_eq!(one_shot["usage"]["output_tokens"], 3);
+
+        let mut failed = ExecSummary {
+            mode: "one-shot".to_string(),
+            provider: provider.clone(),
+            model: "model-a".to_string(),
+            status: Some("failed".to_string()),
+            error: Some("Model response incomplete".to_string()),
+            ..ExecSummary::default()
+        };
+        failed.record_one_shot_outcome(None);
+        let failed = serde_json::to_value(&failed).expect("failed one-shot receipt");
+        assert_eq!(failed["success"], false);
+        assert!(
+            failed.get("usage").is_none(),
+            "no usage is never zero usage"
+        );
 
         let agent = serde_json::to_value(ExecSummary {
             mode: "agent".to_string(),
@@ -17379,6 +17253,10 @@ api_key = "test-only-key"
         })
         .expect("agent exec JSON receipt");
         assert_eq!(agent["provider"], "custom-a");
+        assert!(
+            agent.get("success").is_none() && agent.get("usage").is_none(),
+            "agent receipts keep their pre-#6510 shape"
+        );
         let serialized = serde_json::to_string(&agent).expect("serialize receipt");
         assert!(!serialized.contains("127.0.0.1"));
         assert!(!serialized.contains("local-test-key"));
