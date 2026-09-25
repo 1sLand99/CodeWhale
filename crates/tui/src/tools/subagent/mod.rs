@@ -10134,7 +10134,7 @@ impl ToolSpec for AgentTool {
                 },
                 "wall_time_secs": {
                     "type": "integer", "minimum": 1, "maximum": MAX_CHILD_WALL_TIME.as_secs(),
-                    "description": "Whole-run wall time including queue, model and tools; default 1800. May raise that default, never inherited or operator limits; continuation does not restart the clock."
+                    "description": "Whole-run wall time (queue, model, tools); default 1800, may exceed that but never inherited or operator limits. Continuation keeps the clock."
                 },
                 "deliverables": {
                     "type": "array", "maxItems": 16,
@@ -10159,11 +10159,11 @@ impl ToolSpec for AgentTool {
                 },
                 "fork_context": {
                     "type": "boolean",
-                    "description": "For start: true = child starts from your current conversation prefix (cache-shared); false (default) = fresh context. Carries context, never permissions."
+                    "description": "For start: true = child starts from your conversation prefix (cache-shared); default fresh. Never grants permissions."
                 },
                 "resume_from": {
                     "type": "string",
-                    "description": "Settled child agent_id or session name to fork into a separate new worker. Repeating start with resume_from creates another independent worker; use action=followup to continue parked work without an accidental duplicate. The source must not be running. Its full transcript is loaded and prepended as the new child's context (fork_context=true), continuing the transcript lineage under a new role or profile (e.g. explore → implementer → verifier). Mutually exclusive with fork_context=false. Cross-workspace or missing sources are rejected with a clear error."
+                    "description": "Settled child agent_id or session name to fork into a new independent worker; each start makes another, so use action=followup to continue parked work. Its full transcript becomes the new child's context, continuing the lineage under a new role or profile (e.g. explore → implementer → verifier). Refused with fork_context=false, or for cross-workspace or missing sources."
                 }
             },
             "dependentSchemas": {
@@ -10172,8 +10172,7 @@ impl ToolSpec for AgentTool {
                         {
                             "properties": {
                                 "action": {"const": "start"},
-                                "prompt": {},
-                                "fork_context": {}
+                                "prompt": {}
                             },
                             "required": ["prompt"]
                         },
