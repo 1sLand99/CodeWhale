@@ -2162,7 +2162,6 @@ mod tests {
             }),
             context: ContextConfig {
                 project_pack: Some(true),
-                ..ContextConfig::default()
             },
             ..Config::default()
         };
