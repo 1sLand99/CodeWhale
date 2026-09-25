@@ -487,10 +487,13 @@ impl SnapshotRepo {
         }
         let tree = String::from_utf8_lossy(&tree.stdout).trim().to_string();
 
+        // A HEAD that names a missing commit would make every `commit-tree
+        // -p` below fail ("is not a valid object"), silently ending undo.
+        self.repair_broken_head()?;
         let parent = run_git(
             &self.git_dir,
             &self.work_tree,
-            &["rev-parse", "--verify", "HEAD"],
+            &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
         )?;
         let parent = parent
             .status
@@ -535,6 +538,62 @@ impl SnapshotRepo {
                 "git commit-tree returned a malformed commit id: {sha:?}"
             ))
         })
+    }
+
+    /// Repair a side repo whose HEAD names a commit that no longer exists
+    /// (an interrupted gc or prune, a copied or partially deleted
+    /// `~/.codewhale/snapshots` directory). Left alone, every later snapshot
+    /// fails on `commit-tree -p <missing>` and /undo is dead without a word.
+    ///
+    /// The broken ref is deleted so the next snapshot starts a fresh history.
+    /// Restore points before the break cannot be recovered; the caller tells
+    /// the user. Returns `true` when a repair happened.
+    pub fn repair_broken_head(&self) -> io::Result<bool> {
+        let commit = run_git(
+            &self.git_dir,
+            &self.work_tree,
+            &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+        )?;
+        if commit.status.success() {
+            return Ok(false);
+        }
+        // An unborn branch (fresh repo) names nothing: nothing to repair.
+        let named = run_git(
+            &self.git_dir,
+            &self.work_tree,
+            &["rev-parse", "--verify", "--quiet", "HEAD"],
+        )?;
+        if !named.status.success() {
+            return Ok(false);
+        }
+        let missing = String::from_utf8_lossy(&named.stdout).trim().to_string();
+        let delete = run_git(
+            &self.git_dir,
+            &self.work_tree,
+            &["update-ref", "-d", "HEAD"],
+        )?;
+        if !delete.status.success() {
+            return Err(io_other(format!(
+                "snapshot history HEAD points at missing commit {missing} and could not be reset: {}",
+                String::from_utf8_lossy(&delete.stderr).trim()
+            )));
+        }
+        tracing::warn!(
+            target: "snapshot",
+            "snapshot history HEAD pointed at missing commit {missing}; started a fresh history"
+        );
+        Ok(true)
+    }
+
+    /// Point the side repo's HEAD branch at a commit id that does not exist.
+    #[cfg(test)]
+    pub(crate) fn point_head_at_missing_commit_for_test(&self) {
+        let branch = run_git(&self.git_dir, &self.work_tree, &["symbolic-ref", "HEAD"])
+            .expect("symbolic-ref");
+        let branch = String::from_utf8_lossy(&branch.stdout).trim().to_string();
+        let path = self.git_dir.join(&branch);
+        std::fs::create_dir_all(path.parent().expect("ref parent")).expect("ref dir");
+        std::fs::write(path, "1111111111111111111111111111111111111111\n").expect("write ref");
     }
 
     /// Prefix a snapshot label with its owning session id, if any.
@@ -1668,6 +1727,38 @@ mod tests {
         // The user's workspace must NOT have a real `.git` because we
         // never created one in their workspace — only in the side dir.
         assert!(!repo.work_tree().join(".git").exists());
+    }
+
+    /// B2: a side repo whose HEAD names a missing commit made every snapshot
+    /// fail on `commit-tree -p` ("is not a valid object"), so /undo died
+    /// silently. The broken ref is reset and snapshots resume.
+    #[test]
+    fn broken_head_is_repaired_and_snapshots_resume() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        std::fs::write(repo.work_tree().join("a.txt"), b"alpha").unwrap();
+        repo.snapshot("pre-turn:1").expect("first snapshot");
+        assert!(!repo.repair_broken_head().expect("healthy head"));
+
+        repo.point_head_at_missing_commit_for_test();
+        assert!(
+            repo.list(10).is_err() || repo.list(10).unwrap().is_empty(),
+            "a broken head cannot list its history"
+        );
+
+        assert!(repo.repair_broken_head().expect("repair"), "repaired once");
+        assert!(!repo.repair_broken_head().expect("idempotent"));
+        std::fs::write(repo.work_tree().join("a.txt"), b"beta").unwrap();
+        repo.snapshot("pre-turn:2").expect("snapshots resume");
+        let list = repo.list(10).expect("list after repair");
+        assert_eq!(list.len(), 1, "history restarts at the repair: {list:?}");
+        assert_eq!(list[0].label, "pre-turn:2");
+
+        // The snapshot path repairs on its own too, for callers that never
+        // asked.
+        repo.point_head_at_missing_commit_for_test();
+        repo.snapshot("pre-turn:3")
+            .expect("snapshot repairs on its own");
     }
 
     #[test]
