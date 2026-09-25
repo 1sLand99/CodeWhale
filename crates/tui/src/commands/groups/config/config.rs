@@ -1,6 +1,7 @@
 //! Config commands: config, settings, mode switches, trust, logout
 
 use super::CommandResult;
+use codewhale_config::settings_schema::SETTINGS_SCHEMA;
 use crate::config::{
     ApiProvider, CompletionSound, Config, DEFAULT_STREAM_CHUNK_TIMEOUT_SECS,
     DEFAULT_SUBAGENT_API_TIMEOUT_SECS, DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS,
@@ -516,9 +517,7 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
             .ok()
             .map(|config| notifications_summary(&config)),
         _ => {
-            let known = Settings::available_settings()
-                .iter()
-                .any(|(k, _)| k == &key);
+            let known = SETTINGS_SCHEMA.iter().any(|def| def.key == key);
             if known {
                 Some("(see /settings for current value)".to_string())
             } else {

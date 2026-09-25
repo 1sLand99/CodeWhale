@@ -2987,8 +2987,45 @@ impl ConfigToml {
                     .unix_socket_path = Some(PathBuf::from(value));
             }
             _ => {
-                self.extras
-                    .insert(key.to_string(), toml::Value::String(value.to_string()));
+                // Validate against SETTINGS_SCHEMA if the key is a known setting
+                if let Some(def) = setting(key) {
+                    match def.kind {
+                        SettingKind::Bool(_) => {
+                            parse_bool(value).map_err(|e| anyhow::anyhow!("invalid value for '{key}': {e}"))?;
+                            // Known setting but we don't store it in config.toml extras;
+                            // it belongs in settings.toml. Insert as string so it
+                            // can be detected as a misplaced setting.
+                            self.extras
+                                .insert(key.to_string(), toml::Value::String(value.to_string()));
+                        }
+                        SettingKind::Int => {
+                            value.parse::<i64>().map_err(|e| anyhow::anyhow!("invalid integer for '{key}': {e}"))?;
+                            self.extras
+                                .insert(key.to_string(), toml::Value::String(value.to_string()));
+                        }
+                        SettingKind::Enum(options) => {
+                            let normalized = value.trim().to_ascii_lowercase();
+                            let valid = options.iter().any(|o| o.value.to_ascii_lowercase() == normalized);
+                            if !valid {
+                                let valid_values: Vec<&str> = options.iter().map(|o| o.value).collect();
+                                anyhow::bail!(
+                                    "invalid value '{value}' for '{key}': expected one of {}",
+                                    valid_values.join(", ")
+                                );
+                            }
+                            self.extras
+                                .insert(key.to_string(), toml::Value::String(value.to_string()));
+                        }
+                        SettingKind::String => {
+                            self.extras
+                                .insert(key.to_string(), toml::Value::String(value.to_string()));
+                        }
+                    }
+                } else {
+                    // Unknown key - insert into extras as before
+                    self.extras
+                        .insert(key.to_string(), toml::Value::String(value.to_string()));
+                }
             }
         }
         Ok(())
