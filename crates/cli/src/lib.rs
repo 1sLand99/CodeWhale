@@ -4567,6 +4567,13 @@ fn run_config_command(
                 }
                 return Ok(());
             }
+            if codewhale_tui::config_keys::config_key_home(&key)
+                == codewhale_tui::config_keys::ConfigKeyHome::SettingsToml
+                && let Some(value) = codewhale_tui::config_keys::settings_value(&key)?
+            {
+                println!("{value}");
+                return Ok(());
+            }
             bail!("key not found: {key}");
         }
         ConfigCommand::Set { key, value } => {
@@ -4583,6 +4590,19 @@ fn run_config_command(
                 store.reload()?;
                 println!("set notifications.{}", setting.key());
                 return Ok(());
+            }
+            // Refuse a key nothing reads, and send settings.toml keys to
+            // settings.toml, before config.toml is touched (#6563).
+            match codewhale_tui::config_keys::config_key_home(&key) {
+                codewhale_tui::config_keys::ConfigKeyHome::ConfigToml => {}
+                codewhale_tui::config_keys::ConfigKeyHome::SettingsToml => {
+                    let path = codewhale_tui::config_keys::set_settings_value(&key, &value)?;
+                    println!("set {key} in {}", path.display());
+                    return Ok(());
+                }
+                codewhale_tui::config_keys::ConfigKeyHome::Unknown => {
+                    bail!(codewhale_tui::config_keys::unknown_config_key_message(&key));
+                }
             }
             store.config.set_value(&key, &value)?;
             if key == "telemetry" {
@@ -4713,16 +4733,18 @@ fn apply_per_run_overrides(store: &mut ConfigStore, specs: &[String]) -> Result<
     Ok(())
 }
 
-/// Read-only credential and endpoint check. The dispatcher's extras also
-/// contain settings owned by runtime readers; they are not unknown keys.
-/// Never prints a credential — presence and shape only.
+/// Read-only credential and endpoint check, plus a report of config.toml
+/// keys nothing reads (#6563). Unread keys are warnings: they are preserved
+/// on save and never fail the check. Never prints a credential — presence
+/// and shape only.
 fn run_config_doctor(store: &ConfigStore) -> Result<()> {
     println!("# {}", store.path().display());
     let mut errors: Vec<String> = Vec::new();
-    if !store.config.extras.is_empty() {
-        println!(
-            "note: additional settings are preserved for runtime readers; this check does not classify their support"
-        );
+    let unread = codewhale_tui::config_keys::unread_config_keys(
+        store.config.extras.keys().map(String::as_str),
+    );
+    for finding in &unread {
+        println!("warning: {finding}");
     }
 
     let mut secrets: Vec<(String, Option<String>)> =
@@ -4757,7 +4779,14 @@ fn run_config_doctor(store: &ConfigStore) -> Result<()> {
         }
         bail!("doctor: {} error(s): {}", errors.len(), errors.join("; "));
     }
-    println!("doctor: credentials and endpoints clean");
+    if unread.is_empty() {
+        println!("doctor: credentials and endpoints clean");
+    } else {
+        println!(
+            "doctor: credentials and endpoints clean; {} config.toml key(s) nothing reads",
+            unread.len()
+        );
+    }
     Ok(())
 }
 
@@ -6001,13 +6030,89 @@ mod tests {
     }
 
     #[test]
-    fn config_doctor_preserves_keys_owned_by_other_readers() {
+    fn config_doctor_reports_unread_keys_without_failing() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("config.toml");
-        write_config_fixture(&path, "zzz_unknown = 1\n");
+        write_config_fixture(
+            &path,
+            "zzz_unknown = 1\ncalm_mode = \"false\"\nmax_subagents = 4\n",
+        );
         let store = ConfigStore::load(Some(path)).expect("load fixture");
-        assert!(!store.config.extras.is_empty());
-        run_config_doctor(&store).expect("extras do not establish unsupported settings");
+        let unread = codewhale_tui::config_keys::unread_config_keys(
+            store.config.extras.keys().map(String::as_str),
+        );
+        assert_eq!(unread.len(), 2, "{unread:#?}");
+        assert!(
+            unread
+                .iter()
+                .any(|line| line.contains("`calm_mode` belongs in settings.toml")),
+            "{unread:#?}"
+        );
+        assert!(
+            unread
+                .iter()
+                .any(|line| line.contains("`zzz_unknown` is not read by anything")),
+            "{unread:#?}"
+        );
+        // Warnings, not errors: the keys are preserved and the check passes.
+        run_config_doctor(&store).expect("unread keys warn, they do not fail");
+    }
+
+    #[test]
+    fn config_set_refuses_unknown_keys_and_routes_settings_to_settings_toml() {
+        let _env = env_lock();
+        let home = tempfile::tempdir().expect("isolated home");
+        let _home = ScopedEnvVar::set("CODEWHALE_HOME", &home.path().to_string_lossy());
+        let _config_path = ScopedEnvVar::remove("CODEWHALE_CONFIG_PATH");
+        let _legacy_config_path = ScopedEnvVar::remove("DEEPSEEK_CONFIG_PATH");
+        let path = home.path().join("config.toml");
+        let original = "verbosity = \"normal\"\n";
+        write_config_fixture(&path, original);
+        let settings_path = home.path().join("settings.toml");
+        let mut store = ConfigStore::load(Some(path.clone())).expect("load fixture");
+        let set = |store: &mut ConfigStore, key: &str, value: &str| {
+            run_config_command(
+                store,
+                ConfigCommand::Set {
+                    key: key.into(),
+                    value: value.into(),
+                },
+                false,
+                &[],
+            )
+        };
+
+        let error = set(&mut store, "totally_bogus_key", "42").expect_err("unknown key");
+        assert!(
+            format!("{error:#}").contains("unknown config key `totally_bogus_key`"),
+            "{error:#}"
+        );
+        let error = set(&mut store, "calm_mod", "on").expect_err("typo");
+        assert!(
+            format!("{error:#}").contains("Did you mean `calm_mode`?"),
+            "{error:#}"
+        );
+        // A settings.toml key with a bad value is refused by its validator.
+        set(&mut store, "calm_mode", "flase").expect_err("invalid boolean");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert!(!settings_path.exists(), "refusals write nothing");
+
+        set(&mut store, "calm_mode", "off").expect("settings key routes");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        let settings = std::fs::read_to_string(&settings_path).expect("settings.toml written");
+        assert!(settings.contains("calm_mode = false"), "{settings}");
+        assert_eq!(
+            codewhale_tui::config_keys::settings_value("calm_mode").unwrap(),
+            Some("false".to_string())
+        );
+
+        // config.toml keys still land in config.toml.
+        set(&mut store, "skills_dir", "/tmp/skills").expect("config key");
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("skills_dir"),
+        );
     }
 
     #[test]

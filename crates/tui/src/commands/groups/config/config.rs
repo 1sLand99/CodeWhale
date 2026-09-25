@@ -1,7 +1,6 @@
 //! Config commands: config, settings, mode switches, trust, logout
 
 use super::CommandResult;
-use codewhale_config::settings_schema::SETTINGS_SCHEMA;
 use crate::config::{
     ApiProvider, Config, DEFAULT_STREAM_CHUNK_TIMEOUT_SECS, DEFAULT_SUBAGENT_API_TIMEOUT_SECS,
     DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS, DEFAULT_XIAOMI_MIMO_BASE_URL,
@@ -22,6 +21,7 @@ use crate::settings::Settings;
 use crate::tui::app::{App, AppAction, OnboardingState, ScreenMode, SettingSelection, VimMode};
 use anyhow::Result;
 use codewhale_config::AppMode;
+use codewhale_config::settings_schema::SETTINGS_SCHEMA;
 use codewhale_execpolicy::ApprovalMode;
 use codewhale_localization::{MessageId, resolve_locale, tr};
 use std::path::{Path, PathBuf};
@@ -529,13 +529,9 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
 /// Error for `/config <key>` when `key` is not a known setting: name the
 /// closest real key when there is one, and point at the full list.
 fn unknown_setting_message(key: &str) -> String {
-    let nearest = Settings::available_settings()
-        .into_iter()
-        .filter_map(|(candidate, _)| {
-            crate::commands::best_suggestion_score(key, [candidate]).map(|score| (score, candidate))
-        })
-        .min_by_key(|(score, _)| *score)
-        .map(|(_, candidate)| candidate);
+    // Suggest from the declared schema, the same list `known` checks above,
+    // not the hand-kept `/settings` help table (#6563).
+    let nearest = crate::config_keys::nearest_key(key, SETTINGS_SCHEMA.iter().map(|def| def.key));
     match nearest {
         Some(candidate) => format!(
             "Unknown setting '{key}'. Did you mean `/config {candidate}`? Run `/settings text` to list every setting."
