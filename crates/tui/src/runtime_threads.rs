@@ -7600,9 +7600,10 @@ impl RuntimeThreadManager {
     /// conversation opened from an app is attended, and every shell command
     /// still passes the thread's approval posture. The default is then checked
     /// with the same `validate_shell_access_policy` a PATCH opt-in runs, so a
-    /// project, profile, environment or managed `allow_shell = false` still
-    /// wins at creation. Callers that pass an explicit value (tasks,
-    /// automations, the chat relay) are unchanged.
+    /// shell restriction from a project, profile, environment or managed
+    /// source still wins at creation: an unset value falls back to no shell,
+    /// and an explicit `allow_shell: true` is refused, as PATCH refuses it.
+    /// An explicit `false` is never checked.
     pub(crate) async fn create_thread_with_shell_policy(
         &self,
         req: CreateThreadRequest,
@@ -7665,7 +7666,14 @@ impl RuntimeThreadManager {
         let mode = policy.mode_setting().to_string();
         let permission_posture = Some(policy.permission_wire().to_string());
         let allow_shell = match req.allow_shell {
-            Some(explicit) => explicit,
+            // An explicit opt-in passes the same policy check a PATCH opt-in
+            // runs, and is refused (not silently downgraded) on denial.
+            Some(true) => {
+                self.validate_shell_access_policy(&workspace, config_path, config_profile)
+                    .await?;
+                true
+            }
+            Some(false) => false,
             None => {
                 let interactive_default = self.read_config().interactive_allow_shell();
                 interactive_default
