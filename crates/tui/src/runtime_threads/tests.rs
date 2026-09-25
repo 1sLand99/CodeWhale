@@ -18235,3 +18235,43 @@ async fn canonical_sessions_root_is_resolved_off_the_ui_runtime_and_cached() -> 
     assert_ne!(cached, sessions, "the fixture spells the root two ways");
     Ok(())
 }
+
+/// B3: Runtime API approvals (GPUI, web) follow the one approval clock,
+/// `[approval] timeout_seconds`. Unset, nothing denies on the user's behalf;
+/// `[tools] user_input_timeout_seconds` no longer bounds approvals.
+#[test]
+fn runtime_approvals_wait_indefinitely_unless_approval_timeout_is_set() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    assert_eq!(manager.approval_decision_timeout(), None);
+
+    let mut config = Config::default();
+    config.tools = Some(crate::config::ToolsConfig {
+        user_input_timeout_seconds: Some(300),
+        ..Default::default()
+    });
+    let manager = RuntimeThreadManager::open(
+        config.clone(),
+        PathBuf::from("."),
+        test_manager_config(test_runtime_dir()),
+    )?;
+    assert_eq!(
+        manager.approval_decision_timeout(),
+        None,
+        "the question clock does not bound approvals"
+    );
+
+    config.approval = Some(crate::config::ApprovalConfig {
+        timeout_seconds: Some(45),
+        ..Default::default()
+    });
+    let manager = RuntimeThreadManager::open(
+        config,
+        PathBuf::from("."),
+        test_manager_config(test_runtime_dir()),
+    )?;
+    assert_eq!(
+        manager.approval_decision_timeout(),
+        Some(Duration::from_secs(45))
+    );
+    Ok(())
+}

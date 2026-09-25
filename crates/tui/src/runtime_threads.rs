@@ -598,7 +598,6 @@ where
 }
 const RUNTIME_RESTART_REASON: &str = "Interrupted by process restart";
 const EMPTY_TURN_REASON: &str = "Turn completed without engine output";
-const APPROVAL_DECISION_TIMEOUT: Duration = Duration::from_secs(300);
 const DYNAMIC_TOOL_RESULT_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[cfg(test)]
@@ -610,10 +609,11 @@ static TEST_DYNAMIC_TOOL_RESULT_TIMEOUT_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 impl RuntimeThreadManager {
-    /// Wait for one external approval decision. `[tools]
-    /// user_input_timeout_seconds` governs (#6003): absent uses the built-in
-    /// default, an explicit 0 returns `None` and the decision waits
-    /// indefinitely.
+    /// Wait for one external approval decision. The one approval clock,
+    /// `[approval] timeout_seconds`, governs here as it does for the TUI
+    /// card: absent or `0` returns `None` and the decision waits until the
+    /// person answers or stops the turn (CURRENT_DECISIONS §21). A GPUI or
+    /// web approval is never denied on the user's behalf by default.
     pub(crate) fn approval_decision_timeout(&self) -> Option<Duration> {
         #[cfg(test)]
         {
@@ -622,11 +622,7 @@ impl RuntimeThreadManager {
                 return Some(Duration::from_millis(ms));
             }
         }
-        match self.read_config().user_input_timeout() {
-            Some(wait) if wait.is_zero() => None,
-            Some(wait) => Some(wait),
-            None => Some(APPROVAL_DECISION_TIMEOUT),
-        }
+        self.read_config().approval_timeout()
     }
 }
 
