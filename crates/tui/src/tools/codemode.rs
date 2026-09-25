@@ -1543,6 +1543,9 @@ mod tests {
         );
     }
 
+    // This test deliberately serializes access to process-global spillover
+    // state while awaiting the program.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn oversized_nested_result_keeps_its_envelope_and_says_what_was_cut() {
         let _guard = crate::tools::truncate::TEST_SPILLOVER_GUARD

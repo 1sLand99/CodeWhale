@@ -31,6 +31,15 @@ quieter, and Fleet runs can be checked before they spend anything.
   one test call before it saves, `/status` shows the router's choice, cost and
   latency, and a failing router is shown as failing
   ([#6525](https://github.com/Hmbown/Codewhale/issues/6525)).
+- Code mode composes MCP and plugin tools and is on by default:
+  `execute_tools` programs can call MCP tools, and each nested call passes the
+  same approval gate as a direct call, pausing the program for approval when
+  needed. Every nested call keeps its receipt, including calls that finish
+  before a deadline, and `code_mode = false` turns it off. `codewhale mcp list`
+  and `codewhale doctor` warn when a user MCP server duplicates the built-in
+  Computer Use bundle
+  ([#6562](https://github.com/Hmbown/Codewhale/issues/6562),
+  [#6509](https://github.com/Hmbown/Codewhale/issues/6509)).
 
 ### Fixed
 

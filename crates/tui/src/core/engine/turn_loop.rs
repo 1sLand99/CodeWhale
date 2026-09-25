@@ -2904,7 +2904,6 @@ impl Engine {
                     &mut nested_gate_env,
                 )
                 .await;
-            drop(nested_gate_env);
 
             let authority_changed =
                 authority_changed_before_tools || authority_changed_during_tools;
@@ -4678,6 +4677,7 @@ impl Engine {
             self.tx_event.clone(),
             Some(cancel.clone()),
             EXECUTE_TOOLS_TOOL_NAME.to_string(),
+            Some(tool_id.to_string()),
             tool_input,
             self.session.workspace.clone(),
             tool_registry,
